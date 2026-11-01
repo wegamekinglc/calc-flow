@@ -1,0 +1,3668 @@
+{
+  "issue": "DAL-480",
+  "baseline": "d04e0f3519d3559fffe19b67f2a05e32e2f88701",
+  "branch": "fix/dal-480-documentation-audit",
+  "baseline_markdown_count": 298,
+  "final_markdown_count": 299,
+  "baseline_lines": 69319,
+  "enumeration": [
+    "git ls-files -z: suffix lower() in .md/.markdown",
+    "rg --files --hidden --no-ignore -g *.md -g *.MD -g *.markdown -g !.git/**"
+  ],
+  "enumeration_sets_equal": true,
+  "files": [
+    {
+      "path": ".agents/skills/code-style/SKILL.md",
+      "category": "current-guidance",
+      "baseline_sha256": "c861c62c855858bcf82720de0980264ccae0b9f08beab5b42a46816520831d20",
+      "baseline_lines": 84,
+      "final_sha256": "c861c62c855858bcf82720de0980264ccae0b9f08beab5b42a46816520831d20",
+      "final_lines": 84,
+      "action": "preserved",
+      "fact_basis": [
+        "AGENTS.md",
+        "pyproject.toml",
+        ".agents/skills/code-style/SKILL.md"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": ".claude/agents/README.md",
+      "category": "current-guidance",
+      "baseline_sha256": "c9422196b433f1c17b86e1107a03e41af4023d39fef4e50d497bc54950622489",
+      "baseline_lines": 143,
+      "final_sha256": "c9422196b433f1c17b86e1107a03e41af4023d39fef4e50d497bc54950622489",
+      "final_lines": 143,
+      "action": "preserved",
+      "fact_basis": [
+        ".codex/agents/README.md",
+        "AGENTS.md"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": ".claude/agents/cf-api-designer.md",
+      "category": "current-guidance",
+      "baseline_sha256": "5ca6de56ecd8aae36c926e12b10ef80e8ad269fe4b2670c1e8775af033b2739a",
+      "baseline_lines": 155,
+      "final_sha256": "6c6e9aa7f0903612a87b59986687935fa0bbbbf2fc46c12d0dc2e437635db814",
+      "final_lines": 156,
+      "action": "revised",
+      "fact_basis": [
+        ".codex/agents/README.md",
+        "AGENTS.md",
+        ".codex/agents/cf-api-designer.toml"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": ".claude/agents/cf-critic.md",
+      "category": "current-guidance",
+      "baseline_sha256": "bfe3da8685f98ea5aa8b2ab0a6176c5170c3adf77286846ac84c49e3cc919c9d",
+      "baseline_lines": 175,
+      "final_sha256": "bfe3da8685f98ea5aa8b2ab0a6176c5170c3adf77286846ac84c49e3cc919c9d",
+      "final_lines": 175,
+      "action": "preserved",
+      "fact_basis": [
+        ".codex/agents/README.md",
+        "AGENTS.md",
+        ".codex/agents/cf-critic.toml"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": ".claude/agents/cf-doc-writer.md",
+      "category": "current-guidance",
+      "baseline_sha256": "5aa6e09bc6d13c0b958eef14228857b2da307ab7c15dcb7af9ee527561e16d5a",
+      "baseline_lines": 187,
+      "final_sha256": "36a4d6ff883296399c25692aca7027ff6173627f094368c6eab7e55e005c5759",
+      "final_lines": 189,
+      "action": "revised",
+      "fact_basis": [
+        ".codex/agents/README.md",
+        "AGENTS.md",
+        ".codex/agents/cf-doc-writer.toml"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": ".claude/agents/cf-implementer.md",
+      "category": "current-guidance",
+      "baseline_sha256": "f53ec6a6a5847b7aa39c29a6ca596898b6cbb7b28b9ca41bc6d0c5bd875ceb37",
+      "baseline_lines": 217,
+      "final_sha256": "f53ec6a6a5847b7aa39c29a6ca596898b6cbb7b28b9ca41bc6d0c5bd875ceb37",
+      "final_lines": 217,
+      "action": "preserved",
+      "fact_basis": [
+        ".codex/agents/README.md",
+        "AGENTS.md",
+        ".codex/agents/cf-implementer.toml"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": ".claude/agents/cf-orchestrator.md",
+      "category": "current-guidance",
+      "baseline_sha256": "d64d39f79fe42878f40d8166540c91346ca317dbd856e6afb57385cc9180fd62",
+      "baseline_lines": 181,
+      "final_sha256": "d64d39f79fe42878f40d8166540c91346ca317dbd856e6afb57385cc9180fd62",
+      "final_lines": 181,
+      "action": "preserved",
+      "fact_basis": [
+        ".codex/agents/README.md",
+        "AGENTS.md",
+        ".codex/agents/cf-orchestrator.toml"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": ".claude/agents/cf-performancer.md",
+      "category": "current-guidance",
+      "baseline_sha256": "45d20f82b7fa37c4a985e9b28e995567987c6b945726aec9be37a90ebb2bc6e1",
+      "baseline_lines": 244,
+      "final_sha256": "45d20f82b7fa37c4a985e9b28e995567987c6b945726aec9be37a90ebb2bc6e1",
+      "final_lines": 244,
+      "action": "preserved",
+      "fact_basis": [
+        ".codex/agents/README.md",
+        "AGENTS.md",
+        ".codex/agents/cf-performancer.toml"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": ".claude/agents/cf-reviewer.md",
+      "category": "current-guidance",
+      "baseline_sha256": "8d6516948a3e565b1a41a2b6154f8988a911c1c6198f4f5932dbc2af2b5d6eb1",
+      "baseline_lines": 237,
+      "final_sha256": "8d6516948a3e565b1a41a2b6154f8988a911c1c6198f4f5932dbc2af2b5d6eb1",
+      "final_lines": 237,
+      "action": "preserved",
+      "fact_basis": [
+        ".codex/agents/README.md",
+        "AGENTS.md",
+        ".codex/agents/cf-reviewer.toml"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": ".claude/agents/cf-simplifier.md",
+      "category": "current-guidance",
+      "baseline_sha256": "a45ef1d5f99e5fb08380b73ae6fd183022ae6c74016e064f562b274996d96d7f",
+      "baseline_lines": 211,
+      "final_sha256": "a45ef1d5f99e5fb08380b73ae6fd183022ae6c74016e064f562b274996d96d7f",
+      "final_lines": 211,
+      "action": "preserved",
+      "fact_basis": [
+        ".codex/agents/README.md",
+        "AGENTS.md",
+        ".codex/agents/cf-simplifier.toml"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": ".claude/agents/cf-spec-writer.md",
+      "category": "current-guidance",
+      "baseline_sha256": "34a79e0d2e21ee1a37e532364481a791480f4df1b9323b986a0de8245bcc2726",
+      "baseline_lines": 140,
+      "final_sha256": "219099664fedcca8fa1e3ad9dd2d61c238b51363f26bbb2cb7c514ee9d96d7d0",
+      "final_lines": 141,
+      "action": "revised",
+      "fact_basis": [
+        ".codex/agents/README.md",
+        "AGENTS.md",
+        ".codex/agents/cf-spec-writer.toml"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": ".claude/agents/cf-tester.md",
+      "category": "current-guidance",
+      "baseline_sha256": "d50f7e08f826eb224158c48538ec740fa870da17849ba0ada969bb30675ef2cb",
+      "baseline_lines": 148,
+      "final_sha256": "d50f7e08f826eb224158c48538ec740fa870da17849ba0ada969bb30675ef2cb",
+      "final_lines": 148,
+      "action": "preserved",
+      "fact_basis": [
+        ".codex/agents/README.md",
+        "AGENTS.md",
+        ".codex/agents/cf-tester.toml"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": ".claude/api-notes/docs-examples.md",
+      "category": "historical-record",
+      "baseline_sha256": "9dffa84fa1e224d975461d9fac45cfb0cb53411d95af0949b7ae34be302c3bf7",
+      "baseline_lines": 229,
+      "final_sha256": "9dffa84fa1e224d975461d9fac45cfb0cb53411d95af0949b7ae34be302c3bf7",
+      "final_lines": 229,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".claude/rules/code-style.md",
+      "category": "current-guidance",
+      "baseline_sha256": "204a0cdaa3ddaf9f1476686151f12e1e9700f944925006e45e10671af3332f7e",
+      "baseline_lines": 78,
+      "final_sha256": "204a0cdaa3ddaf9f1476686151f12e1e9700f944925006e45e10671af3332f7e",
+      "final_lines": 78,
+      "action": "preserved",
+      "fact_basis": [
+        "AGENTS.md",
+        "pyproject.toml",
+        ".agents/skills/code-style/SKILL.md"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": ".claude/specs/head-operator.md",
+      "category": "historical-record",
+      "baseline_sha256": "4385cdd2eb9895adc0afb0611fcf7399a8bbb01f61c6f413c83b1f6b1b26f611",
+      "baseline_lines": 59,
+      "final_sha256": "4385cdd2eb9895adc0afb0611fcf7399a8bbb01f61c6f413c83b1f6b1b26f611",
+      "final_lines": 59,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/agents/README.md",
+      "category": "current-guidance",
+      "baseline_sha256": "bee41212fda3f0c7c4916c1806ae4c830ff43a05f9bd9ff83d565e5a0371f3fb",
+      "baseline_lines": 126,
+      "final_sha256": "bee41212fda3f0c7c4916c1806ae4c830ff43a05f9bd9ff83d565e5a0371f3fb",
+      "final_lines": 126,
+      "action": "preserved",
+      "fact_basis": [
+        ".codex/agents/README.md",
+        "AGENTS.md"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": ".codex/artifacts/README.md",
+      "category": "current-guidance",
+      "baseline_sha256": "eb5cb74531a1ff4520b0fe93cadbb7e63e2a9f7cadaba8b7057c863e6b5e0b36",
+      "baseline_lines": 16,
+      "final_sha256": "eb5cb74531a1ff4520b0fe93cadbb7e63e2a9f7cadaba8b7057c863e6b5e0b36",
+      "final_lines": 16,
+      "action": "preserved",
+      "fact_basis": [
+        ".codex/archive/artifacts-through-2026-09-27.tar.gz"
+      ],
+      "review_scope": "archive path and retained historical purpose; no rewriting old outcomes"
+    },
+    {
+      "path": ".codex/artifacts/analysis/dal-310-weekly-doc-audit-2026-09-27.md",
+      "category": "historical-record",
+      "baseline_sha256": "0a61bce767c78bbf2a6600f9ea401d7845d7036ff17ba9d218237a7532a5e50b",
+      "baseline_lines": 45,
+      "final_sha256": "0a61bce767c78bbf2a6600f9ea401d7845d7036ff17ba9d218237a7532a5e50b",
+      "final_lines": 45,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/dal-318-doc-audit-2026-10-04.md",
+      "category": "historical-record",
+      "baseline_sha256": "76ec0398c59c1e4ef3acfa7fa5f44a36d0073517f6c31677c31ba3579198f9e8",
+      "baseline_lines": 87,
+      "final_sha256": "76ec0398c59c1e4ef3acfa7fa5f44a36d0073517f6c31677c31ba3579198f9e8",
+      "final_lines": 87,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/dal-431-ordered-last.md",
+      "category": "historical-record",
+      "baseline_sha256": "7e972d5c5d7521f43cb8e0749d3c57e89d945b26a48b6f0de6d81c911b377049",
+      "baseline_lines": 152,
+      "final_sha256": "7e972d5c5d7521f43cb8e0749d3c57e89d945b26a48b6f0de6d81c911b377049",
+      "final_lines": 152,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/dal-439-ordered-last-state.md",
+      "category": "historical-record",
+      "baseline_sha256": "82d652d9918539a854db49cd73ec075133b9a4a1515caf1553c1818f24a53cd4",
+      "baseline_lines": 76,
+      "final_sha256": "82d652d9918539a854db49cd73ec075133b9a4a1515caf1553c1818f24a53cd4",
+      "final_lines": 76,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/dal-440-compact-state-budget.md",
+      "category": "historical-record",
+      "baseline_sha256": "89acc1b626f2569f544fcb0086635f2b896e6c609260c3e459e4c029753d2690",
+      "baseline_lines": 142,
+      "final_sha256": "89acc1b626f2569f544fcb0086635f2b896e6c609260c3e459e4c029753d2690",
+      "final_lines": 142,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/dal-441-ordered-last-recovery.md",
+      "category": "historical-record",
+      "baseline_sha256": "4196ea29f3a78759881728631c0f7c1a2999fccea1deac286760dae7ed6f41c8",
+      "baseline_lines": 193,
+      "final_sha256": "4196ea29f3a78759881728631c0f7c1a2999fccea1deac286760dae7ed6f41c8",
+      "final_lines": 193,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/dal-442-ordered-last-integration.md",
+      "category": "historical-record",
+      "baseline_sha256": "133be96cff4d60daad3ae19cbbfb310aa8f7a9aa0fd053247bb698a80a0852ed",
+      "baseline_lines": 101,
+      "final_sha256": "133be96cff4d60daad3ae19cbbfb310aa8f7a9aa0fd053247bb698a80a0852ed",
+      "final_lines": 101,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-asof-admission-bulk.md",
+      "category": "historical-record",
+      "baseline_sha256": "5db3669f0ac3a90797bff667346fb199342fd1ad315d340237be9adf57f8a07e",
+      "baseline_lines": 154,
+      "final_sha256": "5db3669f0ac3a90797bff667346fb199342fd1ad315d340237be9adf57f8a07e",
+      "final_lines": 154,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-asof-bulk-copy.md",
+      "category": "historical-record",
+      "baseline_sha256": "6c191486be297a5bbb387880fe6dde7de497a06a99c276fa8dee9e5693d08795",
+      "baseline_lines": 168,
+      "final_sha256": "6c191486be297a5bbb387880fe6dde7de497a06a99c276fa8dee9e5693d08795",
+      "final_lines": 168,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-asof-columnar-admission.md",
+      "category": "historical-record",
+      "baseline_sha256": "3f3ea1b78f71b1aec5c561fc3e345803d847e428d51bddcdc9676adca7428903",
+      "baseline_lines": 94,
+      "final_sha256": "3f3ea1b78f71b1aec5c561fc3e345803d847e428d51bddcdc9676adca7428903",
+      "final_lines": 94,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-asof-identity-ranges.md",
+      "category": "historical-record",
+      "baseline_sha256": "1636ca79b6b3b6e1c2fb2c670d3c74ee276d37aaa69f30e9fa1f01c9fc79e0f4",
+      "baseline_lines": 156,
+      "final_sha256": "1636ca79b6b3b6e1c2fb2c670d3c74ee276d37aaa69f30e9fa1f01c9fc79e0f4",
+      "final_lines": 156,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-asof-key-cache.md",
+      "category": "historical-record",
+      "baseline_sha256": "2b95c0ec31251121790d26e1f46a5be404e5ad26991a2748f08895058091199d",
+      "baseline_lines": 192,
+      "final_sha256": "2b95c0ec31251121790d26e1f46a5be404e5ad26991a2748f08895058091199d",
+      "final_lines": 192,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-asof-output-routing.md",
+      "category": "historical-record",
+      "baseline_sha256": "0b1f996ee1714e77a69abaf86ac34d23801f44b8f306af6cc3882dccf2272d4a",
+      "baseline_lines": 238,
+      "final_sha256": "0b1f996ee1714e77a69abaf86ac34d23801f44b8f306af6cc3882dccf2272d4a",
+      "final_lines": 238,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-asof-parallel-routing.md",
+      "category": "historical-record",
+      "baseline_sha256": "de9c862a7a867cb701fdeae9c5894089856ce2202403831dbe615595f30b6558",
+      "baseline_lines": 168,
+      "final_sha256": "de9c862a7a867cb701fdeae9c5894089856ce2202403831dbe615595f30b6558",
+      "final_lines": 168,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-asof-prefix-counts.md",
+      "category": "historical-record",
+      "baseline_sha256": "b49072a02c7956a03c440a2e496792f302633d1316eab7e08c9ff00e9962ca4d",
+      "baseline_lines": 189,
+      "final_sha256": "b49072a02c7956a03c440a2e496792f302633d1316eab7e08c9ff00e9962ca4d",
+      "final_lines": 189,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-checkpoint-modes.md",
+      "category": "historical-record",
+      "baseline_sha256": "9f30673c17f6af8771ec1ab05e23e4fe824abe46de365d17457371da00249ccf",
+      "baseline_lines": 255,
+      "final_sha256": "9f30673c17f6af8771ec1ab05e23e4fe824abe46de365d17457371da00249ccf",
+      "final_lines": 255,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-compaction-report-scope.md",
+      "category": "historical-record",
+      "baseline_sha256": "e819c16c64528194175466ec29dad6ae19782a5b2dd25a3fbb0b0675e75bab32",
+      "baseline_lines": 38,
+      "final_sha256": "e819c16c64528194175466ec29dad6ae19782a5b2dd25a3fbb0b0675e75bab32",
+      "final_lines": 38,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-compiled-expressions.md",
+      "category": "historical-record",
+      "baseline_sha256": "c6f49f79c51dc854862c404e932287576a59e1dd270f65778839e31eb85db28f",
+      "baseline_lines": 195,
+      "final_sha256": "c6f49f79c51dc854862c404e932287576a59e1dd270f65778839e31eb85db28f",
+      "final_lines": 195,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-development-plan.md",
+      "category": "historical-record",
+      "baseline_sha256": "c67fa23a46ec0b8800a6b00c7066218477482003a74d110bf856996621d1e6e7",
+      "baseline_lines": 600,
+      "final_sha256": "c67fa23a46ec0b8800a6b00c7066218477482003a74d110bf856996621d1e6e7",
+      "final_lines": 600,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-eight-workload-diagnosis.md",
+      "category": "historical-record",
+      "baseline_sha256": "52877ff0731c3870eec70a0a1a0b6ab72e14dee60c1a2e4e84d0f4835bbcc048",
+      "baseline_lines": 770,
+      "final_sha256": "52877ff0731c3870eec70a0a1a0b6ab72e14dee60c1a2e4e84d0f4835bbcc048",
+      "final_lines": 770,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-fresh-acceptance.md",
+      "category": "historical-record",
+      "baseline_sha256": "64b79165287a24ded233ece19585e40c28e8b643032dc311ba7cfaca400a9e07",
+      "baseline_lines": 249,
+      "final_sha256": "64b79165287a24ded233ece19585e40c28e8b643032dc311ba7cfaca400a9e07",
+      "final_lines": 249,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-join-batch-admission.md",
+      "category": "historical-record",
+      "baseline_sha256": "a0a795804436811705a1feb95197b89da5c9b855d1c2532c0cbeb66609942942",
+      "baseline_lines": 190,
+      "final_sha256": "a0a795804436811705a1feb95197b89da5c9b855d1c2532c0cbeb66609942942",
+      "final_lines": 190,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-join-eviction.md",
+      "category": "historical-record",
+      "baseline_sha256": "984a0d82acd4b0215bbb16277c37ba8a89cfb62c5494131c96a513e656ddfad5",
+      "baseline_lines": 278,
+      "final_sha256": "984a0d82acd4b0215bbb16277c37ba8a89cfb62c5494131c96a513e656ddfad5",
+      "final_lines": 278,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-join-hotpaths.md",
+      "category": "historical-record",
+      "baseline_sha256": "edcea123c2a7074566dcd615381b012e0965007421097c7b211111b50a466a7e",
+      "baseline_lines": 232,
+      "final_sha256": "edcea123c2a7074566dcd615381b012e0965007421097c7b211111b50a466a7e",
+      "final_lines": 232,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-join-key-dictionary.md",
+      "category": "historical-record",
+      "baseline_sha256": "5196035dce80ceeff7f74e2b5e3c49ee4264a5aca4b5d8e4f64ddf72df9d12c2",
+      "baseline_lines": 517,
+      "final_sha256": "5196035dce80ceeff7f74e2b5e3c49ee4264a5aca4b5d8e4f64ddf72df9d12c2",
+      "final_lines": 517,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-join-output-projection.md",
+      "category": "historical-record",
+      "baseline_sha256": "18075914c36a6d4940b9bcfe22193c706310e433d2f97df2392a5fd80d0340c1",
+      "baseline_lines": 138,
+      "final_sha256": "18075914c36a6d4940b9bcfe22193c706310e433d2f97df2392a5fd80d0340c1",
+      "final_lines": 138,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-join-state-projection.md",
+      "category": "historical-record",
+      "baseline_sha256": "598e419faead404f501d4fe6d368fe37983215120b3431cb55cb5bb0a3eaf244",
+      "baseline_lines": 761,
+      "final_sha256": "598e419faead404f501d4fe6d368fe37983215120b3431cb55cb5bb0a3eaf244",
+      "final_lines": 761,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-main-comparison.md",
+      "category": "historical-record",
+      "baseline_sha256": "6195ab7739560c4a213c505dba86990ec623edab58d8b92e1b908db13d4ee869",
+      "baseline_lines": 221,
+      "final_sha256": "6195ab7739560c4a213c505dba86990ec623edab58d8b92e1b908db13d4ee869",
+      "final_lines": 221,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-morning-benchmark-failure.md",
+      "category": "historical-record",
+      "baseline_sha256": "b0b742fb580456cc08eb7e9d2b2936f16889bc24e0af8aaa196b13f73bbd6196",
+      "baseline_lines": 452,
+      "final_sha256": "b0b742fb580456cc08eb7e9d2b2936f16889bc24e0af8aaa196b13f73bbd6196",
+      "final_lines": 452,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-release-profile.md",
+      "category": "historical-record",
+      "baseline_sha256": "9d25c8043090996e127159398db4467a33aed67f5621c6ec12cae6370a2344f5",
+      "baseline_lines": 74,
+      "final_sha256": "9d25c8043090996e127159398db4467a33aed67f5621c6ec12cae6370a2344f5",
+      "final_lines": 74,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-second-stage-integration.md",
+      "category": "historical-record",
+      "baseline_sha256": "5031a0eea78d6aafb84ec3efb42638f94eb662813de6cf70f1f18d6d89618d5a",
+      "baseline_lines": 80,
+      "final_sha256": "5031a0eea78d6aafb84ec3efb42638f94eb662813de6cf70f1f18d6d89618d5a",
+      "final_lines": 80,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-segment-publication.md",
+      "category": "historical-record",
+      "baseline_sha256": "a8fe3d791baa858092816da295e27d70e4a04c5dff8a71c1a14baa047d7e6bd3",
+      "baseline_lines": 197,
+      "final_sha256": "a8fe3d791baa858092816da295e27d70e4a04c5dff8a71c1a14baa047d7e6bd3",
+      "final_lines": 197,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-signed-date-key-codec.md",
+      "category": "historical-record",
+      "baseline_sha256": "703246422fd2ee4cbf431b3a4e9e191a0ced16d3947df6c43e1324cd2762bd17",
+      "baseline_lines": 107,
+      "final_sha256": "703246422fd2ee4cbf431b3a4e9e191a0ced16d3947df6c43e1324cd2762bd17",
+      "final_lines": 107,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue406-sustained-performance.md",
+      "category": "historical-record",
+      "baseline_sha256": "d030b2a4aec0601e13c4177242dc22ac85ec020d4d02563f8510fa9109585764",
+      "baseline_lines": 231,
+      "final_sha256": "d030b2a4aec0601e13c4177242dc22ac85ec020d4d02563f8510fa9109585764",
+      "final_lines": 231,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue429-grouped-probe-stop.md",
+      "category": "historical-record",
+      "baseline_sha256": "9561dd4cfad971858c8252cf7ad733fd802abe06e59f0b07b0c2ce903c40ba6a",
+      "baseline_lines": 76,
+      "final_sha256": "9561dd4cfad971858c8252cf7ad733fd802abe06e59f0b07b0c2ce903c40ba6a",
+      "final_lines": 76,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue430-join-columnar-charges.md",
+      "category": "historical-record",
+      "baseline_sha256": "d3f52518e8716c8a1d86370efb40cbb567de03982c7a158c64018a2d98c44e5b",
+      "baseline_lines": 138,
+      "final_sha256": "d3f52518e8716c8a1d86370efb40cbb567de03982c7a158c64018a2d98c44e5b",
+      "final_lines": 138,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue431-join-chunk-state.md",
+      "category": "historical-record",
+      "baseline_sha256": "e903a98176ad3d47bd2027cd49fb944eaff44d329f00649e15de53cffa180256",
+      "baseline_lines": 147,
+      "final_sha256": "e903a98176ad3d47bd2027cd49fb944eaff44d329f00649e15de53cffa180256",
+      "final_lines": 147,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue435-asof-batch-admission.md",
+      "category": "historical-record",
+      "baseline_sha256": "81dd131a117a455183c0c4f61d36c8ac63ad941976665ca28c8566179fb1a25d",
+      "baseline_lines": 111,
+      "final_sha256": "81dd131a117a455183c0c4f61d36c8ac63ad941976665ca28c8566179fb1a25d",
+      "final_lines": 111,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue436-asof-columnar-merge.md",
+      "category": "historical-record",
+      "baseline_sha256": "1033a6526b10652be11416b2d55e4e2b10993f3f1443d79e2c6b7de3abe9dcbb",
+      "baseline_lines": 203,
+      "final_sha256": "1033a6526b10652be11416b2d55e4e2b10993f3f1443d79e2c6b7de3abe9dcbb",
+      "final_lines": 203,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue437-ingress-admission.md",
+      "category": "historical-record",
+      "baseline_sha256": "ccde959b201ef8e51770bb7b9ea9270191ba8142a206fce6a99ae896adbe3a66",
+      "baseline_lines": 190,
+      "final_sha256": "ccde959b201ef8e51770bb7b9ea9270191ba8142a206fce6a99ae896adbe3a66",
+      "final_lines": 190,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue438-ci-recovery.md",
+      "category": "historical-record",
+      "baseline_sha256": "c264af1c07d2eece5868be47ac0f769ea05282481b91289158a6220b1c67652c",
+      "baseline_lines": 124,
+      "final_sha256": "c264af1c07d2eece5868be47ac0f769ea05282481b91289158a6220b1c67652c",
+      "final_lines": 124,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue438-join-morsels.md",
+      "category": "historical-record",
+      "baseline_sha256": "66896446239085c920cd1ac9a5c52ac7911cfcdd04ea6a46a7e828d72b3067ca",
+      "baseline_lines": 160,
+      "final_sha256": "66896446239085c920cd1ac9a5c52ac7911cfcdd04ea6a46a7e828d72b3067ca",
+      "final_lines": 160,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue438-nullable-result-funding.md",
+      "category": "historical-record",
+      "baseline_sha256": "6b291cbf6ab6d1027ccf715d11b4cfd71d010fdc57066b8ae5430b4f806135c6",
+      "baseline_lines": 153,
+      "final_sha256": "6b291cbf6ab6d1027ccf715d11b4cfd71d010fdc57066b8ae5430b4f806135c6",
+      "final_lines": 153,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue467-columnar-state-admission.md",
+      "category": "historical-record",
+      "baseline_sha256": "a7ab6fd38620b6f696ea918ed449e01a6ae181b71fc0654c96a7d6792b75087f",
+      "baseline_lines": 105,
+      "final_sha256": "a7ab6fd38620b6f696ea918ed449e01a6ae181b71fc0654c96a7d6792b75087f",
+      "final_lines": 105,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/join-cpu-pipeline.md",
+      "category": "historical-record",
+      "baseline_sha256": "edbcbc0627812e6964a3c8ff7290c026a73d957b881ce004b7edf615459431d7",
+      "baseline_lines": 289,
+      "final_sha256": "edbcbc0627812e6964a3c8ff7290c026a73d957b881ce004b7edf615459431d7",
+      "final_lines": 289,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/join-interval-benchmark-perf-2026-10-16.md",
+      "category": "historical-record",
+      "baseline_sha256": "7c313aa6e9c94d942edf023ad1110d7cebb36f8e95b0b459b6240433fb621102",
+      "baseline_lines": 203,
+      "final_sha256": "7c313aa6e9c94d942edf023ad1110d7cebb36f8e95b0b459b6240433fb621102",
+      "final_lines": 203,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/join-remaining-gaps-2026-10-17.md",
+      "category": "historical-record",
+      "baseline_sha256": "a685864d3ed289942b1e527465d59a71320b3c59cdfcb15244ed105b04429f08",
+      "baseline_lines": 211,
+      "final_sha256": "a685864d3ed289942b1e527465d59a71320b3c59cdfcb15244ed105b04429f08",
+      "final_lines": 211,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/join-single-thread-performance.md",
+      "category": "historical-record",
+      "baseline_sha256": "5d8cd85ffb46c0ce66ba07c63a7f8edef2584ce29bbbdabc412bafa7f67c3924",
+      "baseline_lines": 303,
+      "final_sha256": "5d8cd85ffb46c0ce66ba07c63a7f8edef2584ce29bbbdabc412bafa7f67c3924",
+      "final_lines": 303,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/pr482-payload-cursor.md",
+      "category": "historical-record",
+      "baseline_sha256": "93f79f85683bf94c7f4c891e701420413a3da4f4e653dfabb4cc992d422fecd8",
+      "baseline_lines": 28,
+      "final_sha256": "93f79f85683bf94c7f4c891e701420413a3da4f4e653dfabb4cc992d422fecd8",
+      "final_lines": 28,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/pr482-remediation.md",
+      "category": "historical-record",
+      "baseline_sha256": "a6f885b7e8d2e15e2d513a955ca456d98bd6c071dce6c281e38d36995b3b7784",
+      "baseline_lines": 77,
+      "final_sha256": "a6f885b7e8d2e15e2d513a955ca456d98bd6c071dce6c281e38d36995b3b7784",
+      "final_lines": 77,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/pr484-remediation.md",
+      "category": "historical-record",
+      "baseline_sha256": "f3834d0a7e6b3bb184df6c3b7f07b415fbe2bc18896bcf265c4b24d8e154f80e",
+      "baseline_lines": 185,
+      "final_sha256": "f3834d0a7e6b3bb184df6c3b7f07b415fbe2bc18896bcf265c4b24d8e154f80e",
+      "final_lines": 185,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stacked-coverage-measurement.md",
+      "category": "historical-record",
+      "baseline_sha256": "75de76a93ba9c20e24e2e129774f80252a7879ceba4f235ae1b4b8d72dd581b3",
+      "baseline_lines": 44,
+      "final_sha256": "75de76a93ba9c20e24e2e129774f80252a7879ceba4f235ae1b4b8d72dd581b3",
+      "final_lines": 44,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-asof-columnar-admission.md",
+      "category": "historical-record",
+      "baseline_sha256": "d6ca7211a3d4165f23bca6198019c65f6cb885439647358c095a0db6b13b69dd",
+      "baseline_lines": 116,
+      "final_sha256": "d6ca7211a3d4165f23bca6198019c65f6cb885439647358c095a0db6b13b69dd",
+      "final_lines": 116,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-asof-output-ranges-fragment-followup-performance.md",
+      "category": "historical-record",
+      "baseline_sha256": "c98dc372a82853ef0b918e0037336df7936d49950f2dd56bc6f7b79493f2dd11",
+      "baseline_lines": 346,
+      "final_sha256": "c98dc372a82853ef0b918e0037336df7936d49950f2dd56bc6f7b79493f2dd11",
+      "final_lines": 346,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-asof-output-ranges-performance.md",
+      "category": "historical-record",
+      "baseline_sha256": "713f574867a50f60f459610a8f56a49f22021ee0adc564b8b4cbf862e862fad5",
+      "baseline_lines": 1457,
+      "final_sha256": "713f574867a50f60f459610a8f56a49f22021ee0adc564b8b4cbf862e862fad5",
+      "final_lines": 1457,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-asof-output-ranges.md",
+      "category": "historical-record",
+      "baseline_sha256": "844dde992bd8bc82478d51322ada7b6f2242726a373d5eb64bc707554c173ee5",
+      "baseline_lines": 160,
+      "final_sha256": "844dde992bd8bc82478d51322ada7b6f2242726a373d5eb64bc707554c173ee5",
+      "final_lines": 160,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-asof-owner-runs-performance.md",
+      "category": "historical-record",
+      "baseline_sha256": "9d9d1641877f58bfbaacd4524c14db250ece46f3c48f1afb3cf23fb71fb8c525",
+      "baseline_lines": 1132,
+      "final_sha256": "9d9d1641877f58bfbaacd4524c14db250ece46f3c48f1afb3cf23fb71fb8c525",
+      "final_lines": 1132,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-asof-owner-runs.md",
+      "category": "historical-record",
+      "baseline_sha256": "8c4fe374c41c8695b6c8fbe51044d9b3ed2d325e8813aabee24b0b0f6ddc3695",
+      "baseline_lines": 99,
+      "final_sha256": "8c4fe374c41c8695b6c8fbe51044d9b3ed2d325e8813aabee24b0b0f6ddc3695",
+      "final_lines": 99,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-asof-runs-performance.md",
+      "category": "historical-record",
+      "baseline_sha256": "30da2485a5c1ae4e86cd267f8f9d1020553d574841c6237d2ec908f1c8977272",
+      "baseline_lines": 1661,
+      "final_sha256": "30da2485a5c1ae4e86cd267f8f9d1020553d574841c6237d2ec908f1c8977272",
+      "final_lines": 1661,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-asof-runs.md",
+      "category": "historical-record",
+      "baseline_sha256": "a7f9d31f3649431870ed2b2809e61fdb86a9fd905dd8b9bde4b30be6999dc698",
+      "baseline_lines": 82,
+      "final_sha256": "a7f9d31f3649431870ed2b2809e61fdb86a9fd905dd8b9bde4b30be6999dc698",
+      "final_lines": 82,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-evidence-python-ci.md",
+      "category": "historical-record",
+      "baseline_sha256": "0f271d030f694d490d75e548d304475672ef24a3aa4ebb15bd3b3a27ac2f9bed",
+      "baseline_lines": 24,
+      "final_sha256": "0f271d030f694d490d75e548d304475672ef24a3aa4ebb15bd3b3a27ac2f9bed",
+      "final_lines": 24,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-asof-evidence.md",
+      "category": "historical-record",
+      "baseline_sha256": "8dc7687ecfdb9a6e9d5a8da03720b86c0adca517654c97790015153e7e66fd82",
+      "baseline_lines": 82,
+      "final_sha256": "8dc7687ecfdb9a6e9d5a8da03720b86c0adca517654c97790015153e7e66fd82",
+      "final_lines": 82,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-asof-performance.md",
+      "category": "historical-record",
+      "baseline_sha256": "33551a5cacf911351960908bb36d29c53456dac1522173803e4dc50f52202f72",
+      "baseline_lines": 876,
+      "final_sha256": "33551a5cacf911351960908bb36d29c53456dac1522173803e4dc50f52202f72",
+      "final_lines": 876,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-checkpoint-preload.md",
+      "category": "historical-record",
+      "baseline_sha256": "8d75d7bd148682a271f49b954a13f5c8051aa2f2fba619f2aee7f0a3ec8a2952",
+      "baseline_lines": 137,
+      "final_sha256": "8d75d7bd148682a271f49b954a13f5c8051aa2f2fba619f2aee7f0a3ec8a2952",
+      "final_lines": 137,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-columnar-state.md",
+      "category": "historical-record",
+      "baseline_sha256": "744069eaee375a51b8845cbc327aa7b9f0cccbcc23df39666459777a6c3bd129",
+      "baseline_lines": 1333,
+      "final_sha256": "744069eaee375a51b8845cbc327aa7b9f0cccbcc23df39666459777a6c3bd129",
+      "final_lines": 1333,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-compaction.md",
+      "category": "historical-record",
+      "baseline_sha256": "ba5b09350432b7f6166e699449db8ca31b5348a665cab85ad684cc2bf3d76ad7",
+      "baseline_lines": 209,
+      "final_sha256": "ba5b09350432b7f6166e699449db8ca31b5348a665cab85ad684cc2bf3d76ad7",
+      "final_lines": 209,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-funded-boolean-payload.md",
+      "category": "historical-record",
+      "baseline_sha256": "b3b1ab480608346fb645bc2fc3d1a36a46748afce4c26f04fb803ece58cdf6cc",
+      "baseline_lines": 54,
+      "final_sha256": "b3b1ab480608346fb645bc2fc3d1a36a46748afce4c26f04fb803ece58cdf6cc",
+      "final_lines": 54,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-funded-delta-only.md",
+      "category": "historical-record",
+      "baseline_sha256": "4a22d4c62641df52a985f14aca96d89a059f01e72109482ff396c1ccd4ec2a5e",
+      "baseline_lines": 66,
+      "final_sha256": "4a22d4c62641df52a985f14aca96d89a059f01e72109482ff396c1ccd4ec2a5e",
+      "final_lines": 66,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-funded-float-payload.md",
+      "category": "historical-record",
+      "baseline_sha256": "45df2b000f495514bf8d6f0cf21efcba35e0f30c6e6991e510950d24803df198",
+      "baseline_lines": 41,
+      "final_sha256": "45df2b000f495514bf8d6f0cf21efcba35e0f30c6e6991e510950d24803df198",
+      "final_lines": 41,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-funded-metadata-validation.md",
+      "category": "historical-record",
+      "baseline_sha256": "05e1e923fc24394c263bf59b2bdbb79443541f0718689f620b33fc536176b5fe",
+      "baseline_lines": 227,
+      "final_sha256": "05e1e923fc24394c263bf59b2bdbb79443541f0718689f620b33fc536176b5fe",
+      "final_lines": 227,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-funded-nullable-float-payload.md",
+      "category": "historical-record",
+      "baseline_sha256": "d6679e57b03895a4feb5b46141b39baba26498cdbbddbcb868c88e002ecb33ba",
+      "baseline_lines": 70,
+      "final_sha256": "d6679e57b03895a4feb5b46141b39baba26498cdbbddbcb868c88e002ecb33ba",
+      "final_lines": 70,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-funded-restore-bases.md",
+      "category": "historical-record",
+      "baseline_sha256": "e4e9d0d36590eca5553f69ee102f04fd40d97c1963887fd69992f6d5b1e56e4b",
+      "baseline_lines": 249,
+      "final_sha256": "e4e9d0d36590eca5553f69ee102f04fd40d97c1963887fd69992f6d5b1e56e4b",
+      "final_lines": 249,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-funded-restore-segments.md",
+      "category": "historical-record",
+      "baseline_sha256": "75d613224056609ee18ce1794f8eb5a823082293e6fb0ce1d240b082932029c0",
+      "baseline_lines": 159,
+      "final_sha256": "75d613224056609ee18ce1794f8eb5a823082293e6fb0ce1d240b082932029c0",
+      "final_lines": 159,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-funded-schema-comparison.md",
+      "category": "historical-record",
+      "baseline_sha256": "2bd583adff5cd092e3d7e99f58d7ead6035b38f7f28c46fd624b0e501b2761ab",
+      "baseline_lines": 118,
+      "final_sha256": "2bd583adff5cd092e3d7e99f58d7ead6035b38f7f28c46fd624b0e501b2761ab",
+      "final_lines": 118,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-funded-utf8-restore.md",
+      "category": "historical-record",
+      "baseline_sha256": "60eb331d822ed574fd8c2035990ae9484006b0e009676af09123d3f863213fd2",
+      "baseline_lines": 60,
+      "final_sha256": "60eb331d822ed574fd8c2035990ae9484006b0e009676af09123d3f863213fd2",
+      "final_lines": 60,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-j2a-dictionary-measurements.md",
+      "category": "historical-record",
+      "baseline_sha256": "a8917010d953806eb165e94a6def448058484d28f095b57afefd1d29e13c66ff",
+      "baseline_lines": 241,
+      "final_sha256": "a8917010d953806eb165e94a6def448058484d28f095b57afefd1d29e13c66ff",
+      "final_lines": 241,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-pr394-integration.md",
+      "category": "historical-record",
+      "baseline_sha256": "90d98de187dd5a51244e28b4476b9b9628915906fd6600a2c765149d4eb37e21",
+      "baseline_lines": 330,
+      "final_sha256": "90d98de187dd5a51244e28b4476b9b9628915906fd6600a2c765149d4eb37e21",
+      "final_lines": 330,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-progress.md",
+      "category": "historical-record",
+      "baseline_sha256": "bb609e309d125d260c78ce05c12467e4296baf3ba22e3c10783a217ef8f0b41f",
+      "baseline_lines": 56,
+      "final_sha256": "bb609e309d125d260c78ce05c12467e4296baf3ba22e3c10783a217ef8f0b41f",
+      "final_lines": 56,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-safety-j1.md",
+      "category": "historical-record",
+      "baseline_sha256": "523e4f0cdf70d42eefb6c36a62a21f60226e1ad40bf5e2ba8e9ca248652e11aa",
+      "baseline_lines": 109,
+      "final_sha256": "523e4f0cdf70d42eefb6c36a62a21f60226e1ad40bf5e2ba8e9ca248652e11aa",
+      "final_lines": 109,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-safety-performance.md",
+      "category": "historical-record",
+      "baseline_sha256": "7c4425ca0e2030f6aa0d8193843b9b0b7a7434a0c1b3ce4ca0644937a06b9b81",
+      "baseline_lines": 2044,
+      "final_sha256": "7c4425ca0e2030f6aa0d8193843b9b0b7a7434a0c1b3ce4ca0644937a06b9b81",
+      "final_lines": 2044,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-status-proof.md",
+      "category": "historical-record",
+      "baseline_sha256": "299a400496fb04cb09cc1eb10e8b464321a7574b6a82e00dc5ef9ef6f924c20e",
+      "baseline_lines": 22,
+      "final_sha256": "299a400496fb04cb09cc1eb10e8b464321a7574b6a82e00dc5ef9ef6f924c20e",
+      "final_lines": 22,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-strict-profile-bulk.md",
+      "category": "historical-record",
+      "baseline_sha256": "78a3046194c44683911d7243e64434be2f6d44cceb90cbc6eccda283d6d64122",
+      "baseline_lines": 105,
+      "final_sha256": "78a3046194c44683911d7243e64434be2f6d44cceb90cbc6eccda283d6d64122",
+      "final_lines": 105,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-strict-profile-cooperative.md",
+      "category": "historical-record",
+      "baseline_sha256": "14b23d9354cb34c56e8740f13a28cb8e8b7e3b8c4d4b2ecd913e77f4579e06d8",
+      "baseline_lines": 94,
+      "final_sha256": "14b23d9354cb34c56e8740f13a28cb8e8b7e3b8c4d4b2ecd913e77f4579e06d8",
+      "final_lines": 94,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-strict-profile-main-integration.md",
+      "category": "historical-record",
+      "baseline_sha256": "da8e26c425d90c7853de27acd92858d20c8679119be864790c13316378c2dbe7",
+      "baseline_lines": 94,
+      "final_sha256": "da8e26c425d90c7853de27acd92858d20c8679119be864790c13316378c2dbe7",
+      "final_lines": 94,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-strict-profile-quantum.md",
+      "category": "historical-record",
+      "baseline_sha256": "c148f911f3fae6d7ecb4a37f158e1062341bdf4011125d9418bb303bab77d2b8",
+      "baseline_lines": 34,
+      "final_sha256": "c148f911f3fae6d7ecb4a37f158e1062341bdf4011125d9418bb303bab77d2b8",
+      "final_lines": 34,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-strict-profile-reusable.md",
+      "category": "historical-record",
+      "baseline_sha256": "20ac7bac1324acc0fe3aa12bb528d0c8060036d4f2c9eb6d66ccf8aac02223cf",
+      "baseline_lines": 88,
+      "final_sha256": "20ac7bac1324acc0fe3aa12bb528d0c8060036d4f2c9eb6d66ccf8aac02223cf",
+      "final_lines": 88,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-strict-profile.md",
+      "category": "historical-record",
+      "baseline_sha256": "e77aabfcc24b4ba123c44751d02f4629b127231da37c111e1dcbb77c24ab0b66",
+      "baseline_lines": 119,
+      "final_sha256": "e77aabfcc24b4ba123c44751d02f4629b127231da37c111e1dcbb77c24ab0b66",
+      "final_lines": 119,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-terminal-recovery.md",
+      "category": "historical-record",
+      "baseline_sha256": "c3b117ebf1928699a615930d59d27eeb9fc9f5562e515a5a6d0ef9f37b886fb4",
+      "baseline_lines": 71,
+      "final_sha256": "c3b117ebf1928699a615930d59d27eeb9fc9f5562e515a5a6d0ef9f37b886fb4",
+      "final_lines": 71,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-pr-retirement-ci.md",
+      "category": "historical-record",
+      "baseline_sha256": "e7960eceb115f4bc246b0417568fc3975f8636a9cc11bcdef81f7f64a5cc6684",
+      "baseline_lines": 145,
+      "final_sha256": "e7960eceb115f4bc246b0417568fc3975f8636a9cc11bcdef81f7f64a5cc6684",
+      "final_lines": 145,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-retained-benchmarks.md",
+      "category": "historical-record",
+      "baseline_sha256": "975bd8a252301996e28ddf3e06e5bb9d43af905f2c4f9f18b836a97d2703b150",
+      "baseline_lines": 121,
+      "final_sha256": "975bd8a252301996e28ddf3e06e5bb9d43af905f2c4f9f18b836a97d2703b150",
+      "final_lines": 121,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-retained-python-ci.md",
+      "category": "historical-record",
+      "baseline_sha256": "764eaf8df8cb07c514d693261f3ffba2e39338463dc241c43740526ebecd3588",
+      "baseline_lines": 44,
+      "final_sha256": "764eaf8df8cb07c514d693261f3ffba2e39338463dc241c43740526ebecd3588",
+      "final_lines": 44,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/api-notes/bounded-backward-asof-join.md",
+      "category": "historical-record",
+      "baseline_sha256": "b69654bb3308ec67020a3deea76385a95e34470fce9228558e4978697afc6026",
+      "baseline_lines": 802,
+      "final_sha256": "b69654bb3308ec67020a3deea76385a95e34470fce9228558e4978697afc6026",
+      "final_lines": 802,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/api-notes/docs-examples.md",
+      "category": "historical-record",
+      "baseline_sha256": "9dffa84fa1e224d975461d9fac45cfb0cb53411d95af0949b7ae34be302c3bf7",
+      "baseline_lines": 229,
+      "final_sha256": "9dffa84fa1e224d975461d9fac45cfb0cb53411d95af0949b7ae34be302c3bf7",
+      "final_lines": 229,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/api-notes/public-runtime-registration-api.md",
+      "category": "historical-record",
+      "baseline_sha256": "65f43cb9a13af3305192e69cfa2d9efb10b9340d0645fc929efdcd9f66942286",
+      "baseline_lines": 474,
+      "final_sha256": "65f43cb9a13af3305192e69cfa2d9efb10b9340d0645fc929efdcd9f66942286",
+      "final_lines": 474,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/api-notes/symbolic-computation-engine.md",
+      "category": "historical-record",
+      "baseline_sha256": "d9a2ac0895cc10fd75c9cdf3cf8143ef776cb6ba5e36945c3fe10213b3e490ed",
+      "baseline_lines": 1652,
+      "final_sha256": "d9a2ac0895cc10fd75c9cdf3cf8143ef776cb6ba5e36945c3fe10213b3e490ed",
+      "final_lines": 1652,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/api-notes/symbolic-exponential-indicators.md",
+      "category": "historical-record",
+      "baseline_sha256": "6604c3f4f5803a9843a915ba65880a8497c9c2177390c8e313167fd49bdc979c",
+      "baseline_lines": 40,
+      "final_sha256": "6604c3f4f5803a9843a915ba65880a8497c9c2177390c8e313167fd49bdc979c",
+      "final_lines": 40,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/api-notes/symbolic-relational-dag.md",
+      "category": "historical-record",
+      "baseline_sha256": "e42f4bc17f93fc2b31dec928d43d1b01c5b606b0a8aa3a0d667406e2a682404c",
+      "baseline_lines": 140,
+      "final_sha256": "e42f4bc17f93fc2b31dec928d43d1b01c5b606b0a8aa3a0d667406e2a682404c",
+      "final_lines": 140,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/arrow-ipc-audit/ARROYO-EXTENSION-PLAN.md",
+      "category": "historical-record",
+      "baseline_sha256": "2f1af234f5d6d19d76b2884a88ae77c9bcbd4aa933a01c61b67a90f564c961a0",
+      "baseline_lines": 26,
+      "final_sha256": "2f1af234f5d6d19d76b2884a88ae77c9bcbd4aa933a01c61b67a90f564c961a0",
+      "final_lines": 26,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/arrow-ipc-audit/ARROYO-REPRODUCE.md",
+      "category": "historical-record",
+      "baseline_sha256": "5fe20930f261806207abf50a4bdec854fc27c8229018c27945a72c864da6fef7",
+      "baseline_lines": 125,
+      "final_sha256": "5fe20930f261806207abf50a4bdec854fc27c8229018c27945a72c864da6fef7",
+      "final_lines": 125,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/arrow-ipc-audit/ARROYO-RESULTS.md",
+      "category": "historical-record",
+      "baseline_sha256": "b423a7bf5bc425d287e90391d19190738da315b76e7adf6291eafbd726f03e53",
+      "baseline_lines": 203,
+      "final_sha256": "b423a7bf5bc425d287e90391d19190738da315b76e7adf6291eafbd726f03e53",
+      "final_lines": 203,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/arrow-ipc-audit/BENCHMARK-AUDIT.md",
+      "category": "historical-record",
+      "baseline_sha256": "d95844b48ee59759394cb52086758376a784979412dbb2984660108767cfb872",
+      "baseline_lines": 126,
+      "final_sha256": "d95844b48ee59759394cb52086758376a784979412dbb2984660108767cfb872",
+      "final_lines": 126,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/arrow-ipc-audit/MEASUREMENT-CORRECTION.md",
+      "category": "historical-record",
+      "baseline_sha256": "04e70a17e1061eadd21d527c9f6b8c807a749faf20125f73460879af938cea75",
+      "baseline_lines": 15,
+      "final_sha256": "04e70a17e1061eadd21d527c9f6b8c807a749faf20125f73460879af938cea75",
+      "final_lines": 15,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/arrow-ipc-audit/PLAN.md",
+      "category": "historical-record",
+      "baseline_sha256": "2c6d28fa7b9fbf1b38e4b1aa9b8153f478ec71d5c4ed1e1d2eaf5a154ec05496",
+      "baseline_lines": 43,
+      "final_sha256": "2c6d28fa7b9fbf1b38e4b1aa9b8153f478ec71d5c4ed1e1d2eaf5a154ec05496",
+      "final_lines": 43,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/arrow-ipc-audit/README.md",
+      "category": "historical-record",
+      "baseline_sha256": "400006666e47685df8ba1362055afba74c54d8eb5f74f795b973bb73300bf863",
+      "baseline_lines": 145,
+      "final_sha256": "400006666e47685df8ba1362055afba74c54d8eb5f74f795b973bb73300bf863",
+      "final_lines": 145,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/arrow-ipc-audit/REPORT.md",
+      "category": "historical-record",
+      "baseline_sha256": "2eb155188a23dc172d358265e16f7be5a5f14d9bfb04c1eadc8e120ad32ed38e",
+      "baseline_lines": 218,
+      "final_sha256": "2eb155188a23dc172d358265e16f7be5a5f14d9bfb04c1eadc8e120ad32ed38e",
+      "final_lines": 218,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/arrow-wrapping/PLAN.md",
+      "category": "historical-record",
+      "baseline_sha256": "70c715ce65f2d459be955a28a317854f65ba4c3b3ee2d5a1d58416424f8804bd",
+      "baseline_lines": 27,
+      "final_sha256": "70c715ce65f2d459be955a28a317854f65ba4c3b3ee2d5a1d58416424f8804bd",
+      "final_lines": 27,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/arrow-wrapping/README.md",
+      "category": "historical-record",
+      "baseline_sha256": "5e4404748d292a5a77364effbec505122b3f2e03c1bd678576cbaa122deb33cb",
+      "baseline_lines": 90,
+      "final_sha256": "5e4404748d292a5a77364effbec505122b3f2e03c1bd678576cbaa122deb33cb",
+      "final_lines": 90,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/arrow-wrapping/REPRODUCE.md",
+      "category": "historical-record",
+      "baseline_sha256": "cdc148abb39fb379750f4cbdbf9bfa3db1eeb85bc046d5f54bccbe4736084c18",
+      "baseline_lines": 69,
+      "final_sha256": "cdc148abb39fb379750f4cbdbf9bfa3db1eeb85bc046d5f54bccbe4736084c18",
+      "final_lines": 69,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/arroyo-attribution/PLAN.md",
+      "category": "historical-record",
+      "baseline_sha256": "247da59d7bc59158daf9ba3e0765896a5b026cfc648615771e01a1f531479957",
+      "baseline_lines": 52,
+      "final_sha256": "247da59d7bc59158daf9ba3e0765896a5b026cfc648615771e01a1f531479957",
+      "final_lines": 52,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/arroyo-attribution/README.md",
+      "category": "historical-record",
+      "baseline_sha256": "e4b9fb0f0664a7cf913bf54259bd33c2cbc6b77a3591f6afe43434cfcc8670a0",
+      "baseline_lines": 93,
+      "final_sha256": "e4b9fb0f0664a7cf913bf54259bd33c2cbc6b77a3591f6afe43434cfcc8670a0",
+      "final_lines": 93,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/arroyo-attribution/REPORT.md",
+      "category": "historical-record",
+      "baseline_sha256": "a965b4ed660b5d911b0437e1457e86803c94323dfcf5754061a93e7744b8ff28",
+      "baseline_lines": 407,
+      "final_sha256": "a965b4ed660b5d911b0437e1457e86803c94323dfcf5754061a93e7744b8ff28",
+      "final_lines": 407,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/arroyo-comparison/PLAN.md",
+      "category": "historical-record",
+      "baseline_sha256": "3600aefe2866c37de08fc83150ab62985e11ba2eaec2ec6dd11dc73480f15e09",
+      "baseline_lines": 47,
+      "final_sha256": "3600aefe2866c37de08fc83150ab62985e11ba2eaec2ec6dd11dc73480f15e09",
+      "final_lines": 47,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/arroyo-comparison/README.md",
+      "category": "historical-record",
+      "baseline_sha256": "c6ee031b9e517492c6b899374c955c295b73d3e88b95ade16c93341aa694440c",
+      "baseline_lines": 93,
+      "final_sha256": "c6ee031b9e517492c6b899374c955c295b73d3e88b95ade16c93341aa694440c",
+      "final_lines": 93,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/arroyo-comparison/REPORT.md",
+      "category": "historical-record",
+      "baseline_sha256": "82421fa91730c673b8947e45423dadf48f207da46b8e062aca3f36a17eb93735",
+      "baseline_lines": 249,
+      "final_sha256": "82421fa91730c673b8947e45423dadf48f207da46b8e062aca3f36a17eb93735",
+      "final_lines": 249,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/critiques/bounded-backward-asof-join-arrow-output-addendum.md",
+      "category": "historical-record",
+      "baseline_sha256": "b504fb6a38950330702fd1cb640203db8218f114b4731079685fa7ed1cd68034",
+      "baseline_lines": 62,
+      "final_sha256": "b504fb6a38950330702fd1cb640203db8218f114b4731079685fa7ed1cd68034",
+      "final_lines": 62,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/critiques/bounded-backward-asof-join.md",
+      "category": "historical-record",
+      "baseline_sha256": "8617d55c4d1e6ea8ff99c768bebb89ff9c4ced5ea2a212fe5ca387e0902f33f5",
+      "baseline_lines": 190,
+      "final_sha256": "8617d55c4d1e6ea8ff99c768bebb89ff9c4ced5ea2a212fe5ca387e0902f33f5",
+      "final_lines": 190,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/critiques/issue406-join-batch-admission.md",
+      "category": "historical-record",
+      "baseline_sha256": "7de9b256020c9aafe54a2b2e96fb30d65d8ca3d7f9f24fd2ae0ba3f78aa43b9d",
+      "baseline_lines": 126,
+      "final_sha256": "7de9b256020c9aafe54a2b2e96fb30d65d8ca3d7f9f24fd2ae0ba3f78aa43b9d",
+      "final_lines": 126,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/critiques/issue406-join-key-dictionary.md",
+      "category": "historical-record",
+      "baseline_sha256": "083fbed7bc670f6f20648b66193ad6f0f7ae3cc76d56810fbf56a6bd0c7554c2",
+      "baseline_lines": 185,
+      "final_sha256": "083fbed7bc670f6f20648b66193ad6f0f7ae3cc76d56810fbf56a6bd0c7554c2",
+      "final_lines": 185,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/critiques/issue406-join-state-projection.md",
+      "category": "historical-record",
+      "baseline_sha256": "19b9b94c2ad33118424d1a3d0ced4e758bc2681311fc6ddd31ecab0538d9fb8a",
+      "baseline_lines": 282,
+      "final_sha256": "19b9b94c2ad33118424d1a3d0ced4e758bc2681311fc6ddd31ecab0538d9fb8a",
+      "final_lines": 282,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/critiques/issue406-segment-publication.md",
+      "category": "historical-record",
+      "baseline_sha256": "b2cbeb5f0d5b86d9bc1770e5cc6c923fd11bb175fd94248e8057ec6cb047c3c6",
+      "baseline_lines": 154,
+      "final_sha256": "b2cbeb5f0d5b86d9bc1770e5cc6c923fd11bb175fd94248e8057ec6cb047c3c6",
+      "final_lines": 154,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/critiques/issue406-segment-staging.md",
+      "category": "historical-record",
+      "baseline_sha256": "7095a9b09ce62366177fd5ed5b9b4177791ab7f62c164efba5a0bb1cdabf8139",
+      "baseline_lines": 77,
+      "final_sha256": "7095a9b09ce62366177fd5ed5b9b4177791ab7f62c164efba5a0bb1cdabf8139",
+      "final_lines": 77,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/critiques/join-single-thread-performance.md",
+      "category": "historical-record",
+      "baseline_sha256": "dd3dcc252afd47a9cebb73cef9ed1f4c7e3a919939f2d51737562e1bd8213c14",
+      "baseline_lines": 195,
+      "final_sha256": "dd3dcc252afd47a9cebb73cef9ed1f4c7e3a919939f2d51737562e1bd8213c14",
+      "final_lines": 195,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/critiques/public-runtime-registration-api.md",
+      "category": "historical-record",
+      "baseline_sha256": "ca354073c5bfe39936d3e27e960725a992b2fcf5290b25c7e73dad4b668e7b92",
+      "baseline_lines": 188,
+      "final_sha256": "ca354073c5bfe39936d3e27e960725a992b2fcf5290b25c7e73dad4b668e7b92",
+      "final_lines": 188,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/critiques/sce-07-rolling-inf-mean.md",
+      "category": "historical-record",
+      "baseline_sha256": "aab34c2cc0a5294b3e23a49242deeee2d32c594f4ac7a7436f63a397c9cafc1c",
+      "baseline_lines": 186,
+      "final_sha256": "aab34c2cc0a5294b3e23a49242deeee2d32c594f4ac7a7436f63a397c9cafc1c",
+      "final_lines": 186,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/critiques/stream-asof-columnar-admission.md",
+      "category": "historical-record",
+      "baseline_sha256": "88b06bcafa4029545843c0914609a608d93e39cdce30fff6886586f44ac703ef",
+      "baseline_lines": 187,
+      "final_sha256": "88b06bcafa4029545843c0914609a608d93e39cdce30fff6886586f44ac703ef",
+      "final_lines": 187,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/critiques/stream-join-asof-acceleration.md",
+      "category": "historical-record",
+      "baseline_sha256": "f4d84835be42f40fcf0ce9972e8debbfc118446e01cd85c7374b85a8b64cccd6",
+      "baseline_lines": 132,
+      "final_sha256": "f4d84835be42f40fcf0ce9972e8debbfc118446e01cd85c7374b85a8b64cccd6",
+      "final_lines": 132,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/critiques/stream-join-columnar-state-key-scratch.md",
+      "category": "historical-record",
+      "baseline_sha256": "34b4dc4067929fba7fd6ab264e230bf54d9c8b1fc909af99efb1d4dc64c66a43",
+      "baseline_lines": 223,
+      "final_sha256": "34b4dc4067929fba7fd6ab264e230bf54d9c8b1fc909af99efb1d4dc64c66a43",
+      "final_lines": 223,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/critiques/stream-join-columnar-state-ownership.md",
+      "category": "historical-record",
+      "baseline_sha256": "aefb3dd3b9be1751a302eb77a5eed421c02eb6190a0cefef89b3d1aded003d7c",
+      "baseline_lines": 206,
+      "final_sha256": "aefb3dd3b9be1751a302eb77a5eed421c02eb6190a0cefef89b3d1aded003d7c",
+      "final_lines": 206,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/critiques/stream-join-columnar-state.md",
+      "category": "historical-record",
+      "baseline_sha256": "56cca259a74d0a1abd9428e93d433e5e6f56e2b474dc9085ea5f374586df5dea",
+      "baseline_lines": 265,
+      "final_sha256": "56cca259a74d0a1abd9428e93d433e5e6f56e2b474dc9085ea5f374586df5dea",
+      "final_lines": 265,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/critiques/symbolic-computation-engine.md",
+      "category": "historical-record",
+      "baseline_sha256": "b4a7d307b31e3151ee96e9462920bea00e749860d10df9ba3e241847399b4327",
+      "baseline_lines": 132,
+      "final_sha256": "b4a7d307b31e3151ee96e9462920bea00e749860d10df9ba3e241847399b4327",
+      "final_lines": 132,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/native-arrow-source-validation.md",
+      "category": "historical-record",
+      "baseline_sha256": "eb34a922f2772a7782bbb0f6603504e7faf24f34c393d328766457230407bfaf",
+      "baseline_lines": 179,
+      "final_sha256": "eb34a922f2772a7782bbb0f6603504e7faf24f34c393d328766457230407bfaf",
+      "final_lines": 179,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/benchmark-workflow-inventory.md",
+      "category": "historical-record",
+      "baseline_sha256": "d341151c4910eaa1a9ea5738e0089fbc8bf62e6e585f523b00861ff1c21b8df2",
+      "baseline_lines": 57,
+      "final_sha256": "d341151c4910eaa1a9ea5738e0089fbc8bf62e6e585f523b00861ff1c21b8df2",
+      "final_lines": 57,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/bounded-backward-asof-join.md",
+      "category": "historical-record",
+      "baseline_sha256": "40ad5db9dd1b7e33c5d148eb8925ba37a58d4a0704dfe5609a7b515e757f70ec",
+      "baseline_lines": 340,
+      "final_sha256": "40ad5db9dd1b7e33c5d148eb8925ba37a58d4a0704dfe5609a7b515e757f70ec",
+      "final_lines": 340,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/codebase-cleanup.md",
+      "category": "historical-record",
+      "baseline_sha256": "fcbf092b9030e580f957d2cd500a1f9f24e50d927de079d71e898579ffb14c8d",
+      "baseline_lines": 90,
+      "final_sha256": "fcbf092b9030e580f957d2cd500a1f9f24e50d927de079d71e898579ffb14c8d",
+      "final_lines": 90,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/issue406-asof-bulk-copy.md",
+      "category": "historical-record",
+      "baseline_sha256": "3590f7a371d5672416278050ac067c5e0d358e4082dbf8864f0141d49657e319",
+      "baseline_lines": 247,
+      "final_sha256": "3590f7a371d5672416278050ac067c5e0d358e4082dbf8864f0141d49657e319",
+      "final_lines": 247,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/issue406-asof-columnar-admission.md",
+      "category": "historical-record",
+      "baseline_sha256": "3095d6c2c9d0e882fd995bfb2235e658dc09b4fa65a85905759f2d24de13a51a",
+      "baseline_lines": 163,
+      "final_sha256": "3095d6c2c9d0e882fd995bfb2235e658dc09b4fa65a85905759f2d24de13a51a",
+      "final_lines": 163,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/issue406-asof-identity-ranges.md",
+      "category": "historical-record",
+      "baseline_sha256": "cb3752a9c38324748f9fed18fda88ac40db4ef1046b788ab846d9ba2ce091ee4",
+      "baseline_lines": 273,
+      "final_sha256": "cb3752a9c38324748f9fed18fda88ac40db4ef1046b788ab846d9ba2ce091ee4",
+      "final_lines": 273,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/issue406-asof-output-routing.md",
+      "category": "historical-record",
+      "baseline_sha256": "0036f9430b18cd2cea1c2e5ee5378d1e6f4cd3eb3b4046603c279fa2c13f53a0",
+      "baseline_lines": 211,
+      "final_sha256": "0036f9430b18cd2cea1c2e5ee5378d1e6f4cd3eb3b4046603c279fa2c13f53a0",
+      "final_lines": 211,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/issue406-asof-parallel-routing.md",
+      "category": "historical-record",
+      "baseline_sha256": "197e6701157880a17dca5c1053751920a954560b41f1dbf87185b8f6231752b3",
+      "baseline_lines": 239,
+      "final_sha256": "197e6701157880a17dca5c1053751920a954560b41f1dbf87185b8f6231752b3",
+      "final_lines": 239,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/issue406-compiled-expressions.md",
+      "category": "historical-record",
+      "baseline_sha256": "018f8925bec96d3ca2897701fd0e071f7d0c5fe67260e83b3f4f26ed1609a7fa",
+      "baseline_lines": 157,
+      "final_sha256": "018f8925bec96d3ca2897701fd0e071f7d0c5fe67260e83b3f4f26ed1609a7fa",
+      "final_lines": 157,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/issue406-groupby-regression.md",
+      "category": "historical-record",
+      "baseline_sha256": "a96fab1caf6c58139f4149ba638df5f16f39c5a6f97329f8370671f0d7678be4",
+      "baseline_lines": 526,
+      "final_sha256": "a96fab1caf6c58139f4149ba638df5f16f39c5a6f97329f8370671f0d7678be4",
+      "final_lines": 526,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/issue406-join-batch-admission.md",
+      "category": "historical-record",
+      "baseline_sha256": "57f40c3688de0a3058b09443b3ca8168f7ba856a3600097817abcfeb07ebf4c9",
+      "baseline_lines": 192,
+      "final_sha256": "57f40c3688de0a3058b09443b3ca8168f7ba856a3600097817abcfeb07ebf4c9",
+      "final_lines": 192,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/issue406-join-key-dictionary.md",
+      "category": "historical-record",
+      "baseline_sha256": "864245e5102da39ddb44350c13c6c75160cf00337875d397bab53227f6a1a3b1",
+      "baseline_lines": 305,
+      "final_sha256": "864245e5102da39ddb44350c13c6c75160cf00337875d397bab53227f6a1a3b1",
+      "final_lines": 305,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/issue406-join-output-projection.md",
+      "category": "historical-record",
+      "baseline_sha256": "f9e2d30857569bc2effba9a8e9c0bb20dbac03f63f007d37dcc0b115345546c9",
+      "baseline_lines": 267,
+      "final_sha256": "f9e2d30857569bc2effba9a8e9c0bb20dbac03f63f007d37dcc0b115345546c9",
+      "final_lines": 267,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/issue406-join-state-projection.md",
+      "category": "historical-record",
+      "baseline_sha256": "b3bde747773dcce00d0e41e99f0cca3c1144ccea03c16a47a8d5f622f4477763",
+      "baseline_lines": 190,
+      "final_sha256": "b3bde747773dcce00d0e41e99f0cca3c1144ccea03c16a47a8d5f622f4477763",
+      "final_lines": 190,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/issue406-release-profile.md",
+      "category": "historical-record",
+      "baseline_sha256": "567fd073ac0dc7f9fdd9b7f99c2f35390e64a20f7acb42605bff1cf1582679c3",
+      "baseline_lines": 141,
+      "final_sha256": "567fd073ac0dc7f9fdd9b7f99c2f35390e64a20f7acb42605bff1cf1582679c3",
+      "final_lines": 141,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/issue406-second-stage-integration.md",
+      "category": "historical-record",
+      "baseline_sha256": "ea1851204e98752fdb9a4dfa2798392231e09b7bc784becd2eec63ad7fda6b28",
+      "baseline_lines": 140,
+      "final_sha256": "ea1851204e98752fdb9a4dfa2798392231e09b7bc784becd2eec63ad7fda6b28",
+      "final_lines": 140,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/issue406-signed-date-key-codec.md",
+      "category": "historical-record",
+      "baseline_sha256": "76d6e3ba02fcc7cc29a6cb8857c2bb367ec1cba9b022b0b3dc68d8fc6d85dfda",
+      "baseline_lines": 146,
+      "final_sha256": "76d6e3ba02fcc7cc29a6cb8857c2bb367ec1cba9b022b0b3dc68d8fc6d85dfda",
+      "final_lines": 146,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/join-cpu-pipeline.md",
+      "category": "historical-record",
+      "baseline_sha256": "55b537273c9a633f241a0d97dcba30900a4172ba657bef7a3c5cf9b328c34b30",
+      "baseline_lines": 253,
+      "final_sha256": "55b537273c9a633f241a0d97dcba30900a4172ba657bef7a3c5cf9b328c34b30",
+      "final_lines": 253,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/join-single-thread-performance.md",
+      "category": "historical-record",
+      "baseline_sha256": "ab71bcb0034f8f9a1b0d6ba6a2af839d493044f3b19da6c6b7c8b145a8d69a27",
+      "baseline_lines": 193,
+      "final_sha256": "ab71bcb0034f8f9a1b0d6ba6a2af839d493044f3b19da6c6b7c8b145a8d69a27",
+      "final_lines": 193,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/pr482-budget-test.md",
+      "category": "historical-record",
+      "baseline_sha256": "0f4c00475bdce75f24c2b84b5771bce338de921bfa84b77e621c2c3288cc7589",
+      "baseline_lines": 94,
+      "final_sha256": "0f4c00475bdce75f24c2b84b5771bce338de921bfa84b77e621c2c3288cc7589",
+      "final_lines": 94,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/pr482-payload-cursor.md",
+      "category": "historical-record",
+      "baseline_sha256": "932ab94116dbebb5c29646d256a16230803cc5332f6dad0ea136ece7d83b2be4",
+      "baseline_lines": 159,
+      "final_sha256": "932ab94116dbebb5c29646d256a16230803cc5332f6dad0ea136ece7d83b2be4",
+      "final_lines": 159,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/pr482-remediation.md",
+      "category": "historical-record",
+      "baseline_sha256": "c2ff631380274cbafbe5eb15e0936d0db547f1a87b82a24f3d05725280a54e27",
+      "baseline_lines": 270,
+      "final_sha256": "c2ff631380274cbafbe5eb15e0936d0db547f1a87b82a24f3d05725280a54e27",
+      "final_lines": 270,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/pr484-remediation.md",
+      "category": "historical-record",
+      "baseline_sha256": "826da913a81f2fa9c089d6a5ab1cf1aa0263fb64f24ca93b02fd2d9f51aaf817",
+      "baseline_lines": 136,
+      "final_sha256": "826da913a81f2fa9c089d6a5ab1cf1aa0263fb64f24ca93b02fd2d9f51aaf817",
+      "final_lines": 136,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/public-runtime-registration-api.md",
+      "category": "historical-record",
+      "baseline_sha256": "d1d430b7b75e77621a0a1fd94d2bec3c6484ab549826b93e417dffdb303e4c09",
+      "baseline_lines": 248,
+      "final_sha256": "d1d430b7b75e77621a0a1fd94d2bec3c6484ab549826b93e417dffdb303e4c09",
+      "final_lines": 248,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/rust-python-example-parity.md",
+      "category": "historical-record",
+      "baseline_sha256": "89f0676bb1b9614ad6117a3c41943dc33c6b1e51861c9b32c96d0a4de5a8eb27",
+      "baseline_lines": 160,
+      "final_sha256": "89f0676bb1b9614ad6117a3c41943dc33c6b1e51861c9b32c96d0a4de5a8eb27",
+      "final_lines": 160,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/stacked-coverage-measurement.md",
+      "category": "historical-record",
+      "baseline_sha256": "72184566cd2084ded74a24a247a947dae69699be641ab6a568fcc6081b68f071",
+      "baseline_lines": 147,
+      "final_sha256": "72184566cd2084ded74a24a247a947dae69699be641ab6a568fcc6081b68f071",
+      "final_lines": 147,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/stream-asof-columnar-admission-build.md",
+      "category": "historical-record",
+      "baseline_sha256": "f4b883dd3a3727f5fc59086f31370893dd925065d6641592630da1d75c2f5f14",
+      "baseline_lines": 182,
+      "final_sha256": "f4b883dd3a3727f5fc59086f31370893dd925065d6641592630da1d75c2f5f14",
+      "final_lines": 182,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/stream-asof-columnar-admission-performance-protocol.md",
+      "category": "historical-record",
+      "baseline_sha256": "3f321c719b6e76061bf5245f9df608623cc9b8b2237e70af21ca65d09ae4b93f",
+      "baseline_lines": 272,
+      "final_sha256": "3f321c719b6e76061bf5245f9df608623cc9b8b2237e70af21ca65d09ae4b93f",
+      "final_lines": 272,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/stream-asof-columnar-admission-performance-tooling-v2.md",
+      "category": "historical-record",
+      "baseline_sha256": "69c24e07f599cd4acf06a717405164d46c9c09eb1d8b6e9cb1bbf5d289d41e9c",
+      "baseline_lines": 179,
+      "final_sha256": "69c24e07f599cd4acf06a717405164d46c9c09eb1d8b6e9cb1bbf5d289d41e9c",
+      "final_lines": 179,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/stream-asof-columnar-admission-performance-tooling.md",
+      "category": "historical-record",
+      "baseline_sha256": "9cf784944d11f51a858ba29feb874031d92da6420aaab220d3e7463158ed9597",
+      "baseline_lines": 205,
+      "final_sha256": "9cf784944d11f51a858ba29feb874031d92da6420aaab220d3e7463158ed9597",
+      "final_lines": 205,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/stream-asof-columnar-admission-preflight.md",
+      "category": "historical-record",
+      "baseline_sha256": "8bc0a4e5300879326afab0a08500692c1ace66b05f5b8f05e084d736a7dcec91",
+      "baseline_lines": 188,
+      "final_sha256": "8bc0a4e5300879326afab0a08500692c1ace66b05f5b8f05e084d736a7dcec91",
+      "final_lines": 188,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/stream-asof-columnar-admission.md",
+      "category": "historical-record",
+      "baseline_sha256": "0b5c75ec0f5f0059fb50e796cab4060f53b85ce9fe12fa51658a3847cf819b14",
+      "baseline_lines": 168,
+      "final_sha256": "0b5c75ec0f5f0059fb50e796cab4060f53b85ce9fe12fa51658a3847cf819b14",
+      "final_lines": 168,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/stream-asof-output-ranges-fragment-followup-performance.md",
+      "category": "historical-record",
+      "baseline_sha256": "3f7446f84860043aec80c5f02ae65d8a23d2891000d477926fbced85531e1d59",
+      "baseline_lines": 131,
+      "final_sha256": "3f7446f84860043aec80c5f02ae65d8a23d2891000d477926fbced85531e1d59",
+      "final_lines": 131,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/stream-asof-output-ranges-fragment-followup-protocol.md",
+      "category": "historical-record",
+      "baseline_sha256": "2901c9cd656438d479dccfab8ec2165c1598368e41d95aefea7bb45f0865d78e",
+      "baseline_lines": 140,
+      "final_sha256": "2901c9cd656438d479dccfab8ec2165c1598368e41d95aefea7bb45f0865d78e",
+      "final_lines": 140,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/stream-asof-output-ranges-fragment-followup-tooling-v2.md",
+      "category": "historical-record",
+      "baseline_sha256": "eb02ab6511806a1a1e0e3d16f23770f5b4a2aa046b29825c2f8611263f59ad24",
+      "baseline_lines": 150,
+      "final_sha256": "eb02ab6511806a1a1e0e3d16f23770f5b4a2aa046b29825c2f8611263f59ad24",
+      "final_lines": 150,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/stream-asof-output-ranges-fragment-followup-tooling.md",
+      "category": "historical-record",
+      "baseline_sha256": "414e51b7cf14ab309711e627d101b2a5b170c1d4e244a3e4b7acda779fb9193e",
+      "baseline_lines": 149,
+      "final_sha256": "414e51b7cf14ab309711e627d101b2a5b170c1d4e244a3e4b7acda779fb9193e",
+      "final_lines": 149,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/stream-asof-output-ranges-performance.md",
+      "category": "historical-record",
+      "baseline_sha256": "81b2f64d623d9aebe49088012a456164b8b7db5f7427203f08e7fcc001b5e583",
+      "baseline_lines": 179,
+      "final_sha256": "81b2f64d623d9aebe49088012a456164b8b7db5f7427203f08e7fcc001b5e583",
+      "final_lines": 179,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/stream-asof-output-ranges.md",
+      "category": "historical-record",
+      "baseline_sha256": "4ff600ea7cdfb8f9d3e9fa813d4685ca058dd88a46c68c131062565b9c7868b1",
+      "baseline_lines": 163,
+      "final_sha256": "4ff600ea7cdfb8f9d3e9fa813d4685ca058dd88a46c68c131062565b9c7868b1",
+      "final_lines": 163,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/stream-join-compaction-ci-test.md",
+      "category": "historical-record",
+      "baseline_sha256": "50e291ee82ce2f4c4dae773d13e7ff9a2fe0c5aca0c1850e0f4b7f40dc2eb712",
+      "baseline_lines": 59,
+      "final_sha256": "50e291ee82ce2f4c4dae773d13e7ff9a2fe0c5aca0c1850e0f4b7f40dc2eb712",
+      "final_lines": 59,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/stream-join-compaction.md",
+      "category": "historical-record",
+      "baseline_sha256": "4314afb2ca6d7ba3a118b312bb61c0a4f0e870ba5a29544443a436dfcb3a389d",
+      "baseline_lines": 235,
+      "final_sha256": "4314afb2ca6d7ba3a118b312bb61c0a4f0e870ba5a29544443a436dfcb3a389d",
+      "final_lines": 235,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/stream-operator-cpu-scaling-final.md",
+      "category": "historical-record",
+      "baseline_sha256": "e133ce243aa3bd72a5292b6046ade2d42e1537d6fd6028741ee5afa7e346a19d",
+      "baseline_lines": 130,
+      "final_sha256": "e133ce243aa3bd72a5292b6046ade2d42e1537d6fd6028741ee5afa7e346a19d",
+      "final_lines": 130,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/reviews/stream-operator-cpu-scaling.md",
+      "category": "historical-record",
+      "baseline_sha256": "b221e78f24887ddc644934552730fc5ff18f65889a48bb78751372a4f773ac16",
+      "baseline_lines": 148,
+      "final_sha256": "b221e78f24887ddc644934552730fc5ff18f65889a48bb78751372a4f773ac16",
+      "final_lines": 148,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/bounded-backward-asof-join.md",
+      "category": "historical-record",
+      "baseline_sha256": "dc1d845b09b8f001823ad19b1695ae6a6e5baa8f3679a2f6c01dcdf449584c6b",
+      "baseline_lines": 290,
+      "final_sha256": "dc1d845b09b8f001823ad19b1695ae6a6e5baa8f3679a2f6c01dcdf449584c6b",
+      "final_lines": 290,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/head-operator.md",
+      "category": "historical-record",
+      "baseline_sha256": "4385cdd2eb9895adc0afb0611fcf7399a8bbb01f61c6f413c83b1f6b1b26f611",
+      "baseline_lines": 59,
+      "final_sha256": "4385cdd2eb9895adc0afb0611fcf7399a8bbb01f61c6f413c83b1f6b1b26f611",
+      "final_lines": 59,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/interval-join-cpu-scaling.md",
+      "category": "historical-record",
+      "baseline_sha256": "f0c1bd863a81788161b4c46c91bb947110e21b43f4596b33b3876cdc5fba3bfe",
+      "baseline_lines": 59,
+      "final_sha256": "f0c1bd863a81788161b4c46c91bb947110e21b43f4596b33b3876cdc5fba3bfe",
+      "final_lines": 59,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/issue406-asof-admission-bulk.md",
+      "category": "historical-record",
+      "baseline_sha256": "27bf94240eab893529bdb37ff0ec852a3b15d591dc08b743cc1815cc0dbf884f",
+      "baseline_lines": 80,
+      "final_sha256": "27bf94240eab893529bdb37ff0ec852a3b15d591dc08b743cc1815cc0dbf884f",
+      "final_lines": 80,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/issue406-asof-bulk-copy.md",
+      "category": "historical-record",
+      "baseline_sha256": "3de13cb8582534337c386c24b79187051a8b497ee0535890f25bf107ef5172ac",
+      "baseline_lines": 42,
+      "final_sha256": "3de13cb8582534337c386c24b79187051a8b497ee0535890f25bf107ef5172ac",
+      "final_lines": 42,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/issue406-asof-columnar-admission.md",
+      "category": "historical-record",
+      "baseline_sha256": "41c5e5fcad033399b960b54a63c5ebc775ab5a95a84b39141d8a1e0943f91e52",
+      "baseline_lines": 57,
+      "final_sha256": "41c5e5fcad033399b960b54a63c5ebc775ab5a95a84b39141d8a1e0943f91e52",
+      "final_lines": 57,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/issue406-asof-identity-ranges.md",
+      "category": "historical-record",
+      "baseline_sha256": "ac627ae4f4503ca50d3a7954b8e51ff95ad7072aecbeac79b04912019adfb08a",
+      "baseline_lines": 49,
+      "final_sha256": "ac627ae4f4503ca50d3a7954b8e51ff95ad7072aecbeac79b04912019adfb08a",
+      "final_lines": 49,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/issue406-asof-output-routing.md",
+      "category": "historical-record",
+      "baseline_sha256": "41ba9a7715233b246f18c5d5689d1b978e46d53b4e8e9efb420c41752320da48",
+      "baseline_lines": 45,
+      "final_sha256": "41ba9a7715233b246f18c5d5689d1b978e46d53b4e8e9efb420c41752320da48",
+      "final_lines": 45,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/issue406-asof-parallel-routing.md",
+      "category": "historical-record",
+      "baseline_sha256": "827f7914b26217f5dbea8244dd8daa57a07fa8357f73ece5990e79dff3fc08be",
+      "baseline_lines": 51,
+      "final_sha256": "827f7914b26217f5dbea8244dd8daa57a07fa8357f73ece5990e79dff3fc08be",
+      "final_lines": 51,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/issue406-asof-prefix-counts.md",
+      "category": "historical-record",
+      "baseline_sha256": "f1a1e90d2165e36cf723aab999d327d9611f41dfb8b6ce790921345d8ab89ed1",
+      "baseline_lines": 56,
+      "final_sha256": "f1a1e90d2165e36cf723aab999d327d9611f41dfb8b6ce790921345d8ab89ed1",
+      "final_lines": 56,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/issue406-checkpoint-modes.md",
+      "category": "historical-record",
+      "baseline_sha256": "af0e883f196b45c744ef95a16cd18c023e4a64d5e7824cdc76a2a37d88cbce7f",
+      "baseline_lines": 72,
+      "final_sha256": "af0e883f196b45c744ef95a16cd18c023e4a64d5e7824cdc76a2a37d88cbce7f",
+      "final_lines": 72,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/issue406-compiled-expressions.md",
+      "category": "historical-record",
+      "baseline_sha256": "c34af05de13c9e01b56c3009edfac1a4e809be0f802327b897dd30863a7b7d27",
+      "baseline_lines": 62,
+      "final_sha256": "c34af05de13c9e01b56c3009edfac1a4e809be0f802327b897dd30863a7b7d27",
+      "final_lines": 62,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/issue406-fresh-v3.md",
+      "category": "historical-record",
+      "baseline_sha256": "c267c53bee76cfdfdba37a5d4a5008544fba35b7151fff4332ba3008b651a33c",
+      "baseline_lines": 191,
+      "final_sha256": "c267c53bee76cfdfdba37a5d4a5008544fba35b7151fff4332ba3008b651a33c",
+      "final_lines": 191,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/issue406-groupby-regression.md",
+      "category": "historical-record",
+      "baseline_sha256": "610b89df8caa25e1172bb4db63ad42925a3a31b7f92f9d82d2783c72866937eb",
+      "baseline_lines": 152,
+      "final_sha256": "610b89df8caa25e1172bb4db63ad42925a3a31b7f92f9d82d2783c72866937eb",
+      "final_lines": 152,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/issue406-join-batch-admission.md",
+      "category": "historical-record",
+      "baseline_sha256": "5c48bb0e9c9925a4fd9d71d7c18cef8f7d4908430aa6cc5f10d568c563a583b1",
+      "baseline_lines": 161,
+      "final_sha256": "5c48bb0e9c9925a4fd9d71d7c18cef8f7d4908430aa6cc5f10d568c563a583b1",
+      "final_lines": 161,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/issue406-join-key-dictionary.md",
+      "category": "historical-record",
+      "baseline_sha256": "5467117b6eb9d11d239d7780e3e54cd672e1615cf6cc6752139a12933dd1da0c",
+      "baseline_lines": 486,
+      "final_sha256": "5467117b6eb9d11d239d7780e3e54cd672e1615cf6cc6752139a12933dd1da0c",
+      "final_lines": 486,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/issue406-join-output-projection.md",
+      "category": "historical-record",
+      "baseline_sha256": "42a8392c1a0c807c17cb3f1804e9cb52e3cdebbf627400bb1c59178ec962af80",
+      "baseline_lines": 79,
+      "final_sha256": "42a8392c1a0c807c17cb3f1804e9cb52e3cdebbf627400bb1c59178ec962af80",
+      "final_lines": 79,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/issue406-join-state-projection.md",
+      "category": "historical-record",
+      "baseline_sha256": "f24abfd0a50940e9b9163a80a9306426c70e8489a2f6102c6da8101f8e3f3c6c",
+      "baseline_lines": 160,
+      "final_sha256": "f24abfd0a50940e9b9163a80a9306426c70e8489a2f6102c6da8101f8e3f3c6c",
+      "final_lines": 160,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/issue406-performance-acceptance.md",
+      "category": "historical-record",
+      "baseline_sha256": "691d6f086a2eb394d7c1dd64ee905ded776afa00c6fc67b3bfba28d4c78b03c9",
+      "baseline_lines": 472,
+      "final_sha256": "691d6f086a2eb394d7c1dd64ee905ded776afa00c6fc67b3bfba28d4c78b03c9",
+      "final_lines": 472,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/issue406-segment-publication.md",
+      "category": "historical-record",
+      "baseline_sha256": "d7625acd970a338f596518df05fa3e87d331c61310f977706afb4d1c6c5f3b18",
+      "baseline_lines": 259,
+      "final_sha256": "d7625acd970a338f596518df05fa3e87d331c61310f977706afb4d1c6c5f3b18",
+      "final_lines": 259,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/issue406-segment-staging.md",
+      "category": "historical-record",
+      "baseline_sha256": "f2ee5bde93efab5311afbe15097a13c93b30b2f5e461ef9687d4fe582936616c",
+      "baseline_lines": 206,
+      "final_sha256": "f2ee5bde93efab5311afbe15097a13c93b30b2f5e461ef9687d4fe582936616c",
+      "final_lines": 206,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/join-cpu-pipeline.md",
+      "category": "historical-record",
+      "baseline_sha256": "cccc90136e96cca746838bf900b6e589d10bf849d664dc73f3244976ea5f0397",
+      "baseline_lines": 88,
+      "final_sha256": "cccc90136e96cca746838bf900b6e589d10bf849d664dc73f3244976ea5f0397",
+      "final_lines": 88,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/join-single-thread-performance.md",
+      "category": "historical-record",
+      "baseline_sha256": "99617e29633c3a4ef6cf5549ed6ddf202317395e6126469deaf31c83fb5828a4",
+      "baseline_lines": 405,
+      "final_sha256": "99617e29633c3a4ef6cf5549ed6ddf202317395e6126469deaf31c83fb5828a4",
+      "final_lines": 405,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/stream-join-asof-acceleration.md",
+      "category": "historical-record",
+      "baseline_sha256": "092fe5d345f00fa6987542a22b549659d68b12e1f8016c88274909c1a6904cdb",
+      "baseline_lines": 296,
+      "final_sha256": "092fe5d345f00fa6987542a22b549659d68b12e1f8016c88274909c1a6904cdb",
+      "final_lines": 296,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/stream-join-j2a-dictionary.md",
+      "category": "historical-record",
+      "baseline_sha256": "e33305f2ff945fd36580f5e512eb4122a6c21e400f1df123c9dffdb43f7be149",
+      "baseline_lines": 183,
+      "final_sha256": "e33305f2ff945fd36580f5e512eb4122a6c21e400f1df123c9dffdb43f7be149",
+      "final_lines": 183,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/stream-join-strict-profile.md",
+      "category": "historical-record",
+      "baseline_sha256": "be6cc6776849db1865a00841e1ec5f36a9d5a5a84a71088ecbdc9ace379864ed",
+      "baseline_lines": 288,
+      "final_sha256": "be6cc6776849db1865a00841e1ec5f36a9d5a5a84a71088ecbdc9ace379864ed",
+      "final_lines": 288,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/stream-operator-cpu-scaling.md",
+      "category": "historical-record",
+      "baseline_sha256": "7f3d2dc016fdb0bc25f4bd6768a56a0b59cf424530f56006292f76cc6049bc8c",
+      "baseline_lines": 72,
+      "final_sha256": "7f3d2dc016fdb0bc25f4bd6768a56a0b59cf424530f56006292f76cc6049bc8c",
+      "final_lines": 72,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/symbolic-computation-contract.md",
+      "category": "historical-record",
+      "baseline_sha256": "e62d128b7658fc527eb92f1bcc888b1d1e9508914713877d7a738b3077eeadaa",
+      "baseline_lines": 875,
+      "final_sha256": "e62d128b7658fc527eb92f1bcc888b1d1e9508914713877d7a738b3077eeadaa",
+      "final_lines": 875,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/symbolic-event-window-aggregation.md",
+      "category": "historical-record",
+      "baseline_sha256": "37da01ab4fbb14d95874c606affb5e7c7453caf80dc2bb1ae4892161cc10e6dc",
+      "baseline_lines": 746,
+      "final_sha256": "37da01ab4fbb14d95874c606affb5e7c7453caf80dc2bb1ae4892161cc10e6dc",
+      "final_lines": 746,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/symbolic-exponential-indicators.md",
+      "category": "historical-record",
+      "baseline_sha256": "fe7bce2bebe6f452335d19fdcba71c2fd40d433c9ab7b598e1c4af7b21c0a254",
+      "baseline_lines": 88,
+      "final_sha256": "fe7bce2bebe6f452335d19fdcba71c2fd40d433c9ab7b598e1c4af7b21c0a254",
+      "final_lines": 88,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/symbolic-relational-dag.md",
+      "category": "historical-record",
+      "baseline_sha256": "d493658f29d3896da44b4b38f25684af6b3e48660cad4e4c755f840df03a8276",
+      "baseline_lines": 113,
+      "final_sha256": "d493658f29d3896da44b4b38f25684af6b3e48660cad4e4c755f840df03a8276",
+      "final_lines": 113,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/specs/window-operator-async-checkpoint-flush.md",
+      "category": "historical-record",
+      "baseline_sha256": "ed3b53751b6babc7609ee5d5d4f1007af0138360bc2502e23bfab08557e494e1",
+      "baseline_lines": 111,
+      "final_sha256": "ed3b53751b6babc7609ee5d5d4f1007af0138360bc2502e23bfab08557e494e1",
+      "final_lines": 111,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/sql-arrow-comparison/PLAN.md",
+      "category": "historical-record",
+      "baseline_sha256": "dc041928921244f3bf7df819a4d2818e4343aa72121b24b4ce6804103a4eef9d",
+      "baseline_lines": 31,
+      "final_sha256": "dc041928921244f3bf7df819a4d2818e4343aa72121b24b4ce6804103a4eef9d",
+      "final_lines": 31,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/sql-arrow-comparison/REPRODUCE.md",
+      "category": "historical-record",
+      "baseline_sha256": "96708f9c27b34c018bf0faa26ddba0fdeb18a4752164c9ffdaab0ddaf9264290",
+      "baseline_lines": 64,
+      "final_sha256": "96708f9c27b34c018bf0faa26ddba0fdeb18a4752164c9ffdaab0ddaf9264290",
+      "final_lines": 64,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/sql-arrow-comparison/RESULTS.md",
+      "category": "historical-record",
+      "baseline_sha256": "480f36b5e31abbaa3bb7bfe52f78c65ab8811d455f63a3e424c686cf12a425f2",
+      "baseline_lines": 154,
+      "final_sha256": "480f36b5e31abbaa3bb7bfe52f78c65ab8811d455f63a3e424c686cf12a425f2",
+      "final_lines": 154,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/sql-prepare-reuse/PLAN.md",
+      "category": "historical-record",
+      "baseline_sha256": "92edc2bf733f7b4a22a734572394f2789eb41b84dbcc0dfe00bb336227dfe7aa",
+      "baseline_lines": 35,
+      "final_sha256": "92edc2bf733f7b4a22a734572394f2789eb41b84dbcc0dfe00bb336227dfe7aa",
+      "final_lines": 35,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/sql-prepare-reuse/README.md",
+      "category": "historical-record",
+      "baseline_sha256": "161bbfb6650c0225364f63c5a6b49cd7fe2df970fcffe865c16c3ace6bc96567",
+      "baseline_lines": 128,
+      "final_sha256": "161bbfb6650c0225364f63c5a6b49cd7fe2df970fcffe865c16c3ace6bc96567",
+      "final_lines": 128,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/sql-prepare-reuse/REPRODUCE.md",
+      "category": "historical-record",
+      "baseline_sha256": "bc353dcd90fd152a8f176455a1610bc7befe87b30855c11d6bb053ab89bbaaa6",
+      "baseline_lines": 57,
+      "final_sha256": "bc353dcd90fd152a8f176455a1610bc7befe87b30855c11d6bb053ab89bbaaa6",
+      "final_lines": 57,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/stream-dispatch/PLAN.md",
+      "category": "historical-record",
+      "baseline_sha256": "d03314ec92421a1b9861690a3c2abfa9de239b9797148b8784aed49051075d7f",
+      "baseline_lines": 27,
+      "final_sha256": "d03314ec92421a1b9861690a3c2abfa9de239b9797148b8784aed49051075d7f",
+      "final_lines": 27,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/stream-dispatch/README.md",
+      "category": "historical-record",
+      "baseline_sha256": "fc45ca43b686284d4937858a5a9d1edd4544f677f725612f1ec452c44967961a",
+      "baseline_lines": 93,
+      "final_sha256": "fc45ca43b686284d4937858a5a9d1edd4544f677f725612f1ec452c44967961a",
+      "final_lines": 93,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/stream-dispatch/REPRODUCE.md",
+      "category": "historical-record",
+      "baseline_sha256": "c0a483e313de16649c9d55dfffb3fa7e934e8358c277afd37a5df5dfe414ae79",
+      "baseline_lines": 58,
+      "final_sha256": "c0a483e313de16649c9d55dfffb3fa7e934e8358c277afd37a5df5dfe414ae79",
+      "final_lines": 58,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": "AGENTS.md",
+      "category": "current-guidance",
+      "baseline_sha256": "57ac7d3b72515c98c141cdc13bd72382e2cf5d3293a5f430df01246356e67ed9",
+      "baseline_lines": 382,
+      "final_sha256": "ae7f2b14744f8cb460ffc599d3afd4bbc3e57115b141ecb1fd5988e48db021a0",
+      "final_lines": 382,
+      "action": "revised",
+      "fact_basis": [
+        "pyproject.toml",
+        "Cargo.toml",
+        "python/calc_flow/__init__.py",
+        "python/calc_flow/_native.pyi",
+        "python/calc_flow/symbolic",
+        "python/calc_flow/runtime.py",
+        "crates/calc-flow/src/lib.rs"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "category": "historical-record",
+      "baseline_sha256": "c7c79e0263992a2dda7b7dbd1d2ea1628b553d91dd99cc7132523c46f4f7ef4f",
+      "baseline_lines": 1919,
+      "final_sha256": "c7c79e0263992a2dda7b7dbd1d2ea1628b553d91dd99cc7132523c46f4f7ef4f",
+      "final_lines": 1919,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": "CLAUDE.md",
+      "category": "current-guidance",
+      "baseline_sha256": "902d52decd5ddc18772ee8ba9ddd2dd23e39c5bc528fe551f804ebefe64bb05b",
+      "baseline_lines": 15,
+      "final_sha256": "902d52decd5ddc18772ee8ba9ddd2dd23e39c5bc528fe551f804ebefe64bb05b",
+      "final_lines": 15,
+      "action": "preserved",
+      "fact_basis": [
+        "AGENTS.md",
+        "pyproject.toml",
+        ".agents/skills/code-style/SKILL.md"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "README.md",
+      "category": "current-guidance",
+      "baseline_sha256": "3bceb0a7c11048a0ed2631f29a11c7e58e980904e3bf37a0762f2e4515ce43d3",
+      "baseline_lines": 223,
+      "final_sha256": "3bceb0a7c11048a0ed2631f29a11c7e58e980904e3bf37a0762f2e4515ce43d3",
+      "final_lines": 223,
+      "action": "preserved",
+      "fact_basis": [
+        "pyproject.toml",
+        "Cargo.toml",
+        "python/calc_flow/__init__.py",
+        "python/calc_flow/_native.pyi",
+        "python/calc_flow/symbolic",
+        "python/calc_flow/runtime.py",
+        "crates/calc-flow/src/lib.rs"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "benchmarks/README.md",
+      "category": "current-guidance",
+      "baseline_sha256": "58099e8534da4deda08d5d9b9e5550ed6407e94e166c13f6e6c1a31cf891cb85",
+      "baseline_lines": 472,
+      "final_sha256": "58099e8534da4deda08d5d9b9e5550ed6407e94e166c13f6e6c1a31cf891cb85",
+      "final_lines": 472,
+      "action": "preserved",
+      "fact_basis": [
+        "scripts/benchmark_suite",
+        "scripts/profile_warm_stream.py",
+        ".github/workflows/benchmark-suite.yml",
+        ".github/workflows/benchmarks.yml",
+        "benchmarks"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "benchmarks/polars-operators/README.md",
+      "category": "current-guidance",
+      "baseline_sha256": "bf399849c88a99d93a9a457fcb442fa8301979ddf991685791d28e4031b53820",
+      "baseline_lines": 289,
+      "final_sha256": "bf399849c88a99d93a9a457fcb442fa8301979ddf991685791d28e4031b53820",
+      "final_lines": 289,
+      "action": "preserved",
+      "fact_basis": [
+        "scripts/benchmark_suite",
+        "scripts/profile_warm_stream.py",
+        ".github/workflows/benchmark-suite.yml",
+        ".github/workflows/benchmarks.yml",
+        "benchmarks"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "benchmarks/risingwave/README.md",
+      "category": "current-guidance",
+      "baseline_sha256": "d96c94f7959078582ea2394213846f8bd84af7121a0acaeeacd055eecfe14eb4",
+      "baseline_lines": 286,
+      "final_sha256": "d96c94f7959078582ea2394213846f8bd84af7121a0acaeeacd055eecfe14eb4",
+      "final_lines": 286,
+      "action": "preserved",
+      "fact_basis": [
+        "scripts/benchmark_suite",
+        "scripts/profile_warm_stream.py",
+        ".github/workflows/benchmark-suite.yml",
+        ".github/workflows/benchmarks.yml",
+        "benchmarks"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "benchmarks/sql-operators/README.md",
+      "category": "current-guidance",
+      "baseline_sha256": "56388eb60368d7d40e3e232ddc5d0dc1a033f858757586b90ef5a06c450105ff",
+      "baseline_lines": 116,
+      "final_sha256": "56388eb60368d7d40e3e232ddc5d0dc1a033f858757586b90ef5a06c450105ff",
+      "final_lines": 116,
+      "action": "preserved",
+      "fact_basis": [
+        "scripts/benchmark_suite",
+        "scripts/profile_warm_stream.py",
+        ".github/workflows/benchmark-suite.yml",
+        ".github/workflows/benchmarks.yml",
+        "benchmarks"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "benchmarks/symbolic/BASELINE.md",
+      "category": "historical-record",
+      "baseline_sha256": "7a3806ab09b94dec829e3af9c0b603db0ca86d5b55b43310c812a152c3a7e048",
+      "baseline_lines": 129,
+      "final_sha256": "7a3806ab09b94dec829e3af9c0b603db0ca86d5b55b43310c812a152c3a7e048",
+      "final_lines": 129,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": "benchmarks/symbolic/SCE05.md",
+      "category": "historical-record",
+      "baseline_sha256": "5aa2879e9be92ee0916896571a87020e395c22881d69a783cefdf8bea846c5ad",
+      "baseline_lines": 64,
+      "final_sha256": "5aa2879e9be92ee0916896571a87020e395c22881d69a783cefdf8bea846c5ad",
+      "final_lines": 64,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": "benchmarks/symbolic/SCE08.md",
+      "category": "historical-record",
+      "baseline_sha256": "cf350bedaaf5ff211ff419ea3515afca21cad6c8eea7bdd1070b8a68eab7bc1a",
+      "baseline_lines": 68,
+      "final_sha256": "cf350bedaaf5ff211ff419ea3515afca21cad6c8eea7bdd1070b8a68eab7bc1a",
+      "final_lines": 68,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": "benchmarks/symbolic/SCE14.md",
+      "category": "historical-record",
+      "baseline_sha256": "80576f3b9c5cfae342dc42924e1a98d4cdb4df4b6f349a84bb2aeebf3dd27d4f",
+      "baseline_lines": 92,
+      "final_sha256": "80576f3b9c5cfae342dc42924e1a98d4cdb4df4b6f349a84bb2aeebf3dd27d4f",
+      "final_lines": 92,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": "benchmarks/symbolic/SCE16.md",
+      "category": "historical-record",
+      "baseline_sha256": "9ea696d610d7314ca418cb0a8e3bebc63b37f88f58be467b78b8b3a441572fd6",
+      "baseline_lines": 76,
+      "final_sha256": "9ea696d610d7314ca418cb0a8e3bebc63b37f88f58be467b78b8b3a441572fd6",
+      "final_lines": 76,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": "crates/calc-flow-connectors/README.md",
+      "category": "current-guidance",
+      "baseline_sha256": "3ef774c55eeb6d2600a92dd23754415a19c021d8c8e89cadfba72044f9d7240e",
+      "baseline_lines": 42,
+      "final_sha256": "3ef774c55eeb6d2600a92dd23754415a19c021d8c8e89cadfba72044f9d7240e",
+      "final_lines": 42,
+      "action": "preserved",
+      "fact_basis": [
+        "crates/calc-flow-connectors/Cargo.toml",
+        "crates/calc-flow-python/Cargo.toml",
+        "crates/calc-flow-connectors/src",
+        "examples",
+        "scripts/run_examples.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "crates/calc-flow-connectors/tests/fixtures/tls/README.md",
+      "category": "current-guidance",
+      "baseline_sha256": "4e3a2db2a17e55b39c904a2eac0f302404dbc6c4ef5cd8e246503930ae46f7eb",
+      "baseline_lines": 4,
+      "final_sha256": "4e3a2db2a17e55b39c904a2eac0f302404dbc6c4ef5cd8e246503930ae46f7eb",
+      "final_lines": 4,
+      "action": "preserved",
+      "fact_basis": [
+        "crates/calc-flow-connectors/Cargo.toml",
+        "crates/calc-flow-python/Cargo.toml",
+        "crates/calc-flow-connectors/src",
+        "examples",
+        "scripts/run_examples.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "crates/calc-flow-connectors/tests/fixtures/zstd/README.md",
+      "category": "current-guidance",
+      "baseline_sha256": "f721234088a0dd1f4c8b3642157023b593ee52de3895d1a20e2f2d4d1bb7d989",
+      "baseline_lines": 8,
+      "final_sha256": "f721234088a0dd1f4c8b3642157023b593ee52de3895d1a20e2f2d4d1bb7d989",
+      "final_lines": 8,
+      "action": "preserved",
+      "fact_basis": [
+        "crates/calc-flow-connectors/Cargo.toml",
+        "crates/calc-flow-python/Cargo.toml",
+        "crates/calc-flow-connectors/src",
+        "examples",
+        "scripts/run_examples.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "crates/calc-flow/examples/README.md",
+      "category": "current-guidance",
+      "baseline_sha256": "33403a8e00a6db57736685137e33a2c098d3ad18a7ed5edbf9714c9b91b401c9",
+      "baseline_lines": 141,
+      "final_sha256": "33403a8e00a6db57736685137e33a2c098d3ad18a7ed5edbf9714c9b91b401c9",
+      "final_lines": 141,
+      "action": "preserved",
+      "fact_basis": [
+        "crates/calc-flow/Cargo.toml",
+        "crates/calc-flow/src",
+        "scripts/run_examples.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "crates/calc-flow/src/operator/join/fixtures/README.md",
+      "category": "current-guidance",
+      "baseline_sha256": "6fadf7bccdb3694f0559b3f373594708f667925edda7b7e22e8ea55673bc2163",
+      "baseline_lines": 13,
+      "final_sha256": "6fadf7bccdb3694f0559b3f373594708f667925edda7b7e22e8ea55673bc2163",
+      "final_lines": 13,
+      "action": "preserved",
+      "fact_basis": [
+        "crates/calc-flow/Cargo.toml",
+        "crates/calc-flow/src",
+        "scripts/run_examples.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "design/tech_spec.md",
+      "category": "historical-record",
+      "baseline_sha256": "ce05943a80c04e85f3bce98ea54c0228d1fceceff387d8640a140f312f956f92",
+      "baseline_lines": 105,
+      "final_sha256": "ce05943a80c04e85f3bce98ea54c0228d1fceceff387d8640a140f312f956f92",
+      "final_lines": 105,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": "design/v0.2-refactor-plan.md",
+      "category": "historical-record",
+      "baseline_sha256": "b22b5b5fcabf5b10196daf98b983e9a72066f97b9e3e4a803dc6a46c8712aeb2",
+      "baseline_lines": 588,
+      "final_sha256": "b22b5b5fcabf5b10196daf98b983e9a72066f97b9e3e4a803dc6a46c8712aeb2",
+      "final_lines": 588,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": "docs/README.md",
+      "category": "current-guidance",
+      "baseline_sha256": "56b4a3a2d45b83c14e0bff1965917ceef7fb09923429047d886fb4e90cdbc84c",
+      "baseline_lines": 86,
+      "final_sha256": "56b4a3a2d45b83c14e0bff1965917ceef7fb09923429047d886fb4e90cdbc84c",
+      "final_lines": 86,
+      "action": "preserved",
+      "fact_basis": [
+        "pyproject.toml",
+        "Cargo.toml",
+        "python/calc_flow/__init__.py",
+        "python/calc_flow/_native.pyi",
+        "python/calc_flow/symbolic",
+        "python/calc_flow/runtime.py",
+        "crates/calc-flow/src/lib.rs"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/api-reference.md",
+      "category": "current-guidance",
+      "baseline_sha256": "35e7afcf808a0f14da215512c9d8d09a9a1a697ea2f9faafdcabfcc52e291f1d",
+      "baseline_lines": 508,
+      "final_sha256": "14507221924da0f1318dd33a66b1ffe8926d086048cbc74ff8b6f2278b82dd67",
+      "final_lines": 508,
+      "action": "revised",
+      "fact_basis": [
+        "pyproject.toml",
+        "Cargo.toml",
+        "python/calc_flow/__init__.py",
+        "python/calc_flow/_native.pyi",
+        "python/calc_flow/symbolic",
+        "python/calc_flow/runtime.py",
+        "crates/calc-flow/src/lib.rs"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/array-guide.md",
+      "category": "current-guidance",
+      "baseline_sha256": "744166625c39dfdb5d78501e7934e231141d5844e8ec96924b2efd66d24ba762",
+      "baseline_lines": 96,
+      "final_sha256": "744166625c39dfdb5d78501e7934e231141d5844e8ec96924b2efd66d24ba762",
+      "final_lines": 96,
+      "action": "preserved",
+      "fact_basis": [
+        "pyproject.toml",
+        "Cargo.toml",
+        "python/calc_flow/__init__.py",
+        "python/calc_flow/_native.pyi",
+        "python/calc_flow/symbolic",
+        "python/calc_flow/runtime.py",
+        "crates/calc-flow/src/lib.rs"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/asof-join-guide.md",
+      "category": "current-guidance",
+      "baseline_sha256": "832cbcbf78ede147be73c76a3789c28ca40605e78aa97bfa32b0d1c1007dc77c",
+      "baseline_lines": 438,
+      "final_sha256": "832cbcbf78ede147be73c76a3789c28ca40605e78aa97bfa32b0d1c1007dc77c",
+      "final_lines": 438,
+      "action": "preserved",
+      "fact_basis": [
+        "crates/calc-flow/src/operator/asof/checkpoint.rs",
+        "crates/calc-flow/src/operator/asof/checkpoint/current_format_tests.rs",
+        "python/calc_flow/capabilities.py",
+        "python/calc_flow/symbolic/asof_analysis.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/batch-guide.md",
+      "category": "current-guidance",
+      "baseline_sha256": "e364b08941502adc12d6e6956e9adbdd60c958087aaecbbedf5e487abab5c198",
+      "baseline_lines": 314,
+      "final_sha256": "e364b08941502adc12d6e6956e9adbdd60c958087aaecbbedf5e487abab5c198",
+      "final_lines": 314,
+      "action": "preserved",
+      "fact_basis": [
+        "pyproject.toml",
+        "Cargo.toml",
+        "python/calc_flow/__init__.py",
+        "python/calc_flow/_native.pyi",
+        "python/calc_flow/symbolic",
+        "python/calc_flow/runtime.py",
+        "crates/calc-flow/src/lib.rs"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/benchmark-suite.md",
+      "category": "current-guidance",
+      "baseline_sha256": "bf3eaf87ea9564478c4cb3e297287f532cc80366449c81231c3031dec901816f",
+      "baseline_lines": 1192,
+      "final_sha256": "bf3eaf87ea9564478c4cb3e297287f532cc80366449c81231c3031dec901816f",
+      "final_lines": 1192,
+      "action": "preserved",
+      "fact_basis": [
+        "scripts/benchmark_suite",
+        "scripts/profile_warm_stream.py",
+        ".github/workflows/benchmark-suite.yml",
+        ".github/workflows/benchmarks.yml",
+        "benchmarks"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/connectors/README.md",
+      "category": "current-guidance",
+      "baseline_sha256": "dcb384205b4d72762aba5e36c05eb72e5291ba87ad3d3322b94e159d2a490383",
+      "baseline_lines": 247,
+      "final_sha256": "dcb384205b4d72762aba5e36c05eb72e5291ba87ad3d3322b94e159d2a490383",
+      "final_lines": 247,
+      "action": "preserved",
+      "fact_basis": [
+        "crates/calc-flow-connectors/Cargo.toml",
+        "crates/calc-flow-python/Cargo.toml",
+        "crates/calc-flow-connectors/src",
+        "examples",
+        "scripts/run_examples.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/connectors/clickhouse.md",
+      "category": "current-guidance",
+      "baseline_sha256": "5bf80358340e9101be4b2e6ab2be6535f2ef1df0b60f53bf19795f01f8da99ba",
+      "baseline_lines": 127,
+      "final_sha256": "5bf80358340e9101be4b2e6ab2be6535f2ef1df0b60f53bf19795f01f8da99ba",
+      "final_lines": 127,
+      "action": "preserved",
+      "fact_basis": [
+        "crates/calc-flow-connectors/Cargo.toml",
+        "crates/calc-flow-python/Cargo.toml",
+        "crates/calc-flow-connectors/src",
+        "examples",
+        "scripts/run_examples.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/connectors/file.md",
+      "category": "current-guidance",
+      "baseline_sha256": "1b87e2ee25611609ecb16839cf8d129fe54a31ea26f7a9a70e355eea7cc770f2",
+      "baseline_lines": 102,
+      "final_sha256": "1b87e2ee25611609ecb16839cf8d129fe54a31ea26f7a9a70e355eea7cc770f2",
+      "final_lines": 102,
+      "action": "preserved",
+      "fact_basis": [
+        "crates/calc-flow-connectors/Cargo.toml",
+        "crates/calc-flow-python/Cargo.toml",
+        "crates/calc-flow-connectors/src",
+        "examples",
+        "scripts/run_examples.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/connectors/http.md",
+      "category": "current-guidance",
+      "baseline_sha256": "841a8254395b9109fe89593bc14ff3549b4db11621802c5b928eaf1017f21e1c",
+      "baseline_lines": 100,
+      "final_sha256": "841a8254395b9109fe89593bc14ff3549b4db11621802c5b928eaf1017f21e1c",
+      "final_lines": 100,
+      "action": "preserved",
+      "fact_basis": [
+        "crates/calc-flow-connectors/Cargo.toml",
+        "crates/calc-flow-python/Cargo.toml",
+        "crates/calc-flow-connectors/src",
+        "examples",
+        "scripts/run_examples.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/connectors/kafka.md",
+      "category": "current-guidance",
+      "baseline_sha256": "5b84feba79cd106d9f98f056d3ef09e2d06333802ad0330536747d0563617f7a",
+      "baseline_lines": 404,
+      "final_sha256": "5b84feba79cd106d9f98f056d3ef09e2d06333802ad0330536747d0563617f7a",
+      "final_lines": 404,
+      "action": "preserved",
+      "fact_basis": [
+        "crates/calc-flow-connectors/Cargo.toml",
+        "crates/calc-flow-python/Cargo.toml",
+        "crates/calc-flow-connectors/src",
+        "examples",
+        "scripts/run_examples.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/connectors/mysql.md",
+      "category": "current-guidance",
+      "baseline_sha256": "36393df5a97b1b75477238e23f3d0f6d6fba4a05bc3839c4e940e78f73751ddb",
+      "baseline_lines": 255,
+      "final_sha256": "36393df5a97b1b75477238e23f3d0f6d6fba4a05bc3839c4e940e78f73751ddb",
+      "final_lines": 255,
+      "action": "preserved",
+      "fact_basis": [
+        "crates/calc-flow-connectors/Cargo.toml",
+        "crates/calc-flow-python/Cargo.toml",
+        "crates/calc-flow-connectors/src",
+        "examples",
+        "scripts/run_examples.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/connectors/postgresql.md",
+      "category": "current-guidance",
+      "baseline_sha256": "1646d1bc9f8dedad5fb809e7e1540fb938f14559b0d5cb296229767f58727cba",
+      "baseline_lines": 157,
+      "final_sha256": "1646d1bc9f8dedad5fb809e7e1540fb938f14559b0d5cb296229767f58727cba",
+      "final_lines": 157,
+      "action": "preserved",
+      "fact_basis": [
+        "crates/calc-flow-connectors/Cargo.toml",
+        "crates/calc-flow-python/Cargo.toml",
+        "crates/calc-flow-connectors/src",
+        "examples",
+        "scripts/run_examples.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/connectors/websocket.md",
+      "category": "current-guidance",
+      "baseline_sha256": "f1a9aab088daf73cc84741bfaf95603372dd948af02636682295b9eb2411f5de",
+      "baseline_lines": 98,
+      "final_sha256": "f1a9aab088daf73cc84741bfaf95603372dd948af02636682295b9eb2411f5de",
+      "final_lines": 98,
+      "action": "preserved",
+      "fact_basis": [
+        "crates/calc-flow-connectors/Cargo.toml",
+        "crates/calc-flow-python/Cargo.toml",
+        "crates/calc-flow-connectors/src",
+        "examples",
+        "scripts/run_examples.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/design.md",
+      "category": "current-guidance",
+      "baseline_sha256": "5372d9be9f233b2e63d535f9df73e51b5f08f57ae264b89ec0716d2a486399f5",
+      "baseline_lines": 395,
+      "final_sha256": "5372d9be9f233b2e63d535f9df73e51b5f08f57ae264b89ec0716d2a486399f5",
+      "final_lines": 395,
+      "action": "preserved",
+      "fact_basis": [
+        "crates/calc-flow/src/operator",
+        "crates/calc-flow/src/runtime",
+        "crates/calc-flow/src/continuous",
+        "crates/calc-flow/src/state",
+        "python/calc_flow/stream.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/examples.md",
+      "category": "current-guidance",
+      "baseline_sha256": "67149e71a18246648154d0ca9ce33d8a0d3ed4bbd5e09de03fa0852046d1d6be",
+      "baseline_lines": 125,
+      "final_sha256": "67149e71a18246648154d0ca9ce33d8a0d3ed4bbd5e09de03fa0852046d1d6be",
+      "final_lines": 125,
+      "action": "preserved",
+      "fact_basis": [
+        "examples",
+        "crates/calc-flow/examples",
+        "scripts/run_examples.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/getting-started.md",
+      "category": "current-guidance",
+      "baseline_sha256": "b74ed7305c7d64c26c8e4fe2bd2e7bebe12d6d99bca6e503b4872e751e2ab05c",
+      "baseline_lines": 251,
+      "final_sha256": "b74ed7305c7d64c26c8e4fe2bd2e7bebe12d6d99bca6e503b4872e751e2ab05c",
+      "final_lines": 251,
+      "action": "preserved",
+      "fact_basis": [
+        "pyproject.toml",
+        "Cargo.toml",
+        "rust-toolchain.toml",
+        ".github/workflows/release.yml",
+        ".github/workflows/ci-linux.yml",
+        "scripts/run_rust_tests.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/introduction.md",
+      "category": "current-guidance",
+      "baseline_sha256": "44f32c30cec45803b79f0ae4da03da560895cd43164b3f185b11e1b3b90a7043",
+      "baseline_lines": 178,
+      "final_sha256": "44f32c30cec45803b79f0ae4da03da560895cd43164b3f185b11e1b3b90a7043",
+      "final_lines": 178,
+      "action": "preserved",
+      "fact_basis": [
+        "pyproject.toml",
+        "Cargo.toml",
+        "python/calc_flow/__init__.py",
+        "python/calc_flow/_native.pyi",
+        "python/calc_flow/symbolic",
+        "python/calc_flow/runtime.py",
+        "crates/calc-flow/src/lib.rs"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/plans/2026-09-09-bounded-backward-asof-join.md",
+      "category": "historical-record",
+      "baseline_sha256": "d472ab381e52332c3e65ee9c3563efbb8682bd42fc69db7b3be9851ad86c164a",
+      "baseline_lines": 536,
+      "final_sha256": "d472ab381e52332c3e65ee9c3563efbb8682bd42fc69db7b3be9851ad86c164a",
+      "final_lines": 536,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": "docs/plans/2026-09-30-streaming-asof-acceleration.md",
+      "category": "historical-record",
+      "baseline_sha256": "db578bda6864c078aad8762c6351e82d7d50703ec95b98a809dec4711c850f67",
+      "baseline_lines": 283,
+      "final_sha256": "db578bda6864c078aad8762c6351e82d7d50703ec95b98a809dec4711c850f67",
+      "final_lines": 283,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": "docs/plans/cross-library-performance.md",
+      "category": "historical-record",
+      "baseline_sha256": "c0766f0795dcf1f48ba09ec50a5c68d02a905fcc50a1398a3c9e781d0a877f7a",
+      "baseline_lines": 200,
+      "final_sha256": "c0766f0795dcf1f48ba09ec50a5c68d02a905fcc50a1398a3c9e781d0a877f7a",
+      "final_lines": 200,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": "docs/projects-guide.md",
+      "category": "current-guidance",
+      "baseline_sha256": "009a38150e1e8797cd1ea71e4bd6f09927e4d7bc1b2ae61dce5f22993e061c69",
+      "baseline_lines": 343,
+      "final_sha256": "009a38150e1e8797cd1ea71e4bd6f09927e4d7bc1b2ae61dce5f22993e061c69",
+      "final_lines": 343,
+      "action": "preserved",
+      "fact_basis": [
+        "schemas/project-v3.schema.json",
+        "crates/calc-flow/src/config.rs",
+        "python/calc_flow/config.py",
+        "python/calc_flow/store.py",
+        "python/calc_flow/symbolic/program.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/python-api.md",
+      "category": "current-guidance",
+      "baseline_sha256": "367e23ce4554a9c9e8543e21351e0388988ffe8871177677b45207f5198d0145",
+      "baseline_lines": 1400,
+      "final_sha256": "367e23ce4554a9c9e8543e21351e0388988ffe8871177677b45207f5198d0145",
+      "final_lines": 1400,
+      "action": "preserved",
+      "fact_basis": [
+        "pyproject.toml",
+        "Cargo.toml",
+        "python/calc_flow/__init__.py",
+        "python/calc_flow/_native.pyi",
+        "python/calc_flow/symbolic",
+        "python/calc_flow/runtime.py",
+        "crates/calc-flow/src/lib.rs"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/python-release.md",
+      "category": "current-guidance",
+      "baseline_sha256": "35a87b97c1c6ac1211d8fc5fea4e3bb5606e134d0b453b73f1f0a58824fde115",
+      "baseline_lines": 84,
+      "final_sha256": "35a87b97c1c6ac1211d8fc5fea4e3bb5606e134d0b453b73f1f0a58824fde115",
+      "final_lines": 84,
+      "action": "preserved",
+      "fact_basis": [
+        "pyproject.toml",
+        "Cargo.toml",
+        "rust-toolchain.toml",
+        ".github/workflows/release.yml",
+        ".github/workflows/ci-linux.yml",
+        "scripts/run_rust_tests.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/runtime-envelope.md",
+      "category": "current-guidance",
+      "baseline_sha256": "9c60f45fc3a249339739b64cfc281088914cd4d32b3e13706623eaf40180f590",
+      "baseline_lines": 1112,
+      "final_sha256": "9c60f45fc3a249339739b64cfc281088914cd4d32b3e13706623eaf40180f590",
+      "final_lines": 1112,
+      "action": "preserved",
+      "fact_basis": [
+        "crates/calc-flow/src/operator",
+        "crates/calc-flow/src/runtime",
+        "crates/calc-flow/src/continuous",
+        "crates/calc-flow/src/state",
+        "python/calc_flow/stream.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/rust-api.md",
+      "category": "current-guidance",
+      "baseline_sha256": "d8024dd0d2da02979803d3fa2ba1c626a6338529ffeea7f274a09b71485acb52",
+      "baseline_lines": 842,
+      "final_sha256": "fe176a36b73ab6b671a7ba67dbf5d947c8c61a7008947ad0d41cb8597cb50358",
+      "final_lines": 844,
+      "action": "revised",
+      "fact_basis": [
+        "pyproject.toml",
+        "Cargo.toml",
+        "python/calc_flow/__init__.py",
+        "python/calc_flow/_native.pyi",
+        "python/calc_flow/symbolic",
+        "python/calc_flow/runtime.py",
+        "crates/calc-flow/src/lib.rs"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/snapshot-sql-native.md",
+      "category": "current-guidance",
+      "baseline_sha256": "7d7541dce79e0280f9fe5946d978aa557ea45a713cd82455059ee8f91bb64af8",
+      "baseline_lines": 50,
+      "final_sha256": "7d7541dce79e0280f9fe5946d978aa557ea45a713cd82455059ee8f91bb64af8",
+      "final_lines": 50,
+      "action": "preserved",
+      "fact_basis": [
+        "pyproject.toml",
+        "Cargo.toml",
+        "python/calc_flow/__init__.py",
+        "python/calc_flow/_native.pyi",
+        "python/calc_flow/symbolic",
+        "python/calc_flow/runtime.py",
+        "crates/calc-flow/src/lib.rs"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/sql-datafusion-performance.md",
+      "category": "current-guidance",
+      "baseline_sha256": "5604db2ab0bfa74cc22f9d837ddf893313de4665e3c2f8f12cedc411dab83adb",
+      "baseline_lines": 252,
+      "final_sha256": "5604db2ab0bfa74cc22f9d837ddf893313de4665e3c2f8f12cedc411dab83adb",
+      "final_lines": 252,
+      "action": "preserved",
+      "fact_basis": [
+        "scripts/benchmark_suite",
+        "scripts/profile_warm_stream.py",
+        ".github/workflows/benchmark-suite.yml",
+        ".github/workflows/benchmarks.yml",
+        "benchmarks"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/streaming-guide.md",
+      "category": "current-guidance",
+      "baseline_sha256": "a98638d47ddbbaf3db6d87a51e215b4b3bf67a14a2a174e84a1544a2fa618339",
+      "baseline_lines": 1749,
+      "final_sha256": "a98638d47ddbbaf3db6d87a51e215b4b3bf67a14a2a174e84a1544a2fa618339",
+      "final_lines": 1749,
+      "action": "preserved",
+      "fact_basis": [
+        "pyproject.toml",
+        "Cargo.toml",
+        "python/calc_flow/__init__.py",
+        "python/calc_flow/_native.pyi",
+        "python/calc_flow/symbolic",
+        "python/calc_flow/runtime.py",
+        "crates/calc-flow/src/lib.rs"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/symbolic-api.md",
+      "category": "current-guidance",
+      "baseline_sha256": "78d16defd8389cbcf1e0abb1b93f887a054d93e077ce685fbdd4023fa5582815",
+      "baseline_lines": 773,
+      "final_sha256": "78d16defd8389cbcf1e0abb1b93f887a054d93e077ce685fbdd4023fa5582815",
+      "final_lines": 773,
+      "action": "preserved",
+      "fact_basis": [
+        "pyproject.toml",
+        "Cargo.toml",
+        "python/calc_flow/__init__.py",
+        "python/calc_flow/_native.pyi",
+        "python/calc_flow/symbolic",
+        "python/calc_flow/runtime.py",
+        "crates/calc-flow/src/lib.rs"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/symbolic-design.md",
+      "category": "current-guidance",
+      "baseline_sha256": "290c63ddddde6e73d3350e6552985aa87a57ab0dad9a37950a9c82252924db51",
+      "baseline_lines": 280,
+      "final_sha256": "290c63ddddde6e73d3350e6552985aa87a57ab0dad9a37950a9c82252924db51",
+      "final_lines": 280,
+      "action": "preserved",
+      "fact_basis": [
+        "pyproject.toml",
+        "Cargo.toml",
+        "python/calc_flow/__init__.py",
+        "python/calc_flow/_native.pyi",
+        "python/calc_flow/symbolic",
+        "python/calc_flow/runtime.py",
+        "crates/calc-flow/src/lib.rs"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/symbolic-workflows.md",
+      "category": "current-guidance",
+      "baseline_sha256": "6ee9497cc1a7456b4aefd3015d6f3c308c11ca88d24945a390a60d9cff7f83c5",
+      "baseline_lines": 283,
+      "final_sha256": "6ee9497cc1a7456b4aefd3015d6f3c308c11ca88d24945a390a60d9cff7f83c5",
+      "final_lines": 283,
+      "action": "preserved",
+      "fact_basis": [
+        "pyproject.toml",
+        "Cargo.toml",
+        "python/calc_flow/__init__.py",
+        "python/calc_flow/_native.pyi",
+        "python/calc_flow/symbolic",
+        "python/calc_flow/runtime.py",
+        "crates/calc-flow/src/lib.rs"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/verification.md",
+      "category": "current-guidance",
+      "baseline_sha256": "e5a5bce9379f2d9ff5d5a55e628465546902eb143c0bcd58cc6f4b84a868e984",
+      "baseline_lines": 131,
+      "final_sha256": "e5a5bce9379f2d9ff5d5a55e628465546902eb143c0bcd58cc6f4b84a868e984",
+      "final_lines": 131,
+      "action": "preserved",
+      "fact_basis": [
+        "pyproject.toml",
+        "Cargo.toml",
+        "rust-toolchain.toml",
+        ".github/workflows/release.yml",
+        ".github/workflows/ci-linux.yml",
+        "scripts/run_rust_tests.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "docs/warm-stream-performance.md",
+      "category": "current-guidance",
+      "baseline_sha256": "92d3be818b68bd6308344006358abdc28e1b8f490cbd255c55aeba193e1fa660",
+      "baseline_lines": 206,
+      "final_sha256": "92d3be818b68bd6308344006358abdc28e1b8f490cbd255c55aeba193e1fa660",
+      "final_lines": 206,
+      "action": "preserved",
+      "fact_basis": [
+        "scripts/benchmark_suite",
+        "scripts/profile_warm_stream.py",
+        ".github/workflows/benchmark-suite.yml",
+        ".github/workflows/benchmarks.yml",
+        "benchmarks"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "examples/README.md",
+      "category": "current-guidance",
+      "baseline_sha256": "bac1634a497fda4cda6d534be431ea341d28e50e9b1bbc4842ab357e5dcb181c",
+      "baseline_lines": 319,
+      "final_sha256": "bac1634a497fda4cda6d534be431ea341d28e50e9b1bbc4842ab357e5dcb181c",
+      "final_lines": 319,
+      "action": "preserved",
+      "fact_basis": [
+        "examples",
+        "crates/calc-flow/examples",
+        "scripts/run_examples.py"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "fuzz/README.md",
+      "category": "current-guidance",
+      "baseline_sha256": "ca4d092b7ed26efc2b7e3980798aa8d5c3990e265fb2438b25759e22e4bae798",
+      "baseline_lines": 14,
+      "final_sha256": "ca4d092b7ed26efc2b7e3980798aa8d5c3990e265fb2438b25759e22e4bae798",
+      "final_lines": 14,
+      "action": "preserved",
+      "fact_basis": [
+        "fuzz/Cargo.toml",
+        "fuzz/fuzz_targets"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "scripts/fixtures/issue406-rustdoc/README.md",
+      "category": "historical-record",
+      "baseline_sha256": "e0503f86470bd5e0e9f81dfd0dd5452ef8b02c4a823eae4b137d93079c30b4ce",
+      "baseline_lines": 11,
+      "final_sha256": "e0503f86470bd5e0e9f81dfd0dd5452ef8b02c4a823eae4b137d93079c30b4ce",
+      "final_lines": 11,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": "scripts/groupby_diagnostic/README.md",
+      "category": "current-guidance",
+      "baseline_sha256": "e3eadd80aa9365b5835e64202204e68e401b0d504b1df6c20250e7c2f407ede1",
+      "baseline_lines": 126,
+      "final_sha256": "e3eadd80aa9365b5835e64202204e68e401b0d504b1df6c20250e7c2f407ede1",
+      "final_lines": 126,
+      "action": "preserved",
+      "fact_basis": [
+        "scripts/benchmark_suite",
+        "scripts/profile_warm_stream.py",
+        ".github/workflows/benchmark-suite.yml",
+        ".github/workflows/benchmarks.yml",
+        "benchmarks"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "tests/fixtures/asof-inner-compat-v1/README.md",
+      "category": "historical-record",
+      "baseline_sha256": "dc87d6ae3d1f3fbe3666d105805f1251582d81c2015c9f20d3afee31972ed1fe",
+      "baseline_lines": 41,
+      "final_sha256": "dc87d6ae3d1f3fbe3666d105805f1251582d81c2015c9f20d3afee31972ed1fe",
+      "final_lines": 41,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": "vendor/arrow-ipc/README.calc-flow.md",
+      "category": "current-guidance",
+      "baseline_sha256": "a935cd0fcdaa548782bb10b25e5af4c195e795918b9016adeaa6182778bb5cfd",
+      "baseline_lines": 20,
+      "final_sha256": "a935cd0fcdaa548782bb10b25e5af4c195e795918b9016adeaa6182778bb5cfd",
+      "final_lines": 20,
+      "action": "preserved",
+      "fact_basis": [
+        "vendor/arrow-ipc/Cargo.toml",
+        "vendor/arrow-ipc/provenance.json",
+        "Cargo.lock"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "vendor/arrow-ipc/README.md",
+      "category": "upstream-vendor",
+      "baseline_sha256": "bbd58fd1c7d2910a2b7887c188d858dc6e56d87742891dc5da407885049f96d8",
+      "baseline_lines": 34,
+      "final_sha256": "bbd58fd1c7d2910a2b7887c188d858dc6e56d87742891dc5da407885049f96d8",
+      "final_lines": 34,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": "vendor/parquet/CONTRIBUTING.md",
+      "category": "upstream-vendor",
+      "baseline_sha256": "b98075433192fb2ab33b559c58ed18ce8e21dbd6f83c5592204f7faa414befe2",
+      "baseline_lines": 63,
+      "final_sha256": "b98075433192fb2ab33b559c58ed18ce8e21dbd6f83c5592204f7faa414befe2",
+      "final_lines": 63,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": "vendor/parquet/README.calc-flow.md",
+      "category": "current-guidance",
+      "baseline_sha256": "237ff6ac5ad4bb7d0faf47f8eee0ad89cb603373f2aa3e34ed452ec89a2959c9",
+      "baseline_lines": 25,
+      "final_sha256": "237ff6ac5ad4bb7d0faf47f8eee0ad89cb603373f2aa3e34ed452ec89a2959c9",
+      "final_lines": 25,
+      "action": "preserved",
+      "fact_basis": [
+        "vendor/parquet/Cargo.toml",
+        "vendor/parquet/provenance.json",
+        "Cargo.lock"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "vendor/parquet/README.md",
+      "category": "upstream-vendor",
+      "baseline_sha256": "b13e919fe8af687cbcbd7a257886a21103d8484376916bbea6785fe17a67a96d",
+      "baseline_lines": 90,
+      "final_sha256": "b13e919fe8af687cbcbd7a257886a21103d8484376916bbea6785fe17a67a96d",
+      "final_lines": 90,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": "vendor/parquet/THRIFT.md",
+      "category": "upstream-vendor",
+      "baseline_sha256": "3725bf644bd461d9bee6480128c1644d5fa47362a8f95683dda64acf99310c3a",
+      "baseline_lines": 478,
+      "final_sha256": "3725bf644bd461d9bee6480128c1644d5fa47362a8f95683dda64acf99310c3a",
+      "final_lines": 478,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": "vendor/pgwire-replication/README.calc-flow.md",
+      "category": "current-guidance",
+      "baseline_sha256": "f3a6d0b1689c0bbb755e4188011e5e8c912fe1efb2731d237892638b50ab9f18",
+      "baseline_lines": 18,
+      "final_sha256": "f3a6d0b1689c0bbb755e4188011e5e8c912fe1efb2731d237892638b50ab9f18",
+      "final_lines": 18,
+      "action": "preserved",
+      "fact_basis": [
+        "vendor/pgwire-replication/Cargo.toml",
+        "vendor/pgwire-replication/provenance.json",
+        "Cargo.lock"
+      ],
+      "review_scope": "current contracts, source/configuration and static references; no runtime execution"
+    },
+    {
+      "path": "vendor/pgwire-replication/README.md",
+      "category": "upstream-vendor",
+      "baseline_sha256": "f761f004318c80583d8bcb8516b63c6f2d12dd836b0316c324a961ec24924134",
+      "baseline_lines": 503,
+      "final_sha256": "f761f004318c80583d8bcb8516b63c6f2d12dd836b0316c324a961ec24924134",
+      "final_lines": 503,
+      "action": "preserved",
+      "fact_basis": [],
+      "review_scope": "fixed-revision or historical/upstream record: check structure/references; preserve recorded results; no claim of passing on latest main"
+    },
+    {
+      "path": ".codex/artifacts/analysis/dal-480-doc-audit-2026-11-01.md",
+      "category": "audit-evidence",
+      "baseline_sha256": null,
+      "baseline_lines": 0,
+      "final_sha256": "c4d111abd1036eb5c02c5daf83c27cf567c2c27357e75463b591b4be286ec69b",
+      "final_lines": 101,
+      "action": "added",
+      "fact_basis": [
+        "DAL-480 current issue and trigger comment",
+        "this run verification evidence"
+      ],
+      "review_scope": "new audit handoff; independent review pending"
+    }
+  ]
+}
