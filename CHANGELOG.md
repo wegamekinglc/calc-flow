@@ -9,6 +9,18 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-02: Prepare the `calc-flow-python` 2026.11.2 release, aligning
+  workspace crates, exact native dependencies, Python metadata, and current
+  documentation. This release removes Pydantic and its transitive dependencies
+  from the default Python installation. `ProjectDocument` retains native
+  project-v3 validation, canonical JSON, and lightweight serialization with
+  improved validation and dump performance. It now raises
+  `ProjectValidationError`; Pydantic-specific `include`/`exclude` dump filters
+  are not supported. Dependency metadata, benchmark support locks, and Rust
+  example numbering are aligned accordingly. Project and managed checkpoint
+  manifest format versions remain 3; engine and operator state compatibility
+  checks still apply when restoring checkpoints.
+
 - 2026-11-01: Prepare the `calc-flow-python` 2026.11.1 release, aligning
   workspace crates, exact native dependencies, Python metadata, and current
   documentation. This release optimizes native SQL ASOF top-1 and interval band

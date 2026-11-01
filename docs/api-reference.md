@@ -11,8 +11,8 @@ for the contracts documented here.
 
 | Surface    | Package or path                | Purpose                                    |
 |------------|--------------------------------|--------------------------------------------|
-| Python API | `calc-flow-python==2026.11.1`  | Expressions, Arrow execution, integrations |
-| Rust core  | `calc-flow = "2026.11.1"`      | Internal runtime and extension contracts   |
+| Python API | `calc-flow-python==2026.11.2`  | Expressions, Arrow execution, integrations |
+| Rust core  | `calc-flow = "2026.11.2"`      | Internal runtime and extension contracts   |
 
 For examples and lifecycle detail, see the [executable example guide](examples.md),
 [Rust runtime reference](rust-api.md), [Python API](python-api.md), and
@@ -498,7 +498,7 @@ manifest publication uses `CheckpointPublicationUnknownError`.
 
 ## Version and compatibility
 
-The Rust crate and Python binding are versioned `2026.11.1` in this checkout.
+The Rust crate and Python binding are versioned `2026.11.2` in this checkout.
 Project format version `3` and checkpoint-manifest version `3` are separate
 protocol values from the package version. The Studio application moved to the
 separate [calc-flow-studio](https://github.com/wegamekinglc/calc-flow-studio)

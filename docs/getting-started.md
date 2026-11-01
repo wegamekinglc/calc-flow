@@ -173,7 +173,7 @@ use `maturin develop` for this release-style installation, and do not leave
 
 ## Verify the installation
 
-For a build from this checkout, confirm that Calc Flow reports version `2026.11.1`.
+For a build from this checkout, confirm that Calc Flow reports version `2026.11.2`.
 A published installation reports the release selected by the package manager,
 which can differ from the current source version. Confirm that the native
 extension loads from the environment rather than `python/calc_flow/`.
