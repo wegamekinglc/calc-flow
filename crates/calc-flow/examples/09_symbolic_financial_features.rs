@@ -19,6 +19,7 @@ async fn main() -> ExampleResult {
         ("volume", floats(&[10.0, 20.0, 30.0, 15.0])),
     ]);
     let plan = financial_graph(&schema(&quotes))?.compile_batch(&UdfRegistry::new().snapshot())?;
+    println!("{}: {:?}", plan.name(), plan.topological_order());
     let run = plan
         .execute(
             BTreeMap::from([("input".into(), quotes)]),
@@ -40,7 +41,16 @@ async fn main() -> ExampleResult {
         &f64_values(&output, "volume_z"),
         &[Some(-1.0), Some(1.0), Some(1.0), Some(-1.0)],
     );
-    support::print(&output)
+    let columns: Vec<_> = schema(&output[0])
+        .fields()
+        .iter()
+        .skip(4)
+        .map(|field| field.name().clone())
+        .collect();
+    support::print_columns(
+        &output,
+        &columns.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
 }
 
 fn financial_graph(

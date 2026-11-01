@@ -64,9 +64,9 @@ managed checkpoint root.
 
 Continue with [SQL and reusable pipelines](docs/batch-guide.md#compose-sql-and-python-pipelines)
 and the [first streaming pipeline](docs/streaming-guide.md#first-python-continuous-job).
-The runnable examples cover [SQL composition](examples/19_sql_expression_pipeline.py),
-[stateful streaming](examples/20_streaming_pipeline.py), and
-[named streaming outputs](examples/21_streaming_outputs.py). The
+The runnable examples cover [SQL composition](examples/32_sql_expression_pipeline.py),
+[stateful streaming](examples/33_streaming_pipeline.py), and
+[named streaming outputs](examples/34_streaming_outputs.py). The
 [connector examples](docs/connectors/README.md) cover all seven transports
 and every supported read/write direction, with service setup and output checks.
 The default wheel includes file; other transports require native build features.

@@ -1,11 +1,19 @@
 # Calc Flow examples
 
-Every runnable example has a [Rust counterpart](../crates/calc-flow/examples/README.md), including connector sources/sinks, recovery, and financial streams.
+All 36 runnable Python examples have a [Rust counterpart](../crates/calc-flow/examples/README.md),
+including connector sources/sinks, recovery, and financial streams. Each pair
+uses the same unique number and filename stem, from `01_datafusion_pipeline`
+to `36_symbolic_event_window`.
+
+Numbers 01–31 retain their existing filenames. The formerly duplicated
+19–22 SQL/streaming examples are now 32–35, and the previously unnumbered
+event-window example is 36. Shared fixture modules and the WebSocket sample
+server keep descriptive, unnumbered names in both languages.
 
 Start with the [documentation overview](../docs/introduction.md) and
 [installation guide](../docs/getting-started.md). Start with Python expressions
-in 01, SQL composition in `19_sql_expression_pipeline.py`, and streams in
-`20_streaming_pipeline.py` and `21_streaming_outputs.py`. Continue to 05 for
+in 01, SQL composition in `32_sql_expression_pipeline.py`, and streams in
+`33_streaming_pipeline.py` and `34_streaming_outputs.py`. Continue to 05 for
 async batch execution, 09 for financial features, and 14 for project export.
 These programs use the internal Rust runtime and check observable results;
 explicit graph, provider, and native-extension examples cover advanced integrations. Each Python program
@@ -32,6 +40,12 @@ when `JAX_PLATFORMS` is unset. NumPy is required by examples 06, 07, and 11;
 JAX is optional in 07, which prints an explicit skip when it is unavailable.
 The `dev` extra installs both providers. For individual application installs,
 use `calc-flow-python[numpy]` or `calc-flow-python[jax]` as needed.
+
+The runner uses the same small inputs for Python and Rust examples 30 and 31:
+30 business flows, 2 accounts, 3 stocks, batches of 4, and 9 quotes for 31.
+Direct execution keeps their original defaults. Both languages print the final
+table and `total elapsed: ... s`, measured before printing and excluding the
+Rust build. Actual durations depend on the run.
 
 The [source installation](../docs/getting-started.md#build-and-install-from-source)
 builds wheels. An editable developer environment can instead use
@@ -179,25 +193,24 @@ Temporary checkpoint lineages do not demonstrate durable restart recovery.
 
 ### SQL and streaming pipelines
 
-These scripts are distinct from the connector files with the same numeric
-prefix. Use the full filename when choosing a program; these scripts run without
-external services and are included in the default example runner.
+Examples 32–36 run without external services and are included in the default
+example runner.
 
-- [19_sql_expression_pipeline.py](19_sql_expression_pipeline.py) — compose
+- [32_sql_expression_pipeline.py](32_sql_expression_pipeline.py) — compose
   reusable functions with `pipe`, SQL filtering, and column arithmetic. Checks
   `order_id=[1, 3]` and `net=[18.0, 27.0]`.
   Guide: [SQL pipelines](../docs/batch-guide.md#compose-sql-and-python-pipelines).
-- [20_streaming_pipeline.py](20_streaming_pipeline.py) — retain native delta
+- [33_streaming_pipeline.py](33_streaming_pipeline.py) — retain native delta
   and nested rolling-mean state across two input batches, followed by SQL.
   The source stays open while `async for` receives `delta=[None, 2.0, 3.0]` and
   `mean_delta=[None, 2.0, 2.5]`. Exiting `async with` cancels the waiting source
   and cleans up temporary checkpoints; the latest timestamp remains buffered.
   Guide: [first stream](../docs/streaming-guide.md#first-python-continuous-job).
-- [21_streaming_outputs.py](21_streaming_outputs.py) — branch a Program and
+- [34_streaming_outputs.py](34_streaming_outputs.py) — branch a Program and
   consume independent `StreamOutput` events by name. Checks
   `double=[2, 4, 6]` and `large=[2, 3]` without assuming cross-output order.
   Guide: [named outputs](../docs/streaming-guide.md#named-streaming-outputs).
-- [22_stream_asof_join.py](22_stream_asof_join.py) — attach the latest quote
+- [35_stream_asof_join.py](35_stream_asof_join.py) — attach the latest quote
   within ten microseconds to each trade. Checks no output while both
   watermarks equal 105, then `quote__price=[10.2, None]` after they advance to
   122. Uses explicit source watermarks and temporary state; no external service
@@ -249,7 +262,7 @@ external services and are included in the default example runner.
   for smaller runs. No external service is needed.
   Guide and execution boundaries: [account market values](../docs/streaming-guide.md#account-market-values).
 
-The explicitly registered [symbolic_event_window.py](symbolic_event_window.py)
+The [36_symbolic_event_window.py](36_symbolic_event_window.py)
 example computes grouped one-minute trade count, volume, low, high, and
 arithmetic average price. It checks native final output with explicit source
 watermarks and a `price_range` branch sharing the same window declaration.
@@ -264,11 +277,11 @@ Run a Rust example with `cargo run -p calc-flow --example NAME`:
 
 - [expression_pipeline.rs](../crates/calc-flow/examples/expression_pipeline.rs)
   (`expression_pipeline`) calculates the introductory totals `[3, 7]`.
-- [sql_join.rs](../crates/calc-flow/examples/sql_join.rs) (`sql_join`) uses the
+- [02_sql_join.rs](../crates/calc-flow/examples/02_sql_join.rs) (`02_sql_join`) uses the
   same order/fee dataset as Python 02, then doubles the net amounts and checks
   `[140, 216, 72]`.
-- [continuous_runtime.rs](../crates/calc-flow/examples/continuous_runtime.rs)
-  (`continuous_runtime`) demonstrates native source/sink traits and the owning
+- [04_continuous_runtime.rs](../crates/calc-flow/examples/04_continuous_runtime.rs)
+  (`04_continuous_runtime`) demonstrates native source/sink traits and the owning
   job lifecycle.
 - [windowed_streaming.rs](../crates/calc-flow/examples/windowed_streaming.rs)
   (`windowed_streaming`) checks deterministic one-minute window sums closed
@@ -311,9 +324,10 @@ standalone with a `main()` entry point, verify its expected behavior even under
 Python optimization (`-O`), and avoid
 mutating caller-owned inputs. Clean up any job and temporary resource. Document
 its dependencies and expected result here, and link it from the relevant
-function guide. The runner discovers numbered Python files automatically;
-`symbolic_event_window.py` is also explicitly registered. Verify discovery
-with `python -m unittest scripts.test_run_examples`.
+function guide. Give its Rust counterpart the same `NN_description.rs` stem
+and preserve the calculation's printed results and diagnostics. The runner
+discovers numbered Python files automatically and uses the same stems for Rust.
+Verify discovery with `python -m unittest scripts.test_run_examples`.
 List examples requiring external services in `SERVICE_PYTHON_EXAMPLES` in
 the runner so they require `--include-services`, and add their setup to
 [the connector instructions](../docs/connectors/README.md).

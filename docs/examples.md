@@ -19,11 +19,11 @@ Continue to [example 14](../examples/14_project_persistence.py) to export a
 
 Run [02_sql_join.py](../examples/02_sql_join.py) for named `cf.sql` aliases
 and a following column expression, then
-[19_sql_expression_pipeline.py](../examples/19_sql_expression_pipeline.py)
+[32_sql_expression_pipeline.py](../examples/32_sql_expression_pipeline.py)
 for reusable `pipe` functions around SQL. The checked final values are
 `doubled=[140, 216, 72]` and `net=[18.0, 27.0]`, respectively.
 Example 03 covers explicit typed UDF registration. Runtime contributors can pair
-Rust's `datafusion_pipeline` with `sql_join` for the same order datasets and
+Rust's `01_datafusion_pipeline` with `02_sql_join` for the same order datasets and
 results as Python 01 and 02. The additional `expression_pipeline` keeps the
 small `[3, 7]` addition from the introduction.
 
@@ -42,11 +42,11 @@ weights in a symbolic batch or continuous program.
 ## Consume a stateful pipeline
 
 Read the [first-stream tutorial](streaming-guide.md#first-python-continuous-job)
-while running [20_streaming_pipeline.py](../examples/20_streaming_pipeline.py).
+while running [33_streaming_pipeline.py](../examples/33_streaming_pipeline.py).
 It composes a price delta, a mean of that delta, and SQL projection, using one
 native job across input batches. Its source stays open while the first three
 rows arrive, and context exit closes the waiting source. Continue with
-[21_streaming_outputs.py](../examples/21_streaming_outputs.py) to branch a
+[34_streaming_outputs.py](../examples/34_streaming_outputs.py) to branch a
 Program and consume named events. Both use `async with` and `async for`, require
 no external service, and clean up temporary checkpoint storage.
 
@@ -67,7 +67,7 @@ bindings, and the separate durable-recovery contract.
 Read the [streaming guide](streaming-guide.md) while running 04 → 08 → 10:
 own a source/sink lifecycle, recover a completed stream, then restore a
 multi-stage rolling calculation from a checkpoint taken during processing.
-For runtime contributors, Rust's `continuous_runtime` and `windowed_streaming` demonstrate the native
+For runtime contributors, Rust's `04_continuous_runtime` and `windowed_streaming` demonstrate the native
 traits and watermark-driven tumbling windows.
 
 The native [late-output file recovery example](../crates/calc-flow-connectors/examples/late_output_recovery.rs)
@@ -106,9 +106,8 @@ These standalone examples declare the calculation with `cf.table_input`,
 `cf.Program`, and reusable Python functions, export a stream project, and
 supply explicit transport/lifecycle settings. They use temporary checkpoints,
 so rerunning starts a new lineage and remote writes remain. Follow the
-connector guide's delivery and repeat-run limits. Use complete filenames:
-`19_clickhouse_source.py`, `20_http_source.py`, and `21_websocket_source.py`
-share numeric prefixes with the SQL and streaming pipeline examples.
+connector guide's delivery and repeat-run limits. Python and Rust counterparts
+share unique numbers 01–36; the SQL and streaming pipeline examples use 32–36.
 
 ## Compose financial and relational calculations
 
@@ -117,7 +116,7 @@ for financial features, recovery, and matrices. Run 12 → 13 for a bounded
 two-stream match followed by an ordered nested join. Consult the
 [expression API](symbolic-api.md) for declaration and ordering requirements.
 
-Run [22_stream_asof_join.py](../examples/22_stream_asof_join.py) for each
+Run [35_stream_asof_join.py](../examples/35_stream_asof_join.py) for each
 trade's latest eligible historical quote. It checks that equal watermarks do
 not emit, then produces one matched price and one null after progress. Read the
 [ASOF guide](asof-join-guide.md) for strict types, tie ordering, and delivery limits.

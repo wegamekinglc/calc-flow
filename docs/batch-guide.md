@@ -87,7 +87,7 @@ per-batch callback and is never serialized. Async functions are rejected.
 `input`. It returns a table declaration, so column expressions and reusable
 functions can follow it without collecting intermediate tables.
 
-Run [19_sql_expression_pipeline.py](../examples/19_sql_expression_pipeline.py):
+Run [32_sql_expression_pipeline.py](../examples/32_sql_expression_pipeline.py):
 
 ```python
 """Reuse table and column pipelines around a native SQL stage."""

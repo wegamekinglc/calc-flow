@@ -34,10 +34,12 @@ fn graph() -> calc_flow::Result<PipelineBuilder> {
 
 #[tokio::main]
 async fn main() -> ExampleResult {
+    let plan = stream_plan(graph()?)?;
+    println!("{}: {:?}", plan.name(), plan.topological_order());
     let root = tempfile::tempdir()?;
     let output: Collected = Arc::default();
-    checkpoint_prefix(root.path(), &output).await?;
-    let terminal = resume(root.path(), &output).await?;
+    let first_open = checkpoint_prefix(root.path(), &output).await?;
+    let (terminal, resumed_open) = resume(root.path(), &output).await?;
     let actual = f64_values(&output.lock().await, "average_gain");
     check_floats(
         &actual,
@@ -51,7 +53,18 @@ async fn main() -> ExampleResult {
         ],
     );
     terminal_restart(root.path(), &output, terminal.completed_epoch).await?;
-    println!("recovered rolling values: {actual:?}");
+    println!(
+        "recovered rolling values: {}",
+        support::format_values(&actual)
+    );
+    println!(
+        "source cursors: {:?} terminal epoch: {}",
+        [first_open, resumed_open].concat(),
+        terminal
+            .completed_epoch
+            .expect("terminal checkpoint")
+            .as_u64()
+    );
     Ok(())
 }
 
@@ -68,7 +81,10 @@ fn recovery_runner(
     )
 }
 
-async fn checkpoint_prefix(root: &std::path::Path, output: &Collected) -> ExampleResult {
+async fn checkpoint_prefix(
+    root: &std::path::Path,
+    output: &Collected,
+) -> ExampleResult<Vec<usize>> {
     let source = ReplaySource::batches(batches())?.pause_at(3);
     let pause = Arc::clone(&source.paused);
     let opens = Arc::clone(&source.opened_at);
@@ -81,20 +97,22 @@ async fn checkpoint_prefix(root: &std::path::Path, output: &Collected) -> Exampl
     let cancelled = first.cancel().await;
     assert_eq!(cancelled.state, JobState::Cancelled);
     assert_eq!(checkpoint??.as_u64(), 1);
-    assert_eq!(*opens.lock().await, [0]);
-    Ok(())
+    let opened_at = opens.lock().await.clone();
+    assert_eq!(opened_at, [0]);
+    Ok(opened_at)
 }
 
 async fn resume(
     root: &std::path::Path,
     output: &Collected,
-) -> ExampleResult<calc_flow::JobOutcome> {
+) -> ExampleResult<(calc_flow::JobOutcome, Vec<usize>)> {
     let source = ReplaySource::batches(batches())?;
     let reopened = Arc::clone(&source.opened_at);
     let second = recovery_runner(root, source, output)?.start().await?;
     let terminal = completed(&second).await?;
-    assert_eq!(*reopened.lock().await, [3]);
-    Ok(terminal)
+    let opened_at = reopened.lock().await.clone();
+    assert_eq!(opened_at, [3]);
+    Ok((terminal, opened_at))
 }
 
 async fn terminal_restart(

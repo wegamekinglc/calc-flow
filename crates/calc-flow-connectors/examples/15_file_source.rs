@@ -18,8 +18,8 @@ async fn main() -> ExampleResult {
             DeliveryGuarantee::ExactlyOnce,
         )
         .await?;
-        support::check_totals(&directory).await?;
-        println!("{format} -> Parquet (exactly_once)");
+        let totals = support::check_totals(&directory).await?;
+        println!("{format} -> Parquet: {totals:?} (exactly_once)");
     }
     Ok(())
 }

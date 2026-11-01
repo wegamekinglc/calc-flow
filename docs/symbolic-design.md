@@ -275,6 +275,6 @@ The relevant runnable examples are
 [11](../examples/11_symbolic_static_matrix.py),
 [12](../examples/12_symbolic_stream_join.py),
 [13](../examples/13_symbolic_relational_dag.py), and
-[event-window aggregation](../examples/symbolic_event_window.py).
+[event-window aggregation](../examples/36_symbolic_event_window.py).
 
 Next: [verification](verification.md).

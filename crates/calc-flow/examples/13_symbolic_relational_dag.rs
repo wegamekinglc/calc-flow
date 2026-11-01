@@ -56,7 +56,10 @@ async fn main() -> ExampleResult {
     .collect::<calc_flow::Result<BTreeMap<_, _>>>()?;
     let result = collect(plan, sources).await?;
     assert_eq!(f64_values(&result["output"], "net_amount"), [Some(97.5)]);
-    support::print(&result["output"])
+    support::print_columns(
+        &result["output"],
+        &["matched__authorization__account_id", "net_amount"],
+    )
 }
 
 fn joins(

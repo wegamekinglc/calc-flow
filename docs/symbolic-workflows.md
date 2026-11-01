@@ -33,7 +33,7 @@ A pipeline is a composed expression declaration. Use ordinary synchronous
 Python functions and `pipe` to reuse table or column calculations; functions
 run once when constructing the graph and retain their own return type.
 
-[19_sql_expression_pipeline.py](../examples/19_sql_expression_pipeline.py)
+[32_sql_expression_pipeline.py](../examples/32_sql_expression_pipeline.py)
 calculates gross order amounts, filters them with `TableExpr.sql`, and applies a
 discount through another function. It collects `net=[18.0, 27.0]` in order-ID
 order. [02_sql_join.py](../examples/02_sql_join.py) joins explicit `cf.sql`
@@ -49,7 +49,7 @@ stream SQL accepts one alias, with cumulative snapshots for aggregation. See the
 
 ## Consume stateful and branching streams
 
-[20_streaming_pipeline.py](../examples/20_streaming_pipeline.py) runs one
+[33_streaming_pipeline.py](../examples/33_streaming_pipeline.py) runs one
 native job through `async with output.stream(batches()) as results`. Its
 `async for` consumer observes a price delta and rolling mean that retain
 history across batches, followed by SQL projection. The source remains open
@@ -57,7 +57,7 @@ while the consumer checks deltas `[None, 2.0, 3.0]` and means
 `[None, 2.0, 2.5]`, then exits and cancels the waiting source. The latest
 timestamp remains buffered behind the default safe watermark.
 
-[21_streaming_outputs.py](../examples/21_streaming_outputs.py) branches with
+[34_streaming_outputs.py](../examples/34_streaming_outputs.py) branches with
 `Program.stream` and consumes `StreamOutput.name` and `.table`, checking
 `double=[2, 4, 6]` and `large=[2, 3]`. Output events arrive independently;
 they are not synchronized result dictionaries.
@@ -141,14 +141,14 @@ using the ordinary project-v3 recovery contract.
 
 ## Aggregate event-time windows
 
-[`symbolic_event_window.py`](../examples/symbolic_event_window.py) declares
+[`36_symbolic_event_window.py`](../examples/36_symbolic_event_window.py) declares
 two UTC one-minute windows grouped by symbol. It computes non-null trade
 count, volume, low, high, and arithmetic average price, then derives
 `price_range` from the window's high and low columns. The named `minute` and
 `summary` outputs share one native window state owner.
 
 ```bash
-uv run python examples/symbolic_event_window.py
+uv run python examples/36_symbolic_event_window.py
 ```
 
 The source sends two public `Watermark` events through

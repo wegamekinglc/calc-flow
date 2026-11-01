@@ -1,4 +1,4 @@
-//! Python 19: reusable expression stages around a read-only SQL stage.
+//! Python 32: reusable expression stages around a read-only SQL stage.
 mod support;
 use calc_flow::{ExecutionOptions, PipelineBuilder, UdfRegistry};
 use std::collections::BTreeMap;

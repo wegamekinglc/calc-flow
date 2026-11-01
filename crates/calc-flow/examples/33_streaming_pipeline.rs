@@ -1,4 +1,4 @@
-//! Python 20: nested rolling stages emit before EOF and are explicitly cancelled.
+//! Python 33: nested rolling stages emit before EOF and are explicitly cancelled.
 #[path = "support/rolling.rs"]
 mod rolling_stages;
 mod support;

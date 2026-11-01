@@ -112,5 +112,8 @@ fn check_results(results: &BTreeMap<String, Vec<calc_flow::Batch>>) -> ExampleRe
         .collect();
     assert_eq!(matches.iter().filter(|v| **v == Some(true)).count(), 1);
     assert_eq!(matches.iter().filter(|v| **v == Some(false)).count(), 1);
-    support::print(&results["output"])
+    support::print_columns(
+        &results["output"],
+        &["authorization__account_id", "amount_matches"],
+    )
 }

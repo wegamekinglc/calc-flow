@@ -51,6 +51,7 @@ async fn main() -> ExampleResult {
     };
     assert_eq!(unchanged, &[2.0, 0.0, 0.0, 1.0]);
     assert!(result.datafusion_metrics.is_empty());
-    println!("Rust matrix result: {values:?}");
+    let rows: Vec<_> = values.chunks_exact(2).collect();
+    println!("Rust matrix result (NumPy/JAX equivalent): {rows:?}");
     Ok(())
 }

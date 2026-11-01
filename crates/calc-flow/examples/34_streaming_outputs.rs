@@ -1,4 +1,4 @@
-//! Python 21: one source fans out to two named stream outputs.
+//! Python 34: one source fans out to two named stream outputs.
 mod support;
 use calc_flow::PipelineBuilder;
 use std::collections::BTreeMap;
@@ -23,10 +23,11 @@ async fn main() -> ExampleResult {
         i64_values(&results["large.output"], "value"),
         [Some(2), Some(3)]
     );
-    for (name, batches) in results {
-        println!("{name}");
-        support::print(&batches)?;
-    }
+    println!(
+        "{{'double': {}, 'large': {}}}",
+        support::format_values(&i64_values(&results["double.output"], "value2")),
+        support::format_values(&i64_values(&results["large.output"], "value")),
+    );
     Ok(())
 }
 

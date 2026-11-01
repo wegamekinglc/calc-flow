@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("net is an Int64 column");
 
     assert_eq!(net.values(), &[140, 216, 72]);
-    println!("doubled net amounts: {net:?}");
+    datafusion::arrow::util::pretty::print_batches(output.batches())?;
     Ok(())
 }
 

@@ -56,7 +56,7 @@ be passed to `StreamingRunner`, and a stream plan cannot be executed with
 
 ## First Python continuous job
 
-[20_streaming_pipeline.py](../examples/20_streaming_pipeline.py) composes a
+[33_streaming_pipeline.py](../examples/33_streaming_pipeline.py) composes a
 price delta, a rolling mean of that delta, and SQL projection in one pipeline:
 
 ```python
@@ -133,7 +133,7 @@ one output table.
 
 ## Named streaming outputs
 
-[21_streaming_outputs.py](../examples/21_streaming_outputs.py) branches one
+[34_streaming_outputs.py](../examples/34_streaming_outputs.py) branches one
 logical source into independent calculations:
 
 ```python
@@ -978,7 +978,7 @@ currently available but the source remains live. `close()` must be safe after
 normal completion, launch failure, cancellation, or another connector's error.
 
 Rust uses the same lifecycle through the `StreamSource` trait. See
-[`continuous_runtime.rs`](../crates/calc-flow/examples/continuous_runtime.rs).
+[`04_continuous_runtime.rs`](../crates/calc-flow/examples/04_continuous_runtime.rs).
 
 ## Watermark policies
 
@@ -1057,7 +1057,7 @@ Python expressions imported from `calc_flow` declare the same native operator wi
 `window.tumbling` or `window.hopping` and an ordered sequence of
 `window.count`, `window.sum`, `window.min`, `window.max`, or `window.avg`
 aggregates. Run
-[`symbolic_event_window.py`](../examples/symbolic_event_window.py) for a
+[`36_symbolic_event_window.py`](../examples/36_symbolic_event_window.py) for a
 grouped minute summary with explicit source watermarks. The
 [symbolic window reference](symbolic-api.md#symbolic-event-time-window-aggregation)
 defines exact types, row origins, and the supported stateless transformations
@@ -1555,7 +1555,7 @@ quote age, and typed sequence values resolve equal-time ties. Both inputs must
 strictly pass the left event time before final output; idle does not close an
 input. Unmatched left rows remain, with all right fields nullable.
 
-[22_stream_asof_join.py](../examples/22_stream_asof_join.py) shows the complete
+[35_stream_asof_join.py](../examples/35_stream_asof_join.py) shows the complete
 trade/quote stream using logical input bindings and explicit source watermarks.
 It checks no output at equal watermarks and final `quote__price=[10.2, None]`
 after progress. Read the [ASOF guide](asof-join-guide.md) for the exact non-null

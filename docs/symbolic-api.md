@@ -195,9 +195,9 @@ snapshot; SQL window functions alone remain batch-local. These aggregate
 snapshots repeat unchanged groups, so downstream operators receive them as new
 rows. Native rolling, event windows, and bounded stream joins have their
 separately declared cross-batch semantics. Use
-[SQL composition](../examples/19_sql_expression_pipeline.py),
+[SQL composition](../examples/32_sql_expression_pipeline.py),
 [named SQL inputs](../examples/02_sql_join.py), and the
-[rolling-to-SQL stream](../examples/20_streaming_pipeline.py) as executable examples.
+[rolling-to-SQL stream](../examples/33_streaming_pipeline.py) as executable examples.
 The [engine selection example](../examples/29_sql_stream_switch.py) executes
 the same SQL declaration through two separately selected `Program` instances.
 
@@ -333,7 +333,7 @@ before the window, then aggregate its named column.
 `count(column)` counts non-null values and always requires a column; there is
 no `count(*)` helper. Choose a non-null trade ID to count every trade.
 `avg` is the ordinary arithmetic mean. It does not weight prices by volume.
-Run the [minute aggregation example](../examples/symbolic_event_window.py)
+Run the [minute aggregation example](../examples/36_symbolic_event_window.py)
 for grouped count, volume, low, high, and average price with explicit source
 watermarks.
 

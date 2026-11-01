@@ -31,7 +31,11 @@ async fn main() -> ExampleResult {
     assert_eq!(streamed, scores);
     support::check_floats(&scores, &[Some(1.0), Some(-3.0), Some(2.5)]);
     assert_eq!(placements, [16, 0]);
-    println!("batch/stream risk scores: {scores:?}\nstatic-weight placement bytes: {placements:?}");
+    println!(
+        "batch/stream risk scores: {}",
+        support::format_values(&scores)
+    );
+    println!("static-weight placement bytes by micro-batch: {placements:?}");
     Ok(())
 }
 
@@ -47,7 +51,7 @@ fn registered_provider(
         &StreamRequirements::default(),
     );
     assert!(missing.is_err(), "provider must be registered explicitly");
-    println!("expected provider gate: {}", missing.err().unwrap());
+    println!("expected final provider gate: {}", missing.err().unwrap());
     matrix::register(&providers)?;
     Ok(providers)
 }
@@ -94,6 +98,7 @@ fn stream_runner(
         &StreamRequirements::default(),
     )?;
     let source = segmented_source(prices)?;
+    println!("{}: {:?}", plan.name(), plan.topological_order());
     runner(
         plan,
         BTreeMap::from([("table".into(), source.binding())]),
