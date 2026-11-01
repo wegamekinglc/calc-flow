@@ -58,6 +58,12 @@ assert round_tripped.root == document.root
 """
     environment = os.environ.copy()
     environment["CALC_FLOW_TEST_INIT"] = calc_flow.__file__
+    package_root = os.path.dirname(
+        os.path.dirname(os.path.realpath(calc_flow.__file__))
+    )
+    environment["PYTHONPATH"] = (
+        package_root + os.pathsep + environment.get("PYTHONPATH", "")
+    )
     completed = subprocess.run(
         ["python", "-c", script],
         executable=sys.executable,
