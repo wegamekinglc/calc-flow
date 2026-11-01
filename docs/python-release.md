@@ -37,6 +37,19 @@ Windows wheels are required together, alongside macOS wheels.
 It checks each wheel's platform, ABI, metadata, and contents, checks the source
 distribution's contents, and records artifact hashes.
 
+## Python dependency metadata
+
+`[project.dependencies]` in `pyproject.toml` supplies the wheel's runtime
+`Requires-Dist` metadata. The default Python dependencies are `pyarrow` and
+`typing-extensions`; NumPy and JAX are optional extras, and Maturin is a build
+requirement rather than a wheel runtime dependency. Project-document validation
+uses the native Rust runtime and does not require Pydantic.
+
+After changing these declarations, regenerate `benchmarks/requirements.lock`
+with the workflow's compile command and review the separately maintained
+`benchmarks/risingwave/requirements.lock` support environment. The local root
+`uv.lock` is ignored by Git and is not a release artifact.
+
 ## Workflow
 
 The workflow:

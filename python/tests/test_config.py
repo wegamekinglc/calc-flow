@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from collections import UserDict
 from copy import deepcopy
 from types import MappingProxyType
 
 import pytest
-from pydantic import ValidationError
 
+import calc_flow
 from calc_flow import (
     ConfigError,
     PipelineBuilder,
@@ -15,6 +18,7 @@ from calc_flow import (
     Runtime,
     project_json_schema,
 )
+from calc_flow import ProjectValidationError as ValidationError
 from calc_flow.config import _openapi_project_schema
 
 
@@ -37,6 +41,40 @@ def _assert_json_error(project: object, message: str) -> None:
     ] == [("value_error", (), f"Value error, {message}")]
 
 
+def test_project_document_works_without_pydantic_installed() -> None:
+    script = """
+import os
+import sys
+sys.modules["pydantic"] = None
+sys.modules["pydantic_core"] = None
+import calc_flow
+assert os.path.samefile(calc_flow.__file__, os.environ["CALC_FLOW_TEST_INIT"])
+from calc_flow import PipelineBuilder, ProjectDocument
+project = PipelineBuilder("config").expression("calc", "b = a + 1").project
+document = ProjectDocument.model_validate(project)
+assert document.model_dump(mode="json")["format_version"] == 3
+round_tripped = ProjectDocument.model_validate_json(document.model_dump_json())
+assert round_tripped.root == document.root
+"""
+    environment = os.environ.copy()
+    environment["CALC_FLOW_TEST_INIT"] = calc_flow.__file__
+    package_root = os.path.dirname(
+        os.path.dirname(os.path.realpath(calc_flow.__file__))
+    )
+    environment["PYTHONPATH"] = (
+        package_root + os.pathsep + environment.get("PYTHONPATH", "")
+    )
+    completed = subprocess.run(
+        ["python", "-c", script],
+        executable=sys.executable,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_project_document_delegates_schema_and_rust_defaults() -> None:
     schema = ProjectDocument.model_json_schema()
     assert schema == json.loads(project_json_schema())
@@ -53,6 +91,35 @@ def test_project_document_delegates_schema_and_rust_defaults() -> None:
     )
     assert document.root["description"] == ""
     assert document.root["runtime"]["options"]["timeout_seconds"] == 30
+
+
+def test_project_document_exclude_none_preserves_nested_json_nulls() -> None:
+    value = {"keep_null": None, "nested": [{"also_keep": None}]}
+    document = ProjectDocument.model_validate(_project_with_data(value))
+
+    dumped = document.model_dump(exclude_none=True)
+    dumped_json = json.loads(document.model_dump_json(exclude_none=True))
+    assert dumped["data_sources"][0]["data"] == value
+    assert dumped_json["data_sources"][0]["data"] == value
+
+
+def test_project_document_equality_requires_the_same_concrete_type() -> None:
+    class ChildDocument(ProjectDocument):
+        pass
+
+    class OtherChildDocument(ProjectDocument):
+        pass
+
+    project = _minimal_project()
+    document = ProjectDocument.model_validate(project)
+    child = ChildDocument.model_validate(project)
+    other_child = OtherChildDocument.model_validate(project)
+
+    assert child == ChildDocument.model_validate(project)
+    assert document != child
+    assert child != document
+    assert child != other_child
+    assert other_child != child
 
 
 def test_project_document_openapi_schema_rewrites_component_references() -> None:

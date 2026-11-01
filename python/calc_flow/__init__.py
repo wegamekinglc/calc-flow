@@ -20,7 +20,7 @@ from calc_flow.capabilities import (
     connector_capabilities,
 )
 from calc_flow.compute import compute, compute_async
-from calc_flow.config import ProjectDocument
+from calc_flow.config import ProjectDocument, ProjectValidationError
 from calc_flow.errors import (
     CalcFlowError,
     CancelledError,
@@ -201,6 +201,7 @@ __all__ = [
     "ProviderError",
     "ProviderContext",
     "ProjectDocument",
+    "ProjectValidationError",
     "ExecutionPlan",
     "PipelineBuilder",
     "ConnectorCapabilities",
