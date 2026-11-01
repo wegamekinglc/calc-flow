@@ -153,7 +153,7 @@ deduplication choice. Old Error/Drop project serialization and checkpoint
 bytes retain their contract, but their checkpoints cannot initialize the new
 policy. See [two-branch recovery](streaming-guide.md#durable-recovery-of-both-branches).
 Project format 3 and manifest version 3 are independent of package version
-2026.10.27.
+2026.11.1.
 
 ## Union and event-time windows
 

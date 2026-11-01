@@ -7,6 +7,18 @@ the [documentation index](docs/README.md).
 Entries describe the state at their date, including superseded decisions and
 measurements. Use the current guides for supported behavior.
 
+## 2026-11
+
+- 2026-11-01: Prepare the `calc-flow-python` 2026.11.1 release, aligning
+  workspace crates, exact native dependencies, Python metadata, and current
+  documentation. This release optimizes native SQL ASOF top-1 and interval band
+  execution, reduces streaming Join output and state overhead, and keeps
+  single-match Join selections compact. It also reuses Python declaration
+  preparation and finite SQL query preparation, reduces Arrow binding and result
+  wrapping overhead, and adds Rust counterparts for the Python examples. Project
+  and managed checkpoint manifest format versions remain 3; engine and operator
+  state compatibility checks still apply when restoring checkpoints.
+
 ## 2026-10
 
 - 2026-10-31: Compute fixed non-null Join output widths from schema, charge compact

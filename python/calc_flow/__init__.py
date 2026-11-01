@@ -122,7 +122,7 @@ from calc_flow.symbolic import (
     with_late_output,
 )
 
-__version__ = "2026.10.27"
+__version__ = "2026.11.1"
 Batch = _native.Batch
 ExecutionOptions = _native.ExecutionOptions
 ProviderContext = _native.ProviderContext
