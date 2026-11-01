@@ -299,9 +299,11 @@ class ProjectDocument:
         if include is not None or exclude is not None:
             raise TypeError("ProjectDocument does not support include/exclude filters")
         if exclude_none:
-            filtered = _exclude_none_values(root)
-            assert isinstance(filtered, dict)
-            return filtered
+            return {
+                key: _exclude_none_values(item)
+                for key, item in root.items()
+                if item is not None
+            }
         return root
 
     def model_dump(

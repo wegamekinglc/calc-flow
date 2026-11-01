@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from collections import UserDict
 from copy import deepcopy
 from types import MappingProxyType
@@ -52,7 +51,7 @@ round_tripped = ProjectDocument.model_validate_json(document.model_dump_json())
 assert round_tripped.root == document.root
 """
     completed = subprocess.run(
-        [sys.executable, "-c", script],
+        ["python", "-c", script],
         capture_output=True,
         text=True,
         check=False,
