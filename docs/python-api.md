@@ -43,6 +43,12 @@ uv add "calc-flow-python[numpy]"  # optional
 uv add "calc-flow-python[jax]"    # optional
 ```
 
+The default Python dependencies are `pyarrow` and `typing-extensions`. The
+`array` extra installs both NumPy and JAX; `benchmark` and `dev` are not runtime
+requirements. Project-document validation uses the native Rust runtime and does
+not require Pydantic. Maturin is required for source builds, not for installing
+a prebuilt wheel.
+
 From a source checkout:
 
 ```bash
@@ -1255,10 +1261,13 @@ through the physical `input`/`output` bindings.
 `ProjectDocument` validates a strict `format_version: 3` mapping with the Rust
 schema. `project_json_schema()` returns the generated schema;
 `validate_project_json(document)` returns canonical JSON. Invalid documents
-raise a pydantic `ValidationError` whose entries carry the engine's stable
-issue codes as `type` and the failing project path as `loc`; malformed stream
-Join input reports codes such as `invalid_time_bound` and
-`unsupported_join_type` instead of a flattened message.
+raise `ProjectValidationError`, a `ValueError` whose `errors()` entries carry
+the engine's stable issue codes as `type` and the failing project path as `loc`;
+malformed stream Join input reports codes such as `invalid_time_bound` and
+`unsupported_join_type` instead of a flattened message. `ProjectDocument` is not
+a Pydantic model: catch `ProjectValidationError` rather than Pydantic's
+`ValidationError`; Pydantic-specific `include`/`exclude` dump filters are not
+supported.
 
 Project v3 selects `runtime.mode` explicitly. Stream projects carry exact
 connector and format identities, non-secret options, named secret references,
@@ -1384,7 +1393,9 @@ errors. Continuous lifecycle failures use payload-safe
 `CheckpointPublicationUnknownError` subclass. These exceptions expose only
 structured category, job/epoch/phase/component identifiers, diagnostic ID,
 and deterministic position fields—never connector values, cursor payloads,
-paths, callback representations, or raw source chains.
+paths, callback representations, or raw source chains. Project-document
+validation instead raises `ProjectValidationError`, a separate `ValueError`
+with structured `errors()` entries rather than a `CalcFlowError` subclass.
 
 ## More examples
 

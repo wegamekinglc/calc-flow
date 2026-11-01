@@ -4,9 +4,6 @@ import json
 import math
 from typing import Any, Union
 
-from pydantic import GetJsonSchemaHandler, RootModel, ValidationError, model_validator
-from pydantic_core import CoreSchema, PydanticCustomError
-
 from calc_flow import _native
 from calc_flow._compat import TypeAliasType
 
@@ -17,8 +14,65 @@ JSONValue = TypeAliasType(
 _MAX_JSON_DEPTH = 32
 
 
+class ProjectValidationError(ValueError):
+    __slots__ = ("_errors", "title")
+
+    def __init__(self, title: str, errors: list[dict[str, Any]]) -> None:
+        self.title = title
+        self._errors = tuple(error.copy() for error in errors)
+        super().__init__()
+
+    def errors(
+        self,
+        *,
+        include_url: bool = True,
+        include_context: bool = True,
+        include_input: bool = True,
+    ) -> list[dict[str, Any]]:
+        del include_url
+        excluded = set()
+        if not include_context:
+            excluded.add("ctx")
+        if not include_input:
+            excluded.add("input")
+        return [
+            {key: value for key, value in error.items() if key not in excluded}
+            for error in self._errors
+        ]
+
+    def error_count(self) -> int:
+        return len(self._errors)
+
+    def __str__(self) -> str:
+        count = len(self._errors)
+        lines = [
+            f"{count} validation error{'' if count == 1 else 's'} for {self.title}"
+        ]
+        for error in self._errors:
+            location = ".".join(str(part) for part in error["loc"]) or "__root__"
+            lines.append(f"{location}\n  {error['msg']} [type={error['type']}]")
+        return "\n".join(lines)
+
+
 def _json_error(message: str) -> ValueError:
     return ValueError(message)
+
+
+def _project_value_error(
+    title: str, message: str, input_value: object
+) -> ProjectValidationError:
+    return ProjectValidationError(
+        title,
+        [
+            {
+                "type": "value_error",
+                "loc": (),
+                "msg": f"Value error, {message}",
+                "input": input_value,
+                "ctx": {"error": ValueError(message)},
+            }
+        ],
+    )
 
 
 def _parse_issue_path(path: str) -> tuple[str | int, ...]:
@@ -43,13 +97,16 @@ def _native_issues(error: Exception) -> tuple[dict[str, str], ...]:
     )
 
 
-def _structured_project_error(issues: tuple[dict[str, str], ...]) -> ValidationError:
-    return ValidationError.from_exception_data(
+def _structured_project_error(
+    issues: tuple[dict[str, str], ...],
+) -> ProjectValidationError:
+    return ProjectValidationError(
         "ProjectDocument",
         [
             {
-                "type": PydanticCustomError(issue["code"], issue["message"]),
+                "type": issue["code"],
                 "loc": _parse_issue_path(issue["path"]),
+                "msg": issue["message"],
                 "input": None,
             }
             for issue in issues
@@ -147,11 +204,60 @@ def _openapi_project_schema(component_name: str) -> dict[str, Any]:
     return schema
 
 
-class ProjectDocument(RootModel[dict[str, JSONValue]]):
-    @model_validator(mode="before")
+def _exclude_none_values(value: object) -> object:
+    if type(value) is dict:
+        return {
+            key: _exclude_none_values(item)
+            for key, item in value.items()
+            if item is not None
+        }
+    if type(value) is list:
+        return [_exclude_none_values(item) for item in value]
+    return value
+
+
+class ProjectDocument:
+    __slots__ = ("root",)
+
+    def __init__(self, root: dict[str, JSONValue]) -> None:
+        self.root = self._validated_root(root)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, ProjectDocument):
+            return NotImplemented
+        return self.root == other.root
+
     @classmethod
-    def _validate_with_rust(cls, value: object) -> dict[str, JSONValue]:
-        return _canonicalize(value)
+    def _validated_root(cls, value: object) -> dict[str, JSONValue]:
+        try:
+            return _canonicalize(value)
+        except ProjectValidationError:
+            raise
+        except (TypeError, ValueError, RecursionError) as error:
+            raise _project_value_error(cls.__name__, str(error), value) from error
+
+    @classmethod
+    def _from_validated_root(cls, root: dict[str, JSONValue]) -> ProjectDocument:
+        document = object.__new__(cls)
+        document.root = root
+        return document
+
+    @classmethod
+    def model_validate(
+        cls,
+        obj: object,
+        *,
+        strict: bool | None = None,
+        extra: str | None = None,
+        from_attributes: bool | None = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+    ) -> ProjectDocument:
+        del strict, extra, from_attributes, context, by_alias, by_name
+        if isinstance(obj, cls):
+            return obj
+        return cls._from_validated_root(cls._validated_root(obj))
 
     @classmethod
     def model_validate_json(
@@ -167,33 +273,14 @@ class ProjectDocument(RootModel[dict[str, JSONValue]]):
         del extra
         try:
             parsed = json.loads(json_data, object_pairs_hook=_reject_duplicate_pairs)
-        except RecursionError as cause:
-            validation_error = _json_error(
-                "project JSON exceeds the maximum nesting depth"
-            )
-            raise ValidationError.from_exception_data(
+        except RecursionError as error:
+            raise _project_value_error(
                 cls.__name__,
-                [
-                    {
-                        "type": "value_error",
-                        "loc": (),
-                        "input": json_data,
-                        "ctx": {"error": validation_error},
-                    }
-                ],
-            ) from cause
-        except (TypeError, ValueError, UnicodeDecodeError) as error:
-            raise ValidationError.from_exception_data(
-                cls.__name__,
-                [
-                    {
-                        "type": "value_error",
-                        "loc": (),
-                        "input": json_data,
-                        "ctx": {"error": ValueError(str(error))},
-                    }
-                ],
+                "project JSON exceeds the maximum nesting depth",
+                json_data,
             ) from error
+        except (TypeError, ValueError, UnicodeDecodeError) as error:
+            raise _project_value_error(cls.__name__, str(error), json_data) from error
         return cls.model_validate(
             parsed,
             strict=strict,
@@ -202,12 +289,78 @@ class ProjectDocument(RootModel[dict[str, JSONValue]]):
             by_name=by_name,
         )
 
-    @classmethod
-    def __get_pydantic_json_schema__(
-        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
-    ) -> dict[str, Any]:
-        del core_schema, handler
-        return _openapi_project_schema(cls.__name__)
+    @staticmethod
+    def _dump_root(
+        root: dict[str, JSONValue],
+        include: object,
+        exclude: object,
+        exclude_none: bool,
+    ) -> dict[str, JSONValue]:
+        if include is not None or exclude is not None:
+            raise TypeError("ProjectDocument does not support include/exclude filters")
+        if exclude_none:
+            filtered = _exclude_none_values(root)
+            assert isinstance(filtered, dict)
+            return filtered
+        return root
+
+    def model_dump(
+        self,
+        *,
+        mode: str = "python",
+        include: object = None,
+        exclude: object = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        exclude_unset: bool = False,
+        exclude_defaults: bool = False,
+        exclude_none: bool = False,
+        exclude_computed_fields: bool = False,
+        round_trip: bool = False,
+        warnings: bool | str = True,
+        fallback: object = None,
+        serialize_as_any: bool = False,
+        polymorphic_serialization: bool | None = None,
+    ) -> dict[str, JSONValue]:
+        del context, by_alias, exclude_unset, exclude_defaults
+        del exclude_computed_fields, round_trip, warnings, fallback
+        del serialize_as_any, polymorphic_serialization
+        if mode not in {"python", "json"}:
+            raise ValueError("mode must be 'python' or 'json'")
+        root = self._dump_root(self.root, include, exclude, exclude_none)
+        encoded = json.dumps(root, allow_nan=False, separators=(",", ":"))
+        return json.loads(encoded)
+
+    def model_dump_json(
+        self,
+        *,
+        indent: int | None = None,
+        ensure_ascii: bool = False,
+        include: object = None,
+        exclude: object = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        exclude_unset: bool = False,
+        exclude_defaults: bool = False,
+        exclude_none: bool = False,
+        exclude_computed_fields: bool = False,
+        round_trip: bool = False,
+        warnings: bool | str = True,
+        fallback: object = None,
+        serialize_as_any: bool = False,
+        polymorphic_serialization: bool | None = None,
+    ) -> str:
+        del context, by_alias, exclude_unset, exclude_defaults
+        del exclude_computed_fields, round_trip, warnings, fallback
+        del serialize_as_any, polymorphic_serialization
+        root = self._dump_root(self.root, include, exclude, exclude_none)
+        return json.dumps(
+            root,
+            indent=indent,
+            ensure_ascii=ensure_ascii,
+            allow_nan=False,
+            separators=(",", ":") if indent is None else None,
+        )
 
     @classmethod
     def model_json_schema(cls, *args: object, **kwargs: object) -> dict[str, Any]:

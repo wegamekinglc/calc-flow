@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from collections import UserDict
 from copy import deepcopy
 from types import MappingProxyType
 
 import pytest
-from pydantic import ValidationError
 
 from calc_flow import (
     ConfigError,
@@ -15,6 +16,7 @@ from calc_flow import (
     Runtime,
     project_json_schema,
 )
+from calc_flow import ProjectValidationError as ValidationError
 from calc_flow.config import _openapi_project_schema
 
 
@@ -35,6 +37,27 @@ def _assert_json_error(project: object, message: str) -> None:
         (error["type"], error["loc"], error["msg"])
         for error in caught.value.errors(include_url=False)
     ] == [("value_error", (), f"Value error, {message}")]
+
+
+def test_project_document_works_without_pydantic_installed() -> None:
+    script = """
+import sys
+sys.modules["pydantic"] = None
+sys.modules["pydantic_core"] = None
+from calc_flow import PipelineBuilder, ProjectDocument
+project = PipelineBuilder("config").expression("calc", "b = a + 1").project
+document = ProjectDocument.model_validate(project)
+assert document.model_dump(mode="json")["format_version"] == 3
+round_tripped = ProjectDocument.model_validate_json(document.model_dump_json())
+assert round_tripped.root == document.root
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_project_document_delegates_schema_and_rust_defaults() -> None:

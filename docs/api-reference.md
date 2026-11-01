@@ -326,7 +326,7 @@ table-to-array-to-table provider described in the
 
 ### Projects and stores
 
-`ProjectDocument` is the strict Pydantic root model for format v3.
+`ProjectDocument` is the strict data-only root document for format v3.
 `project_json_schema()` returns the Rust-generated schema and
 `validate_project_json()` returns canonical validated JSON.
 
@@ -482,6 +482,8 @@ Rust returns `CalcFlowError` variants. Python exposes the stable hierarchy:
 `CalcFlowError`, `ConfigError`, `CompileError`, `ExecutionError`,
 `ProviderError`, `CheckpointError`, `CancelledError`,
 `StreamingRuntimeError`, and `CheckpointPublicationUnknownError`.
+`ProjectValidationError` is a separate `ValueError` for `ProjectDocument`
+validation, with structured `errors()` entries.
 
 Invalid user documents and graph definitions are configuration/compile errors;
 execution, callbacks, source/sink failures, cancellation, and checkpoint

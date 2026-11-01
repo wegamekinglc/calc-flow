@@ -4,8 +4,8 @@ import json
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
 
+from calc_flow import ProjectValidationError as ValidationError
 from calc_flow import _native
 from calc_flow.config import ProjectDocument
 

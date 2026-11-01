@@ -95,6 +95,10 @@ uv add "calc-flow-python[numpy]"
 uv add "calc-flow-python[jax]"
 ```
 
+The default Python dependencies are `pyarrow` and `typing-extensions`. NumPy and
+JAX are optional; `calc-flow-python[array]` installs both. Project-document
+validation uses the native Rust runtime and does not require Pydantic.
+
 Continue with the [batch guide](batch-guide.md) after installation. Native
 runtime and extension authors can find crate installation and examples in the
 [Rust runtime reference](rust-api.md).

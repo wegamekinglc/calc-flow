@@ -29,6 +29,11 @@ uv add "calc-flow-python[numpy]"
 uv add "calc-flow-python[jax]"
 ```
 
+The core package's default Python dependencies are `pyarrow` and
+`typing-extensions`. NumPy and JAX remain optional; `calc-flow-python[array]`
+installs both. Project-document validation uses the native Rust runtime and does
+not require Pydantic.
+
 ## Python quickstart
 
 ```python
