@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from collections import UserDict
 from copy import deepcopy
 from types import MappingProxyType
@@ -40,7 +42,10 @@ def _assert_json_error(project: object, message: str) -> None:
 
 def test_project_document_works_without_pydantic_installed() -> None:
     script = """
+import os
 import sys
+expected = os.environ["CALC_FLOW_TEST_PYTHON"]
+assert os.path.samefile(sys.executable, expected)
 sys.modules["pydantic"] = None
 sys.modules["pydantic_core"] = None
 from calc_flow import PipelineBuilder, ProjectDocument
@@ -50,11 +55,17 @@ assert document.model_dump(mode="json")["format_version"] == 3
 round_tripped = ProjectDocument.model_validate_json(document.model_dump_json())
 assert round_tripped.root == document.root
 """
+    environment = os.environ.copy()
+    environment["PATH"] = (
+        os.path.dirname(sys.executable) + os.pathsep + environment.get("PATH", "")
+    )
+    environment["CALC_FLOW_TEST_PYTHON"] = sys.executable
     completed = subprocess.run(
         ["python", "-c", script],
         capture_output=True,
         text=True,
         check=False,
+        env=environment,
     )
     assert completed.returncode == 0, completed.stderr
 

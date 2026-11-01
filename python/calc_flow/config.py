@@ -12,6 +12,23 @@ JSONValue = TypeAliasType(
     Union[None, bool, int, float, str, list["JSONValue"], dict[str, "JSONValue"]],
 )
 _MAX_JSON_DEPTH = 32
+_MODEL_VALIDATE_IGNORED_OPTIONS = frozenset(
+    {"strict", "extra", "from_attributes", "context", "by_alias", "by_name"}
+)
+_DUMP_IGNORED_OPTIONS = frozenset(
+    {
+        "context",
+        "by_alias",
+        "exclude_unset",
+        "exclude_defaults",
+        "exclude_computed_fields",
+        "round_trip",
+        "warnings",
+        "fallback",
+        "serialize_as_any",
+        "polymorphic_serialization",
+    }
+)
 
 
 class ProjectValidationError(ValueError):
@@ -56,6 +73,18 @@ class ProjectValidationError(ValueError):
 
 def _json_error(message: str) -> ValueError:
     return ValueError(message)
+
+
+def _discard_options(
+    options: dict[str, Any], allowed: frozenset[str], method: str
+) -> None:
+    if not options:
+        return
+    unknown = options.keys() - allowed
+    if unknown:
+        names = ", ".join(sorted(unknown))
+        raise TypeError(f"{method}() got unexpected keyword arguments: {names}")
+    options.clear()
 
 
 def _project_value_error(
@@ -231,18 +260,8 @@ class ProjectDocument:
         return document
 
     @classmethod
-    def model_validate(
-        cls,
-        obj: object,
-        *,
-        strict: bool | None = None,
-        extra: str | None = None,
-        from_attributes: bool | None = None,
-        context: Any | None = None,
-        by_alias: bool | None = None,
-        by_name: bool | None = None,
-    ) -> ProjectDocument:
-        del strict, extra, from_attributes, context, by_alias, by_name
+    def model_validate(cls, obj: object, **options: Any) -> ProjectDocument:
+        _discard_options(options, _MODEL_VALIDATE_IGNORED_OPTIONS, "model_validate")
         if isinstance(obj, cls):
             return obj
         return cls._from_validated_root(cls._validated_root(obj))
@@ -279,66 +298,29 @@ class ProjectDocument:
 
     @staticmethod
     def _dump_root(
-        root: dict[str, JSONValue],
-        include: object,
-        exclude: object,
-        exclude_none: bool,
+        root: dict[str, JSONValue], options: dict[str, Any], method: str
     ) -> dict[str, JSONValue]:
-        del exclude_none
+        include = options.pop("include", None)
+        exclude = options.pop("exclude", None)
+        options.pop("exclude_none", False)
+        _discard_options(options, _DUMP_IGNORED_OPTIONS, method)
         if include is not None or exclude is not None:
             raise TypeError("ProjectDocument does not support include/exclude filters")
         return root
 
     def model_dump(
-        self,
-        *,
-        mode: str = "python",
-        include: object = None,
-        exclude: object = None,
-        context: Any | None = None,
-        by_alias: bool | None = None,
-        exclude_unset: bool = False,
-        exclude_defaults: bool = False,
-        exclude_none: bool = False,
-        exclude_computed_fields: bool = False,
-        round_trip: bool = False,
-        warnings: bool | str = True,
-        fallback: object = None,
-        serialize_as_any: bool = False,
-        polymorphic_serialization: bool | None = None,
+        self, *, mode: str = "python", **options: Any
     ) -> dict[str, JSONValue]:
-        del context, by_alias, exclude_unset, exclude_defaults
-        del exclude_computed_fields, round_trip, warnings, fallback
-        del serialize_as_any, polymorphic_serialization
         if mode not in {"python", "json"}:
             raise ValueError("mode must be 'python' or 'json'")
-        root = self._dump_root(self.root, include, exclude, exclude_none)
+        root = self._dump_root(self.root, options, "model_dump")
         encoded = json.dumps(root, allow_nan=False, separators=(",", ":"))
         return json.loads(encoded)
 
     def model_dump_json(
-        self,
-        *,
-        indent: int | None = None,
-        ensure_ascii: bool = False,
-        include: object = None,
-        exclude: object = None,
-        context: Any | None = None,
-        by_alias: bool | None = None,
-        exclude_unset: bool = False,
-        exclude_defaults: bool = False,
-        exclude_none: bool = False,
-        exclude_computed_fields: bool = False,
-        round_trip: bool = False,
-        warnings: bool | str = True,
-        fallback: object = None,
-        serialize_as_any: bool = False,
-        polymorphic_serialization: bool | None = None,
+        self, *, indent: int | None = None, ensure_ascii: bool = False, **options: Any
     ) -> str:
-        del context, by_alias, exclude_unset, exclude_defaults
-        del exclude_computed_fields, round_trip, warnings, fallback
-        del serialize_as_any, polymorphic_serialization
-        root = self._dump_root(self.root, include, exclude, exclude_none)
+        root = self._dump_root(self.root, options, "model_dump_json")
         return json.dumps(
             root,
             indent=indent,
