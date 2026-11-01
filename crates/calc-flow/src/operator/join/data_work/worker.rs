@@ -194,7 +194,9 @@ fn append_matches(
     position_prepaid: bool,
 ) -> Result<()> {
     let mut remaining = bounds.matches();
-    if let Some((start, expected)) = inputs.dense_bounds(position, bounds) {
+    if remaining > 1
+        && let Some((start, expected)) = inputs.dense_bounds(position, bounds)
+    {
         debug_assert_eq!(expected, remaining);
         return append_dense_matches(pairs, position, start, remaining, position_prepaid, quantum);
     }
