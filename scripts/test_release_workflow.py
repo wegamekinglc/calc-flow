@@ -79,6 +79,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         publication = workflow.split("  publish-python-core:\n", 1)[1]
 
         self.assertIn("needs: [wheels, sdist]", unit_tests)
+        self.assertIn("runs-on: ubuntu-24.04", unit_tests)
         self.assertIn(
             "name: wheel-ubuntu-latest-x86_64-${{ matrix.base_tag }}", unit_tests
         )
