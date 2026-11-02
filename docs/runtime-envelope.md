@@ -345,17 +345,17 @@ fails before enqueue, a closed receiver wakes blocked senders, and each fan-out
 edge is charged independently even though immutable payload buffers are
 shared. The default `Block` path therefore propagates a slow consumer through
 sink, operator, source task, prefetch slot, and source pump. FIFO order, close wakeup, and single-producer ownership apply to every edge.
-An edge budget or source batch declaration cannot exceed 1,000,000 rows.
-Byte budgets must be positive and fit the native address space; no smaller
-global byte ceiling applies. Project-v3 stream runtime options use the same
-bounds. Row and envelope backpressure remains active when the byte budget is
+Row and byte budgets must be positive and fit the native address space;
+there is no smaller global row or byte ceiling. The default row budget is
+1,000,000; callers may explicitly configure larger batches and queues.
+Project-v3 stream runtime options use the same bounds. Row and envelope backpressure remains active when the byte budget is
 `usize::MAX`; these queue charges do not cap total runtime or process memory.
 
 Project-v3 JSON requires an `options` object and preserves its historical field
 defaults: `{}` or omitted budget fields use 10,000 rows and 64 MiB. The omitted
 checkpoint interval remains 30 seconds. This keeps existing documents and
 their durable fingerprints stable. New `StreamRunOptions::default()` values
-serialize the current one-million-row and address-space byte limits explicitly;
+serialize the current one-million-row default and address-space byte budget explicitly;
 explicit project values are preserved and participate in the project fingerprint.
 
 ## Stream plan compilation

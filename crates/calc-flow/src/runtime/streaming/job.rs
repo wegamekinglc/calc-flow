@@ -791,16 +791,13 @@ fn validate_source_budget(
     {
         return Ok(());
     }
-    Err(CalcFlowError::InvalidArgument {
-        field: format!("sources.{binding_id}.capabilities"),
-        message: format!(
-            "maximum batch ({} rows, {} bytes) exceeds edge {:?} budget ({} rows, {} bytes)",
-            capabilities.max_batch_rows,
-            capabilities.max_batch_bytes,
-            edge_id,
-            budget.max_rows,
-            budget.max_bytes
-        ),
+    Err(CalcFlowError::SourceBudgetExceeded {
+        source_id: binding_id.into(),
+        edge: edge_id.into(),
+        max_batch_rows: capabilities.max_batch_rows,
+        max_batch_bytes: capabilities.max_batch_bytes,
+        max_rows: budget.max_rows,
+        max_bytes: budget.max_bytes,
     })
 }
 
@@ -992,6 +989,49 @@ fn validate_runtime_id(value: &str, field: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn source_budget_diagnostics_report_declared_limits() {
+        let error = super::validate_source_budget(
+            "warehouse.primary",
+            SourceCapabilities {
+                replayable: false,
+                max_batch_rows: 2,
+                max_batch_bytes: 17,
+            },
+            EdgeBudget::new(1, 16).unwrap(),
+            "private://edge-diagnostic-sentinel",
+        )
+        .unwrap_err();
+        let projected =
+            crate::runtime::streaming::projection::project_public_error(Some(7), &error);
+        assert_eq!(projected.component_id(), Some("warehouse.primary"));
+        for detail in [
+            "max_batch_rows=2",
+            "max_batch_bytes=17",
+            "edge_max_rows=1",
+            "edge_max_bytes=16",
+        ] {
+            assert!(projected.message().contains(detail), "{projected:?}");
+        }
+        assert!(!format!("{projected:?}").contains("private://"));
+
+        let invalid_identity = super::validate_source_budget(
+            "private://source-diagnostic-sentinel",
+            SourceCapabilities {
+                replayable: false,
+                max_batch_rows: 2,
+                max_batch_bytes: 17,
+            },
+            EdgeBudget::new(1, 16).unwrap(),
+            "private://edge-diagnostic-sentinel",
+        )
+        .unwrap_err();
+        let projected =
+            crate::runtime::streaming::projection::project_public_error(Some(7), &invalid_identity);
+        assert_eq!(projected.component_id(), None);
+        assert!(!format!("{projected:?}").contains("private://"));
+    }
+
     use std::{
         collections::BTreeMap,
         sync::{
@@ -1463,10 +1503,13 @@ mod tests {
                 sources,
                 vec![named_sink("output", "sink", &opened)],
             ));
-            assert!(matches!(
-                error,
-                CalcFlowError::InvalidArgument { ref field, .. } if field == expected_field
-            ));
+            match error {
+                CalcFlowError::InvalidArgument { field, .. } => assert_eq!(field, expected_field),
+                CalcFlowError::SourceBudgetExceeded { source_id, .. } => {
+                    assert_eq!(format!("sources.{source_id}.capabilities"), expected_field);
+                }
+                error => panic!("unexpected preflight error: {error:?}"),
+            }
             assert!(!opened.load(Ordering::SeqCst));
         }
     }
@@ -1507,10 +1550,13 @@ mod tests {
                 ],
                 sinks,
             ));
-            assert!(matches!(
-                error,
-                CalcFlowError::InvalidArgument { ref field, .. } if field == expected_field
-            ));
+            match error {
+                CalcFlowError::InvalidArgument { field, .. } => assert_eq!(field, expected_field),
+                CalcFlowError::SourceBudgetExceeded { source_id, .. } => {
+                    assert_eq!(format!("sources.{source_id}.capabilities"), expected_field);
+                }
+                error => panic!("unexpected preflight error: {error:?}"),
+            }
             assert!(!opened.load(Ordering::SeqCst));
         }
     }

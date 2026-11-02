@@ -235,7 +235,13 @@ async fn send_rejects_a_single_message_larger_than_the_byte_budget() {
         .unwrap_err();
     assert!(matches!(
         error,
-        CalcFlowError::InvalidArgument { ref field, .. } if field == "message.bytes"
+        CalcFlowError::EdgeBudgetExceeded {
+            rows: 1,
+            bytes: 33,
+            max_rows: 16,
+            max_bytes: 32,
+            ..
+        }
     ));
 
     // The failed send changed nothing: the queue stays empty and a legal
@@ -272,7 +278,13 @@ async fn send_rejects_a_single_message_larger_than_the_row_budget() {
         .unwrap_err();
     assert!(matches!(
         error,
-        CalcFlowError::InvalidArgument { ref field, .. } if field == "message.rows"
+        CalcFlowError::EdgeBudgetExceeded {
+            rows: 5,
+            bytes: 1,
+            max_rows: 4,
+            max_bytes: 1_024,
+            ..
+        }
     ));
 }
 
@@ -309,6 +321,42 @@ async fn send_accepts_a_single_message_exactly_at_the_row_budget() {
         4
     );
     blocked.await.unwrap();
+}
+
+#[tokio::test]
+async fn budget_diagnostics_explicit_large_batch_keeps_backpressure_and_whole_messages() {
+    let rows = 5_000_000;
+    let (mut sender, mut receiver) =
+        edge_channel("source.out->node.in", EdgeBudget::new(rows, 64).unwrap()).unwrap();
+    sender
+        .send(StreamMessage::data(external_batch(rows, 8)))
+        .await
+        .unwrap();
+
+    let mut cancelled = Box::pin(sender.send(StreamMessage::data(external_batch(1, 1))));
+    assert_pending(&mut cancelled).await;
+    drop(cancelled);
+    assert_eq!(receiver.metrics().queue_depth, 1);
+    assert_eq!(receiver.metrics().charged_rows, rows);
+    assert_eq!(receiver.metrics().charged_bytes, 8);
+
+    let mut blocked = Box::pin(sender.send(StreamMessage::data(external_batch(1, 1))));
+    assert_pending(&mut blocked).await;
+    let message = receiver.recv().await.unwrap().unwrap();
+    assert_eq!(message.as_data().unwrap().num_rows(), rows);
+    assert_eq!(receiver.metrics().charged_rows, 0);
+    blocked.await.unwrap();
+    let message = receiver.recv().await.unwrap().unwrap();
+    assert_eq!(message.as_data().unwrap().num_rows(), 1);
+
+    sender
+        .send(StreamMessage::data(external_batch(rows, 8)))
+        .await
+        .unwrap();
+    drop(receiver);
+    assert_eq!(sender.metrics().queue_depth, 0);
+    assert_eq!(sender.metrics().charged_rows, 0);
+    assert_eq!(sender.metrics().charged_bytes, 0);
 }
 
 #[tokio::test]

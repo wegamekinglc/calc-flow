@@ -128,6 +128,14 @@ cargo run -p calc-flow --example 30_streaming_stock_positions -- --rows 30 --acc
 cargo run -p calc-flow --example 31_streaming_account_market_values -- --rows 30 --accounts 2 --stocks 3 --batch-size 4 --quote-rows 9
 ```
 
+The Rust demos derive compatible edge budgets from `--batch-size` and the
+complete account/stock snapshot size. For example, `--batch-size 5000000`
+admits five-million-row source batches without additional runtime settings.
+The demo source and edges use the default address-space byte budget; there is
+no separate 64 MiB source allowance. Valuation keeps its independent SQL state
+budgets. Queue budgets do not bound total process memory, and batches retain
+their declared boundaries.
+
 ## Run the inventory
 
 ```bash

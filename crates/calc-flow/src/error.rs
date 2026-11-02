@@ -16,6 +16,29 @@ pub enum CalcFlowError {
     Connector(#[from] crate::connector::ConnectorError),
     #[error("invalid {field}: {message}")]
     InvalidArgument { field: String, message: String },
+    /// A declared source batch bound exceeds a configured outgoing edge budget.
+    #[error(
+        "source {source_id:?} declares max_batch_rows={max_batch_rows}, max_batch_bytes={max_batch_bytes}, exceeding edge {edge:?} budget edge_max_rows={max_rows}, edge_max_bytes={max_bytes}"
+    )]
+    SourceBudgetExceeded {
+        source_id: String,
+        edge: String,
+        max_batch_rows: usize,
+        max_batch_bytes: usize,
+        max_rows: usize,
+        max_bytes: usize,
+    },
+    /// One complete stream message exceeds a configured edge budget before enqueue.
+    #[error(
+        "batch_rows={rows}, batch_bytes={bytes} exceeds edge {edge:?} budget edge_max_rows={max_rows}, edge_max_bytes={max_bytes}"
+    )]
+    EdgeBudgetExceeded {
+        edge: String,
+        rows: usize,
+        bytes: usize,
+        max_rows: usize,
+        max_bytes: usize,
+    },
     #[error("project format version {found} is unsupported; expected {expected}")]
     UnsupportedVersion { expected: u32, found: u32 },
     #[error("graph compilation failed: {message}")]

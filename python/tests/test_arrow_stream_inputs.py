@@ -27,6 +27,23 @@ def test_arrow_source_binding_streams_bounded_materialized_input() -> None:
     asyncio.run(run())
 
 
+def test_materialized_stream_accepts_explicit_five_million_row_budget() -> None:
+    rows = 5_000_000
+    data = pa.table({"value": pa.nulls(rows, type=pa.int8())})
+    source = cf.table_input("events", schema=data.schema)
+    config = cf.StreamRuntimeConfig(edge_budget=cf.EdgeBudget(rows, 8 << 20))
+
+    async def run() -> None:
+        async with source.stream(data, config=config) as results:
+            tables = [table async for table in results]
+        assert len(tables) == 1
+        assert tables[0].equals(data)
+        assert results.job.status()["state"] == "completed"
+        assert results.job.status()["task_count"] == 0
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("named", [False, True])
 @pytest.mark.parametrize("kind", ["chunks", "slice", "record", "empty"])
 def test_materialized_stream_matches_iterable_without_python_source_calls(

@@ -57,12 +57,12 @@ pub struct EdgeBudget {
 }
 
 impl EdgeBudget {
-    /// Largest admitted row count for one stream batch or edge budget.
-    pub const MAX_ROWS: usize = 1_000_000;
+    /// Address-space maximum; row limits are chosen explicitly by callers.
+    pub const MAX_ROWS: usize = usize::MAX;
     /// Address-space maximum; byte limits are chosen explicitly by callers.
     pub const MAX_BYTES: usize = usize::MAX;
 
-    /// Creates a budget with positive, bounded limits (S10.1).
+    /// Creates a budget with positive, caller-chosen limits (S10.1).
     ///
     /// # Errors
     ///
@@ -78,12 +78,6 @@ impl EdgeBudget {
             return Err(CalcFlowError::InvalidArgument {
                 field: "max_bytes".into(),
                 message: "must be greater than zero".into(),
-            });
-        }
-        if max_rows > Self::MAX_ROWS {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "max_rows".into(),
-                message: format!("must not exceed {}", Self::MAX_ROWS),
             });
         }
         Ok(Self {
@@ -1563,7 +1557,9 @@ mod runtime_projection_tests {
         let explicit = EdgeBudget::new(17, (256 << 20) + 1).unwrap();
         assert_eq!(explicit.max_rows, 17);
         assert_eq!(explicit.max_bytes, (256 << 20) + 1);
-        assert!(EdgeBudget::new(EdgeBudget::MAX_ROWS + 1, 1).is_err());
+        assert!(EdgeBudget::new(5_000_000, 1).is_ok());
+        assert!(EdgeBudget::new(usize::MAX, usize::MAX).is_ok());
+        assert!(EdgeBudget::new(0, 1).is_err());
         assert!(EdgeBudget::new(1, 0).is_err());
     }
 
