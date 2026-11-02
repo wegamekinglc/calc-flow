@@ -1670,8 +1670,9 @@ independent `max_rows` bound; bytes have `max_bytes`. A source declaration that
 can exceed the effective edge budget fails before open.
 The default permits 1,000,000 queued rows and has no byte ceiling below the
 native address-space limit. Set `EdgeBudget(max_rows=..., max_bytes=...)` to
-choose an explicit byte ceiling. Stream edges and source batch declarations
-retain a maximum of 1,000,000 rows. Project-v3 JSON keeps the historical
+choose an explicit byte ceiling. Explicit row budgets and source declarations
+may exceed 1,000,000 rows; both dimensions must be positive and fit the native
+address space. Project-v3 JSON keeps the historical
 10,000-row and 64 MiB defaults when budget fields are omitted from its required
 `options` object, including `options: {}`, so existing project fingerprints
 remain stable.
@@ -1683,7 +1684,8 @@ keeps existing record-batch boundaries and splits records that exceed the
 selected budget. Existing small Arrow chunks stay small. Iterable sources
 preserve caller-provided batch boundaries and reject oversized batches rather
 than combining or splitting them. Neither path waits to assemble a full
-1,000,000-row batch. Larger batches can improve throughput while increasing
+1,000,000-row batch. Explicit budgets remain strict: the runtime never expands
+a supplied budget or splits a whole snapshot relation to make it fit. Larger batches can improve throughput while increasing
 per-batch latency and working memory.
 Snapshot SQL ingress requires whole relations rather than slices, as described
 in [snapshot SQL](#complete-replacement-snapshot-sql).

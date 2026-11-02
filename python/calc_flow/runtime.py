@@ -602,7 +602,9 @@ class EdgeBudget:
     """Per-edge row backpressure with an optional explicit byte ceiling.
 
     Defaults allow one million queued rows and impose no byte ceiling below
-    the native address-space limit. This does not limit total process memory.
+    the native address-space limit. Explicit row budgets may exceed one
+    million; both dimensions must fit the native address space. This does not
+    limit total process memory.
     """
 
     max_rows: int = 1_000_000

@@ -465,7 +465,12 @@ fn project_runtime_failure(
     {
         return error;
     }
-    let (category, message, component_kind, component_id) = safe_failure_fields(failure);
+    let (category, mut message, component_kind, component_id) = safe_failure_fields(failure);
+    if !matches!(failure.origin, FailureOrigin::Preflight)
+        && let Some(detail) = edge_budget_detail(&failure.error)
+    {
+        message = format!("{message}: {detail}");
+    }
     StreamingError {
         category,
         reason_code: failure_reason(&failure.error),
@@ -744,6 +749,22 @@ fn static_input_null_message(error: &CalcFlowError) -> Option<String> {
     crate::operator::is_portable_identifier(name).then(|| message.clone())
 }
 
+fn edge_budget_detail(error: &CalcFlowError) -> Option<String> {
+    let CalcFlowError::EdgeBudgetExceeded {
+        rows,
+        bytes,
+        max_rows,
+        max_bytes,
+        ..
+    } = error
+    else {
+        return None;
+    };
+    Some(format!(
+        "batch_rows={rows}, batch_bytes={bytes} exceeds edge_max_rows={max_rows}, edge_max_bytes={max_bytes}"
+    ))
+}
+
 fn preflight_failure_fields(
     error: &CalcFlowError,
 ) -> (
@@ -752,6 +773,40 @@ fn preflight_failure_fields(
     Option<ComponentKind>,
     Option<String>,
 ) {
+    if let CalcFlowError::SourceBudgetExceeded {
+        source_id,
+        max_batch_rows,
+        max_batch_bytes,
+        max_rows,
+        max_bytes,
+        ..
+    } = error
+    {
+        if crate::json::validate_portable_identifier("source", source_id).is_err() {
+            return (
+                StreamingErrorCategory::Validation,
+                "source ID is not a portable identifier".into(),
+                Some(ComponentKind::Source),
+                None,
+            );
+        }
+        return (
+            StreamingErrorCategory::Validation,
+            format!(
+                "source {source_id:?} declares max_batch_rows={max_batch_rows}, max_batch_bytes={max_batch_bytes}, exceeding edge_max_rows={max_rows}, edge_max_bytes={max_bytes}"
+            ),
+            Some(ComponentKind::Source),
+            Some(source_id.clone()),
+        );
+    }
+    if let Some(detail) = edge_budget_detail(error) {
+        return (
+            StreamingErrorCategory::Validation,
+            detail,
+            Some(ComponentKind::Edge),
+            None,
+        );
+    }
     if let CalcFlowError::InvalidArgument { field, message } = error {
         return invalid_argument_failure_fields(field, message);
     }
@@ -1552,6 +1607,52 @@ mod tests {
     const SECRET: &str = "private-connector-payload-redaction-sentinel";
     const PATH: &str = "/srv/private/checkpoints/customer-42";
     const PANIC: &str = "private-panic-payload-redaction-sentinel";
+
+    #[test]
+    fn edge_budget_diagnostics_report_actual_cost_and_origin() {
+        use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
+
+        for origin in [
+            FailureOrigin::Task {
+                task_id: TaskId::new(91),
+                task_name: "source:orders:task".into(),
+            },
+            FailureOrigin::OperatorEntry {
+                node_id: "positions".into(),
+            },
+        ] {
+            let record = RecordBatch::try_from_iter(vec![(
+                "value",
+                Arc::new(Int64Array::from(vec![1, 2])) as _,
+            )])
+            .unwrap();
+            let batch = crate::Batch::table(vec![record], crate::BatchMetadata::default()).unwrap();
+            let bytes = batch.estimated_bytes().unwrap();
+            let (sender, _receiver) =
+                crate::edge_channel(SECRET, crate::EdgeBudget::new(1, 8).unwrap()).unwrap();
+            let error = sender
+                .validate_message(&crate::StreamMessage::data(batch))
+                .unwrap_err();
+            let failure = Arc::new(RuntimeFailure { origin, error });
+            let projected = project_runtime_failures(7, vec![failure], None);
+            let error = &projected[0];
+            assert!(matches!(
+                error.component_kind(),
+                Some(ComponentKind::Source | ComponentKind::Operator)
+            ));
+            assert!(matches!(error.component_id(), Some("orders" | "positions")));
+            for detail in [
+                "batch_rows=2".to_owned(),
+                format!("batch_bytes={bytes}"),
+                "edge_max_rows=1".to_owned(),
+                "edge_max_bytes=8".to_owned(),
+            ] {
+                assert!(error.message().contains(&detail), "{error:?}");
+            }
+            assert!(!format!("{error:?}").contains(SECRET));
+            assert_eq!(sender.metrics().queue_depth, 0);
+        }
+    }
 
     #[test]
     fn streaming_projection_maps_shared_error_vectors_without_sensitive_text() {

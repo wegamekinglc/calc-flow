@@ -94,7 +94,7 @@ impl Default for RuntimeSpec {
 #[serde(default = "project_v3_stream_defaults", deny_unknown_fields)]
 pub struct StreamRunOptions {
     pub checkpoint_interval_ms: u64,
-    #[schemars(range(min = 1, max = 1_000_000))]
+    #[schemars(range(min = 1))]
     pub max_batch_rows: usize,
     #[schemars(range(min = 1))]
     pub max_batch_bytes: usize,
@@ -1782,13 +1782,6 @@ fn validate_runtime(project: &ProjectSpec, mode: CompileMode, issues: &mut Vec<V
                     "must be greater than zero",
                 ));
             }
-            if options.max_batch_rows > crate::EdgeBudget::MAX_ROWS {
-                issues.push(issue(
-                    "runtime.options.max_batch_rows",
-                    "out_of_range",
-                    format!("must not exceed {}", crate::EdgeBudget::MAX_ROWS),
-                ));
-            }
             if options.max_batch_bytes == 0 {
                 issues.push(issue(
                     "runtime.options.max_batch_bytes",
@@ -3364,7 +3357,7 @@ mod tests {
     }
 
     #[test]
-    fn project_stream_runtime_rejects_oversized_batch_budget() {
+    fn project_stream_runtime_accepts_explicit_large_batch_budget() {
         let project: ProjectSpec = serde_json::from_value(serde_json::json!({
             "format_version": 3,
             "id": "bounded",
@@ -3372,7 +3365,7 @@ mod tests {
             "runtime": {
                 "mode": "stream",
                 "options": {
-                    "max_batch_rows": 1_000_001,
+                    "max_batch_rows": 5_000_000,
                     "max_batch_bytes": (256 << 20) + 1
                 }
             },
@@ -3381,13 +3374,7 @@ mod tests {
         .unwrap();
         let mut issues = Vec::new();
         validate_runtime(&project, CompileMode::Stream, &mut issues);
-        assert_eq!(
-            issues
-                .iter()
-                .map(|issue| issue.path.as_str())
-                .collect::<Vec<_>>(),
-            ["runtime.options.max_batch_rows"]
-        );
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]

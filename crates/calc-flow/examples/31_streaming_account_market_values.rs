@@ -3,7 +3,7 @@
 mod stock_account_data;
 mod support;
 use calc_flow::{
-    BatchKind, EdgeBudget, NodeOperator, OperatorMetadata, PipelineBuilder, Port, SinkBinding,
+    BatchKind, NodeOperator, OperatorMetadata, PipelineBuilder, Port, SinkBinding,
     SnapshotSqlOperator, SourceBinding, StateBudget, StreamRuntimeConfig, StreamingRunner,
     WatermarkPolicy,
 };
@@ -33,13 +33,11 @@ async fn main() -> ExampleResult {
     Ok(())
 }
 
-fn runtime_config() -> calc_flow::Result<StreamRuntimeConfig> {
+fn runtime_config(options: Options) -> calc_flow::Result<StreamRuntimeConfig> {
     Ok(StreamRuntimeConfig {
-        checkpointing: false,
-        edge_budget: EdgeBudget::new(100_000, 64 << 20)?,
         sql_compact_state_budget: Some(StateBudget::new(100_000, 64 << 20)?),
         sql_snapshot_state_budget: Some(StateBudget::new(200_000, 128 << 20)?),
-        ..StreamRuntimeConfig::default()
+        ..options.runtime_config()?
     })
 }
 
@@ -60,7 +58,7 @@ fn configured_runner(options: Options, last: &Latest) -> calc_flow::Result<Strea
         )?],
     )]);
     StreamingRunner::without_checkpoints(best_effort_plan(graph()?)?, sources, sinks)?
-        .with_runtime_config(runtime_config()?)
+        .with_runtime_config(runtime_config(options)?)
 }
 
 fn position_fields() -> Vec<Field> {

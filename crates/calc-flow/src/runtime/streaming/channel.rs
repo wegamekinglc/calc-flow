@@ -307,8 +307,9 @@ impl EdgeSender {
     /// # Errors
     ///
     /// Returns [`CalcFlowError::InvalidArgument`] when the message's cost
-    /// cannot be measured or exceeds a budget limit by itself, and
-    /// [`CalcFlowError::EdgeClosed`] when the receiver is closed or dropped.
+    /// cannot be measured, [`CalcFlowError::EdgeBudgetExceeded`] when a complete
+    /// message exceeds a configured limit, and [`CalcFlowError::EdgeClosed`]
+    /// when the receiver is closed or dropped.
     pub async fn send(&mut self, message: StreamMessage) -> Result<()> {
         self.send_observed(message, None).await
     }

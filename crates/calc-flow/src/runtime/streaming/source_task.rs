@@ -1289,12 +1289,6 @@ pub(super) fn validate_source_capabilities(
             message: "must be greater than zero".into(),
         });
     }
-    if capabilities.max_batch_rows > crate::EdgeBudget::MAX_ROWS {
-        return Err(CalcFlowError::InvalidArgument {
-            field: format!("sources.{binding_id}.capabilities.max_batch_rows"),
-            message: format!("must not exceed {}", crate::EdgeBudget::MAX_ROWS),
-        });
-    }
     Ok(())
 }
 
@@ -1308,16 +1302,13 @@ fn validate_source_edge_budgets(
         if capabilities.max_batch_rows > budget.max_rows
             || capabilities.max_batch_bytes > budget.max_bytes
         {
-            return Err(CalcFlowError::InvalidArgument {
-                field: format!("sources.{binding_id}.capabilities"),
-                message: format!(
-                    "maximum batch ({}, {} bytes) exceeds edge {:?} budget ({}, {} bytes)",
-                    capabilities.max_batch_rows,
-                    capabilities.max_batch_bytes,
-                    output.edge(),
-                    budget.max_rows,
-                    budget.max_bytes
-                ),
+            return Err(CalcFlowError::SourceBudgetExceeded {
+                source_id: binding_id.into(),
+                edge: output.edge().into(),
+                max_batch_rows: capabilities.max_batch_rows,
+                max_batch_bytes: capabilities.max_batch_bytes,
+                max_rows: budget.max_rows,
+                max_bytes: budget.max_bytes,
             });
         }
     }
@@ -2640,19 +2631,19 @@ mod tests {
     }
 
     #[test]
-    fn oversized_source_capability_is_rejected() {
+    fn source_capability_accepts_explicit_large_batches_and_rejects_zero() {
         assert!(
             super::validate_source_capabilities(
                 "input",
                 SourceCapabilities {
                     replayable: true,
-                    max_batch_rows: EdgeBudget::MAX_ROWS,
+                    max_batch_rows: 5_000_000,
                     max_batch_bytes: EdgeBudget::MAX_BYTES,
                 },
             )
             .is_ok()
         );
-        for (rows, bytes, field) in [(1_000_001, 1, "max_batch_rows"), (1, 0, "max_batch_bytes")] {
+        for (rows, bytes, field) in [(0, 1, "max_batch_rows"), (1, 0, "max_batch_bytes")] {
             assert!(matches!(
                 super::validate_source_capabilities(
                     "input",
@@ -2698,8 +2689,12 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(CalcFlowError::InvalidArgument { ref field, .. })
-                if field == "sources.input.capabilities"
+            Err(CalcFlowError::SourceBudgetExceeded {
+                ref source_id,
+                max_batch_rows: 2,
+                max_rows: 1,
+                ..
+            }) if source_id == "input"
         ));
         assert_eq!(*opened_at.lock(), OpenObservation::NotOpened);
         assert_eq!(supervisor.task_count(), 0);

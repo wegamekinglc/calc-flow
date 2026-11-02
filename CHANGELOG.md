@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-03: Allow explicitly configured stream row budgets and source batches
+  above one million rows while retaining the default and strict edge admission.
+  Preserve historical project-v3 omitted-field defaults. Derive stock demo
+  budgets from batch and snapshot sizes, build Arrow columns directly, and
+  report declared or actual batch costs in payload-free budget errors.
+
 - 2026-11-02: Prepare the `calc-flow-python` 2026.11.2 release, aligning
   workspace crates, exact native dependencies, Python metadata, and current
   documentation. This release removes Pydantic and its transitive dependencies

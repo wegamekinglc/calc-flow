@@ -1,14 +1,17 @@
 //! Lazy Rust equivalents of `examples/stock_account_data.py` and quote fixtures.
 #![allow(dead_code)]
-use crate::support::{self, ExampleResult, floats, ints, strings, times};
+use crate::support::{self, ExampleResult};
 use async_trait::async_trait;
 use calc_flow::{
-    Batch, BatchMetadata, Cursor, NativeWatermarkCapability, ReplayPositioning, Result,
-    SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema, StreamSink,
-    StreamSource,
+    Batch, BatchMetadata, Cursor, EdgeBudget, NativeWatermarkCapability, ReplayPositioning, Result,
+    SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema, StreamRuntimeConfig,
+    StreamSink, StreamSource,
 };
 use datafusion::arrow::{
-    array::{Array, Float64Array, Int64Array, StringArray},
+    array::{
+        Array, Float64Array, Float64Builder, Int64Array, Int64Builder, StringArray, StringBuilder,
+        TimestampMicrosecondBuilder,
+    },
     datatypes::{DataType, Field, Schema, SchemaRef},
     record_batch::RecordBatch,
 };
@@ -55,6 +58,24 @@ impl Options {
         }
         Ok(())
     }
+    pub fn runtime_config(self) -> Result<StreamRuntimeConfig> {
+        let snapshots = usize::try_from(self.pairs())
+            .map_err(|error| support::invalid("--accounts/--stocks", error.to_string()))?;
+        let defaults = StreamRuntimeConfig::default();
+        Ok(StreamRuntimeConfig {
+            checkpointing: false,
+            edge_budget: EdgeBudget::new(
+                defaults
+                    .edge_budget
+                    .max_rows
+                    .max(usize::try_from(self.batch_size).unwrap())
+                    .max(snapshots),
+                defaults.edge_budget.max_bytes,
+            )?,
+            ..defaults
+        })
+    }
+
     fn pairs(self) -> u64 {
         u64::from(self.accounts) * u64::from(self.stocks)
     }
@@ -171,11 +192,11 @@ impl DemoSource {
             .saturating_add(u64::from(self.options.batch_size))
             .min(boundary)
     }
-    fn batch(&self, end: u64) -> Result<Batch> {
+    async fn batch(&self, end: u64) -> Result<Batch> {
         if self.quotes {
-            self.quote_batch(end)
+            self.quote_batch(end).await
         } else {
-            self.trade_batch(end)
+            self.trade_batch(end).await
         }
     }
     fn trade_row(&self, i: u64, pairs: u64) -> (String, String, i64, &'static str, &'static str) {
@@ -207,20 +228,35 @@ impl DemoSource {
             },
         )
     }
-    fn trade_batch(&self, end: u64) -> Result<Batch> {
+    async fn trade_batch(&self, end: u64) -> Result<Batch> {
         let pairs = self.options.pairs();
-        let rows: Vec<_> = (self.offset..end)
-            .map(|i| self.trade_row(i, pairs))
-            .collect();
+        let mut accounts = StringBuilder::new();
+        let mut stocks = StringBuilder::new();
+        let mut quantities = Int64Builder::new();
+        let mut sides = StringBuilder::new();
+        let mut prices = Float64Builder::new();
+        let mut flows = StringBuilder::new();
+        for i in self.offset..end {
+            let (account, stock, quantity, side, flow) = self.trade_row(i, pairs);
+            accounts.append_value(account);
+            stocks.append_value(stock);
+            quantities.append_value(quantity);
+            sides.append_value(side);
+            prices.append_value(10.0);
+            flows.append_value(flow);
+            if (i - self.offset + 1).is_multiple_of(4096) {
+                tokio::task::yield_now().await;
+            }
+        }
         let record = RecordBatch::try_new(
             trade_schema(),
             vec![
-                strings(&rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>()),
-                strings(&rows.iter().map(|r| r.1.as_str()).collect::<Vec<_>>()),
-                ints(&rows.iter().map(|r| r.2).collect::<Vec<_>>()),
-                strings(&rows.iter().map(|r| r.3).collect::<Vec<_>>()),
-                floats(&vec![10.0; rows.len()]),
-                strings(&rows.iter().map(|r| r.4).collect::<Vec<_>>()),
+                Arc::new(accounts.finish()),
+                Arc::new(stocks.finish()),
+                Arc::new(quantities.finish()),
+                Arc::new(sides.finish()),
+                Arc::new(prices.finish()),
+                Arc::new(flows.finish()),
             ],
         )
         .map_err(|e| support::invalid("trades", e.to_string()))?;
@@ -242,18 +278,28 @@ impl DemoSource {
             i64::try_from(cycle + 1)? * 1_000_000,
         ))
     }
-    fn quote_batch(&self, end: u64) -> Result<Batch> {
+    async fn quote_batch(&self, end: u64) -> Result<Batch> {
         let rounds = self.options.quote_rows / u64::from(self.options.stocks);
-        let rows: Vec<_> = (self.offset..end)
-            .map(|i| self.quote_row(i, rounds))
-            .collect::<ExampleResult<Vec<_>>>()
-            .map_err(|e| support::invalid("quotes", e.to_string()))?;
+        let mut stocks = StringBuilder::new();
+        let mut prices = Float64Builder::new();
+        let mut timestamps = TimestampMicrosecondBuilder::new();
+        for i in self.offset..end {
+            let (stock, price, timestamp) = self
+                .quote_row(i, rounds)
+                .map_err(|error| support::invalid("quotes", error.to_string()))?;
+            stocks.append_value(stock);
+            prices.append_value(price);
+            timestamps.append_value(timestamp);
+            if (i - self.offset + 1).is_multiple_of(4096) {
+                tokio::task::yield_now().await;
+            }
+        }
         let record = RecordBatch::try_new(
             quote_schema(),
             vec![
-                strings(&rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>()),
-                floats(&rows.iter().map(|r| r.1).collect::<Vec<_>>()),
-                times(&rows.iter().map(|r| r.2).collect::<Vec<_>>()),
+                Arc::new(stocks.finish()),
+                Arc::new(prices.finish()),
+                Arc::new(timestamps.finish().with_timezone("UTC")),
             ],
         )
         .map_err(|e| support::invalid("quotes", e.to_string()))?;
@@ -267,7 +313,7 @@ impl StreamSource for DemoSource {
             replay_positioning: ReplayPositioning::Unsupported,
             delivery: SourceDeliveryCapability::Lossy,
             max_batch_rows: usize::try_from(self.options.batch_size).unwrap(),
-            max_batch_bytes: 64 << 20,
+            max_batch_bytes: EdgeBudget::default().max_bytes,
             schema: SourceSchema::Exact(if self.quotes {
                 quote_schema()
             } else {
@@ -286,7 +332,7 @@ impl StreamSource for DemoSource {
             return Ok(None);
         }
         let end = self.batch_end(total);
-        let batch = self.batch(end)?;
+        let batch = self.batch(end).await?;
         self.offset = end;
         Ok(Some(SourceEvent::Data {
             batch,
@@ -454,10 +500,69 @@ mod tests {
             "0",
             "--accounts",
             "1",
+            "--batch-size",
+            "1",
         ])
         .unwrap();
         assert_eq!(options.rows, 2);
         assert_eq!(options.accounts, 1);
         options.validate(false).unwrap();
+    }
+
+    #[test]
+    fn runtime_budget_covers_large_batches_and_complete_snapshots() {
+        for (batch_size, accounts, stocks, expected) in
+            [(5_000_000, 2, 3, 5_000_000), (4, 2_000, 1_000, 2_000_000)]
+        {
+            let options = Options {
+                rows: 30,
+                accounts,
+                stocks,
+                batch_size,
+                quote_rows: 10_000,
+            };
+            let config = options.runtime_config().unwrap();
+            assert_eq!(config.edge_budget.max_rows, expected);
+            assert_eq!(config.edge_budget.max_bytes, usize::MAX);
+            assert!(!config.checkpointing);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_batch_generation_keeps_the_unaccepted_offset() {
+        use calc_flow::StreamSource;
+        let options = Options {
+            rows: 20_000,
+            accounts: 1,
+            stocks: 1,
+            batch_size: 20_000,
+            quote_rows: 20_000,
+        };
+        for quotes in [false, true] {
+            let mut source = if quotes {
+                super::DemoSource::quotes(options)
+            } else {
+                super::DemoSource::trades(options)
+            };
+            source.open(None).await.unwrap();
+            if !quotes {
+                source.next().await.unwrap().unwrap();
+            }
+            let offset = source.offset;
+            let mut pending = Box::pin(source.next());
+            assert!(futures::poll!(pending.as_mut()).is_pending());
+            drop(pending);
+            assert_eq!(source.offset, offset);
+            source.close().await.unwrap();
+        }
+    }
+
+    #[test]
+    fn explicit_large_batches_pass_option_validation() {
+        for batch_size in ["1000001", "5000000"] {
+            let options = parsed(&["--batch-size", batch_size]).unwrap();
+            options.validate(false).unwrap();
+            options.validate(true).unwrap();
+        }
     }
 }

@@ -2,10 +2,7 @@
 #[path = "support/stock_account_data.rs"]
 mod stock_account_data;
 mod support;
-use calc_flow::{
-    PipelineBuilder, SinkBinding, SourceBinding, StreamRuntimeConfig, StreamingRunner,
-    WatermarkPolicy,
-};
+use calc_flow::{PipelineBuilder, SinkBinding, SourceBinding, StreamingRunner, WatermarkPolicy};
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use stock_account_data::{DemoSource, LastSink, Latest, Options, check_positions};
 use support::{ExampleResult, best_effort_plan, expression, sql};
@@ -72,8 +69,5 @@ fn configured_runner(options: Options, last: &Latest) -> calc_flow::Result<Strea
             )?],
         )]),
     )?
-    .with_runtime_config(StreamRuntimeConfig {
-        checkpointing: false,
-        ..StreamRuntimeConfig::default()
-    })
+    .with_runtime_config(options.runtime_config()?)
 }
