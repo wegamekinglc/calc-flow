@@ -101,3 +101,7 @@ harness = false
 [[bench]]
 name = "stream_window_groups"
 harness = false
+
+[[example]]
+name = "grouped_sum_state_benchmark"
+required-features = ["benchmark-internals"]

@@ -9,6 +9,13 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-04: Merge grouped integer SQL `SUM` states in columns, reducing
+  per-group accumulator construction and state conversion during cumulative
+  streaming updates. Preserve wrapping integer arithmetic, null handling,
+  transactional state updates, and checkpoint compatibility. See the focused
+  [performance report](benchmarks/sum-state/README.md) for measured scope and
+  before/after results.
+
 - 2026-11-03: Allow explicitly configured stream row budgets and source batches
   above one million rows while retaining the default and strict edge admission.
   Preserve historical project-v3 omitted-field defaults. Derive stock demo

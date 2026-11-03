@@ -407,6 +407,10 @@ impl PartialGroups {
                 )
                 .map_err(|error| df_error(name, error))?;
         }
+        self.check_size(name)
+    }
+
+    fn check_size(&self, name: &str) -> Result<()> {
         let actual = self.accumulators.iter().try_fold(
             checked_bytes(
                 self.base_bytes,
@@ -427,6 +431,33 @@ impl PartialGroups {
         Ok(())
     }
 
+    async fn merge_integer_history(
+        &mut self,
+        candidates: &CandidateMap,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<()> {
+        for (index, accumulator) in self.accumulators.iter_mut().enumerate() {
+            if !accumulator.integer_sum() {
+                continue;
+            }
+            // Built-in integer SUM merges commute under DataFusion's wrapping addition.
+            for (chunk, slots) in self.slots.chunks(CHUNK_ROWS).enumerate() {
+                context.check_cancelled()?;
+                let start = chunk * CHUNK_ROWS;
+                let saved = slots.iter().enumerate().map(|(offset, slot)| {
+                    (
+                        start + offset,
+                        candidates[slot].group.states[index].as_slice(),
+                    )
+                });
+                accumulator.seed_batch(saved, self.slots.len(), name)?;
+                tokio::task::yield_now().await;
+            }
+        }
+        self.check_size(name)
+    }
+
     async fn merge(
         &mut self,
         candidates: &mut CandidateMap,
@@ -437,6 +468,8 @@ impl PartialGroups {
         if self.slots.is_empty() {
             return Ok(());
         }
+        self.merge_integer_history(candidates, context, name)
+            .await?;
         let states = self.emit_states(name)?;
         for (rank, slot) in self.slots.iter().enumerate() {
             if rank % 128 == 0 {
@@ -470,7 +503,7 @@ impl PartialGroups {
         name: &str,
     ) -> Result<()> {
         for (index, arrays) in states.iter().enumerate() {
-            if self.sequential[index] {
+            if self.sequential[index] || self.accumulators[index].integer_sum() {
                 let state = arrays
                     .iter()
                     .map(|array| {
@@ -937,10 +970,16 @@ impl IncrementalSql {
             group: Group {
                 key,
                 values,
-                states: previous.map_or_else(
-                    || vec![Vec::new(); self.aggregates.len()],
-                    |previous| previous.states.clone(),
-                ),
+                states: self
+                    .aggregates
+                    .iter()
+                    .enumerate()
+                    .map(|(index, expression)| {
+                        previous
+                            .filter(|_| self.uses_grouped_accumulator(expression))
+                            .map_or_else(Vec::new, |previous| previous.states[index].clone())
+                    })
+                    .collect(),
                 results: vec![ScalarValue::Null; self.aggregates.len()],
                 reservation,
             },
@@ -953,6 +992,7 @@ impl IncrementalSql {
         self.ordered_last
             || self.global_records.is_some()
             || (self.sequential.is_some() && grouped_float::selected(expr))
+            || (!self.keys.is_empty() && grouped_sum::integer_sum(expr))
     }
 
     fn candidate_accumulators(
@@ -4072,6 +4112,10 @@ mod tests {
 #[cfg(test)]
 #[path = "compact_checkpoint_tests.rs"]
 mod compact_checkpoint_tests;
+
+#[cfg(test)]
+#[path = "grouped_integer_tests.rs"]
+mod grouped_integer_tests;
 
 #[cfg(test)]
 #[path = "compact_plan_tests.rs"]

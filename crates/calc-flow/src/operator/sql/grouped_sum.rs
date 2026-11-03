@@ -13,9 +13,29 @@ pub(super) fn selected(expression: &AggregateFunctionExpr) -> bool {
         && expression.field().data_type() == &DataType::Float64
 }
 
+pub(super) fn integer_sum(expression: &AggregateFunctionExpr) -> bool {
+    expression
+        .fun()
+        .inner()
+        .is::<datafusion::functions_aggregate::sum::Sum>()
+        && !expression.is_distinct()
+        && expression.order_bys().is_empty()
+        && matches!(
+            expression.field().data_type(),
+            DataType::Int64 | DataType::UInt64
+        )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MergeKind {
+    Reset,
+    Numeric,
+    IntegerSum,
+}
+
 pub(super) struct PartialAccumulator {
     native: Box<dyn GroupsAccumulator>,
-    numeric: bool,
+    merge_kind: MergeKind,
     ordered_last: bool,
     ignore_nulls: bool,
 }
@@ -26,7 +46,13 @@ impl PartialAccumulator {
             native: expression
                 .create_groups_accumulator()
                 .map_err(|error| df_error(name, error))?,
-            numeric: selected(expression),
+            merge_kind: if integer_sum(expression) {
+                MergeKind::IntegerSum
+            } else if selected(expression) {
+                MergeKind::Numeric
+            } else {
+                MergeKind::Reset
+            },
             ordered_last: super::ordered_last::selected(expression),
             ignore_nulls: expression.ignore_nulls(),
         })
@@ -66,25 +92,24 @@ impl PartialAccumulator {
                 count,
             )
             .map_err(|error| df_error(name, error))?;
-        if self.numeric {
-            self.native
-                .merge_batch(&values, &ranks, count)
-                .map_err(|error| df_error(name, error))
-        } else {
+        if self.merge_kind == MergeKind::Reset {
             let reset = super::grouped_float::reset(first.last().expect("sequential state"), name)?
                 .to_array_of_size(ranks.len())
                 .map_err(|error| df_error(name, error))?;
             self.native
                 .merge_batch(&[reset], &ranks, count)
                 .map_err(|error| df_error(name, error))?;
-            self.native
-                .merge_batch(&values, &ranks, count)
-                .map_err(|error| df_error(name, error))
         }
+        self.native
+            .merge_batch(&values, &ranks, count)
+            .map_err(|error| df_error(name, error))
     }
 
     pub fn ordered_last(&self) -> bool {
         self.ordered_last
+    }
+    pub fn integer_sum(&self) -> bool {
+        self.merge_kind == MergeKind::IntegerSum
     }
     pub fn ignore_nulls(&self) -> bool {
         self.ignore_nulls
