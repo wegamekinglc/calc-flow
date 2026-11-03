@@ -1,5 +1,8 @@
 # Grouped integer SUM state measurements
 
+[Complete 2026-11-04 results](20261104/README.md) retain all four cases, all
+160 formal observations, paired intervals and both accepted CPU profiles.
+
 This focused comparison measures the stock-position graph from Rust examples
 29/30 on the baseline and candidate product revisions, using one common harness.
 It follows the maintained two-round paired-median method in

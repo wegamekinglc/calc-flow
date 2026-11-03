@@ -1,0 +1,276 @@
+{
+  "baseline": {
+    "total_samples": 1785,
+    "targets": {
+      "candidate": {
+        "inclusive_samples": 291,
+        "inclusive_percent": 16.30252100840336,
+        "self_samples": 35,
+        "self_percent": 1.9607843137254901,
+        "observed_symbols": [
+          "calc_flow::operator::sql::incremental::IncrementalSql::candidate [grouped_sum_state_benchmark]"
+        ]
+      },
+      "candidate_accumulators": {
+        "inclusive_samples": 0,
+        "inclusive_percent": 0.0,
+        "self_samples": 0,
+        "self_percent": 0.0,
+        "observed_symbols": []
+      },
+      "scalar_drop": {
+        "inclusive_samples": 73,
+        "inclusive_percent": 4.089635854341736,
+        "self_samples": 73,
+        "self_percent": 4.089635854341736,
+        "observed_symbols": [
+          "core::ptr::drop_in_place<datafusion_common::scalar::ScalarValue> [grouped_sum_state_benchmark]"
+        ]
+      },
+      "group_drop": {
+        "inclusive_samples": 193,
+        "inclusive_percent": 10.81232492997199,
+        "self_samples": 53,
+        "self_percent": 2.969187675070028,
+        "observed_symbols": [
+          "core::ptr::drop_in_place<calc_flow::operator::sql::incremental::Group> [grouped_sum_state_benchmark]"
+        ]
+      },
+      "row_converter": {
+        "inclusive_samples": 129,
+        "inclusive_percent": 7.226890756302521,
+        "self_samples": 7,
+        "self_percent": 0.39215686274509803,
+        "observed_symbols": [
+          "arrow_row::RowConverter::append [grouped_sum_state_benchmark]",
+          "arrow_row::RowConverter::convert_columns [grouped_sum_state_benchmark]"
+        ]
+      },
+      "row_encode": {
+        "inclusive_samples": 129,
+        "inclusive_percent": 7.226890756302521,
+        "self_samples": 113,
+        "self_percent": 6.330532212885154,
+        "observed_symbols": [
+          "arrow_row::LengthTracker::push_variable [grouped_sum_state_benchmark]",
+          "arrow_row::RowConverter::append [grouped_sum_state_benchmark]",
+          "arrow_row::RowConverter::convert_columns [grouped_sum_state_benchmark]",
+          "arrow_row::encode_column [grouped_sum_state_benchmark]",
+          "arrow_row::push_generic_byte_array_lengths [grouped_sum_state_benchmark]",
+          "arrow_row::row_lengths [grouped_sum_state_benchmark]",
+          "arrow_row::variable::encode_generic_byte_array [grouped_sum_state_benchmark]",
+          "arrow_row::variable::encode_one [grouped_sum_state_benchmark]"
+        ]
+      },
+      "hashing": {
+        "inclusive_samples": 55,
+        "inclusive_percent": 3.081232492997199,
+        "self_samples": 55,
+        "self_percent": 3.081232492997199,
+        "observed_symbols": [
+          "core::hash::BuildHasher::hash_one [grouped_sum_state_benchmark]"
+        ]
+      },
+      "hash_map_any": {
+        "inclusive_samples": 113,
+        "inclusive_percent": 6.330532212885154,
+        "self_samples": 68,
+        "self_percent": 3.8095238095238093,
+        "observed_symbols": [
+          "core::ptr::drop_in_place<hashbrown::raw::RawTable<(alloc::string::String,alloc::sync::Arc<datafusion_expr::udwf::WindowUDF>)>> [grouped_sum_state_benchmark]",
+          "hashbrown::map::HashMap<K,V,S,A>::insert [grouped_sum_state_benchmark]",
+          "hashbrown::raw::RawTable<T,A>::reserve_rehash [grouped_sum_state_benchmark]",
+          "hashbrown::raw::RawTableInner::fallible_with_capacity [grouped_sum_state_benchmark]"
+        ]
+      },
+      "memory_reservation": {
+        "inclusive_samples": 0,
+        "inclusive_percent": 0.0,
+        "self_samples": 0,
+        "self_percent": 0.0,
+        "observed_symbols": []
+      },
+      "new_empty": {
+        "inclusive_samples": 0,
+        "inclusive_percent": 0.0,
+        "self_samples": 0,
+        "self_percent": 0.0,
+        "observed_symbols": []
+      },
+      "output_chunk": {
+        "inclusive_samples": 146,
+        "inclusive_percent": 8.179271708683473,
+        "self_samples": 0,
+        "self_percent": 0.0,
+        "observed_symbols": [
+          "calc_flow::operator::sql::incremental::IncrementalSql::output_chunk [grouped_sum_state_benchmark]"
+        ]
+      },
+      "merge_integer_history": {
+        "inclusive_samples": 0,
+        "inclusive_percent": 0.0,
+        "self_samples": 0,
+        "self_percent": 0.0,
+        "observed_symbols": []
+      },
+      "merge_rank": {
+        "inclusive_samples": 98,
+        "inclusive_percent": 5.490196078431373,
+        "self_samples": 27,
+        "self_percent": 1.5126050420168067,
+        "observed_symbols": [
+          "calc_flow::operator::sql::incremental::PartialGroups::merge_rank [grouped_sum_state_benchmark]"
+        ]
+      },
+      "finalize_candidate": {
+        "inclusive_samples": 217,
+        "inclusive_percent": 12.156862745098039,
+        "self_samples": 51,
+        "self_percent": 2.857142857142857,
+        "observed_symbols": [
+          "calc_flow::operator::sql::incremental::IncrementalSql::finalize_candidate [grouped_sum_state_benchmark]"
+        ]
+      }
+    }
+  },
+  "candidate": {
+    "total_samples": 1625,
+    "targets": {
+      "candidate": {
+        "inclusive_samples": 281,
+        "inclusive_percent": 17.29230769230769,
+        "self_samples": 60,
+        "self_percent": 3.6923076923076925,
+        "observed_symbols": [
+          "calc_flow::operator::sql::incremental::IncrementalSql::candidate [grouped_sum_state_benchmark]"
+        ]
+      },
+      "candidate_accumulators": {
+        "inclusive_samples": 0,
+        "inclusive_percent": 0.0,
+        "self_samples": 0,
+        "self_percent": 0.0,
+        "observed_symbols": []
+      },
+      "scalar_drop": {
+        "inclusive_samples": 77,
+        "inclusive_percent": 4.7384615384615385,
+        "self_samples": 77,
+        "self_percent": 4.7384615384615385,
+        "observed_symbols": [
+          "core::ptr::drop_in_place<datafusion_common::scalar::ScalarValue> [grouped_sum_state_benchmark]"
+        ]
+      },
+      "group_drop": {
+        "inclusive_samples": 235,
+        "inclusive_percent": 14.461538461538462,
+        "self_samples": 47,
+        "self_percent": 2.8923076923076922,
+        "observed_symbols": [
+          "core::ptr::drop_in_place<calc_flow::operator::sql::incremental::Group> [grouped_sum_state_benchmark]"
+        ]
+      },
+      "row_converter": {
+        "inclusive_samples": 129,
+        "inclusive_percent": 7.938461538461539,
+        "self_samples": 3,
+        "self_percent": 0.18461538461538463,
+        "observed_symbols": [
+          "arrow_row::RowConverter::append [grouped_sum_state_benchmark]",
+          "arrow_row::RowConverter::convert_columns [grouped_sum_state_benchmark]"
+        ]
+      },
+      "row_encode": {
+        "inclusive_samples": 129,
+        "inclusive_percent": 7.938461538461539,
+        "self_samples": 113,
+        "self_percent": 6.953846153846154,
+        "observed_symbols": [
+          "arrow_row::LengthTracker::push_variable [grouped_sum_state_benchmark]",
+          "arrow_row::RowConverter::append [grouped_sum_state_benchmark]",
+          "arrow_row::RowConverter::convert_columns [grouped_sum_state_benchmark]",
+          "arrow_row::encode_column [grouped_sum_state_benchmark]",
+          "arrow_row::push_generic_byte_array_lengths [grouped_sum_state_benchmark]",
+          "arrow_row::row_lengths [grouped_sum_state_benchmark]",
+          "arrow_row::variable::encode_generic_byte_array [grouped_sum_state_benchmark]",
+          "arrow_row::variable::encode_one [grouped_sum_state_benchmark]"
+        ]
+      },
+      "hashing": {
+        "inclusive_samples": 49,
+        "inclusive_percent": 3.0153846153846153,
+        "self_samples": 49,
+        "self_percent": 3.0153846153846153,
+        "observed_symbols": [
+          "core::hash::BuildHasher::hash_one [grouped_sum_state_benchmark]"
+        ]
+      },
+      "hash_map_any": {
+        "inclusive_samples": 99,
+        "inclusive_percent": 6.092307692307692,
+        "self_samples": 56,
+        "self_percent": 3.4461538461538463,
+        "observed_symbols": [
+          "<hashbrown::map::HashMap<K,V,S,A> as core::clone::Clone>::clone [grouped_sum_state_benchmark]",
+          "core::ptr::drop_in_place<hashbrown::raw::RawTable<(alloc::string::String,alloc::string::String)>> [grouped_sum_state_benchmark]",
+          "core::ptr::drop_in_place<hashbrown::raw::RawTable<(alloc::string::String,alloc::sync::Arc<datafusion_expr::udf::ScalarUDF>)>> [grouped_sum_state_benchmark]",
+          "hashbrown::map::HashMap<K,V,S,A>::insert [grouped_sum_state_benchmark]",
+          "hashbrown::raw::RawTable<T,A>::reserve_rehash [grouped_sum_state_benchmark]"
+        ]
+      },
+      "memory_reservation": {
+        "inclusive_samples": 0,
+        "inclusive_percent": 0.0,
+        "self_samples": 0,
+        "self_percent": 0.0,
+        "observed_symbols": []
+      },
+      "new_empty": {
+        "inclusive_samples": 1,
+        "inclusive_percent": 0.06153846153846154,
+        "self_samples": 1,
+        "self_percent": 0.06153846153846154,
+        "observed_symbols": [
+          "arrow_array::array::new_empty_array [grouped_sum_state_benchmark]"
+        ]
+      },
+      "output_chunk": {
+        "inclusive_samples": 130,
+        "inclusive_percent": 8.0,
+        "self_samples": 0,
+        "self_percent": 0.0,
+        "observed_symbols": [
+          "calc_flow::operator::sql::incremental::IncrementalSql::output_chunk [grouped_sum_state_benchmark]"
+        ]
+      },
+      "merge_integer_history": {
+        "inclusive_samples": 11,
+        "inclusive_percent": 0.676923076923077,
+        "self_samples": 11,
+        "self_percent": 0.676923076923077,
+        "observed_symbols": [
+          "calc_flow::operator::sql::incremental::PartialGroups::merge_integer_history::{{closure}}::{{closure}} [grouped_sum_state_benchmark]"
+        ]
+      },
+      "merge_rank": {
+        "inclusive_samples": 93,
+        "inclusive_percent": 5.723076923076923,
+        "self_samples": 28,
+        "self_percent": 1.7230769230769232,
+        "observed_symbols": [
+          "calc_flow::operator::sql::incremental::PartialGroups::merge_rank [grouped_sum_state_benchmark]"
+        ]
+      },
+      "finalize_candidate": {
+        "inclusive_samples": 7,
+        "inclusive_percent": 0.4307692307692308,
+        "self_samples": 7,
+        "self_percent": 0.4307692307692308,
+        "observed_symbols": [
+          "calc_flow::operator::sql::incremental::IncrementalSql::finalize_candidate [grouped_sum_state_benchmark]"
+        ]
+      }
+    }
+  },
+  "scope": "Exact union of accepted sampled stacks containing matching symbols; inclusive categories overlap. A missing/inlined symbol does not prove zero execution or zero cost. Profile sample proportions are not wall-time attribution."
+}
