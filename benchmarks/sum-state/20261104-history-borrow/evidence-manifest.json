@@ -1,0 +1,43 @@
+{
+  "cumulative_budget_seconds": 600,
+  "cumulative_measurement_seconds": 581.6153308720098,
+  "current_profiles": 0,
+  "failure": null,
+  "files": {
+    "README.md": {
+      "bytes": 6020,
+      "sha256": "76e6fad5e836c84b11d0470a1d5535b82055f81359a7c67c809e0555a570f503"
+    },
+    "complete-evidence.json.gz": {
+      "bytes": 249210,
+      "sha256": "e3f2cdebf6d89e0ce932db6a2008c30974801ab9d83a4c9bc93d020cdf14331a"
+    },
+    "historical-baseline-stacks.json.gz": {
+      "bytes": 6373,
+      "sha256": "82bdef0f73c627078d9804a0c265aea6cdb04573b273735e1e0cb4f8d74951f0"
+    },
+    "profile-summary.json": {
+      "bytes": 16814,
+      "sha256": "c06034c165e6f07a8a836b87b61d599221afa2a40352d45262fe5d0e14ed13ce"
+    },
+    "profile-targets.json": {
+      "bytes": 5049,
+      "sha256": "ca99a241e189ccfa4b7eb8803bef5652034146256ca493114c2773ed1e6c10f3"
+    },
+    "samples.csv": {
+      "bytes": 17758,
+      "sha256": "b87dab7a23db125f28609cebe06ec7dbd2913777f9b00e6f97dac6bc2037c67c"
+    },
+    "summary.json": {
+      "bytes": 39299,
+      "sha256": "c9fcc721b4fc275e08b012061a3185b279e6b820798d843ee288ef1ef9801cea"
+    }
+  },
+  "formal_observations": 120,
+  "phase_seconds": 110.51010693600983,
+  "phase_stopped_monotonic": 189698.808760326,
+  "prior_measurement_seconds": 471.105223936,
+  "remaining_seconds": 18.38466912799015,
+  "retries": 0,
+  "status": "completed"
+}
