@@ -1,4 +1,4 @@
-"""Four fixed, paired SUM-state cases with complete per-snapshot evidence.
+"""Fixed paired SUM-state cases with complete per-snapshot evidence.
 
 Build receipts and reproduction commands are documented in benchmarks/sum-state.
 The driver never builds binaries or retries incomplete measurements.
@@ -365,28 +365,91 @@ def write_samples(path, acquisition):
                 )
 
 
+def finalize_acquisition(args, acquisition, builds, started, deadline):
+    from scripts.benchmark_suite.sum_state_publication import (
+        persist_source,
+        update_timing,
+    )
+
+    try:
+        for build in builds.values():
+            verify_build(build)
+    except BaseException as error:
+        acquisition["status"] = "stopped"
+        acquisition["failure"] = repr(error)
+    write_samples(args.output / "samples.csv", acquisition)
+    update_timing(args, acquisition, started, deadline, time.monotonic())
+    persist_source(args, acquisition)
+    final = time.monotonic()
+    if final > deadline:
+        update_timing(args, acquisition, started, deadline, final)
+        persist_source(args, acquisition)
+
+
+def measurement_scope(history_borrow, budget_seconds, prior_seconds):
+    if not (
+        math.isfinite(budget_seconds)
+        and 0 < budget_seconds <= 600
+        and math.isfinite(prior_seconds)
+        and prior_seconds >= 0
+    ):
+        raise ValueError("invalid measurement budget")
+    if history_borrow and prior_seconds <= 0:
+        raise ValueError("history-borrow requires prior measurement accounting")
+    if budget_seconds + prior_seconds > 600 + 1e-9:
+        raise ValueError("cumulative measurement budget exceeds600 seconds")
+    return {
+        "cases": CASES[:3] if history_borrow else CASES,
+        "profile_sides": ("candidate",)
+        if history_borrow
+        else ("baseline", "candidate"),
+        "profile_min_remaining_seconds": 25 if history_borrow else 0,
+        "unmeasured_final_source": ["stock-batch-8cpu"] if history_borrow else [],
+    }
+
+
 def run(args):
     started = time.monotonic()
-    deadline = started + 600
+    scope = measurement_scope(
+        args.history_borrow, args.budget_seconds, args.prior_measurement_seconds
+    )
+    deadline = started + args.budget_seconds
     if args.output.exists():
         raise FileExistsError(
             "use a new output directory; never overwrite a collection"
         )
     args.output.mkdir(parents=True)
+    if args.publish_directory and args.publish_directory.exists():
+        raise FileExistsError("use a new publication directory")
     builds = {
         side: checked_build(getattr(args, side + "_build"))
         for side in ("baseline", "candidate")
     }
     compare_builds(builds)
+    if args.history_borrow:
+        previous = json.loads(
+            (ROOT / "benchmarks/sum-state/20261104/evidence-manifest.json").read_text()
+        )
+        if (
+            abs(previous["inclusive_phase_seconds"] - args.prior_measurement_seconds)
+            > 1e-6
+        ):
+            raise ValueError("prior measurement accounting differs from sealed receipt")
     os.sched_setaffinity(0, {31})
     plan = {
-        "cases": CASES,
+        "cases": scope["cases"],
         "rounds": 2,
         "pairs_per_round": 10,
         "warmups_per_arm_per_round": 1,
-        "budget_seconds": 600,
+        "budget_seconds": args.budget_seconds,
+        "prior_measurement_seconds": args.prior_measurement_seconds,
+        "cumulative_budget_seconds": 600,
+        "history_borrow": args.history_borrow,
+        "profile_sides": scope["profile_sides"],
+        "profile_min_remaining_seconds": scope["profile_min_remaining_seconds"],
+        "unmeasured_final_source": scope["unmeasured_final_source"],
         "builds_separate": True,
-        "profiles": "baseline/candidate stream1CPU, six jobs each, first excluded"
+        "profiles": "selected stream1CPU sides, six jobs each, first excluded"
         if args.perf
         else None,
         "scope": (
@@ -424,6 +487,7 @@ def run(args):
             for path in (
                 Path(__file__),
                 ROOT / "scripts/benchmark_suite/sum_state_profile.py",
+                ROOT / "scripts/benchmark_suite/sum_state_publication.py",
                 ROOT / "scripts/benchmark_suite/report.py",
                 ROOT / "scripts/benchmark_suite/statistics.py",
                 ROOT / "scripts/toolkit.py",
@@ -494,7 +558,7 @@ def run(args):
         )
         fixture = {row["fixture"]: row for row in prepared}
         write_json(args.output / "fixture-manifest.json", fixture)
-        for case in CASES:
+        for case in scope["cases"]:
             record = {
                 **case,
                 "comparison": "interleaved",
@@ -572,9 +636,17 @@ def run(args):
                 json.dumps({"case": case["id"], "statistics": record["statistics"]}),
                 flush=True,
             )
-        if args.perf:
+        profile_allowed = (
+            args.perf
+            and deadline - time.monotonic() >= scope["profile_min_remaining_seconds"]
+        )
+        if args.perf and not profile_allowed:
+            acquisition["profile_skip_reason"] = (
+                "predeclared remaining-time admission refused; timings prioritized"
+            )
+        if profile_allowed:
             profile_case = CASES[0]
-            for side in builds:
+            for side in scope["profile_sides"]:
                 path = args.output / "profiles" / side
                 rows, receipt = measure(
                     args,
@@ -600,12 +672,10 @@ def run(args):
                     }
                 )
                 write_json(args.output / "acquisition.json", acquisition)
-        if args.perf:
+        if acquisition["profiles"]:
             from scripts.benchmark_suite.sum_state_profile import decode
 
             decode(args, acquisition, builds, deadline)
-        for build in builds.values():
-            verify_build(build)
         write_samples(args.output / "samples.csv", acquisition)
         if time.monotonic() > deadline:
             raise TimeoutError("inclusive acquisition deadline after preflight/cleanup")
@@ -615,22 +685,13 @@ def run(args):
         acquisition["failure"] = repr(error)
         raise
     finally:
-        write_samples(args.output / "samples.csv", acquisition)
-        acquisition["elapsed_seconds"] = time.monotonic() - started
-        write_json(args.output / "acquisition.json", acquisition)
-        write_json(
-            args.output / "summary.json",
-            {
-                "status": acquisition["status"],
-                "elapsed_seconds": acquisition["elapsed_seconds"],
-                "cases": [
-                    {k: v for k, v in case.items() if k != "observations"}
-                    for case in acquisition["cases"]
-                ],
-                "profiles": acquisition["profiles"],
-                "failure": acquisition["failure"],
-            },
-        )
+        finalize_acquisition(args, acquisition, builds, started, deadline)
+        if args.publish_directory:
+            from scripts.benchmark_suite.sum_state_publication import publish
+
+            publish(args, acquisition, plan, machine, builds, deadline)
+    if acquisition["status"] != "completed":
+        raise RuntimeError(f"measurement stopped: {acquisition['failure']}")
 
 
 def measure(args, builds, case, fixtures, side, path, deadline, *, profile=False):
@@ -683,7 +744,13 @@ def main():
     parser.add_argument("--perf", type=lambda x: Path(x).resolve())
     parser.add_argument("--perf-library", type=lambda x: Path(x).resolve())
     parser.add_argument("--samply", type=lambda x: Path(x).resolve())
+    parser.add_argument("--history-borrow", action="store_true")
+    parser.add_argument("--budget-seconds", type=float, default=600)
+    parser.add_argument("--prior-measurement-seconds", type=float, default=0)
+    parser.add_argument("--publish-directory", type=lambda x: Path(x).resolve())
     args = parser.parse_args()
+    if args.publish_directory and not args.history_borrow:
+        parser.error("automatic publication is scoped to --history-borrow")
     if bool(args.perf) != bool(args.samply):
         parser.error("--perf and --samply are required together")
     run(args)

@@ -106,3 +106,43 @@ per-snapshot digest, and pair order through the per-invocation command files.
 `environment.json` and fixture manifests preserve provenance. The PR records
 compact copies of these outputs and any accepted profile summaries; large raw
 perf data remains local with hashes and exact windows.
+
+## History-borrow followup
+
+The second candidate removes per-touched-group integer history copies by borrowing
+immutable previous groups. Its verification keeps the same Rust harness and
+selects exactly the three stream cases above, with the original two rounds of
+ten alternating pairs. Finite execution is unmeasured on this final source;
+the earlier control remains inconclusive and does not prove final equivalence.
+
+The first collection and its analysis/publication used 471.105223936 seconds.
+The followup receives only the remaining 128.894776064 seconds of the original
+600-second total. Build and implementation time remain separate. The controller
+checks the prior sealed receipt and rejects resetting or exceeding that budget.
+A candidate-only one-CPU profile is admitted only if at least 25 seconds remain
+after all formal timings; otherwise it is explicitly skipped. All statistics,
+profile decoding and target counts, artifact generation and the stop receipt run
+automatically within the residual deadline. There is no timing-driven retry.
+
+After sealing the new candidate with the same builder, run from its worktree:
+
+```bash
+python -m scripts.benchmark_suite.sum_state \
+  --history-borrow \
+  --budget-seconds '128.894776064' \
+  --prior-measurement-seconds '471.105223936' \
+  --baseline-build '/absolute/path/to/baseline-final/build.json' \
+  --candidate-build '/absolute/path/to/history-borrow/build.json' \
+  --output '/absolute/path/to/new-history-borrow-collection' \
+  --publish-directory 'benchmarks/sum-state/20261104-history-borrow' \
+  --perf '/absolute/path/to/perf' --samply '/absolute/path/to/samply' \
+  --perf-library '/absolute/path/to/perf/libraries'
+```
+
+The final artifact directory contains 120 formal rows if all three cases finish,
+all raw warmup/formal/profile observations and source seals, per-case paired
+intervals and CPU/RSS statistics, accepted stacks, target counters, and the
+cumulative stop receipt. Any incomplete cases remain explicitly partial. The old
+baseline profile is labeled as historical context from an earlier window cohort
+with matching binary, harness, fixture and resources; it is not a new paired
+profile comparison. The first four-case evidence is preserved unchanged.

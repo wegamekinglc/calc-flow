@@ -433,7 +433,7 @@ impl PartialGroups {
 
     async fn merge_integer_history(
         &mut self,
-        candidates: &CandidateMap,
+        committed: &[Group],
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<()> {
@@ -448,7 +448,9 @@ impl PartialGroups {
                 let saved = slots.iter().enumerate().map(|(offset, slot)| {
                     (
                         start + offset,
-                        candidates[slot].group.states[index].as_slice(),
+                        committed
+                            .get(*slot)
+                            .map_or(&[][..], |group| group.states[index].as_slice()),
                     )
                 });
                 accumulator.seed_batch(saved, self.slots.len(), name)?;
@@ -461,6 +463,7 @@ impl PartialGroups {
     async fn merge(
         &mut self,
         candidates: &mut CandidateMap,
+        committed: &[Group],
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<()> {
@@ -468,8 +471,7 @@ impl PartialGroups {
         if self.slots.is_empty() {
             return Ok(());
         }
-        self.merge_integer_history(candidates, context, name)
-            .await?;
+        self.merge_integer_history(committed, context, name).await?;
         let states = self.emit_states(name)?;
         for (rank, slot) in self.slots.iter().enumerate() {
             if rank % 128 == 0 {
@@ -976,7 +978,7 @@ impl IncrementalSql {
                     .enumerate()
                     .map(|(index, expression)| {
                         previous
-                            .filter(|_| self.uses_grouped_accumulator(expression))
+                            .filter(|_| self.needs_owned_history(expression))
                             .map_or_else(Vec::new, |previous| previous.states[index].clone())
                     })
                     .collect(),
@@ -988,11 +990,14 @@ impl IncrementalSql {
         })
     }
 
-    fn uses_grouped_accumulator(&self, expr: &AggregateFunctionExpr) -> bool {
+    fn needs_owned_history(&self, expr: &AggregateFunctionExpr) -> bool {
         self.ordered_last
             || self.global_records.is_some()
             || (self.sequential.is_some() && grouped_float::selected(expr))
-            || (!self.keys.is_empty() && grouped_sum::integer_sum(expr))
+    }
+
+    fn uses_grouped_accumulator(&self, expr: &AggregateFunctionExpr) -> bool {
+        self.needs_owned_history(expr) || (!self.keys.is_empty() && grouped_sum::integer_sum(expr))
     }
 
     fn candidate_accumulators(
@@ -1318,7 +1323,9 @@ impl IncrementalSql {
                 .await?;
         }
         if let Some(mut partial) = candidates.partial.take() {
-            partial.merge(&mut candidates.groups, context, name).await?;
+            partial
+                .merge(&mut candidates.groups, &self.groups, context, name)
+                .await?;
         }
         drop(native);
         self.finalize_candidates(&mut candidates.groups, context, name)

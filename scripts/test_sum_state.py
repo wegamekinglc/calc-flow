@@ -2,16 +2,29 @@
 
 from __future__ import annotations
 
+import csv
+import gzip
+import hashlib
+import io
+import json
+import tempfile
 import unittest
+from contextlib import redirect_stdout
 from copy import deepcopy
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from scripts.benchmark_suite.sum_state import (
     THREAD_ENV,
     compare_builds,
     compare_oracles,
+    finalize_acquisition,
+    measurement_scope,
     validate_sample,
 )
 from scripts.benchmark_suite.sum_state_profile import clock_alignment
+from scripts.benchmark_suite.sum_state_publication import publish, validate_inventory
 
 
 class SumStateEvidenceTests(unittest.TestCase):
@@ -95,6 +108,27 @@ class SumStateEvidenceTests(unittest.TestCase):
             validate_sample(self.row, self.case, self.fixture)
 
 
+class MeasurementScopeTests(unittest.TestCase):
+    def test_history_borrow_preserves_stream_case_samples_and_residual_budget(self):
+        scope = measurement_scope(True, 128.894776064, 471.105223936)
+        self.assertEqual(len(scope["cases"]), 3)
+        self.assertTrue(all(case["mode"] == "stream" for case in scope["cases"]))
+        self.assertEqual(scope["profile_sides"], ("candidate",))
+        self.assertEqual(scope["profile_min_remaining_seconds"], 25)
+
+    def test_rejects_resetting_cumulative_measurement_budget(self):
+        with self.assertRaisesRegex(ValueError, "cumulative"):
+            measurement_scope(True, 600, 471.105223936)
+
+    def test_rejects_history_borrow_without_prior_accounting(self):
+        with self.assertRaisesRegex(ValueError, "prior"):
+            measurement_scope(True, 600, 0)
+
+    def test_rejects_nonfinite_budget(self):
+        with self.assertRaisesRegex(ValueError, "budget"):
+            measurement_scope(True, float("nan"), 471.105223936)
+
+
 class BuildCompatibilityTests(unittest.TestCase):
     def setUp(self):
         self.base = {
@@ -136,6 +170,181 @@ class BuildCompatibilityTests(unittest.TestCase):
         candidate["build_environment"] = {"RUSTFLAGS": "-C target-cpu=native"}
         with self.assertRaisesRegex(ValueError, "RUSTFLAGS"):
             compare_builds({"baseline": self.base, "candidate": candidate})
+
+
+class FinalSealDeadlineTests(unittest.TestCase):
+    def test_late_final_seal_demotes_both_durable_source_records(self):
+        clock = [100.0]
+
+        def verify(_):
+            clock[0] = 130.0
+
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(
+                output=Path(directory), prior_measurement_seconds=471.105223936
+            )
+            acquisition = {
+                "status": "completed",
+                "failure": None,
+                "cases": [],
+                "profiles": [],
+            }
+            with (
+                patch(
+                    "scripts.benchmark_suite.sum_state.verify_build", side_effect=verify
+                ),
+                patch(
+                    "scripts.benchmark_suite.sum_state.time.monotonic",
+                    side_effect=lambda: clock[0],
+                ),
+            ):
+                finalize_acquisition(args, acquisition, {"candidate": {}}, 0, 128)
+            for name in ("acquisition.json", "summary.json"):
+                record = json.loads((args.output / name).read_text())
+                self.assertEqual(record["status"], "stopped")
+                self.assertIn("deadline", record["failure"])
+                self.assertGreater(record["cumulative_measurement_seconds"], 600)
+
+
+class PublicationInventoryTests(unittest.TestCase):
+    def test_rejects_completed_status_with_missing_formal_observation(self):
+        case = {
+            "id": "a",
+            "observations": [{}] * 39,
+            "baseline": [[1.0] * 10] * 2,
+            "candidate": [[1.0] * 10] * 2,
+            "statistics": {"samples": 20},
+        }
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            validate_inventory({"status": "completed", "cases": [case]}, ["a"])
+
+    def test_retains_partial_inventory_without_claiming_completion(self):
+        validate_inventory({"status": "stopped", "cases": []}, ["a"])
+
+    def test_publishes_retained_rows_without_reexecuting_workload(self):
+        self._exercise_publication()
+
+    def test_late_publication_persists_stopped_authoritative_records(self):
+        self._exercise_publication(late=True)
+
+    def _exercise_publication(self, *, late=False):
+        previous = Path(__file__).resolve().parents[1] / "benchmarks/sum-state/20261104"
+        saved = json.loads(
+            gzip.decompress((previous / "complete-evidence.json.gz").read_bytes())
+        )
+        acquisition = deepcopy(saved["acquisition"])
+        acquisition["started_monotonic"] = 0
+        acquisition["cases"] = acquisition["cases"][:3]
+        acquisition["profiles"] = [
+            row for row in acquisition["profiles"] if row["side"] == "candidate"
+        ]
+        plan = deepcopy(saved["plan"])
+        plan["cases"] = plan["cases"][:3]
+        plan["unmeasured_final_source"] = ["stock-batch-8cpu"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "collection"
+            output.mkdir()
+            (output / "fixture-manifest.json").write_text(json.dumps(saved["fixtures"]))
+            profiles = json.loads((previous / "profile-summary.json").read_text())
+            (output / "profile-summary.json").write_text(
+                json.dumps([row for row in profiles if row["side"] == "candidate"])
+            )
+            profile = output / "profiles/candidate"
+            profile.mkdir(parents=True)
+            (profile / "stacks.json.gz").write_bytes(
+                (previous / "candidate-stacks.json.gz").read_bytes()
+            )
+            (profile / "stderr.log").write_text("")
+            with (previous / "samples.csv").open() as source:
+                reader = csv.DictReader(source)
+                rows = [row for row in reader if row["case"] != "stock-batch-8cpu"]
+                with (output / "samples.csv").open("w", newline="") as target:
+                    writer = csv.DictWriter(target, fieldnames=reader.fieldnames)
+                    writer.writeheader()
+                    writer.writerows(rows)
+            (output / "acquisition.json").write_text(json.dumps(acquisition))
+            (output / "summary.json").write_text(
+                json.dumps(
+                    {
+                        "status": acquisition["status"],
+                        "failure": None,
+                    }
+                )
+            )
+            args = SimpleNamespace(
+                output=output,
+                publish_directory=root / "published",
+                prior_measurement_seconds=471.105223936,
+                budget_seconds=128.894776064,
+            )
+            ticks = iter((100, 100, 100, 129))
+
+            def clock():
+                return next(ticks, 130) if late else 100
+
+            with (
+                patch(
+                    "scripts.benchmark_suite.sum_state_publication.time.monotonic",
+                    side_effect=clock,
+                ),
+                redirect_stdout(io.StringIO()),
+            ):
+                if late:
+                    with self.assertRaisesRegex(TimeoutError, "deadline"):
+                        publish(
+                            args,
+                            acquisition,
+                            plan,
+                            saved["environment"],
+                            saved["plan"]["builds"],
+                            128,
+                        )
+                else:
+                    publish(
+                        args,
+                        acquisition,
+                        plan,
+                        saved["environment"],
+                        saved["plan"]["builds"],
+                        128,
+                    )
+            summary = json.loads((args.publish_directory / "summary.json").read_text())
+            self.assertEqual(summary["formal_observations"], 120)
+            self.assertEqual(summary["unmeasured_final_source"], ["stock-batch-8cpu"])
+            self.assertEqual(len(summary["profiles"]), 1)
+            manifest = json.loads(
+                (args.publish_directory / "evidence-manifest.json").read_text()
+            )
+            if late:
+                for path in (
+                    output / "acquisition.json",
+                    output / "summary.json",
+                    output / "phase-stopped.json",
+                    args.publish_directory / "summary.json",
+                    args.publish_directory / "evidence-manifest.json",
+                ):
+                    record = json.loads(path.read_text())
+                    self.assertEqual(record["status"], "stopped", str(path))
+                    self.assertIn("deadline", record["failure"])
+                raw = json.loads(
+                    gzip.decompress(
+                        (
+                            args.publish_directory / "complete-evidence.json.gz"
+                        ).read_bytes()
+                    )
+                )
+                self.assertEqual(raw["acquisition"]["status"], "stopped")
+                self.assertGreater(manifest["cumulative_measurement_seconds"], 600)
+                for name, record in manifest["files"].items():
+                    contents = (args.publish_directory / name).read_bytes()
+                    self.assertEqual(
+                        hashlib.sha256(contents).hexdigest(), record["sha256"]
+                    )
+            else:
+                self.assertAlmostEqual(
+                    manifest["cumulative_measurement_seconds"], 571.105223936
+                )
 
 
 class ProfileClockTests(unittest.TestCase):
