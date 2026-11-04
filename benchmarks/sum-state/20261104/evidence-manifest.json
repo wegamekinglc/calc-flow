@@ -1,0 +1,48 @@
+{
+  "measurement_start_monotonic": 187286.171380127,
+  "original_deadline_monotonic": 187886.171380127,
+  "inclusive_elapsed_to_publication_seconds": 227.6975207850046,
+  "acquisition_elapsed_seconds": 147.06748737301677,
+  "formal_observations": 160,
+  "valid_profiles": 2,
+  "retries": 0,
+  "files": {
+    "README.md": {
+      "bytes": 10338,
+      "sha256": "5779d33275b057d170092dbff0b2abebfa8b92721180e54d3d8dc6344598149c"
+    },
+    "baseline-stacks.json.gz": {
+      "bytes": 6373,
+      "sha256": "82bdef0f73c627078d9804a0c265aea6cdb04573b273735e1e0cb4f8d74951f0"
+    },
+    "candidate-stacks.json.gz": {
+      "bytes": 5729,
+      "sha256": "677f8764e68d60f85e70f40d27c979a84b459186980b67a4f02e0afc03993a88"
+    },
+    "complete-evidence.json.gz": {
+      "bytes": 334038,
+      "sha256": "ac5fe5bbcb3672e039846a62179b7b5ee1db60166c43f5687e9ecb4cec7727a1"
+    },
+    "profile-summary.json": {
+      "bytes": 32759,
+      "sha256": "b1bcdd3630c0a9315215e32a29303fdcda4e97367b7f2271dacf59dbc294f36d"
+    },
+    "profile-targets.json": {
+      "bytes": 10754,
+      "sha256": "f2616cea5fb9a3258b4781dbc0038945762e91460174abd3c9593d3c81514faa"
+    },
+    "samples.csv": {
+      "bytes": 23698,
+      "sha256": "2e63a7f88ed946cc26dff1aa8c73b65975415716d59a59844166b53133fd20ec"
+    },
+    "summary.json": {
+      "bytes": 62106,
+      "sha256": "ecfc33fd770201ab1aa6bcb0aa6ae573d7e8b4bc414cd0480eb21b2b2ef3fb0c"
+    }
+  },
+  "inclusive_elapsed_to_final_artifact_seconds": 402.20497354201507,
+  "measurement_phase_stopped_monotonic": 187757.276604063,
+  "inclusive_phase_seconds": 471.1052239359997,
+  "remaining_total_budget_seconds": 128.89477606400033,
+  "phase_note": "First candidate completed; no workload retries. Phase includes preflight,fixtures,warmups,formal runs,all oracle checks,profiles,decoding,analysis,artifact generation and cleanup. Builds excluded. Future changed-candidate phase may consume only remaining total budget."
+}

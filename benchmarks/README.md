@@ -51,6 +51,11 @@ remain informational; their existing specialized correctness/evidence gates
 are preserved. These are different measurement contracts, not interchangeable
 historical samples.
 
+The focused [grouped integer SUM comparison](sum-state/README.md) measures
+streaming stock positions, sparse group updates, and a finite batch control.
+It preserves per-snapshot correctness evidence, paired samples, build identity,
+CPU profiles, and resource observations without extending the scheduled suite.
+
 ## Layout
 
 | Path                                               | Contents                                                         |

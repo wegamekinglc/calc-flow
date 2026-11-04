@@ -17,7 +17,7 @@ import re
 import shutil
 import subprocess  # nosec B404
 import zipfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -62,7 +62,13 @@ def fingerprint_json(
     ).hexdigest()
 
 
-def command_output(arguments: Sequence[str], *, cwd: Path | None = None) -> str:
+def command_output(
+    arguments: Sequence[str],
+    *,
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+) -> str:
     """Run one fixed-argv command without a shell and return stripped stdout."""
     completed = subprocess.run(  # nosec B603 B607  # nosemgrep
         list(arguments),
@@ -71,6 +77,8 @@ def command_output(arguments: Sequence[str], *, cwd: Path | None = None) -> str:
         cwd=cwd,
         shell=False,
         text=True,
+        env=env,
+        timeout=timeout,
     )
     return completed.stdout.strip()
 

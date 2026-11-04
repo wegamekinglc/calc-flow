@@ -302,6 +302,12 @@ jobs:
         run: uv run --no-sync ruff check .
       - name: Verify complexity gates
         run: uv run --no-sync python scripts/verify_complexity_gates.py
+      - name: Test SUM measurement tools
+        run: >-
+          uv run --no-sync python -m unittest
+          scripts.test_sum_state
+          scripts.test_sum_state_build
+          scripts.test_sum_state_profile
       - name: Run unit, property, and coverage tests
         env:
           # Python callbacks now run on Rust worker threads; sysmon traces them.

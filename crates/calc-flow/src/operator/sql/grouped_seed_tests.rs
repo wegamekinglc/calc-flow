@@ -73,7 +73,7 @@ fn observe(accumulator: PartialAccumulator) -> (PartialAccumulator, MergeRows) {
                 native: accumulator.native,
                 merge_rows: merge_rows.clone(),
             }),
-            numeric: accumulator.numeric,
+            merge_kind: accumulator.merge_kind,
         },
         merge_rows,
     )
