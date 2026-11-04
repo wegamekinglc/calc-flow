@@ -505,6 +505,18 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Reclaim disk space for Rust test binaries
+        # All-feature integration tests and examples link DataFusion separately.
+        # Keep room for those binaries and runner logs on the workspace disk.
+        run: |
+          df -h . "$RUNNER_TEMP"
+          for unused_sdk in /usr/local/lib/android /usr/share/dotnet; do
+            if [ -d "$unused_sdk" ]; then
+              sudo du -sh "$unused_sdk"
+              sudo rm -rf -- "$unused_sdk"
+            fi
+          done
+          df -h . "$RUNNER_TEMP"
       - name: Ensure libcurl headers for vendored librdkafka
         # librdkafka 2.12's cmake path includes curl/curl.h even with
         # WITH_CURL=0 (rust-rdkafka#829); the headers satisfy the stale
@@ -582,6 +594,11 @@ jobs:
         timeout-minutes: 30
         run: python3.13 scripts/run_rust_tests.py --python-stress-runs 3
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+      - name: Report Rust build disk usage
+        if: ${{ always() }}
+        run: |
+          df -h . "$RUNNER_TEMP"
+          if [ -d target ]; then du -sh target; fi
       - name: Record Rust installation and cache step results
         if: ${{ always() }}
         continue-on-error: true
