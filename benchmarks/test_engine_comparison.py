@@ -60,7 +60,7 @@ def test_interval_sql_parallel_plan_builds_reference_once():
 
     data = workload(64_000, scenario="interval_join")
     context = SessionContext(
-        SessionConfig().with_target_partitions(32).with_batch_size(8192)
+        SessionConfig().with_target_partitions(4).with_batch_size(8192)
     )
     for name in ("input", "reference"):
         context.register_record_batches(name, [data.table.to_batches()])
@@ -76,7 +76,7 @@ def test_interval_sql_parallel_plan_builds_reference_once():
     build, probe = joins[0].children()
     assert not any(node.display().startswith("CrossJoinExec") for node in nodes(build))
     assert any(node.display().startswith("CrossJoinExec") for node in nodes(probe))
-    assert plan.partition_count == 32
+    assert plan.partition_count == 4
 
 
 @pytest.mark.parametrize("backend", ("calc-flow-sql", "datafusion"))
@@ -216,7 +216,7 @@ def test_single_thread_reference_rejects_a_process_with_a_larger_pool(
 ):
     import polars as pl
 
-    monkeypatch.setattr(pl, "thread_pool_size", lambda: 32)
+    monkeypatch.setattr(pl, "thread_pool_size", lambda: 4)
     case = next(case for case in engine_cases(101) if case["backend"] == "polars-1t")
     with pytest.raises(ValueError, match="single-thread.*one thread"):
         EngineCase(case, tmp_path)

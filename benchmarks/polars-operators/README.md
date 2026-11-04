@@ -199,18 +199,19 @@ the original 81-cell snapshot's SHA-256 and exact per-cell contents before
 accepting the complete 84-cell report.
 
 The original focused verification used the same prepared Python and the
-measured implementation:
+measured implementation. Commands below are updated to the current 4T limit;
+the pass counts are retained from the original runs, not claimed as new 4T evidence:
 
 ```bash
-PYTHONPATH=. POLARS_MAX_THREADS=32 TOKIO_WORKER_THREADS=32 JAX_PLATFORMS=cpu \
+PYTHONPATH=. POLARS_MAX_THREADS=4 TOKIO_WORKER_THREADS=4 JAX_PLATFORMS=cpu \
   "$BENCH_PY" -m pytest benchmarks/test_polars_operators.py -q
 # Initial implementation: 25 passed.
 
-PYTHONPATH=. POLARS_MAX_THREADS=32 TOKIO_WORKER_THREADS=32 JAX_PLATFORMS=cpu \
+PYTHONPATH=. POLARS_MAX_THREADS=4 TOKIO_WORKER_THREADS=4 JAX_PLATFORMS=cpu \
   "$BENCH_PY" -m pytest benchmarks/test_engine_comparison.py -q -k polars
 # Initial implementation: 32 passed, 181 deselected.
 
-PYTHONPATH=. POLARS_MAX_THREADS=32 TOKIO_WORKER_THREADS=32 JAX_PLATFORMS=cpu \
+PYTHONPATH=. POLARS_MAX_THREADS=4 TOKIO_WORKER_THREADS=4 JAX_PLATFORMS=cpu \
   "$BENCH_PY" -m pytest benchmarks/test_polars_operators.py -q -k 'argmax or unique'
 # Final implementation: 12 passed, 13 deselected.
 
@@ -261,7 +262,7 @@ The same prepared Python 3.13.9 / Polars 2.0.0 environment passed:
 "$BENCH_PY" -m ruff format --check benchmarks/engine_comparison.py
 # 1 file already formatted.
 
-PYTHONPATH=. POLARS_MAX_THREADS=32 TOKIO_WORKER_THREADS=32 JAX_PLATFORMS=cpu \
+PYTHONPATH=. POLARS_MAX_THREADS=4 TOKIO_WORKER_THREADS=4 JAX_PLATFORMS=cpu \
   "$BENCH_PY" -m pytest benchmarks/test_polars_operators.py \
   benchmarks/test_engine_comparison.py \
   -q -k 'polars and (argmax or unique or average or samples_collect)'

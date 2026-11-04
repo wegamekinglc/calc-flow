@@ -18,7 +18,7 @@ except ModuleNotFoundError:  # Direct `python scripts/...` invocation.
 
 ROWS = (100_000, 1_000_000, 2_100_000)
 ENTITIES = (1, 4, 16, 64)
-PARTITIONS = (1, 2, 4, 8, 16, 32)
+PARTITIONS = (1, 4)
 BATCH_SIZES = (4_096, 8_192, 16_384, 32_768)
 
 

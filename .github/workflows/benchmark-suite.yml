@@ -258,8 +258,8 @@ jobs:
           target/benchmark-venv/bin/python -m unittest scripts.test_sustained_join
           uv pip install --python target/benchmark-venv/bin/python --no-deps \
             --target target/adapter-site target/releases/candidate/*.whl
-          PYTHONPATH=target/adapter-site:. POLARS_MAX_THREADS=32 \
-            TOKIO_WORKER_THREADS=32 JAX_PLATFORMS=cpu \
+          PYTHONPATH=target/adapter-site:. POLARS_MAX_THREADS=4 \
+            TOKIO_WORKER_THREADS=4 JAX_PLATFORMS=cpu \
             target/benchmark-venv/bin/python -m pytest \
             benchmarks/test_engine_comparison.py benchmarks/test_engine_stream.py \
             benchmarks/test_retained_stream.py benchmarks/test_sql_operators.py \

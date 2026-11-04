@@ -17,7 +17,13 @@ from scripts.benchmark_suite.aggregate import (
     summarize,
     validate_fragment,
 )
-from scripts.benchmark_suite.catalog import CONTRACT, get_shard, shard_cases
+from scripts.benchmark_suite.catalog import (
+    CONTRACT,
+    get_shard,
+    polars_thread_count,
+    shard_cases,
+    worker_thread_count,
+)
 from scripts.benchmark_suite.provenance import harness_sha256
 from scripts.benchmark_suite.validation import _validate_catalog_cases
 from scripts.test_benchmark_suite import measured_case
@@ -287,7 +293,10 @@ class BenchmarkAggregateTests(unittest.TestCase):
         row = measured_case(**shard_cases(report["shard"])[0])
         row["evidence"] = [
             {
-                "environment": {"polars_threads": 32, "tokio_worker_threads": "32"},
+                "environment": {
+                    "polars_threads": polars_thread_count(row),
+                    "tokio_worker_threads": str(worker_thread_count(row)),
+                },
                 "native_sha256": {side: "a" * 64 for side in ("baseline", "candidate")},
                 "completion": {
                     side: {"state": "completed"} for side in ("baseline", "candidate")

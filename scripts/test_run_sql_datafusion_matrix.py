@@ -11,9 +11,10 @@ class TestSqlDataFusionMatrix(unittest.TestCase):
     def test_full_screening_matrix_has_every_declared_point(self) -> None:
         points = matrix_points()
 
-        self.assertEqual(len(points), 3 * 4 * 6 * 4)
+        self.assertEqual(len(points), 3 * 4 * 2 * 4)
         self.assertIn((100_000, 1, 1, 4_096), points)
-        self.assertIn((2_100_000, 64, 32, 32_768), points)
+        self.assertIn((2_100_000, 64, 4, 32_768), points)
+        self.assertEqual({point[2] for point in points}, {1, 4})
         self.assertEqual(points, sorted(points))
 
     def test_pareto_frontier_rejects_dominated_latency_and_memory(self) -> None:

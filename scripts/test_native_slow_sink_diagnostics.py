@@ -130,8 +130,8 @@ class SlowSinkEvidenceTests(unittest.TestCase):
 
     def test_thread_settings_preserve_formal_worker_limits(self) -> None:
         expected = {
-            "TOKIO_WORKER_THREADS": "32",
-            "POLARS_MAX_THREADS": "32",
+            "TOKIO_WORKER_THREADS": "4",
+            "POLARS_MAX_THREADS": "4",
             "OMP_NUM_THREADS": "1",
             "OPENBLAS_NUM_THREADS": "1",
             "MKL_NUM_THREADS": "1",
@@ -142,7 +142,7 @@ class SlowSinkEvidenceTests(unittest.TestCase):
         self.assertEqual(thread_settings({}), expected)
         for changed in (
             {**expected, "TOKIO_WORKER_THREADS": "1"},
-            {**expected, "OPENBLAS_NUM_THREADS": "32"},
+            {**expected, "OPENBLAS_NUM_THREADS": "2"},
         ):
             with self.assertRaisesRegex(ValueError, "predeclared diagnostic"):
                 thread_settings(changed)

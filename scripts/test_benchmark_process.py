@@ -203,7 +203,7 @@ class CommandOwnershipTests(unittest.IsolatedAsyncioTestCase):
         child = SimpleNamespace(returncode=0, wait=wait)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            env = {"TOKIO_WORKER_THREADS": "32"}
+            env = {"TOKIO_WORKER_THREADS": "4"}
             with (
                 patch(
                     "scripts.benchmark_suite.process.shutil.which",
@@ -385,14 +385,14 @@ class BenchmarkProcessTests(unittest.IsolatedAsyncioTestCase):
 
     def test_worker_environment_has_explicit_thread_and_cache_boundaries(self):
         environment = child_environment(Path(__file__).resolve().parent / "test-site")
-        self.assertEqual(environment["TOKIO_WORKER_THREADS"], "32")
-        self.assertEqual(environment["POLARS_MAX_THREADS"], "32")
+        self.assertEqual(environment["TOKIO_WORKER_THREADS"], "4")
+        self.assertEqual(environment["POLARS_MAX_THREADS"], "4")
         self.assertEqual(environment["OPENBLAS_NUM_THREADS"], "1")
 
     def test_single_thread_polars_environment_preserves_other_pool_sizes(self):
         environment = child_environment(polars_threads=1)
         self.assertEqual(environment["POLARS_MAX_THREADS"], "1")
-        self.assertEqual(environment["TOKIO_WORKER_THREADS"], "32")
+        self.assertEqual(environment["TOKIO_WORKER_THREADS"], "4")
         self.assertEqual(environment["OPENBLAS_NUM_THREADS"], "1")
 
 

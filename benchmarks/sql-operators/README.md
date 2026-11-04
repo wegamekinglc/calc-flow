@@ -93,14 +93,15 @@ PYTHONPATH=. target/benchmark-venv/bin/python benchmarks/sql-operators/collect.p
 
 The baseline checkout used `git worktree add --detach target/sql-baseline abadd7fe6a02acfc6d5b4f55ba1ab6ce22b4fcb8`. Dependencies came from `uv pip sync --python target/benchmark-venv/bin/python --require-hashes benchmarks/requirements.lock`. The actual native build command is recorded in `build.json`; it used `maturin build --release --locked`. For a fresh run, the maintained `python -m scripts.benchmark_suite build --source . --output target/sql-release` entry point produces a new sealed manifest (with its own build/ABI identity), then the same collector can be used against the baseline catalog.
 
-Validation used the same native SHA-256 as the sealed measurement wheel:
+Validation used the same native SHA-256 as the sealed measurement wheel. Commands
+below are updated to the current 4T limit; pass counts remain historical evidence:
 
 ```bash
 # 47 passed
-JAX_PLATFORMS=cpu TOKIO_WORKER_THREADS=32 target/benchmark-venv/bin/python -m pytest \
+JAX_PLATFORMS=cpu TOKIO_WORKER_THREADS=4 target/benchmark-venv/bin/python -m pytest \
   python/tests/test_native_sql_array_position.py benchmarks/test_sql_operators.py -q
 # 60 passed; 141 unrelated cases deselected
-JAX_PLATFORMS=cpu TOKIO_WORKER_THREADS=32 target/benchmark-venv/bin/python -m pytest \
+JAX_PLATFORMS=cpu TOKIO_WORKER_THREADS=4 target/benchmark-venv/bin/python -m pytest \
   benchmarks/test_engine_comparison.py -q \
   -k 'interval_sql or (engine_outputs and (calc-flow-sql or datafusion))'
 # 63 passed

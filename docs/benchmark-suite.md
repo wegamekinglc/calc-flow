@@ -317,8 +317,9 @@ uses 4. Native streaming reports one or four Tokio workers as
 `Native stream (ready, 1T)` and `Native stream (ready, 4T)`. Polars references
 run in separate fresh processes with `POLARS_MAX_THREADS=4` or `1`, reported as
 `Polars (4T)` and `Polars (1T)`. Measurement and artifact validation check the
-actual thread configuration against each case.
-BLAS helper pools use one thread. The Python benchmark fixtures retain
+actual thread configuration against each case. All other multi-thread engine,
+warm and diagnostic workers also use 4T; only explicit single-thread references
+use 1T. BLAS helper pools use one thread. The Python benchmark fixtures retain
 their own query configuration and timing boundaries. Cross-library native
 streaming uses an already-started runner with **empty rolling state**. Each
 invocation compiles a fresh single-use plan, awaits runner startup and the
@@ -858,10 +859,11 @@ native OFF runtime evidence and allocation coverage remain outstanding. The
 ASOF single-CPU ON baseline advanced epochs in only 13/20 measured samples.
 No clock fix completes these targets or allows new samples to fill old indices.
 
-`calc-flow.issue406-milestone.v1` is the current acquisition policy in
-`scripts/benchmark_suite/issue406_milestone.py`. Historical v2/v3 plans,
+`calc-flow.issue406-milestone.v2` is the current acquisition policy in
+`scripts/benchmark_suite/issue406_milestone.py`. Historical fresh v2/v3 plans,
 their exact revisions, third-product retained controls, recognized failures and
-stopped observations remain historical. The new policy uses only its sealed
+stopped observations remain historical. The milestone v2 policy uses only 1T
+and 4T configurations; archived 32T results remain separate evidence. The new policy uses only its sealed
 baseline and candidate for every pair, including all twelve formerly missing
 baseline OFF arms. Both products require enabled and OFF builds of
 `stream_join_perf` and `stream_asof_e2e`, plus ordinary and traced wheels with
@@ -911,7 +913,7 @@ An OFF sample requires successful cleanup and disabled checkpoint evidence;
 source support for the switch alone is not proof of true OFF execution.
 
 The inventory contains the original 38 semantic cases plus ASOF 10M per side
-on one CPU in three checkpoint modes and interval Join 1M per side on one/32
+on one CPU in three checkpoint modes and interval Join 1M per side on one/four
 CPUs in three modes. The interval path reuses the maintained workload and graph,
 seals both Arrow inputs, project, submission order and full output oracle, and
 checks both sequence identities, multiplicities, types and values. Its processing
@@ -959,8 +961,8 @@ build/execution identities, including after an early stop.
 The envelope is 5,400 seconds total, with collection cutoff at 4,800, settlement
 deadline at 5,100, a 300-second settlement reserve and five-second startup/seal
 allowances. Row 5 retains cumulative 360-second arm / 720-second group limits.
-Serial CPU is limited to 2× target wall time; every 32-CPU case explicitly
-declares 32×. Owned RSS must stay at most 24 GiB, available memory at least 4 GiB,
+Serial CPU is limited to 2× target wall time; every four-CPU case explicitly
+declares 4×. Owned RSS must stay at most 24 GiB, available memory at least 4 GiB,
 output at most 20 GiB and free disk at least 10 GiB. Missing sources, inventory,
 CPU evidence, ownership cleanup or exhausted resources/budget stops acquisition.
 There is no retry, sample expansion, third product or automatic budget extension.
@@ -968,7 +970,9 @@ There is no retry, sample expansion, third product or automatic budget extension
 Reports retain all eight formal conditions and separately list the tighter
 planning targets, including ASOF10M, interval1M and runtime 0.1 ms per actual
 input data batch. LOW and ON limits are the corresponding absolute OFF goal
-divided by 0.90 and 0.75, respectively. For example, Join1M single-CPU LOW/ON
+divided by 0.90 and 0.75, respectively. These are product goals, not archived
+32T measurements or cross-thread comparisons; milestone v2 establishes new 4T
+evidence independently. For example, Join1M single-CPU LOW/ON
 limits are 66.67/80 ms even when measured OFF takes 200 ms. ON also requires
 completed, advancing nonterminal epochs; a fast finite run without them remains
 unmeasured for periodic impact. The runtime floor divides each projection sample

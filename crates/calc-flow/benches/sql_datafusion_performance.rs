@@ -62,7 +62,6 @@ type BenchResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 enum Profile {
     SerialControl,
     MatchedAdaptive,
-    P32Saturation,
     Matrix,
     Attribution,
 }
@@ -72,7 +71,6 @@ impl Profile {
         match value {
             "serial-control" => Ok(Self::SerialControl),
             "matched-adaptive" => Ok(Self::MatchedAdaptive),
-            "p32-saturation" => Ok(Self::P32Saturation),
             "matrix" => Ok(Self::Matrix),
             "attribution" => Ok(Self::Attribution),
             _ => Err(format!("unsupported profile {value:?}").into()),
@@ -83,7 +81,6 @@ impl Profile {
         match self {
             Self::SerialControl => "serial-control",
             Self::MatchedAdaptive => "matched-adaptive",
-            Self::P32Saturation => "p32-saturation",
             Self::Matrix => "matrix",
             Self::Attribution => "attribution",
         }
@@ -91,7 +88,6 @@ impl Profile {
 
     const fn default_rows(self) -> usize {
         match self {
-            Self::P32Saturation => 2_097_152,
             Self::Matrix => 100_000,
             Self::SerialControl | Self::MatchedAdaptive | Self::Attribution => 1_000_000,
         }
@@ -100,8 +96,14 @@ impl Profile {
     const fn default_partitions(self) -> usize {
         match self {
             Self::SerialControl => 1,
-            Self::Matrix => 4,
-            Self::MatchedAdaptive | Self::P32Saturation | Self::Attribution => 32,
+            Self::MatchedAdaptive | Self::Matrix | Self::Attribution => 4,
+        }
+    }
+
+    const fn worker_threads(self) -> usize {
+        match self {
+            Self::SerialControl => 1,
+            Self::MatchedAdaptive | Self::Matrix | Self::Attribution => 4,
         }
     }
 }
@@ -145,7 +147,7 @@ impl Args {
                 "--rows" => rows = Some(parse_positive(&value, "rows")?),
                 "--entities" => entities = Some(parse_positive(&value, "entities")?),
                 "--batch-size" => batch_size = Some(parse_positive(&value, "batch-size")?),
-                "--partitions" => partitions = Some(parse_positive(&value, "partitions")?),
+                "--partitions" => partitions = Some(parse_partitions(&value)?),
                 "--samples" => samples = Some(parse_positive(&value, "samples")?),
                 "--warmups" => warmups = Some(parse_positive(&value, "warmups")?),
                 _ => return Err(format!("unknown argument {flag:?}").into()),
@@ -175,6 +177,14 @@ fn parse_positive(value: &str, name: &str) -> BenchResult<usize> {
         return Err(format!("{name} must be positive").into());
     }
     Ok(parsed)
+}
+
+fn parse_partitions(value: &str) -> BenchResult<usize> {
+    let partitions = parse_positive(value, "partitions")?;
+    if !matches!(partitions, 1 | 4) {
+        return Err("partitions must be one or four".into());
+    }
+    Ok(partitions)
 }
 
 #[derive(Serialize)]
@@ -594,6 +604,7 @@ fn config(args: &Args) -> DataFusionConfig {
     DataFusionConfig {
         batch_size: args.batch_size,
         target_partitions: args.partitions,
+        max_partitions: args.partitions,
         min_rows_per_partition: MIN_ROWS_PER_PARTITION,
         small_rows_threshold: SMALL_ROWS_THRESHOLD,
         enable_rolling_rewrite: false,
@@ -941,7 +952,7 @@ async fn raw_datafusion_sample(
             effective_partitions,
             parallelism_mode: "fixed".to_owned(),
             available_parallelism,
-            max_partitions: 32,
+            max_partitions: configured_partitions,
             min_rows_per_partition: MIN_ROWS_PER_PARTITION,
             small_rows_threshold: SMALL_ROWS_THRESHOLD,
             parallelism_decision_reused: false,
@@ -2094,7 +2105,71 @@ async fn run_operator_workload_tests() -> BenchResult<()> {
 }
 
 #[cfg(test)]
+fn require_partition_defaults() -> BenchResult<()> {
+    for profile in [
+        Profile::MatchedAdaptive,
+        Profile::Matrix,
+        Profile::Attribution,
+    ] {
+        if profile.default_partitions() != 4 {
+            return Err(format!("{} default partitions must be four", profile.as_str()).into());
+        }
+    }
+    if Profile::SerialControl.default_partitions() != 1 {
+        return Err("serial control must use one partition".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn require_profile_worker_threads() -> BenchResult<()> {
+    for profile in [
+        Profile::SerialControl,
+        Profile::MatchedAdaptive,
+        Profile::Matrix,
+        Profile::Attribution,
+    ] {
+        let expected = if profile == Profile::SerialControl {
+            1
+        } else {
+            4
+        };
+        if profile.worker_threads() != expected {
+            return Err(format!("{} runtime must use {expected} workers", profile.as_str()).into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn require_supported_partition_overrides() -> BenchResult<()> {
+    for valid in ["1", "4"] {
+        parse_partitions(valid)?;
+    }
+    for invalid in ["0", "2", "8", "16", "32"] {
+        if parse_partitions(invalid).is_ok() {
+            return Err(format!("unsupported partition count {invalid} was accepted").into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_thread_configuration_tests() -> BenchResult<()> {
+    require_partition_defaults()?;
+    require_profile_worker_threads()?;
+    if Profile::parse("p32-saturation").is_ok() {
+        return Err("retired p32 profile must not run in current benchmarks".into());
+    }
+    require_supported_partition_overrides()
+}
+
+#[cfg(test)]
 async fn run_bench_self_tests() -> BenchResult<()> {
+    if let Err(error) = run_thread_configuration_tests() {
+        eprintln!("sql_datafusion_performance thread-configuration tests: {error}");
+        std::process::exit(1);
+    }
     if let Err(error) = run_output_anchor_tests() {
         eprintln!("sql_datafusion_performance output-anchor tests: {error}");
         std::process::exit(1);
@@ -2127,18 +2202,14 @@ async fn run_all_workloads(args: &Args) -> BenchResult<Vec<CaseEvidence>> {
     Ok(cases)
 }
 
-#[tokio::main]
-async fn main() -> BenchResult<()> {
-    // Benchmark setup, both workload cases, provenance, and atomic publication
-    // remain one top-level evidence lifecycle.
-    #[cfg(test)]
-    let self_test = std::env::args_os().len() == 1; // nosemgrep
-    #[cfg(test)]
-    if self_test {
-        return run_bench_self_tests().await;
-    }
+fn build_runtime(worker_threads: usize) -> BenchResult<tokio::runtime::Runtime> {
+    Ok(tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .build()?)
+}
 
-    let args = Args::parse()?;
+async fn run_benchmark(args: Args) -> BenchResult<()> {
     let cases = run_all_workloads(&args).await?;
     let report = Report {
         schema_version: 1,
@@ -2149,4 +2220,16 @@ async fn main() -> BenchResult<()> {
     };
     write_report(&args.output, &report)?;
     Ok(())
+}
+
+fn main() -> BenchResult<()> {
+    #[cfg(test)]
+    // nosemgrep
+    if std::env::args().len() == 1 {
+        return build_runtime(4)?.block_on(run_bench_self_tests());
+    }
+
+    let args = Args::parse()?;
+    let worker_threads = args.profile.worker_threads();
+    build_runtime(worker_threads)?.block_on(run_benchmark(args))
 }

@@ -108,7 +108,12 @@ fixed single-partition execution.
 
 The comparison benchmark runs Calc Flow and raw DataFusion in the same binary
 with identical input batch boundaries, session configuration, and normalized
-physical plan. Fair profiles always disable the rolling rewrite.
+physical plan. Fair profiles always disable the rolling rewrite. Current runs
+accept only p1 and p4 through `--partitions`; the retired p32 profile and other
+partition counts are rejected rather than executed. The binary constructs its
+own runtime after parsing: `serial-control` uses one Tokio worker, while
+`matched-adaptive`, `matrix`, and `attribution` use four. It does not inherit a
+host-dependent Tokio pool from the environment.
 
 ```bash
 cargo bench -p calc-flow --bench sql_datafusion_performance -- \
@@ -152,9 +157,9 @@ envelope; canonical key order, null/NaN masks, and values must then match. This
 does not add a global sort to either measured physical plan.
 
 `--require-p1` applies one conjunctive gate to the matched-adaptive report and
-its serial control: effective p16 execution for the 1m-row, 64-entity
+its serial control: effective p4 execution for the 1m-row, 64-entity
 `sma_20` and `dual_sma_spread` workloads, absolute Calc Flow latency budgets
-of 90 ms and 110 ms, paired ratios of at most 1.30x and 1.20x, and p16 peak
+of 90 ms and 110 ms, paired ratios of at most 1.30x and 1.20x, and p4 peak
 RSS within 1.5x of the p1 serial control, with latency and ratio read as the
 better of the two independent repeats. The absolute budgets bind only at or
 above the 16-logical-core calibration specification
@@ -177,9 +182,10 @@ python scripts/analyze_sql_datafusion_attribution.py \
   --output target/sql-datafusion/attribution-analysis.json
 ```
 
-The manually dispatched SQL/DataFusion matrix runs the complete P3 grid for
-100k, 1m, and 2.1m rows; 1, 4, 16, and 64 active entities; p1 through p32;
-batch sizes 4096 through 32768; and both SMA workloads. Five-pair screening
+The manually dispatched SQL/DataFusion matrix runs the current P3 grid for
+100k, 1m, and 2.1m rows; 1, 4, 16, and 64 active entities; p1 and p4;
+batch sizes 4096 through 32768; and both SMA workloads. Historical p16/p32
+reports remain archival evidence and are not relabeled as p4 measurements. Five-pair screening
 retains the latency/RSS Pareto frontier,
 then candidates receive two independent 20-pair runs. Both the paired and
 matrix jobs upload their measured reports with `if: always()`, so a failed

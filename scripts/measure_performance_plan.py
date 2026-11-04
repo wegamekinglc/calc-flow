@@ -324,8 +324,8 @@ def _fallback_path(query: dict) -> dict:
 def _validate_fallback_config(case: dict, query: dict, side: str) -> None:
     expected_config = {
         "configured_batch_size": _fallback_batch_size(case),
-        "configured_target_partitions": 32,
-        "requested_target_partitions": 32,
+        "configured_target_partitions": THREADS,
+        "requested_target_partitions": THREADS,
     }
     if any(
         type(query.get(name)) is not int or query[name] != value

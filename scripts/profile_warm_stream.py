@@ -390,9 +390,9 @@ def _configured_worker_environment(
     environment: dict[str, str], workers: int | None
 ) -> dict[str, str]:
     if workers is None:
-        return dict(environment)
-    if type(workers) is not int or workers < 1:
-        raise ValueError("worker thread override must be a positive integer")
+        return {**environment, "TOKIO_WORKER_THREADS": "4"}
+    if type(workers) is not int or workers not in (1, 4):
+        raise ValueError("worker thread override must be one or four")
     return {**environment, "TOKIO_WORKER_THREADS": str(workers)}
 
 
@@ -650,9 +650,11 @@ async def _worker_environments(
 def _allowed_fingerprint_differences(
     environments: list[dict[str, Any]], thread_counts: tuple[int, int] | None
 ) -> set[str]:
-    if thread_counts is None:
-        return {"native_sha256"}
     actual = [env.get("tokio_worker_threads") for env in environments]
+    if thread_counts is None:
+        if actual != ["4"] * len(environments):
+            raise ValueError("worker did not load the default four Tokio workers")
+        return {"native_sha256"}
     if actual != [str(count) for count in thread_counts]:
         raise ValueError("worker did not load the declared thread override")
     return {"native_sha256", "tokio_worker_threads"}
@@ -888,8 +890,10 @@ def main() -> None:
     else:
         if args.samples < 2:
             parser.error("at least two paired samples are required")
-        if args.worker_threads is not None and min(args.worker_threads) < 1:
-            parser.error("worker thread overrides must be positive")
+        if args.worker_threads is not None and any(
+            count not in (1, 4) for count in args.worker_threads
+        ):
+            parser.error("worker thread overrides must be one or four")
         asyncio.run(compare(args))
 
 

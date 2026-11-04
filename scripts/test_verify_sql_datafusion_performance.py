@@ -156,6 +156,14 @@ def _p1_reports(parallelism: int = 32) -> tuple[dict[str, object], dict[str, obj
     matched["environment"]["available_parallelism"] = parallelism
     matched["cases"].append(copy.deepcopy(matched["cases"][0]))
     matched["cases"][1]["name"] = "dual_sma_spread"
+    for case in matched["cases"]:
+        for engine_name in ("calc_flow", "raw_datafusion"):
+            engine = case[engine_name]
+            engine["configured_partitions"] = 4
+            engine["requested_partitions"] = 4
+            engine["effective_partitions"] = 4
+            engine["max_partitions"] = 4
+            engine["partition_rows"] = [250_000] * 4
     serial = copy.deepcopy(matched)
     serial["profile"] = "serial-control"
     for case in serial["cases"]:
@@ -411,17 +419,7 @@ class TestSqlDataFusionEvidence(unittest.TestCase):
             verify_report(first, minimum_samples=20, repeat=second)
 
     def test_p1_accepts_both_workloads_and_serial_memory_control(self) -> None:
-        matched = _report()
-        matched["cases"].append(copy.deepcopy(matched["cases"][0]))
-        matched["cases"][1]["name"] = "dual_sma_spread"
-        serial = copy.deepcopy(matched)
-        serial["profile"] = "serial-control"
-        for case in serial["cases"]:
-            engine = case["calc_flow"]
-            engine["configured_partitions"] = 1
-            engine["requested_partitions"] = 1
-            engine["effective_partitions"] = 1
-            engine["partition_rows"] = [1_000_000]
+        matched, serial = _p1_reports()
 
         verify_p1(matched, serial)
 
@@ -432,17 +430,7 @@ class TestSqlDataFusionEvidence(unittest.TestCase):
             ("peak_rss_bytes", 160_000_000, "RSS"),
         ):
             with self.subTest(field=field):
-                matched = _report()
-                matched["cases"].append(copy.deepcopy(matched["cases"][0]))
-                matched["cases"][1]["name"] = "dual_sma_spread"
-                serial = copy.deepcopy(matched)
-                serial["profile"] = "serial-control"
-                for case in serial["cases"]:
-                    engine = case["calc_flow"]
-                    engine["configured_partitions"] = 1
-                    engine["requested_partitions"] = 1
-                    engine["effective_partitions"] = 1
-                    engine["partition_rows"] = [1_000_000]
+                matched, serial = _p1_reports()
                 if field == "ratio":
                     matched["cases"][0]["paired_ratio_median"] = value
                 else:

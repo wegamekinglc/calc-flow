@@ -1877,14 +1877,22 @@ def _validate_plan_precharge(plan):
 
 def _validate_plan_cpus(plan):
     cpus = plan.get("cpus")
+    current = plan.get("schema") == milestone.SCHEMA
+    required = (
+        max((case.get("threads", 1) for case in plan.get("cases", [])), default=1)
+        if current
+        else 32
+    )
+    if required not in (1, 4, 32):
+        raise ValueError("execution CPU inventory is not a supported sealed contract")
     if (
         not isinstance(cpus, list)
-        or len(cpus) != 32
-        or len(set(cpus)) != 32
+        or len(cpus) != required
+        or len(set(cpus)) != required
         or any(type(cpu) is not int for cpu in cpus)
         or not set(cpus).issubset(os.sched_getaffinity(0))
     ):
-        raise ValueError("execution requires one available fixed 32-CPU set")
+        raise ValueError(f"execution requires one available fixed {required}-CPU set")
 
 
 def _validate_plan_envelope(plan):

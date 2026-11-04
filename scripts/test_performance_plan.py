@@ -104,7 +104,7 @@ def sample_failure_workers(case, sample):
     for side in ("baseline", "candidate"):
         worker = AsyncMock()
         worker.request.side_effect = [
-            {"native_sha256": side, "tokio_worker_threads": "32"},
+            {"native_sha256": side, "tokio_worker_threads": "4"},
             {"case": case, "warmup": sample},
             sample,
             RuntimeError("late sample failure"),
@@ -169,7 +169,7 @@ class PerformancePlanFailureEvidenceTests(unittest.IsolatedAsyncioTestCase):
                 for _ in range(2):
                     worker = AsyncMock()
                     worker.request.side_effect = [
-                        {"native_sha256": "native", "tokio_worker_threads": "32"},
+                        {"native_sha256": "native", "tokio_worker_threads": "4"},
                         {"case": case, "warmup": sample},
                         {"state": "completed", "after_status": status},
                     ]
@@ -210,7 +210,7 @@ class PerformancePlanJournalTests(unittest.IsolatedAsyncioTestCase):
         for side in ("baseline", "candidate"):
             worker = AsyncMock()
             worker.request.side_effect = [
-                {"native_sha256": side, "tokio_worker_threads": "32"},
+                {"native_sha256": side, "tokio_worker_threads": "4"},
                 {"case": case, "warmup": sample},
                 sample,
                 {"state": "completed"},
@@ -475,8 +475,8 @@ def fallback_sample(case, side="candidate"):
         "datafusion_metrics": [
             {
                 "configured_batch_size": case.get("batch_size", 8192),
-                "configured_target_partitions": 32,
-                "requested_target_partitions": 32,
+                "configured_target_partitions": 4,
+                "requested_target_partitions": 4,
                 "rolling_rewrite_enabled": not disabled,
                 "rolling_candidate_windows": 0 if disabled else count,
                 "rolling_rewritten_windows": 0,
@@ -703,7 +703,7 @@ class SqlFallbackFactoryTests(unittest.TestCase):
                     self.assertEqual(
                         builder.with_datafusion_config.call_args.kwargs,
                         {
-                            "target_partitions": 32,
+                            "target_partitions": 4,
                             "batch_size": max(8192, rows) if is_map else 8192,
                             "enable_rolling_rewrite": variant != "rewrite_disabled",
                         },
@@ -791,7 +791,7 @@ class SqlFallbackControllerTests(unittest.IsolatedAsyncioTestCase):
             warmup, sample = samples[side]
             worker = AsyncMock()
             worker.request.side_effect = [
-                {"native_sha256": side, "tokio_worker_threads": "32"},
+                {"native_sha256": side, "tokio_worker_threads": "4"},
                 {"case": case, "warmup": warmup},
                 sample,
                 {"state": "completed"},
@@ -802,7 +802,7 @@ class SqlFallbackControllerTests(unittest.IsolatedAsyncioTestCase):
             declaration = {
                 "query": reference["query"],
                 "fixture": reference["fixture"],
-                "environment": {"tokio_worker_threads": "32"},
+                "environment": {"tokio_worker_threads": "4"},
                 "paths": {
                     side: controller._fallback_path(
                         fallback_sample(case, side)["datafusion_metrics"][0]
