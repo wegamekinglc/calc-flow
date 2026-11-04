@@ -54,14 +54,24 @@ class WarmProfileTests(unittest.TestCase):
                 profile._core_wheel(directory, directory)
 
     def test_worker_thread_override_is_explicit_validated_and_immutable(self) -> None:
-        original = {"TOKIO_WORKER_THREADS": "8", "PATH": "unchanged"}
+        original = {"TOKIO_WORKER_THREADS": "4", "PATH": "unchanged"}
         configured = profile._configured_worker_environment(original, 1)
         self.assertEqual(configured["TOKIO_WORKER_THREADS"], "1")
-        self.assertEqual(original["TOKIO_WORKER_THREADS"], "8")
+        self.assertEqual(original["TOKIO_WORKER_THREADS"], "4")
         self.assertEqual(
             profile._configured_worker_environment(original, None), original
         )
-        for value in (0, -1, True, 1.5):
+        for inherited in ({"TOKIO_WORKER_THREADS": "32"}, {}):
+            configured = profile._configured_worker_environment(inherited, None)
+            self.assertEqual(configured["TOKIO_WORKER_THREADS"], "4")
+            self.assertEqual(
+                inherited.get("TOKIO_WORKER_THREADS"), "32" if inherited else None
+            )
+        self.assertEqual(
+            profile._configured_worker_environment(original, 4)["TOKIO_WORKER_THREADS"],
+            "4",
+        )
+        for value in (0, -1, True, 1.5, 2, 8, 16, 32):
             with self.assertRaises(ValueError):
                 profile._configured_worker_environment(original, value)
 
@@ -209,7 +219,7 @@ class WarmProcessTests(unittest.IsolatedAsyncioTestCase):
         args = SimpleNamespace(
             baseline_build=Path("left"),
             candidate_build=Path("right"),
-            worker_threads=(32, 1),
+            worker_threads=(4, 1),
         )
         with (
             patch.object(
@@ -231,19 +241,30 @@ class WarmProcessTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
             )
-            for count in (32, 1)
+            for count in (4, 1)
         ]
         manifests = [{"native_sha256": "same"}] * 2
         result = await profile._worker_environments(
-            workers, manifests, thread_counts=(32, 1)
+            workers, manifests, thread_counts=(4, 1)
         )
         self.assertEqual(result[1]["tokio_worker_threads"], "1")
         with self.assertRaisesRegex(ValueError, "thread override"):
-            await profile._worker_environments(
-                workers, manifests, thread_counts=(32, 2)
-            )
-        with self.assertRaisesRegex(ValueError, "fingerprints differ"):
+            await profile._worker_environments(workers, manifests, thread_counts=(4, 2))
+        with self.assertRaisesRegex(ValueError, "default four"):
             await profile._worker_environments(workers, manifests)
+
+    def test_default_worker_environments_require_four_threads(self) -> None:
+        valid = [{"tokio_worker_threads": "4"}] * 2
+        self.assertEqual(
+            profile._allowed_fingerprint_differences(valid, None), {"native_sha256"}
+        )
+        for count in ("32", None):
+            invalid = [{"tokio_worker_threads": count}] * 2
+            with (
+                self.subTest(count=count),
+                self.assertRaisesRegex(ValueError, "default four"),
+            ):
+                profile._allowed_fingerprint_differences(invalid, None)
 
     async def test_fresh_case_closes_both_workers_on_measurement_failure(self) -> None:
         workers = [SimpleNamespace(close=AsyncMock()) for _ in range(2)]
@@ -284,6 +305,7 @@ class WarmProcessTests(unittest.IsolatedAsyncioTestCase):
                     return_value={
                         "native_sha256": name,
                         "numpy": version,
+                        "tokio_worker_threads": "4",
                     }
                 )
             )
@@ -295,7 +317,12 @@ class WarmProcessTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_matching_worker_fingerprints_keep_optional_affinity(self) -> None:
         environments = [
-            {"native_sha256": name, "numpy": "1", "cpu_affinity": None}
+            {
+                "native_sha256": name,
+                "numpy": "1",
+                "cpu_affinity": None,
+                "tokio_worker_threads": "4",
+            }
             for name in ("baseline", "candidate")
         ]
         workers = [

@@ -7,17 +7,19 @@ from scripts.benchmark_suite import issue406_report as report_tools
 from scripts.benchmark_suite import issue406_sources as sources
 from scripts.benchmark_suite.report import ROUNDS, SAMPLES, table
 
+# Absolute product goals are not historical measurements. The v2 policy applies
+# them to new 1T/4T runs without comparing against archived 32T result tables.
 FORMAL = {
-    1: ((1, 0.060), (32, 0.015)),
-    2: ((1, 0.600), (32, 0.150)),
-    6: ((1, 0.100), (32, 0.030)),
+    1: ((1, 0.060), (4, 0.015)),
+    2: ((1, 0.600), (4, 0.150)),
+    6: ((1, 0.100), (4, 0.030)),
 }
 PLANNING = {
-    1: ((1, 0.025), (32, 0.012)),
-    2: ((1, 0.250), (32, 0.130)),
-    6: ((1, 0.040), (32, 0.030)),
+    1: ((1, 0.025), (4, 0.012)),
+    2: ((1, 0.250), (4, 0.130)),
+    6: ((1, 0.040), (4, 0.030)),
     9: ((1, 0.400),),
-    10: ((1, 0.300), (32, 0.150)),
+    10: ((1, 0.300), (4, 0.150)),
 }
 
 

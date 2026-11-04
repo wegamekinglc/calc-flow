@@ -11,7 +11,7 @@ from unittest import mock
 def _worker_response(operation, release, case):
     sample = {"seconds": 1.0, "correctness": {"passed": True}}
     return {
-        "hello": {**release, "polars_threads": 32, "tokio_worker_threads": "32"},
+        "hello": {**release, "polars_threads": 4, "tokio_worker_threads": "4"},
         "prepare": {"case": case, "warmup": sample},
         "sample": sample,
         "finish": {"state": "completed"},

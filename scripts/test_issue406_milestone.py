@@ -115,6 +115,24 @@ class MilestonePolicyTests(unittest.TestCase):
         self.assertEqual(sum(len(group[0].sides) for group in groups), 90)
         self.assertEqual(len(acceptance_inventory()), 38)
         self.assertEqual(sum(len(case.sides) for case in acceptance_inventory()), 64)
+        self.assertEqual(milestone.SCHEMA, "calc-flow.issue406-milestone.v2")
+        self.assertEqual({case.threads for case in cases}, {1, 4})
+        self.assertEqual(set(milestone.cpu_budgets().values()), {2.0, 4.0})
+
+    def test_current_plan_uses_four_cpus_and_preserves_historical_cpu_contracts(self):
+        from scripts.benchmark_suite.issue406_run import _validate_plan_cpus
+
+        current = {**plan(), "cpus": list(range(4))}
+        with patch("os.sched_getaffinity", return_value=set(range(32))):
+            _validate_plan_cpus(current)
+            with self.assertRaisesRegex(ValueError, "4-CPU"):
+                _validate_plan_cpus({**current, "cpus": list(range(32))})
+            historical = {
+                "schema": "calc-flow.issue406-milestone.v1",
+                "cases": [{"threads": 32}],
+                "cpus": list(range(32)),
+            }
+            _validate_plan_cpus(historical)
 
     def test_wrong_source_inventory_budget_and_third_product_fail_closed(self):
         for field, value in (
@@ -283,7 +301,7 @@ def _runtime_sample(case, seconds, side, epochs, sample):
     return {
         **sample,
         "product_commit": ("a" if side == "baseline" else "b") * 40,
-        "cpu_budget": 2.0 if case.threads == 1 else 32.0,
+        "cpu_budget": 2.0 if case.threads == 1 else 4.0,
         "cpu_evidence": {
             "schema": "calc-flow.phase-resources.v1",
             "scope": "processing",
@@ -566,7 +584,7 @@ class MilestoneReportTests(unittest.TestCase):
         milestone.validate_sample(case, "candidate", sample, plan())
         for field, value in (
             ("product_commit", "e" * 40),
-            ("cpu_budget", 32.0),
+            ("cpu_budget", 4.0),
             ("cleanup_complete", False),
             ("lifecycle", "failed"),
             ("processing_checkpoint_free", False),

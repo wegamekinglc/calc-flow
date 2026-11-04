@@ -61,9 +61,19 @@ class AcceptanceCase:
 
 
 def acceptance_inventory() -> tuple[AcceptanceCase, ...]:
-    """List each selected size, mode, thread setting, and necessary control."""
+    """Return the frozen execution/fresh inventory with historical 1T/32T cases."""
 
-    runtime = _runtime_inventory()
+    return _acceptance_inventory(32)
+
+
+def current_acceptance_inventory() -> tuple[AcceptanceCase, ...]:
+    """Return the milestone-v2 inventory with explicit 1T/4T cases."""
+
+    return _acceptance_inventory(4)
+
+
+def _acceptance_inventory(parallel_threads: int) -> tuple[AcceptanceCase, ...]:
+    runtime = _runtime_inventory(parallel_threads)
     overhead = tuple(
         AcceptanceCase(7, workload, 1_000_000, 1024, mode)
         for workload in ("asof", "projection", "asof_operator")
@@ -85,14 +95,14 @@ def acceptance_inventory() -> tuple[AcceptanceCase, ...]:
     return (*runtime, *components, *overhead, *small_batches)
 
 
-def _runtime_inventory() -> tuple[AcceptanceCase, ...]:
+def _runtime_inventory(parallel_threads: int) -> tuple[AcceptanceCase, ...]:
     return tuple(
         AcceptanceCase(row, workload, rows, 64_000, mode, threads)
         for row, workload, sizes, configurations in (
-            (1, "join_sealed", (1_000_000,), (1, 32)),
-            (2, "join_sealed", (10_000_000,), (1, 32)),
+            (1, "join_sealed", (1_000_000,), (1, parallel_threads)),
+            (2, "join_sealed", (10_000_000,), (1, parallel_threads)),
             (3, "join_retained", (1_000_000, 4_000_000), (1,)),
-            (6, "asof", (1_000_000,), (1, 32)),
+            (6, "asof", (1_000_000,), (1, parallel_threads)),
         )
         for rows in sizes
         for threads in configurations

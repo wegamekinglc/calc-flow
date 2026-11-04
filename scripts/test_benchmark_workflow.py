@@ -300,6 +300,16 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         )[1].split("      - name:", 1)[0]
         self.assertIn("benchmarks/test_retained_stream.py", adapters)
         self.assertIn("-m pytest", adapters)
+        self.assertIn("POLARS_MAX_THREADS=4", adapters)
+        self.assertIn("TOKIO_WORKER_THREADS=4", adapters)
+        self.assertNotIn("POLARS_MAX_THREADS=32", adapters)
+        self.assertNotIn("TOKIO_WORKER_THREADS=32", adapters)
+
+    def test_sql_benchmarks_use_only_serial_and_four_thread_profiles(self):
+        suite = (ROOT / ".github/workflows/benchmarks.yml").read_text(encoding="utf-8")
+        self.assertNotIn("p32-saturation", suite)
+        profile_loop = "for profile in serial-control matched-adaptive attribution; do"
+        self.assertEqual(suite.count(profile_loop), 2)
 
     def test_complete_suite_is_the_only_scheduled_benchmark_workflow(self):
         diagnostics = (ROOT / ".github/workflows/benchmarks.yml").read_text(

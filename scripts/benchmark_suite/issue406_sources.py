@@ -144,10 +144,10 @@ def validate_binding(plan: dict, execution: Path, files: dict) -> None:
 
 
 def validate_native_identity(plan, build, descriptor, product):
-    if (plan.get("schema"), plan.get("source_policy")) != (
+    if plan.get("source_policy") != POLICY or plan.get("schema") not in {
         "calc-flow.issue406-milestone.v1",
-        POLICY,
-    ):
+        "calc-flow.issue406-milestone.v2",
+    }:
         return
     if (
         build.get("harness_git_sha") != plan["build_harness_git_sha"]

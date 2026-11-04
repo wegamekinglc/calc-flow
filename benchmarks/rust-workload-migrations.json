@@ -119,6 +119,13 @@
       "candidate_sha256": "d506749a896357a4902ce60a3bf3b2a2fdb274ad8b168d1450e231b23f967a64",
       "reason": "Retire execute/external_plan_table_requirement, a 0.6 ns benchmark of the requires_datafusion() bool getter whose timing measures loop alignment rather than calc-flow work. Every other core benchmark, its fixtures and timing boundaries are unchanged; the baseline-only retired case is dropped instead of reported as missing.",
       "reference": "PR #522; retired sub-nanosecond core getter benchmark"
+    },
+    {
+      "target": "sql_datafusion_performance",
+      "baseline_sha256": "edeac3050279be916529bcddb23e039afba1be2afd3bfaf005cc1b973c86083b",
+      "candidate_sha256": "79e6c63bbe31b36c7c9ca600545f72e800d28b8cb03d2175139b041b625d1cbd",
+      "reason": "Thread configuration migration: matched-adaptive, attribution and matrix runs accept only p1/p4, retire the current p32 profile and reject other partition overrides. The binary builds one Tokio worker for serial-control and four for every other current profile instead of inheriting host defaults. Workload correctness and timing boundaries are unchanged; historical p16/p32 reports remain archival and no cross-thread timing equivalence is declared.",
+      "reference": "Complete benchmark suite run 41888462478; fixed 1T/4T benchmark configuration"
     }
   ]
 }

@@ -6,11 +6,18 @@ import unittest
 
 class AcceptanceInventoryTests(unittest.TestCase):
     def test_inventory_preserves_every_target_and_true_retained_sizes(self):
-        from scripts.benchmark_suite.issue406_acceptance import acceptance_inventory
+        from scripts.benchmark_suite.issue406_acceptance import (
+            acceptance_inventory,
+            current_acceptance_inventory,
+        )
 
         cases = acceptance_inventory()
         self.assertEqual({case.row for case in cases}, set(range(1, 9)))
         self.assertEqual(len({case.id for case in cases}), len(cases))
+        self.assertEqual({case.threads for case in cases}, {1, 32})
+        self.assertEqual(
+            {case.threads for case in current_acceptance_inventory()}, {1, 4}
+        )
         self.assert_retained_inventory(cases)
         self.assertTrue(all(case.rows == 1_000_000 for case in cases if case.row == 7))
 

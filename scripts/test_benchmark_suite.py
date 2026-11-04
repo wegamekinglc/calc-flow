@@ -235,10 +235,14 @@ class BenchmarkSuiteTests(unittest.TestCase):
             case = next(case for case in cases if case["backend"] == backend)
             with self.subTest(backend=backend, threads=expected):
                 self.assertEqual(catalog.worker_thread_count(case), expected)
+        self.assertEqual(catalog.THREADS, 4)
         self.assertEqual(catalog.polars_thread_count({"backend": "polars"}), 4)
         self.assertEqual(catalog.polars_thread_count({"backend": "polars-1t"}), 1)
+        self.assertEqual(
+            catalog.polars_thread_count({"backend": "calc-flow-stream"}), 4
+        )
         warm = catalog.warm_cases(1_000_000)[0]
-        self.assertEqual(catalog.worker_thread_count(warm), 32)
+        self.assertEqual(catalog.worker_thread_count(warm), 4)
 
     def test_calc_flow_evidence_uses_variant_thread_counts(self):
         from scripts.benchmark_suite.validation import _validate_evidence
@@ -260,7 +264,7 @@ class BenchmarkSuiteTests(unittest.TestCase):
             row["evidence"] = [
                 {
                     "environment": {
-                        "polars_threads": 32,
+                        "polars_threads": 4,
                         "polars_engine": "streaming",
                         "tokio_worker_threads": str(threads),
                     },
@@ -280,7 +284,7 @@ class BenchmarkSuiteTests(unittest.TestCase):
                 bad = deepcopy(row)
                 for evidence in bad["evidence"]:
                     evidence["environment"]["tokio_worker_threads"] = (
-                        "1" if threads == 32 else "32"
+                        "4" if threads == 1 else "1"
                     )
                 with self.assertRaisesRegex(ValueError, "thread"):
                     _validate_evidence(bad, {"candidate": release})
@@ -357,7 +361,7 @@ class BenchmarkSuiteTests(unittest.TestCase):
                 "environment": {
                     "polars_threads": 1,
                     "polars_engine": "streaming",
-                    "tokio_worker_threads": "32",
+                    "tokio_worker_threads": "4",
                 },
                 "samples": {
                     "candidate": [{"seconds": 0.01, "correctness": {"passed": True}}]
@@ -378,7 +382,7 @@ class BenchmarkSuiteTests(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "Polars.*engine"),
             ):
                 _validate_evidence(bad, {"candidate": release})
-        for backend, polars_threads in (("polars-1t", 32), ("polars", 1)):
+        for backend, polars_threads in (("polars-1t", 4), ("polars", 1)):
             bad = deepcopy(row)
             bad["backend"] = backend
             for evidence in bad["evidence"]:

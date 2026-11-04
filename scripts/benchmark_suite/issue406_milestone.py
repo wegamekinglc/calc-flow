@@ -13,8 +13,10 @@ from scripts.benchmark_suite import issue406_sources as sources
 from scripts.benchmark_suite.issue406_acceptance import (
     MODES,
     AcceptanceCase,
-    acceptance_inventory,
     validate_observation,
+)
+from scripts.benchmark_suite.issue406_acceptance import (
+    current_acceptance_inventory as acceptance_inventory,
 )
 from scripts.benchmark_suite.issue406_fresh import Row5Budget
 from scripts.benchmark_suite.issue406_measurement import (
@@ -25,7 +27,7 @@ from scripts.benchmark_suite.issue406_measurement import (
 from scripts.benchmark_suite.report import ROUNDS, SAMPLES
 from scripts.toolkit import sha256_file, write_json
 
-SCHEMA = "calc-flow.issue406-milestone.v1"
+SCHEMA = "calc-flow.issue406-milestone.v2"
 SIDES = ("baseline", "candidate")
 ENVELOPE = {
     "budget_seconds": 5400,
@@ -65,14 +67,14 @@ def inventory() -> tuple[MilestoneCase, ...]:
         *(MilestoneCase(9, "asof", 10_000_000, 64_000, mode) for mode in MODES),
         *(
             MilestoneCase(10, "interval_join", 1_000_000, 64_000, mode, threads)
-            for threads in (1, 32)
+            for threads in (1, 4)
             for mode in MODES
         ),
     )
 
 
 def cpu_budgets() -> dict[str, float]:
-    return {case.id: 2.0 if case.threads == 1 else 32.0 for case in inventory()}
+    return {case.id: 2.0 if case.threads == 1 else 4.0 for case in inventory()}
 
 
 def _revision(value) -> bool:
@@ -140,7 +142,7 @@ def validate_envelope(plan: dict) -> None:
     if plan.get("cases") != [asdict(case) for case in inventory()]:
         raise ValueError("milestone inventory must contain exactly 47 semantic cases")
     if plan.get("cpu_budgets") != cpu_budgets():
-        raise ValueError("milestone requires serial 2x and explicit parallel 32x CPU")
+        raise ValueError("milestone requires serial 2x and explicit parallel 4x CPU")
     _validate_milestone_exceptions(plan)
     _validate_anchor_descriptor(plan.get("preparation_anchor", {}))
 

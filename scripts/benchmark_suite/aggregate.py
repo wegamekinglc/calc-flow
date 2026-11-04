@@ -145,9 +145,11 @@ def _provenance(reports: list[dict], base: str, head: str) -> str:
             f"Baseline: `{base}`. Candidate: `{head}`.",
             "",
             "Worker identities, dependency versions, raw samples and exact timing "
-            "scopes are retained in the JSON artifacts. New engine SQL/DataFusion "
-            "target partitions and Tokio/Polars worker settings are 32; BLAS helpers "
-            "use one thread. Legacy fixtures retain their own query configuration. "
+            "scopes are retained in the JSON artifacts. Multi-thread engine, warm "
+            "and diagnostic workers use four Tokio/Polars threads and four "
+            "SQL/DataFusion target partitions; explicit single-thread references "
+            "use one. BLAS helpers use one thread. Legacy fixtures retain their "
+            "own query configuration. "
             "Each shard compares versions on its own runner, never "
             "across hosts.",
             "",

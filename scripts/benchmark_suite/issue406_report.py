@@ -271,6 +271,19 @@ def _mode_effect(off: dict, enabled: dict, mode: str) -> dict:
 def _runtime_target(
     cases: list[dict], row: int, workload: str, rows: int, limits: tuple
 ) -> dict:
+    parallel = {
+        case["threads"]
+        for case in cases
+        if case["row"] == row
+        and case["workload"] == workload
+        and case["rows"] == rows
+        and case["threads"] != 1
+    }
+    if len(parallel) == 1:
+        current = parallel.pop()
+        limits = tuple(
+            (current if threads == 32 else threads, limit) for threads, limit in limits
+        )
     absolute, modes = [], []
     for threads, limit in limits:
         off = _find(cases, row, workload, "off", shape=(rows, threads))

@@ -15,7 +15,7 @@ class BenchmarkMeasureTests(unittest.IsolatedAsyncioTestCase):
         case = {"id": "recovery", "family": "warm", "backend": "calc-flow"}
         release = {"native_sha256": "a" * 64}
         sample = {"seconds": 0.01, "correctness": {"passed": True}}
-        environment = {**release, "polars_threads": 32, "tokio_worker_threads": "32"}
+        environment = {**release, "polars_threads": 4, "tokio_worker_threads": "4"}
         workers = {}
         for side in ("baseline", "candidate"):
             requests = [environment, {"case": case, "warmup": sample}, sample]
@@ -60,7 +60,7 @@ class BenchmarkMeasureTests(unittest.IsolatedAsyncioTestCase):
             environment = {
                 **release,
                 "polars_threads": threads,
-                "tokio_worker_threads": "32",
+                "tokio_worker_threads": "4",
             }
             for engine in (None, "auto", "in-memory"):
                 with (
@@ -80,7 +80,7 @@ class BenchmarkMeasureTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 {
                     "polars_threads": threads,
-                    "tokio_worker_threads": "32",
+                    "tokio_worker_threads": "4",
                     "polars_engine": "streaming",
                 },
             )
@@ -90,8 +90,8 @@ class BenchmarkMeasureTests(unittest.IsolatedAsyncioTestCase):
         release = {"native_sha256": "a" * 64}
         environment = {
             **release,
-            "polars_threads": 32,
-            "tokio_worker_threads": "32",
+            "polars_threads": 4,
+            "tokio_worker_threads": "4",
             "packages": {"polars": "2.0.0", "numpy": "2.4.4"},
             "platform": "same-host",
         }
@@ -135,8 +135,8 @@ class BenchmarkMeasureTests(unittest.IsolatedAsyncioTestCase):
             "candidate": {"native_sha256": "b" * 64},
         }
         environment = {
-            "polars_threads": 32,
-            "tokio_worker_threads": "32",
+            "polars_threads": 4,
+            "tokio_worker_threads": "4",
             "packages": {"polars": "2.0.0", "numpy": "2.4.4"},
         }
         workers = {}
@@ -177,7 +177,7 @@ class BenchmarkMeasureTests(unittest.IsolatedAsyncioTestCase):
             worker.close.assert_awaited_once()
 
     async def test_legacy_pair_accepts_release_before_polars_engine_metadata(self):
-        environment = {"polars_threads": 32, "tokio_worker_threads": "32"}
+        environment = {"polars_threads": 4, "tokio_worker_threads": "4"}
         releases = {
             "baseline": {"native_sha256": "a" * 64},
             "candidate": {"native_sha256": "b" * 64},
@@ -215,7 +215,7 @@ class BenchmarkMeasureTests(unittest.IsolatedAsyncioTestCase):
             **release,
             "polars_threads": 1,
             "polars_engine": "streaming",
-            "tokio_worker_threads": "32",
+            "tokio_worker_threads": "4",
         }
         sample = {"seconds": 0.01, "correctness": {"passed": True}}
 

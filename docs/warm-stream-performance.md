@@ -143,17 +143,20 @@ from uninstrumented paired comparisons.
 
 ### Explicit scheduler configuration comparisons
 
-Use the identical build manifest on both sides with `--worker-threads` to test
-Tokio worker counts. The comparator rejects different native or Python wheels
-and permits only the declared worker-count difference in child fingerprints.
-This option does not change Calc Flow defaults or SQL/DataFusion parallelism.
+Ordinary comparisons and diagnostics force four Tokio workers and verify the
+reported worker count, including when the parent environment is unset or
+requests another value. Use the identical build manifest on both sides with
+`--worker-threads` to test explicit worker counts. Only the 1T and 4T controls
+are accepted. The comparator rejects different native or Python wheels and
+permits only the declared worker-count difference in child fingerprints. This
+option does not change Calc Flow defaults or SQL/DataFusion parallelism.
 
 ```bash
 uv run --extra benchmark python scripts/profile_warm_stream.py compare \
   --baseline-build target/warm-candidate-wheels/build.json \
   --candidate-build target/warm-candidate-wheels/build.json \
   --history-rows 1024000 --append-rows 64 --samples 30 \
-  --worker-threads 32 1 --output target/scheduler-32-to-1.json
+  --worker-threads 4 1 --output target/scheduler-4-to-1.json
 ```
 
 Results from different worker counts are configuration experiments, not

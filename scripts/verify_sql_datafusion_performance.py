@@ -732,20 +732,20 @@ def _verify_p1_latency(
 def _verify_p1_memory(name: str, case: dict, serial: dict) -> None:
     if serial["calc_flow"]["effective_partitions"] != 1:
         raise ValueError(f"P1 {name} serial control must use p1")
-    p16_rss = case["calc_flow"]["peak_rss_bytes"]
+    p4_rss = case["calc_flow"]["peak_rss_bytes"]
     p1_rss = serial["calc_flow"]["peak_rss_bytes"]
     rss_limit = p1_rss * 1.5
-    if p16_rss > rss_limit:
+    if p4_rss > rss_limit:
         raise ValueError(
-            f"P1 {name} p16 peak RSS {p16_rss} bytes exceeds 1.5x p1 "
+            f"P1 {name} p4 peak RSS {p4_rss} bytes exceeds 1.5x p1 "
             f"serial-control limit {rss_limit:.0f} bytes (p1 {p1_rss} bytes)"
         )
 
 
 def _verify_p1_case(case: dict, gate: P1Gate) -> list[str]:
     name = case["name"]
-    if case["calc_flow"]["effective_partitions"] != 16:
-        raise ValueError(f"P1 {name} requires effective p16")
+    if case["calc_flow"]["effective_partitions"] != 4:
+        raise ValueError(f"P1 {name} requires effective p4")
     latency_limit, ratio_limit = P1_LIMITS[name]
     key = (name, case["rows"], case["active_entities"])
     latency_ms, ratio = _best_p1_measurements(case, gate.repeat_cases.get(key))
@@ -781,7 +781,7 @@ def _require_p1_workload_coverage(observed: set[str]) -> None:
 def verify_p1(
     report: object, serial_control: object, *, repeat: object | None = None
 ) -> list[str]:
-    """Apply the P1 matched-p16 latency, ratio, and memory requirements.
+    """Apply the P1 matched-p4 latency, ratio, and memory requirements.
 
     The absolute latency budgets only bind on hosts at or above
     ``P1_CALIBRATION_MIN_PARALLELISM`` logical cores; slower hosts get an

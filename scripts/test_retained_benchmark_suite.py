@@ -184,7 +184,7 @@ class RetainedBenchmarkSuiteTests(unittest.TestCase):
             if message["operation"] == "hello":
                 return {
                     **release,
-                    "polars_threads": 32,
+                    "polars_threads": catalog.polars_thread_count(case),
                     "tokio_worker_threads": str(catalog.worker_thread_count(case)),
                 }
             if message["operation"] == "prepare":
