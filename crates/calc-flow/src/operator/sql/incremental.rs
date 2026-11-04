@@ -4,7 +4,7 @@ use std::{borrow::Cow, mem::size_of, sync::Arc};
 use ahash::RandomState;
 use datafusion::{
     arrow::{
-        array::{ArrayRef, BooleanArray},
+        array::{ArrayRef, BooleanArray, StringBuilder},
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
         row::{RowConverter, SortField},
@@ -1979,23 +1979,69 @@ impl IncrementalSql {
         candidates: &CandidateMap,
         name: &str,
     ) -> Result<RecordBatch> {
+        let borrowed = self
+            .keys
+            .iter()
+            .any(|key| key.field.data_type() == &DataType::Utf8)
+            .then(|| {
+                (start..end)
+                    .map(|slot| self.output_group(slot, candidates))
+                    .collect::<Vec<_>>()
+            });
         let columns = (0..self.keys.len() + self.aggregates.len())
             .map(|column| {
-                ScalarValue::iter_to_array((start..end).map(|slot| {
-                    let group = candidates
-                        .get(&slot)
-                        .map_or_else(|| &self.groups[slot], |candidate| &candidate.group);
-                    if column < self.keys.len() {
-                        group.values[column].clone()
-                    } else {
-                        group.results[column - self.keys.len()].clone()
-                    }
-                }))
-                .map_err(|error| df_error(name, error))
+                if let Some(groups) = &borrowed {
+                    self.borrowed_output_column(groups, column, name)
+                } else {
+                    self.scalar_output_column(
+                        (start..end).map(|slot| self.output_group(slot, candidates)),
+                        column,
+                        name,
+                    )
+                }
             })
             .collect::<Result<Vec<ArrayRef>>>()?;
         RecordBatch::try_new(self.aggregate_schema.clone(), columns)
             .map_err(|error| df_error(name, error))
+    }
+
+    fn output_group<'a>(&'a self, slot: usize, candidates: &'a CandidateMap) -> &'a Group {
+        candidates
+            .get(&slot)
+            .map_or_else(|| &self.groups[slot], |candidate| &candidate.group)
+    }
+
+    fn scalar_output_column<'a>(
+        &self,
+        groups: impl Iterator<Item = &'a Group>,
+        column: usize,
+        name: &str,
+    ) -> Result<ArrayRef> {
+        ScalarValue::iter_to_array(groups.map(|group| {
+            if column < self.keys.len() {
+                group.values[column].clone()
+            } else {
+                group.results[column - self.keys.len()].clone()
+            }
+        }))
+        .map_err(|error| df_error(name, error))
+    }
+
+    fn borrowed_output_column(
+        &self,
+        groups: &[&Group],
+        column: usize,
+        name: &str,
+    ) -> Result<ArrayRef> {
+        if self
+            .keys
+            .get(column)
+            .is_some_and(|key| key.field.data_type() == &DataType::Utf8)
+            && let Some(array) = utf8_key_output(groups, column, name)?
+        {
+            return Ok(array);
+        }
+        self.scalar_output_column(groups.iter().copied(), column, name)
     }
 
     fn apply_having(&self, aggregate: RecordBatch, name: &str) -> Result<RecordBatch> {
@@ -2674,6 +2720,34 @@ fn grouped_aggregates_supported(
     aggregates: &[Arc<AggregateFunctionExpr>],
 ) -> bool {
     keys.is_empty() || native_groups_supported(aggregates)
+}
+
+fn utf8_output_capacity(bytes: usize, name: &str) -> Result<usize> {
+    i32::try_from(bytes).map(|_| bytes).map_err(|_| {
+        df_error(
+            name,
+            format!("UTF8 output exceeds i32 offset capacity: {bytes} bytes"),
+        )
+    })
+}
+
+fn utf8_key_output(groups: &[&Group], column: usize, name: &str) -> Result<Option<ArrayRef>> {
+    let mut bytes = 0;
+    for group in groups {
+        let ScalarValue::Utf8(value) = &group.values[column] else {
+            return Ok(None);
+        };
+        bytes = checked_bytes(bytes, [(value.as_ref().map_or(0, String::len), 1)], name)?;
+    }
+    let capacity = utf8_output_capacity(bytes, name)?;
+    let mut builder = StringBuilder::with_capacity(groups.len(), capacity);
+    for group in groups {
+        let ScalarValue::Utf8(value) = &group.values[column] else {
+            return Ok(None);
+        };
+        builder.append_option(value.as_deref());
+    }
+    Ok(Some(Arc::new(builder.finish())))
 }
 
 async fn key_output_charge<'a>(
