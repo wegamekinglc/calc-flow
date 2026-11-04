@@ -339,7 +339,7 @@ impl DataFusionRuntime {
         node_id: Option<&str>,
     ) -> std::result::Result<(), Error> {
         let (registrations, adapter_ns, register_ns) =
-            register_tables(context, &scope.input.tables, node_id)?;
+            register_tables(context, &scope.input.tables, node_id, self.input_partitions)?;
         scope.registrations = Some(registrations);
         let mut planned = plan_uncached(self, context, query).await?;
         planned.input_adapter_ns = adapter_ns;
