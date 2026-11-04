@@ -1,0 +1,457 @@
+{
+  "actual_build_receipts": {
+    "baseline": {
+      "actual_product_revision": "af400b38511bc7f6255fd3549518095b51b20e0c",
+      "binary_sha256": "be89d670e89c7142fdf89849ae86240d3df3b86b2bfa508b52979a525f4c96bd",
+      "cargo_lock_sha256": "7c65baff0b6d1c9598817ae0fb92eac205e51f431054a16cabc9ab87db9ff7cb",
+      "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+      "features": [
+        "benchmark-internals"
+      ],
+      "flags": {
+        "CARGO_BUILD_JOBS": "2",
+        "CARGO_ENCODED_RUSTFLAGS": null,
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": null,
+        "CARGO_PROFILE_RELEASE_DEBUG": null,
+        "CARGO_PROFILE_RELEASE_LTO": null,
+        "CARGO_PROFILE_RELEASE_OPT_LEVEL": null,
+        "CARGO_TARGET_DIR": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target",
+        "RUSTFLAGS": null,
+        "RUSTUP_TOOLCHAIN": null
+      },
+      "harness_sha256": "657de3e697907e473691c2fd0d1b99967d46577333135c50176801f6faa4e04e",
+      "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/sum-followup-columnar-20261104/build/candidate/build.json",
+      "sha256": "ca4d98c8a3a06c135f9f10f8dc7ac6527ffefbd926d7a8499465e974c8673219",
+      "source_root": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-followup-columnar-measured"
+    },
+    "candidate": {
+      "actual_product_revision": "fe0e86ad220bd88ae3aeb1ae6c384e3a72e0a792",
+      "binary_sha256": "08fbff37a2e1c7ac51b08a117172c8b276bb0c0ab146de61836d74e30e43239d",
+      "cargo_lock_sha256": "7c65baff0b6d1c9598817ae0fb92eac205e51f431054a16cabc9ab87db9ff7cb",
+      "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+      "features": [
+        "benchmark-internals"
+      ],
+      "flags": {
+        "CARGO_BUILD_JOBS": "2",
+        "CARGO_ENCODED_RUSTFLAGS": null,
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": null,
+        "CARGO_PROFILE_RELEASE_DEBUG": null,
+        "CARGO_PROFILE_RELEASE_LTO": null,
+        "CARGO_PROFILE_RELEASE_OPT_LEVEL": null,
+        "CARGO_TARGET_DIR": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target",
+        "RUSTFLAGS": null,
+        "RUSTUP_TOOLCHAIN": null
+      },
+      "harness_sha256": "657de3e697907e473691c2fd0d1b99967d46577333135c50176801f6faa4e04e",
+      "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/sum-batch-parallel-20261104/build/candidate/build.json",
+      "sha256": "f478fd69d7ce5f56acb4845b3444ec1c1103fc9027015ad052c2149a6628fe7e",
+      "source_root": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-batch-parallel-measured"
+    }
+  },
+  "baseline_actual_revision": "af400b38511bc7f6255fd3549518095b51b20e0c",
+  "baseline_binary_sha256": "be89d670e89c7142fdf89849ae86240d3df3b86b2bfa508b52979a525f4c96bd",
+  "baseline_receipt": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/sum-followup-columnar-20261104/build/candidate/build.json",
+  "baseline_reuse": "Only after full source/binary/compiler/lock/config/vendor/support compatibility and Git-blob equivalence against merged c9afa. Never label af400 as a fresh c9afa build.",
+  "budget_excludes": [
+    "native builds",
+    "implementation",
+    "ordinary focused functional tests"
+  ],
+  "budget_includes": [
+    "all preflight/source/binary/Git-object guards",
+    "fixture generation/adaptation and independent manifest oracle",
+    "startup",
+    "warmup",
+    "formal invocations",
+    "all per-snapshot arithmetic/schema/hash validation",
+    "CPU captures",
+    "clock-verified decoding",
+    "SQL worker/target analysis",
+    "publication",
+    "owned-process cleanup"
+  ],
+  "budget_seconds": 600,
+  "builds": {
+    "baseline": "reuse compatible actual af400, otherwise new common657 build separately timed",
+    "candidate_actual_seconds": 631.7837250090088,
+    "candidate_estimate_seconds": [
+      600,
+      900
+    ],
+    "candidate_validation_seconds": 0.9791688799741678,
+    "native_owner": "performance",
+    "no_overlap_with_native_tests_or_measurement": true
+  },
+  "candidate_actual_symbols": {
+    "command": [
+      "/usr/bin/nm",
+      "-n",
+      "-S",
+      "-C",
+      "--defined-only",
+      "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/sum-batch-parallel-20261104/build/candidate/grouped_sum_state_benchmark"
+    ],
+    "observed": {
+      "sql_coordinator_merge": [],
+      "sql_local_update": [
+        "<calc_flow::operator::sql::incremental::grouped_parallel::Work as calc_flow::runtime::streaming::gather_work::parallel::ParallelCpuWork>::run"
+      ]
+    },
+    "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/sum-batch-parallel-20261104/build/candidate/candidate-symbols.txt",
+    "sha256": "a03090fe1bc90100fae5ab96c701ec8a2fe0f503c16c5bcdc8de8508af963779",
+    "tool": {
+      "path": "/usr/bin/nm",
+      "sha256": "f04262bf48192a7cbb78a17ca49ae03f8930b0372bd0115576f957b2e2a57a01",
+      "version": "GNU nm (GNU Binutils for Ubuntu) 2.46\nCopyright (C) 2026 Free Software Foundation, Inc.\nThis program is free software; you may redistribute it under the terms of\nthe GNU General Public License version 3 or (at your option) any later version.\nThis program has absolutely no warranty."
+    }
+  },
+  "candidate_public_before_native_build": true,
+  "candidate_public_tree": "e0834050279eba44c48205c84aaa0eb1a600a396",
+  "candidate_revision": "fe0e86ad220bd88ae3aeb1ae6c384e3a72e0a792",
+  "cases": [
+    {
+      "cpus": [
+        0
+      ],
+      "fixture": "stock",
+      "id": "stock-stream-1cpu",
+      "mode": "stream",
+      "partitions": 1,
+      "reason": "one-CPU serial admission and overhead control"
+    },
+    {
+      "cpus": [
+        0,
+        2,
+        4,
+        6
+      ],
+      "fixture": "stock",
+      "id": "stock-stream-4cpu",
+      "mode": "stream",
+      "partitions": 1,
+      "reason": "four physical cores and bounded partial reduction"
+    },
+    {
+      "cpus": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "fixture": "stock",
+      "id": "stock-stream-8cpu",
+      "mode": "stream",
+      "partitions": 1,
+      "reason": "eight logical CPUs, four cores, at most five local units"
+    },
+    {
+      "cpus": [
+        0
+      ],
+      "fixture": "sparse",
+      "id": "sparse-stream-1cpu",
+      "mode": "stream",
+      "partitions": 1,
+      "reason": "preserve sparse single-CPU retained-state performance"
+    },
+    {
+      "cpus": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "fixture": "hotkey",
+      "id": "hotkey-stream-8cpu",
+      "mode": "stream",
+      "partitions": 1,
+      "reason": "90-percent hot-key skew with retained seed tail"
+    }
+  ],
+  "common_harness": {
+    "note": "Native instrumentation only; permanent overlay in frozen build trees, never replace development harness753.",
+    "path": "crates/calc-flow/examples/grouped_sum_state_benchmark.rs",
+    "revision": "84186554b078e25e71003a74fedc91c63b2b7f70",
+    "sha256": "657de3e697907e473691c2fd0d1b99967d46577333135c50176801f6faa4e04e"
+  },
+  "destination": "benchmarks/sum-state/sum-batch-parallel-20261104",
+  "execution_order": [
+    "validate full seals and exact public source objects",
+    "verify compiled exact SQL worker symbols",
+    "prepare maintained dense/sparse fixtures",
+    "generate hotkey fixture and independent all-prefix manifest",
+    "freeze all materialized fixture hashes before measured/profile jobs",
+    "required baseline and candidate dense8 CPU captures (six jobs each, exclude first)",
+    "decode and verify all timestamps plus SQL-specific per-window multi-TID gate",
+    "five fixed cases in listed order",
+    "post-source seals, full statistics/profile target analysis, publication and cleanup"
+  ],
+  "formal_observations": 200,
+  "maintained_fixture_seals": {
+    "sparse": {
+      "batch_rows": [
+        10000,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100
+      ],
+      "fixture": "sparse",
+      "input_rows": 12000,
+      "input_sha256": "641effd7042bd3d0cd1be8f3fef6e6b5d7d726b47c71eaf761a6ec76f10ff3e0",
+      "schema_sha256": "a0e913e165c9b520cf4ad29c294897dda94207e0d3081256927b7d4064d9c1d5",
+      "snapshot_rows": [
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000
+      ],
+      "snapshot_schema_sha256": "13a316580158451de94c8f627faa89607bb24382d87cd7e1dc31844bee1de8c5",
+      "snapshot_sha256": [
+        "27c12eedce20a2f994a703372dd8fc29e3873f64d569d2d09bac4771453c0790",
+        "f63952ae1a403c9d40cc8c508c01b5f7a8ba5d7d39699efb2d4fd0483affd5f9",
+        "083c0a4581293f2d9aad8ee7496a49eef5e3b99acf174bcdcea03d62c38462f4",
+        "526f83c375466e37d35c2b123bce0f564b0aacb16118b60b07c8542cf319978b",
+        "39603be1cf772fdf1d0ef01a202349a2d659c8ee03e26c4b5a072939b91eb679",
+        "bebae210d904ecce4a7f941d354911cdf55bf5f5671145d52aa62419632f5f48",
+        "a51ad92a2b4cac4c4177c50e88215ad5c8346d53301a07f261d619b3ac9c5d42",
+        "aa7b857865d715f71402bbea225a22e5f1ee805c6ded6d5ddd8df987a5fcc61f",
+        "ad465198a2741a146f5a33781f6bcc35b9bd3b5d7f084004c3f2becb892aabb5",
+        "0822c710657a3e1dfb383e9fd36a7d1fb41e84bcbb3b8d7307e7814d2886161f",
+        "fa132b549ac11e9e214a93f72b0462519debe8cba66c2da334fa3605927e0db0",
+        "f05161a8595a4e1b437035734300aab28896f80da6e4bbdcbcc24e4cf0445501",
+        "b1723670bba1ed8ea454e719ff18b9209a7503a6409f9115d7c53600dadc15a5",
+        "2ee8cb647ba8ead105fed34f690f532da12a8859032c4d1a48bc4a3cacebfb3f",
+        "c0314af95533ffe37139fc486f9477f0e32d7ed240f64aa3d26e39a8d36f6b40",
+        "73705e43cb8e592895ed5909384f2323155ff1b88f9bf0df1b40d0ceb5a25b99",
+        "8ba7e8a2d3249faaafd3133d8b32049b175b875276ebdd65c6df4753eb1d9a4d",
+        "7b9c01aa3110202aa5fc0357da8aacbe0760c43a673a32c6ffecd96410815a34",
+        "720eb84fec6bd9d446f0d1e35177b7fd8b948221bb493fa1049501b5a06a551f",
+        "f999b3ceb45afe720cd6b8871a1fbd8457a95fab21b7eda9c68812e0c4f1c2e8",
+        "dc8025243282ce8d5b72f01bdde1a76e6fa8837f3e0efc980d8c50af210d523c"
+      ]
+    },
+    "stock": {
+      "batch_rows": [
+        10000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000
+      ],
+      "fixture": "stock",
+      "input_rows": 2010000,
+      "input_sha256": "a2d5af0e890eb8de7475be91ccbadcb21fad3c320a78e7b5639d20040d61bfab",
+      "schema_sha256": "a0e913e165c9b520cf4ad29c294897dda94207e0d3081256927b7d4064d9c1d5",
+      "snapshot_rows": [
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000
+      ],
+      "snapshot_schema_sha256": "13a316580158451de94c8f627faa89607bb24382d87cd7e1dc31844bee1de8c5",
+      "snapshot_sha256": [
+        "27c12eedce20a2f994a703372dd8fc29e3873f64d569d2d09bac4771453c0790",
+        "1e50bcf6458b8d8ba59565444b305fef526190fdc157f86353a3b1bca4e03e1e",
+        "ce09da77dc08a2eea660308cf1beff6b4966234d032f90e660fa6575a0b6531d",
+        "7746299025277eb54d4f267dadcde28e7e3b4a859e4226982dfbb8b551b9dc24",
+        "5e2c1696dac7e7b0614b767c4dc52cfe87617e8be053fa136b7d3dfca40ec090",
+        "0f919c0e2a1f4b96345a1af10d83b267646e6f5fbe02114823540e3479178ba0",
+        "2a5ae20a7c2833030d19524acc322b7752f535bfb660affe1e36550c47f15979",
+        "9a8a943d1d5678ac1664a60b84bbd9c19f45327758e2d2b98dbed34ed4d090ee",
+        "10cffd2614d510de575e65c2c61514717b113dc71cd193e3ba45f4ff5e943580",
+        "022bdc2b4fe6bd3872db4f173fadce5e93986b9184843869fb4bf7f28f691b6b",
+        "6b7db3636f012c654b8e456f85787cc6a3f946741be0d7e48069327f951836a9",
+        "0bfa93a21db4c511b860308ac162f11d0b06d0c53cf7f49205e06d7d930bf776",
+        "142c1869bb946b31fcd909e5babc817e8533de56abd9c8ba23842ab6730a50c1",
+        "7d6c0c8a64a2995d47991d82c7288f7a89453bb3fabbf56ef4155d41692b599c",
+        "126d2148df1205ba15191661c67251d1b3331cd9a44ce7eb1e3b6fbd98194b34",
+        "ae6f0f858e07ac0ca8840f099b14ce1ce797e560941ff2155728149b349f9902",
+        "634508bf638d5119c67c3a37b4af5d3caf6708b0232a654a38a3411df62893c2",
+        "c48a2f4f38800e1a290f164590bff5898c4a05a60e2bbe2bbfa4b0a5300c91df",
+        "9a69e00ec1ca3dc87f9c8fc4b2010375c0928f234f7d0b67b2ee083e4ced0b2f",
+        "ee489916711ada4eab1f97a29b3f6b9792298a8e0ad8b2bd9978f42c1b8dc6fd",
+        "f522ddd53f35922972bcef785662747654bbe5086630e789c9a39bafde5aa099"
+      ]
+    }
+  },
+  "materialized_fixture_seals": "Generated and frozen inside the600s fixture phase before any profile/timing invocation; common generator+90/100 recipe+independent21snapshot oracle are already fixed here.",
+  "merged_base_revision": "c9afa829ff025280ab346667582c62dc26a34785",
+  "pairs_per_round": 10,
+  "performance_acceptance": "All five complete, accepted SQL-worker profile evidence, no regression on any selected case and improved on at least one of stock-stream-4cpu/stock-stream-8cpu. Otherwise report prototype limits without expanding/retrying.",
+  "prior_measurement_seconds": 0,
+  "profile_callgraph": "dwarf,16384",
+  "profile_case": "stock-stream-8cpu",
+  "profile_event": "cpu-clock:u",
+  "profile_evidence": "Publish full selected stacks, every sample timestamp text, clock alignment, exact rules and per-window/per-OS-TID counters. Large perf and nm output remain sealed local files with path/hash/tool identity. Inclusive shares overlap; unresolved leaves remain visible.",
+  "profile_exclude_first": true,
+  "profile_gate": "Both CPU profiles accepted; candidate must have >=2 distinct canonical OS TIDs with exact SQL-local-worker frames in every one of five verified processing windows. No occupancy-only speedup claim or retries.",
+  "profile_hz": 999,
+  "profile_jobs_per_side": 6,
+  "profile_sides": [
+    "baseline",
+    "candidate"
+  ],
+  "resource_policy": {
+    "controller_affinity": [
+      31
+    ],
+    "datafusion_target_partitions": 1,
+    "external_thread_variables": "all maintained non-Tokio thread variables remain 1",
+    "host": "WSL2; outside-guest host load/power unobservable",
+    "min_rows_per_partition": 1,
+    "tokio_workers": "affinity count",
+    "worker_affinity": "case cpus; one=0, four=0/2/4/6 (four cores), eight=0..7 (four cores/eight logical CPUs)"
+  },
+  "rounds": 2,
+  "schema": "calc-flow.sum-batch-parallel.protocol.v1",
+  "slug": "sum-batch-parallel-20261104",
+  "source_layout": {
+    "baseline_permanent_frozen": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-followup-columnar-measured",
+    "candidate_permanent_frozen": "new detached public candidate tree + exact657 overlay; never restore or edit afterward",
+    "development": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-batch-parallel"
+  },
+  "sql_phase_frames": [
+    [
+      "sql_local_update",
+      "calc_flow::operator::sql::incremental::grouped_parallel::Work::aggregate_range"
+    ],
+    [
+      "sql_local_update",
+      "calc_flow::operator::sql::incremental::grouped_parallel::Work::aggregate_chunk"
+    ],
+    [
+      "sql_local_update",
+      "<calc_flow::operator::sql::incremental::grouped_parallel::Work as calc_flow::runtime::streaming::gather_work::parallel::ParallelCpuWork>::run"
+    ],
+    [
+      "sql_coordinator_merge",
+      "calc_flow::operator::sql::incremental::grouped_parallel::merge_fragment"
+    ],
+    [
+      "sql_coordinator_merge",
+      "calc_flow::operator::sql::incremental::grouped_parallel::merge_fragment::{{closure}}"
+    ],
+    [
+      "sql_coordinator_merge",
+      "calc_flow::operator::sql::incremental::grouped_parallel::resolve_ranks::{{closure}}"
+    ],
+    [
+      "sql_coordinator_merge",
+      "calc_flow::operator::sql::incremental::grouped_parallel::merge_states::{{closure}}"
+    ]
+  ],
+  "statistics": "Existing two-round paired-median 97.8515625% confidence intervals and +5% decision rule; retain every exact verdict, no equivalence from inconclusive.",
+  "status": "frozen-awaiting-independent-acquisition-review",
+  "stop": "Any deadline/conflict/drift/oracle/required-profile failure stops and preserves partial evidence; settle owned processes. No added cases/samples or favorable retries.",
+  "tool_source_sha256": {
+    "scripts/benchmark_suite/sum_batch_parallel.py": "52d29ece79b9472ae3fa030ed1fa7211a5f703a35e3aeffc4a3400ac8b0cd8bb",
+    "scripts/benchmark_suite/sum_state_profile.py": "6ef4cc3d63b3c54e1db7acb5d98061bcac5e7a6cc080b7294450f167107fdbed",
+    "scripts/test_sum_batch_parallel.py": "f36b2501b1cfc4332dbb880ebb4f1a90ce3a616f91534f6fe1963470a05d889d"
+  },
+  "unmeasured": [
+    "finite DataFusion path",
+    "2CPU case",
+    "null input performance",
+    "other scales/types/checkpoint modes"
+  ],
+  "warmup_invocations": 20,
+  "warmups_per_arm_per_round": 1,
+  "workload": {
+    "checkpointing": false,
+    "dense_source_business_rows": 2000000,
+    "hotkey_recipe": "Leave first 10k-row seed batch and all non-key columns unchanged. In each subsequent 100k-row source batch, rows with local row_index%100<90 use account-000/stock-000, the rest retain their original keys. Each SQL batch still has 80k trades; 72k hot and 8k other trade rows.",
+    "max_units_dense_1cpu": 1,
+    "max_units_dense_4cpu": 4,
+    "max_units_dense_8cpu": 5,
+    "oracle": "Independent Python integer modular prefix oracle for every transformed batch; native harness independently validates all full snapshots. Common657 requires all six input columns non-null; reject null fixture rather than claim nullable performance coverage.",
+    "outputs": "retain every full snapshot for post-primary-timer validation",
+    "parallel_admission": "rows>=32768 AND chunks>=4; U=min(8,owner.parallelism(),chunks/2), complete contiguous legacy chunks; exact UnboundedMemoryPool only",
+    "retained_groups": 10000,
+    "seed_and_sparse": "below parallel admission; serial",
+    "seed_rows": 10000,
+    "snapshots_per_stream": 21,
+    "source_business_batch_rows": 100000,
+    "sql_business_batch_rows_after_trade_filter": 80000,
+    "sql_chunks_per_business_batch": 10,
+    "sql_legacy_chunk_rows": 8192
+  }
+}

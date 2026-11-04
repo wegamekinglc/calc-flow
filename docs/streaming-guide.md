@@ -762,6 +762,14 @@ by default. Supply
 to enforce application limits. The budget's cumulative input row/byte
 accounting also applies when native compact state is selected.
 
+Compact grouped integer `SUM` updates currently process each original Batch
+serially. Increasing DataFusion partitions does not create local partial
+workers for this compact path. A
+[bounded batch-parallel experiment](../benchmarks/sum-state/sum-batch-parallel-20261104.md)
+used multiple CPU workers but regressed in its dense four- and eight-CPU cases;
+that prototype is retained as experiment evidence. The shared native CPU
+service used by other operators does not imply parallel compact SUM updates.
+
 Use `StreamRuntimeConfig(sql_compact_state_budget=StateBudget(100_000, 64 << 20))`
 to limit each aggregate SQL node to 100,000 live groups and 64 MiB of conservative
 owned-state charges. `StateBudget.max_rows` means live groups here, including

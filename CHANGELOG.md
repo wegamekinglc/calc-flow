@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-05: Record a bounded batch-parallel integer SQL `SUM` experiment and
+  its reproducible profiling tools. Reject the runtime prototype after confirmed
+  dense-stream regressions of 15.75% with four CPUs and 18.60% with eight CPUs.
+  Preserve the serial runtime and publish the
+  [complete experiment and follow-up direction](benchmarks/sum-state/sum-batch-parallel-20261104.md).
+
 - 2026-11-04: Construct cumulative SQL UTF-8 grouping-key output from borrowed
   strings and share group lookups within each output chunk. Remove intermediate
   scalar-string clones while preserving complete snapshots, schemas,
