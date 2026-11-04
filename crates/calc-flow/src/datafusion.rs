@@ -211,6 +211,11 @@ pub struct DataFusionQueryMetric {
 pub struct DataFusionRuntime {
     compact_pool: Arc<crate::state_memory_pool::OwnedStatePool>,
     config: DataFusionConfig,
+    /// Experimental input-table partition count (benchmark-only).
+    ///
+    /// Production callers keep the default of one partition; the cached
+    /// batch-input experiment sets this before the lazy session initializes.
+    input_partitions: usize,
     runtime_env: Arc<RuntimeEnv>,
     context: OnceLock<SessionContext>,
     selected_udfs: Vec<(UdfReference, Arc<ScalarUDF>)>,
@@ -233,6 +238,30 @@ pub struct DataFusionRuntime {
 impl DataFusionRuntime {
     pub(crate) const fn serial_owned_sql(&self) -> bool {
         self.config.serial_owned_sql()
+    }
+
+    /// Sets the experimental input-table partition count.
+    ///
+    /// Benchmark-only: production batch plans never call this and keep one
+    /// input partition. The value must be set before the session initializes;
+    /// later calls fail closed instead of silently re-registering tables.
+    #[cfg(any(test, feature = "benchmark-internals"))]
+    pub(crate) fn set_input_partitions(&mut self, partitions: usize) -> Result<()> {
+        self.ensure_open()?;
+        if partitions == 0 {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "input_partitions".into(),
+                message: "must be positive".into(),
+            });
+        }
+        if self.context.get().is_some() {
+            return Err(CalcFlowError::Internal {
+                message: "input partitions must be set before the DataFusion session initializes"
+                    .into(),
+            });
+        }
+        self.input_partitions = partitions;
+        Ok(())
     }
 
     /// Creates a run-scoped runtime that owns a lazily initialized `DataFusion` session.
@@ -287,6 +316,7 @@ impl DataFusionRuntime {
         let runtime_acquire_ns = nanos(started.elapsed());
         Ok(Self {
             config,
+            input_partitions: 1,
             compact_pool: Arc::new(crate::state_memory_pool::OwnedStatePool::new(
                 runtime_env.memory_pool.clone(),
                 "SQL compact state budget",
@@ -411,7 +441,8 @@ impl DataFusionRuntime {
                 vec![RecordBatch::new_empty(Arc::clone(schema))],
                 BatchMetadata::new("schema", 0, BTreeMap::new())?,
             )?;
-            registrations.register(alias, &input, Some(node_id))?;
+            // Schema-only planning keeps the existing single-partition shape.
+            registrations.register(alias, &input, Some(node_id), 1)?;
         }
         physical_query_schema(context, &query, node_id).await
     }
@@ -437,7 +468,8 @@ impl DataFusionRuntime {
         self.incremental_sql_plan_calls
             .fetch_add(1, Ordering::Relaxed);
         let mut registrations = TableRegistrations::new(context);
-        registrations.register(alias, &input, Some(node_id))?;
+        // Schema-only planning keeps the existing single-partition shape.
+        registrations.register(alias, &input, Some(node_id), 1)?;
         let state = context.state();
         let raw = state
             .statement_to_plan(query.statement())
@@ -647,7 +679,7 @@ impl DataFusionRuntime {
             u64::from(!context_preexisting) * nanos(session_state_create_start.elapsed());
         let planned = if snapshot_budget.is_some() {
             let (registrations, input_adapter_ns, table_register_ns) =
-                register_tables(context, tables, node_id)?;
+                register_tables(context, tables, node_id, self.input_partitions)?;
             let planned = self.plan_query(context, query, tables, node_id).await?;
             PlannedQuery {
                 input_adapter_ns,
@@ -791,7 +823,7 @@ impl DataFusionRuntime {
             return bind_template(context, &template, batches, node_id);
         }
         let (registrations, input_adapter_ns, table_register_ns) =
-            register_tables(context, tables, node_id)?;
+            register_tables(context, tables, node_id, self.input_partitions)?;
         let planned = self.plan_query(context, query, tables, node_id).await?;
         Ok(PlannedQuery {
             input_adapter_ns,
@@ -1289,6 +1321,32 @@ fn validate_udf_sql_namespace<'a>(
     Ok(())
 }
 
+/// Splits the record batches of one input table into contiguous, roughly equal
+/// partitions for the benchmark-only input-partition experiment.
+///
+/// A single partition keeps the exact existing registration shape. Empty inputs
+/// stay one empty partition, and a request larger than the batch count is
+/// capped at the batch count so every partition holds at least one batch.
+pub(crate) fn split_record_batches(
+    batches: &[RecordBatch],
+    partitions: usize,
+) -> Vec<Vec<RecordBatch>> {
+    if partitions <= 1 || batches.len() <= 1 {
+        return vec![batches.to_vec()];
+    }
+    let count = partitions.min(batches.len());
+    let base = batches.len() / count;
+    let remainder = batches.len() % count;
+    let mut result = Vec::with_capacity(count);
+    let mut start = 0;
+    for index in 0..count {
+        let width = base + usize::from(index < remainder);
+        result.push(batches[start..start + width].to_vec());
+        start += width;
+    }
+    result
+}
+
 struct TableRegistrations<'a> {
     context: &'a SessionContext,
     aliases: Vec<String>,
@@ -1312,6 +1370,7 @@ impl<'a> TableRegistrations<'a> {
         alias: &str,
         batch: &Batch,
         node_id: Option<&str>,
+        input_partitions: usize,
     ) -> Result<TableRegistrationTiming> {
         if !is_identifier(alias) {
             return Err(registration_error(
@@ -1324,9 +1383,9 @@ impl<'a> TableRegistrations<'a> {
         let table = batch
             .table_payload()
             .map_err(|error| registration_error(alias, node_id, error))?;
-        let provider =
-            MemTable::try_new(Arc::clone(table.schema()), vec![table.batches().to_vec()])
-                .map_err(|error| registration_error(alias, node_id, error))?;
+        let partitions = split_record_batches(table.batches(), input_partitions);
+        let provider = MemTable::try_new(Arc::clone(table.schema()), partitions)
+            .map_err(|error| registration_error(alias, node_id, error))?;
         let input_adapter_ns = nanos(input_adapter_start.elapsed());
         let table_register_start = Instant::now();
         self.context
@@ -1392,12 +1451,13 @@ fn register_tables<'a>(
     context: &'a SessionContext,
     tables: &BTreeMap<String, Batch>,
     node_id: Option<&str>,
+    input_partitions: usize,
 ) -> Result<(TableRegistrations<'a>, u64, u64)> {
     let mut registrations = TableRegistrations::new(context);
     let mut input_adapter_ns = 0_u64;
     let mut table_register_ns = 0_u64;
     for (alias, batch) in tables {
-        let timing = registrations.register(alias, batch, node_id)?;
+        let timing = registrations.register(alias, batch, node_id, input_partitions)?;
         input_adapter_ns = input_adapter_ns.saturating_add(timing.input_adapter_ns);
         table_register_ns = table_register_ns.saturating_add(timing.table_register_ns);
     }

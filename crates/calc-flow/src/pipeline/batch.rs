@@ -153,6 +153,8 @@ pub struct BatchExecutionPlan {
     /// Built-in batch operators hold no run state; only external ones can.
     has_operator_state: bool,
     row_parallel_sql: bool,
+    /// Experimental benchmark-only input partition count; one in production.
+    input_partitions: usize,
     pub(crate) run_lock: tokio::sync::Mutex<()>,
     operation_state: StdMutex<OperationState>,
 }
@@ -236,6 +238,7 @@ impl PipelineBuilder {
             query_templates: Arc::default(),
             has_operator_state,
             row_parallel_sql,
+            input_partitions: 1,
             run_lock: tokio::sync::Mutex::new(()),
             operation_state: StdMutex::new(OperationState::default()),
         })
@@ -249,6 +252,30 @@ impl BatchExecutionPlan {
 
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
+    }
+
+    /// Sets the experimental input-table partition count for this plan.
+    ///
+    /// Benchmark-only: the value is applied when each node registers its input
+    /// tables, so every input alias is split into that many contiguous
+    /// `MemTable` partitions. Production plans keep the default of one. The
+    /// setting is not part of the project document, fingerprint, or public
+    /// configuration contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] when `partitions` is zero.
+    #[cfg(any(test, feature = "benchmark-internals"))]
+    #[must_use = "the modified plan is the value to execute"]
+    pub fn with_input_partitions(mut self, partitions: usize) -> Result<Self> {
+        if partitions == 0 {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "input_partitions".into(),
+                message: "must be positive".into(),
+            });
+        }
+        self.input_partitions = partitions;
+        Ok(self)
     }
 
     pub const fn datafusion_config(&self) -> Option<DataFusionConfig> {
@@ -421,6 +448,8 @@ impl BatchExecutionPlan {
                     Arc::clone(&self.query_templates),
                 )?;
                 runtime.register_udfs(&table.udfs, &table.selected_udfs)?;
+                #[cfg(any(test, feature = "benchmark-internals"))]
+                runtime.set_input_partitions(self.input_partitions)?;
                 if self.row_parallel_sql {
                     let input_rows = inputs
                         .values()
@@ -1345,6 +1374,10 @@ mod parallelism_tests;
 #[cfg(test)]
 #[path = "batch/template_tests.rs"]
 mod template_tests;
+
+#[cfg(test)]
+#[path = "batch/input_partition_tests.rs"]
+mod input_partition_tests;
 
 #[cfg(test)]
 mod data_tests {

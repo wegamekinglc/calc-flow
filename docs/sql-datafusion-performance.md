@@ -74,6 +74,14 @@ Single-input batch graphs, standalone DataFusion runtimes and stream nodes keep
 the entity-based policy. Fixed mode is unchanged. Session creation remains lazy
 and its first-query phase timing retains the initialization cost.
 
+Input registration is not a parallelism ceiling. With more than one effective
+target partition, DataFusion's round-robin repartition increases row-local scan
+parallelism to that effective count, so registering an input table as one
+`MemTable` partition does not keep projection or filter execution single-core.
+The effective partition decision described above (fixed mode or the opted-in
+`auto` policy) is therefore the SQL parallelism control; splitting the input
+into extra table partitions does not add parallelism on DataFusion 55.
+
 ## Telemetry
 
 Each `DataFusionQueryMetric` records configured, requested and effective
