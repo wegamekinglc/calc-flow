@@ -34,6 +34,7 @@ from scripts.benchmark_suite.catalog import (
     CAPABILITIES,
     POLARS_ENGINE,
     THREADS,
+    worker_thread_count,
 )
 
 # Keep comparison-engine fixture chunks independent of native stream batching.
@@ -308,7 +309,7 @@ def sql_query(scenario: str) -> str:
         raise ValueError("unsupported SQL benchmark scenario") from error
 
 
-def _calc_flow(data: Workload, scenario: str):
+def _calc_flow(data: Workload, scenario: str, target_partitions: int = THREADS):
     aliases = (
         ("input", "dimension")
         if scenario == "join"
@@ -318,7 +319,7 @@ def _calc_flow(data: Workload, scenario: str):
     )
     plan = (
         PipelineBuilder("suite-sql")
-        .with_datafusion_config(target_partitions=THREADS, batch_size=8192)
+        .with_datafusion_config(target_partitions=target_partitions, batch_size=8192)
         .sql("query", sql_query(scenario), aliases=aliases)
         .compile_batch()
     )
@@ -330,7 +331,7 @@ def _calc_flow(data: Workload, scenario: str):
     return lambda: plan.execute(inputs).outputs["output"].to_pyarrow()
 
 
-def _datafusion(data: Workload, scenario: str):
+def _datafusion(data: Workload, scenario: str, target_partitions: int = THREADS):
     from datafusion import SessionConfig, SessionContext
 
     batches = data.table.to_batches(max_chunksize=TABLE_BATCH_ROWS)
@@ -339,7 +340,9 @@ def _datafusion(data: Workload, scenario: str):
 
     def execute():
         context = SessionContext(
-            SessionConfig().with_target_partitions(THREADS).with_batch_size(8192)
+            SessionConfig()
+            .with_target_partitions(target_partitions)
+            .with_batch_size(8192)
         )
         context.register_record_batches("input", [batches])
         if scenario == "join":
@@ -534,7 +537,7 @@ class EngineCase:
         self.expected = expected_output(self.data, scenario)
         self.loop = None
         self.finance = None
-        if backend == "calc-flow-stream":
+        if backend.startswith("calc-flow-stream"):
             self.events = stream_events(
                 self.data.table,
                 self.data.entities,
@@ -573,10 +576,16 @@ class EngineCase:
             except BaseException:
                 self.finance.close()
                 raise
+        elif backend.startswith("calc-flow-sql"):
+            self.calculate = _calc_flow(
+                self.data, scenario, target_partitions=worker_thread_count(case)
+            )
+        elif backend == "datafusion":
+            self.calculate = _datafusion(
+                self.data, scenario, target_partitions=worker_thread_count(case)
+            )
         else:
             factory = {
-                "calc-flow-sql": _calc_flow,
-                "datafusion": _datafusion,
                 "polars": _polars,
                 "polars-1t": _polars,
                 "ta-lib": _ta_lib,

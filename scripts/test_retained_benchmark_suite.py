@@ -94,7 +94,15 @@ class RetainedBenchmarkSuiteTests(unittest.TestCase):
         self.assertEqual(max(case["rows"] for case in interval), 1_000_000)
         self.assertEqual(
             {case["backend"] for case in interval},
-            {"calc-flow-stream", "calc-flow-sql", "datafusion", "polars", "polars-1t"},
+            {
+                "calc-flow-stream-1t",
+                "calc-flow-stream",
+                "calc-flow-sql-1t",
+                "calc-flow-sql",
+                "datafusion",
+                "polars",
+                "polars-1t",
+            },
         )
 
     def test_scheduled_retained_variants_have_explicit_dimensions(self):
@@ -174,7 +182,11 @@ class RetainedBenchmarkSuiteTests(unittest.TestCase):
 
         async def request(**message):
             if message["operation"] == "hello":
-                return {**release, "polars_threads": 32, "tokio_worker_threads": "32"}
+                return {
+                    **release,
+                    "polars_threads": 32,
+                    "tokio_worker_threads": str(catalog.worker_thread_count(case)),
+                }
             if message["operation"] == "prepare":
                 warmup = wrong if operation == "prepare" else sample
                 return {"case": case, "warmup": warmup}

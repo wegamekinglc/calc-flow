@@ -17,13 +17,17 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def child_environment(
-    site: Path | None = None, *, source: Path = ROOT, polars_threads: int = THREADS
+    site: Path | None = None,
+    *,
+    source: Path = ROOT,
+    polars_threads: int = THREADS,
+    tokio_threads: int = THREADS,
 ) -> dict[str, str]:
     return {
         **os.environ,
         "PYTHONPATH": os.pathsep.join(str(p) for p in (site, source) if p is not None),
         "PYTHONDONTWRITEBYTECODE": "1",
-        "TOKIO_WORKER_THREADS": str(THREADS),
+        "TOKIO_WORKER_THREADS": str(tokio_threads),
         "POLARS_MAX_THREADS": str(polars_threads),
         "OMP_NUM_THREADS": "1",
         "OPENBLAS_NUM_THREADS": "1",
@@ -173,7 +177,13 @@ class Worker:
 
     @classmethod
     async def start(
-        cls, site: Path, root: Path, *, source: Path, polars_threads: int = THREADS
+        cls,
+        site: Path,
+        root: Path,
+        *,
+        source: Path,
+        polars_threads: int = THREADS,
+        tokio_threads: int = THREADS,
     ):
         root.mkdir(parents=True, exist_ok=True)
         log = (root / "stderr.log").open("wb")
@@ -187,7 +197,10 @@ class Worker:
                 str(root),
                 cwd=source,
                 env=child_environment(
-                    site, source=source, polars_threads=polars_threads
+                    site,
+                    source=source,
+                    polars_threads=polars_threads,
+                    tokio_threads=tokio_threads,
                 ),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,

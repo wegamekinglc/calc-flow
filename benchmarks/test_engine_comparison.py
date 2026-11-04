@@ -222,6 +222,16 @@ def test_single_thread_reference_rejects_a_process_with_a_larger_pool(
         EngineCase(case, tmp_path)
 
 
+@pytest.mark.parametrize("backend", ("calc-flow-sql-1t", "calc-flow-stream-1t"))
+def test_calc_flow_single_thread_variants_execute_oracles(backend, tmp_path):
+    case = next(case for case in engine_cases(10) if case["backend"] == backend)
+    runner = EngineCase(case, tmp_path)
+    try:
+        assert runner.sample()["correctness"]["passed"]
+    finally:
+        runner.close()
+
+
 @pytest.mark.parametrize("scenario", STREAM_CASES)
 def test_ready_stream_repeated_samples_use_fresh_execution_plans(scenario, tmp_path):
     case = next(

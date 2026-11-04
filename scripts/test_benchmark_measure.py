@@ -56,7 +56,7 @@ class BenchmarkMeasureTests(unittest.IsolatedAsyncioTestCase):
 
     def test_polars_collection_engine_is_required_for_polars_references(self):
         release = {"native_sha256": "a" * 64}
-        for backend, threads in (("polars", 32), ("polars-1t", 1)):
+        for backend, threads in (("polars", 4), ("polars-1t", 1)):
             environment = {
                 **release,
                 "polars_threads": threads,

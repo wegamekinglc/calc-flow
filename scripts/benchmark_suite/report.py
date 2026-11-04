@@ -389,7 +389,7 @@ def _reference_cell(case: dict | None) -> str:
         return "missing"
     if (
         case["status"] == "ok"
-        and case.get("backend") == "calc-flow-stream"
+        and case.get("backend", "").startswith("calc-flow-stream")
         and case.get("scope")
         != (INTERVAL_SCOPE if case.get("scenario") == "interval_join" else STREAM_SCOPE)
     ):
@@ -417,10 +417,12 @@ def _cross_library_table(cases: list[dict]) -> str:
         [
             "Rows",
             "Scenario",
-            "Native stream (ready)",
-            "Calc Flow SQL",
-            "DataFusion",
-            "Polars (32T)",
+            "Native stream (ready, 1T)",
+            "Native stream (ready, 4T)",
+            "Calc Flow SQL (1T)",
+            "Calc Flow SQL (4T)",
+            "DataFusion (4T)",
+            "Polars (4T)",
             "Polars (1T)",
             "TA-Lib",
             "Finance-Python",
@@ -431,7 +433,9 @@ def _cross_library_table(cases: list[dict]) -> str:
 
 def _cross_library_row(size: int, scenario: str, index: dict) -> list[object]:
     backends = (
+        "calc-flow-stream-1t",
         "calc-flow-stream",
+        "calc-flow-sql-1t",
         "calc-flow-sql",
         "datafusion",
         "polars",
@@ -450,7 +454,11 @@ def _cross_library_row(size: int, scenario: str, index: dict) -> list[object]:
             scenario not in CAPABILITIES[backend]
             or scenario == "interval_join"
             and size > INTERVAL_MAX_ROWS
-            or (backend == "calc-flow-stream" and cap is not None and size > cap)
+            or (
+                backend.startswith("calc-flow-stream")
+                and cap is not None
+                and size > cap
+            )
         ):
             return "unsupported"
         return _reference_cell(index.get((size, scenario, backend)))
