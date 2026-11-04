@@ -1591,9 +1591,60 @@ def test_array_expression_validates_function_arguments(
 
 
 @pytest.mark.parametrize(
+    ("shape", "message"),
+    [
+        ("1", "reshape shape must be a tuple or list"),
+        ("(" + ",".join(["True"] * 17) + ")", "reshape rank limit is 16"),
+        ("(+1,)", "reshape dimensions must be integers"),
+        ("(-True,)", "reshape dimensions must be integers"),
+        ("(1.0,)", "reshape dimensions must be integers"),
+        ("(-1.0,)", "reshape dimensions must be integers"),
+        ("(--1,)", "reshape dimensions must be integers"),
+        ("(-1, -1, True)", "reshape dimensions must be integers"),
+        ("(-1, -1, 0, -2, 1000001)", "reshape shape allows at most one -1"),
+        (
+            "(-1, 0, -2, 1000001)",
+            "reshape cannot combine a zero dimension with -1",
+        ),
+        ("(-2, 1000001, 1000001)", "reshape dimensions must be non-negative or -1"),
+        ("(1000001, 1000001)", "reshape dimension limit is 1000000"),
+        ("(-1, 10001, 1000)", "reshape output limit is 10000000 elements"),
+    ],
+)
+def test_reshape_reports_first_shape_error(shape: str, message: str) -> None:
+    with pytest.raises(ValueError) as error:
+        _external("reshape_invalid", "numpy", f"reshape(x, {shape})").compile_batch()
+
+    assert str(error.value) == f"invalid array expression: {message}"
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "[]",
+        "[-0, 3]",
+        "[2, -1]",
+        "(1000000, 10)",
+        "(-1, 1000000, 10)",
+        "(0, 1000000, 1000000)",
+    ],
+)
+def test_reshape_accepts_literal_shapes_and_exact_limits(shape: str) -> None:
+    runtime = Runtime()
+    register_numpy(runtime)
+
+    _external("reshape_valid", "numpy", f"reshape(x, {shape})").compile_batch(runtime)
+
+
+@pytest.mark.parametrize(
     ("source_shape", "expression", "message"),
     [
         ((1001, 1000), "reshape(x, (-1,))", "reshape dimension limit is 1000000"),
+        (
+            (1_000_001, 11),
+            "reshape(x, (-1, 11))",
+            "reshape dimension limit is 1000000",
+        ),
         (
             (1001, 10000),
             "reshape(x, (-1, 11))",
@@ -1617,6 +1668,11 @@ def test_numpy_provider_rejects_inferred_reshape_limits(
     ("source_shape", "expression", "message"),
     [
         ((1001, 1000), "reshape(x, (-1,))", "reshape dimension limit is 1000000"),
+        (
+            (1_000_001, 11),
+            "reshape(x, (-1, 11))",
+            "reshape dimension limit is 1000000",
+        ),
         (
             (1001, 10000),
             "reshape(x, (-1, 11))",

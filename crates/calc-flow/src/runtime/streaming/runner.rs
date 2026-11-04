@@ -549,11 +549,6 @@ impl ContinuousJob {
             .collect()
     }
 
-    #[cfg(test)]
-    pub(crate) fn gather_owner_for_test(&self) -> super::gather_work::JobGatherOwner {
-        self.core.gather_work.clone()
-    }
-
     pub(crate) fn status(&self) -> ContinuousJobStatus {
         let (state, terminal_cause) = {
             let state = self.core.state.lock();
@@ -1099,14 +1094,6 @@ impl ContinuousRunner {
 
     pub(crate) fn diagnostics(&self) -> RunnerDiagnosticsSnapshot {
         self.core.diagnostics.snapshot()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn managed_checkpoint_for_test(
-        storage: ManagedCheckpointRuntime,
-        config: StreamRuntimeConfig,
-    ) -> crate::Result<CheckpointRuntimeSpec> {
-        CheckpointRuntimeSpec::managed(storage, config)
     }
 
     #[cfg(test)]

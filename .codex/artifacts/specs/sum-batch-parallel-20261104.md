@@ -1,5 +1,17 @@
 # Single-Batch Parallel Integer SUM - Specification
 
+## Outcome
+
+The prototype at public revision
+`fe0e86ad220bd88ae3aeb1ae6c384e3a72e0a792` passed its focused functional
+review but failed the fixed performance acceptance below: dense four- and
+eight-CPU cases confirmed regressions. The archive delivery therefore preserves
+the target branch's serial SUM implementation; its final tree is checked
+against merged `d5e05c31110ebb1e6bfb8fa3d63359f50010f16e`. The
+requirements below describe the rejected prototype, not a shipped parallel SUM
+contract. See the
+[experiment decision and sealed results](../../../benchmarks/sum-state/sum-batch-parallel-20261104.md).
+
 ## Source
 
 - User request on 2026-11-04: continue performance work under the previous
@@ -268,14 +280,13 @@ passing controls need not be rerun unchanged.
   the existing 90% workspace line floor), and cross-platform checks finish
   green before the already-authorized merge; pending CI is not merge readiness.
 
-## Review Handoff
+## Final Disposition
 
-The linked preimplementation critique permits focused RED/GREEN implementation
-under the narrowed eligibility, admission, ownership, and error-order rules
-above. Actual code still requires independent verification of checked capacity
-bounds, variable-width key encoding, peak reduction overlap, backing-buffer
-credit lifetime, and interruptible settlement against FR3/FR6/FR8. No public
-contract decision or further user permission is needed for these internal
-rules. The next route is the implementer, followed by independent source and
-measurement review; this specification does not establish performance or merge
-readiness.
+Independent source review and 70 focused/affected Rust tests verified the
+prototype's functional and ownership boundaries. The frozen five-case
+measurement then rejected its performance. The runtime prototype is preserved
+at the public revision above, while the delivery restores the merged serial
+runtime and publishes the tools and sealed evidence. The
+[canonical review](../reviews/sum-batch-parallel-20261104.md) records the
+separate source, measurement, and archive-delivery decisions. Required remote
+CI remains a condition for merging that archive delivery.

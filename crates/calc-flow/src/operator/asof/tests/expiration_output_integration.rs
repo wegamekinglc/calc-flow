@@ -1,14 +1,31 @@
 use super::*;
-use crate::OperatorStateSnapshot;
+use crate::{OperatorStateSnapshot, runtime::streaming::gather_work::TestService};
 use datafusion::arrow::array::Array;
 
-#[tokio::test(flavor = "current_thread")]
-async fn test_a03_a10_projected_restore_preserves_multiplicity_and_funding() {
+#[test]
+fn test_a03_a10_projected_restore_preserves_multiplicity_and_funding() {
+    // Keep service control outside Tokio, including cleanup after an assertion panic.
+    let service = TestService::new(
+        std::thread::available_parallelism().map_or(1, usize::from),
+        1,
+    )
+    .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(projected_restore_preserves_multiplicity_and_funding(
+        &service,
+    ));
+}
+
+async fn projected_restore_preserves_multiplicity_and_funding(service: &TestService) {
     let (mut operator, left, right) = prefix_fixture();
     operator.set_output_projection(vec![2, 5, 5]).unwrap();
     let configured = operator.runtime.pool.reserved();
     assert!(configured > 0);
-    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new())
+        .with_gather_owner(service.owner("asof-projected-restore".into()));
     let context = StreamOperatorContext::new(&job, "asof", None);
     let mut output = EdgeCollector::new(operator.output_ports().to_vec());
     operator
@@ -357,8 +374,25 @@ fn assert_cropped_caller(caller: &Batch, original_record: &RecordBatch) {
     );
 }
 
-#[tokio::test]
-async fn test_cropped_dominance_only_progress_restores_typed_identity_and_complete_output() {
+#[test]
+fn test_cropped_dominance_only_progress_restores_typed_identity_and_complete_output() {
+    let service = TestService::new(
+        std::thread::available_parallelism().map_or(1, usize::from),
+        1,
+    )
+    .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(
+        cropped_dominance_only_progress_restores_typed_identity_and_complete_output(&service),
+    );
+}
+
+async fn cropped_dominance_only_progress_restores_typed_identity_and_complete_output(
+    service: &TestService,
+) {
     let mut operator = cropped_operator();
     let configured = operator.runtime.pool.reserved();
     assert!(configured > 0);
@@ -414,7 +448,8 @@ async fn test_cropped_dominance_only_progress_restores_typed_identity_and_comple
     assert_eq!(restored.status.retained_right_rows, 1);
     assert_eq!(restored.status.identity_only_rows, 2);
     assert_log_funded(&restored);
-    let job = StreamJobContext::new(2, "asof", JsonMap::new(), None, CancellationToken::new());
+    let job = StreamJobContext::new(2, "asof", JsonMap::new(), None, CancellationToken::new())
+        .with_gather_owner(service.owner("asof-cropped-restore".into()));
     let left_caller = cropped_input(&restored, &[("A", 105, 123), ("B", 105, 124)]);
     let left_original = left_caller.table_payload().unwrap().batches()[0].clone();
     let _delivered = assert_cropped_continuation(

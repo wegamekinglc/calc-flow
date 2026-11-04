@@ -682,18 +682,9 @@ impl TestService {
 
     pub(crate) fn owner(&self, run_id: Arc<str>) -> super::JobGatherOwner {
         let owner = super::JobGatherOwner::new(run_id);
-        self.attach_owner(&owner);
+        owner.0.home.state.lock().service =
+            Some(Arc::downgrade(&self.control.as_ref().unwrap().service));
         owner
-    }
-
-    pub(crate) fn attach_owner(&self, owner: &super::JobGatherOwner) {
-        let mut state = owner.0.home.state.lock();
-        assert!(state.open && state.control.is_none());
-        assert!(state.pool.is_none() && state.phase == PoolPhase::Absent);
-        assert!(matches!(&state.slot, Slot::Empty));
-        assert!(state.service.is_none());
-        assert_eq!(state.generation, 0);
-        state.service = Some(Arc::downgrade(&self.control.as_ref().unwrap().service));
     }
 
     pub(crate) fn joined_workers(&self) -> usize {

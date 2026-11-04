@@ -182,7 +182,6 @@ async fn case(dtype: &DataType) {
     partial.accumulators = accumulators;
     plan.update_records(
         &records,
-        None,
         &mut candidates,
         (&reservation, workspace),
         &context,

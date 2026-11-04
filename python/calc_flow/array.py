@@ -204,48 +204,51 @@ def _validate_call(node: ast.Call) -> None:
         _reshape_shape(node.args[1])
 
 
+def _reshape_dimension(node: ast.AST) -> int:
+    value: object
+    if isinstance(node, ast.Constant):
+        value = node.value
+    elif (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, ast.USub)
+        and isinstance(node.operand, ast.Constant)
+        and type(node.operand.value) is int
+    ):
+        value = -node.operand.value
+    else:
+        raise _array_error("reshape dimensions must be integers")
+    if type(value) is not int:
+        raise _array_error("reshape dimensions must be integers")
+    return value
+
+
 def _reshape_shape(node: ast.AST) -> tuple[int, ...]:
     if not isinstance(node, (ast.Tuple, ast.List)):
         raise _array_error("reshape shape must be a tuple or list")
     if len(node.elts) > _MAX_RESHAPE_RANK:
         raise _array_error(f"reshape rank limit is {_MAX_RESHAPE_RANK}")
-    dimensions: list[int] = []
-    for item in node.elts:
-        value: object
-        if isinstance(item, ast.Constant):
-            value = item.value
-        elif (
-            isinstance(item, ast.UnaryOp)
-            and isinstance(item.op, ast.USub)
-            and isinstance(item.operand, ast.Constant)
-            and type(item.operand.value) is int
-        ):
-            value = -item.operand.value
-        else:
-            raise _array_error("reshape dimensions must be integers")
-        if type(value) is not int:
-            raise _array_error("reshape dimensions must be integers")
-        dimensions.append(value)
+    dimensions = tuple(_reshape_dimension(item) for item in node.elts)
     if dimensions.count(-1) > 1:
         raise _array_error("reshape shape allows at most one -1")
     if -1 in dimensions and 0 in dimensions:
         raise _array_error("reshape cannot combine a zero dimension with -1")
     if any(dimension < -1 for dimension in dimensions):
         raise _array_error("reshape dimensions must be non-negative or -1")
+    known_elements = math.prod(dimension for dimension in dimensions if dimension != -1)
+    _validate_reshape_limits(dimensions, known_elements)
+    return dimensions
+
+
+def _validate_reshape_limits(dimensions: tuple[int, ...], elements: int) -> None:
     if any(dimension > _MAX_RESHAPE_DIMENSION for dimension in dimensions):
         raise _array_error(f"reshape dimension limit is {_MAX_RESHAPE_DIMENSION}")
-    known_elements = math.prod(dimension for dimension in dimensions if dimension != -1)
-    if known_elements > _MAX_RESHAPE_ELEMENTS:
+    if elements > _MAX_RESHAPE_ELEMENTS:
         raise _array_error(f"reshape output limit is {_MAX_RESHAPE_ELEMENTS} elements")
-    return tuple(dimensions)
 
 
 def _validate_reshape_result(value: object) -> None:
     dimensions = tuple(int(dimension) for dimension in getattr(value, "shape", ()))
-    if any(dimension > _MAX_RESHAPE_DIMENSION for dimension in dimensions):
-        raise _array_error(f"reshape dimension limit is {_MAX_RESHAPE_DIMENSION}")
-    if math.prod(dimensions) > _MAX_RESHAPE_ELEMENTS:
-        raise _array_error(f"reshape output limit is {_MAX_RESHAPE_ELEMENTS} elements")
+    _validate_reshape_limits(dimensions, math.prod(dimensions))
 
 
 def _evaluate(

@@ -762,27 +762,13 @@ by default. Supply
 to enforce application limits. The budget's cumulative input row/byte
 accounting also applies when native compact state is selected.
 
-Large grouped `SUM` updates over `Int64`/`UInt64` columns can prepare local
-partials on the shared native CPU service. This internal path requires column
-grouping keys, supported infallible native comparisons, `NOT`, or null tests,
-no pending input normalization checks, and the default unbounded engine memory
-pool. Bounded or custom engine pools retain serial updates. Admission requires
-at least 32,768 rows and four input chunks of up to 8,192 rows; at most eight
-work units run, limited further by available CPUs and two chunks per unit.
-Small batches and single-CPU jobs remain serial. The native service detects
-process CPU availability at startup. DataFusion's partition setting is separate;
-no additional public setting is required.
-Existing native fast paths for a single Boolean or integer grouping key also
-remain serial. Predicates containing `AND` or `OR` retain serial execution,
-including when DataFusion would short-circuit them by copying input columns.
-
-Each work unit owns funded temporary keys and integer aggregate state. The
-coordinator merges contiguous ranges in input order, incorporates committed
-history once, and emits the same complete snapshot before committing. Parallel
-scratch uses engine reservations; live distinct groups still use the compact
-state budget. A next batch or checkpoint cannot overtake unfinished work.
-Floating-point, decimal, mixed, ordered, custom, and computed aggregates retain
-their existing execution paths.
+Compact grouped integer `SUM` updates currently process each original Batch
+serially. Increasing DataFusion partitions does not create local partial
+workers for this compact path. A
+[bounded batch-parallel experiment](../benchmarks/sum-state/sum-batch-parallel-20261104.md)
+used multiple CPU workers but regressed in its dense four- and eight-CPU cases;
+that prototype is retained as experiment evidence. The shared native CPU
+service used by other operators does not imply parallel compact SUM updates.
 
 Use `StreamRuntimeConfig(sql_compact_state_budget=StateBudget(100_000, 64 << 20))`
 to limit each aggregate SQL node to 100,000 live groups and 64 MiB of conservative

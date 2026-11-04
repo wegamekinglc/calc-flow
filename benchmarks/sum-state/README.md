@@ -1,5 +1,9 @@
 # Grouped integer SUM state measurements
 
+[Rejected batch-parallel experiment](sum-batch-parallel-20261104.md) records
+five fixed cases, actual multicore profiles, confirmed dense-stream regressions,
+and the decision to retain serial grouped SUM execution.
+
 [Complete 2026-11-04 results](20261104/README.md) retain all four cases, all
 160 formal observations, paired intervals and both accepted CPU profiles.
 
