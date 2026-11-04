@@ -442,8 +442,9 @@ def settle_invocation(process):
 def start_invocation(command, env, output, errors):
     command = validated_argv(command)
     # Trusted local receipts/fixed flags form validated, absolute argv. No shell.
+    # The taint rule focuses on argv, after executable and NUL validation above.
     return subprocess.Popen(  # nosec B603  # nosemgrep
-        command,
+        command,  # nosemgrep: dangerous-subprocess-use-tainted-env-args
         env=env,
         cwd=ROOT,
         stdout=output,

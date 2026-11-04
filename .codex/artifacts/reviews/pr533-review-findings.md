@@ -136,18 +136,57 @@ It overlays that measured harness into the baseline and states that the split
 diagnostic sources have not been performance remeasured. This prevents
 attributing the archived timings to the newly decomposed instrumentation.
 
+### Focused follow-up after remote Opengrep reanalysis
+
+The root's remote inventory at published revision
+`e6cc18eb3be7ba2f8c5389bf84e95394aea63350` reduced the original 41 findings
+to one critical Opengrep finding. That remaining
+`dangerous-subprocess-use-tainted-env-args` rule focuses on the `command`
+argument line of `start_invocation`, which was outside the existing call-line
+audit marker. The focused source correction reviewed here is local commit
+`97893ff652e46c6875a0076d04b9af21c96a3563`.
+
+That correction adds an explanatory comment and a rule-specific audit marker
+on the focused argument line. It does not change Python AST or execution:
+`validated_argv` still validates executable selection and NUL-free argv before
+launch, argument values remain literal, `shell=False` remains explicit, and
+process-group cleanup is unchanged. No quoting transform, global exclusion or
+weaker validation is introduced. The reviewer inspected the complete focused
+diff and surrounding subprocess boundary and found no source blocker.
+
+The root retained actual Opengrep 1.33.1 evidence under
+`target/pr533-opengrep/`, with executable SHA-256
+`46e8133cc490f9f50518061590ce2f6be5a08afaeda034471c0ceda4b3899808`.
+The inspected `verification.json` and scan outputs show:
+
+- A static, unexecuted tainted-argv probe with the call-line marker reports one
+  critical finding; the argument-line marker yields zero findings. The same
+  RED-to-GREEN result holds with Codacy's exact fully qualified rule ID.
+- The complete corrected source scan reports zero findings and zero errors.
+  The complete source already reported zero locally before this correction;
+  the probe validates focused-marker handling, not reproduction of Codacy's
+  complete interprocedural taint analysis.
+- The author reported the five maintained argv/lifecycle tests, Ruff,
+  formatting and whitespace checks passing. No Rust build, performance run or
+  remote mutation was needed for this comment-only change.
+
+The latest observed remote result remains the one-finding result at
+`e6cc18eb`; the focused local verification does not establish that a newer
+remote Codacy analysis is green.
+
 ### CI State and Verdict
 
 The prior Linux job failed at `Verify complexity gates`, before Python pytest
 and coverage upload. The associated Coveralls failure does not establish a
 coverage regression; the prior Rust coverage and cross-platform successes also
 do not certify the new corrective head. Remote Codacy/Opengrep and CI results
-must be reported from the root's single post-publication snapshot. This reviewer
+must be reported from the root's post-publication checks. This reviewer
 made no CI status poll, remote review submission or remote mutation.
 
 **Approve — PASS for the reviewed corrective code and local evidence.**
 
-The known 41 findings and local CI routing regression have no remaining source
-blocker. Fresh remote analysis and required CI remain unverified by this review;
-pending or failed required checks still block merge. No merge authority is
-granted.
+The known findings and local CI routing regression have no remaining source
+blocker after the focused correction. Fresh remote analysis and required CI
+remain unverified by this review; the last observed remote critical finding
+must be cleared and all required checks must pass before merge. No merge
+authority is granted by this review.
