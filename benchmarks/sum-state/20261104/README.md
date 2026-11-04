@@ -102,6 +102,7 @@ Read the full evidence using Python:
 ```python
 import gzip, json
 from pathlib import Path
+
 data = json.loads(gzip.decompress(Path("complete-evidence.json.gz").read_bytes()))
 print(data["acquisition"]["status"])
 ```
