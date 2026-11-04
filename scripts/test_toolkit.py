@@ -100,6 +100,20 @@ class PercentileTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
+    def test_command_output_passes_owned_environment_and_timeout(self) -> None:
+        completed = Mock(returncode=0, stdout="result\n")
+        environment = {"TOKIO_WORKER_THREADS": "1"}
+        with patch("scripts.toolkit.subprocess.run", return_value=completed) as run:
+            self.assertEqual(
+                command_output(
+                    ["/usr/bin/nm", "--version"], env=environment, timeout=7
+                ),
+                "result",
+            )
+        self.assertIs(run.call_args.kwargs["env"], environment)
+        self.assertEqual(run.call_args.kwargs["timeout"], 7)
+        self.assertFalse(run.call_args.kwargs["shell"])
+
     def test_command_output_requires_success_and_strips_stdout(self) -> None:
         completed = Mock(returncode=0, stdout="  result \n", stderr="")
         with patch("scripts.toolkit.subprocess.run", return_value=completed) as run:

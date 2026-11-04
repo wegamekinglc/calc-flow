@@ -8,75 +8,86 @@ import gzip
 import json
 import os
 import re
-import subprocess
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from scripts.toolkit import write_json
+from scripts.toolkit import command_output, require_executable, write_json
 
 
 def command(argv, deadline, env):
     remaining = deadline - time.monotonic()
     if remaining <= 5:
         raise TimeoutError("profile analysis deadline")
-    return subprocess.check_output(argv, env=env, text=True, timeout=remaining - 2)
+    executable = require_executable(argv[0])
+    return command_output([executable, *argv[1:]], env=env, timeout=remaining - 2)
+
+
+def _symbols(output):
+    rows = []
+    for line in output.splitlines():
+        fields = line.split(maxsplit=3)
+        if len(fields) != 4 or fields[2] not in "tTwW":
+            continue
+        start, size = int(fields[0], 16), int(fields[1], 16)
+        if size:
+            rows.append((start, start + size, fields[3]))
+    return sorted(rows)
+
+
+def _library_symbols(path, deadline, env):
+    argv = ["nm", "-n", "-S", "-C", "--defined-only", str(path)]
+    result = command(argv, deadline, env)
+    if not result.strip():
+        result = command([argv[0], "-D", *argv[1:]], deadline, env)
+    rows = _symbols(result)
+    return [row[0] for row in rows], rows
 
 
 def symbol_tables(profile, deadline, env):
     tables = {}
     for library in profile["libs"]:
-        path = Path(library["path"])
-        if not path.is_file():
-            continue
-        result = command(
-            ["nm", "-n", "-S", "-C", "--defined-only", str(path)], deadline, env
-        )
-        if not result.strip():
-            result = command(
-                ["nm", "-D", "-n", "-S", "-C", "--defined-only", str(path)],
-                deadline,
-                env,
-            )
-        rows = []
-        for line in result.splitlines():
-            fields = line.split(maxsplit=3)
-            if len(fields) == 4 and fields[2] in "tTwW":
-                start, size = int(fields[0], 16), int(fields[1], 16)
-                if size:
-                    rows.append((start, start + size, fields[3]))
-        rows.sort()
-        tables[library["debugName"]] = ([r[0] for r in rows], rows)
+        path = Path(library["path"]).resolve()
+        if path.is_file():
+            tables[library["debugName"]] = _library_symbols(path, deadline, env)
     return tables
 
 
-def frame_names(profile, thread, tables):
-    names = []
+def _symbol_at(table, address):
+    if table is None:
+        return None
+    position = bisect.bisect_right(table[0], address) - 1
+    if position >= 0 and address < table[1][position][1]:
+        return table[1][position][2]
+    return None
+
+
+def _frame_name(profile, thread, tables, index):
     frames, funcs = thread["frameTable"], thread["funcTable"]
-    resources, strings = thread["resourceTable"], thread["stringArray"]
-    for index in range(frames["length"]):
-        func = frames["func"][index]
-        resource = funcs["resource"][func]
-        address = frames["address"][index]
-        name = strings[funcs["name"][func]]
-        if (
-            resource is not None
-            and resource >= 0
-            and address is not None
-            and address >= 0
-        ):
-            library = profile["libs"][resources["lib"][resource]]["debugName"]
-            table = tables.get(library)
-            resolved = None
-            if table:
-                position = bisect.bisect_right(table[0], address) - 1
-                if position >= 0 and address < table[1][position][1]:
-                    resolved = table[1][position][2]
-            name = f"{resolved or hex(address)} [{library}]"
-        names.append(re.sub(r"::h[0-9a-f]{16}(?= |$)", "", name))
-    return names
+    func = frames["func"][index]
+    resource = funcs["resource"][func]
+    address = frames["address"][index]
+    name = thread["stringArray"][funcs["name"][func]]
+    if resource is None or address is None:
+        return name
+    if resource < 0 or address < 0:
+        return name
+    library_index = thread["resourceTable"]["lib"][resource]
+    library = profile["libs"][library_index]["debugName"]
+    resolved = _symbol_at(tables.get(library), address)
+    return f"{resolved or hex(address)} [{library}]"
 
 
-def clock_alignment(raw, profile, pid):
+def frame_names(profile, thread, tables):
+    return [
+        re.sub(
+            r"::h[0-9a-f]{16}(?= |$)", "", _frame_name(profile, thread, tables, index)
+        )
+        for index in range(thread["frameTable"]["length"])
+    ]
+
+
+def _original_samples(raw, pid):
     original = collections.defaultdict(list)
     for line in raw.splitlines():
         match = re.match(r"\s*(\d+)/(\d+)\s+(\d+)\.(\d+):", line)
@@ -84,179 +95,233 @@ def clock_alignment(raw, profile, pid):
             original[match[2]].append(
                 int(match[3]) * 1000 + int(match[4].ljust(9, "0")) / 1e6
             )
+    return original
+
+
+def _same_pid(thread, pid):
+    return str(thread["pid"]).split(".")[0] == str(pid)
+
+
+def _imported_samples(profile, pid):
     imported = collections.defaultdict(list)
     for thread in profile["threads"]:
-        if str(thread["pid"]).split(".")[0] == str(pid):
+        if _same_pid(thread, pid):
             imported[str(thread["tid"]).split(".")[0]].extend(thread["samples"]["time"])
-    imported = {key: sorted(value) for key, value in imported.items() if value}
+    return {key: sorted(value) for key, value in imported.items() if value}
+
+
+def _thread_errors(original, imported, offset):
+    if len(original) != len(imported):
+        raise ValueError("profile clock sample count mismatch")
+    return [abs(a - b - offset) for a, b in zip(original, imported, strict=True)]
+
+
+def clock_alignment(raw, profile, pid):
+    original = _original_samples(raw, pid)
+    imported = _imported_samples(profile, pid)
     if set(original) != set(imported) or not original:
         raise ValueError("profile clock thread inventory mismatch")
-    offset = min(min(v) for v in original.values()) - min(
-        min(v) for v in imported.values()
-    )
-    errors, count = [], 0
-    for tid, values in original.items():
-        if len(values) != len(imported[tid]):
-            raise ValueError("profile clock sample count mismatch")
-        errors.extend(
-            abs(a - b - offset) for a, b in zip(values, imported[tid], strict=True)
-        )
-        count += len(values)
-    if max(errors) >= 0.00001:
+    offset = min(map(min, original.values())) - min(map(min, imported.values()))
+    errors = [
+        _thread_errors(values, imported[tid], offset)
+        for tid, values in original.items()
+    ]
+    maximum = max(map(max, errors))
+    if maximum >= 0.00001:
         raise ValueError("profile clock alignment exceeds10ns")
     return {
         "offset_ms": offset,
-        "max_error_ms": max(errors),
-        "matched_sample_count": count,
+        "max_error_ms": maximum,
+        "matched_sample_count": sum(map(len, errors)),
     }
 
 
-def decode(args, acquisition, builds, deadline):
-    env = dict(os.environ)
-    if args.perf_library:
-        env["LD_LIBRARY_PATH"] = str(args.perf_library)
-    reports = []
-    for item in acquisition["profiles"]:
-        root = args.output / item["path"]
-        output = root / "profile.json.gz"
-        command(
-            [
-                str(args.samply),
-                "import",
-                "--save-only",
-                "--output",
-                str(output),
-                str(root / "perf.data"),
-            ],
-            deadline,
-            env,
-        )
-        profile = json.loads(gzip.decompress(output.read_bytes()))
-        tables = symbol_tables(profile, deadline, env)
-        pid = item["rows"][0]["pid"]
-        raw = command(
-            [
-                str(args.perf),
-                "script",
-                "-i",
-                str(root / "perf.data"),
-                "--ns",
-                "-F",
-                "pid,tid,time",
-                "-G",
-            ],
-            deadline,
-            env,
-        )
-        (root / "sample-timestamps.txt").write_text(raw)
-        alignment = clock_alignment(raw, profile, pid)
-        write_json(root / "clock-alignment.json", alignment)
-        windows = [
-            (
-                r["start_ns"] / 1e6 - alignment["offset_ms"],
-                r["end_ns"] / 1e6 - alignment["offset_ms"],
-            )
-            for r in item["windows"]
+def _phase(chain):
+    for phase in ("update_chunk", "finish_transaction", "commit", "ExpressionOperator"):
+        if any(("::" + phase) in frame for frame in chain):
+            return phase
+    return "other"
+
+
+def _chain(stack, names, table):
+    result = []
+    cursor = stack
+    while cursor is not None:
+        result.append(names[table["frame"][cursor]])
+        cursor = table["prefix"][cursor]
+    return tuple(result)
+
+
+def _window_index(when, windows):
+    return next(
+        (i for i, (start, end) in enumerate(windows) if start <= when <= end), None
+    )
+
+
+@dataclass(slots=True)
+class SampleCounts:
+    """Own the mutable counters of one decoded profile."""
+
+    windows: list[int]
+    total: int = 0
+    unresolved: int = 0
+    own: collections.Counter = field(default_factory=collections.Counter)
+    inclusive: collections.Counter = field(default_factory=collections.Counter)
+    threads: collections.Counter = field(default_factory=collections.Counter)
+    phases: collections.Counter = field(default_factory=collections.Counter)
+    stacks: collections.Counter = field(default_factory=collections.Counter)
+
+    def observe(self, chain, thread, count, selected):
+        self.total += count
+        self.unresolved += count if chain[0].startswith("0x") else 0
+        self.windows[selected] += count
+        self.own[chain[0]] += count
+        self.inclusive.update({name: count for name in set(chain)})
+        self.stacks[chain] += count
+        self.threads[f"{thread['name']} tid={thread['tid']}"] += count
+        self.phases[_phase(chain)] += count
+
+    def ranked(self, values):
+        return [
+            {"name": name, "samples": count, "percent": 100 * count / self.total}
+            for name, count in values.most_common(40)
         ]
-        own, inclusive, threads, phases, stacks = (
-            collections.Counter() for _ in range(5)
-        )
-        window_counts = [0] * len(windows)
-        unresolved = total = 0
-        for thread in profile["threads"]:
-            if str(thread["pid"]).split(".")[0] != str(pid):
-                continue
-            names = frame_names(profile, thread, tables)
-            table = thread["stackTable"]
-            samples = thread["samples"]
-            weights = samples.get("weight") or [1] * samples["length"]
-            cache = {}
-            for stack, weight, when in zip(
-                samples["stack"], weights, samples["time"], strict=True
-            ):
-                selected = next(
-                    (
-                        i
-                        for i, (start, end) in enumerate(windows)
-                        if start <= when <= end
-                    ),
-                    None,
-                )
-                if stack is None or selected is None:
-                    continue
-                if stack not in cache:
-                    chain, cursor = [], stack
-                    while cursor is not None:
-                        chain.append(names[table["frame"][cursor]])
-                        cursor = table["prefix"][cursor]
-                    cache[stack] = tuple(chain)
-                chain = cache[stack]
-                count = weight or 1
-                total += count
-                unresolved += count if chain[0].startswith("0x") else 0
-                window_counts[selected] += count
-                own[chain[0]] += count
-                inclusive.update({name: count for name in set(chain)})
-                stacks[chain] += count
-                threads[f"{thread['name']} tid={thread['tid']}"] += count
-                phase = next(
-                    (
-                        phase
-                        for phase in (
-                            "update_chunk",
-                            "finish_transaction",
-                            "commit",
-                            "ExpressionOperator",
-                        )
-                        if any(("::" + phase) in frame for frame in chain)
-                    ),
-                    "other",
-                )
-                phases[phase] += count
-        if not total or not all(window_counts):
-            raise ValueError("missing sampled processing window")
 
-        def ranked(values, sample_total=total):
-            return [
-                {"name": name, "samples": count, "percent": 100 * count / sample_total}
-                for name, count in values.most_common(40)
-            ]
-
-        frames = sorted({frame for stack in stacks for frame in stack})
-        frame_ids = {name: index for index, name in enumerate(frames)}
-        stack_data = {
+    def stack_data(self):
+        frames = sorted({frame for stack in self.stacks for frame in stack})
+        ids = {name: index for index, name in enumerate(frames)}
+        return {
             "order": "leaf first",
             "frames": frames,
             "stacks": [
-                {"frames": [frame_ids[frame] for frame in chain], "samples": count}
-                for chain, count in stacks.most_common()
+                {"frames": [ids[frame] for frame in chain], "samples": count}
+                for chain, count in self.stacks.most_common()
             ],
         }
-        (root / "stacks.json.gz").write_bytes(
-            gzip.compress(
-                json.dumps(stack_data, separators=(",", ":")).encode(), mtime=0
-            )
+
+
+def _count_thread(profile, thread, tables, windows, counts):
+    names = frame_names(profile, thread, tables)
+    samples = thread["samples"]
+    weights = samples.get("weight") or [1] * samples["length"]
+    cache = {}
+    for stack, weight, when in zip(
+        samples["stack"], weights, samples["time"], strict=True
+    ):
+        selected = _window_index(when, windows)
+        if stack is None or selected is None:
+            continue
+        if stack not in cache:
+            cache[stack] = _chain(stack, names, thread["stackTable"])
+        counts.observe(cache[stack], thread, weight or 1, selected)
+
+
+def _count_samples(profile, tables, pid, windows):
+    counts = SampleCounts([0] * len(windows))
+    for thread in profile["threads"]:
+        if _same_pid(thread, pid):
+            _count_thread(profile, thread, tables, windows, counts)
+    if not counts.total or not all(counts.windows):
+        raise ValueError("missing sampled processing window")
+    return counts
+
+
+def _import_profile(args, root, deadline, env):
+    output = root / "profile.json.gz"
+    command(
+        [
+            str(args.samply),
+            "import",
+            "--save-only",
+            "--output",
+            str(output),
+            str(root / "perf.data"),
+        ],
+        deadline,
+        env,
+    )
+    return json.loads(gzip.decompress(output.read_bytes()))
+
+
+def _aligned_windows(args, item, root, profile, deadline):
+    env = _environment(args)
+    raw = command(
+        [
+            str(args.perf),
+            "script",
+            "-i",
+            str(root / "perf.data"),
+            "--ns",
+            "-F",
+            "pid,tid,time",
+            "-G",
+        ],
+        deadline,
+        env,
+    )
+    (root / "sample-timestamps.txt").write_text(raw)
+    alignment = clock_alignment(raw, profile, item["rows"][0]["pid"])
+    write_json(root / "clock-alignment.json", alignment)
+    windows = [
+        (
+            r["start_ns"] / 1e6 - alignment["offset_ms"],
+            r["end_ns"] / 1e6 - alignment["offset_ms"],
         )
-        report = {
-            "side": item["side"],
-            "binary_sha256": builds[item["side"]]["binary_sha256"],
-            "perf_data_sha256": item["perf_data_sha256"],
-            "windows": item["windows"],
-            "clock_alignment": alignment,
-            "samples": total,
-            "samples_per_window": window_counts,
-            "unresolved_leaf_samples": unresolved,
-            "self": ranked(own),
-            "inclusive": ranked(inclusive),
-            "threads": ranked(threads),
-            "disjoint_phases": ranked(phases),
-            "scope": "user-mode CPU only; first job excluded; inclusive shares overlap",
-            "symbolization": (
-                "GNU nm -n -S -C exact nonzero-sized code ranges; "
-                "dynamic symbol fallback; no source-line/inline attribution"
-            ),
-        }
-        write_json(root / "summary.json", report)
-        reports.append(report)
+        for r in item["windows"]
+    ]
+    return alignment, windows
+
+
+def _environment(args):
+    env = dict(os.environ)
+    if args.perf_library:
+        env["LD_LIBRARY_PATH"] = str(args.perf_library)
+    return env
+
+
+def _report(item, build, alignment, counts):
+    return {
+        "side": item["side"],
+        "binary_sha256": build["binary_sha256"],
+        "perf_data_sha256": item["perf_data_sha256"],
+        "windows": item["windows"],
+        "clock_alignment": alignment,
+        "samples": counts.total,
+        "samples_per_window": counts.windows,
+        "unresolved_leaf_samples": counts.unresolved,
+        "self": counts.ranked(counts.own),
+        "inclusive": counts.ranked(counts.inclusive),
+        "threads": counts.ranked(counts.threads),
+        "disjoint_phases": counts.ranked(counts.phases),
+        "scope": "user-mode CPU only; first job excluded; inclusive shares overlap",
+        "symbolization": (
+            "GNU nm -n -S -C exact nonzero-sized code ranges; "
+            "dynamic symbol fallback; no source-line/inline attribution"
+        ),
+    }
+
+
+def _decode_item(args, item, build, deadline):
+    root = args.output / item["path"]
+    env = _environment(args)
+    profile = _import_profile(args, root, deadline, env)
+    tables = symbol_tables(profile, deadline, env)
+    alignment, windows = _aligned_windows(args, item, root, profile, deadline)
+    counts = _count_samples(profile, tables, item["rows"][0]["pid"], windows)
+    (root / "stacks.json.gz").write_bytes(
+        gzip.compress(
+            json.dumps(counts.stack_data(), separators=(",", ":")).encode(), mtime=0
+        )
+    )
+    report = _report(item, build, alignment, counts)
+    write_json(root / "summary.json", report)
+    return report
+
+
+def decode(args, acquisition, builds, deadline):
+    reports = [
+        _decode_item(args, item, builds[item["side"]], deadline)
+        for item in acquisition["profiles"]
+    ]
     write_json(args.output / "profile-summary.json", reports)
     return reports

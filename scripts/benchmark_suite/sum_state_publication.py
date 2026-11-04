@@ -7,6 +7,7 @@ import hashlib
 import json
 import shutil
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from scripts.toolkit import linear_percentile, write_json
@@ -75,47 +76,6 @@ def persist_source(args, acquisition):
     )
 
 
-def profile_targets(path):
-    data = json.loads(gzip.decompress(path.read_bytes()))
-    frames, stacks = data["frames"], data["stacks"]
-    total = sum(row["samples"] for row in stacks)
-    targets = {}
-    for name, needle in TARGETS.items():
-        matching = {i for i, frame in enumerate(frames) if needle in frame}
-        inclusive = sum(
-            row["samples"]
-            for row in stacks
-            if any(index in matching for index in row["frames"])
-        )
-        own = sum(row["samples"] for row in stacks if row["frames"][0] in matching)
-        targets[name] = {
-            "inclusive_samples": inclusive,
-            "inclusive_percent": 100 * inclusive / total,
-            "self_samples": own,
-            "self_percent": 100 * own / total,
-            "observed_symbols": [frames[i] for i in sorted(matching)],
-        }
-    return {"total_samples": total, "targets": targets}
-
-
-def table(headers, rows):
-    text = [[str(v) for v in row] for row in [headers, *rows]]
-    widths = [max(len(row[i]) + 2 for row in text) for i in range(len(headers))]
-    lines = []
-    for index, row in enumerate(text):
-        if index == 1:
-            lines.append("|" + "|".join("-" * width for width in widths) + "|")
-        lines.append(
-            "|"
-            + "|".join(
-                " " + value.ljust(width - 2) + " "
-                for value, width in zip(row, widths, strict=True)
-            )
-            + "|"
-        )
-    return "\n".join(lines)
-
-
 def render(summary):
     complete = summary["status"] == "completed"
     lines = [
@@ -137,44 +97,7 @@ def render(summary):
         "## Timings and exact maintained verdicts",
         "",
     ]
-    rows, intervals, resources = [], [], []
-    for case in summary["cases"]:
-        statistics = case.get("statistics")
-        if statistics is None:
-            rows.append([case["id"], "incomplete", "incomplete", "unknown", "partial"])
-            continue
-        rows.append(
-            [
-                case["id"],
-                f"{1000 * statistics['base_p50']:.3f}",
-                f"{1000 * statistics['head_p50']:.3f}",
-                f"{statistics['change_percent']:+.2f}%",
-                statistics["verdict"],
-            ]
-        )
-        for index, interval in enumerate(statistics["round_intervals"], 1):
-            intervals.append(
-                [
-                    case["id"],
-                    index,
-                    f"{interval['median']:+.2f}%",
-                    f"[{interval['low']:+.2f}%, {interval['high']:+.2f}%]",
-                    f"{100 * interval['coverage']:.5f}%",
-                ]
-            )
-        for side in ("baseline", "candidate"):
-            resource = case["resource_summary"][side]
-            distribution = case["wall_distribution"][side]
-            resources.append(
-                [
-                    case["id"],
-                    side,
-                    f"{distribution['p95_ms']:.3f}",
-                    f"{resource['processing_cpu_ms_p50']:.3f}",
-                    f"{resource['processing_average_cores_p50']:.3f}",
-                    f"{resource['whole_process_peak_rss_p50'] / 2**20:.2f}",
-                ]
-            )
+    rows, intervals, resources = rendered_rows(summary)
     lines += [
         table(
             ["Case", "Baseline P50 ms", "Candidate P50 ms", "P50 change", "Verdict"],
@@ -278,58 +201,193 @@ def render(summary):
     return "\n".join(lines)
 
 
+@dataclass(frozen=True, slots=True)
+class PublicationContext:
+    args: object
+    acquisition: dict
+    plan: dict
+    machine: dict
+    builds: dict
+    deadline: float
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationData:
+    context: PublicationContext
+    summary: dict
+    raw: dict
+    targets: dict
+    profiles: list
+
+
+def inclusive_count(stacks, matching):
+    return sum(
+        row["samples"]
+        for row in stacks
+        if any(index in matching for index in row["frames"])
+    )
+
+
+def self_count(stacks, matching):
+    return sum(row["samples"] for row in stacks if row["frames"][0] in matching)
+
+
+def target_entry(frames, stacks, total, needle):
+    matching = {i for i, frame in enumerate(frames) if needle in frame}
+    inclusive, own = inclusive_count(stacks, matching), self_count(stacks, matching)
+    return {
+        "inclusive_samples": inclusive,
+        "inclusive_percent": 100 * inclusive / total,
+        "self_samples": own,
+        "self_percent": 100 * own / total,
+        "observed_symbols": [frames[i] for i in sorted(matching)],
+    }
+
+
+def profile_targets(path):
+    data = json.loads(gzip.decompress(path.read_bytes()))
+    frames, stacks = data["frames"], data["stacks"]
+    total = sum(row["samples"] for row in stacks)
+    return {
+        "total_samples": total,
+        "targets": {
+            name: target_entry(frames, stacks, total, needle)
+            for name, needle in TARGETS.items()
+        },
+    }
+
+
+def table_row(row, widths):
+    cells = (
+        " " + value.ljust(width - 2) + " "
+        for value, width in zip(row, widths, strict=True)
+    )
+    return "|" + "|".join(cells) + "|"
+
+
+def table_widths(text, columns):
+    return [max(len(row[index]) + 2 for row in text) for index in range(columns)]
+
+
+def table(headers, rows):
+    text = [list(map(str, row)) for row in [headers, *rows]]
+    widths = table_widths(text, len(headers))
+    lines = []
+    for index, row in enumerate(text):
+        if index == 1:
+            lines.append("|" + "|".join("-" * width for width in widths) + "|")
+        lines.append(table_row(row, widths))
+    return "\n".join(lines)
+
+
+def interval_rows(case):
+    return [
+        [
+            case["id"],
+            index,
+            f"{interval['median']:+.2f}%",
+            f"[{interval['low']:+.2f}%, {interval['high']:+.2f}%]",
+            f"{100 * interval['coverage']:.5f}%",
+        ]
+        for index, interval in enumerate(case["statistics"]["round_intervals"], 1)
+    ]
+
+
+def resource_row(case, side):
+    resource, distribution = (
+        case["resource_summary"][side],
+        case["wall_distribution"][side],
+    )
+    return [
+        case["id"],
+        side,
+        f"{distribution['p95_ms']:.3f}",
+        f"{resource['processing_cpu_ms_p50']:.3f}",
+        f"{resource['processing_average_cores_p50']:.3f}",
+        f"{resource['whole_process_peak_rss_p50'] / 2**20:.2f}",
+    ]
+
+
+def timing_row(case):
+    statistics = case["statistics"]
+    return [
+        case["id"],
+        f"{1000 * statistics['base_p50']:.3f}",
+        f"{1000 * statistics['head_p50']:.3f}",
+        f"{statistics['change_percent']:+.2f}%",
+        statistics["verdict"],
+    ]
+
+
+def rendered_rows(summary):
+    rows, intervals, resources = [], [], []
+    for case in summary["cases"]:
+        if case.get("statistics") is None:
+            rows.append([case["id"], "incomplete", "incomplete", "unknown", "partial"])
+        else:
+            rows.append(timing_row(case))
+            intervals.extend(interval_rows(case))
+            resources.extend(
+                resource_row(case, side) for side in ("baseline", "candidate")
+            )
+    return rows, intervals, resources
+
+
+def complete_case(case):
+    if len(case["observations"]) != 40:
+        return False
+    if case.get("statistics", {}).get("samples") != 20:
+        return False
+    for side in ("baseline", "candidate"):
+        if len(case[side]) != 2 or any(len(values) != 10 for values in case[side]):
+            return False
+    return True
+
+
 def validate_inventory(acquisition, expected_ids):
     if acquisition["status"] != "completed":
         return
     cases = acquisition["cases"]
-    complete = [case["id"] for case in cases] == list(expected_ids)
-    for case in cases:
-        complete = complete and len(case["observations"]) == 40
-        complete = complete and case.get("statistics", {}).get("samples") == 20
-        for side in ("baseline", "candidate"):
-            complete = complete and len(case[side]) == 2
-            complete = complete and all(len(values) == 10 for values in case[side])
-    if not complete:
+    if [case["id"] for case in cases] != list(expected_ids):
+        raise ValueError("incomplete completed evidence inventory")
+    if not all(map(complete_case, cases)):
         raise ValueError("incomplete completed evidence inventory")
 
 
-def publish(args, acquisition, plan, machine, builds, deadline):
-    update_timing(
-        args, acquisition, acquisition["started_monotonic"], deadline, time.monotonic()
-    )
-    validate_inventory(acquisition, [case["id"] for case in plan["cases"]])
-    destination = args.publish_directory
-    destination.mkdir(parents=True, exist_ok=False)
-    root = args.output
+def historical_context(context, fixtures):
     previous = Path(__file__).resolve().parents[2] / "benchmarks/sum-state/20261104"
-    fixtures_path = root / "fixture-manifest.json"
-    fixtures = read(fixtures_path) if fixtures_path.exists() else {}
     first = read(previous / "summary.json")
     if (
         first["builds"]["baseline"]["binary_sha256"]
-        != builds["baseline"]["binary_sha256"]
+        != context.builds["baseline"]["binary_sha256"]
     ):
         raise ValueError("historical profile baseline binary differs")
-    if (
-        fixtures
-        and first["fixtures"]["stock"]["input_sha256"]
-        != fixtures["stock"]["input_sha256"]
+    if fixtures and (
+        first["fixtures"]["stock"]["input_sha256"] != fixtures["stock"]["input_sha256"]
     ):
         raise ValueError("historical profile fixture differs")
-    profiles_path = root / "profile-summary.json"
-    profiles = read(profiles_path) if profiles_path.exists() else []
+    return previous, first
+
+
+def profile_has_warning(path):
+    stderr = (path / "stderr.log").read_text().lower()
+    return any(
+        word in stderr for word in ("lost", "unwind", "warning", "corrupt", "truncat")
+    )
+
+
+def publication_profiles(context, previous):
+    root, destination = context.args.output, context.args.publish_directory
+    path = root / "profile-summary.json"
+    profiles = read(path) if path.exists() else []
     targets = {
         "historical_baseline": read(previous / "profile-targets.json")["baseline"]
     }
-    for profile in acquisition["profiles"]:
+    for profile in context.acquisition["profiles"]:
         path = root / profile["path"]
-        stderr = (path / "stderr.log").read_text()
-        if any(
-            word in stderr.lower()
-            for word in ("lost", "unwind", "warning", "corrupt", "truncat")
-        ):
+        if profile_has_warning(path):
             profiles = []
-            acquisition["profile_skip_reason"] = (
+            context.acquisition["profile_skip_reason"] = (
                 "captured profile excluded: lost/unwind/warning diagnostic"
             )
         if profiles:
@@ -342,141 +400,225 @@ def publish(args, acquisition, plan, machine, builds, deadline):
         previous / "baseline-stacks.json.gz",
         destination / "historical-baseline-stacks.json.gz",
     )
-    historical_profile = next(
-        row for row in first["profiles"] if row["side"] == "baseline"
-    )
-    cases = [
-        {k: v for k, v in case.items() if k != "observations"}
-        for case in acquisition["cases"]
+    return profiles, targets
+
+
+def strip_observations(case):
+    return {key: value for key, value in case.items() if key != "observations"}
+
+
+def wall_distribution(case, side):
+    values = [
+        row["row"]["seconds"] * 1000
+        for row in case["observations"]
+        if row["side"] == side
     ]
-    for case, original in zip(cases, acquisition["cases"], strict=True):
-        case["wall_distribution"] = {}
-        for side in ("baseline", "candidate"):
-            values = [
-                row["row"]["seconds"] * 1000
-                for row in original["observations"]
-                if row["side"] == side
-            ]
-            if values:
-                case["wall_distribution"][side] = {
-                    "p50_ms": linear_percentile(values, 0.5),
-                    "p95_ms": linear_percentile(values, 0.95),
-                    "min_ms": min(values),
-                    "max_ms": max(values),
-                }
-    summary = {
+    if not values:
+        return None
+    return {
+        "p50_ms": linear_percentile(values, 0.5),
+        "p95_ms": linear_percentile(values, 0.95),
+        "min_ms": min(values),
+        "max_ms": max(values),
+    }
+
+
+def case_distributions(case):
+    result = {}
+    for side in ("baseline", "candidate"):
+        distribution = wall_distribution(case, side)
+        if distribution is not None:
+            result[side] = distribution
+    return result
+
+
+def publication_cases(acquisition):
+    result = []
+    for case in acquisition["cases"]:
+        result.append(
+            {**strip_observations(case), "wall_distribution": case_distributions(case)}
+        )
+    return result
+
+
+def build_view(build):
+    return {key: value for key, value in build.items() if key != "source_sha256"}
+
+
+def baseline_profile(first):
+    return next(row for row in first["profiles"] if row["side"] == "baseline")
+
+
+def publication_summary(context, fixtures, first, profiles):
+    acquisition = context.acquisition
+    return {
         "status": acquisition["status"],
         "failure": acquisition["failure"],
         "formal_observations": sum(
             len(case["observations"]) for case in acquisition["cases"]
         ),
-        "cases": cases,
-        "environment": machine,
+        "cases": publication_cases(acquisition),
+        "environment": context.machine,
         "fixtures": fixtures,
-        "builds": {
-            side: {k: v for k, v in build.items() if k != "source_sha256"}
-            for side, build in builds.items()
-        },
+        "builds": {side: build_view(build) for side, build in context.builds.items()},
         "profiles": profiles,
-        "historical_baseline_profile": historical_profile,
+        "historical_baseline_profile": baseline_profile(first),
         "profile_disposition": "accepted"
         if profiles
         else acquisition.get("profile_skip_reason", "capture/analysis incomplete"),
-        "unmeasured_final_source": plan["unmeasured_final_source"],
-        "prior_measurement_seconds": args.prior_measurement_seconds,
-        "phase_budget_seconds": args.budget_seconds,
+        "unmeasured_final_source": context.plan["unmeasured_final_source"],
+        "prior_measurement_seconds": context.args.prior_measurement_seconds,
+        "phase_budget_seconds": context.args.budget_seconds,
     }
-    invocations = {}
+
+
+def invocation_file(path):
+    names = {
+        "command.json",
+        "receipt.json",
+        "stdout.jsonl",
+        "stderr.log",
+        "clock-alignment.json",
+    }
+    return path.is_file() and path.name in names
+
+
+def invocation_files(root):
+    result = {}
     for directory in (root / "timings", root / "prepare", root / "profiles"):
         for path in sorted(directory.rglob("*")):
-            if path.is_file() and path.name in {
-                "command.json",
-                "receipt.json",
-                "stdout.jsonl",
-                "stderr.log",
-                "clock-alignment.json",
-            }:
-                invocations[str(path.relative_to(root))] = path.read_text()
+            if invocation_file(path):
+                result[str(path.relative_to(root))] = path.read_text()
+    return result
+
+
+def publication_data(context):
+    args, acquisition = context.args, context.acquisition
+    update_timing(
+        args,
+        acquisition,
+        acquisition["started_monotonic"],
+        context.deadline,
+        time.monotonic(),
+    )
+    validate_inventory(acquisition, [case["id"] for case in context.plan["cases"]])
+    args.publish_directory.mkdir(parents=True, exist_ok=False)
+    fixture_path = args.output / "fixture-manifest.json"
+    fixtures = read(fixture_path) if fixture_path.exists() else {}
+    previous, first = historical_context(context, fixtures)
+    profiles, targets = publication_profiles(context, previous)
+    summary = publication_summary(context, fixtures, first, profiles)
     raw = {
         "acquisition": acquisition,
-        "plan": plan,
-        "environment": machine,
+        "plan": context.plan,
+        "environment": context.machine,
         "fixtures": fixtures,
-        "builds": builds,
-        "invocations": invocations,
+        "builds": context.builds,
+        "invocations": invocation_files(args.output),
         "profiles": profiles,
         "targets": targets,
         "historical_profile_context": {
             "artifact": "../20261104",
-            "baseline": historical_profile,
+            "baseline": baseline_profile(first),
             "source": first["builds"]["baseline"],
         },
     }
+    return PublicationData(context, summary, raw, targets, profiles)
 
-    def metadata(now):
-        update_timing(
-            args, acquisition, acquisition["started_monotonic"], deadline, now
-        )
-        summary.update(
-            {
-                key: acquisition[key]
-                for key in (
-                    "status",
-                    "failure",
-                    "elapsed_seconds",
-                    "cumulative_measurement_seconds",
-                )
-            }
-        )
-        persist_source(args, acquisition)
-        (destination / "complete-evidence.json.gz").write_bytes(
-            gzip.compress(json.dumps(raw, separators=(",", ":")).encode(), mtime=0)
-        )
-        write_json(destination / "summary.json", summary)
-        (destination / "README.md").write_text(render(summary))
 
-    def stopped_receipt(now):
-        phase_seconds = now - acquisition["started_monotonic"]
-        return {
-            "prior_measurement_seconds": args.prior_measurement_seconds,
-            "phase_seconds": phase_seconds,
-            "cumulative_measurement_seconds": args.prior_measurement_seconds
-            + phase_seconds,
-            "cumulative_budget_seconds": 600,
-            "remaining_seconds": 600 - args.prior_measurement_seconds - phase_seconds,
-            "status": acquisition["status"],
-            "failure": acquisition["failure"],
-            "phase_stopped_monotonic": now,
-            "formal_observations": summary["formal_observations"],
-            "current_profiles": len(profiles),
-            "retries": 0,
-            "files": {
-                path.name: {"bytes": path.stat().st_size, "sha256": sha(path)}
-                for path in sorted(destination.iterdir())
-                if path.is_file() and path.name != "evidence-manifest.json"
-            },
-        }
-
-    write_json(
-        destination / "profile-summary.json",
+def write_metadata(data, now):
+    context, acquisition = data.context, data.context.acquisition
+    update_timing(
+        context.args,
+        acquisition,
+        acquisition["started_monotonic"],
+        context.deadline,
+        now,
+    )
+    data.summary.update(
         {
-            "current_candidate": profiles,
-            "historical_baseline_context": historical_profile,
+            key: acquisition[key]
+            for key in (
+                "status",
+                "failure",
+                "elapsed_seconds",
+                "cumulative_measurement_seconds",
+            )
+        }
+    )
+    persist_source(context.args, acquisition)
+    destination = context.args.publish_directory
+    (destination / "complete-evidence.json.gz").write_bytes(
+        gzip.compress(json.dumps(data.raw, separators=(",", ":")).encode(), mtime=0)
+    )
+    write_json(destination / "summary.json", data.summary)
+    (destination / "README.md").write_text(render(data.summary))
+
+
+def artifact_hashes(destination):
+    return {
+        path.name: {"bytes": path.stat().st_size, "sha256": sha(path)}
+        for path in sorted(destination.iterdir())
+        if path.is_file() and path.name != "evidence-manifest.json"
+    }
+
+
+def stopped_receipt(data, now):
+    context, acquisition = data.context, data.context.acquisition
+    prior = context.args.prior_measurement_seconds
+    elapsed = now - acquisition["started_monotonic"]
+    return {
+        "prior_measurement_seconds": prior,
+        "phase_seconds": elapsed,
+        "cumulative_measurement_seconds": prior + elapsed,
+        "cumulative_budget_seconds": 600,
+        "remaining_seconds": 600 - prior - elapsed,
+        "status": acquisition["status"],
+        "failure": acquisition["failure"],
+        "phase_stopped_monotonic": now,
+        "formal_observations": data.summary["formal_observations"],
+        "current_profiles": len(data.profiles),
+        "retries": 0,
+        "files": artifact_hashes(context.args.publish_directory),
+    }
+
+
+def write_receipt(data, receipt):
+    write_json(data.context.args.publish_directory / "evidence-manifest.json", receipt)
+    write_json(data.context.args.output / "phase-stopped.json", receipt)
+
+
+def finish_publication(data):
+    context = data.context
+    write_metadata(data, time.monotonic())
+    receipt = stopped_receipt(data, time.monotonic())
+    write_receipt(data, receipt)
+    final = time.monotonic()
+    if final > context.deadline:
+        # Demote all dependent metadata and hashes before exposing the timeout.
+        write_metadata(data, final)
+        write_receipt(data, stopped_receipt(data, time.monotonic()))
+        raise TimeoutError("residual deadline exhausted during publication")
+    print(
+        json.dumps(
+            {"publication": str(context.args.publish_directory), "receipt": receipt}
+        ),
+        flush=True,
+    )
+
+
+def publish(context):
+    data = publication_data(context)
+    write_json(
+        context.args.publish_directory / "profile-summary.json",
+        {
+            "current_candidate": data.profiles,
+            "historical_baseline_context": data.summary["historical_baseline_profile"],
         },
     )
-    write_json(destination / "profile-targets.json", targets)
-    shutil.copy2(root / "samples.csv", destination / "samples.csv")
-    metadata(time.monotonic())
-    receipt = stopped_receipt(time.monotonic())
-    write_json(destination / "evidence-manifest.json", receipt)
-    write_json(root / "phase-stopped.json", receipt)
-    final = time.monotonic()
-    if final > deadline:
-        # Publication can cross the deadline after writing optimistic metadata.
-        # Rewrite every authoritative status and dependent hash before returning.
-        metadata(final)
-        receipt = stopped_receipt(time.monotonic())
-        write_json(destination / "evidence-manifest.json", receipt)
-        write_json(root / "phase-stopped.json", receipt)
-        raise TimeoutError("residual deadline exhausted during publication")
-    print(json.dumps({"publication": str(destination), "receipt": receipt}), flush=True)
+    write_json(context.args.publish_directory / "profile-targets.json", data.targets)
+    shutil.copy2(
+        context.args.output / "samples.csv",
+        context.args.publish_directory / "samples.csv",
+    )
+    finish_publication(data)

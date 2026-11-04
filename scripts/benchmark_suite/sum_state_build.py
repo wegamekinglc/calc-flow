@@ -6,35 +6,39 @@ import argparse
 import json
 import os
 import shutil
-import subprocess
+
+# The fixed Cargo build needs separate, lifecycle-owned compiler/log streams.
+import subprocess  # nosec B404
 import time
 from pathlib import Path
 
 from scripts.benchmark_suite.rust import clear_stale_product_library
 from scripts.benchmark_suite.sum_state import HARNESS, sha
-from scripts.toolkit import write_json
+from scripts.toolkit import command_output, git_output, require_executable, write_json
 
 EXAMPLE = "grouped_sum_state_benchmark"
 
 
+def _is_product_library(message: dict) -> bool:
+    target = message["target"]
+    return target["name"] == "calc_flow" and "lib" in target["kind"]
+
+
+def _is_example(message: dict) -> bool:
+    return message["target"]["name"] == EXAMPLE and bool(message.get("executable"))
+
+
+def _rebuilt_artifact(artifacts: list[dict]) -> dict:
+    if len(artifacts) != 1 or artifacts[0]["fresh"]:
+        raise ValueError("product and diagnostic example must actually rebuild")
+    return artifacts[0]
+
+
 def compiled_binary(messages: list[dict]) -> Path:
     artifacts = [m for m in messages if m.get("reason") == "compiler-artifact"]
-    libraries = [
-        m
-        for m in artifacts
-        if m["target"]["name"] == "calc_flow" and "lib" in m["target"]["kind"]
-    ]
-    examples = [
-        m for m in artifacts if m["target"]["name"] == EXAMPLE and m.get("executable")
-    ]
-    if (
-        len(libraries) != 1
-        or len(examples) != 1
-        or libraries[0]["fresh"]
-        or examples[0]["fresh"]
-    ):
-        raise ValueError("product and diagnostic example must actually rebuild")
-    return Path(examples[0]["executable"])
+    _rebuilt_artifact([m for m in artifacts if _is_product_library(m)])
+    example = _rebuilt_artifact([m for m in artifacts if _is_example(m)])
+    return Path(example["executable"])
 
 
 def source_seals(source: Path) -> dict[str, str]:
@@ -80,7 +84,7 @@ def build(args: argparse.Namespace) -> None:
         if stale.is_file():
             stale.unlink()
     command = [
-        "cargo",
+        require_executable("cargo"),
         "build",
         "--release",
         "--locked",
@@ -103,13 +107,16 @@ def build(args: argparse.Namespace) -> None:
         (output / "compiler.jsonl").open("w") as stdout,
         (output / "build.log").open("w") as stderr,
     ):
-        result = subprocess.run(
+        # The executable is resolved above and every argument is module-owned;
+        # paths from the CLI are cwd/environment values, never shell commands.
+        result = subprocess.run(  # nosec B603  # nosemgrep
             command,
             cwd=source,
             env=environment,
             stdout=stdout,
             stderr=stderr,
             check=False,
+            shell=False,
         )
     elapsed = time.monotonic() - started
     write_json(
@@ -134,13 +141,10 @@ def build(args: argparse.Namespace) -> None:
         "binary": str(binary),
         "binary_sha256": sha(binary),
         "source_root": str(source),
-        "revision": subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=source,
-            text=True,
-        ).strip(),
+        "revision": git_output(source, "rev-parse", "HEAD"),
         "command": command,
-        "rustc": subprocess.check_output(["rustc", "-Vv"], text=True),
+        "rustc": command_output([require_executable("rustc"), "-Vv"], timeout=30)
+        + "\n",
         "cargo_lock_sha256": sha(source / "Cargo.lock"),
         "harness_sha256": sha(source / HARNESS),
         "features": ["benchmark-internals"],

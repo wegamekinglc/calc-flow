@@ -609,6 +609,24 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn('CARGO_PROFILE_DEV_DEBUG: "0"', python_job)
         self.assertIn("uv run pytest", python_job)
 
+    def test_sum_tool_tests_run_after_installing_dev_dependencies(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
+        lint = workflow.split("  lint-and-test:\n", 1)[1].split("  package:\n", 1)[0]
+        package = workflow.split("  package:\n", 1)[1].split(
+            "  legacy-python-wheel:\n", 1
+        )[0]
+        command = "uv run --no-sync python -m unittest"
+
+        self.assertIn(command, lint)
+        self.assertLess(lint.index("uv sync --extra dev"), lint.index(command))
+        for module in (
+            "scripts.test_sum_state",
+            "scripts.test_sum_state_build",
+            "scripts.test_sum_state_profile",
+        ):
+            self.assertIn(module, lint)
+            self.assertNotIn(module, package)
+
     def test_agents_rust_runner_uses_synced_python_dependencies(self) -> None:
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         sync = "uv sync --extra dev"

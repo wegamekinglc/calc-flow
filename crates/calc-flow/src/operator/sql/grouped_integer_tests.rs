@@ -3,8 +3,8 @@ use crate::{CancellationToken, DataFusionConfig, JsonMap, StreamJobContext};
 use datafusion::arrow::array::{Int64Array, StringArray};
 use std::collections::BTreeMap;
 
-fn record(unsigned: bool, native_key: bool, phase: usize) -> RecordBatch {
-    let values = match phase {
+fn phase_values(unsigned: bool, phase: usize) -> Vec<Option<u64>> {
+    match phase {
         0 => vec![
             Some(u64::MAX >> usize::from(!unsigned)),
             None,
@@ -20,11 +20,11 @@ fn record(unsigned: bool, native_key: bool, phase: usize) -> RecordBatch {
             .collect(),
         3 => vec![],
         _ => vec![None, Some(2), None, Some(99)],
-    };
-    let keys = (0..values.len())
-        .map(|index| i64::try_from(index).unwrap())
-        .collect::<Vec<_>>();
-    let values: ArrayRef = if unsigned {
+    }
+}
+
+fn value_array(unsigned: bool, values: Vec<Option<u64>>) -> ArrayRef {
+    if unsigned {
         Arc::new(datafusion::arrow::array::UInt64Array::from(values))
     } else {
         Arc::new(Int64Array::from(
@@ -33,25 +33,39 @@ fn record(unsigned: bool, native_key: bool, phase: usize) -> RecordBatch {
                 .map(|value| value.map(|value| i64::try_from(value).unwrap()))
                 .collect::<Vec<_>>(),
         ))
-    };
-    let key: ArrayRef = if native_key {
-        Arc::new(Int64Array::from(keys.clone()))
+    }
+}
+
+fn key_array(native_key: bool, keys: &[i64]) -> ArrayRef {
+    if native_key {
+        Arc::new(Int64Array::from(keys.to_vec()))
     } else {
         Arc::new(StringArray::from(
             keys.iter()
                 .map(|key| (*key != 2).then(|| format!("account-{key}")))
                 .collect::<Vec<_>>(),
         ))
-    };
-    let enabled = keys
-        .iter()
-        .map(|key| match phase {
-            2 => *key % 5 != 0,
-            5 => *key % 7 != 0,
-            _ => *key < 3 || phase == 0,
-        })
+    }
+}
+
+fn enabled_array(keys: &[i64], phase: usize) -> BooleanArray {
+    BooleanArray::from(
+        keys.iter()
+            .map(|key| match phase {
+                2 => *key % 5 != 0,
+                5 => *key % 7 != 0,
+                _ => *key < 3 || phase == 0,
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn record(unsigned: bool, native_key: bool, phase: usize) -> RecordBatch {
+    let values = phase_values(unsigned, phase);
+    let keys = (0..values.len())
+        .map(|index| i64::try_from(index).unwrap())
         .collect::<Vec<_>>();
-    let mut columns = vec![("key", key)];
+    let mut columns = vec![("key", key_array(native_key, &keys))];
     if !native_key {
         columns.push((
             "stock",
@@ -59,8 +73,8 @@ fn record(unsigned: bool, native_key: bool, phase: usize) -> RecordBatch {
         ));
     }
     columns.extend([
-        ("value", values),
-        ("enabled", Arc::new(BooleanArray::from(enabled)) as ArrayRef),
+        ("value", value_array(unsigned, values)),
+        ("enabled", Arc::new(enabled_array(&keys, phase)) as ArrayRef),
     ]);
     let schema = Arc::new(Schema::new(
         columns
@@ -237,4 +251,84 @@ fn with_floating_column(record: &RecordBatch) -> RecordBatch {
     let mut columns = record.columns().to_vec();
     columns.push(floating);
     RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+}
+
+fn fixture_cell(record: &RecordBatch, column: &str, row: usize) -> ScalarValue {
+    ScalarValue::try_from_array(record.column_by_name(column).unwrap(), row).unwrap()
+}
+
+#[test]
+fn test_grouped_integer_fixture_preserves_phase_boundaries_and_masks() {
+    let signed = record(false, false, 0);
+    let unsigned = record(true, true, 0);
+    assert_eq!(signed.num_rows(), 4);
+    assert_eq!(
+        fixture_cell(&signed, "value", 0),
+        ScalarValue::Int64(Some(i64::MAX))
+    );
+    assert_eq!(
+        fixture_cell(&unsigned, "value", 0),
+        ScalarValue::UInt64(Some(u64::MAX))
+    );
+    assert_eq!(fixture_cell(&signed, "key", 2), ScalarValue::Utf8(None));
+    assert_eq!(
+        fixture_cell(&unsigned, "key", 2),
+        ScalarValue::Int64(Some(2))
+    );
+    assert_eq!(
+        fixture_cell(&signed, "enabled", 3),
+        ScalarValue::Boolean(Some(true))
+    );
+    let next = record(false, false, 1);
+    assert_eq!(next.num_rows(), 5);
+    assert_eq!(fixture_cell(&next, "value", 1), ScalarValue::Int64(Some(7)));
+    assert_eq!(
+        fixture_cell(&next, "enabled", 3),
+        ScalarValue::Boolean(Some(false))
+    );
+    let dense = record(false, false, 2);
+    assert_eq!(dense.num_rows(), CHUNK_ROWS + 1);
+    assert_eq!(fixture_cell(&dense, "value", 0), ScalarValue::Int64(None));
+    assert_eq!(
+        fixture_cell(&dense, "value", CHUNK_ROWS),
+        ScalarValue::Int64(Some(2))
+    );
+    assert_eq!(
+        fixture_cell(&dense, "enabled", 0),
+        ScalarValue::Boolean(Some(false))
+    );
+    assert_eq!(
+        fixture_cell(&dense, "stock", CHUNK_ROWS),
+        ScalarValue::Utf8(Some("stock".into()))
+    );
+    let empty = record(false, false, 3);
+    assert_eq!(empty.num_rows(), 0);
+    assert!(
+        empty
+            .schema()
+            .fields()
+            .iter()
+            .all(|field| field.is_nullable())
+    );
+    let sparse = record(false, false, 4);
+    assert_eq!(sparse.num_rows(), 4);
+    assert_eq!(fixture_cell(&sparse, "value", 0), ScalarValue::Int64(None));
+    assert_eq!(
+        fixture_cell(&sparse, "value", 1),
+        ScalarValue::Int64(Some(2))
+    );
+    let updated = record(false, false, 5);
+    assert_eq!(updated.num_rows(), CHUNK_ROWS + 1);
+    assert_eq!(
+        fixture_cell(&updated, "value", 1),
+        ScalarValue::Int64(Some(3))
+    );
+    assert_eq!(
+        fixture_cell(&updated, "value", CHUNK_ROWS),
+        ScalarValue::Int64(None)
+    );
+    assert_eq!(
+        fixture_cell(&updated, "enabled", 0),
+        ScalarValue::Boolean(Some(false))
+    );
 }

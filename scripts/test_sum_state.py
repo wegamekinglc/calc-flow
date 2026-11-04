@@ -7,14 +7,16 @@ import gzip
 import hashlib
 import io
 import json
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
+from scripts.benchmark_suite import sum_state
 from scripts.benchmark_suite.sum_state import (
     THREAD_ENV,
     compare_builds,
@@ -22,9 +24,14 @@ from scripts.benchmark_suite.sum_state import (
     finalize_acquisition,
     measurement_scope,
     validate_sample,
+    validated_argv,
 )
 from scripts.benchmark_suite.sum_state_profile import clock_alignment
-from scripts.benchmark_suite.sum_state_publication import publish, validate_inventory
+from scripts.benchmark_suite.sum_state_publication import (
+    PublicationContext,
+    publish,
+    validate_inventory,
+)
 
 
 class SumStateEvidenceTests(unittest.TestCase):
@@ -106,6 +113,71 @@ class SumStateEvidenceTests(unittest.TestCase):
         self.row["seconds"] = float("nan")
         with self.assertRaisesRegex(ValueError, "timing"):
             validate_sample(self.row, self.case, self.fixture)
+
+
+class InvocationArgvTests(unittest.TestCase):
+    def test_rejects_shell_command_text(self):
+        with self.assertRaisesRegex(ValueError, "argv"):
+            validated_argv("echo unsafe; text")
+
+    def test_rejects_embedded_nul_argument(self):
+        with self.assertRaisesRegex(ValueError, "argv"):
+            validated_argv(["python", "bad\0argument"])
+
+    def test_resolves_fixed_executable_without_interpreting_arguments(self):
+        result = validated_argv([sys.executable, "literal;$(unchanged)"])
+        self.assertTrue(Path(result[0]).is_absolute())
+        self.assertEqual(result[1], "literal;$(unchanged)")
+
+
+class InvocationLifecycleTests(unittest.TestCase):
+    def test_timeout_terminates_then_kills_and_reaps_process_group(self):
+        process = Mock(pid=123, returncode=None)
+        process.poll.return_value = None
+        process.wait.side_effect = [sum_state.subprocess.TimeoutExpired("worker", 2), 0]
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(sum_state.subprocess, "Popen", return_value=process) as launch,
+            patch.object(
+                sum_state,
+                "poll_invocation",
+                side_effect=TimeoutError("inclusive acquisition deadline"),
+            ),
+            patch.object(sum_state.os, "killpg", create=True) as kill,
+            patch.object(sum_state.signal, "SIGKILL", 9, create=True),
+        ):
+            env = {name: "1" for name in THREAD_ENV}
+            with self.assertRaisesRegex(TimeoutError, "deadline"):
+                sum_state.invoke(
+                    [sys.executable, "literal;argument"],
+                    env,
+                    Path(directory) / "invocation",
+                    10,
+                )
+            self.assertEqual(
+                kill.call_args_list, [call(123, sum_state.signal.SIGTERM), call(123, 9)]
+            )
+            self.assertEqual(process.wait.call_count, 2)
+            self.assertFalse(launch.call_args.kwargs["shell"])
+            self.assertTrue(Path(launch.call_args.args[0][0]).is_absolute())
+            self.assertEqual(launch.call_args.args[0][1], "literal;argument")
+
+    def test_spawn_failure_does_not_attempt_to_kill_absent_process(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(
+                sum_state.subprocess, "Popen", side_effect=OSError("spawn failed")
+            ),
+            patch.object(sum_state.os, "killpg", create=True) as kill,
+        ):
+            with self.assertRaisesRegex(OSError, "spawn failed"):
+                sum_state.invoke(
+                    [sys.executable],
+                    {name: "1" for name in THREAD_ENV},
+                    Path(directory) / "invocation",
+                    10,
+                )
+            kill.assert_not_called()
 
 
 class MeasurementScopeTests(unittest.TestCase):
@@ -227,7 +299,7 @@ class PublicationInventoryTests(unittest.TestCase):
     def test_late_publication_persists_stopped_authoritative_records(self):
         self._exercise_publication(late=True)
 
-    def _exercise_publication(self, *, late=False):
+    def _saved_publication(self):
         previous = Path(__file__).resolve().parents[1] / "benchmarks/sum-state/20261104"
         saved = json.loads(
             gzip.decompress((previous / "complete-evidence.json.gz").read_bytes())
@@ -241,110 +313,114 @@ class PublicationInventoryTests(unittest.TestCase):
         plan = deepcopy(saved["plan"])
         plan["cases"] = plan["cases"][:3]
         plan["unmeasured_final_source"] = ["stock-batch-8cpu"]
+        return previous, saved, acquisition, plan
+
+    def _prepare_publication(self, output, previous, saved, acquisition):
+        output.mkdir()
+        (output / "fixture-manifest.json").write_text(json.dumps(saved["fixtures"]))
+        profiles = json.loads((previous / "profile-summary.json").read_text())
+        (output / "profile-summary.json").write_text(
+            json.dumps([row for row in profiles if row["side"] == "candidate"])
+        )
+        profile = output / "profiles/candidate"
+        profile.mkdir(parents=True)
+        (profile / "stacks.json.gz").write_bytes(
+            (previous / "candidate-stacks.json.gz").read_bytes()
+        )
+        (profile / "stderr.log").write_text("")
+        self._copy_sample_rows(previous, output)
+        (output / "acquisition.json").write_text(json.dumps(acquisition))
+        (output / "summary.json").write_text(
+            json.dumps({"status": acquisition["status"], "failure": None})
+        )
+
+    def _copy_sample_rows(self, previous, output):
+        with (previous / "samples.csv").open() as source:
+            reader = csv.DictReader(source)
+            rows = [row for row in reader if row["case"] != "stock-batch-8cpu"]
+            with (output / "samples.csv").open("w", newline="") as target:
+                writer = csv.DictWriter(target, fieldnames=reader.fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+
+    def _invoke_publication(self, context, late):
+        ticks = iter((100, 100, 100, 129))
+
+        def clock():
+            return next(ticks, 130) if late else 100
+
+        with (
+            patch(
+                "scripts.benchmark_suite.sum_state_publication.time.monotonic",
+                side_effect=clock,
+            ),
+            redirect_stdout(io.StringIO()),
+        ):
+            if late:
+                with self.assertRaisesRegex(TimeoutError, "deadline"):
+                    publish(context)
+            else:
+                publish(context)
+
+    def _assert_stopped_publication(self, args, manifest):
+        paths = (
+            args.output / "acquisition.json",
+            args.output / "summary.json",
+            args.output / "phase-stopped.json",
+            args.publish_directory / "summary.json",
+            args.publish_directory / "evidence-manifest.json",
+        )
+        for path in paths:
+            record = json.loads(path.read_text())
+            self.assertEqual(record["status"], "stopped", str(path))
+            self.assertIn("deadline", record["failure"])
+        raw = json.loads(
+            gzip.decompress(
+                (args.publish_directory / "complete-evidence.json.gz").read_bytes()
+            )
+        )
+        self.assertEqual(raw["acquisition"]["status"], "stopped")
+        self.assertGreater(manifest["cumulative_measurement_seconds"], 600)
+        for name, record in manifest["files"].items():
+            contents = (args.publish_directory / name).read_bytes()
+            self.assertEqual(hashlib.sha256(contents).hexdigest(), record["sha256"])
+
+    def _assert_publication(self, args, late):
+        summary = json.loads((args.publish_directory / "summary.json").read_text())
+        self.assertEqual(summary["formal_observations"], 120)
+        self.assertEqual(summary["unmeasured_final_source"], ["stock-batch-8cpu"])
+        self.assertEqual(len(summary["profiles"]), 1)
+        manifest = json.loads(
+            (args.publish_directory / "evidence-manifest.json").read_text()
+        )
+        if late:
+            self._assert_stopped_publication(args, manifest)
+        else:
+            self.assertAlmostEqual(
+                manifest["cumulative_measurement_seconds"], 571.105223936
+            )
+
+    def _exercise_publication(self, *, late=False):
+        previous, saved, acquisition, plan = self._saved_publication()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            output = root / "collection"
-            output.mkdir()
-            (output / "fixture-manifest.json").write_text(json.dumps(saved["fixtures"]))
-            profiles = json.loads((previous / "profile-summary.json").read_text())
-            (output / "profile-summary.json").write_text(
-                json.dumps([row for row in profiles if row["side"] == "candidate"])
-            )
-            profile = output / "profiles/candidate"
-            profile.mkdir(parents=True)
-            (profile / "stacks.json.gz").write_bytes(
-                (previous / "candidate-stacks.json.gz").read_bytes()
-            )
-            (profile / "stderr.log").write_text("")
-            with (previous / "samples.csv").open() as source:
-                reader = csv.DictReader(source)
-                rows = [row for row in reader if row["case"] != "stock-batch-8cpu"]
-                with (output / "samples.csv").open("w", newline="") as target:
-                    writer = csv.DictWriter(target, fieldnames=reader.fieldnames)
-                    writer.writeheader()
-                    writer.writerows(rows)
-            (output / "acquisition.json").write_text(json.dumps(acquisition))
-            (output / "summary.json").write_text(
-                json.dumps(
-                    {
-                        "status": acquisition["status"],
-                        "failure": None,
-                    }
-                )
-            )
             args = SimpleNamespace(
-                output=output,
+                output=root / "collection",
                 publish_directory=root / "published",
                 prior_measurement_seconds=471.105223936,
                 budget_seconds=128.894776064,
             )
-            ticks = iter((100, 100, 100, 129))
-
-            def clock():
-                return next(ticks, 130) if late else 100
-
-            with (
-                patch(
-                    "scripts.benchmark_suite.sum_state_publication.time.monotonic",
-                    side_effect=clock,
-                ),
-                redirect_stdout(io.StringIO()),
-            ):
-                if late:
-                    with self.assertRaisesRegex(TimeoutError, "deadline"):
-                        publish(
-                            args,
-                            acquisition,
-                            plan,
-                            saved["environment"],
-                            saved["plan"]["builds"],
-                            128,
-                        )
-                else:
-                    publish(
-                        args,
-                        acquisition,
-                        plan,
-                        saved["environment"],
-                        saved["plan"]["builds"],
-                        128,
-                    )
-            summary = json.loads((args.publish_directory / "summary.json").read_text())
-            self.assertEqual(summary["formal_observations"], 120)
-            self.assertEqual(summary["unmeasured_final_source"], ["stock-batch-8cpu"])
-            self.assertEqual(len(summary["profiles"]), 1)
-            manifest = json.loads(
-                (args.publish_directory / "evidence-manifest.json").read_text()
+            self._prepare_publication(args.output, previous, saved, acquisition)
+            context = PublicationContext(
+                args,
+                acquisition,
+                plan,
+                saved["environment"],
+                saved["plan"]["builds"],
+                128,
             )
-            if late:
-                for path in (
-                    output / "acquisition.json",
-                    output / "summary.json",
-                    output / "phase-stopped.json",
-                    args.publish_directory / "summary.json",
-                    args.publish_directory / "evidence-manifest.json",
-                ):
-                    record = json.loads(path.read_text())
-                    self.assertEqual(record["status"], "stopped", str(path))
-                    self.assertIn("deadline", record["failure"])
-                raw = json.loads(
-                    gzip.decompress(
-                        (
-                            args.publish_directory / "complete-evidence.json.gz"
-                        ).read_bytes()
-                    )
-                )
-                self.assertEqual(raw["acquisition"]["status"], "stopped")
-                self.assertGreater(manifest["cumulative_measurement_seconds"], 600)
-                for name, record in manifest["files"].items():
-                    contents = (args.publish_directory / name).read_bytes()
-                    self.assertEqual(
-                        hashlib.sha256(contents).hexdigest(), record["sha256"]
-                    )
-            else:
-                self.assertAlmostEqual(
-                    manifest["cumulative_measurement_seconds"], 571.105223936
-                )
+            self._invoke_publication(context, late)
+            self._assert_publication(args, late)
 
 
 class ProfileClockTests(unittest.TestCase):

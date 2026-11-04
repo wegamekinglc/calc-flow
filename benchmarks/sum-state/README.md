@@ -49,6 +49,16 @@ not an isolated operator working-set metric.
 
 ## Reproduction
 
+The committed results use the measured Rust harness at
+`84186554b078e25e71003a74fedc91c63b2b7f70`, SHA-256
+`657de3e697907e473691c2fd0d1b99967d46577333135c50176801f6faa4e04e`.
+Subsequent analyzer fixes split the diagnostic functions and tooling without
+changing the two production SUM modules. Those diagnostic sources were not
+performance remeasured. The archived source, measurements and hashes remain
+unchanged; use the measured checkout below to reproduce their instrumentation.
+The initial candidate's product revision was `0a728e8e2e001a4dcf18c23f64b08f525b3d140b`;
+the final history-borrow product and its harness use the revision above.
+
 Run these commands serially from the candidate repository root with other native
 builds stopped. The focused builder overlays the common diagnostic example into
 the isolated baseline, seals product/support/vendor source, forces the product
@@ -58,13 +68,17 @@ Builds are outside the 600-second acquisition budget (estimate 10–15 minutes p
 side with the warmed cache; the first observed build took 726 seconds).
 
 ```bash
+git worktree add --detach 'target/sum-state-measured' \
+  '84186554b078e25e71003a74fedc91c63b2b7f70'
 git worktree add --detach 'target/sum-state-baseline' \
   '199d70b4156591153eb6b15cc2c8ffc238b3348f'
 python -m scripts.benchmark_suite.sum_state_build \
-  --source 'target/sum-state-baseline' --harness-source '.' \
+  --source 'target/sum-state-baseline' \
+  --harness-source 'target/sum-state-measured' \
   --output 'target/sum-state-build/baseline' --target 'target'
 python -m scripts.benchmark_suite.sum_state_build \
-  --source '.' --harness-source '.' \
+  --source 'target/sum-state-measured' \
+  --harness-source 'target/sum-state-measured' \
   --output 'target/sum-state-build/candidate' --target 'target'
 ```
 

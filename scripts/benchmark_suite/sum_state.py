@@ -2,6 +2,7 @@
 
 Build receipts and reproduction commands are documented in benchmarks/sum-state.
 The driver never builds binaries or retries incomplete measurements.
+Its owned subprocess boundary uses validated absolute argv without a shell.
 """
 
 from __future__ import annotations
@@ -15,15 +16,16 @@ import os
 import platform
 import signal
 import statistics
-import subprocess
+import subprocess  # nosec B404
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import psutil
 
 from scripts.benchmark_suite.report import comparison
-from scripts.toolkit import write_json
+from scripts.toolkit import command_output, require_executable, write_json
 
 ROOT = Path(__file__).resolve().parents[2]
 HARNESS = "crates/calc-flow/examples/grouped_sum_state_benchmark.rs"
@@ -86,63 +88,6 @@ def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def validate_sample(row, case, fixture):
-    seconds = row.get("seconds")
-    if type(seconds) not in (float, int) or not math.isfinite(seconds) or seconds <= 0:
-        raise ValueError("invalid timing")
-    if not (
-        row.get("process_cpu_ns", 0) > 0
-        and row.get("end_ns", 0) > row.get("start_ns", 0)
-    ):
-        raise ValueError("invalid timing clocks")
-    observed = row.get("process_observations", {})
-    if observed.get("observed_cpu_affinity") != case["cpus"]:
-        raise ValueError("actual CPU affinity mismatch")
-    expected_threads = {name: "1" for name in THREAD_ENV}
-    expected_threads["TOKIO_WORKER_THREADS"] = str(len(case["cpus"]))
-    if observed.get("observed_thread_environment") != expected_threads:
-        raise ValueError("actual thread environment mismatch")
-    stream = case["mode"] == "stream"
-    indices = range(len(fixture["batch_rows"])) if stream else [-1]
-    expected = {
-        "schema": "calc-flow.sum-state.v1",
-        "mode": case["mode"],
-        "partitions": case["partitions"],
-        "validated_all_snapshots": True,
-        "input_sha256": fixture["input_sha256"],
-        "input_schema_sha256": fixture["schema_sha256"],
-        "input_rows": fixture["input_rows"],
-        "batch_rows": fixture["batch_rows"],
-        "snapshot_rows": [fixture["snapshot_rows"][i] for i in indices],
-        "snapshot_sha256": [fixture["snapshot_sha256"][i] for i in indices],
-        "snapshot_schema_sha256": [fixture["snapshot_schema_sha256"] for _ in indices],
-    }
-    for key, value in expected.items():
-        if row.get(key) != value:
-            raise ValueError(f"invalid evidence {key}: {row.get(key)!r} != {value!r}")
-    if stream:
-        status = row["diagnostics"]
-        if (
-            status["state"] != "completed"
-            or status["terminal_cause"] != "natural_end"
-            or status["task_count"]
-            or status["task_errors"]
-            or status["metrics_overflowed"]
-        ):
-            raise ValueError("incomplete lifecycle")
-        if any(
-            status["checkpoint"][key] is not None
-            for key in ("current_epoch", "last_completed_epoch")
-        ):
-            raise ValueError("unexpected checkpoint lifecycle")
-        if any(
-            v["errors"] or not v["ended"]
-            for group in ("sources", "operators", "sinks")
-            for v in status[group].values()
-        ):
-            raise ValueError("unsettled actor lifecycle")
-
-
 def compare_oracles(left, right):
     for field in ORACLE_FIELDS:
         if left[field] != right[field]:
@@ -181,139 +126,6 @@ def verify_build(build):
     for name, digest in build["source_sha256"].items():
         if sha(source / name) != digest:
             raise ValueError(f"source drift: {name}")
-
-
-def compare_builds(builds):
-    base, candidate = builds["baseline"], builds["candidate"]
-    for key in ("cargo_lock_sha256", "harness_sha256", "rustc", "features"):
-        if base[key] != candidate[key]:
-            raise ValueError(f"incomparable build {key}")
-    for key in (
-        "RUSTFLAGS",
-        "CARGO_ENCODED_RUSTFLAGS",
-        "RUSTUP_TOOLCHAIN",
-        "CARGO_PROFILE_RELEASE_LTO",
-        "CARGO_PROFILE_RELEASE_OPT_LEVEL",
-        "CARGO_PROFILE_RELEASE_CODEGEN_UNITS",
-        "CARGO_PROFILE_RELEASE_DEBUG",
-    ):
-        if base.get("build_environment", {}).get(key) != candidate.get(
-            "build_environment", {}
-        ).get(key):
-            raise ValueError(f"incomparable build environment {key}")
-    for config in (
-        "Cargo.toml",
-        "crates/calc-flow/Cargo.toml",
-        "rust-toolchain.toml",
-        ".cargo/config.toml",
-    ):
-        if base["source_sha256"].get(config) != candidate["source_sha256"].get(config):
-            raise ValueError(f"incomparable compiled configuration: {config}")
-    for shared in (
-        "crates/calc-flow/examples/support/mod.rs",
-        "crates/calc-flow/examples/support/stock_account_data.rs",
-    ):
-        left = base["source_sha256"].get(shared)
-        if not left or left != candidate["source_sha256"].get(shared):
-            raise ValueError(f"incomparable shared harness source: {shared}")
-    vendors = [
-        {
-            name: digest
-            for name, digest in build["source_sha256"].items()
-            if name.startswith("vendor/")
-        }
-        for build in (base, candidate)
-    ]
-    if not vendors[0] or vendors[0] != vendors[1]:
-        raise ValueError("incomparable vendored dependencies")
-
-
-def guard(builds):
-    bad = []
-    for process in psutil.process_iter(["pid", "name", "cmdline", "status"]):
-        if process.pid == os.getpid() or process.info["status"] == psutil.STATUS_ZOMBIE:
-            continue
-        argv = process.info["cmdline"] or []
-        if process.info["name"] in {
-            "cargo",
-            "rustc",
-            "maturin",
-            "pytest",
-            "samply",
-            "perf",
-        } or any(
-            "run_stock_positions_" in arg or arg == "benchmarks.stock_positions"
-            for arg in argv
-        ):
-            bad.append(process.info)
-    if bad:
-        raise RuntimeError(f"competing build/measurement: {bad}")
-    for build in builds.values():
-        if sha(build["binary"]) != build["binary_sha256"]:
-            raise ValueError("binary drift")
-
-
-def invoke(command, env, path, deadline):
-    path.mkdir(parents=True, exist_ok=False)
-    write_json(
-        path / "command.json",
-        {
-            "argv": command,
-            "environment": {k: env[k] for k in THREAD_ENV},
-        },
-    )
-    started = time.monotonic()
-    peak = 0
-    process = None
-    try:
-        with (
-            (path / "stdout.jsonl").open("wb") as output,
-            (path / "stderr.log").open("wb") as errors,
-        ):
-            process = subprocess.Popen(
-                command,
-                env=env,
-                cwd=ROOT,
-                stdout=output,
-                stderr=errors,
-                start_new_session=True,
-            )
-            while process.poll() is None:
-                if time.monotonic() > deadline - 5:
-                    raise TimeoutError("inclusive acquisition deadline")
-                try:
-                    parent = psutil.Process(process.pid)
-                    peak = max(
-                        peak,
-                        sum(
-                            p.memory_info().rss
-                            for p in [parent, *parent.children(recursive=True)]
-                            if p.is_running()
-                        ),
-                    )
-                except psutil.Error:
-                    pass
-                time.sleep(0.02)
-            if process.returncode:
-                raise RuntimeError(f"command failed ({process.returncode}): {path}")
-    finally:
-        if process is not None and process.poll() is None:
-            os.killpg(process.pid, signal.SIGTERM)
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait(timeout=2)
-    receipt = {
-        "whole_process_wall_seconds": time.monotonic() - started,
-        "sampled_process_tree_peak_rss": peak,
-        "owned_process_reaped": process.returncode is not None,
-    }
-    write_json(path / "receipt.json", receipt)
-    rows = [
-        json.loads(line) for line in (path / "stdout.jsonl").read_text().splitlines()
-    ]
-    return rows, receipt
 
 
 def environment(workers):
@@ -386,18 +198,308 @@ def finalize_acquisition(args, acquisition, builds, started, deadline):
         persist_source(args, acquisition)
 
 
-def measurement_scope(history_borrow, budget_seconds, prior_seconds):
-    if not (
-        math.isfinite(budget_seconds)
-        and 0 < budget_seconds <= 600
-        and math.isfinite(prior_seconds)
-        and prior_seconds >= 0
+@dataclass(frozen=True, slots=True)
+class CollectionContext:
+    args: argparse.Namespace
+    builds: dict
+    scope: dict
+    started: float
+    deadline: float
+
+
+@dataclass(frozen=True, slots=True)
+class MeasurementContext:
+    collection: CollectionContext
+    fixture: dict
+
+
+@dataclass(frozen=True, slots=True)
+class RoundContext:
+    measurement: MeasurementContext
+    case: dict
+    number: int
+    record: dict
+    path: Path
+
+
+def validate_timing(row):
+    seconds = row.get("seconds")
+    if type(seconds) not in (float, int):
+        raise ValueError("invalid timing")
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("invalid timing")
+    if row.get("process_cpu_ns", 0) <= 0:
+        raise ValueError("invalid timing clocks")
+    if row.get("end_ns", 0) <= row.get("start_ns", 0):
+        raise ValueError("invalid timing clocks")
+
+
+def validate_resources(row, case):
+    observed = row.get("process_observations", {})
+    if observed.get("observed_cpu_affinity") != case["cpus"]:
+        raise ValueError("actual CPU affinity mismatch")
+    expected = {name: "1" for name in THREAD_ENV}
+    expected["TOKIO_WORKER_THREADS"] = str(len(case["cpus"]))
+    if observed.get("observed_thread_environment") != expected:
+        raise ValueError("actual thread environment mismatch")
+
+
+def expected_sample(case, fixture):
+    indices = range(len(fixture["batch_rows"])) if case["mode"] == "stream" else [-1]
+    return {
+        "schema": "calc-flow.sum-state.v1",
+        "mode": case["mode"],
+        "partitions": case["partitions"],
+        "validated_all_snapshots": True,
+        "input_sha256": fixture["input_sha256"],
+        "input_schema_sha256": fixture["schema_sha256"],
+        "input_rows": fixture["input_rows"],
+        "batch_rows": fixture["batch_rows"],
+        "snapshot_rows": [fixture["snapshot_rows"][i] for i in indices],
+        "snapshot_sha256": [fixture["snapshot_sha256"][i] for i in indices],
+        "snapshot_schema_sha256": [fixture["snapshot_schema_sha256"] for _ in indices],
+    }
+
+
+def validate_fields(row, expected):
+    for key, value in expected.items():
+        if row.get(key) != value:
+            raise ValueError(f"invalid evidence {key}: {row.get(key)!r} != {value!r}")
+
+
+def actor_unsettled(actor):
+    return actor["errors"] or not actor["ended"]
+
+
+def validate_stream_status(status):
+    if status["state"] != "completed" or status["terminal_cause"] != "natural_end":
+        raise ValueError("incomplete lifecycle")
+    if any(status[key] for key in ("task_count", "task_errors", "metrics_overflowed")):
+        raise ValueError("incomplete lifecycle")
+    epochs = ("current_epoch", "last_completed_epoch")
+    if any(status["checkpoint"][key] is not None for key in epochs):
+        raise ValueError("unexpected checkpoint lifecycle")
+    validate_actor_status(status)
+
+
+def validate_actor_status(status):
+    for group in ("sources", "operators", "sinks"):
+        if any(actor_unsettled(value) for value in status[group].values()):
+            raise ValueError("unsettled actor lifecycle")
+
+
+def validate_sample(row, case, fixture):
+    validate_timing(row)
+    validate_resources(row, case)
+    validate_fields(row, expected_sample(case, fixture))
+    if case["mode"] == "stream":
+        validate_stream_status(row["diagnostics"])
+
+
+def compare_fields(left, right, keys, label, *, required=False):
+    for key in keys:
+        left_value = left[key] if required else left.get(key)
+        right_value = right[key] if required else right.get(key)
+        if left_value != right_value:
+            raise ValueError(f"incomparable {label} {key}")
+
+
+def compare_shared_sources(left, right):
+    for path in (
+        "crates/calc-flow/examples/support/mod.rs",
+        "crates/calc-flow/examples/support/stock_account_data.rs",
     ):
+        digest = left.get(path)
+        if not digest or digest != right.get(path):
+            raise ValueError(f"incomparable shared harness source: {path}")
+
+
+def vendor_seals(build):
+    return {
+        name: digest
+        for name, digest in build["source_sha256"].items()
+        if name.startswith("vendor/")
+    }
+
+
+def compare_builds(builds):
+    base, candidate = builds["baseline"], builds["candidate"]
+    compare_fields(
+        base,
+        candidate,
+        ("cargo_lock_sha256", "harness_sha256", "rustc", "features"),
+        "build",
+        required=True,
+    )
+    compare_fields(
+        base.get("build_environment", {}),
+        candidate.get("build_environment", {}),
+        (
+            "RUSTFLAGS",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "RUSTUP_TOOLCHAIN",
+            "CARGO_PROFILE_RELEASE_LTO",
+            "CARGO_PROFILE_RELEASE_OPT_LEVEL",
+            "CARGO_PROFILE_RELEASE_CODEGEN_UNITS",
+            "CARGO_PROFILE_RELEASE_DEBUG",
+        ),
+        "build environment",
+    )
+    compare_fields(
+        base["source_sha256"],
+        candidate["source_sha256"],
+        (
+            "Cargo.toml",
+            "crates/calc-flow/Cargo.toml",
+            "rust-toolchain.toml",
+            ".cargo/config.toml",
+        ),
+        "compiled configuration:",
+    )
+    compare_shared_sources(base["source_sha256"], candidate["source_sha256"])
+    vendors = vendor_seals(base)
+    if not vendors or vendors != vendor_seals(candidate):
+        raise ValueError("incomparable vendored dependencies")
+
+
+def benchmark_argument(argument):
+    return (
+        "run_stock_positions_" in argument or argument == "benchmarks.stock_positions"
+    )
+
+
+def competing_process(process):
+    if process.pid == os.getpid() or process.info["status"] == psutil.STATUS_ZOMBIE:
+        return False
+    names = {"cargo", "rustc", "maturin", "pytest", "samply", "perf"}
+    arguments = process.info["cmdline"] or []
+    return process.info["name"] in names or any(map(benchmark_argument, arguments))
+
+
+def guard(builds):
+    processes = psutil.process_iter(["pid", "name", "cmdline", "status"])
+    bad = [process.info for process in processes if competing_process(process)]
+    if bad:
+        raise RuntimeError(f"competing build/measurement: {bad}")
+    for build in builds.values():
+        if sha(build["binary"]) != build["binary_sha256"]:
+            raise ValueError("binary drift")
+
+
+def validate_argv_values(arguments):
+    if not isinstance(arguments, (list, tuple)) or not arguments:
+        raise ValueError("command requires a nonempty argv vector")
+    if any(not isinstance(value, str) for value in arguments):
+        raise ValueError("argv values must be strings")
+    if any("\0" in value for value in arguments):
+        raise ValueError("argv values must not contain NUL")
+
+
+def absolute_executable(value):
+    path = Path(value)
+    if not path.is_absolute():
+        path = Path(require_executable(value))
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise ValueError("executable must be an executable regular file")
+    return str(path)
+
+
+def validated_argv(arguments):
+    validate_argv_values(arguments)
+    return [absolute_executable(arguments[0]), *arguments[1:]]
+
+
+def process_tree_rss(process):
+    try:
+        parent = psutil.Process(process.pid)
+        children = [parent, *parent.children(recursive=True)]
+        return sum(child.memory_info().rss for child in children if child.is_running())
+    except psutil.Error:
+        return 0
+
+
+def poll_invocation(process, deadline):
+    peak = 0
+    while process.poll() is None:
+        if time.monotonic() > deadline - 5:
+            raise TimeoutError("inclusive acquisition deadline")
+        peak = max(peak, process_tree_rss(process))
+        time.sleep(0.02)
+    return peak
+
+
+def settle_invocation(process):
+    if process is None or process.poll() is not None:
+        return
+    os.killpg(process.pid, signal.SIGTERM)
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=2)
+
+
+def start_invocation(command, env, output, errors):
+    command = validated_argv(command)
+    # Trusted local receipts/fixed flags form validated, absolute argv. No shell.
+    return subprocess.Popen(  # nosec B603  # nosemgrep
+        command,
+        env=env,
+        cwd=ROOT,
+        stdout=output,
+        stderr=errors,
+        start_new_session=True,
+        shell=False,
+    )
+
+
+def invoke(command, env, path, deadline):
+    command = validated_argv(command)
+    path.mkdir(parents=True, exist_ok=False)
+    write_json(
+        path / "command.json",
+        {
+            "argv": command,
+            "environment": {key: env[key] for key in THREAD_ENV},
+        },
+    )
+    started, process = time.monotonic(), None
+    try:
+        with (
+            (path / "stdout.jsonl").open("wb") as output,
+            (path / "stderr.log").open("wb") as errors,
+        ):
+            process = start_invocation(command, env, output, errors)
+            peak = poll_invocation(process, deadline)
+            if process.returncode:
+                raise RuntimeError(f"command failed ({process.returncode}): {path}")
+    finally:
+        settle_invocation(process)
+    receipt = {
+        "whole_process_wall_seconds": time.monotonic() - started,
+        "sampled_process_tree_peak_rss": peak,
+        "owned_process_reaped": process.returncode is not None,
+    }
+    write_json(path / "receipt.json", receipt)
+    rows = [
+        json.loads(line) for line in (path / "stdout.jsonl").read_text().splitlines()
+    ]
+    return rows, receipt
+
+
+def validate_budget(budget, prior):
+    if not math.isfinite(budget) or not 0 < budget <= 600:
         raise ValueError("invalid measurement budget")
+    if not math.isfinite(prior) or prior < 0:
+        raise ValueError("invalid measurement budget")
+    if budget + prior > 600 + 1e-9:
+        raise ValueError("cumulative measurement budget exceeds600 seconds")
+
+
+def measurement_scope(history_borrow, budget_seconds, prior_seconds):
+    validate_budget(budget_seconds, prior_seconds)
     if history_borrow and prior_seconds <= 0:
         raise ValueError("history-borrow requires prior measurement accounting")
-    if budget_seconds + prior_seconds > 600 + 1e-9:
-        raise ValueError("cumulative measurement budget exceeds600 seconds")
     return {
         "cases": CASES[:3] if history_borrow else CASES,
         "profile_sides": ("candidate",)
@@ -408,12 +510,7 @@ def measurement_scope(history_borrow, budget_seconds, prior_seconds):
     }
 
 
-def run(args):
-    started = time.monotonic()
-    scope = measurement_scope(
-        args.history_borrow, args.budget_seconds, args.prior_measurement_seconds
-    )
-    deadline = started + args.budget_seconds
+def create_output(args):
     if args.output.exists():
         raise FileExistsError(
             "use a new output directory; never overwrite a collection"
@@ -421,11 +518,9 @@ def run(args):
     args.output.mkdir(parents=True)
     if args.publish_directory and args.publish_directory.exists():
         raise FileExistsError("use a new publication directory")
-    builds = {
-        side: checked_build(getattr(args, side + "_build"))
-        for side in ("baseline", "candidate")
-    }
-    compare_builds(builds)
+
+
+def validate_prior_budget(args):
     if args.history_borrow:
         previous = json.loads(
             (ROOT / "benchmarks/sum-state/20261104/evidence-manifest.json").read_text()
@@ -435,7 +530,27 @@ def run(args):
             > 1e-6
         ):
             raise ValueError("prior measurement accounting differs from sealed receipt")
+
+
+def collection_context(args, started):
+    scope = measurement_scope(
+        args.history_borrow, args.budget_seconds, args.prior_measurement_seconds
+    )
+    create_output(args)
+    builds = {
+        side: checked_build(getattr(args, side + "_build"))
+        for side in ("baseline", "candidate")
+    }
+    compare_builds(builds)
+    validate_prior_budget(args)
     os.sched_setaffinity(0, {31})
+    return CollectionContext(
+        args, builds, scope, started, started + args.budget_seconds
+    )
+
+
+def collection_plan(context):
+    args, scope, builds = context.args, context.scope, context.builds
     plan = {
         "cases": scope["cases"],
         "rounds": 2,
@@ -463,13 +578,18 @@ def run(args):
         ),
         "builds": builds,
     }
-    write_json(args.output / "plan.json", plan)
+    return plan
+
+
+def machine_identity(context):
+    args = context.args
     machine = {
         "platform": platform.platform(),
         "python": platform.python_version(),
-        "topology": subprocess.check_output(
-            ["lscpu", "-e=CPU,CORE,SOCKET,ONLINE"], text=True
-        ),
+        "topology": command_output(
+            [require_executable("lscpu"), "-e=CPU,CORE,SOCKET,ONLINE"]
+        )
+        + "\n",
         "host_limits": (
             "WSL host load and power state unobservable; "
             "eight logical CPUs report four core IDs"
@@ -515,204 +635,263 @@ def run(args):
         },
     }
     if args.perf:
-        tool_env = environment(1)
-        if args.perf_library:
-            tool_env["LD_LIBRARY_PATH"] = str(args.perf_library)
-        machine["profile_tools"] = {
-            name: {
-                "path": str(path),
-                "sha256": sha(path),
-                "version": subprocess.check_output(
-                    [str(path), "--version"],
-                    text=True,
-                    env=tool_env,
-                    timeout=max(1, deadline - time.monotonic()),
-                ).strip(),
-            }
-            for name, path in (("perf", args.perf), ("samply", args.samply))
-        }
-    write_json(args.output / "environment.json", machine)
-    acquisition = {
+        machine["profile_tools"] = profile_tool_identities(context)
+    return machine
+
+
+def profile_tool_identities(context):
+    args = context.args
+    env = environment(1)
+    if args.perf_library:
+        env["LD_LIBRARY_PATH"] = str(args.perf_library)
+    return {
+        name: tool_identity(path, env, context.deadline)
+        for name, path in (("perf", args.perf), ("samply", args.samply))
+    }
+
+
+def tool_identity(path, env, deadline):
+    executable = absolute_executable(str(path))
+    return {
+        "path": str(path),
+        "sha256": sha(path),
+        "version": command_output(
+            [executable, "--version"],
+            env=env,
+            timeout=max(1, deadline - time.monotonic()),
+        ),
+    }
+
+
+def acquisition_state(context):
+    return {
         "status": "running",
-        "started_monotonic": started,
-        "deadline": deadline,
+        "started_monotonic": context.started,
+        "deadline": context.deadline,
         "cases": [],
         "profiles": [],
         "failure": None,
     }
-    write_json(args.output / "acquisition.json", acquisition)
-    try:
-        guard(builds)
-        prepared, _ = invoke(
-            [
-                "taskset",
-                "-c",
-                "0",
-                builds["baseline"]["binary"],
-                "--prepare",
-                str(args.output / "fixture"),
-            ],
-            environment(1),
-            args.output / "prepare",
-            deadline,
-        )
-        fixture = {row["fixture"]: row for row in prepared}
-        write_json(args.output / "fixture-manifest.json", fixture)
-        for case in scope["cases"]:
-            record = {
-                **case,
-                "comparison": "interleaved",
-                "correctness": True,
-                "rows": fixture[case["fixture"]]["input_rows"],
-                "baseline": [],
-                "candidate": [],
-                "observations": [],
-            }
-            acquisition["cases"].append(record)
-            for round_index in range(2):
-                round_path = (
-                    args.output / "timings" / case["id"] / f"round-{round_index + 1}"
-                )
-                for side in builds:
-                    measure(
-                        args,
-                        builds,
-                        case,
-                        fixture,
-                        side,
-                        round_path / ("warmup-" + side),
-                        deadline,
-                    )
-                samples = {side: [] for side in builds}
-                for pair in range(10):
-                    pair_rows = {}
-                    for side in (
-                        ("baseline", "candidate")
-                        if pair % 2 == 0
-                        else ("candidate", "baseline")
-                    ):
-                        path = round_path / f"pair-{pair + 1}-{side}"
-                        row, receipt = measure(
-                            args, builds, case, fixture, side, path, deadline
-                        )
-                        samples[side].append(row["seconds"])
-                        pair_rows[side] = row
-                        record["observations"].append(
-                            {
-                                "round": round_index + 1,
-                                "pair": pair + 1,
-                                "side": side,
-                                "path": str(path.relative_to(args.output)),
-                                "row": row,
-                                "resources": receipt,
-                            }
-                        )
-                    compare_oracles(pair_rows["baseline"], pair_rows["candidate"])
-                    write_json(args.output / "acquisition.json", acquisition)
-                for side in builds:
-                    record[side].append(samples[side])
-            record["statistics"] = comparison(record)
-            record["resource_summary"] = {
-                side: {
-                    "processing_cpu_ms_p50": statistics.median(
-                        o["row"]["process_cpu_ns"] / 1e6
-                        for o in record["observations"]
-                        if o["side"] == side
-                    ),
-                    "processing_average_cores_p50": statistics.median(
-                        o["row"]["process_cpu_ns"] / 1e9 / o["row"]["seconds"]
-                        for o in record["observations"]
-                        if o["side"] == side
-                    ),
-                    "whole_process_peak_rss_p50": statistics.median(
-                        o["resources"]["sampled_process_tree_peak_rss"]
-                        for o in record["observations"]
-                        if o["side"] == side
-                    ),
-                }
-                for side in builds
-            }
-            print(
-                json.dumps({"case": case["id"], "statistics": record["statistics"]}),
-                flush=True,
-            )
-        profile_allowed = (
-            args.perf
-            and deadline - time.monotonic() >= scope["profile_min_remaining_seconds"]
-        )
-        if args.perf and not profile_allowed:
-            acquisition["profile_skip_reason"] = (
-                "predeclared remaining-time admission refused; timings prioritized"
-            )
-        if profile_allowed:
-            profile_case = CASES[0]
-            for side in scope["profile_sides"]:
-                path = args.output / "profiles" / side
-                rows, receipt = measure(
-                    args,
-                    builds,
-                    profile_case,
-                    fixture,
-                    side,
-                    path,
-                    deadline,
-                    profile=True,
-                )
-                acquisition["profiles"].append(
-                    {
-                        "side": side,
-                        "path": str(path.relative_to(args.output)),
-                        "rows": rows,
-                        "windows": [
-                            {"start_ns": r["start_ns"], "end_ns": r["end_ns"]}
-                            for r in rows[1:]
-                        ],
-                        "resources": receipt,
-                        "perf_data_sha256": sha(path / "perf.data"),
-                    }
-                )
-                write_json(args.output / "acquisition.json", acquisition)
-        if acquisition["profiles"]:
-            from scripts.benchmark_suite.sum_state_profile import decode
 
-            decode(args, acquisition, builds, deadline)
-        write_samples(args.output / "samples.csv", acquisition)
-        if time.monotonic() > deadline:
-            raise TimeoutError("inclusive acquisition deadline after preflight/cleanup")
-        acquisition["status"] = "completed"
+
+def save_acquisition(context, acquisition):
+    write_json(context.args.output / "acquisition.json", acquisition)
+
+
+def prepare_fixture(context):
+    guard(context.builds)
+    prepared, _ = invoke(
+        [
+            "taskset",
+            "-c",
+            "0",
+            context.builds["baseline"]["binary"],
+            "--prepare",
+            str(context.args.output / "fixture"),
+        ],
+        environment(1),
+        context.args.output / "prepare",
+        context.deadline,
+    )
+    fixture = {row["fixture"]: row for row in prepared}
+    write_json(context.args.output / "fixture-manifest.json", fixture)
+    return MeasurementContext(context, fixture)
+
+
+def collect_pair(context, pair, samples):
+    order = ("baseline", "candidate") if pair % 2 == 0 else ("candidate", "baseline")
+    rows = {}
+    for side in order:
+        path = context.path / f"pair-{pair + 1}-{side}"
+        row, receipt = measure(context.measurement, context.case, side, path)
+        samples[side].append(row["seconds"])
+        rows[side] = row
+        context.record["observations"].append(
+            {
+                "round": context.number + 1,
+                "pair": pair + 1,
+                "side": side,
+                "path": str(
+                    path.relative_to(context.measurement.collection.args.output)
+                ),
+                "row": row,
+                "resources": receipt,
+            }
+        )
+    compare_oracles(rows["baseline"], rows["candidate"])
+
+
+def collect_round(context, acquisition):
+    collection = context.measurement.collection
+    for side in collection.builds:
+        measure(
+            context.measurement, context.case, side, context.path / ("warmup-" + side)
+        )
+    samples = {side: [] for side in collection.builds}
+    for pair in range(10):
+        collect_pair(context, pair, samples)
+        save_acquisition(collection, acquisition)
+    for side in collection.builds:
+        context.record[side].append(samples[side])
+
+
+def case_record(measurement, case):
+    return {
+        **case,
+        "comparison": "interleaved",
+        "correctness": True,
+        "rows": measurement.fixture[case["fixture"]]["input_rows"],
+        "baseline": [],
+        "candidate": [],
+        "observations": [],
+    }
+
+
+def side_resources(observations):
+    return {
+        "processing_cpu_ms_p50": statistics.median(
+            row["row"]["process_cpu_ns"] / 1e6 for row in observations
+        ),
+        "processing_average_cores_p50": statistics.median(
+            row["row"]["process_cpu_ns"] / 1e9 / row["row"]["seconds"]
+            for row in observations
+        ),
+        "whole_process_peak_rss_p50": statistics.median(
+            row["resources"]["sampled_process_tree_peak_rss"] for row in observations
+        ),
+    }
+
+
+def resources_for_side(record, side):
+    return side_resources(
+        [row for row in record["observations"] if row["side"] == side]
+    )
+
+
+def collect_case(measurement, case, acquisition):
+    collection = measurement.collection
+    record = case_record(measurement, case)
+    acquisition["cases"].append(record)
+    for number in range(2):
+        path = collection.args.output / "timings" / case["id"] / f"round-{number + 1}"
+        collect_round(
+            RoundContext(measurement, case, number, record, path), acquisition
+        )
+    record["statistics"] = comparison(record)
+    record["resource_summary"] = {
+        side: resources_for_side(record, side) for side in collection.builds
+    }
+    print(
+        json.dumps({"case": case["id"], "statistics": record["statistics"]}), flush=True
+    )
+
+
+def profile_observation(side, path, rows, receipt):
+    return {
+        "side": side,
+        "path": str(path),
+        "rows": rows,
+        "windows": [
+            {"start_ns": row["start_ns"], "end_ns": row["end_ns"]} for row in rows[1:]
+        ],
+        "resources": receipt,
+    }
+
+
+def collect_profiles(measurement, acquisition):
+    context = measurement.collection
+    if not context.args.perf:
+        return
+    if (
+        context.deadline - time.monotonic()
+        < context.scope["profile_min_remaining_seconds"]
+    ):
+        acquisition["profile_skip_reason"] = (
+            "predeclared remaining-time admission refused; timings prioritized"
+        )
+        return
+    for side in context.scope["profile_sides"]:
+        path = context.args.output / "profiles" / side
+        rows, receipt = measure(measurement, CASES[0], side, path, profile=True)
+        observed = profile_observation(
+            side, path.relative_to(context.args.output), rows, receipt
+        )
+        observed["perf_data_sha256"] = sha(path / "perf.data")
+        acquisition["profiles"].append(observed)
+        save_acquisition(context, acquisition)
+    from scripts.benchmark_suite.sum_state_profile import decode
+
+    decode(context.args, acquisition, context.builds, context.deadline)
+
+
+def collect(context, acquisition):
+    measurement = prepare_fixture(context)
+    for case in context.scope["cases"]:
+        collect_case(measurement, case, acquisition)
+    collect_profiles(measurement, acquisition)
+    write_samples(context.args.output / "samples.csv", acquisition)
+    if time.monotonic() > context.deadline:
+        raise TimeoutError("inclusive acquisition deadline after preflight/cleanup")
+    acquisition["status"] = "completed"
+
+
+def publish_collection(context, acquisition, plan, machine):
+    if context.args.publish_directory:
+        from scripts.benchmark_suite.sum_state_publication import (
+            PublicationContext,
+            publish,
+        )
+
+        publish(
+            PublicationContext(
+                context.args,
+                acquisition,
+                plan,
+                machine,
+                context.builds,
+                context.deadline,
+            )
+        )
+
+
+def run(args):
+    started = time.monotonic()
+    context = collection_context(args, started)
+    plan, machine = collection_plan(context), machine_identity(context)
+    write_json(args.output / "plan.json", plan)
+    write_json(args.output / "environment.json", machine)
+    acquisition = acquisition_state(context)
+    save_acquisition(context, acquisition)
+    try:
+        collect(context, acquisition)
     except BaseException as error:
         acquisition["status"] = "stopped"
         acquisition["failure"] = repr(error)
         raise
     finally:
-        finalize_acquisition(args, acquisition, builds, started, deadline)
-        if args.publish_directory:
-            from scripts.benchmark_suite.sum_state_publication import publish
-
-            publish(args, acquisition, plan, machine, builds, deadline)
+        finalize_acquisition(
+            args, acquisition, context.builds, started, context.deadline
+        )
+        publish_collection(context, acquisition, plan, machine)
     if acquisition["status"] != "completed":
         raise RuntimeError(f"measurement stopped: {acquisition['failure']}")
 
 
-def measure(args, builds, case, fixtures, side, path, deadline, *, profile=False):
-    guard(builds)
-    build = builds[side]
+def native_command(context, case, side, path, profile):
+    collection = context.collection
     command = [
         "taskset",
         "-c",
         ",".join(map(str, case["cpus"])),
-        build["binary"],
-        str(args.output / "fixture" / (case["fixture"] + ".arrow")),
+        collection.builds[side]["binary"],
+        str(collection.args.output / "fixture" / (case["fixture"] + ".arrow")),
         case["mode"],
         str(case["partitions"]),
         "6" if profile else "1",
     ]
-    env = environment(len(case["cpus"]))
-    if args.perf_library:
-        env["LD_LIBRARY_PATH"] = str(args.perf_library)
     if profile:
         command = [
-            str(args.perf),
+            str(collection.args.perf),
             "record",
             "-e",
             "cpu-clock:u",
@@ -727,12 +906,26 @@ def measure(args, builds, case, fixtures, side, path, deadline, *, profile=False
             "--",
             *command,
         ]
-    rows, receipt = invoke(command, env, path, deadline)
+    return command
+
+
+def measure(context, case, side, path, *, profile=False):
+    collection = context.collection
+    guard(collection.builds)
+    env = environment(len(case["cpus"]))
+    if collection.args.perf_library:
+        env["LD_LIBRARY_PATH"] = str(collection.args.perf_library)
+    rows, receipt = invoke(
+        native_command(context, case, side, path, profile),
+        env,
+        path,
+        collection.deadline,
+    )
     if len(rows) != (6 if profile else 1):
         raise ValueError("wrong invocation count")
     for row in rows:
-        validate_sample(row, case, fixtures[case["fixture"]])
-    guard(builds)
+        validate_sample(row, case, context.fixture[case["fixture"]])
+    guard(collection.builds)
     return (rows if profile else rows[0]), receipt
 
 
