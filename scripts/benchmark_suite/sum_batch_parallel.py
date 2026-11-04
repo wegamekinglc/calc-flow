@@ -242,7 +242,8 @@ def source_equivalence(build, revision, deadline):
         if name == maintained.HARNESS:
             continue
         data = (Path(build["source_root"]) / name).read_bytes()
-        identity = hashlib.sha1(
+        # Git blob IDs; security seals use SHA256.
+        identity = hashlib.sha1(  # nosemgrep: insecure-hash-algorithm-sha1
             f"blob {len(data)}\0".encode() + data, usedforsecurity=False
         ).hexdigest()
         if objects.get(name) != identity:

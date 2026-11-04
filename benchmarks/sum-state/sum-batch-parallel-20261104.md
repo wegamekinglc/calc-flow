@@ -80,6 +80,10 @@ its public source is
 The [frozen protocol](sum-batch-parallel-20261104.protocol.json), SHA-256
 `7455ab73636085a84b2dbd983cc831fcfdc23a37b54f76d63fe3efdcc568b72c`,
 records the five cases, source identities, affinity, sample counts, and budget.
+The acquisition used the exact driver at public `fe0e86ad`. The archive copy
+later adds a documented, rule-specific audit annotation for Git blob SHA-1
+identity; its Python AST is unchanged. This later annotation does not replace
+the original driver hash sealed with the measurements.
 The [complete evidence](sum-batch-parallel-20261104/complete-evidence.json.gz)
 includes compiler/build seals, actual core/example `fresh=false` records,
 the new-module depfile proof, source inventories, commands, all snapshot/schema

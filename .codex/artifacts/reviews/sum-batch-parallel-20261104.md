@@ -10,9 +10,14 @@
 [fe0e86ad220bd88ae3aeb1ae6c384e3a72e0a792](https://github.com/wegamekinglc/calc-flow/commit/fe0e86ad220bd88ae3aeb1ae6c384e3a72e0a792),
 tree `e0834050279eba44c48205c84aaa0eb1a600a396`.
 
-**Archive verification checkpoint:** `36cad599f16a4073762411e1bd8c7a0492ee3e4e`, tree
+**Archive runtime verification checkpoint:** `36cad599f16a4073762411e1bd8c7a0492ee3e4e`, tree
 `bc7209cbee98a34925dac3ff7b55fcc85aa8f341`
 (local verification identity, before adding this final review).
+
+**Security followup checkpoint:** local
+`fd4168a143dc963cc8f834bcef0f3ca25998b672`, tree
+`1a8d9bbc96a354bfb8b9989c2f62e615f92f5711`, based on published archive head
+`4f3c9b7206def7967ac10d12818b159bc5ff1b30`.
 
 **Upstream artifacts:** [Specification](../specs/sum-batch-parallel-20261104.md)
 and [preimplementation critique](../critiques/sum-batch-parallel-20261104.md).
@@ -20,8 +25,10 @@ The critique's conditional TDD clearance is `f1d9ce64`. Historical source
 review bound to local `2dafaa83`; tool checkpoints are `bc178d1d` and
 `f9c1eb50`. Public fe0 contains those reviewed code/tool bytes.
 
-**Files changed against base:** 22. No archive PR or new remote check results
-were available at this handoff.
+**Files changed against base:** 22. The archive is now
+[PR #537](https://github.com/wegamekinglc/calc-flow/pull/537). Its published
+4f3c9b72 head has one observed Codacy hash-rule blocker; the narrow local
+correction below requires final-head remote verification.
 Only the parent agent performs remote publication, CI completion, and merge.
 
 ## Summary
@@ -56,9 +63,10 @@ parallel compact SUM behavior, public knob, schema, or checkpoint change.
   1.23.0 reported maximum CCN 8/7/5 for driver/decoder/tests, maximum NLOC
   91/27/68, at most five parameters, and no new waivers. Root's actual
   `scripts/verify_complexity_gates.py` reported “complexity ratchet holds”.
-  Actual Bandit 1.8.6 and Opengrep 1.33.1 scans reported zero findings/errors
-  in the changed Python scope. The later strings/test-only attribution
-  correction changed no sensitive subprocess call.
+  Actual Bandit 1.8.6 scans and Opengrep 1.33.1 scans of the two subprocess
+  rules reported zero findings/errors in the changed Python scope. That
+  Opengrep result did not cover the complete Codacy rule pack. The later
+  strings/test-only attribution correction changed no sensitive subprocess call.
 - After runtime restoration, root ran the 24 tool tests plus the affected CI
   registration test: **25 passed**. This verifies that retained tooling does
   not depend on the removed prototype module; no new native build was needed.
@@ -265,6 +273,44 @@ physical predicate payload ownership, AND/OR whole-record copies, and
 simultaneous variable-literal evaluation copies. They remain documented as
 prototype findings; the corrected prototype was still rejected by performance.
 
+### Observed Codacy Hash Finding — Narrow Local Fix Approved
+
+PR #537 at 4f3c9b72 reported one critical Opengrep issue for the Git blob
+identity calculation in `source_equivalence`, rule
+`python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1`.
+The call constructs Git's canonical `blob <length>\0<data>` object ID for
+comparison with `git ls-tree`, using `usedforsecurity=False`. Build/source
+receipts and measurement seals continue to use SHA-256.
+
+Commit fd4168a1 adds only an explanatory comment and a rule-specific
+`nosemgrep: insecure-hash-algorithm-sha1` on that call. The blob header,
+input bytes, comparison, failure path, and SHA-256 seals are unchanged.
+This is an audited Git-format compatibility exception, not a global rule
+exclusion or weaker security seal. No test merely mirroring the comment,
+native rebuild, or repeated performance run was needed.
+
+Reviewer read the primary-derived rule, qualified rule, verification receipt,
+and actual complete-driver before/after scan JSON under
+`<root>/target/sum-batch-parallel-20261104/security/`. Actual Opengrep 1.33.1
+with the Codacy-qualified ID and `--no-rewrite-rule-ids --error` reported
+one finding before (exit 1), zero after (exit 0), with no errors. Its
+qualified ID is
+`Semgrep_python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1`;
+the actual engine verifies that the annotation's suffix identifies that rule.
+Before/after Python AST hashes are identical:
+`fb396d2b904e0afed82c2a3c277f588920d7a16d63213fe8e8d8ae180b01a234`.
+Author focused Ruff lint/format and diff checks passed; reviewer did not
+repeat them. This local result does not establish remote Codacy completion.
+
+The frozen protocol still records the measured public fe0 driver SHA-256
+`52d29ece79b9472ae3fa030ed1fa7211a5f703a35e3aeffc4a3400ac8b0cd8bb`.
+The annotated archive driver SHA-256 is
+`29760a53fb59634ebd2ea9e507d99a7b5be79d7d7e22cb91e808028ce18675c8`.
+The latter is a post-measurement source revision, not the acquired driver.
+Reproducing the original frozen protocol uses the public fe0 tools; the
+historical protocol, driver hash, matcher, statistics, and all sealed evidence
+remain unchanged. No new observation or performance claim is made.
+
 ## Style Issues
 
 None remain in the reviewed retained tool scope. No dependency, unsafe-code
@@ -307,10 +353,12 @@ directories and all nine new sealed artifact files are unchanged.
 The final narrow merge review binds delivery to d5e05c31 and checkpoint
 36cad599. The benchmark protocol and all measurement claims remain bound to
 the original c9afa/af400 versus public fe0 comparison. The only later archive
-documentation edits distinguish those identities. Retained measurement tools,
-tests, protocol, and sealed result bytes have no delta from the previous
-review. Against current main, the CI workflow differs only by the one SUM
-test-module registration; upstream's disk-space stabilization is preserved.
+documentation edits distinguish those identities. At that merge checkpoint,
+measurement tools, tests, protocol, and sealed results had no delta from the
+previous review. The subsequent hash-rule annotation is the separate
+AST-identical followup above. Against current main, the CI workflow differs
+only by the one SUM test-module registration; upstream's disk-space
+stabilization is preserved.
 
 ## Next Single Optimization Hypothesis
 
