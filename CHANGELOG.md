@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-04: Prepare eligible large grouped integer SQL `SUM` updates with
+  bounded local partials on the shared native CPU service. Merge and commit on
+  the coordinator, preserving full snapshots and checkpoint compatibility.
+  Small updates, bounded/custom engine memory pools, and unsupported SQL shapes
+  retain their existing paths.
+
 - 2026-11-04: Construct cumulative SQL UTF-8 grouping-key output from borrowed
   strings and share group lookups within each output chunk. Remove intermediate
   scalar-string clones while preserving complete snapshots, schemas,

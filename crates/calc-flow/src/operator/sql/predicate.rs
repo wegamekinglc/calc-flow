@@ -20,6 +20,12 @@ pub(super) struct InputPredicate {
 }
 
 impl InputPredicate {
+    pub(super) fn parallel_charge(&self, schema: &SchemaRef, name: &str) -> Result<usize> {
+        super::grouped_parallel::predicate_charge(self.expression.as_ref(), schema, name)
+    }
+    pub(super) fn parallel_nodes(&self) -> Option<usize> {
+        super::grouped_parallel::predicate_nodes(self.expression.as_ref(), 0)
+    }
     pub fn supported(expression: &Expr, schema: &SchemaRef) -> bool {
         nodes(expression, schema, 0).is_some_and(|nodes| nodes <= 256)
     }

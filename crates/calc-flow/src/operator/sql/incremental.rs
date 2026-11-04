@@ -44,6 +44,9 @@ pub(super) mod compact_state;
 #[path = "grouped_float.rs"]
 pub(in crate::operator::sql) mod grouped_float;
 
+#[path = "grouped_parallel.rs"]
+mod grouped_parallel;
+
 #[path = "grouped_sum.rs"]
 mod grouped_sum;
 
@@ -74,11 +77,16 @@ mod input_checks;
 use group_key::GroupKey;
 use native_expression::output_work;
 
+#[cfg(test)]
+#[path = "grouped_parallel_tests.rs"]
+mod grouped_parallel_tests;
+
 #[path = "output_order.rs"]
 mod output_order;
 
 pub(super) struct IncrementalSql {
     schema: SchemaRef,
+    parallel_scratch: bool,
     ordered_last: bool,
     pub(in crate::operator::sql) compact_budget: Option<crate::StateBudget>,
     scratch: MemoryReservation,
@@ -753,6 +761,7 @@ impl IncrementalSql {
         };
         let (converter, finalizer_bytes) = grouped_layout(&keys, &aggregates, name)?;
         Ok(Some(Self {
+            parallel_scratch: grouped_parallel::unbounded(runtime),
             ordered_last: aggregates.iter().any(|expr| ordered_last::selected(expr)),
             variable_extrema: variable_extrema_slots(&aggregates),
             compact_budget: None,
@@ -1068,6 +1077,7 @@ impl IncrementalSql {
         } else {
             self.update_records(
                 table.batches(),
+                input_owner,
                 &mut candidates,
                 (&reservation, workspace),
                 context,
@@ -1287,11 +1297,18 @@ impl IncrementalSql {
     async fn update_records(
         &self,
         records: &[RecordBatch],
+        input_owner: Option<Arc<MemoryReservation>>,
         candidates: &mut InputCandidates,
         workspace: (&MemoryReservation, usize),
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<usize> {
+        if grouped_parallel::update(self, records, input_owner, candidates, context, name).await? {
+            return records.iter().try_fold(0usize, |rows, record| {
+                rows.checked_add(record.num_rows())
+                    .ok_or_else(|| df_error(name, "SQL input row count overflow"))
+            });
+        }
         #[cfg(test)]
         let mut rows = 0;
         #[cfg(not(test))]

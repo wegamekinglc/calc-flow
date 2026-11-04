@@ -136,7 +136,10 @@ def clock_alignment(raw, profile, pid):
     }
 
 
-def _phase(chain):
+def _phase(chain, rules=()):
+    for label, needle in rules:
+        if any(frame.rsplit(" [", 1)[0] == needle for frame in chain):
+            return label
     for phase in ("update_chunk", "finish_transaction", "commit", "ExpressionOperator"):
         if any(("::" + phase) in frame for frame in chain):
             return phase
@@ -163,6 +166,7 @@ class SampleCounts:
     """Own the mutable counters of one decoded profile."""
 
     windows: list[int]
+    phase_frames: tuple = ()
     total: int = 0
     unresolved: int = 0
     own: collections.Counter = field(default_factory=collections.Counter)
@@ -170,6 +174,7 @@ class SampleCounts:
     threads: collections.Counter = field(default_factory=collections.Counter)
     phases: collections.Counter = field(default_factory=collections.Counter)
     stacks: collections.Counter = field(default_factory=collections.Counter)
+    worker_threads: collections.Counter = field(default_factory=collections.Counter)
 
     def observe(self, chain, thread, count, selected):
         self.total += count
@@ -179,7 +184,17 @@ class SampleCounts:
         self.inclusive.update({name: count for name in set(chain)})
         self.stacks[chain] += count
         self.threads[f"{thread['name']} tid={thread['tid']}"] += count
-        self.phases[_phase(chain)] += count
+        phase = _phase(chain, self.phase_frames)
+        self.phases[phase] += count
+        if phase == "sql_local_update":
+            tid = str(thread["tid"]).split(".")[0]
+            self.worker_threads[(selected + 1, tid, thread["name"])] += count
+
+    def worker_distribution(self):
+        return [
+            {"window": window, "tid": tid, "name": name, "samples": samples}
+            for (window, tid, name), samples in sorted(self.worker_threads.items())
+        ]
 
     def ranked(self, values):
         return [
@@ -216,8 +231,8 @@ def _count_thread(profile, thread, tables, windows, counts):
         counts.observe(cache[stack], thread, weight or 1, selected)
 
 
-def _count_samples(profile, tables, pid, windows):
-    counts = SampleCounts([0] * len(windows))
+def _count_samples(profile, tables, pid, windows, phase_frames=()):
+    counts = SampleCounts([0] * len(windows), phase_frames=phase_frames)
     for thread in profile["threads"]:
         if _same_pid(thread, pid):
             _count_thread(profile, thread, tables, windows, counts)
@@ -293,6 +308,8 @@ def _report(item, build, alignment, counts):
         "inclusive": counts.ranked(counts.inclusive),
         "threads": counts.ranked(counts.threads),
         "disjoint_phases": counts.ranked(counts.phases),
+        "phase_frame_rules": counts.phase_frames,
+        "sql_worker_samples_by_window": counts.worker_distribution(),
         "scope": "user-mode CPU only; first job excluded; inclusive shares overlap",
         "symbolization": (
             "GNU nm -n -S -C exact nonzero-sized code ranges; "
@@ -307,7 +324,13 @@ def _decode_item(args, item, build, deadline):
     profile = _import_profile(args, root, deadline, env)
     tables = symbol_tables(profile, deadline, env)
     alignment, windows = _aligned_windows(args, item, root, profile, deadline)
-    counts = _count_samples(profile, tables, item["rows"][0]["pid"], windows)
+    counts = _count_samples(
+        profile,
+        tables,
+        item["rows"][0]["pid"],
+        windows,
+        getattr(args, "sql_phase_frames", ()),
+    )
     (root / "stacks.json.gz").write_bytes(
         gzip.compress(
             json.dumps(counts.stack_data(), separators=(",", ":")).encode(), mtime=0
