@@ -7,11 +7,11 @@ import re
 from scripts.benchmark_suite.catalog import (
     CONTRACT,
     POLARS_ENGINE,
-    THREADS,
     comparison_kind,
     get_shard,
     polars_thread_count,
     shard_cases,
+    worker_thread_count,
 )
 from scripts.benchmark_suite.dependency_migrations import validate_dependency_migrations
 from scripts.benchmark_suite.measure import validate_stream_sample
@@ -114,7 +114,7 @@ def _validate_evidence(case: dict, releases: dict) -> None:
         raise ValueError("unexpected Polars collection engine")
     if environment["polars_threads"] != polars_thread_count(case) or environment[
         "tokio_worker_threads"
-    ] != str(THREADS):
+    ] != str(worker_thread_count(case)):
         raise ValueError("unexpected worker thread configuration")
     for side in ("baseline", "candidate"):
         actual = _evidence_seconds(case, side)

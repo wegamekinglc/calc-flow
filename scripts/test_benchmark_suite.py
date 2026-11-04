@@ -147,7 +147,9 @@ class BenchmarkSuiteTests(unittest.TestCase):
         self.assertEqual(
             {c["backend"] for c in cases},
             {
+                "calc-flow-stream-1t",
                 "calc-flow-stream",
+                "calc-flow-sql-1t",
                 "calc-flow-sql",
                 "datafusion",
                 "polars",
@@ -205,6 +207,84 @@ class BenchmarkSuiteTests(unittest.TestCase):
         self.assertTrue(references["polars-1t"])
         self.assertEqual(references["polars"], references["polars-1t"])
 
+    def test_calc_flow_thread_references_cover_1t_and_4t(self):
+        cases = engine_cases()
+        references = {
+            backend: {
+                (case["rows"], case["scenario"])
+                for case in cases
+                if case["backend"] == backend
+            }
+            for backend in (
+                "calc-flow-sql-1t",
+                "calc-flow-sql",
+                "calc-flow-stream-1t",
+                "calc-flow-stream",
+            )
+        }
+        self.assertTrue(all(references.values()))
+        expected = next(iter(references.values()))
+        self.assertTrue(all(reference == expected for reference in references.values()))
+        for backend, expected in (
+            ("calc-flow-sql-1t", 1),
+            ("calc-flow-sql", 4),
+            ("calc-flow-stream-1t", 1),
+            ("calc-flow-stream", 4),
+            ("datafusion", 32),
+        ):
+            case = next(case for case in cases if case["backend"] == backend)
+            with self.subTest(backend=backend, threads=expected):
+                self.assertEqual(catalog.worker_thread_count(case), expected)
+        self.assertEqual(catalog.polars_thread_count({"backend": "polars"}), 4)
+        self.assertEqual(catalog.polars_thread_count({"backend": "polars-1t"}), 1)
+        warm = catalog.warm_cases(1_000_000)[0]
+        self.assertEqual(catalog.worker_thread_count(warm), 32)
+
+    def test_calc_flow_evidence_uses_variant_thread_counts(self):
+        from scripts.benchmark_suite.validation import _validate_evidence
+
+        release = {"native_sha256": "a" * 64}
+        for backend, threads in (
+            ("calc-flow-sql-1t", 1),
+            ("calc-flow-sql", 4),
+            ("calc-flow-stream-1t", 1),
+            ("calc-flow-stream", 4),
+            ("datafusion", 32),
+        ):
+            row = measured_case(
+                backend=backend,
+                comparison="external",
+                baseline=[],
+                candidate=[[0.01] * 10] * 2,
+            )
+            row["evidence"] = [
+                {
+                    "environment": {
+                        "polars_threads": 32,
+                        "polars_engine": "streaming",
+                        "tokio_worker_threads": str(threads),
+                    },
+                    "samples": {
+                        "candidate": [
+                            {"seconds": 0.01, "correctness": {"passed": True}}
+                        ]
+                        * 10
+                    },
+                    "completion": {"candidate": {"state": "completed"}},
+                    "native_sha256": {"candidate": release["native_sha256"]},
+                }
+                for _ in range(2)
+            ]
+            with self.subTest(backend=backend, threads=threads):
+                _validate_evidence(row, {"candidate": release})
+                bad = deepcopy(row)
+                for evidence in bad["evidence"]:
+                    evidence["environment"]["tokio_worker_threads"] = (
+                        "1" if threads == 32 else "32"
+                    )
+                with self.assertRaisesRegex(ValueError, "thread"):
+                    _validate_evidence(bad, {"candidate": release})
+
     def test_cross_library_table_distinguishes_polars_thread_counts(self):
         report = render_report(
             [
@@ -221,11 +301,45 @@ class BenchmarkSuiteTests(unittest.TestCase):
             [],
         )
         table = report.split("## Cross-library comparison")[1]
-        self.assertIn("Polars (32T)", table)
+        self.assertIn("Polars (4T)", table)
         self.assertIn("Polars (1T)", table)
         join = next(line for line in table.splitlines() if "| join " in line)
         self.assertIn("2.000000", join)
         self.assertIn("1.000000", join)
+
+    def test_cross_library_table_separates_calc_flow_thread_counts(self):
+        report = render_report(
+            [
+                measured_case(
+                    id=f"engines/100/{backend}/join",
+                    backend=backend,
+                    scenario="join",
+                    comparison="external",
+                    baseline=[],
+                    candidate=[[seconds] * 10] * 2,
+                )
+                for backend, seconds in (
+                    ("calc-flow-stream-1t", 0.001),
+                    ("calc-flow-stream", 0.002),
+                    ("calc-flow-sql-1t", 0.003),
+                    ("calc-flow-sql", 0.004),
+                    ("polars", 0.005),
+                    ("polars-1t", 0.006),
+                )
+            ],
+            [],
+        )
+        table = report.split("## Cross-library comparison")[1]
+        for heading in (
+            "Native stream (ready, 1T)",
+            "Native stream (ready, 4T)",
+            "Calc Flow SQL (1T)",
+            "Calc Flow SQL (4T)",
+            "Polars (4T)",
+            "Polars (1T)",
+        ):
+            self.assertIn(heading, table)
+        self.assertNotIn("Polars (32T)", table)
 
     def test_single_thread_reference_evidence_rejects_mislabeled_thread_pools(self):
         from scripts.benchmark_suite.validation import _validate_evidence
@@ -369,6 +483,31 @@ class BenchmarkSuiteTests(unittest.TestCase):
                 for case in catalog.warm_cases(history)
             ),
         )
+
+    def test_prechange_catalog_marks_only_new_calc_flow_thread_variants_as_new(self):
+        original = (
+            Path(__file__).resolve().parents[1] / "scripts/benchmark_suite/catalog.py"
+        ).read_text()
+        original = original.replace('    "calc-flow-sql-1t": SQL_CASES,\n', "").replace(
+            '    "calc-flow-stream-1t": STREAM_CASES,\n', ""
+        )
+        with TemporaryDirectory() as directory:
+            baseline = Path(directory)
+            path = baseline / "scripts/benchmark_suite/catalog.py"
+            path.parent.mkdir(parents=True)
+            path.write_text(original)
+            ids = baseline_case_ids(baseline, {"family": "engines"})
+            self.assertEqual(len(ids), 591)
+            for case in engine_cases():
+                expected = (
+                    "new"
+                    if case["backend"] in ("calc-flow-sql-1t", "calc-flow-stream-1t")
+                    else "interleaved"
+                    if case["backend"].startswith("calc-flow")
+                    else "external"
+                )
+                with self.subTest(case=case["id"], expected=expected):
+                    self.assertEqual(catalog.comparison_kind(case, ids), expected)
 
     def test_baseline_case_ids_fail_closed_without_declarative_constants(self):
         with TemporaryDirectory() as directory:
@@ -871,7 +1010,8 @@ class BenchmarkSuiteTests(unittest.TestCase):
         report = render_report(
             [measured_case(**case) for case in engine_cases(100)], []
         )
-        self.assertIn("Native stream (ready)", report)
+        self.assertIn("Native stream (ready, 1T)", report)
+        self.assertIn("Native stream (ready, 4T)", report)
         self.assertIn("excludes runner startup", report)
         self.assertNotIn("includes runner startup/drain", report)
 

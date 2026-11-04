@@ -15,6 +15,7 @@ from scripts.benchmark_suite.catalog import (
     comparison_kind,
     polars_thread_count,
     shard_cases,
+    worker_thread_count,
 )
 from scripts.benchmark_suite.diagnostics import observe, persist
 from scripts.benchmark_suite.process import ROOT, Worker, install
@@ -27,6 +28,7 @@ def validate_environment(
     release: dict,
     *,
     polars_threads: int = THREADS,
+    tokio_threads: int = THREADS,
     backend: str = "calc-flow",
 ) -> dict:
     if environment["native_sha256"] != release["native_sha256"]:
@@ -35,7 +37,7 @@ def validate_environment(
         )
     if environment["polars_threads"] != polars_threads or environment[
         "tokio_worker_threads"
-    ] != str(THREADS):
+    ] != str(tokio_threads):
         raise ValueError("worker thread configuration does not match the catalog")
     is_polars = backend in ("polars", "polars-1t")
     if is_polars and environment.get("polars_engine") != POLARS_ENGINE:
@@ -61,7 +63,10 @@ def validate_sample(sample: dict) -> float:
 def validate_stream_sample(case: dict, sample: dict) -> None:
     """Require original adapter evidence for every replay-backed dimension."""
 
-    if case.get("backend") != "calc-flow-stream" or "batch_rows" not in case:
+    if (
+        not case.get("backend", "").startswith("calc-flow-stream")
+        or "batch_rows" not in case
+    ):
         return
     evidence = sample.get("stream_evidence")
     _validate_stream_dimensions(case, evidence)
@@ -107,6 +112,7 @@ async def _prepare(workers: dict, releases: dict, case: dict, contexts: dict) ->
             ),
             releases[side],
             polars_threads=polars_thread_count(case),
+            tokio_threads=worker_thread_count(case),
             backend=case["backend"],
         )
         response = await worker.request(
@@ -183,6 +189,7 @@ async def _round(
                 root / side,
                 source=source,
                 polars_threads=polars_thread_count(case),
+                tokio_threads=worker_thread_count(case),
             )
         environment = await _prepare(workers, releases, case, contexts)
         samples = await _samples(workers, case, contexts, root)

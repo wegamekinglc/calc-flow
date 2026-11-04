@@ -74,10 +74,12 @@ REPORT_CASES = SQL_CASES + tuple(
     scenario for scenario in STREAM_CASES if scenario not in SQL_CASES
 )
 CAPABILITIES = {
+    "calc-flow-sql-1t": SQL_CASES,
     "calc-flow-sql": SQL_CASES,
     "datafusion": SQL_CASES,
     "polars": POLARS_CASES,
     "polars-1t": POLARS_SINGLE_THREAD_CASES,
+    "calc-flow-stream-1t": STREAM_CASES,
     "calc-flow-stream": STREAM_CASES,
     "ta-lib": ROLLING_CASES,
     "finance-python": FINANCE_CASES,
@@ -86,6 +88,8 @@ STREAM_JOIN_MAX_ROWS = None
 STREAM_ASOF_MAX_ROWS = None
 STREAM_WINDOW_MAX_ROWS = None
 THREADS = 32
+CALC_FLOW_THREADS = 4
+POLARS_THREADS = 4
 BATCH_ROWS = 1_000_000
 CONTRACT = "calc-flow-benchmark-suite-v3"
 STREAM_SCOPE = "ready-enqueue-to-arrow/bounded-feeds-v7"
@@ -130,7 +134,9 @@ def stream_dimensions(scenario: str, batch_rows: int, checkpoint: bool) -> dict:
     }
 
 
-def stream_variant_cases(rows: int, *, checkpoint_duration: bool = False) -> list[dict]:
+def stream_variant_cases(
+    rows: int, *, checkpoint_duration: bool = False, backend: str = "calc-flow-stream"
+) -> list[dict]:
     """Return small-batch cases and the explicitly paced checkpoint matrix."""
 
     cases = []
@@ -140,7 +146,9 @@ def stream_variant_cases(rows: int, *, checkpoint_duration: bool = False) -> lis
         for batch_rows, checkpoint in _stream_variant_dimensions(
             rows, checkpoint_duration
         ):
-            cases.append(_stream_variant_case(rows, scenario, batch_rows, checkpoint))
+            cases.append(
+                _stream_variant_case(rows, scenario, batch_rows, checkpoint, backend)
+            )
     return cases
 
 
@@ -152,15 +160,19 @@ def _stream_variant_dimensions(rows: int, checkpoint_duration: bool) -> tuple:
 
 
 def _stream_variant_case(
-    rows: int, scenario: str, batch_rows: int, checkpoint: bool
+    rows: int,
+    scenario: str,
+    batch_rows: int,
+    checkpoint: bool,
+    backend: str = "calc-flow-stream",
 ) -> dict:
     suffix = f"batch-{batch_rows}" + (
         "/checkpoint-100ms-duration-recovery" if checkpoint else ""
     )
     return {
-        "id": f"engines/{rows}/calc-flow-stream/{scenario}/{suffix}",
+        "id": f"engines/{rows}/{backend}/{scenario}/{suffix}",
         "family": "engines",
-        "backend": "calc-flow-stream",
+        "backend": backend,
         "scenario": scenario,
         "rows": rows,
         "variant": "checkpoint-recovery" if checkpoint else "small-batch",
@@ -171,7 +183,22 @@ def _stream_variant_case(
 def polars_thread_count(case: dict) -> int:
     """Return the process-local Polars pool size for one catalog case."""
 
-    return 1 if case.get("backend") == "polars-1t" else THREADS
+    backend = case.get("backend")
+    if backend == "polars-1t":
+        return 1
+    return POLARS_THREADS if backend == "polars" else THREADS
+
+
+def worker_thread_count(case: dict) -> int:
+    """Return the Tokio worker count for one engine-matrix case."""
+
+    if case.get("family") != "engines":
+        return THREADS
+    if case.get("backend") in ("calc-flow-sql-1t", "calc-flow-stream-1t"):
+        return 1
+    if case.get("backend") in ("calc-flow-sql", "calc-flow-stream"):
+        return CALC_FLOW_THREADS
+    return THREADS
 
 
 def comparison_kind(case: dict, baseline_ids: frozenset[str] | None) -> str:
@@ -202,7 +229,7 @@ def _measured_stream_case(
     if cap is None:
         return True
     return not (
-        backend == "calc-flow-stream"
+        backend.startswith("calc-flow-stream")
         and scenario in ("join", "asof_join", "window_sum")
         and size > cap
     )
@@ -219,7 +246,7 @@ def engine_cases(rows: int | None = None) -> list[dict]:
             "rows": size,
             "scope": (
                 STREAM_SCOPE
-                if backend == "calc-flow-stream"
+                if backend.startswith("calc-flow-stream")
                 else FINANCE_SCOPE
                 if backend == "finance-python"
                 else "execute-to-arrow"
@@ -244,6 +271,7 @@ def engine_cases(rows: int | None = None) -> list[dict]:
     ]
     for case in cases:
         if case["scenario"] == "asof_join" and case["backend"] in (
+            "calc-flow-sql-1t",
             "calc-flow-sql",
             "datafusion",
         ):
@@ -251,12 +279,20 @@ def engine_cases(rows: int | None = None) -> list[dict]:
         if case["scenario"] == "interval_join":
             case["reference_algorithm"] = (
                 "native-interval-v1"
-                if case["backend"] == "calc-flow-stream"
+                if case["backend"].startswith("calc-flow-stream")
                 else "integer-second-offset-equality-v1"
             )
-            if case["backend"] == "calc-flow-stream":
+            if case["backend"].startswith("calc-flow-stream"):
                 case.update(stream_dimensions("interval_join", BATCH_ROWS, False))
-    return [*cases, *(case for size in sizes for case in stream_variant_cases(size))]
+    return [
+        *cases,
+        *(
+            case
+            for size in sizes
+            for backend in ("calc-flow-stream-1t", "calc-flow-stream")
+            for case in stream_variant_cases(size, backend=backend)
+        ),
+    ]
 
 
 def warm_cases(history: int) -> list[dict]:
@@ -342,10 +378,26 @@ def _assigned_constant(
     target = node.targets[0]
     if not isinstance(target, ast.Name):
         return None
+    if target.id == "CAPABILITIES":
+        backends = _declarative_backend_names(node.value)
+        return None if backends is None else (target.id, backends)
     value: _CatalogConstant | None = _declarative_tuple(node.value, constants)
     if value is None:
         value = _declarative_scalar(node.value)
     return None if value is None else (target.id, value)
+
+
+def _declarative_backend_names(node: ast.expr) -> tuple[str, ...] | None:
+    """Return the literal backend keys declared by ``CAPABILITIES``."""
+
+    if not isinstance(node, ast.Dict):
+        return None
+    names = []
+    for key in node.keys:
+        if not isinstance(key, ast.Constant) or type(key.value) is not str:
+            return None
+        names.append(key.value)
+    return tuple(names)
 
 
 def _declarative_scalar(node: ast.expr) -> int | str | None:
@@ -482,11 +534,18 @@ def _baseline_engine_columns(constants: dict[str, _CatalogConstant]) -> tuple:
     scope = constants.get("STREAM_SCOPE")
     if isinstance(scope, str) and scope != STREAM_SCOPE:
         stream = tuple(scenario for scenario in stream if scenario == "interval_join")
+    declared = constants.get("CAPABILITIES", ())
     return (
+        *((("calc-flow-sql-1t", sql),) if "calc-flow-sql-1t" in declared else ()),
         ("calc-flow-sql", sql),
         ("datafusion", sql),
         ("polars", constants.get("POLARS_CASES", sql)),
         ("polars-1t", constants.get("POLARS_SINGLE_THREAD_CASES", ())),
+        *(
+            (("calc-flow-stream-1t", stream),)
+            if "calc-flow-stream-1t" in declared
+            else ()
+        ),
         ("calc-flow-stream", stream),
         ("ta-lib", rolling),
         ("finance-python", constants.get("FINANCE_CASES", ())),
@@ -499,7 +558,7 @@ def _baseline_interval_matches(constants: dict, backend: str, scenario: str, row
     if rows > constants.get("INTERVAL_MAX_ROWS", INTERVAL_MAX_ROWS):
         return False
     return (
-        backend != "calc-flow-stream"
+        not backend.startswith("calc-flow-stream")
         or constants.get("INTERVAL_SCOPE") == INTERVAL_SCOPE
     )
 
@@ -547,10 +606,19 @@ def _baseline_variant_scope_matches(constants: dict, case: dict) -> bool:
 
 
 def _baseline_variant_ids(constants: dict[str, _CatalogConstant]) -> set[str]:
+    backends = (
+        *(
+            ("calc-flow-stream-1t",)
+            if "calc-flow-stream-1t" in constants.get("CAPABILITIES", ())
+            else ()
+        ),
+        "calc-flow-stream",
+    )
     return {
         case["id"]
         for rows in constants["ROW_SCALES"]
-        for case in stream_variant_cases(int(rows))
+        for backend in backends
+        for case in stream_variant_cases(int(rows), backend=backend)
         if _baseline_variant_dimensions_match(constants, case)
         if _baseline_variant_scope_matches(constants, case)
     }

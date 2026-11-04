@@ -112,7 +112,7 @@ scale and four selected `Program.execute` cases. The Rust `stream_union` target
 measures native Union forwarding. These cases extend the inventory without
 adding a new shard or changing the scheduled 06:00 and 18:00 runs.
 
-There are 591 engine cases and 26 warm cases, in addition to dynamically
+There are 828 engine cases and 26 warm cases, in addition to dynamically
 discovered cases. Warm cases use one entity to support one-row appends.
 Compare measurements only when entity count, history depth, append size,
 and timing boundaries match.
@@ -125,23 +125,23 @@ decode throughput side by side in the step log and uploads
 Its cold Kafka build stays off the Rust shard's timed path, and it carries no
 regression verdict.
 
-| Backend          | Projection  | Filter      | Group by    | Join        | SMA(20) | Dual SMA | Interval Join |
-|------------------|-------------|-------------|-------------|-------------|---------|----------|---------------|
-| Calc Flow SQL    | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      | Through 1M    |
-| Raw DataFusion   | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      | Through 1M    |
-| Polars 1T / 32T  | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      | Through 1M    |
-| Native streaming | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      | Through 1M    |
-| TA-Lib           | Unsupported | Unsupported | Unsupported | Unsupported | Yes     | Yes      | Unsupported   |
-| Finance-Python   | Unsupported | Unsupported | Unsupported | Unsupported | Yes     | Yes      | Unsupported   |
+| Backend                  | Projection  | Filter      | Group by    | Join        | SMA(20) | Dual SMA | Interval Join |
+|--------------------------|-------------|-------------|-------------|-------------|---------|----------|---------------|
+| Calc Flow SQL 1T / 4T    | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      | Through 1M    |
+| Raw DataFusion           | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      | Through 1M    |
+| Polars 1T / 4T           | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      | Through 1M    |
+| Native streaming 1T / 4T | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      | Through 1M    |
+| TA-Lib                   | Unsupported | Unsupported | Unsupported | Unsupported | Yes     | Yes      | Unsupported   |
+| Finance-Python           | Unsupported | Unsupported | Unsupported | Unsupported | Yes     | Yes      | Unsupported   |
 
-| Backend          | Average     | Argmax 64   | Argmax 256  | Unique 64   | CS mean     | Window sum  | ASOF join   |
-|------------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------|
-| Calc Flow SQL    | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         |
-| Raw DataFusion   | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         |
-| Native streaming | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         |
-| Finance-Python   | Yes         | Yes         | Yes         | Yes         | Yes         | Unsupported | Unsupported |
-| Polars 1T / 32T  | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         |
-| TA-Lib           | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported |
+| Backend                  | Average     | Argmax 64   | Argmax 256  | Unique 64   | CS mean     | Window sum  | ASOF join   |
+|--------------------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------|
+| Calc Flow SQL 1T / 4T    | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         |
+| Raw DataFusion           | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         |
+| Native streaming 1T / 4T | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         |
+| Finance-Python           | Yes         | Yes         | Yes         | Yes         | Yes         | Unsupported | Unsupported |
+| Polars 1T / 4T           | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         | Yes         |
+| TA-Lib                   | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported |
 
 Unsupported operations are explicit cells, not silent dependency skips.
 Native streaming measures `join` through the bounded temporal join with the
@@ -191,7 +191,7 @@ DataFusion sessions. Unique count uses `COUNT(DISTINCT price)` over 64 rows. CS 
 partitions by exact event time. Window sum uses epoch-anchored, half-open
 ten-second bins and preserves UTC microsecond timestamps.
 
-Polars covers the same fourteen scenarios in both its 1T and 32T references.
+Polars covers the same fourteen scenarios in both its 1T and 4T references.
 Cumulative sum/count implements average; exact-time window means implement
 CS mean; UTC timestamp truncation and grouped sums implement the epoch-anchored
 ten-second bins. Unique count uses native integer-index rolling groups after
@@ -212,9 +212,10 @@ with the highest sequence on ties and retaining unmatched left rows. Its
 `zero-tolerance-asof-equality-v1` identity describes this reduction; these
 results do not measure a general nonzero-tolerance backward ASOF join.
 All added SQL cases retain the original 10-to-10M scales, 64,000-row Arrow
-chunks, 32 target partitions, 8,192-row execution batches and execute-to-Arrow
-timer. The existing two-round, ten-sample collector measures Calc Flow SQL as new
-coverage when the baseline catalog lacks their IDs.
+chunks, 8,192-row execution batches and execute-to-Arrow timer. Calc Flow SQL
+uses one or four target partitions; raw DataFusion retains 32. The existing
+two-round, ten-sample collector measures Calc Flow SQL as new coverage when
+the baseline catalog lacks their IDs.
 
 `interval_join` uses exactly 64 keys and inclusive bounds of five seconds
 before and after each left event. Both inputs contain the same Arrow rows and
@@ -310,10 +311,13 @@ It does not participate in Python suite or Calc Flow worker environment
 comparisons, so release workers that predate this metadata remain comparable.
 Package versions, machine/thread identities, and native hashes are still checked.
 
-SQL/raw-DataFusion target partitions and Tokio workers are fixed to 32.
-Polars references run in separate fresh processes with `POLARS_MAX_THREADS=32`
-or `1`, reported as `Polars (32T)` and `Polars (1T)`. Measurement and artifact
-validation check the actual Polars pool size against each case.
+Calc Flow SQL runs with one or four target partitions and Tokio workers,
+reported as `Calc Flow SQL (1T)` and `Calc Flow SQL (4T)`. Raw DataFusion
+retains 32. Native streaming reports one or four Tokio workers as
+`Native stream (ready, 1T)` and `Native stream (ready, 4T)`. Polars references
+run in separate fresh processes with `POLARS_MAX_THREADS=4` or `1`, reported as
+`Polars (4T)` and `Polars (1T)`. Measurement and artifact validation check the
+actual thread configuration against each case.
 BLAS helper pools use one thread. The Python benchmark fixtures retain
 their own query configuration and timing boundaries. Cross-library native
 streaming uses an already-started runner with **empty rolling state**. Each
@@ -329,7 +333,8 @@ starts with the first quote enqueue. The left-state assertion happens after
 timing. Persistent warm append remains a separate workload.
 
 Cross-library columns are application-boundary references, not interchangeable
-kernel measurements. The native column is labeled `Native stream (ready)`.
+kernel measurements. The native columns are labeled `Native stream (ready, 1T)`
+and `Native stream (ready, 4T)`.
 Report contract v3 validates the ready-runner timing scope and complete
 sample statistics. Both revisions must be measured with the same scope;
 do not subtract a separately measured startup time from another report.
