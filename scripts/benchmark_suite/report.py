@@ -421,7 +421,7 @@ def _cross_library_table(cases: list[dict]) -> str:
             "Native stream (ready, 4T)",
             "Calc Flow SQL (1T)",
             "Calc Flow SQL (4T)",
-            "DataFusion",
+            "DataFusion (4T)",
             "Polars (4T)",
             "Polars (1T)",
             "TA-Lib",

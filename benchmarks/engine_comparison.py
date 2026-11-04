@@ -331,7 +331,7 @@ def _calc_flow(data: Workload, scenario: str, target_partitions: int = THREADS):
     return lambda: plan.execute(inputs).outputs["output"].to_pyarrow()
 
 
-def _datafusion(data: Workload, scenario: str):
+def _datafusion(data: Workload, scenario: str, target_partitions: int = THREADS):
     from datafusion import SessionConfig, SessionContext
 
     batches = data.table.to_batches(max_chunksize=TABLE_BATCH_ROWS)
@@ -340,7 +340,9 @@ def _datafusion(data: Workload, scenario: str):
 
     def execute():
         context = SessionContext(
-            SessionConfig().with_target_partitions(THREADS).with_batch_size(8192)
+            SessionConfig()
+            .with_target_partitions(target_partitions)
+            .with_batch_size(8192)
         )
         context.register_record_batches("input", [batches])
         if scenario == "join":
@@ -578,9 +580,12 @@ class EngineCase:
             self.calculate = _calc_flow(
                 self.data, scenario, target_partitions=worker_thread_count(case)
             )
+        elif backend == "datafusion":
+            self.calculate = _datafusion(
+                self.data, scenario, target_partitions=worker_thread_count(case)
+            )
         else:
             factory = {
-                "datafusion": _datafusion,
                 "polars": _polars,
                 "polars-1t": _polars,
                 "ta-lib": _ta_lib,

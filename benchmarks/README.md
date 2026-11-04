@@ -24,7 +24,7 @@ count, cross-section mean, ten-second tumbling sum, and backward ASOF cases.
 Unsupported library/scenario combinations remain explicit cells.
 
 Calc Flow SQL and native streaming each report 1T and 4T configurations.
-Raw DataFusion retains its 32T configuration. Calc Flow SQL and raw DataFusion
+Raw DataFusion uses 4T. Calc Flow SQL and raw DataFusion
 cover all fourteen stream scenarios, including these seven additional operators,
 at the original 10-to-10M row scales. SQL argmax returns the lag of the oldest
 tied maximum; ASOF retains the fixture's zero tolerance and records its equivalent

@@ -230,7 +230,7 @@ class BenchmarkSuiteTests(unittest.TestCase):
             ("calc-flow-sql", 4),
             ("calc-flow-stream-1t", 1),
             ("calc-flow-stream", 4),
-            ("datafusion", 32),
+            ("datafusion", 4),
         ):
             case = next(case for case in cases if case["backend"] == backend)
             with self.subTest(backend=backend, threads=expected):
@@ -249,7 +249,7 @@ class BenchmarkSuiteTests(unittest.TestCase):
             ("calc-flow-sql", 4),
             ("calc-flow-stream-1t", 1),
             ("calc-flow-stream", 4),
-            ("datafusion", 32),
+            ("datafusion", 4),
         ):
             row = measured_case(
                 backend=backend,
@@ -335,6 +335,7 @@ class BenchmarkSuiteTests(unittest.TestCase):
             "Native stream (ready, 4T)",
             "Calc Flow SQL (1T)",
             "Calc Flow SQL (4T)",
+            "DataFusion (4T)",
             "Polars (4T)",
             "Polars (1T)",
         ):

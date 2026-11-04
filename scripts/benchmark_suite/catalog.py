@@ -89,6 +89,7 @@ STREAM_ASOF_MAX_ROWS = None
 STREAM_WINDOW_MAX_ROWS = None
 THREADS = 32
 CALC_FLOW_THREADS = 4
+DATAFUSION_THREADS = 4
 POLARS_THREADS = 4
 BATCH_ROWS = 1_000_000
 CONTRACT = "calc-flow-benchmark-suite-v3"
@@ -198,6 +199,8 @@ def worker_thread_count(case: dict) -> int:
         return 1
     if case.get("backend") in ("calc-flow-sql", "calc-flow-stream"):
         return CALC_FLOW_THREADS
+    if case.get("backend") == "datafusion":
+        return DATAFUSION_THREADS
     return THREADS
 
 

@@ -213,7 +213,7 @@ with the highest sequence on ties and retaining unmatched left rows. Its
 results do not measure a general nonzero-tolerance backward ASOF join.
 All added SQL cases retain the original 10-to-10M scales, 64,000-row Arrow
 chunks, 8,192-row execution batches and execute-to-Arrow timer. Calc Flow SQL
-uses one or four target partitions; raw DataFusion retains 32. The existing
+uses one or four target partitions; raw DataFusion uses 4. The existing
 two-round, ten-sample collector measures Calc Flow SQL as new coverage when
 the baseline catalog lacks their IDs.
 
@@ -313,7 +313,7 @@ Package versions, machine/thread identities, and native hashes are still checked
 
 Calc Flow SQL runs with one or four target partitions and Tokio workers,
 reported as `Calc Flow SQL (1T)` and `Calc Flow SQL (4T)`. Raw DataFusion
-retains 32. Native streaming reports one or four Tokio workers as
+uses 4. Native streaming reports one or four Tokio workers as
 `Native stream (ready, 1T)` and `Native stream (ready, 4T)`. Polars references
 run in separate fresh processes with `POLARS_MAX_THREADS=4` or `1`, reported as
 `Polars (4T)` and `Polars (1T)`. Measurement and artifact validation check the
