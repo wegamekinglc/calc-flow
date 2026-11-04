@@ -448,7 +448,6 @@ impl BatchExecutionPlan {
                     Arc::clone(&self.query_templates),
                 )?;
                 runtime.register_udfs(&table.udfs, &table.selected_udfs)?;
-                #[cfg(any(test, feature = "benchmark-internals"))]
                 runtime.set_input_partitions(self.input_partitions)?;
                 if self.row_parallel_sql {
                     let input_rows = inputs

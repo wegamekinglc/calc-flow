@@ -102,6 +102,43 @@ fn result_values(output: &Batch) -> ProbeResult<Vec<i64>> {
     Ok(values)
 }
 
+async fn measure_configuration(
+    name: &str,
+    query: &str,
+    input: &Batch,
+    input_partitions: usize,
+    expected: &mut Option<Vec<i64>>,
+) -> ProbeResult<()> {
+    let plan = plan(query, input_partitions)?;
+    let mut durations = Vec::with_capacity(SAMPLES);
+    let mut output_partitions = 0;
+    for _ in 0..SAMPLES {
+        let started = Instant::now();
+        let result = plan
+            .execute(
+                BTreeMap::from([("input".to_owned(), input.clone())]),
+                ExecutionOptions::default(),
+            )
+            .await?;
+        durations.push(started.elapsed().as_secs_f64() * 1_000.0);
+        output_partitions = result.datafusion_metrics[0].output_partition_count;
+        let values = result_values(&result.outputs["output"])?;
+        match expected {
+            Some(expected) => assert_eq!(
+                &values, expected,
+                "probe outputs differ for input_partitions={input_partitions}"
+            ),
+            None => *expected = Some(values),
+        }
+    }
+    durations.sort_by(|left, right| left.partial_cmp(right).unwrap());
+    println!(
+        "query={name} input_partitions={input_partitions} output_partitions={output_partitions} median_ms={:.2}",
+        durations[durations.len() / 2]
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> ProbeResult<()> {
     let input = input_batch()?;
@@ -109,33 +146,7 @@ async fn main() -> ProbeResult<()> {
     for (name, query) in QUERIES {
         let mut expected: Option<Vec<i64>> = None;
         for input_partitions in PARTITIONS {
-            let plan = plan(query, input_partitions)?;
-            let mut durations = Vec::with_capacity(SAMPLES);
-            let mut output_partitions = 0;
-            for _ in 0..SAMPLES {
-                let started = Instant::now();
-                let result = plan
-                    .execute(
-                        BTreeMap::from([("input".to_owned(), input.clone())]),
-                        ExecutionOptions::default(),
-                    )
-                    .await?;
-                durations.push(started.elapsed().as_secs_f64() * 1_000.0);
-                output_partitions = result.datafusion_metrics[0].output_partition_count;
-                let values = result_values(&result.outputs["output"])?;
-                match &expected {
-                    Some(expected) => assert_eq!(
-                        &values, expected,
-                        "probe outputs differ for input_partitions={input_partitions}"
-                    ),
-                    None => expected = Some(values),
-                }
-            }
-            durations.sort_by(|left, right| left.partial_cmp(right).unwrap());
-            println!(
-                "query={name} input_partitions={input_partitions} output_partitions={output_partitions} median_ms={:.2}",
-                durations[durations.len() / 2]
-            );
+            measure_configuration(name, query, &input, input_partitions, &mut expected).await?;
         }
     }
     Ok(())

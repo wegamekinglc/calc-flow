@@ -242,10 +242,10 @@ impl DataFusionRuntime {
 
     /// Sets the experimental input-table partition count.
     ///
-    /// Benchmark-only: production batch plans never call this and keep one
-    /// input partition. The value must be set before the session initializes;
-    /// later calls fail closed instead of silently re-registering tables.
-    #[cfg(any(test, feature = "benchmark-internals"))]
+    /// Batch plans call this for every run; only benchmark/test builds can
+    /// request a value above one. The value must be set before the session
+    /// initializes; later calls fail closed instead of silently re-registering
+    /// tables.
     pub(crate) fn set_input_partitions(&mut self, partitions: usize) -> Result<()> {
         self.ensure_open()?;
         if partitions == 0 {
