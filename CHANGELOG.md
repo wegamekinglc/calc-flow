@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-04: Construct cumulative SQL UTF-8 grouping-key output from borrowed
+  strings and share group lookups within each output chunk. Remove intermediate
+  scalar-string clones while preserving complete snapshots, schemas,
+  transactional updates and checkpoint layout. See the focused
+  [output-construction report](benchmarks/sum-state/sum-followup-columnar-20261104/README.md).
+
 - 2026-11-04: Merge grouped integer SQL `SUM` states in columns, reducing
   per-group accumulator construction and state conversion during cumulative
   streaming updates. Preserve wrapping integer arithmetic, null handling,

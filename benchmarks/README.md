@@ -56,6 +56,10 @@ streaming stock positions, sparse group updates, and a finite batch control.
 It preserves per-snapshot correctness evidence, paired samples, build identity,
 CPU profiles, and resource observations without extending the scheduled suite.
 
+The [UTF-8 grouped-output follow-up](sum-state/sum-followup-columnar-20261104/README.md)
+tracks current-version profiling, the original finite control and separately
+sealed candidate comparisons under one cumulative measurement budget.
+
 ## Layout
 
 | Path                                               | Contents                                                         |

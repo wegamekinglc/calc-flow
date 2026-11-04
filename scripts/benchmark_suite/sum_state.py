@@ -368,17 +368,35 @@ def benchmark_argument(argument):
     )
 
 
-def competing_process(process):
+def competing_process(process, target_roots=()):
     if process.pid == os.getpid() or process.info["status"] == psutil.STATUS_ZOMBIE:
         return False
+    if native_target_process(process, target_roots):
+        return True
     names = {"cargo", "rustc", "maturin", "pytest", "samply", "perf"}
     arguments = process.info["cmdline"] or []
     return process.info["name"] in names or any(map(benchmark_argument, arguments))
 
 
+def native_target_process(process, roots):
+    executable = process.info.get("exe")
+    if not executable:
+        return False
+    return any(Path(executable).is_relative_to(root) for root in roots)
+
+
+def native_target_roots(builds):
+    paths = (
+        build.get("build_environment", {}).get("CARGO_TARGET_DIR")
+        for build in builds.values()
+    )
+    return tuple(Path(path).resolve() for path in paths if path)
+
+
 def guard(builds):
-    processes = psutil.process_iter(["pid", "name", "cmdline", "status"])
-    bad = [process.info for process in processes if competing_process(process)]
+    processes = psutil.process_iter(["pid", "name", "cmdline", "status", "exe"])
+    roots = native_target_roots(builds)
+    bad = [process.info for process in processes if competing_process(process, roots)]
     if bad:
         raise RuntimeError(f"competing build/measurement: {bad}")
     for build in builds.values():
