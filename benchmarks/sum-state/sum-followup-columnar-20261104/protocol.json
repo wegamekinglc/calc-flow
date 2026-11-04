@@ -1,0 +1,178 @@
+{
+  "schema": "calc-flow.sum-followup-columnar.protocol.v1",
+  "slug": "sum-followup-columnar-20261104",
+  "merged_product_revision": "4f2a6190d20ce18d10750cd87d86da0bec6f778f",
+  "historical_product_revision": "199d70b4156591153eb6b15cc2c8ffc238b3348f",
+  "candidate": "one profile-selected narrow optimization; freeze actualrevision+source seals beforeformal",
+  "common_native_harness": {
+    "revision": "84186554b078e25e71003a74fedc91c63b2b7f70",
+    "path": "crates/calc-flow/examples/grouped_sum_state_benchmark.rs",
+    "sha256": "657de3e697907e473691c2fd0d1b99967d46577333135c50176801f6faa4e04e",
+    "overlay_root": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/sum-followup-columnar-20261104/common-harness",
+    "note": "Audited common measurement instrumentation only; does not select841 product. PRsource keeps current75370a harness; onlyfrozen diagnostic buildtrees receive657 overlay."
+  },
+  "builds": {
+    "owner": "/root/performance",
+    "estimate_seconds_per_new_release": [
+      600,
+      900
+    ],
+    "separate_from_measurement": true,
+    "reuse_historical": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/sum-state-20261104/build/baseline-final/build.json",
+    "historical_reuse_requires": [
+      "actualbinary SHA256",
+      "all original source seals",
+      "compiler",
+      "features",
+      "Cargo.lock",
+      "sharedsupport",
+      "harness657",
+      "profilebuildflags"
+    ],
+    "merged_current": "MUST newbuild actual4f2, neverreuse841 product",
+    "candidate": "MUST newbuild frozenactualcandidateproduct withsame657overlay",
+    "fallback": "If historicalreceipt incompatible, rebuild199 withsame657; no forcedreuse."
+  },
+  "measurement_budget": {
+    "total_seconds": 600,
+    "P0_hard_cap_seconds": 120,
+    "P1_seconds": "600 minus recordedP0 actual phase elapsed",
+    "includes": [
+      "artifact/runtime preflight",
+      "fixturegeneration",
+      "warmup",
+      "startup",
+      "all native jobs",
+      "full per-snapshot arithmetic/schema/hash oracle",
+      "onCPUcapture",
+      "offline decode/clockverification",
+      "targetcounters",
+      "publication",
+      "ownedprocess cleanup"
+    ],
+    "excludes": [
+      "nativebuilds",
+      "implementation",
+      "ordinary focusedfunctionaltests"
+    ],
+    "stop": "Stop on conflict, drift, oracle failure or deadline; preservepartial; no timing-driven retry or sample/case expansion."
+  },
+  "distinct_workloads": [
+    "stock-stream-1cpu",
+    "stock-stream-8cpu",
+    "sparse-stream-1cpu",
+    "stock-batch-8cpu"
+  ],
+  "max_distinct_cases": 5,
+  "P0": {
+    "finite_comparison": {
+      "case": "stock-batch-8cpu",
+      "baseline": "199d true historical",
+      "candidate": "merged4f2 truecurrent",
+      "rounds": 2,
+      "pairs_per_round": 10,
+      "warmups_per_arm_per_round": 1,
+      "statistics": "maintainedpaired median97.8515625%intervals andexisting5%rule; no guarantee ofequivalence"
+    },
+    "current_profile": {
+      "case": "stock-stream-1cpu",
+      "product": "merged4f2",
+      "jobs": 6,
+      "exclude_first": true,
+      "sample_hz": 999,
+      "event": "cpu-clock:u",
+      "callgraph": "dwarf,16384",
+      "scope": "exact CLOCK_MONOTONIC processing windows; verifyall per-thread importedtimestamps",
+      "note": "Perturbedprofiletimes nevermix withformalfinite results."
+    },
+    "publish": "Complete finiteCSV/rawobservations, currentprofile/stacks/targetcounts,seals,originalfinitegap disposition,phase receipt beforetechnicalhandoff.",
+    "execution_order": [
+      "preflight and immutable identities",
+      "fixture preparation",
+      "required current-product CPU capture",
+      "required decode and all-timestamp verification",
+      "finite199d versus4f2 paired comparison",
+      "source seals,full profile target attribution,publication and cleanup"
+    ],
+    "required_profile": {
+      "product_revision": "4f2a6190d20ce18d10750cd87d86da0bec6f778f",
+      "accepted_profiles": 1,
+      "accepted_processing_windows": 5,
+      "analysis": "self/inclusive tables,allstacks,targetcounts andclockverification",
+      "gate": "No implementation selection or P1 if absent/invalid/partial; completed P0 receipt and analysis required; never fallback to old841/0a profiles"
+    }
+  },
+  "P1": {
+    "comparison": "merged4f2 versus actualnewcandidate",
+    "cases": [
+      "stock-stream-1cpu",
+      "stock-stream-8cpu",
+      "sparse-stream-1cpu",
+      "stock-batch-8cpu"
+    ],
+    "rounds": 2,
+    "pairs_per_round": 10,
+    "warmups_per_arm_per_round": 1,
+    "candidate_profile": {
+      "case": "stock-stream-1cpu",
+      "jobs": 6,
+      "exclude_first": true,
+      "admit_only_if_seconds_remaining_afterformal": 25,
+      "otherwise": "explicitbudgetskip, noresampling"
+    },
+    "statistics": "same maintainedpairedmedian/5%rule; per-caseonly; do notuse P0old199 comparisonasnewcandidate regressioncontrol"
+  },
+  "resource_policy": {
+    "worker_cpus": {
+      "1": [
+        0
+      ],
+      "8": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ]
+    },
+    "controller_cpu": 31,
+    "logical_cpu_note": "8logicalCPUs report4coreIDs, verifylive topology",
+    "tokio_workers": "matchesaffinitysize",
+    "other_thread_env": "all maintained externalthreadvariables1",
+    "nooverlap": "No Cargo/rustc/nativefunctionaltests orotherbenchmarks duringcapture; processguard before/aftereachinvocation."
+  },
+  "workload": {
+    "dense_business_rows": 2000000,
+    "seed_rows": 10000,
+    "business_batch_rows": 100000,
+    "accounts": 100,
+    "stocks": 100,
+    "sparse": "10k seeds +20x100rows (80trade,20nontrade perbatch),100distinctupdatedgroupsacrossfixture",
+    "partitions": {
+      "stream": 1,
+      "finite": 8
+    },
+    "min_rows_per_partition": 1,
+    "stream_compact_groups": 10000,
+    "checkpointing": false,
+    "outputs": "21full10k-group snapshotsstream;1finalsnapshotfinite; allretainedforposttimervalidation"
+  },
+  "evidence": {
+    "destination": "benchmarks/sum-state/sum-followup-columnar-20261104",
+    "immutable_prior_dirs": [
+      "20261104",
+      "20261104-history-borrow"
+    ],
+    "complete": "Readable allformalCSV+percaseintervalsCPU/RSS,compressedallraw/commands/warmups/oracles,seals/toolhashes;acceptedprofiles+allstackcounts withrawperfhashes/localpaths;explicitpartial/unmeasured paths."
+  },
+  "source_layout": {
+    "historical": "existing199d sealedsource_root remainsimmutable",
+    "merged": "target/worktrees/sum-followup-profile-main detached4f2 permanently retains657diagnosticoverlay",
+    "development": "target/worktrees/sum-followup-columnar retainscurrent753harness forCI; neveroverlayit",
+    "final_candidate": "afterproductioncommit create NEW detached candidate-perf tree, apply657 onlythere, build/seal/preservepermanently; no restoreaftermeasurement"
+  },
+  "candidate_public_before_build": true
+}

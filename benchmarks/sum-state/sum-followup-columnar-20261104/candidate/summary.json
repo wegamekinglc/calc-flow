@@ -1,0 +1,1303 @@
+{
+  "builds": {
+    "baseline": {
+      "binary": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/sum-followup-columnar-20261104/build/current/grouped_sum_state_benchmark",
+      "binary_sha256": "17259e26f471722696cbc9c1af67ebc901d1d3c2c6f67b49f78f77c655137ab2",
+      "build_elapsed_seconds": 554.2100078990043,
+      "build_environment": {
+        "CARGO_BUILD_JOBS": "2",
+        "CARGO_ENCODED_RUSTFLAGS": null,
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": null,
+        "CARGO_PROFILE_RELEASE_DEBUG": null,
+        "CARGO_PROFILE_RELEASE_LTO": null,
+        "CARGO_PROFILE_RELEASE_OPT_LEVEL": null,
+        "CARGO_TARGET_DIR": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target",
+        "RUSTFLAGS": null,
+        "RUSTUP_TOOLCHAIN": null
+      },
+      "cargo_lock_sha256": "7c65baff0b6d1c9598817ae0fb92eac205e51f431054a16cabc9ab87db9ff7cb",
+      "command": [
+        "/home/wegamekinglc/.cargo/bin/cargo",
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--features",
+        "benchmark-internals",
+        "--example",
+        "grouped_sum_state_benchmark",
+        "--message-format=json"
+      ],
+      "compiler_log_sha256": "0f832a1cef77b4f5bf45e6e7f834e80b7301c6e5a223137be95576f1624b112e",
+      "example_recompiled": true,
+      "features": [
+        "benchmark-internals"
+      ],
+      "harness_sha256": "657de3e697907e473691c2fd0d1b99967d46577333135c50176801f6faa4e04e",
+      "product_recompiled": true,
+      "revision": "4f2a6190d20ce18d10750cd87d86da0bec6f778f",
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+      "source_root": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-followup-profile-main"
+    },
+    "candidate": {
+      "binary": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/sum-followup-columnar-20261104/build/candidate/grouped_sum_state_benchmark",
+      "binary_sha256": "be89d670e89c7142fdf89849ae86240d3df3b86b2bfa508b52979a525f4c96bd",
+      "build_elapsed_seconds": 558.39798921498,
+      "build_environment": {
+        "CARGO_BUILD_JOBS": "2",
+        "CARGO_ENCODED_RUSTFLAGS": null,
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": null,
+        "CARGO_PROFILE_RELEASE_DEBUG": null,
+        "CARGO_PROFILE_RELEASE_LTO": null,
+        "CARGO_PROFILE_RELEASE_OPT_LEVEL": null,
+        "CARGO_TARGET_DIR": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target",
+        "RUSTFLAGS": null,
+        "RUSTUP_TOOLCHAIN": null
+      },
+      "cargo_lock_sha256": "7c65baff0b6d1c9598817ae0fb92eac205e51f431054a16cabc9ab87db9ff7cb",
+      "command": [
+        "/home/wegamekinglc/.cargo/bin/cargo",
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--features",
+        "benchmark-internals",
+        "--example",
+        "grouped_sum_state_benchmark",
+        "--message-format=json"
+      ],
+      "compiler_log_sha256": "f415035c79ea79ad5b4ecebd8467c149ddf4273fd522b92449837595ff727e06",
+      "example_recompiled": true,
+      "features": [
+        "benchmark-internals"
+      ],
+      "harness_sha256": "657de3e697907e473691c2fd0d1b99967d46577333135c50176801f6faa4e04e",
+      "product_recompiled": true,
+      "revision": "af400b38511bc7f6255fd3549518095b51b20e0c",
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+      "source_root": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-followup-columnar-measured"
+    }
+  },
+  "cases": [
+    {
+      "baseline": [
+        [
+          0.269026961,
+          0.291743729,
+          0.299931107,
+          0.268588421,
+          0.29921736,
+          0.289157196,
+          0.277290216,
+          0.278181314,
+          0.28124984,
+          0.277235639
+        ],
+        [
+          0.271076465,
+          0.279068702,
+          0.286617431,
+          0.285767187,
+          0.271661712,
+          0.276128743,
+          0.273989907,
+          0.281107732,
+          0.282929044,
+          0.291885589
+        ]
+      ],
+      "candidate": [
+        [
+          0.253793154,
+          0.281081882,
+          0.262880394,
+          0.265065227,
+          0.265133385,
+          0.291090395,
+          0.301941279,
+          0.258924753,
+          0.26606145,
+          0.279947704
+        ],
+        [
+          0.266129696,
+          0.285650353,
+          0.2848373,
+          0.274273251,
+          0.26963147,
+          0.262890187,
+          0.274849804,
+          0.26554247,
+          0.267709177,
+          0.265791464
+        ]
+      ],
+      "comparison": "interleaved",
+      "correctness": true,
+      "cpus": [
+        0
+      ],
+      "fixture": "stock",
+      "id": "stock-stream-1cpu",
+      "mode": "stream",
+      "partitions": 1,
+      "reason": "principal changed integer SUM state path",
+      "resource_summary": {
+        "baseline": {
+          "processing_average_cores_p50": 0.9999542009698509,
+          "processing_cpu_ms_p50": 279.347,
+          "whole_process_peak_rss_p50": 245942272.0
+        },
+        "candidate": {
+          "processing_average_cores_p50": 0.9999548482984182,
+          "processing_cpu_ms_p50": 266.08410000000003,
+          "whole_process_peak_rss_p50": 244480000.0
+        }
+      },
+      "rows": 2010000,
+      "statistics": {
+        "base_p50": 0.280088217,
+        "change_percent": -4.701654586204862,
+        "head_max": 0.301941279,
+        "head_min": 0.253793154,
+        "head_p50": 0.26691943650000005,
+        "head_p95": 0.2916329392,
+        "round_changes": [
+          -4.527422170524203,
+          -2.923496999184594
+        ],
+        "round_intervals": [
+          {
+            "coverage": 0.978515625,
+            "high": 0.9782526553161031,
+            "low": -11.391041950239778,
+            "median": -4.527422170524203
+          },
+          {
+            "coverage": 0.978515625,
+            "high": 0.3138425825298663,
+            "low": -5.537116282521904,
+            "median": -2.923496999184594
+          }
+        ],
+        "round_min_changes": [
+          -5.50852748786218,
+          -3.019914694549375
+        ],
+        "rows_per_second": 7530362.068631145,
+        "samples": 20,
+        "verdict": "no-confirmed-regression"
+      },
+      "wall_distribution": {
+        "baseline": {
+          "max_ms": 299.931107,
+          "min_ms": 268.58842100000004,
+          "p50_ms": 280.088217,
+          "p95_ms": 299.25304735
+        },
+        "candidate": {
+          "max_ms": 301.941279,
+          "min_ms": 253.79315400000002,
+          "p50_ms": 266.9194365,
+          "p95_ms": 291.6329392
+        }
+      }
+    },
+    {
+      "baseline": [
+        [
+          0.272151434,
+          0.293997129,
+          0.278470268,
+          0.278955269,
+          0.294579795,
+          0.296445697,
+          0.278845285,
+          0.284545948,
+          0.274476392,
+          0.274909295
+        ],
+        [
+          0.261589897,
+          0.309635494,
+          0.273286641,
+          0.285189528,
+          0.275988614,
+          0.283616891,
+          0.272374342,
+          0.275901447,
+          0.2782854,
+          0.293701216
+        ]
+      ],
+      "candidate": [
+        [
+          0.303479607,
+          0.262347071,
+          0.265052314,
+          0.268649378,
+          0.26048015,
+          0.278118649,
+          0.281016976,
+          0.278141612,
+          0.256104287,
+          0.26340336
+        ],
+        [
+          0.269457701,
+          0.284131415,
+          0.296362979,
+          0.261847456,
+          0.276371167,
+          0.258871061,
+          0.294863386,
+          0.281307505,
+          0.255923145,
+          0.265620195
+        ]
+      ],
+      "comparison": "interleaved",
+      "correctness": true,
+      "cpus": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "fixture": "stock",
+      "id": "stock-stream-8cpu",
+      "mode": "stream",
+      "partitions": 1,
+      "reason": "same changed path with eight workers",
+      "resource_summary": {
+        "baseline": {
+          "processing_average_cores_p50": 1.1682689587234987,
+          "processing_cpu_ms_p50": 326.64225,
+          "whole_process_peak_rss_p50": 261410816.0
+        },
+        "candidate": {
+          "processing_average_cores_p50": 1.1741748183284149,
+          "processing_cpu_ms_p50": 317.4098,
+          "whole_process_peak_rss_p50": 259366912.0
+        }
+      },
+      "rows": 2010000,
+      "statistics": {
+        "base_p50": 0.2786577765,
+        "change_percent": -3.446606486505144,
+        "head_max": 0.303479607,
+        "head_min": 0.255923145,
+        "head_p50": 0.2690535395,
+        "head_p95": 0.29671881040000003,
+        "round_changes": [
+          -4.501904028630127,
+          -3.948557556702498
+        ],
+        "round_intervals": [
+          {
+            "coverage": 0.978515625,
+            "high": 0.7788157508203719,
+            "low": -10.76543097806919,
+            "median": -4.501904028630127
+          },
+          {
+            "coverage": 0.978515625,
+            "high": 8.256667582881217,
+            "low": -8.725090354368204,
+            "median": -3.948557556702498
+          }
+        ],
+        "round_min_changes": [
+          -5.896403617700596,
+          -2.166273263986185
+        ],
+        "rows_per_second": 7470632.067265556,
+        "samples": 20,
+        "verdict": "inconclusive"
+      },
+      "wall_distribution": {
+        "baseline": {
+          "max_ms": 309.635494,
+          "min_ms": 261.589897,
+          "p50_ms": 278.6577765,
+          "p95_ms": 297.10518685000005
+        },
+        "candidate": {
+          "max_ms": 303.479607,
+          "min_ms": 255.923145,
+          "p50_ms": 269.0535395,
+          "p95_ms": 296.71881040000005
+        }
+      }
+    },
+    {
+      "baseline": [
+        [
+          0.035116425,
+          0.03737689,
+          0.034672545,
+          0.033426021,
+          0.035502155,
+          0.03479493,
+          0.0351349,
+          0.034405239,
+          0.03344643,
+          0.033975037
+        ],
+        [
+          0.038245664,
+          0.03419895,
+          0.033928729,
+          0.033983675,
+          0.033397951,
+          0.03625056,
+          0.039280283,
+          0.033856837,
+          0.033619766,
+          0.034142937
+        ]
+      ],
+      "candidate": [
+        [
+          0.029881321,
+          0.028430645,
+          0.027850445,
+          0.028261172,
+          0.028729053,
+          0.029206526,
+          0.028961532,
+          0.027362902,
+          0.026593153,
+          0.030468706
+        ],
+        [
+          0.027237108,
+          0.029563578,
+          0.027586792,
+          0.028785388,
+          0.027592183,
+          0.02844705,
+          0.030043153,
+          0.027576164,
+          0.027919962,
+          0.028040223
+        ]
+      ],
+      "comparison": "interleaved",
+      "correctness": true,
+      "cpus": [
+        0
+      ],
+      "fixture": "sparse",
+      "id": "sparse-stream-1cpu",
+      "mode": "stream",
+      "partitions": 1,
+      "reason": "100 updated groups among 10k retained groups",
+      "resource_summary": {
+        "baseline": {
+          "processing_average_cores_p50": 0.9999931102942858,
+          "processing_cpu_ms_p50": 34.30185,
+          "whole_process_peak_rss_p50": 75167744.0
+        },
+        "candidate": {
+          "processing_average_cores_p50": 1.0000062505350975,
+          "processing_cpu_ms_p50": 28.34615,
+          "whole_process_peak_rss_p50": 73893888.0
+        }
+      },
+      "rows": 12000,
+      "statistics": {
+        "base_p50": 0.0343020945,
+        "change_percent": -17.363913448492173,
+        "head_max": 0.030468706,
+        "head_min": 0.026593153,
+        "head_p50": 0.028345908500000003,
+        "head_p95": 0.030064430649999998,
+        "round_changes": [
+          -18.324237555976417,
+          -18.212347243793687
+        ],
+        "round_intervals": [
+          {
+            "coverage": 0.978515625,
+            "high": -14.907850101483856,
+            "low": -20.490309429137877,
+            "median": -18.324237555976417
+          },
+          {
+            "coverage": 0.978515625,
+            "high": -15.296423944732284,
+            "low": -23.515945646318283,
+            "median": -18.212347243793687
+          }
+        ],
+        "round_min_changes": [
+          -20.44176302049232,
+          -18.446769384145757
+        ],
+        "rows_per_second": 423341.52034675475,
+        "samples": 20,
+        "verdict": "improved"
+      },
+      "wall_distribution": {
+        "baseline": {
+          "max_ms": 39.280283,
+          "min_ms": 33.397951,
+          "p50_ms": 34.302094499999995,
+          "p95_ms": 38.29739495
+        },
+        "candidate": {
+          "max_ms": 30.468706,
+          "min_ms": 26.593153,
+          "p50_ms": 28.3459085,
+          "p95_ms": 30.06443065
+        }
+      }
+    },
+    {
+      "baseline": [
+        [
+          0.06065616,
+          0.055335396,
+          0.06564947,
+          0.057339478,
+          0.062957816,
+          0.057975318,
+          0.05787409,
+          0.061692782,
+          0.04889283,
+          0.054980107
+        ],
+        [
+          0.054061931,
+          0.058458065,
+          0.052625648,
+          0.056717438,
+          0.056033417,
+          0.052476151,
+          0.056975877,
+          0.055028057,
+          0.069247676,
+          0.061720917
+        ]
+      ],
+      "candidate": [
+        [
+          0.052577947,
+          0.058156219,
+          0.107852102,
+          0.066270467,
+          0.053986464,
+          0.066319768,
+          0.055112917,
+          0.051197276,
+          0.053112064,
+          0.060603729
+        ],
+        [
+          0.068082077,
+          0.056493505,
+          0.052391073,
+          0.051088935,
+          0.053620195,
+          0.058302042,
+          0.051829746,
+          0.049740164,
+          0.057956579,
+          0.053969935
+        ]
+      ],
+      "comparison": "interleaved",
+      "correctness": true,
+      "cpus": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "fixture": "stock",
+      "id": "stock-batch-8cpu",
+      "mode": "batch",
+      "partitions": 8,
+      "reason": "finite execution control unaffected by state implementation",
+      "resource_summary": {
+        "baseline": {
+          "processing_average_cores_p50": 2.711926405003869,
+          "processing_cpu_ms_p50": 153.32299999999998,
+          "whole_process_peak_rss_p50": 247080960.0
+        },
+        "candidate": {
+          "processing_average_cores_p50": 2.726800682944118,
+          "processing_cpu_ms_p50": 148.6714,
+          "whole_process_peak_rss_p50": 251269120.0
+        }
+      },
+      "rows": 2010000,
+      "statistics": {
+        "base_p50": 0.057157677500000004,
+        "change_percent": -4.56279386089472,
+        "head_max": 0.107852102,
+        "head_min": 0.049740164,
+        "head_p50": 0.0545496905,
+        "head_p95": 0.07007057825000003,
+        "round_changes": [
+          6.863619284230127,
+          -6.669438755080048
+        ],
+        "round_intervals": [
+          {
+            "coverage": 0.978515625,
+            "high": 15.575637085499805,
+            "low": -14.249782743416638,
+            "median": 6.863619284230127
+          },
+          {
+            "coverage": 0.978515625,
+            "high": 11.10197849686041,
+            "low": -12.558112187477711,
+            "median": -6.669438755080048
+          }
+        ],
+        "round_min_changes": [
+          4.713259592459673,
+          -5.213772252465687
+        ],
+        "rows_per_second": 36847138.48193144,
+        "samples": 20,
+        "verdict": "inconclusive"
+      },
+      "wall_distribution": {
+        "baseline": {
+          "max_ms": 69.247676,
+          "min_ms": 48.89283,
+          "p50_ms": 57.157677500000005,
+          "p95_ms": 65.82938030000001
+        },
+        "candidate": {
+          "max_ms": 107.852102,
+          "min_ms": 49.740164,
+          "p50_ms": 54.5496905,
+          "p95_ms": 70.07057825000003
+        }
+      }
+    }
+  ],
+  "cumulative_measurement_seconds": 172.974925056973,
+  "elapsed_seconds": 137.27114778698888,
+  "environment": {
+    "controller_affinity": [
+      31
+    ],
+    "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "driver_sha256": "c942412beacfcac872ff56de4831f55d0cb7711d9944bb8dcac7b190ed4e80fd",
+    "helper_sha256": {
+      "scripts/benchmark_suite/report.py": "3910e484b601db483d8eed5afc973d7b965164e1452edc71a144fa697455e1f2",
+      "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
+      "scripts/benchmark_suite/sum_followup.py": "847d6346e91cc5c8a8505cbf405840d861d2242c9087b637ef89767a6e0369a6",
+      "scripts/benchmark_suite/sum_state.py": "c942412beacfcac872ff56de4831f55d0cb7711d9944bb8dcac7b190ed4e80fd",
+      "scripts/benchmark_suite/sum_state_profile.py": "82fffdd79703c9af65e5f095d6db0ca42e8b4c357dfc6b25e12f39cc96c2f539",
+      "scripts/benchmark_suite/sum_state_publication.py": "35f0a81ca4da6a8854d0df1f6a6198ea094c5ece53b08b6ae6d3f89695ac1fba",
+      "scripts/toolkit.py": "ef8ad17c43ea4a974e5e01a3fcaf1aec7a70e19b88286db8b82c4dcde2945d56"
+    },
+    "host_limits": "WSL host load and power state unobservable; eight logical CPUs report four core IDs",
+    "inherited_diagnostic_environment": {
+      "RUST_BACKTRACE": null,
+      "RUST_LOG": null
+    },
+    "memory_bytes": 33453572096,
+    "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "profile_tools": {
+      "perf": {
+        "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/thread-profile-20261104/tools/perf-package/usr/bin/perf",
+        "sha256": "c43fb7c12fc3c26f5962784a9b7d87001c7dd158f8cc37ab53d29bd7d2dd2721",
+        "version": "perf version 7.0.14"
+      },
+      "samply": {
+        "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/thread-profile-20261104/tools/samply-x86_64-unknown-linux-gnu/samply",
+        "sha256": "0ca59d520059aa2ee4db1860c732089829e75740ee75314e84d2b0ab8c90873e",
+        "version": "samply 0.13.1"
+      }
+    },
+    "python": "3.13.9",
+    "runtime_defaults": {
+      "benchmark_internals": true,
+      "checkpoint_interval_seconds": 60,
+      "checkpoint_timeout_seconds": 600,
+      "checkpointing": false,
+      "collect_diagnostics": true,
+      "datafusion_batch_size": 8192,
+      "dispatch_trace": "Disabled default; harness never starts recorder",
+      "edge_budget": {
+        "max_bytes": 18446744073709551615,
+        "max_rows": 1000000
+      },
+      "join_cpu_trace": "Disabled default; harness never starts recorder",
+      "retained_epochs": 2,
+      "sql_compact_state_max_bytes": 9007199254740991,
+      "sql_compact_state_max_groups": 10000,
+      "sql_snapshot_state_budget": null,
+      "sql_state_budget": null,
+      "watermarks": "Disabled"
+    },
+    "topology": "CPU CORE SOCKET ONLINE\n  0    0      0    yes\n  1    0      0    yes\n  2    1      0    yes\n  3    1      0    yes\n  4    2      0    yes\n  5    2      0    yes\n  6    3      0    yes\n  7    3      0    yes\n  8    4      0    yes\n  9    4      0    yes\n 10    5      0    yes\n 11    5      0    yes\n 12    6      0    yes\n 13    6      0    yes\n 14    7      0    yes\n 15    7      0    yes\n 16    8      0    yes\n 17    8      0    yes\n 18    9      0    yes\n 19    9      0    yes\n 20   10      0    yes\n 21   10      0    yes\n 22   11      0    yes\n 23   11      0    yes\n 24   12      0    yes\n 25   12      0    yes\n 26   13      0    yes\n 27   13      0    yes\n 28   14      0    yes\n 29   14      0    yes\n 30   15      0    yes\n 31   15      0    yes\n"
+  },
+  "failure": null,
+  "fixtures": {
+    "sparse": {
+      "batch_rows": [
+        10000,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100
+      ],
+      "fixture": "sparse",
+      "input_rows": 12000,
+      "input_sha256": "641effd7042bd3d0cd1be8f3fef6e6b5d7d726b47c71eaf761a6ec76f10ff3e0",
+      "schema_sha256": "a0e913e165c9b520cf4ad29c294897dda94207e0d3081256927b7d4064d9c1d5",
+      "snapshot_rows": [
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000
+      ],
+      "snapshot_schema_sha256": "13a316580158451de94c8f627faa89607bb24382d87cd7e1dc31844bee1de8c5",
+      "snapshot_sha256": [
+        "27c12eedce20a2f994a703372dd8fc29e3873f64d569d2d09bac4771453c0790",
+        "f63952ae1a403c9d40cc8c508c01b5f7a8ba5d7d39699efb2d4fd0483affd5f9",
+        "083c0a4581293f2d9aad8ee7496a49eef5e3b99acf174bcdcea03d62c38462f4",
+        "526f83c375466e37d35c2b123bce0f564b0aacb16118b60b07c8542cf319978b",
+        "39603be1cf772fdf1d0ef01a202349a2d659c8ee03e26c4b5a072939b91eb679",
+        "bebae210d904ecce4a7f941d354911cdf55bf5f5671145d52aa62419632f5f48",
+        "a51ad92a2b4cac4c4177c50e88215ad5c8346d53301a07f261d619b3ac9c5d42",
+        "aa7b857865d715f71402bbea225a22e5f1ee805c6ded6d5ddd8df987a5fcc61f",
+        "ad465198a2741a146f5a33781f6bcc35b9bd3b5d7f084004c3f2becb892aabb5",
+        "0822c710657a3e1dfb383e9fd36a7d1fb41e84bcbb3b8d7307e7814d2886161f",
+        "fa132b549ac11e9e214a93f72b0462519debe8cba66c2da334fa3605927e0db0",
+        "f05161a8595a4e1b437035734300aab28896f80da6e4bbdcbcc24e4cf0445501",
+        "b1723670bba1ed8ea454e719ff18b9209a7503a6409f9115d7c53600dadc15a5",
+        "2ee8cb647ba8ead105fed34f690f532da12a8859032c4d1a48bc4a3cacebfb3f",
+        "c0314af95533ffe37139fc486f9477f0e32d7ed240f64aa3d26e39a8d36f6b40",
+        "73705e43cb8e592895ed5909384f2323155ff1b88f9bf0df1b40d0ceb5a25b99",
+        "8ba7e8a2d3249faaafd3133d8b32049b175b875276ebdd65c6df4753eb1d9a4d",
+        "7b9c01aa3110202aa5fc0357da8aacbe0760c43a673a32c6ffecd96410815a34",
+        "720eb84fec6bd9d446f0d1e35177b7fd8b948221bb493fa1049501b5a06a551f",
+        "f999b3ceb45afe720cd6b8871a1fbd8457a95fab21b7eda9c68812e0c4f1c2e8",
+        "dc8025243282ce8d5b72f01bdde1a76e6fa8837f3e0efc980d8c50af210d523c"
+      ]
+    },
+    "stock": {
+      "batch_rows": [
+        10000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000
+      ],
+      "fixture": "stock",
+      "input_rows": 2010000,
+      "input_sha256": "a2d5af0e890eb8de7475be91ccbadcb21fad3c320a78e7b5639d20040d61bfab",
+      "schema_sha256": "a0e913e165c9b520cf4ad29c294897dda94207e0d3081256927b7d4064d9c1d5",
+      "snapshot_rows": [
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000
+      ],
+      "snapshot_schema_sha256": "13a316580158451de94c8f627faa89607bb24382d87cd7e1dc31844bee1de8c5",
+      "snapshot_sha256": [
+        "27c12eedce20a2f994a703372dd8fc29e3873f64d569d2d09bac4771453c0790",
+        "1e50bcf6458b8d8ba59565444b305fef526190fdc157f86353a3b1bca4e03e1e",
+        "ce09da77dc08a2eea660308cf1beff6b4966234d032f90e660fa6575a0b6531d",
+        "7746299025277eb54d4f267dadcde28e7e3b4a859e4226982dfbb8b551b9dc24",
+        "5e2c1696dac7e7b0614b767c4dc52cfe87617e8be053fa136b7d3dfca40ec090",
+        "0f919c0e2a1f4b96345a1af10d83b267646e6f5fbe02114823540e3479178ba0",
+        "2a5ae20a7c2833030d19524acc322b7752f535bfb660affe1e36550c47f15979",
+        "9a8a943d1d5678ac1664a60b84bbd9c19f45327758e2d2b98dbed34ed4d090ee",
+        "10cffd2614d510de575e65c2c61514717b113dc71cd193e3ba45f4ff5e943580",
+        "022bdc2b4fe6bd3872db4f173fadce5e93986b9184843869fb4bf7f28f691b6b",
+        "6b7db3636f012c654b8e456f85787cc6a3f946741be0d7e48069327f951836a9",
+        "0bfa93a21db4c511b860308ac162f11d0b06d0c53cf7f49205e06d7d930bf776",
+        "142c1869bb946b31fcd909e5babc817e8533de56abd9c8ba23842ab6730a50c1",
+        "7d6c0c8a64a2995d47991d82c7288f7a89453bb3fabbf56ef4155d41692b599c",
+        "126d2148df1205ba15191661c67251d1b3331cd9a44ce7eb1e3b6fbd98194b34",
+        "ae6f0f858e07ac0ca8840f099b14ce1ce797e560941ff2155728149b349f9902",
+        "634508bf638d5119c67c3a37b4af5d3caf6708b0232a654a38a3411df62893c2",
+        "c48a2f4f38800e1a290f164590bff5898c4a05a60e2bbe2bbfa4b0a5300c91df",
+        "9a69e00ec1ca3dc87f9c8fc4b2010375c0928f234f7d0b67b2ee083e4ced0b2f",
+        "ee489916711ada4eab1f97a29b3f6b9792298a8e0ad8b2bd9978f42c1b8dc6fd",
+        "f522ddd53f35922972bcef785662747654bbe5086630e789c9a39bafde5aa099"
+      ]
+    }
+  },
+  "phase": "candidate",
+  "profile_disposition": "accepted",
+  "profiles": [
+    {
+      "binary_sha256": "be89d670e89c7142fdf89849ae86240d3df3b86b2bfa508b52979a525f4c96bd",
+      "clock_alignment": {
+        "matched_sample_count": 3115,
+        "max_error_ms": 2.9802322387695312e-08,
+        "offset_ms": 227209320.38713
+      },
+      "disjoint_phases": [
+        {
+          "name": "update_chunk",
+          "percent": 45.32924961715161,
+          "samples": 592
+        },
+        {
+          "name": "finish_transaction",
+          "percent": 22.970903522205205,
+          "samples": 300
+        },
+        {
+          "name": "ExpressionOperator",
+          "percent": 15.237366003062787,
+          "samples": 199
+        },
+        {
+          "name": "commit",
+          "percent": 13.782542113323125,
+          "samples": 180
+        },
+        {
+          "name": "other",
+          "percent": 2.679938744257274,
+          "samples": 35
+        }
+      ],
+      "inclusive": [
+        {
+          "name": "<calc_flow::operator::sql::SqlOperator as calc_flow::operator::stream::StreamOperator>::process_data::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 82.54211332312404,
+          "samples": 1078
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::update_with_input_owner::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 68.45329249617151,
+          "samples": 894
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::update_chunk [grouped_sum_state_benchmark]",
+          "percent": 45.32924961715161,
+          "samples": 592
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::update_chunk_input [grouped_sum_state_benchmark]",
+          "percent": 45.25267993874426,
+          "samples": 591
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::finish_transaction::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 22.970903522205205,
+          "samples": 300
+        },
+        {
+          "name": "<core::iter::adapters::GenericShunt<I,R> as core::iter::traits::iterator::Iterator>::next [grouped_sum_state_benchmark]",
+          "percent": 17.304747320061256,
+          "samples": 226
+        },
+        {
+          "name": "calc_flow::runtime::streaming::operator_task::dispatch_or_cancel::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 15.390505359877489,
+          "samples": 201
+        },
+        {
+          "name": "calc_flow::runtime::streaming::operator_task::run_operator_loop::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 15.390505359877489,
+          "samples": 201
+        },
+        {
+          "name": "<calc_flow::operator::expression::ExpressionOperator as calc_flow::operator::stream::StreamOperator>::process_data::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 15.237366003062787,
+          "samples": 199
+        },
+        {
+          "name": "calc_flow::datafusion::DataFusionRuntime::stream_expression::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 15.160796324655436,
+          "samples": 198
+        },
+        {
+          "name": "calc_flow::datafusion_template::compiled::push [grouped_sum_state_benchmark]",
+          "percent": 14.777947932618684,
+          "samples": 193
+        },
+        {
+          "name": "calc_flow::runtime::streaming::operator_task::run_after_operator_entry::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 14.318529862174579,
+          "samples": 187
+        },
+        {
+          "name": "core::ptr::drop_in_place<calc_flow::operator::sql::incremental::Group> [grouped_sum_state_benchmark]",
+          "percent": 14.088820826952526,
+          "samples": 184
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::commit [grouped_sum_state_benchmark]",
+          "percent": 13.782542113323125,
+          "samples": 180
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::candidate [grouped_sum_state_benchmark]",
+          "percent": 13.169984686064318,
+          "samples": 172
+        },
+        {
+          "name": "arrow_select::filter::filter_array [grouped_sum_state_benchmark]",
+          "percent": 11.791730474732006,
+          "samples": 154
+        },
+        {
+          "name": "arrow_select::filter::filter_bytes [grouped_sum_state_benchmark]",
+          "percent": 10.719754977029096,
+          "samples": 140
+        },
+        {
+          "name": "calc_flow::runtime::streaming::supervisor::TaskRegistration::run::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 10.336906584992343,
+          "samples": 135
+        },
+        {
+          "name": "arrow_row::RowConverter::append [grouped_sum_state_benchmark]",
+          "percent": 10.336906584992343,
+          "samples": 135
+        },
+        {
+          "name": "arrow_row::RowConverter::convert_columns [grouped_sum_state_benchmark]",
+          "percent": 10.336906584992343,
+          "samples": 135
+        },
+        {
+          "name": "calc_flow::datafusion_template::compiled::filter_record [grouped_sum_state_benchmark]",
+          "percent": 9.95405819295559,
+          "samples": 130
+        },
+        {
+          "name": "arrow_select::filter::FilterBytes<OffsetSize>::extend_idx [grouped_sum_state_benchmark]",
+          "percent": 8.95865237366003,
+          "samples": 117
+        },
+        {
+          "name": "arrow_select::filter::filter_record_batch [grouped_sum_state_benchmark]",
+          "percent": 8.95865237366003,
+          "samples": 117
+        },
+        {
+          "name": "arrow_select::filter::FilterPredicate::filter_record_batch [grouped_sum_state_benchmark]",
+          "percent": 8.422664624808576,
+          "samples": 110
+        },
+        {
+          "name": "arrow_row::variable::encode_generic_byte_array [grouped_sum_state_benchmark]",
+          "percent": 8.269525267993874,
+          "samples": 108
+        },
+        {
+          "name": "arrow_row::encode_column [grouped_sum_state_benchmark]",
+          "percent": 8.269525267993874,
+          "samples": 108
+        },
+        {
+          "name": "hashbrown::map::HashMap<K,V,S,A>::insert [grouped_sum_state_benchmark]",
+          "percent": 7.73353751914242,
+          "samples": 101
+        },
+        {
+          "name": "core::ptr::drop_in_place<alloc::vec::Vec<alloc::vec::Vec<datafusion_common::scalar::ScalarValue>>> [grouped_sum_state_benchmark]",
+          "percent": 5.742725880551301,
+          "samples": 75
+        },
+        {
+          "name": "hashbrown::raw::RawTable<T,A>::reserve_rehash [grouped_sum_state_benchmark]",
+          "percent": 5.51301684532925,
+          "samples": 72
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::output_chunk [grouped_sum_state_benchmark]",
+          "percent": 5.436447166921899,
+          "samples": 71
+        },
+        {
+          "name": "arrow_row::variable::encode_one [grouped_sum_state_benchmark]",
+          "percent": 5.436447166921899,
+          "samples": 71
+        },
+        {
+          "name": "0xb23b3 [libc.so.6]",
+          "percent": 5.436447166921899,
+          "samples": 71
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::PartialGroups::merge_rank [grouped_sum_state_benchmark]",
+          "percent": 5.053598774885145,
+          "samples": 66
+        },
+        {
+          "name": "<datafusion_physical_expr::expressions::case::CaseExpr as datafusion_physical_expr_common::physical_expr::PhysicalExpr>::evaluate [grouped_sum_state_benchmark]",
+          "percent": 4.900459418070444,
+          "samples": 64
+        },
+        {
+          "name": "datafusion_physical_expr::projection::Projector::project_batch [grouped_sum_state_benchmark]",
+          "percent": 4.900459418070444,
+          "samples": 64
+        },
+        {
+          "name": "datafusion_physical_expr::aggregate::AggregateFunctionExpr::field [grouped_sum_state_benchmark]",
+          "percent": 3.9816232771822357,
+          "samples": 52
+        },
+        {
+          "name": "datafusion_physical_expr::expressions::case::CaseBody::expr_or_expr [grouped_sum_state_benchmark]",
+          "percent": 3.8284839203675345,
+          "samples": 50
+        },
+        {
+          "name": "0xb3cec [libc.so.6]",
+          "percent": 3.6753445635528332,
+          "samples": 48
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::candidate_slot [grouped_sum_state_benchmark]",
+          "percent": 3.6753445635528332,
+          "samples": 48
+        },
+        {
+          "name": "core::ptr::drop_in_place<datafusion_common::scalar::ScalarValue> [grouped_sum_state_benchmark]",
+          "percent": 3.5222052067381315,
+          "samples": 46
+        }
+      ],
+      "perf_data_sha256": "111fb87d9d2c2faadd0d4f0ffd50a4dd97384bac3718781390801fe1f8a48fa3",
+      "samples": 1306,
+      "samples_per_window": [
+        258,
+        259,
+        268,
+        258,
+        263
+      ],
+      "scope": "user-mode CPU only; first job excluded; inclusive shares overlap",
+      "self": [
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::finish_transaction::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 5.666156202143951,
+          "samples": 74
+        },
+        {
+          "name": "arrow_select::filter::FilterBytes<OffsetSize>::extend_idx [grouped_sum_state_benchmark]",
+          "percent": 4.900459418070444,
+          "samples": 64
+        },
+        {
+          "name": "arrow_row::variable::encode_one [grouped_sum_state_benchmark]",
+          "percent": 4.211332312404288,
+          "samples": 55
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::update_chunk_input [grouped_sum_state_benchmark]",
+          "percent": 4.134762633996937,
+          "samples": 54
+        },
+        {
+          "name": "<core::iter::adapters::GenericShunt<I,R> as core::iter::traits::iterator::Iterator>::next [grouped_sum_state_benchmark]",
+          "percent": 3.8284839203675345,
+          "samples": 50
+        },
+        {
+          "name": "core::ptr::drop_in_place<datafusion_common::scalar::ScalarValue> [grouped_sum_state_benchmark]",
+          "percent": 3.5222052067381315,
+          "samples": 46
+        },
+        {
+          "name": "0x1972b2 [libc.so.6]",
+          "percent": 3.5222052067381315,
+          "samples": 46
+        },
+        {
+          "name": "core::hash::BuildHasher::hash_one [grouped_sum_state_benchmark]",
+          "percent": 3.445635528330781,
+          "samples": 45
+        },
+        {
+          "name": "arrow_row::variable::encode_generic_byte_array [grouped_sum_state_benchmark]",
+          "percent": 2.8330781010719757,
+          "samples": 37
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::PartialGroups::merge_rank [grouped_sum_state_benchmark]",
+          "percent": 2.8330781010719757,
+          "samples": 37
+        },
+        {
+          "name": "core::ptr::drop_in_place<calc_flow::operator::sql::incremental::Group> [grouped_sum_state_benchmark]",
+          "percent": 2.5267993874425727,
+          "samples": 33
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::candidate [grouped_sum_state_benchmark]",
+          "percent": 2.450229709035222,
+          "samples": 32
+        },
+        {
+          "name": "hashbrown::raw::RawTable<T,A>::reserve_rehash [grouped_sum_state_benchmark]",
+          "percent": 2.3736600306278715,
+          "samples": 31
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::candidate_slot [grouped_sum_state_benchmark]",
+          "percent": 2.3736600306278715,
+          "samples": 31
+        },
+        {
+          "name": "0xb23a9 [libc.so.6]",
+          "percent": 2.22052067381317,
+          "samples": 29
+        },
+        {
+          "name": "hashbrown::map::HashMap<K,V,S,A>::insert [grouped_sum_state_benchmark]",
+          "percent": 2.0673813169984685,
+          "samples": 27
+        },
+        {
+          "name": "arrow_select::filter::FilterBytes<OffsetSize>::extend_offsets_idx [grouped_sum_state_benchmark]",
+          "percent": 1.7611026033690658,
+          "samples": 23
+        },
+        {
+          "name": "0x197a00 [libc.so.6]",
+          "percent": 1.6079632465543645,
+          "samples": 21
+        },
+        {
+          "name": "datafusion_physical_expr::aggregate::AggregateFunctionExpr::field [grouped_sum_state_benchmark]",
+          "percent": 1.5313935681470139,
+          "samples": 20
+        },
+        {
+          "name": "<datafusion_functions_aggregate_common::aggregate::groups_accumulator::prim_op::PrimitiveGroupsAccumulator<T,F> as datafusion_expr_common::groups_accumulator::GroupsAccumulator>::update_batch [grouped_sum_state_benchmark]",
+          "percent": 1.5313935681470139,
+          "samples": 20
+        },
+        {
+          "name": "0xb3cf8 [libc.so.6]",
+          "percent": 1.454823889739663,
+          "samples": 19
+        },
+        {
+          "name": "datafusion_common::scalar::ScalarValue::is_null [grouped_sum_state_benchmark]",
+          "percent": 1.454823889739663,
+          "samples": 19
+        },
+        {
+          "name": "0xb0f93 [libc.so.6]",
+          "percent": 1.3782542113323124,
+          "samples": 18
+        },
+        {
+          "name": "0xb0f9d [libc.so.6]",
+          "percent": 1.3016845329249618,
+          "samples": 17
+        },
+        {
+          "name": "0xb2119 [libc.so.6]",
+          "percent": 1.1485451761102603,
+          "samples": 15
+        },
+        {
+          "name": "arrow_row::LengthTracker::push_variable [grouped_sum_state_benchmark]",
+          "percent": 1.0719754977029097,
+          "samples": 14
+        },
+        {
+          "name": "0xb23bc [libc.so.6]",
+          "percent": 1.0719754977029097,
+          "samples": 14
+        },
+        {
+          "name": "free@@GLIBC_2.2.5 [libc.so.6]",
+          "percent": 1.0719754977029097,
+          "samples": 14
+        },
+        {
+          "name": "0x197a85 [libc.so.6]",
+          "percent": 0.9954058192955589,
+          "samples": 13
+        },
+        {
+          "name": "0x1972b6 [libc.so.6]",
+          "percent": 0.9954058192955589,
+          "samples": 13
+        },
+        {
+          "name": "0xb2185 [libc.so.6]",
+          "percent": 0.9954058192955589,
+          "samples": 13
+        },
+        {
+          "name": "arrow_select::filter::filter_native [grouped_sum_state_benchmark]",
+          "percent": 0.9188361408882083,
+          "samples": 12
+        },
+        {
+          "name": "core::ptr::drop_in_place<alloc::vec::Vec<core::option::Option<alloc::boxed::Box<dyn datafusion_expr_common::accumulator::Accumulator>>>> [grouped_sum_state_benchmark]",
+          "percent": 0.9188361408882083,
+          "samples": 12
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::finalize_candidate [grouped_sum_state_benchmark]",
+          "percent": 0.9188361408882083,
+          "samples": 12
+        },
+        {
+          "name": "0x197a46 [libc.so.6]",
+          "percent": 0.8422664624808576,
+          "samples": 11
+        },
+        {
+          "name": "0x1984d3 [libc.so.6]",
+          "percent": 0.8422664624808576,
+          "samples": 11
+        },
+        {
+          "name": "0xb2708 [libc.so.6]",
+          "percent": 0.7656967840735069,
+          "samples": 10
+        },
+        {
+          "name": "<core::iter::adapters::map::Map<I,F> as core::iter::traits::iterator::Iterator>::next [grouped_sum_state_benchmark]",
+          "percent": 0.7656967840735069,
+          "samples": 10
+        },
+        {
+          "name": "<datafusion_common::scalar::ScalarValue as core::clone::Clone>::clone [grouped_sum_state_benchmark]",
+          "percent": 0.7656967840735069,
+          "samples": 10
+        },
+        {
+          "name": "core::ptr::drop_in_place<alloc::vec::Vec<alloc::vec::Vec<datafusion_common::scalar::ScalarValue>>> [grouped_sum_state_benchmark]",
+          "percent": 0.6891271056661562,
+          "samples": 9
+        }
+      ],
+      "side": "candidate",
+      "symbolization": "GNU nm -n -S -C exact nonzero-sized code ranges; dynamic symbol fallback; no source-line/inline attribution",
+      "threads": [
+        {
+          "name": "tokio-rt-worker tid=56947",
+          "percent": 99.92343032159265,
+          "samples": 1305
+        },
+        {
+          "name": "grouped_sum_sta tid=56945.2",
+          "percent": 0.07656967840735068,
+          "samples": 1
+        }
+      ],
+      "unresolved_leaf_samples": 385,
+      "windows": [
+        {
+          "end_ns": 227210190653363,
+          "start_ns": 227209932308005
+        },
+        {
+          "end_ns": 227210712935412,
+          "start_ns": 227210440693028
+        },
+        {
+          "end_ns": 227211229570113,
+          "start_ns": 227210960646157
+        },
+        {
+          "end_ns": 227211737696463,
+          "start_ns": 227211478636625
+        },
+        {
+          "end_ns": 227212253869713,
+          "start_ns": 227211988329993
+        }
+      ]
+    }
+  ],
+  "status": "completed"
+}
