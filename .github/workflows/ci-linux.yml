@@ -690,6 +690,18 @@ jobs:
       CH_TEST_URL: http://localhost:8123
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Reclaim disk space for instrumented coverage
+        # Hosted runners can provide a 72 GB root disk; unused SDKs must not
+        # consume the space needed by instrumented binaries and the swap file.
+        run: |
+          df -h . "$RUNNER_TEMP"
+          for unused_sdk in /usr/local/lib/android /usr/share/dotnet; do
+            if [ -d "$unused_sdk" ]; then
+              sudo du -sh "$unused_sdk"
+              sudo rm -rf -- "$unused_sdk"
+            fi
+          done
+          df -h . "$RUNNER_TEMP"
       - name: Ensure libcurl headers for vendored librdkafka
         run: |
           if dpkg-query -W -f='${Status}' libcurl4-openssl-dev 2>/dev/null \
