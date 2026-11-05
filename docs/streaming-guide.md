@@ -770,6 +770,11 @@ used multiple CPU workers but regressed in its dense four- and eight-CPU cases;
 that prototype is retained as experiment evidence. The shared native CPU
 service used by other operators does not imply parallel compact SUM updates.
 
+A separate [composite UTF-8 key experiment](../benchmarks/sum-state/sum-columnar-keys-20261105.md)
+reduced key encoding and allocated bytes in a focused probe, but its fixed
+five-case comparison established no dense-stream improvement. That runtime
+prototype was withdrawn; the existing key path remains in use.
+
 Use `StreamRuntimeConfig(sql_compact_state_budget=StateBudget(100_000, 64 << 20))`
 to limit each aggregate SQL node to 100,000 live groups and 64 MiB of conservative
 owned-state charges. `StateBudget.max_rows` means live groups here, including

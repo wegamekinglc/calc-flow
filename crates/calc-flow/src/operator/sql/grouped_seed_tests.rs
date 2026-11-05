@@ -175,16 +175,13 @@ async fn case(dtype: &DataType) {
     assert!(plan.sequential.is_some());
 
     let records = vec![record(dtype, 0, 64, 1), record(dtype, 64, 160, 2)];
-    let input_rows = records.iter().map(RecordBatch::num_rows).sum();
-    let (reservation, workspace, mut candidates) =
-        plan.input_candidates(input_rows, "seed").unwrap();
+    let (reservation, workspace, mut candidates) = plan.input_candidates(160, "seed").unwrap();
     let partial = candidates.partial.as_mut().unwrap();
     let (accumulators, observations): (Vec<_>, Vec<MergeRows>) =
         partial.accumulators.drain(..).map(observe).unzip();
     partial.accumulators = accumulators;
     plan.update_records(
         &records,
-        input_rows,
         &mut candidates,
         (&reservation, workspace),
         &context,

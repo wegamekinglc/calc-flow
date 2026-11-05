@@ -1,0 +1,239 @@
+{
+  "slug": "sum-columnar-keys-20261105",
+  "baseline_revision": "22f4b9a562bdd087a75d810aeeb2161f29a3d6b7",
+  "candidate_revision": "e492158c4d7109c779b7b52aac87cf6ffd3e1613",
+  "budget_seconds": 600,
+  "prior_measurement_seconds": 0,
+  "rounds": 2,
+  "pairs_per_round": 10,
+  "warmups_per_arm_per_round": 1,
+  "cases": [
+    {
+      "id": "stock-stream-1cpu",
+      "fixture": "stock",
+      "mode": "stream",
+      "cpus": [
+        0
+      ],
+      "partitions": 1,
+      "reason": "transaction-wide composite-key encoding target"
+    },
+    {
+      "id": "stock-stream-4cpu",
+      "fixture": "stock",
+      "mode": "stream",
+      "cpus": [
+        0,
+        2,
+        4,
+        6
+      ],
+      "partitions": 1,
+      "reason": "same key path with four physical cores"
+    },
+    {
+      "id": "sparse-stream-1cpu",
+      "fixture": "sparse",
+      "mode": "stream",
+      "cpus": [
+        0
+      ],
+      "partitions": 1,
+      "reason": "legacy selector sparse retained-snapshot control"
+    },
+    {
+      "id": "distinct-stream-1cpu",
+      "fixture": "distinct",
+      "mode": "stream",
+      "cpus": [
+        0
+      ],
+      "partitions": 1,
+      "reason": "all-distinct N=G selects legacy whole-pipeline control"
+    },
+    {
+      "id": "edge-stream-1cpu",
+      "fixture": "edge",
+      "mode": "stream",
+      "cpus": [
+        0
+      ],
+      "partitions": 1,
+      "reason": "first eligible N=2G edge and least canonical-row saving"
+    }
+  ],
+  "control_fixtures": {
+    "distinct": {
+      "copies": 1,
+      "groups": 10000,
+      "business_batches": 20,
+      "business_sql_rows": 10000,
+      "input_rows": 210000,
+      "selector": "legacy N=G"
+    },
+    "edge": {
+      "copies": 2,
+      "groups": 10000,
+      "business_batches": 20,
+      "business_sql_rows": 20000,
+      "input_rows": 410000,
+      "selector": "first eligible N=2G"
+    }
+  },
+  "formal_observations": 200,
+  "warmup_observations": 20,
+  "profile_jobs": 12,
+  "execution_order": [
+    "global quiet/source/helper preflight",
+    "maintained and control fixtures with independent 21-snapshot oracles",
+    "both dense1 profiles and accepted clock/loss analysis",
+    "five fixed cases in declared order",
+    "post source/binary/helper seals",
+    "statistics/publication/deadline/cleanup"
+  ],
+  "required_profiles": {
+    "case": "stock-stream-1cpu",
+    "sides": [
+      "baseline",
+      "candidate"
+    ],
+    "jobs_per_arm": 6,
+    "excluded_first_jobs": 1,
+    "accepted_processing_windows_per_arm": 5,
+    "sql_worker_gate": false
+  },
+  "common_harness": {
+    "sha256": "657de3e697907e473691c2fd0d1b99967d46577333135c50176801f6faa4e04e",
+    "source_revision": "84186554b078e25e71003a74fedc91c63b2b7f70",
+    "overlay": "native example only; permanent detached source trees",
+    "development_harness_unchanged": true
+  },
+  "source_tree_gate": "all compiled source Git blobs equal their actual public revision except audited common657 example; before/after live SHA256 seals and actual fresh core/example Cargo artifact records",
+  "control_recipe": "seed unchanged; business i selects original full 10k-key cycles (i+offset)%10 for offset in range(copies); all selected flow_type values become trade; other columns preserved; independent wrapping integer full-prefix oracle",
+  "selector_scope": {
+    "dense": "N80000/G10000 target",
+    "sparse": "legacy small N control",
+    "distinct": "N10000/G10000 legacy whole-pipeline guard",
+    "edge": "N20000/G10000 first eligible edge; at least 50percent canonical-row saving floor"
+  },
+  "chunk_cardinality": {
+    "dense_sql_batch_rows": 80000,
+    "dense_batch_distinct_keys": 10000,
+    "full_chunks": 9,
+    "full_chunk_rows": 8192,
+    "full_chunk_distinct_keys": 8024,
+    "last_chunk_rows": 6272,
+    "chunk_local_distinct_sum": 78488,
+    "distinct_chunks": [
+      8192,
+      1808
+    ],
+    "edge_chunks": [
+      8192,
+      8192,
+      3616
+    ]
+  },
+  "acceptance": "completed correctness/resource/source/helper/profile evidence, at least one dense target exact maintained improved, no exact regression among any five; inconclusive is uncertainty and never equivalence",
+  "unmeasured": [
+    "finite",
+    "below-edge active-interner latency",
+    "tight-byte latency",
+    "nullable inputs",
+    "UInt64 latency",
+    "generic aggregate latency",
+    "checkpoint latency"
+  ],
+  "build_estimate_seconds_per_arm": [
+    600,
+    900
+  ],
+  "build_receipt_sha256": {
+    "baseline": "14a457da91fbe5bd7ec31c88d34331861edeb080ca586d4d7850d6b67a2246d7",
+    "candidate": "ffa4f8a1453820428f64ab034a7240c42c74454243d34027fc86176e75d9502e"
+  },
+  "build_accounting": "fresh current22f baseline and reviewed public candidate, native builds/verification separate from one600-second acquisition; no historical budget or product reuse",
+  "thread_policy": {
+    "one_cpu": [
+      0
+    ],
+    "four_cpu": [
+      0,
+      2,
+      4,
+      6
+    ],
+    "controller": [
+      31
+    ],
+    "datafusion_target_partitions": 1,
+    "input_partitions": 1,
+    "min_rows_per_partition": 1,
+    "external_pools": 1,
+    "checkpoints": false
+  },
+  "tool_source_sha256": {
+    "scripts/benchmark_suite/sum_columnar_keys.py": "a3e7a634c7cc6a35097d1fc5e320926d1b57991efb88e993cbab7f5447dedf47",
+    "scripts/benchmark_suite/sum_inline_state.py": "139915940223cd1b5c1ca1362965ee639aac54e4d7c6a42e33d53cf252d1feab",
+    "scripts/benchmark_suite/sum_state.py": "c942412beacfcac872ff56de4831f55d0cb7711d9944bb8dcac7b190ed4e80fd",
+    "scripts/benchmark_suite/sum_state_profile.py": "6ef4cc3d63b3c54e1db7acb5d98061bcac5e7a6cc080b7294450f167107fdbed",
+    "scripts/benchmark_suite/sum_state_publication.py": "35f0a81ca4da6a8854d0df1f6a6198ea094c5ece53b08b6ae6d3f89695ac1fba",
+    "scripts/benchmark_suite/sum_followup.py": "847d6346e91cc5c8a8505cbf405840d861d2242c9087b637ef89767a6e0369a6",
+    "scripts/benchmark_suite/sum_batch_parallel.py": "29760a53fb59634ebd2ea9e507d99a7b5be79d7d7e22cb91e808028ce18675c8",
+    "scripts/benchmark_suite/report.py": "0daf6c205c2cc733813d2c658c6541d811f8324b502c2f2982a09de5a8dd9ff2",
+    "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
+    "scripts/toolkit.py": "ef8ad17c43ea4a974e5e01a3fcaf1aec7a70e19b88286db8b82c4dcde2945d56",
+    "scripts/test_sum_columnar_keys.py": "9a699caf9c17078932cf38028357d5308901bd1753082654f4295e7ca464efdc"
+  },
+  "helper_inventory_scope": "fixed reviewed active-helper inventory, not every transitive import or system dependency",
+  "status": "frozen actual acquisition packet; awaits independent reviewer PASS and separate parentGO; no measurement started",
+  "profile_route_anchors": [
+    "calc_flow::operator::sql::incremental::columnar_keys::Dictionary::intern",
+    "calc_flow::operator::sql::incremental::IncrementalSql::update_columnar_chunk",
+    "calc_flow::operator::sql::incremental::IncrementalSql::admit_columnar_keys"
+  ],
+  "profile_active_work_anchors": [
+    "calc_flow::operator::sql::incremental::columnar_keys::Dictionary::intern",
+    "calc_flow::operator::sql::incremental::IncrementalSql::admit_columnar_keys"
+  ],
+  "profile_route_scope": "existing dense1 five-window stacks only; exact canonical frame intersects sealed compiled nm anchor. update_columnar_chunk dispatcher alone is not active-interner proof. Missing/inlined/unsampled work anchors remain unresolved, with separate reviewed same-shape unit/source route-hit proof; no extra capture or worker gate.",
+  "common_harness_selector_settings": {
+    "max_groups": 10000,
+    "max_bytes": 9007199254740991,
+    "byte_sentinel_is_StateBudget_default": true,
+    "engine_pool": "exact UnboundedMemoryPool via default DataFusionRuntime::new",
+    "sql_where": false,
+    "sql_filter": false,
+    "key_types": [
+      "Utf8 Column",
+      "Utf8 Column"
+    ],
+    "aggregate": "one trusted built-in SUM(Int64 Column delta)",
+    "upstream_filter": "independent Expression flow_type=trade, before SQL",
+    "dense_N": 80000,
+    "G_cap": 10000,
+    "dense_selector_eligible": true,
+    "seed_N": 10000,
+    "seed_selector_eligible": false,
+    "runtime_route_proof": "Same-shape focused test passed before public source freeze; actual Release profile attribution unresolved if exact anchors remain inlined/nonseparable."
+  },
+  "binary_sha256": {
+    "baseline": "73bc770aebdf43271f04d896eb7fbf5d20297bd587977e4c26c0d0d6156a4af6",
+    "candidate": "db9a9476e975b783790d460b2757e937068fef67e31cf9e4849de95eced66147"
+  },
+  "compiled_columnar_anchors": {
+    "baseline": [],
+    "candidate": []
+  },
+  "profile_route_preflight_limit": "Both declared exact nm anchor subsets are empty in these LTO binaries. Profiles cannot independently prove an active interner invocation or separately attribute that function cost. Preserve unresolved/nonseparable status; reviewed same-shape unit test provides source/functional route evidence, not timing.",
+  "same_shape_route_test": {
+    "public_revision": "e492158c4d7109c779b7b52aac87cf6ffd3e1613",
+    "file": "crates/calc-flow/src/operator/sql/columnar_key_boundary_tests.rs",
+    "name": "test_columnar_maintained_dense_sql_shape_uses_10000_distinct_canonical_keys",
+    "scope": "80000 SQL rows,10000 group cap,two Utf8 Columns,SUM(delta Int64 Column),default byte sentinel,noSQLWHERE; encoded10000 canonical keys,10legacy chunks; GREEN author receipt independently reviewed; no Release instrumentation"
+  },
+  "build_actual_seconds": {
+    "baseline": 599.736255464959,
+    "candidate": 641.0632423910429
+  }
+}

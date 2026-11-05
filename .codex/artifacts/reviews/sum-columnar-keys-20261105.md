@@ -1,21 +1,25 @@
 # Columnar composite grouping-key review
 
-**Source and measurement tools: PASS. Performance, CI and merge approval:
-pending.**
+**Archive-only delivery: PASS. Runtime prototype: REJECT. Required final-head
+CI remains pending; this is not merge approval.**
 
 ## Scope and checkpoint
 
 - Branch: `feature/sum-columnar-keys`; base
   `22f4b9a562bdd087a75d810aeeb2161f29a3d6b7`.
-- Reviewed source: local verification checkpoint
+- Reviewed archive checkpoint: local `8080ab3b03e5fe8b20f263cdce64c6b92dd4659b`,
+  tree `d100e3e9ac9b99166b119bfef862b9614449d201`, before this report update.
+- Historical reviewed prototype: local verification checkpoint
   `6dd9475167928d1534b91d84c66b6dde7ead79f5`, tree
-  `9b4fbd788d36580c04d64b43bff8813e2ba0aa64`. This is not yet the public
-  measured-candidate revision. Seven Rust files include the runtime module,
-  integration, focused tests and one necessary existing-test caller adaptation.
+  `9b4fbd788d36580c04d64b43bff8813e2ba0aa64`. The measured public candidate is
+  [e492158c](https://github.com/wegamekinglc/calc-flow/commit/e492158c4d7109c779b7b52aac87cf6ffd3e1613),
+  tree `441f82dfb4558ce0d70613e50958b4da67e70d23`, exactly matching the
+  subsequent source-review tree. Its seven Rust paths are restored/removed
+  from the final archive delivery; the prototype remains experimental history.
 - This report includes the adversarial design review against the
   [study specification](../specs/sum-columnar-keys-20261105.md), subsequent source
-  review and tool review. There is no PR or final-head CI result at this
-  checkpoint.
+  review, tool review, actual acquisition gate and final negative-result review.
+  There is no final public-head CI result at this checkpoint.
 - Review used repository guidance, `$code-style`, current incremental SQL
   source and the pinned DataFusion 55 implementation. No compilation, tests,
   fixture generation or measurements were run by the reviewer.
@@ -144,14 +148,21 @@ clock evidence remain available. The owner recorded actual prefix/dispatcher
 REDs followed by 26 passing focused tests, Ruff/format and complexity checks;
 the reviewer did not repeat them.
 
-The reviewed draft remains inadmissible for acquisition until the actual public
-candidate and fresh baseline/candidate receipts, native/helper/source seals and
-final protocol are supplied. No measurement has been approved in this review
-checkpoint.
+The actual acquisition gate subsequently passed against public `e492158c` and
+protocol SHA256
+`1ba3640f929df2964e330a99c4330bbb5a6736d32cf9d8bb8b064ca119d94422`.
+The reviewer independently verified both receipt/binary hashes, all 1008/1013
+pre/post/live source seals and public Git blobs with only the common657 overlay,
+raw fresh-false core/example Cargo records, copied dependency files including
+the new module, exact nm inventories and equal compiler/config/vendor/support.
+Both exact route inventories were empty before acquisition. This was qualified
+as nonseparable attribution, never permission to change matchers or claim a
+Release path hit. The fixed five cases and original 600-second budget were
+unchanged. No reviewer native workload was run.
 
-## Frozen production review
+## Historical prototype source review
 
-The current implementation follows the accepted design. It adds a cached Copy
+The measured implementation followed the accepted design. It added a cached Copy
 plan containing two column indices, an optional boxed transaction dictionary,
 and a private module; it leaves `Group`, `Candidate`, persistent indices,
 checkpoint descriptors and SUM arithmetic unchanged. The measured test-build
@@ -204,11 +215,11 @@ the later `rows()` oracle helper.
 
 ## Build and test evidence
 
-Author evidence was inspected rather than rerun. Final fresh tests and strict
-lint cover the frozen source; failed intermediate compiles and the corrected
+Author evidence was inspected rather than rerun. These fresh tests and strict
+lint cover the historical prototype; failed intermediate compiles and the corrected
 WHERE fixture are not counted as passing tests or production RED evidence.
 
-- Rust: **38 passed, zero failed**: ten new focused tests and 28 exact existing
+- Historical prototype Rust: **38 passed, zero failed**: ten new focused tests and 28 exact existing
   controls on the same fresh `calc_flow-69fc90115393543c` test binary, SHA256
   `18deb6aa521a528855cef6dc67756b52418bd2dfb3c0463d3b51ab71dabfaa62`.
   The new suite compiled in 204 seconds and ran in 0.31 seconds; existing
@@ -262,21 +273,103 @@ ordered LAST_VALUE, capture, finalization cancellation and output metadata.
 Checkpoint bytes continue to come from canonical keys and the existing writer;
 ephemeral IDs are not serialized. There are no unaddressed source/style blockers.
 
-The specification and reviewed five-case protocol agree. A user-facing runtime
-guide update and measured outcome documentation remain delivery work after the
-campaign. They must state the exact activation conditions and must not recommend
-relaxing business memory limits for performance. Unconfigured compact budgets,
-ordinary finite-byte budgets and custom/bounded engine pools remain legacy.
+The specification and five-case protocol agree. Final narrative, changelog,
+measurement index and streaming guide now identify this as a rejected experiment
+and retain the existing runtime. The narrative states the exact experimental
+activation conditions without recommending relaxed business memory limits.
+Unconfigured compact budgets, ordinary finite-byte budgets and custom/bounded
+engine pools were outside the active prototype route.
+
+## Completed campaign and frozen verdict
+
+The single acquisition completed in **147.604826276 seconds of 600**, with
+prior debit zero and no retries, extra cases or observations. This is the final
+manifest debit; the earlier summary write excludes the small publication tail.
+Fresh baseline/candidate builds took 599.736/641.063 seconds separately. An
+external build was recorded during candidate compilation, so those durations
+are not a controlled build-performance comparison. Acquisition began only
+after the maintained quiet guard passed.
+
+The emitted outcomes below are retained without recomputing statistics:
+
+| Case         | Baseline P50 ms | Candidate P50 ms | Change  | Exact verdict |
+|--------------|-----------------|------------------|---------|---------------|
+| Dense 1T     | 185.134         | 189.210          | +2.20%  | inconclusive  |
+| Dense 4T     | 172.947         | 180.635          | +4.45%  | inconclusive  |
+| Sparse 1T    | 22.838          | 22.725           | -0.49%  | inconclusive  |
+| Distinct 1T  | 99.598          | 99.617           | +0.02%  | inconclusive  |
+| Edge 1T      | 108.790         | 121.376          | +11.57% | inconclusive  |
+
+Neither dense target has the required exact `improved` verdict, so frozen
+performance acceptance is **false**. In particular, the edge intervals are
+`[4.8841%, 19.5476%]` and `[5.5730%, 14.0848%]`. The first lower endpoint is
+at most 5%; the maintained rule does not label this a confirmed regression.
+No inconclusive case establishes equivalence. The runtime is rejected for
+failing its predeclared acceptance contract, not because every case was proven
+slower. No threshold tuning or reuse of the remaining time is approved.
+
+The reviewer verified all nine manifest-listed file hashes/lengths, the exact
+protocol copy, 200 CSV/formal rows with 40 per case and two rounds of ten per
+arm, twenty warmups and twelve profile jobs. All 232 native samples match every
+independent input/schema/value digest and all 21 snapshots: 4872 snapshot checks
+with successful validation flags. All 223 embedded invocation receipts confirm
+reaping. Native diagnostics report natural completion, no remaining tasks or
+task errors, completed actors and empty edges. Helper-after seals match the
+frozen eleven-helper inventory; completed finalization includes native source
+and binary post-seals. No acquisition/evidence blocker was found.
+
+The accepted profiles contain 876/963 selected user-CPU samples over five
+windows each. Baseline window counts are 176/172/168/174/186; candidate counts
+are 190/216/198/184/175. All 2319/2503 raw timestamps match imported clocks,
+with maximum error below `6e-8` ms. Unresolved leaf counts are 173/174; perf
+stderr reports no loss/unwind warning. Both exact route records remain
+`nonseparable_or_inlined`, with null counts, as required before acquisition.
+
+Existing emitted inclusive shares show RowConverter at 13.13% versus 2.28%,
+candidate byte-key equality at 7.48% and candidate `group_rank` at 22.01%.
+Absence from retained baseline top entries does not establish symbol absence
+or zero cost. These are overlapping CPU shares from different cohorts, not
+phase wall times or an isolated cause of the pooled elapsed changes. Reduced
+encoding/allocation did not establish end-to-end acceleration. Resource medians
+likewise do not establish a capacity or RSS improvement.
+
+Evidence commit `e373aab2b818868f4a66b1a0354ff530c3b76b76` preserves the protocol
+and ten generated files, including the manifest; manifest SHA256 is
+`ccd0921e8b661f45d6e9d665333dd2337b6bb4872bed0fd2b976e75ce6262eb1`.
+The complete raw gzip SHA256 is
+`7cfe9466fe5a4d7176bc44959ccc203b07b8b77e9551f6eadc67eb27bfabe9e5`.
+The [parent narrative](../../../benchmarks/sum-state/sum-columnar-keys-20261105.md)
+and [sealed results](../../../benchmarks/sum-state/sum-columnar-keys-20261105/README.md)
+accurately describe the source identities, timer boundary, resource/profiling
+limits and unmeasured paths. Nullable/UInt64/generic/checkpoint/finite,
+tight-byte and near-below-edge timings remain unmeasured.
+
+## Final archive scope
+
+The restore preceding the reviewed archive checkpoint returns all seven Rust
+paths to `22f4b9a`: the two existing files are restored and five new modules are
+removed. The final diff against that base contains no changes under `crates`,
+Cargo manifests/lock, generated project schema, Python runtime or Python tests.
+No native rebuild is required to establish byte identity. The preserved 38-test
+result concerns the experimental revision, not newly shipped runtime behavior.
+
+The archive retains the reviewed Python collector/tests, one CI test-module
+registration, specification/review, original negative evidence and explanatory
+documentation. Its helpers and common native harness remain the measured ones.
+Reproduction targets the public baseline and `e492158c` prototype with the sole
+common657 overlay, not the archive's restored runtime. Original measured trees,
+binaries, protocol and generated evidence remain preserved. No APIs, configuration,
+checkpoint wire format or thread policy change in the delivery.
 
 ## Current verdict
 
-**SOURCE PASS** for the frozen local checkpoint above, and **tool PASS** for
-`5372c5d2`. The scalarized dictionary, per-chunk canonical admission, complete
-prepayment, cancellation and half-input selector satisfy the accepted design
-constraints. No blocking source or style issue remains.
+**Archive-only PASS; runtime prototype REJECT.** Historical source/tool safety
+approval did not confer performance acceptance. The final archive honors the
+negative result, restores the runtime and preserves reproducible evidence.
+No blocking archive source, evidence, style or documentation issue remains.
 
-This permits publishing the reviewed candidate and preparing its fresh Release
-build. Acquisition still requires the actual public candidate, complete matching
-build/source/helper receipts and final frozen protocol. Performance acceptance,
-outcome/activation documentation, final specialist delivery review and green
-required checks remain pending. This is not merge approval.
+Green required checks on the exact final public head remain a merge gate,
+including coverage and cross-platform checks. CI is pending at this review
+snapshot, not green. Only the parent may publish/merge under the user's existing
+authority after those checks pass. No further experiment is authorized by the
+unused campaign budget.
