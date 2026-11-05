@@ -109,3 +109,6 @@ required-features = ["benchmark-internals"]
 [[example]]
 name = "input_partitions_probe"
 required-features = ["benchmark-internals"]
+
+[[example]]
+name = "auto_rows_probe"

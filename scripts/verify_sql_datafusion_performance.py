@@ -209,8 +209,8 @@ def _verify_engine_configuration(engine: dict, label: str) -> None:
 
     for field in ENGINE_POSITIVE_FIELDS:
         _positive_int(engine[field], f"{label}.{field}")
-    if engine["parallelism_mode"] not in {"fixed", "auto"}:
-        raise ValueError(f"{label}.parallelism_mode must be fixed or auto")
+    if engine["parallelism_mode"] not in {"fixed", "auto", "auto_rows"}:
+        raise ValueError(f"{label}.parallelism_mode must be fixed, auto, or auto_rows")
     if type(engine["parallelism_decision_reused"]) is not bool:
         raise ValueError(f"{label}.parallelism_decision_reused must be a bool")
     _nonnegative_int(engine["decision_input_rows"], f"{label}.decision_input_rows")

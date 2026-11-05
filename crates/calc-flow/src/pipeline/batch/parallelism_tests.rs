@@ -228,3 +228,129 @@ async fn batch_parallel_sql_single_input_retains_conservative_auto() {
     assert_eq!(metric.effective_target_partitions, 1);
     assert_eq!(metric.partition_limit_reason, "missing_active_entities");
 }
+
+fn batch_with_entities(rows: usize, start: i64, entities: usize) -> Batch {
+    let record = RecordBatch::try_from_iter(vec![
+        ("key", Arc::new(Int64Array::from(vec![1; rows])) as _),
+        (
+            "value",
+            Arc::new(Int64Array::from_iter_values(
+                (0..rows).map(|row| i64::try_from(row).unwrap() + start),
+            )) as _,
+        ),
+    ])
+    .unwrap();
+    let attributes = BTreeMap::from([(
+        crate::DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY.to_owned(),
+        serde_json::json!(entities),
+    )]);
+    Batch::table(
+        vec![record],
+        BatchMetadata::new("batch", 0, attributes).unwrap(),
+    )
+    .unwrap()
+}
+
+fn single_input_plan(mode: DataFusionParallelismMode) -> BatchExecutionPlan {
+    PipelineBuilder::new("single input")
+        .unwrap()
+        .with_datafusion_config(config(mode, true))
+        .add_node(
+            "query",
+            Box::new(
+                SqlOperator::new(
+                    "query",
+                    "SELECT value FROM input ORDER BY value",
+                    vec!["input".into()],
+                    vec![],
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap()
+        .compile_batch(&UdfRegistry::new().snapshot())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn batch_parallel_sql_auto_rows_uses_rows_without_entity_metadata() {
+    let plan = single_input_plan(DataFusionParallelismMode::AutoRows);
+    let result = plan
+        .execute(
+            BTreeMap::from([("input".into(), batch(64, 0))]),
+            crate::ExecutionOptions::default(),
+        )
+        .await
+        .unwrap();
+    let metric = &result.datafusion_metrics[0];
+    let available = std::thread::available_parallelism().unwrap().get();
+    assert_eq!(metric.effective_target_partitions, available.min(4));
+    assert_eq!(metric.decision_active_entities, None);
+    assert_ne!(metric.effective_target_partitions, 0);
+}
+
+#[tokio::test]
+async fn batch_parallel_sql_auto_rows_lets_entity_metadata_lower_the_request() {
+    let plan = single_input_plan(DataFusionParallelismMode::AutoRows);
+    let result = plan
+        .execute(
+            BTreeMap::from([("input".into(), batch_with_entities(64, 0, 2))]),
+            crate::ExecutionOptions::default(),
+        )
+        .await
+        .unwrap();
+    let metric = &result.datafusion_metrics[0];
+    assert_eq!(metric.effective_target_partitions, 2);
+    assert_eq!(metric.decision_active_entities, Some(2));
+    assert_eq!(metric.decision_active_entities_source, "batch_metadata");
+    assert_eq!(metric.partition_limit_reason, "active_entities");
+}
+
+#[tokio::test]
+async fn batch_parallel_sql_auto_rows_ignores_invalid_entity_metadata() {
+    let plan = single_input_plan(DataFusionParallelismMode::AutoRows);
+    let result = plan
+        .execute(
+            BTreeMap::from([("input".into(), batch_with_entities(64, 0, 0))]),
+            crate::ExecutionOptions::default(),
+        )
+        .await
+        .unwrap();
+    let metric = &result.datafusion_metrics[0];
+    let available = std::thread::available_parallelism().unwrap().get();
+    assert_eq!(metric.effective_target_partitions, available.min(4));
+    assert_eq!(metric.decision_active_entities, None);
+}
+
+#[tokio::test]
+async fn batch_parallel_sql_auto_rows_keeps_small_inputs_single_partition() {
+    let plan = single_input_plan(DataFusionParallelismMode::AutoRows);
+    let result = plan
+        .execute(
+            BTreeMap::from([("input".into(), batch(2, 0))]),
+            crate::ExecutionOptions::default(),
+        )
+        .await
+        .unwrap();
+    let metric = &result.datafusion_metrics[0];
+    assert_eq!(metric.effective_target_partitions, 1);
+    assert_eq!(metric.partition_limit_reason, "small_input");
+}
+
+#[tokio::test]
+async fn batch_parallel_sql_auto_rows_multi_input_uses_run_row_policy() {
+    let plan = plan(config(DataFusionParallelismMode::AutoRows, true), false);
+    let result = plan
+        .execute(inputs(&plan, 64), crate::ExecutionOptions::default())
+        .await
+        .unwrap();
+    let available = std::thread::available_parallelism().unwrap().get();
+    for metric in result.datafusion_metrics {
+        assert_eq!(metric.effective_target_partitions, available.min(4));
+        assert_eq!(metric.decision_input_rows, 66);
+        assert_eq!(
+            metric.decision_active_entities_source,
+            "batch_multi_input_sql"
+        );
+    }
+}

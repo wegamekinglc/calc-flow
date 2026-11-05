@@ -27,7 +27,7 @@ executions.
 |--------------------------|---------|----------------------------------------------------------------|
 | `batch_size`             | `8192`  | DataFusion execution batch size                                |
 | `target_partitions`      | `1`     | Requested count in `fixed` mode                                |
-| `parallelism_mode`       | `fixed` | `fixed` preserves explicit behavior; `auto` uses trusted facts |
+| `parallelism_mode`       | `fixed` | `fixed` preserves explicit behavior; `auto` uses trusted facts; `auto_rows` uses input rows without requiring entity statistics |
 | `max_partitions`         | `32`    | Upper bound for `auto`                                         |
 | `min_rows_per_partition` | `65536` | Work cap used by both modes                                    |
 | `small_rows_threshold`   | `10001` | Smaller auto workloads remain p1                               |
@@ -38,7 +38,8 @@ The project schema accepts non-negative numeric values for compatibility with
 external-only plans, which never create a DataFusion runtime. When a project
 does execute a table expression or SQL node, every numeric value is validated
 as positive before DataFusion is initialized. Omitted fields use their
-defaults. `parallelism_mode="auto"` is opt-in.
+defaults. `parallelism_mode="auto"` and `parallelism_mode="auto_rows"` are
+opt-in.
 
 Auto mode calculates:
 
@@ -73,6 +74,17 @@ rows to choose its partition count.
 Single-input batch graphs, standalone DataFusion runtimes and stream nodes keep
 the entity-based policy. Fixed mode is unchanged. Session creation remains lazy
 and its first-query phase timing retains the initialization cost.
+
+`parallelism_mode="auto_rows"` is a second opt-in policy for graphs without
+trusted active-entity statistics. Input rows remain the primary work cap
+(`requested = min(available_parallelism, max_partitions)`;
+`effective = min(requested, ceil(rows / min_rows_per_partition))`), while a
+trusted `calc_flow.datafusion.active_entities` value, when present and valid,
+can only lower that count. Unlike `auto`, a missing, malformed, zero, or
+row-count-exceeding entity value is ignored rather than pinning the run to one
+partition; inputs below `small_rows_threshold` and single-entity inputs still
+use one partition. Batch graphs containing multi-input SQL use the same
+whole-run external-row policy as `auto`. The default remains `fixed`.
 
 Input registration is not a parallelism ceiling. With more than one effective
 target partition, DataFusion's round-robin repartition increases row-local scan

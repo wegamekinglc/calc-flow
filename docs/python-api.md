@@ -595,7 +595,10 @@ For batch graphs containing multi-input SQL, auto mode chooses one run-scoped
 partition budget from total external table rows and host capacity before the
 first node executes. Other graphs and runtimes require trusted
 `calc_flow.datafusion.active_entities` batch metadata and otherwise use p1.
-Both policies avoid scanning rows. Fixed p1 remains the default.
+Both policies avoid scanning rows. `parallelism_mode="auto_rows"` additionally
+uses input rows when no trusted active-entity metadata is supplied; entity
+statistics, when present, only lower the row-based request. Fixed p1 remains the
+default.
 See [SQL and DataFusion performance controls](sql-datafusion-performance.md)
 for all fields, telemetry, evidence gates, and rollback steps.
 

@@ -700,6 +700,7 @@ async fn calc_flow_sample(
             parallelism_mode: match metric.parallelism_mode {
                 DataFusionParallelismMode::Fixed => "fixed",
                 DataFusionParallelismMode::Auto => "auto",
+                DataFusionParallelismMode::AutoRows => "auto_rows",
             }
             .to_owned(),
             available_parallelism: metric.available_parallelism,
