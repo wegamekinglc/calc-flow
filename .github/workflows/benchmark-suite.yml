@@ -173,11 +173,11 @@ jobs:
     name: Benchmark ${{ matrix.id }}
     needs: [prepare, build]
     runs-on: ubuntu-latest
-    # The full 10M engine inventory exceeds three hours with paired SQL windows.
-    # The Rust shard nears that limit when its build cache misses and both sides
+    # The complete 10M engine inventory needs six hours with paired 1T/4T cases.
+    # The Rust shard nears four hours when its build cache misses and both sides
     # compile from cold dependencies before four measured blocks.
     # Include dependency setup and artifact retention in those job budgets.
-    timeout-minutes: ${{ (matrix.id == 'engines-10000000' || matrix.id == 'rust') && 240 || 180 }}
+    timeout-minutes: ${{ matrix.id == 'engines-10000000' && 360 || matrix.id == 'rust' && 240 || 180 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
