@@ -4,7 +4,7 @@ use std::{borrow::Cow, mem::size_of, sync::Arc};
 use ahash::RandomState;
 use datafusion::{
     arrow::{
-        array::{ArrayRef, BooleanArray, StringBuilder},
+        array::{ArrayRef, BooleanArray, Int64Array, StringBuilder, UInt64Array},
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
         row::{RowConverter, SortField},
@@ -1067,7 +1067,7 @@ impl IncrementalSql {
         name: &str,
     ) -> Result<Vec<Option<Box<dyn Accumulator>>>> {
         if self.inline_sum.is_some() {
-            return Ok(vec![None]);
+            return Ok(Vec::new());
         }
         self.aggregates
             .iter()
@@ -1897,6 +1897,9 @@ impl IncrementalSql {
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<()> {
+        if self.inline_sum.is_some() {
+            return Ok(());
+        }
         for (index, candidate) in candidates.values_mut().enumerate() {
             if index % 128 == 0 {
                 if index != 0 {
@@ -2092,6 +2095,29 @@ impl IncrementalSql {
         column: usize,
         name: &str,
     ) -> Result<ArrayRef> {
+        if column == self.keys.len() {
+            match self.inline_sum {
+                Some(InlineSum::Int64(_)) => {
+                    let values = groups
+                        .map(|group| match &group.aggregates {
+                            GroupAggregates::IntegerSum(InlineSum::Int64(value)) => Ok(*value),
+                            _ => Err(df_error(name, "inline Int64 SUM output state differs")),
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    return Ok(Arc::new(Int64Array::from(values)));
+                }
+                Some(InlineSum::UInt64(_)) => {
+                    let values = groups
+                        .map(|group| match &group.aggregates {
+                            GroupAggregates::IntegerSum(InlineSum::UInt64(value)) => Ok(*value),
+                            _ => Err(df_error(name, "inline UInt64 SUM output state differs")),
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    return Ok(Arc::new(UInt64Array::from(values)));
+                }
+                None => {}
+            }
+        }
         ScalarValue::iter_to_array(groups.map(|group| {
             if column < self.keys.len() {
                 group.values[column].clone()
@@ -4014,7 +4040,7 @@ mod tests {
         ];
         let mut columns = vec![(
             "key".into(),
-            Arc::new(datafusion::arrow::array::Int64Array::from(vec![0, 1, 0, 2])) as ArrayRef,
+            Arc::new(Int64Array::from(vec![0, 1, 0, 2])) as ArrayRef,
         )];
         let mut expressions = vec!["key".into(), "COUNT(*)".into()];
         for (index, value) in maximums.iter().enumerate() {
@@ -4219,8 +4245,7 @@ mod tests {
                 result.push(scalar.evaluate().unwrap());
             }
         }
-        let mut columns =
-            vec![Arc::new(datafusion::arrow::array::Int64Array::from(vec![0, 1, 2])) as ArrayRef];
+        let mut columns = vec![Arc::new(Int64Array::from(vec![0, 1, 2])) as ArrayRef];
         for column in 0..plan.aggregates.len() {
             columns.push(
                 ScalarValue::iter_to_array(results.iter().map(|row| row[column].clone())).unwrap(),

@@ -131,3 +131,50 @@ async fn test_grouped_inline_single_sum_avoids_owned_state_and_result_heap_vecto
         "inline storage must not add transient candidate/finalize allocations over the measured legacy boundary: {single:?}"
     );
 }
+
+#[tokio::test]
+async fn test_grouped_inline_sum_has_no_finalizer_vector() {
+    let fixture = allocation_fixture(true).await;
+    let candidate = updated_candidate(&fixture, &fixture.plan.groups[0], 0);
+    assert!(
+        candidate.accumulators.is_empty(),
+        "inline SUM must not allocate a placeholder finalizer vector"
+    );
+    drop((candidate, fixture.partial, fixture.plan));
+    assert_eq!(fixture.runtime.incremental_memory_pool().reserved(), 0);
+}
+
+#[tokio::test]
+async fn test_grouped_inline_sum_skips_empty_finalizer_pass() {
+    let fixture = allocation_fixture(true).await;
+    let candidate = updated_candidate(&fixture, &fixture.plan.groups[0], 0);
+    let mut candidates = CandidateMap::default();
+    candidates.insert(0, candidate);
+    let job = StreamJobContext::new(
+        972,
+        "inline-allocation",
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "inline-allocation", None);
+    let before = fixture
+        .plan
+        .finalized_groups
+        .load(std::sync::atomic::Ordering::SeqCst);
+    fixture
+        .plan
+        .finalize_candidates(&mut candidates, &context, "inline-allocation")
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .plan
+            .finalized_groups
+            .load(std::sync::atomic::Ordering::SeqCst),
+        before,
+        "inline SUM must skip the empty per-candidate finalizer pass"
+    );
+    drop((candidates, fixture.partial, fixture.plan));
+    assert_eq!(fixture.runtime.incremental_memory_pool().reserved(), 0);
+}

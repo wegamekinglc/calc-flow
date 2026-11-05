@@ -1119,7 +1119,7 @@ async fn test_sql_incremental_cancel_stops_group_finalization_and_rolls_back() {
         };
         let mut operator = SqlOperator::new(
             "totals",
-            "SELECT key, SUM(value) AS total FROM events GROUP BY key",
+            "SELECT key, SUM(value) AS total, COUNT(value) AS valid FROM events GROUP BY key",
             vec!["events".into()],
             vec![],
         )

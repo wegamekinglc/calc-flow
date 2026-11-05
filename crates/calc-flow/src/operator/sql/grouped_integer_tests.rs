@@ -29,7 +29,7 @@ fn phase_values(unsigned: bool, phase: usize) -> Vec<Option<u64>> {
 
 fn value_array(unsigned: bool, values: Vec<Option<u64>>) -> ArrayRef {
     if unsigned {
-        Arc::new(datafusion::arrow::array::UInt64Array::from(values))
+        Arc::new(UInt64Array::from(values))
     } else {
         Arc::new(Int64Array::from(
             values
