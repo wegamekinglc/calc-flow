@@ -89,7 +89,7 @@ pub struct DataFusionConfig {
     pub min_rows_per_partition: usize,
     /// Inputs below this row count remain single-partition in automatic mode.
     pub small_rows_threshold: usize,
-    /// Enables bounded SQL `AVG` and compatible paired `COUNT` rolling rewrites.
+    /// Enables supported bounded SQL rolling rewrites.
     pub enable_rolling_rewrite: bool,
     /// Collects plan strings and recursively traversed physical metrics.
     pub collect_diagnostics: bool,
