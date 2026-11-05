@@ -474,9 +474,19 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn('CARGO_BUILD_JOBS: "3"', header)
         self.assertIn('CARGO_PROFILE_DEV_DEBUG: "0"', header)
         self.assertIn('CARGO_PROFILE_TEST_DEBUG: "0"', header)
+        reclaim_name = "      - name: Reclaim disk space for instrumented coverage\n"
         swap_name = "      - name: Add swap headroom for instrumented linking\n"
         compile_name = "      - name: Compile instrumented Rust targets\n"
+        self.assertLess(coverage.index(reclaim_name), coverage.index(swap_name))
         self.assertLess(coverage.index(swap_name), coverage.index(compile_name))
+        reclaim_step = coverage.split(reclaim_name, 1)[1].split("      - name:", 1)[0]
+        for required in (
+            "/usr/local/lib/android",
+            "/usr/share/dotnet",
+            'sudo rm -rf -- "$unused_sdk"',
+            'df -h . "$RUNNER_TEMP"',
+        ):
+            self.assertIn(required, reclaim_step)
         swap_step = coverage.split(swap_name, 1)[1].split("      - name:", 1)[0]
         self.assertIn("sudo swapon", swap_step)
         compile_step = coverage.split(compile_name, 1)[1].split("      - name:", 1)[0]
