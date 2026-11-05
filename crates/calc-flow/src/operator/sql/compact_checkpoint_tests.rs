@@ -269,7 +269,7 @@ fn native_state_rows(operator: &super::super::SqlOperator) -> Vec<Vec<ScalarValu
                 .values
                 .iter()
                 .cloned()
-                .chain(group.states.iter().flatten().cloned())
+                .chain(group.aggregates.states().flat_map(|state| state.to_vec()))
                 .collect()
         })
         .collect()

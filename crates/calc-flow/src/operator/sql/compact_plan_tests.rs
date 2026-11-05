@@ -788,8 +788,12 @@ fn snapshot(plan: &IncrementalSql) -> Vec<GroupState> {
         .map(|group| {
             (
                 group.values.to_vec(),
-                group.states.clone(),
-                group.results.clone(),
+                group
+                    .aggregates
+                    .states()
+                    .map(|state| state.to_vec())
+                    .collect(),
+                group.aggregates.results().map(Cow::into_owned).collect(),
             )
         })
         .collect()

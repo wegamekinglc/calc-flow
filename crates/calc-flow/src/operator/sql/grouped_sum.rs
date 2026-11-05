@@ -58,21 +58,26 @@ impl PartialAccumulator {
         })
     }
 
-    pub fn seed_batch<'a>(
+    pub fn seed_batch<S: AsRef<[ScalarValue]>>(
         &mut self,
-        saved: impl Clone + Iterator<Item = (usize, &'a [ScalarValue])>,
+        saved: impl Clone + Iterator<Item = (usize, S)>,
         count: usize,
         name: &str,
     ) -> Result<()> {
         let ordered_last = self.ordered_last;
-        let saved = saved.filter(|(_, state)| seed_present(state, ordered_last));
-        let Some((_, first)) = saved.clone().next() else {
+        let saved = saved.filter(|(_, state)| seed_present(state.as_ref(), ordered_last));
+        let Some((_, first_state)) = saved.clone().next() else {
             return Ok(());
         };
+        let first = first_state.as_ref();
         let ranks = saved.clone().map(|(rank, _)| rank).collect::<Vec<_>>();
         let values = (0..first.len())
             .map(|field| {
-                ScalarValue::iter_to_array(saved.clone().map(|(_, state)| state[field].clone()))
+                ScalarValue::iter_to_array(
+                    saved
+                        .clone()
+                        .map(|(_, state)| state.as_ref()[field].clone()),
+                )
             })
             .collect::<DataFusionResult<Vec<_>>>()
             .map_err(|error| df_error(name, error))?;
