@@ -1,5 +1,10 @@
 # Grouped integer SUM state measurements
 
+[Accepted 2026-11-05 inline-state study](sum-inline-state-20261105.md) records
+the fresh-main comparison of dense one/four-CPU and sparse one-CPU streams,
+120 formal observations, both profiles, and the accepted compact-state change.
+The remaining sections below describe the earlier measurement cohorts.
+
 [Rejected batch-parallel experiment](sum-batch-parallel-20261104.md) records
 five fixed cases, actual multicore profiles, confirmed dense-stream regressions,
 and the decision to retain serial grouped SUM execution.

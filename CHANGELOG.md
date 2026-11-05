@@ -9,6 +9,14 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-05: Store a single grouped integer SQL `SUM` in one compact nullable
+  state and cache its bound type metadata. Reduce selected dense-stream median
+  elapsed time by 28.24% with one CPU and 31.18% with four CPUs, and sparse-stream
+  elapsed time by 13.93%, in a frozen three-case comparison. Preserve generic group
+  layout, transactional updates, and checkpoint encoding. See the
+  [inline-state study](benchmarks/sum-state/sum-inline-state-20261105.md) for
+  paired intervals, profiles, resource scope, and unmeasured paths.
+
 - 2026-11-05: Record a bounded batch-parallel integer SQL `SUM` experiment and
   its reproducible profiling tools. Reject the runtime prototype after confirmed
   dense-stream regressions of 15.75% with four CPUs and 18.60% with eight CPUs.

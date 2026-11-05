@@ -1,0 +1,53 @@
+{
+  "budget_seconds": 600,
+  "cumulative_measurement_seconds": 102.02959463198204,
+  "current_binary_sha256": "8378ba7b8683780868604ce70568aa626f61e0abcd1742ec84f050b95aef1ed3",
+  "current_profile_analysis_complete": true,
+  "current_profiles": 2,
+  "failure": null,
+  "files": {
+    "README.md": {
+      "bytes": 4544,
+      "sha256": "9424f3f249755423e765b7d8c2f007dce24fb1da85e58bbb313dba68dc5906d4"
+    },
+    "baseline-stacks.json.gz": {
+      "bytes": 5240,
+      "sha256": "bea9ce5450296e5ace04e48ac29a4d8a7a8db2fba47a1a96f23e23974ffd0b23"
+    },
+    "candidate-stacks.json.gz": {
+      "bytes": 4277,
+      "sha256": "cda16a05c52e958fe1389838b0c64ce0fed1ea684679c9b599c7b51da88a6d7a"
+    },
+    "complete-evidence.json.gz": {
+      "bytes": 297034,
+      "sha256": "21500dcdb7a9db4361d9e643f0e4a96dba22cf3c99176cfb4c951578e60572d6"
+    },
+    "profile-summary.json": {
+      "bytes": 32996,
+      "sha256": "0d65fd5e05ebffeff31a1c4e35959c61a7c83307468de333a497b88f5d623aaf"
+    },
+    "profile-targets.json": {
+      "bytes": 9767,
+      "sha256": "3a3c01051eb229a9f091956c423a92b0932e63ab6942cd54252e8f06c987a604"
+    },
+    "samples.csv": {
+      "bytes": 17848,
+      "sha256": "7b9ebffe10305f8281f5e4bb5488374de7f65801b5a4e537097b3bc1065e5c54"
+    },
+    "summary.json": {
+      "bytes": 69096,
+      "sha256": "76f6ecacd19f4624136a49a2ba01dcad9c3b79000e88a2c42d6b8456f0d4e9a4"
+    }
+  },
+  "formal_observations": 120,
+  "performance_acceptance": true,
+  "phase": "inline-state",
+  "phase_seconds": 102.02959463198204,
+  "phase_stopped_monotonic": 300082.893980054,
+  "prior_measurement_seconds": 0,
+  "profile_records": 2,
+  "protocol_sha256": "1bb73519f7e11e686fbe562fa6490597e272ccb9bf6fad758faf1f43d4c9f6c4",
+  "retries": 0,
+  "slug": "sum-inline-state-20261105",
+  "status": "completed"
+}

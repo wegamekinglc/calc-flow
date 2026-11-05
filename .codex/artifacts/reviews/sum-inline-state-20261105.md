@@ -4,37 +4,51 @@
 
 **Base:** `222f4e2d88f56b5b4ce635abab24eceed732da6d`
 
-**Reviewed source:** local checkpoint
+**Measured source:** public
+[74a1eaf2183adfd04fcb1aeecd655c6df73ed16f](https://github.com/wegamekinglc/calc-flow/commit/74a1eaf2183adfd04fcb1aeecd655c6df73ed16f),
+tree `04b554c37f0afe8e40fa8e821b9c6b808418f558`. It exactly matches the
+reviewed source/tool tree after the initial review.
+
+**Final delivery verification checkpoint:** local
+`d0c60561f4a5cd5355736722956c6bbf029b7075`, tree
+`9310d1a17cd048fcc15cd1061795fa6de3c74caa`, before this review update.
+Only evidence and documentation differ from the measured source.
+
+**Original source verification checkpoint:** local
 `d0bbca1bf92b0ae4a2a8b44539f1aabecbe8b721`, tree
 `5f45ac22c52623f6478feb1a5dfb613e47bf3fc1`.
 The author committed fourteen Rust files; the worktree was clean at handoff.
 
 **Reviewed tools:** `b3fbd09aee2136498e27334c8ead35e35f4d0cef`,
 following `259ad4e3`. Specification and CI registration are in ancestor
-`47f5bcbf`. These are local verification identities, not an assumed public
-candidate or measured product.
+`47f5bcbf`. These are local verification identities; public 74a1eaf2 is the
+actual measured candidate.
 
 **Upstream:** [Study specification](../specs/sum-inline-state-20261105.md)
 and the previous experiment's
 [next bounded hypothesis](../../../benchmarks/sum-state/sum-batch-parallel-20261104.md#next-bounded-hypothesis).
 
-**Files changed against base:** 20, including this review.
+**Files changed against base:** 33, including this review.
 
-No PR/check-run snapshot exists for this source handoff. The parent owns
-publication, final CI verification, and merge.
+The final review precedes opening the delivery PR; no final remote check
+result is claimed. The parent owns publication, required CI completion,
+and merge.
 
 ## Summary
 
-**Premeasurement SOURCE/tool PASS.** Exactly one eligible grouped integer
-SUM stores one compact typed nullable state and derives its result from it.
-A plan-bound cache removes repeated field-metadata allocation. All other
-aggregate shapes retain generic state/result vectors.
+**Final source, performance, and documentation PASS, with required remote
+checks still pending.** The frozen comparison meets its acceptance rule:
+dense one/four-CPU and sparse one-CPU whole-run wall medians improve by
+28.24%, 31.18%, and 13.93%, respectively. Every case has the exact maintained
+`improved` verdict from its two rounds, with complete correctness and resource
+evidence.
 
-The reviewed implementation preserves checkpoint encoding, output acceptance,
-and transactional rollback. Focused allocation evidence establishes a
-component improvement; no end-to-end speedup or delivery acceptance is
-claimed. Public candidate identity, fresh candidate build, actual sampling
-gate, performance acceptance, and final required remote checks remain pending.
+Exactly one eligible grouped integer SUM stores compact typed nullable state
+and derives its result from it. A plan-bound cache removes repeated field
+metadata allocation. Generic representation, checkpoint encoding, output
+acceptance, and rollback remain intact. The benefit is scoped to this frozen
+three-case comparison; generic/UInt64/nullable/checkpoint performance remains
+unmeasured. Pending CI is not merge readiness.
 
 ## Source and Domain Review
 
@@ -197,7 +211,8 @@ CARGO_TARGET_DIR=<root>/target CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 cargo clip
 - Reviewer read actual final GREEN/controls/Clippy logs under
   `<root>/target/sum-inline-state-{final-green,controls,strict-clippy-final}.log`
   and reviewed frozen source/tools. No reviewer native build, test,
-  measurement, repeated Python check, or remote operation was run.
+  measurement, repeated Python test, or remote operation was run. Final
+  artifact verification only reads the sealed observations and receipts.
 - **New unresolved failures:** none. Full workspace suites, combined 90%
   Rust coverage, connector services, remote Codacy, cross-platform CI, and
   final delivery checks were not run locally or represented as passed.
@@ -218,7 +233,7 @@ two ordered-LAST controls, actual finalization cancellation, native capture,
 and two UTF-8 output/recovery cases. The cancellation query uses exactly one
 SUM and exercises the inline path, including native keys.
 
-## Measurement Protocol Review
+## Measurement Protocol and Actual Acquisition Gate
 
 Tool checkpoint b3fbd09a is approved within its reviewed scope. It reuses the
 maintained resource, process-cleanup, oracle, statistics, profile, and artifact
@@ -227,9 +242,11 @@ not a claim to seal every transitive import or system dependency. Unused
 catalog constants imported by the general reporter do not participate in
 these SUM statistics; native builder helpers belong to separate build evidence.
 
-The draft protocol SHA-256 is
-`d82589c17a0714d7a3ff4ccc8d58d4b0edc942316e18d2cd45c90f314bce9115`.
-Its candidate revision/receipt are still null, so it cannot authorize sampling.
+The actual [frozen protocol](../../../benchmarks/sum-state/sum-inline-state-20261105.protocol.json)
+SHA-256 is
+`1bb73519f7e11e686fbe562fa6490597e272ccb9bf6fad758faf1f43d4c9f6c4`.
+Reviewer approved the filled public-candidate/receipt gate before acquisition.
+The earlier null-candidate draft was not used to authorize sampling.
 
 - Three fixed cases: dense one CPU, dense four CPUs `[0,2,4,6]`, sparse one
   CPU. Each has two rounds of ten alternating pairs and one warmup per arm
@@ -257,33 +274,145 @@ Its candidate revision/receipt are still null, so it cannot authorize sampling.
   rehash published artifacts, and retain partial/raw evidence. Source/binary
   post-seals and owned cleanup remain mandatory.
 
-The fresh baseline build is separately recorded at 597.861 seconds; no
-comparison has run and no runtime improvement is established.
+Both builds actually recompiled core and example (`fresh=false` in all four
+Cargo records), from the expected permanent frozen source paths. Baseline
+and candidate source inventories contain 1,004 and 1,008 entries. Live files,
+source-before maps, actual compiler records, copied dependency files, and
+public-source equivalence were verified. The candidate core depfile includes
+the new production `group_aggregates.rs` module.
+
+Both products use identical compiler/lock/features/flags/configuration and
+the common657-only harness overlay. Actual identities are:
+
+- Baseline 222f4e2d binary SHA-256
+  `c99c5bb268f320d71f4efb957d2ac4a709ddc231751536836f1d64a9c0e2c83b`;
+  build receipt SHA-256
+  `3f2dba8cac80662e357305e10adeb4af089e084e28929a4a50775214ffb3b7d2`.
+- Public candidate 74a1eaf2 binary SHA-256
+  `8378ba7b8683780868604ce70568aa626f61e0abcd1742ec84f050b95aef1ed3`;
+  build receipt SHA-256
+  `49f7a0922ced5b9a599de5701a1ecb5b996f632ebb480d813b2ccf2702ff5feb`.
+
+Build times are 597.861 and 548.642 seconds, with separately recorded build
+verification. They are outside the acquisition budget. Mandatory live quiet
+guards ran inside acquisition; no native build overlapped measurement.
+
+## Completed Performance Evidence
+
+The single acquisition completed in **102.02959463198204/600 seconds**, prior
+debit zero, retries zero. It contains exactly 120 formal observations,
+twelve warmups, and two six-job profile processes. All 144 workload jobs pass
+the maintained independent twenty-one-snapshot/schema/resource/lifecycle
+validators. All 135 owned workload invocation receipts confirm reaping.
+
+Each dense run has 10,000 seed rows plus twenty 100,000-row source batches;
+sparse uses the same seeds plus twenty 100-row batches. Each retains all
+twenty-one full snapshots. The primary timer starts after IPC preload and
+covers graph construction, planning, execution, retained output collection,
+natural end, and cleanup. Oracles run afterward, within the shared budget.
+These are whole-run elapsed times, not per-row or per-Batch latency.
+
+| Case             | Baseline P50 ms | Candidate P50 ms | Change  | Verdict  |
+|------------------|-----------------|------------------|---------|----------|
+| Dense, one CPU   | 263.467         | 189.067          | -28.24% | improved |
+| Dense, four CPUs | 250.388         | 172.311          | -31.18% | improved |
+| Sparse, one CPU  | 27.236          | 23.442           | -13.93% | improved |
+
+The maintained paired-median intervals are:
+
+| Case             | Round one interval   | Round two interval   |
+|------------------|----------------------|----------------------|
+| Dense, one CPU   | [-35.354%, -26.351%] | [-31.594%, -25.657%] |
+| Dense, four CPUs | [-34.011%, -29.002%] | [-34.139%, -27.098%] |
+| Sparse, one CPU  | [-20.951%, -7.309%]  | [-19.128%, -9.263%]  |
+
+Every upper endpoint is below -5%; therefore all three cases are `improved`
+and the frozen acceptance predicate is true. Reviewer checked the emitted
+endpoints/rule without rerunning statistics or collecting extra observations.
+The 120 CSV rows match the complete raw observation inventory and wall values.
+
+Processing-interval CPU P50 falls 263.453→186.243 ms, 297.202→219.231 ms,
+and 27.236→23.443 ms for these cases. Whole-process peak RSS P50 falls
+231.06→227.19 MiB, 243.88→239.95 MiB, and 70.52→66.50 MiB. The four-CPU
+case's median average cores are 1.189→1.280. RSS includes input preload,
+retained outputs, and validation; it is not isolated SQL working set or a
+budget-capacity guarantee. No new SUM parallelism is claimed.
+
+### Profile Interpretation
+
+Fresh dense single-CPU profiles contain 1,288 baseline samples across windows
+[258,281,248,250,251], and 878 candidate samples across
+[177,175,175,171,180]. Baseline/candidate unresolved leaf counts are 374/184.
+The 3,016/2,441 original timestamps match imported per-thread clocks, with
+maximum error 5.960464477539063e-8 ms, below the 10 ns gate. Neither profile
+has lost/unwind/warning diagnostics.
+
+Group destruction's inclusive share changes 14.75%→4.78%, candidate
+construction 14.44%→8.20%, and scalar destruction 2.87%→0.80%. The maintained
+disjoint commit bucket changes 14.67%→4.90%. These observations support the
+allocation/destruction mechanism alongside the component counter. Inclusive
+shares overlap and separate processing cohorts do not establish paired
+phase-wall deltas. Missing/inlined symbols do not imply zero cost.
+
+The combined packing/cache candidate was measured; their separate wall-time
+contributions were not isolated. Row conversion/filtering remain possible
+future hypotheses. No additional variant, profile, case, or observation was
+run using the unused budget, and no new speedup is promised for those paths.
+
+### Artifact Integrity and Final Source Identity
+
+The nine sealed acquisition files and protocol remain byte-identical. The
+[manifest](../../../benchmarks/sum-state/sum-inline-state-20261105/evidence-manifest.json)
+SHA-256 is
+`bf4c824baa46fa21a4225c3e4865bc96117febfd1d585be29fe4b4ce1dfb604c`.
+All eight recorded file hashes/byte counts match. The 297,034-byte complete
+raw evidence SHA-256 is
+`21500dcdb7a9db4361d9e643f0e4a96dba22cf3c99176cfb4c951578e60572d6`.
+
+Raw evidence retains source/build receipts, all formal/warmup/profile jobs,
+snapshot oracles, per-thread timestamps, alignment, stacks, resources, and
+cleanup. Original large perf files remain at disclosed local paths with
+hashes; imported full stacks are in the public artifact set.
+
+Reviewer verified native live source/binary post-seals and equality of all
+ten frozen helper hashes before/after acquisition. Published summary records
+two accepted profiles, verified helper seals, complete analysis, completed
+status, null failure, and true performance acceptance. No sealed file was
+edited to change a verdict or narrative.
+
+Final delivery checkpoint d0c60561 has no change from measured public P74 in
+crates, Cargo files, configuration, scripts/helpers, schema, or Python API.
+Only evidence and documentation were added. The final delivery does not
+substitute a new unmeasured implementation.
 
 ## Blocking Issues
 
-None remain for the reviewed source/tool scope. Publishing the reviewed
-source and building its exact frozen candidate may proceed. Actual public
-source/build/protocol identity and acquisition authorization still require
-their final gate. Performance acceptance and final required CI/Codacy,
-coverage, and cross-platform checks remain merge blockers while unresolved.
+None remain for reviewed source, tools, performance evidence, or outcome
+documentation. The frozen performance contract is met. Final required
+CI/Codacy, coverage, and cross-platform checks remain merge blockers while
+pending or unresolved; no final remote success is asserted here.
 
 ## Style and Documentation Consistency
 
 No new dependency, unsafe exception, public knob, blanket security/complexity
 exclusion, or fee-capacity claim is introduced. The specification describes
 compact typed nullable state, preserved generic layout, immutable outputs,
-and unchanged checkpoint contracts. Final measured results and application
-documentation must be reconciled after the frozen comparison; source-level
-allocation evidence must not be presented as an end-to-end speedup.
+and unchanged checkpoint contracts. The dated changelog and benchmark index
+link the accepted study; older cohorts and the rejected parallel experiment
+remain clearly labeled. The parent analysis describes whole-run timings,
+paired intervals, component versus process resource scope, profile limits,
+and explicitly unmeasured paths. No guide/API command change is needed for
+this internal representation optimization.
 
 ## Verdict
 
-**Approve — premeasurement SOURCE/tool PASS**, bound to local d0bbca1b and
-tool b3fbd09a. The reviewed design findings are closed with actual allocation,
-footprint, semantic, recovery, and failure evidence.
+**Approve — final specialist source, performance, and documentation PASS**,
+bound to measured public 74a1eaf2 and local final delivery d0c60561.
+The design findings are closed, all three measured cases are improved under
+the frozen rule, and complete campaign and provenance evidence is
+preserved.
 
-This permits public source publication and a fresh exact-candidate build.
-It does not authorize a null-candidate protocol, claim performance acceptance,
-or establish merge readiness. The final performance and required remote
-results must be reviewed before delivery, using this same canonical artifact.
+This is not a green-CI or merge-ready statement. The exact final PR head must
+pass all required CI, Codacy, coverage, and cross-platform checks before the
+already-authorized merge. No new measurement is needed for evidence/document
+additions that leave the reviewed measured source and helpers unchanged.
