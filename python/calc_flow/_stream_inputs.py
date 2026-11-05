@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterable, AsyncIterator, Mapping
+from collections.abc import AsyncIterable, AsyncIterator, Mapping, Sequence
 from datetime import timedelta
 from typing import NoReturn, Union
 
@@ -35,8 +35,15 @@ from calc_flow.symbolic.nodes import CStr
 
 StreamInput = TypeAliasType(
     "StreamInput",
-    Union[AsyncIterable[Union[TableData, Watermark]], SourceBinding, TableData],
+    Union[
+        AsyncIterable[Union[TableData, Watermark]],
+        SourceBinding,
+        TableData,
+        Sequence[TableData],
+    ],
 )
+
+_MATERIALIZED_ITEMS = (pa.Table, pa.RecordBatch, Batch)
 
 _POLICIES = (SourceProvidedWatermarks, BoundedOutOfOrderness, DisabledWatermarks)
 
@@ -239,8 +246,10 @@ def _source_binding(
         return data, None
     name, value = logical_input
     config = _source_config(name, value, budget, policy)
-    if isinstance(data, (pa.Table, pa.RecordBatch, Batch)):
+    if isinstance(data, _MATERIALIZED_ITEMS):
         return _materialized_binding(data, config, complete_snapshot)
+    if isinstance(data, Sequence):
+        return _materialized_sequence_binding(data, config, complete_snapshot)
     if not isinstance(data, AsyncIterable):
         raise TypeError(
             f"stream.inputs.{name}: expected async iterable, materialized Arrow "
@@ -271,6 +280,44 @@ def _materialized_binding(
         config.policy,
         config.ordered_column,
     ), None
+
+
+def _sequence_tables(data: Sequence[TableData], path: str) -> list[pa.Table]:
+    tables = []
+    for item in data:
+        table = _arrow_table(item, path)
+        if isinstance(table, pa.RecordBatch):
+            table = pa.Table.from_batches([table])
+        tables.append(table)
+    return tables
+
+
+def _validate_materialized_sequence(data: Sequence[TableData], path: str) -> None:
+    if not data:
+        raise ValueError(f"{path}: materialized sequence must not be empty")
+    if not all(isinstance(item, _MATERIALIZED_ITEMS) for item in data):
+        raise TypeError(
+            f"{path}: materialized sequence must contain Arrow Table, "
+            "RecordBatch or table Batch values"
+        )
+
+
+def _materialized_sequence_binding(
+    data: Sequence[TableData], config: _IterableConfig, complete_snapshot: bool
+) -> tuple[SourceBinding, _IterableSource | None]:
+    path = f"stream.inputs.{config.name}"
+    _validate_materialized_sequence(data, path)
+    if complete_snapshot:
+        raise ValueError(
+            f"{path}: materialized sequence is not supported for snapshot_sql; "
+            "supply one complete table per input"
+        )
+    tables = _sequence_tables(data, path)
+    for table in tables:
+        if not table.schema.equals(config.schema):
+            raise ValueError(f"{path}.schema: expected declared Arrow schema")
+    merged = tables[0] if len(tables) == 1 else pa.concat_tables(tables)
+    return _materialized_binding(merged, config, complete_snapshot)
 
 
 async def _whole_table(data: TableData) -> AsyncIterator[TableData]:

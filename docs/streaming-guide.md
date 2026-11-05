@@ -693,6 +693,14 @@ async def replay():
         return pa.concat_tables([table async for table in results])
 ```
 
+A non-empty list or tuple of Table, RecordBatch and table Batch values is also
+accepted for one dynamic input. The sequence is schema-checked and concatenated
+into one materialized input whose chunks reuse the caller's immutable buffers;
+it then uses the same native source, so no Python source call happens per batch.
+Each input record batch remains a source record boundary. Empty sequences,
+mismatched schemas and non-Arrow items are rejected; snapshot SQL and
+source-provided watermarks keep their single-complete-table rules.
+
 `Program.stream({"events": data})` also accepts Table, RecordBatch and table
 Batch values. One Arrow import shares immutable buffers; the native source
 emits record slices that fit both row and visible-byte limits, without Python
