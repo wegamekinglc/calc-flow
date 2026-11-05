@@ -5,12 +5,21 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+#[cfg(test)]
+use datafusion::arrow::{
+    buffer::Buffer,
+    datatypes::{DataType, Field},
+};
 use datafusion::arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{CalcFlowError, JsonMap, Result};
+
+#[cfg(test)]
+#[path = "batch/arrow_run_end_validation_tests.rs"]
+mod arrow_run_end_validation_tests;
 
 /// Adds `addend` to `total`, reporting overflow as a typed error (spec S10.2:
 /// byte and row sums use checked arithmetic; overflow is a typed error).

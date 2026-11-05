@@ -1,0 +1,12 @@
+{
+  "baseline": {
+    "compiled_anchors": [],
+    "inclusive_samples": null,
+    "status": "nonseparable_or_inlined"
+  },
+  "candidate": {
+    "compiled_anchors": [],
+    "inclusive_samples": null,
+    "status": "nonseparable_or_inlined"
+  }
+}

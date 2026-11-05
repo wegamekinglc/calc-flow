@@ -1,5 +1,10 @@
 # Grouped integer SUM state measurements
 
+[Rejected 2026-11-05 composite-key experiment](sum-columnar-keys-20261105.md)
+records five cases, 200 formal observations, both CPU profiles and complete
+snapshot checks. Allocation reductions did not establish dense-stream speedups;
+the runtime prototype is withdrawn and the existing key path is retained.
+
 [Accepted 2026-11-05 inline-state study](sum-inline-state-20261105.md) records
 the fresh-main comparison of dense one/four-CPU and sparse one-CPU streams,
 120 formal observations, both profiles, and the accepted compact-state change.
