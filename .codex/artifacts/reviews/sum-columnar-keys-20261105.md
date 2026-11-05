@@ -1,14 +1,16 @@
 # Columnar composite grouping-key review
 
-**Archive-only delivery: PASS. Runtime prototype: REJECT. Required final-head
-CI remains pending; this is not merge approval.**
+**Research archive and Arrow security correction: PASS. Runtime prototype:
+REJECT. Required final-head CI remains pending; this is not merge approval.**
 
 ## Scope and checkpoint
 
 - Branch: `feature/sum-columnar-keys`; base
   `22f4b9a562bdd087a75d810aeeb2161f29a3d6b7`.
-- Reviewed archive checkpoint: local `8080ab3b03e5fe8b20f263cdce64c6b92dd4659b`,
-  tree `d100e3e9ac9b99166b119bfef862b9614449d201`, before this report update.
+- Reviewed delivery checkpoint: local `67fc715786e494daf7fb8e726d69c989510be1b9`,
+  tree `fcc25d8a6375f0f72310d044a60c0f89117a9780`, before this report update.
+  It includes the post-acquisition security correction
+  `5cde59211057b7564892995d032f8ce4616c92db`.
 - Historical reviewed prototype: local verification checkpoint
   `6dd9475167928d1534b91d84c66b6dde7ead79f5`, tree
   `9b4fbd788d36580c04d64b43bff8813e2ba0aa64`. The measured public candidate is
@@ -18,8 +20,9 @@ CI remains pending; this is not merge approval.**
   from the final archive delivery; the prototype remains experimental history.
 - This report includes the adversarial design review against the
   [study specification](../specs/sum-columnar-keys-20261105.md), subsequent source
-  review, tool review, actual acquisition gate and final negative-result review.
-  There is no final public-head CI result at this checkpoint.
+  review, tool review, actual acquisition gate, negative-result review and the
+  required dependency-security follow-up for PR #545. The corrected public head
+  has not yet completed CI at this checkpoint.
 - Review used repository guidance, `$code-style`, current incremental SQL
   source and the pinned DataFusion 55 implementation. No compilation, tests,
   fixture generation or measurements were run by the reviewer.
@@ -344,32 +347,103 @@ accurately describe the source identities, timer boundary, resource/profiling
 limits and unmeasured paths. Nullable/UInt64/generic/checkpoint/finite,
 tight-byte and near-below-edge timings remain unmeasured.
 
-## Final archive scope
+## Final delivery scope
 
-The restore preceding the reviewed archive checkpoint returns all seven Rust
+The archive restore returned all seven prototype Rust
 paths to `22f4b9a`: the two existing files are restored and five new modules are
-removed. The final diff against that base contains no changes under `crates`,
-Cargo manifests/lock, generated project schema, Python runtime or Python tests.
-No native rebuild is required to establish byte identity. The preserved 38-test
-result concerns the experimental revision, not newly shipped runtime behavior.
+removed. That archive checkpoint had no runtime/API/schema diff against the
+study baseline. The subsequent security correction changes the dependency pin,
+root/fuzz locks and a test-only Batch module; the final delivery is therefore
+not byte-identical to `22f4b9a`. The seven SUM prototype paths remain restored.
+The preserved 38-test result concerns the experimental revision, not the
+security-updated product.
 
 The archive retains the reviewed Python collector/tests, one CI test-module
 registration, specification/review, original negative evidence and explanatory
 documentation. Its helpers and common native harness remain the measured ones.
 Reproduction targets the public baseline and `e492158c` prototype with the sole
 common657 overlay, not the archive's restored runtime. Original measured trees,
-binaries, protocol and generated evidence remain preserved. No APIs, configuration,
-checkpoint wire format or thread policy change in the delivery.
+binaries, protocol and generated evidence remain preserved. The security change
+does not reintroduce the prototype or add an API, configuration setting,
+checkpoint wire format or thread policy.
+
+## Dependency-security follow-up
+
+The initial PR #545 dependency-policy check reported `RUSTSEC-2026-0442` for
+the inherited `arrow-data 59.2.0`. The official
+[RustSec advisory](https://raw.githubusercontent.com/RustSec/advisory-db/main/crates/arrow-data/RUSTSEC-2026-0442.md)
+identifies improper RunEndEncoded validation and requires at least 59.3.2 on
+the 59.x line. The [upstream reproducer](https://github.com/apache/arrow-rs/issues/11587)
+demonstrates a parent logical offset/length that exceeds its last run end.
+DataFusion 55's Arrow 59 semver requirements permit the patched dependency;
+the Arrow 59.3.2 MSRV is below the workspace's Rust 1.94 requirement.
+
+The reviewed five-file correction pins `arrow-data` to `=59.3.2`; root and
+fuzz locks update only `arrow-data` 59.2.0 and `arrow-buffer`/`arrow-schema`
+59.3.1 to 59.3.2. The latter two are required by patched arrow-data. The fuzz
+lock additionally records the already-declared `datafusion-functions-nested`
+55 dependency edge, without introducing a new package version. Full locked
+metadata for both graphs contains a single 59.3.2 copy of each affected Arrow
+crate. Vendor locks, audit exceptions and workspace lints are unchanged.
+
+`batch.rs` adds only `cfg(test)` imports/module wiring. The shared 54-line
+repository module constructs valid run ends `[2,3]` and values `[7,9]`, verifies
+valid length/slicing, then requires errors for parent length 5 and offset 1
+plus length 3. It never reads an invalid array element or uses unsafe code.
+The Arrow-only probe imports this exact file by path; it is not a rewritten
+surrogate test.
+
+Observed old-dependency RED: two expected failures after the valid controls,
+7.51-second build. Patched GREEN: two passes, 4.53-second build. Strict
+Arrow-only Clippy passed in 2.43 seconds with all/pedantic warnings denied and
+unsafe forbidden. The actual full-workspace policy command
+`cargo deny --locked check` passed advisories, bans, licenses and sources;
+pre-existing duplicate/yanked warnings remain warnings under unchanged policy.
+Locked root/fuzz metadata succeeded. The reviewer inspected these logs and
+resolved graphs without rerunning native work.
+
+The probe commands use the manifest at
+`target/pr545-arrow-security/Cargo.toml` and the shared repository test source:
+
+```bash
+cargo test --locked --manifest-path /home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr545-arrow-security/Cargo.toml --test run_end_validation -- --nocapture
+cargo clippy --locked --manifest-path /home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr545-arrow-security/Cargo.toml --tests -- -D warnings
+cargo deny --locked check
+cargo metadata --locked --format-version 1
+cargo metadata --locked --manifest-path fuzz/Cargo.toml --format-version 1
+```
+
+The RED used the same test command before updating the probe's old dependency
+lock, without `--locked`. Logs and resolved graphs are under
+`target/pr545-arrow-security/{red,green,clippy,deny}.log` and
+`{root,fuzz}-metadata.json`. Test/Clippy used the shared repository target,
+two build jobs and `CARGO_INCREMENTAL=0`.
+
+**The full core/DataFusion test graph was not built locally after this
+dependency update.** The shared module's integration was reviewed statically;
+final required CI must compile/run it along with the full product, coverage and
+platform checks. The unchanged CI also runs cargo-audit with the documented
+exceptions. Arrow-only GREEN is not reported as full-core GREEN.
+
+The top-level experiment narrative and changelog now disclose the security
+correction. Every recorded timing, allocation and profile remains scoped to
+the original `22f4b9a` versus `e492158c` sources and frozen pre-correction locks.
+The security-updated delivery has not been performance measured. No old source,
+binary, protocol or generated evidence was rewritten to imply otherwise.
 
 ## Current verdict
 
-**Archive-only PASS; runtime prototype REJECT.** Historical source/tool safety
-approval did not confer performance acceptance. The final archive honors the
-negative result, restores the runtime and preserves reproducible evidence.
-No blocking archive source, evidence, style or documentation issue remains.
+**Archive and security-source PASS; runtime prototype REJECT.** Historical
+source/tool safety approval did not confer performance acceptance. The delivery
+honors the negative result, excludes the prototype, preserves reproducible
+evidence and fixes the observed Arrow advisory without suppressing audit policy.
+No unaddressed source, evidence, style or documentation issue remains.
 
 Green required checks on the exact final public head remain a merge gate,
-including coverage and cross-platform checks. CI is pending at this review
-snapshot, not green. Only the parent may publish/merge under the user's existing
-authority after those checks pass. No further experiment is authorized by the
-unused campaign budget.
+including dependency policy, coverage reporting and cross-platform checks. The
+prior public head had the now-addressed dependency failure and a Coveralls
+upload HTTP 504; the latter was not a unit-test or coverage-floor failure, but
+successful final-head reporting is still required. Updated-head CI is pending
+at this review snapshot, not green. Only the parent may publish/merge under the
+user's existing authority after those checks pass. No further experiment is
+authorized by the unused campaign budget.

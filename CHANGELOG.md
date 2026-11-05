@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-05: Pin `arrow-data` and its required buffer/schema dependencies to
+  59.3.2 to address `RUSTSEC-2026-0442`. Reject RunEndEncoded arrays whose run
+  ends do not cover their logical offset plus length. Preserve the audit gates
+  and add safe-construction regression controls.
+
 - 2026-11-05: Record a bounded composite UTF-8 grouped `SUM` key experiment.
   Lower canonical encoding and allocated bytes in a focused probe, but obtain
   no confirmed dense-stream improvement in five fixed end-to-end cases.

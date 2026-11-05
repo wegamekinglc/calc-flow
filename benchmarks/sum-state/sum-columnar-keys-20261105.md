@@ -209,6 +209,22 @@ The measured candidate remains available as experimental history. This PR
 ships research tools and evidence; it does not enable columnar interning or
 change configuration, checkpoint encoding or thread policy.
 
+The first delivery CI detected
+[RUSTSEC-2026-0442](https://raw.githubusercontent.com/RustSec/advisory-db/main/crates/arrow-data/RUSTSEC-2026-0442.md)
+in the existing Arrow dependency. The correction pins `arrow-data` to 59.3.2
+and updates its necessary `arrow-buffer`/`arrow-schema` closure to 59.3.2,
+including the dependent fuzz lock. It adds safe construction tests for
+RunEndEncoded arrays whose run ends do not cover the logical offset plus
+length, as described in the [upstream issue](https://github.com/apache/arrow-rs/issues/11587).
+The audit policy is preserved. This correction does not reintroduce the SUM
+prototype.
+
+The security-updated delivery has not been performance measured. Every timing,
+allocation and profile result above remains bound to the original baseline
+and experimental candidate with their frozen pre-correction dependencies.
+The original source trees, binaries, protocol and evidence remain unchanged;
+required CI validates the corrected delivery separately.
+
 Nullable/UInt64/generic/checkpoint/finite latency, tight-byte pools and
 near-below-edge latency remain unmeasured. The long-string allocation result
 does not establish a speedup for a long-string workload. A further study
