@@ -116,8 +116,23 @@ fn plan(shape: Shape, config: DataFusionConfig) -> ProbeResult<calc_flow::BatchE
     Ok(builder.compile_batch(&UdfRegistry::new().snapshot())?)
 }
 
-fn inputs(plan: &calc_flow::BatchExecutionPlan) -> ProbeResult<BTreeMap<String, Batch>> {
-    let facts = batch(ROWS, BATCHES)?;
+fn batch_with_entities(rows: usize, batches: usize, entities: usize) -> ProbeResult<Batch> {
+    let batch = batch(rows, batches)?;
+    let metadata = batch
+        .metadata()
+        .clone()
+        .with_datafusion_active_entities(entities)?;
+    Ok(batch.with_metadata(metadata))
+}
+
+fn inputs(
+    plan: &calc_flow::BatchExecutionPlan,
+    entities: Option<usize>,
+) -> ProbeResult<BTreeMap<String, Batch>> {
+    let facts = match entities {
+        Some(entities) => batch_with_entities(ROWS, BATCHES, entities)?,
+        None => batch(ROWS, BATCHES)?,
+    };
     let dimension = batch(KEYS, 1)?;
     plan.external_inputs()
         .iter()
@@ -161,10 +176,11 @@ async fn measure(
     shape: Shape,
     mode: DataFusionParallelismMode,
     partitions: usize,
+    entities: Option<usize>,
     expected: &mut Option<Vec<Vec<i64>>>,
 ) -> ProbeResult<()> {
     let plan = plan(shape, config(mode, partitions))?;
-    let inputs = inputs(&plan)?;
+    let inputs = inputs(&plan, entities)?;
     let mut durations = Vec::with_capacity(SAMPLES);
     let mut effective = 0;
     let mut output_partitions = 0;
@@ -189,8 +205,9 @@ async fn measure(
         }
     }
     durations.sort_by(|left, right| left.partial_cmp(right).unwrap());
+    let entity_label = entities.map_or_else(|| "none".to_owned(), |value| value.to_string());
     println!(
-        "query={} mode={mode:?} requested_partitions={partitions} effective_partitions={effective} output_partitions={output_partitions} median_ms={:.2}",
+        "query={} mode={mode:?} entities={entity_label} requested_partitions={partitions} effective_partitions={effective} output_partitions={output_partitions} median_ms={:.2}",
         shape.name(),
         durations[durations.len() / 2]
     );
@@ -208,11 +225,19 @@ async fn main() -> ProbeResult<()> {
     );
     for shape in [Shape::Projection, Shape::GroupBy, Shape::Join] {
         let mut expected: Option<Vec<Vec<i64>>> = None;
-        measure(shape, DataFusionParallelismMode::Fixed, 1, &mut expected).await?;
+        measure(
+            shape,
+            DataFusionParallelismMode::Fixed,
+            1,
+            None,
+            &mut expected,
+        )
+        .await?;
         measure(
             shape,
             DataFusionParallelismMode::Fixed,
             request,
+            None,
             &mut expected,
         )
         .await?;
@@ -220,6 +245,7 @@ async fn main() -> ProbeResult<()> {
             shape,
             DataFusionParallelismMode::Auto,
             request,
+            None,
             &mut expected,
         )
         .await?;
@@ -227,6 +253,15 @@ async fn main() -> ProbeResult<()> {
             shape,
             DataFusionParallelismMode::AutoRows,
             request,
+            None,
+            &mut expected,
+        )
+        .await?;
+        measure(
+            shape,
+            DataFusionParallelismMode::Auto,
+            request,
+            Some(KEYS),
             &mut expected,
         )
         .await?;

@@ -573,6 +573,13 @@ if __name__ == "__main__":
     main()
 ```
 
+`Batch.from_pyarrow(table, active_entities=n)` (and `Batch.from_array`) records
+a trusted positive active-entity count under
+`calc_flow.datafusion.active_entities` for `auto` partition selection. Zero or a
+conflicting existing value is rejected. This is the supported way to make
+single-input batch graphs eligible for entity-aware automatic parallelism.
+See [SQL and DataFusion performance](sql-datafusion-performance.md).
+
 The SQL aliases `o` and `f` name the declarations inside the query; collection
 binds data by logical input names `orders` and `fees`. The final doubled values
 are `[140, 216, 72]`. Only one read-only DataFusion `SELECT` or CTE is accepted;

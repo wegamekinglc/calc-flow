@@ -83,7 +83,10 @@ trusted `calc_flow.datafusion.active_entities` value, when present and valid,
 can only lower that count. Unlike `auto`, a missing, malformed, zero, or
 row-count-exceeding entity value is ignored rather than pinning the run to one
 partition; inputs below `small_rows_threshold` and single-entity inputs still
-use one partition. Batch graphs containing multi-input SQL use the same
+use one partition. Python callers can attach the trusted count with
+`Batch.from_pyarrow(..., active_entities=n)` or `Batch.from_array(...)`; the
+engine additionally validates that the value is positive and no larger than the
+input row count. Batch graphs containing multi-input SQL use the same
 whole-run external-row policy as `auto`. The default remains `fixed`.
 
 Input registration is not a parallelism ceiling. With more than one effective
