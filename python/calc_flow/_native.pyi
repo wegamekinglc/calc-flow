@@ -120,7 +120,10 @@ class _ExecutionCancellation(Protocol):
 class Batch:
     @staticmethod
     def from_pyarrow(
-        table: _ArrowCStream, metadata: Mapping[str, object] | None = None
+        table: _ArrowCStream,
+        metadata: Mapping[str, object] | None = None,
+        *,
+        active_entities: int | None = None,
     ) -> Batch: ...
     @staticmethod
     def from_array(
@@ -128,6 +131,7 @@ class Batch:
         *,
         backend: str,
         metadata: Mapping[str, object] | None = None,
+        active_entities: int | None = None,
     ) -> Batch: ...
     @staticmethod
     def _from_external(

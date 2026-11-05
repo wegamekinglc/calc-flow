@@ -336,11 +336,12 @@ impl PyBatch {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (table, metadata=None))]
+    #[pyo3(signature = (table, metadata=None, *, active_entities=None))]
     fn from_pyarrow(
         py: Python<'_>,
         table: &Bound<'_, PyAny>,
         metadata: Option<&Bound<'_, PyAny>>,
+        active_entities: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let export = table
             .getattr(intern!(py, "__arrow_c_stream__"))
@@ -357,25 +358,26 @@ impl PyBatch {
         if batches.is_empty() {
             batches.push(RecordBatch::new_empty(schema));
         }
-        let metadata = metadata_from_python(py, metadata)?;
+        let metadata = metadata_from_python_with_active_entities(py, metadata, active_entities)?;
         let inner = calc_flow::Batch::table(batches, metadata).map_err(crate::error::to_py_err)?;
         Ok(Self::from_inner(inner))
     }
 
     #[staticmethod]
-    #[pyo3(signature = (array, *, backend, metadata=None))]
+    #[pyo3(signature = (array, *, backend, metadata=None, active_entities=None))]
     fn from_array(
         py: Python<'_>,
         array: &Bound<'_, PyAny>,
         backend: String,
         metadata: Option<&Bound<'_, PyAny>>,
+        active_entities: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let prepared = py
             .import(intern!(py, "calc_flow.array"))?
             .getattr(intern!(py, "_prepare_array"))?
             .call1((array, &backend))?;
         let (object, len): (Py<PyAny>, usize) = prepared.extract()?;
-        let metadata = metadata_from_python(py, metadata)?;
+        let metadata = metadata_from_python_with_active_entities(py, metadata, active_entities)?;
         let estimated_bytes = estimate_payload_bytes(object.bind(py), len);
         let payload = PythonPayload {
             object,
@@ -504,6 +506,26 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyBatch>()
 }
 
+pub(crate) fn metadata_from_python_with_active_entities(
+    py: Python<'_>,
+    metadata: Option<&Bound<'_, PyAny>>,
+    active_entities: Option<&Bound<'_, PyAny>>,
+) -> PyResult<calc_flow::BatchMetadata> {
+    let metadata = metadata_from_python(py, metadata)?;
+    let Some(value) = active_entities else {
+        return Ok(metadata);
+    };
+    if value.is_instance_of::<PyBool>() || !value.is_instance_of::<PyInt>() {
+        return Err(PyTypeError::new_err(
+            "active_entities must be a positive integer",
+        ));
+    }
+    let active_entities: usize = value.extract()?;
+    metadata
+        .with_datafusion_active_entities(active_entities)
+        .map_err(crate::error::to_py_err)
+}
+
 pub(crate) fn metadata_from_python(
     py: Python<'_>,
     value: Option<&Bound<'_, PyAny>>,
@@ -620,6 +642,7 @@ mod tests {
         datatypes::{DataType, Field, Schema},
     };
     use pyo3::{
+        IntoPyObject,
         exceptions::{PyTypeError, PyValueError},
         types::{PyDict, PyList, PySlice, PyTuple},
     };
@@ -648,7 +671,7 @@ mod tests {
             let (table, values) = table();
             let table = table.into_pyarrow(py).unwrap();
 
-            let batch = PyBatch::from_pyarrow(py, &table, Some(metadata.as_any())).unwrap();
+            let batch = PyBatch::from_pyarrow(py, &table, Some(metadata.as_any()), None).unwrap();
 
             assert_eq!(batch.kind().unwrap(), "table");
             assert_eq!(batch.num_rows().unwrap(), 3);
@@ -671,6 +694,38 @@ mod tests {
     }
 
     #[test]
+    fn table_batch_records_active_entities_metadata() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (table, _) = table();
+            let table = table.into_pyarrow(py).unwrap();
+            let entities = 4_i64.into_pyobject(py).unwrap();
+            let batch = PyBatch::from_pyarrow(py, &table, None, Some(entities.as_any())).unwrap();
+            let inner = batch.clone_inner().unwrap();
+            assert_eq!(
+                inner.metadata().attributes()[calc_flow::DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY]
+                    .as_u64(),
+                Some(4)
+            );
+
+            let zero = 0_i64.into_pyobject(py).unwrap();
+            assert!(PyBatch::from_pyarrow(py, &table, None, Some(zero.as_any())).is_err());
+
+            let conflict = PyDict::new(py);
+            conflict
+                .set_item(calc_flow::DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY, 2)
+                .unwrap();
+            assert!(PyBatch::from_pyarrow(
+                py,
+                &table,
+                Some(conflict.as_any()),
+                Some(entities.as_any()),
+            )
+            .is_err());
+        });
+    }
+
+    #[test]
     fn empty_table_gets_a_schema_preserving_zero_row_batch() {
         Python::initialize();
         Python::attach(|py| {
@@ -685,6 +740,7 @@ mod tests {
                     .unwrap()
                     .into_pyarrow(py)
                     .unwrap(),
+                None,
                 None,
             )
             .unwrap();
@@ -777,7 +833,7 @@ mod tests {
         Python::attach(|py| {
             let (table, _) = table();
             let table = table.into_pyarrow(py).unwrap();
-            let batch = PyBatch::from_pyarrow(py, &table, None).unwrap();
+            let batch = PyBatch::from_pyarrow(py, &table, None, None).unwrap();
 
             batch.__clear__();
 

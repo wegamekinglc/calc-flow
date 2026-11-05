@@ -34,6 +34,29 @@ def test_table_batch_reuses_arrow_buffers_and_copies_metadata() -> None:
     assert batch.num_rows == 3
 
 
+def test_batch_active_entities_records_trusted_metadata() -> None:
+    table = pa.table({"value": [1, 2, 3]})
+
+    batch = Batch.from_pyarrow(table, active_entities=4)
+
+    assert batch.metadata["calc_flow.datafusion.active_entities"] == 4
+
+
+def test_batch_active_entities_rejects_zero_conflicts_and_bools() -> None:
+    table = pa.table({"value": [1, 2, 3]})
+
+    with pytest.raises(ConfigError):
+        Batch.from_pyarrow(table, active_entities=0)
+    with pytest.raises(ConfigError):
+        Batch.from_pyarrow(
+            table,
+            metadata={"calc_flow.datafusion.active_entities": 2},
+            active_entities=4,
+        )
+    with pytest.raises(TypeError):
+        Batch.from_pyarrow(table, active_entities=True)
+
+
 def test_multi_chunk_table_reuses_every_arrow_buffer() -> None:
     table = pa.table(
         {

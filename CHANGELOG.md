@@ -17,6 +17,12 @@ measurements. Use the current guides for supported behavior.
   [inline-state study](benchmarks/sum-state/sum-inline-state-20261105.md) for
   paired intervals, profiles, resource scope, and unmeasured paths.
 
+- 2026-11-05: Expose the trusted active-entity count through
+  `Batch.from_pyarrow(..., active_entities=n)` and `Batch.from_array(...)`, and
+  add `BatchMetadata::with_datafusion_active_entities` for Rust callers. The
+  value enables entity-aware `auto` partition selection for single-input batch
+  graphs; zero or a conflicting existing value is rejected. Project and
+  checkpoint formats are unchanged.
 - 2026-11-05: Add an opt-in `parallelism_mode="auto_rows"` DataFusion policy.
   It derives the target-partition request from input rows and host capacity
   without requiring trusted active-entity statistics; valid entity metadata can

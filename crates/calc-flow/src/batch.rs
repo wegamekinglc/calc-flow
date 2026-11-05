@@ -111,6 +111,51 @@ impl BatchMetadata {
     pub fn attributes(&self) -> &JsonMap {
         &self.attributes
     }
+
+    /// Returns metadata carrying a trusted active-entity count for batch SQL
+    /// `auto` parallelism.
+    ///
+    /// The count is stored under
+    /// [`crate::DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY`]. The `DataFusion`
+    /// planner reads it only for automatic partition policies and additionally
+    /// requires the value to be positive and no larger than the input row
+    /// count. This helper rejects zero and a conflicting existing value so a
+    /// caller cannot silently override another binding's trusted statistics.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] for a zero count or for a
+    /// conflicting existing value under the same key.
+    pub fn with_datafusion_active_entities(mut self, active_entities: usize) -> Result<Self> {
+        let field = "metadata.attributes.calc_flow.datafusion.active_entities";
+        if active_entities == 0 {
+            return Err(CalcFlowError::InvalidArgument {
+                field: field.into(),
+                message: "must be positive".into(),
+            });
+        }
+        let active_entities =
+            u64::try_from(active_entities).map_err(|_| CalcFlowError::InvalidArgument {
+                field: field.into(),
+                message: "must fit in an unsigned 64-bit integer".into(),
+            })?;
+        let mut attributes = (*self.attributes).clone();
+        if let Some(existing) = attributes.get(crate::DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY) {
+            if existing.as_u64() != Some(active_entities) {
+                return Err(CalcFlowError::InvalidArgument {
+                    field: field.into(),
+                    message: "conflicts with the existing active-entity count".into(),
+                });
+            }
+            return Ok(self);
+        }
+        attributes.insert(
+            crate::DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY.to_owned(),
+            Value::from(active_entities),
+        );
+        self.attributes = Arc::new(attributes);
+        Ok(self)
+    }
 }
 
 #[derive(Clone)]
@@ -975,6 +1020,31 @@ impl Batch {
 
 #[cfg(test)]
 mod tests {
+    use crate::DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY;
+
+    use super::BatchMetadata;
+
+    #[test]
+    fn metadata_with_active_entities_is_additive_and_conflict_checked() {
+        let metadata = BatchMetadata::default()
+            .with_datafusion_active_entities(4)
+            .unwrap();
+        assert_eq!(
+            metadata.attributes()[DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY].as_u64(),
+            Some(4)
+        );
+
+        let repeated = metadata.clone().with_datafusion_active_entities(4).unwrap();
+        assert_eq!(repeated, metadata);
+
+        assert!(
+            BatchMetadata::default()
+                .with_datafusion_active_entities(0)
+                .is_err()
+        );
+        assert!(metadata.with_datafusion_active_entities(8).is_err());
+    }
+
     use super::*;
 
     #[test]
