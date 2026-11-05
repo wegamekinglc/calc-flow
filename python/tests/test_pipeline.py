@@ -288,6 +288,16 @@ def test_project_json_helpers_are_canonical_strict_and_defaulted() -> None:
         validate_project_json(json.dumps({**minimal, "callable": "os.system"}))
 
 
+def test_datafusion_configuration_accepts_auto_rows_mode() -> None:
+    configured = PipelineBuilder("auto-rows-datafusion").with_datafusion_config(
+        parallelism_mode="auto_rows",
+        max_partitions=4,
+        min_rows_per_partition=65_536,
+    )
+
+    assert configured.project["graph"]["datafusion"]["parallelism_mode"] == "auto_rows"
+
+
 def test_datafusion_configuration_is_functional_and_exposes_auto_controls() -> None:
     original = PipelineBuilder("auto-datafusion")
     configured = original.with_datafusion_config(
@@ -319,7 +329,7 @@ def test_datafusion_configuration_is_functional_and_exposes_auto_controls() -> N
     [
         ("batch_size", 0, "positive integer"),
         ("max_partitions", True, "positive integer"),
-        ("parallelism_mode", "dynamic", "fixed or auto"),
+        ("parallelism_mode", "dynamic", "fixed, auto, or auto_rows"),
         ("enable_rolling_rewrite", 1, "exact bool"),
     ],
 )

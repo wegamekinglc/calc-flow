@@ -167,6 +167,23 @@ all formal/warmup records and snapshot oracles, resource observations, commands,
 profile clocks, helper/native post-seals, and cleanup. Large original perf files
 remain at recorded local paths with hashes; imported full stacks are public.
 
+## Upstream integration after acquisition
+
+After acquisition, main advanced to
+`49525978f0a4731ee2e2ad8ce01faefff86a2f4a`, adding the explicit opt-in
+`auto_rows` partition policy. The delivery integrates that commit, including its
+Cargo configuration, generated schema, Python surface, documentation, and tests.
+The unchanged SUM implementation and reviewed measurement helpers still match
+public candidate `74a1eaf2`.
+
+The common657 workload explicitly selected Fixed mode and one target partition.
+Source review finds that selected decision path unchanged by the new policy;
+the default also remains Fixed. The integrated product and `auto_rows` mode
+were not performance remeasured. Every timing in this report remains bound to
+the frozen comparison of `222f4e2d` and `74a1eaf2`. Final CI must cover the
+combined delivery; the sealed measurements and original build/source identities
+remain unchanged.
+
 ## Next bounded hypothesis
 
 The accepted change lowers serial state-management cost without adding workers.

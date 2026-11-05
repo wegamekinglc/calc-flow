@@ -17,6 +17,14 @@ measurements. Use the current guides for supported behavior.
   [inline-state study](benchmarks/sum-state/sum-inline-state-20261105.md) for
   paired intervals, profiles, resource scope, and unmeasured paths.
 
+- 2026-11-05: Add an opt-in `parallelism_mode="auto_rows"` DataFusion policy.
+  It derives the target-partition request from input rows and host capacity
+  without requiring trusted active-entity statistics; valid entity metadata can
+  only lower the request, and missing metadata is ignored instead of forcing one
+  partition. Multi-input batch SQL uses the existing whole-run external-row
+  policy, the default remains `fixed`, and project/checkpoint formats are
+  unchanged.
+
 - 2026-11-05: Record a bounded batch-parallel integer SQL `SUM` experiment and
   its reproducible profiling tools. Reject the runtime prototype after confirmed
   dense-stream regressions of 15.75% with four CPUs and 18.60% with eight CPUs.

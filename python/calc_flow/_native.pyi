@@ -371,7 +371,7 @@ class _DataFusionMetric(TypedDict):
     coalesce_operator_count: int
     output_rows: int
     configured_batch_size: int
-    parallelism_mode: Literal["fixed", "auto"]
+    parallelism_mode: Literal["fixed", "auto", "auto_rows"]
     configured_target_partitions: int
     requested_target_partitions: int
     effective_target_partitions: int

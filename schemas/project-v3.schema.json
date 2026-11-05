@@ -933,6 +933,11 @@
           "const": "auto",
           "description": "Choose a partition count from host capacity and input work. Batch graphs\ncontaining multi-input SQL use the external table row count; other\nruntimes also require trusted input entity statistics.",
           "type": "string"
+        },
+        {
+          "const": "auto_rows",
+          "description": "Choose a partition count from host capacity and input rows without\nrequiring trusted active-entity statistics. A trusted entity count,\nwhen present, can only lower the row-based request. Multi-input batch\nSQL uses the same whole-run external-row policy as [`Self::Auto`].",
+          "type": "string"
         }
       ]
     },

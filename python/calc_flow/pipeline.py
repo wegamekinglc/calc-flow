@@ -919,7 +919,7 @@ class PipelineBuilder:
         *,
         batch_size: int = 8_192,
         target_partitions: int = 1,
-        parallelism_mode: Literal["fixed", "auto"] = "fixed",
+        parallelism_mode: Literal["fixed", "auto", "auto_rows"] = "fixed",
         max_partitions: int = 32,
         min_rows_per_partition: int = 65_536,
         small_rows_threshold: int = 10_001,
@@ -928,10 +928,12 @@ class PipelineBuilder:
     ) -> PipelineBuilder:
         """Return a builder with an immutable run-scoped DataFusion policy.
 
-        ``auto`` is opt-in. Batch graphs containing multi-input SQL select a
-        run-scoped budget from external table rows and host capacity. Other
-        graphs require trusted ``calc_flow.datafusion.active_entities`` batch
-        metadata and fall back to one partition when it is absent or invalid.
+        ``auto`` and ``auto_rows`` are opt-in. Batch graphs containing multi-input
+        SQL select a run-scoped budget from external table rows and host capacity.
+        Other ``auto`` graphs require trusted
+        ``calc_flow.datafusion.active_entities`` batch metadata and fall back to
+        one partition when it is absent or invalid; ``auto_rows`` uses input rows
+        instead and treats entity metadata as an optional upper bound.
         """
         integers = {
             "batch_size": batch_size,
@@ -946,9 +948,9 @@ class PipelineBuilder:
             if value <= 0:
                 raise ValueError(f"{field_name} must be a positive integer")
         if type(parallelism_mode) is not str:
-            raise TypeError("parallelism_mode must be fixed or auto")
-        if parallelism_mode not in {"fixed", "auto"}:
-            raise ValueError("parallelism_mode must be fixed or auto")
+            raise TypeError("parallelism_mode must be a string")
+        if parallelism_mode not in {"fixed", "auto", "auto_rows"}:
+            raise ValueError("parallelism_mode must be fixed, auto, or auto_rows")
         for field_name, value in {
             "enable_rolling_rewrite": enable_rolling_rewrite,
             "collect_diagnostics": collect_diagnostics,

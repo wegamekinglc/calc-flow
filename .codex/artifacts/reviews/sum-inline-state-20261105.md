@@ -2,7 +2,9 @@
 
 **Branch:** `feature/sum-inline-state` → `main`
 
-**Base:** `222f4e2d88f56b5b4ce635abab24eceed732da6d`
+**Delivery base:** `49525978f0a4731ee2e2ad8ce01faefff86a2f4a`
+
+**Experiment base:** `222f4e2d88f56b5b4ce635abab24eceed732da6d`
 
 **Measured source:** public
 [74a1eaf2183adfd04fcb1aeecd655c6df73ed16f](https://github.com/wegamekinglc/calc-flow/commit/74a1eaf2183adfd04fcb1aeecd655c6df73ed16f),
@@ -10,9 +12,10 @@ tree `04b554c37f0afe8e40fa8e821b9c6b808418f558`. It exactly matches the
 reviewed source/tool tree after the initial review.
 
 **Final delivery verification checkpoint:** local
-`d0c60561f4a5cd5355736722956c6bbf029b7075`, tree
-`9310d1a17cd048fcc15cd1061795fa6de3c74caa`, before this review update.
-Only evidence and documentation differ from the measured source.
+`03fb8fac5289ec950bfbc6464c2ab7dbb5256671`, tree
+`2ab0cd85fc231311d7108c969bc05f2c63c06df9`, before this review update.
+It integrates upstream AutoRows while preserving the measured SUM modules
+and reviewed helper bytes. The integrated product is not a measured binary.
 
 **Original source verification checkpoint:** local
 `d0bbca1bf92b0ae4a2a8b44539f1aabecbe8b721`, tree
@@ -30,9 +33,10 @@ and the previous experiment's
 
 **Files changed against base:** 33, including this review.
 
-The final review precedes opening the delivery PR; no final remote check
-result is claimed. The parent owns publication, required CI completion,
-and merge.
+The delivery is [PR #542](https://github.com/wegamekinglc/calc-flow/pull/542).
+The earlier parent snapshot had no Actions run because of the merge conflict,
+with Codacy in progress. The integrated final head still needs required
+checks; no remote success is claimed. The parent owns publication and merge.
 
 ## Summary
 
@@ -80,9 +84,9 @@ new state. Global-record/coalescer paths remain explicitly Generic.
 Group fields still release key/value/aggregate storage before their
 reservation. Conservative aggregate fees are retained. Group, Candidate,
 map slots, container capacity, and imports continue using the existing
-dynamic size-based charges. No public API, project schema, dependency,
-checkpoint-policy version, state-layout version, or new worker model is
-introduced.
+dynamic size-based charges. The SUM optimization changes no public API,
+project schema, dependency, checkpoint policy/version, state layout, or
+worker model.
 
 ## Design Findings Closed Before Measurement
 
@@ -380,10 +384,36 @@ two accepted profiles, verified helper seals, complete analysis, completed
 status, null failure, and true performance acceptance. No sealed file was
 edited to change a verdict or narrative.
 
-Final delivery checkpoint d0c60561 has no change from measured public P74 in
-crates, Cargo files, configuration, scripts/helpers, schema, or Python API.
-Only evidence and documentation were added. The final delivery does not
-substitute a new unmeasured implementation.
+The SUM implementation, its codec/output adaptations, and reviewed measurement
+helpers still match measured public P74. Upstream integration intentionally
+changes other runtime/configuration/schema/Python surfaces as described below;
+the entire integrated product is not byte-equivalent to P74 or performance
+remeasured.
+
+## Upstream Integration Qualification
+
+After acquisition, main advanced to 49525978, adding explicit opt-in
+`DataFusionParallelismMode::AutoRows`. The final merge has parents
+published delivery `2f9e0fedef5f6f46bd98769f4d12ee41912d384a` and main495.
+Its only conflict was the changelog; both entries are preserved. Upstream
+Cargo declarations, generated schema, Python surfaces, documentation, and
+tests remain intact. The schema/DataFusion configuration/Cargo/Python surfaces
+have no additional SUM-related diff against main495.
+
+Reviewer read the 222→495 configuration/decision delta and exact maintained
+harness. common657 explicitly selects Fixed mode, one target partition,
+and minimum rows per partition one. The default remains Fixed/one;
+`serial_owned_sql` and Fixed-one template admission are unchanged.
+`prepare_batch_sql_parallelism` returns early for Fixed. The added AutoRows
+branch is not selected, and the Fixed partition calculation/result remains
+the same. No SQL SUM module or reviewed measurement helper changes upstream.
+
+This supports integration compatibility, not performance equivalence of the
+new binary. Every reported timing, build/source seal, and acceptance result
+remains the original 222f4e2d→public74a1eaf2 comparison. The integrated product
+and AutoRows mode are explicitly unmeasured. No additional build, test, profile,
+or measurement was run locally for this narrow integration review; final CI
+must verify the combined tree. Sealed measurements/protocol remain unchanged.
 
 ## Blocking Issues
 
@@ -401,18 +431,20 @@ and unchanged checkpoint contracts. The dated changelog and benchmark index
 link the accepted study; older cohorts and the rejected parallel experiment
 remain clearly labeled. The parent analysis describes whole-run timings,
 paired intervals, component versus process resource scope, profile limits,
-and explicitly unmeasured paths. No guide/API command change is needed for
-this internal representation optimization.
+and explicitly unmeasured paths. The SUM optimization needs no guide/API
+command change. The separate upstream AutoRows API/schema/docs changes are
+preserved and are not attributed to this optimization.
 
 ## Verdict
 
 **Approve — final specialist source, performance, and documentation PASS**,
-bound to measured public 74a1eaf2 and local final delivery d0c60561.
+bound to measured public 74a1eaf2 and local integrated delivery 03fb8fac,
+with the upstream integration qualification above.
 The design findings are closed, all three measured cases are improved under
 the frozen rule, and complete campaign and provenance evidence is
 preserved.
 
 This is not a green-CI or merge-ready statement. The exact final PR head must
 pass all required CI, Codacy, coverage, and cross-platform checks before the
-already-authorized merge. No new measurement is needed for evidence/document
-additions that leave the reviewed measured source and helpers unchanged.
+already-authorized merge. Original performance claims remain scoped to the
+sealed cohort; integration does not establish new performance results.
