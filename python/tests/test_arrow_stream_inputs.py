@@ -101,6 +101,70 @@ def test_materialized_stream_matches_iterable_without_python_source_calls(
     assert (data.to_pydict(), data.schema) == before
 
 
+def test_materialized_sequence_streams_without_python_source_calls(
+    monkeypatch,
+) -> None:
+    schema = pa.schema([pa.field("value", pa.int64())])
+    batches = [
+        pa.record_batch([[1, 2]], schema=schema),
+        pa.record_batch([[3]], schema=schema),
+    ]
+    source = cf.table_input("events", schema=schema)
+    output = source.select(doubled=source["value"] * 2)
+    calls = 0
+    original = _IterableSource.next
+
+    async def counted(self):
+        nonlocal calls
+        calls += 1
+        return await original(self)
+
+    monkeypatch.setattr(_IterableSource, "next", counted)
+
+    async def feed():
+        for batch in batches:
+            yield batch
+
+    async def collect(value):
+        async with output.stream(value) as results:
+            tables = [table async for table in results]
+        assert results.job.status()["state"] == "completed"
+        assert results.job.status()["task_count"] == 0
+        return tables
+
+    expected = asyncio.run(collect(feed()))
+    assert calls > 0
+    calls = 0
+    actual = asyncio.run(collect(batches))
+    assert calls == 0
+    assert len(actual) == len(batches)
+    assert pa.concat_tables(actual).equals(pa.concat_tables(expected))
+    assert [batch.to_pydict() for batch in batches] == [
+        {"value": [1, 2]},
+        {"value": [3]},
+    ]
+
+
+def test_materialized_sequence_rejects_invalid_input() -> None:
+    schema = pa.schema([("value", pa.int64())])
+    source = cf.table_input("events", schema=schema)
+
+    async def rejects(value, error, match):
+        with pytest.raises(error, match=match):
+            async with source.stream(value):
+                pass
+
+    asyncio.run(rejects([], ValueError, "must not be empty"))
+    asyncio.run(
+        rejects(
+            [pa.table({"value": [1]}, schema=schema), pa.table({"value": ["x"]})],
+            ValueError,
+            "declared Arrow schema",
+        )
+    )
+    asyncio.run(rejects([1, 2], TypeError, "materialized sequence"))
+
+
 def test_materialized_stream_delivers_results_without_python_sink_calls(
     monkeypatch,
 ) -> None:

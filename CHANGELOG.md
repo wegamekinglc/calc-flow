@@ -20,6 +20,13 @@ measurements. Use the current guides for supported behavior.
   Withdraw the runtime prototype and preserve the existing key path. Publish
   the [complete study](benchmarks/sum-state/sum-columnar-keys-20261105.md),
   paired intervals, profiles, correctness checks and reproducible tools.
+- 2026-11-05: Accept a non-empty list or tuple of materialized Arrow tables,
+  record batches or table batches as one stream input. The sequence is
+  schema-checked and concatenated without copying buffers, then replayed by the
+  native Arrow source with its record boundaries intact, avoiding one Python
+  source call per batch. Empty sequences, mismatched schemas and non-Arrow items
+  are rejected; snapshot SQL and source-provided watermark rules are unchanged.
+
 
 - 2026-11-05: Store a single grouped integer SQL `SUM` in one compact nullable
   state and cache its bound type metadata. Reduce selected dense-stream median
