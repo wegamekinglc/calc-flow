@@ -46,6 +46,7 @@ use crate::operator::{
     DataFusionRollingWindow,
 };
 
+mod argmax;
 mod sql_aggregate;
 use sql_aggregate::{SqlRollingKernel, SqlRollingState};
 
@@ -90,10 +91,13 @@ impl QueryPlanner for CalcFlowQueryPlanner {
         logical_plan: &LogicalPlan,
         session_state: &dyn Session,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        let eligibility = inspect_logical_windows(logical_plan);
+        let (logical_plan, argmax_windows) = argmax::rewrite(logical_plan)?;
+        let mut eligibility = inspect_logical_windows(&logical_plan);
+        eligibility.candidate_windows += argmax_windows;
+        eligibility.rewritten_windows = argmax_windows;
         let planner = DefaultPhysicalPlanner::default();
         let plan = planner
-            .create_physical_plan(logical_plan, session_state)
+            .create_physical_plan(&logical_plan, session_state)
             .await?;
         if eligibility.candidate_windows == 0 || !eligibility.fallback_reasons.is_empty() {
             self.audit.replace(eligibility);
@@ -101,7 +105,7 @@ impl QueryPlanner for CalcFlowQueryPlanner {
         }
 
         let original = Arc::clone(&plan);
-        let mut rewritten_windows = 0;
+        let mut rewritten_windows = argmax_windows;
         let transformed = plan.transform_up(|node| {
             let Some(window) = node.downcast_ref::<BoundedWindowAggExec>() else {
                 return Ok(Transformed::no(node));
@@ -122,7 +126,7 @@ impl QueryPlanner for CalcFlowQueryPlanner {
                 rewritten_windows, audit.candidate_windows
             ));
             if audit.contains_count {
-                audit.rewritten_windows = 0;
+                audit.rewritten_windows = argmax_windows;
                 self.audit.replace(audit);
                 return Ok(original);
             }
@@ -141,6 +145,9 @@ fn inspect_logical_windows(plan: &LogicalPlan) -> RollingRewriteAuditSnapshot {
 fn inspect_logical_node(plan: &LogicalPlan, audit: &mut RollingRewriteAuditSnapshot) {
     if let LogicalPlan::Window(window) = plan {
         for expression in &window.window_expr {
+            if argmax::is_rewritten(expression) {
+                continue;
+            }
             audit.candidate_windows += 1;
             audit.contains_count |= logical_window_function(expression)
                 .and_then(inspect_logical_aggregate)

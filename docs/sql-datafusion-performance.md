@@ -31,7 +31,7 @@ executions.
 | `max_partitions`         | `32`    | Upper bound for `auto`                                         |
 | `min_rows_per_partition` | `65536` | Work cap used by both modes                                    |
 | `small_rows_threshold`   | `10001` | Smaller auto workloads remain p1                               |
-| `enable_rolling_rewrite` | `true`  | Enables bounded `AVG` and compatible paired `COUNT` rewrites   |
+| `enable_rolling_rewrite` | `true`  | Enables supported bounded SQL rolling rewrites                |
 | `collect_diagnostics`    | `true`  | Collects plan strings and physical metric traversal            |
 
 The project schema accepts non-negative numeric values for compatibility with
@@ -257,6 +257,15 @@ promise on arbitrary floating inputs. Native `stable_v1`/`stable_v2` profiles,
 checkpoint identities and transition ordering are unchanged. Finite
 comparison tolerances and special-value classifications are checked by the
 corresponding numerical fixtures.
+
+A separate composite rewrite recognizes the rolling-age expression formed by
+`COUNT(*)`, `array_position(array_agg(price), MAX(price))`, and the outer casts.
+All three windows must reference the same Float64 column and bounded row frame,
+without filters, distinctness, or null-treatment changes. The rewrite uses a
+sliding accumulator that counts NULL row positions and retains the oldest tied
+maximum. An all-NULL frame follows `array_position`'s null-safe comparison and
+uses its oldest NULL. Other projection expressions must remain simple input columns; extra
+or partially matching windows retain the ordinary DataFusion path.
 
 Retained-window updates are amortized `O(1)` per value. Sorting, partitioning,
 scanning and Arrow output construction remain part of full-query cost.

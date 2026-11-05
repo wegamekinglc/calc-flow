@@ -882,7 +882,7 @@
         },
         "enable_rolling_rewrite": {
           "default": true,
-          "description": "Enables bounded SQL `AVG` and compatible paired `COUNT` rolling rewrites.",
+          "description": "Enables supported bounded SQL rolling rewrites.",
           "type": "boolean"
         },
         "max_partitions": {
