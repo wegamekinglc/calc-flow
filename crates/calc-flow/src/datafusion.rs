@@ -59,6 +59,11 @@ pub enum DataFusionParallelismMode {
     /// containing multi-input SQL use the external table row count; other
     /// runtimes also require trusted input entity statistics.
     Auto,
+    /// Choose a partition count from host capacity and input rows without
+    /// requiring trusted active-entity statistics. A trusted entity count,
+    /// when present, can only lower the row-based request. Multi-input batch
+    /// SQL uses the same whole-run external-row policy as [`Self::Auto`].
+    AutoRows,
 }
 
 /// Batch metadata key carrying a trusted positive active-entity count.
@@ -918,7 +923,10 @@ impl DataFusionRuntime {
 
     /// Freeze a whole-batch policy without eagerly creating the session.
     pub(crate) fn prepare_batch_sql_parallelism(&mut self, input_rows: usize) {
-        if self.config.parallelism_mode != DataFusionParallelismMode::Auto {
+        if !matches!(
+            self.config.parallelism_mode,
+            DataFusionParallelismMode::Auto | DataFusionParallelismMode::AutoRows
+        ) {
             return;
         }
         self.parallelism_decision.get_or_init(|| {
@@ -1206,7 +1214,9 @@ fn parallelism_decision(
     let available_parallelism = available_parallelism.max(1);
     let requested_partitions = match config.parallelism_mode {
         DataFusionParallelismMode::Fixed => config.target_partitions,
-        DataFusionParallelismMode::Auto => available_parallelism.min(config.max_partitions),
+        DataFusionParallelismMode::Auto | DataFusionParallelismMode::AutoRows => {
+            available_parallelism.min(config.max_partitions)
+        }
     };
     let decision = |effective_partitions, limit_reason| DataFusionParallelismDecision {
         requested_partitions,
@@ -1248,6 +1258,32 @@ fn parallelism_decision(
         } else {
             "available_parallelism"
         };
+        return decision(effective_partitions, reason);
+    }
+    if config.parallelism_mode == DataFusionParallelismMode::AutoRows {
+        if input_rows < config.small_rows_threshold {
+            return decision(1, "small_input");
+        }
+        let work_cap = input_rows.div_ceil(config.min_rows_per_partition).max(1);
+        let mut effective_partitions = requested_partitions.min(work_cap);
+        let mut reason = if effective_partitions == work_cap && work_cap < requested_partitions {
+            "minimum_rows_per_partition"
+        } else if config.max_partitions <= available_parallelism {
+            "configured_max_partitions"
+        } else {
+            "available_parallelism"
+        };
+        // Trusted entity statistics only tighten the row-based request. Unlike
+        // `Auto`, their absence never pins the run to one partition.
+        if let Some(entities) = active_entities {
+            if entities < 2 {
+                return decision(1, "single_entity");
+            }
+            if effective_partitions > entities {
+                effective_partitions = entities;
+                reason = "active_entities";
+            }
+        }
         return decision(effective_partitions, reason);
     }
 

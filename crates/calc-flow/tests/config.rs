@@ -252,6 +252,22 @@ fn datafusion_config_accepts_opt_in_auto_parallelism() {
 }
 
 #[test]
+fn datafusion_config_accepts_opt_in_auto_rows_parallelism() {
+    let config = serde_json::from_value::<DataFusionConfig>(json!({
+        "parallelism_mode": "auto_rows",
+        "max_partitions": 16,
+        "min_rows_per_partition": 32_768,
+        "small_rows_threshold": 10_001
+    }))
+    .unwrap();
+
+    assert_eq!(
+        serde_json::to_value(config).unwrap()["parallelism_mode"],
+        json!("auto_rows")
+    );
+}
+
+#[test]
 fn validate_rejects_invalid_constructed_identity_positions_and_limits() {
     let (providers, udfs) = empty_registries();
     let mut value = project(expression_node("node"));

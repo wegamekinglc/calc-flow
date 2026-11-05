@@ -126,7 +126,9 @@ create no DataFusion session or UDF snapshot.
 `BatchExecutionPlan::requires_datafusion()` returns the classification alone.
 `DataFusionConfig` keeps `parallelism_mode=Fixed` and
 `target_partitions=1` as its compatible default. Opt-in `Auto` freezes a
-whole-run external-row policy for batch graphs containing multi-input SQL.
+whole-run external-row policy for batch graphs containing multi-input SQL, and
+opt-in `AutoRows` derives the request from input rows without requiring trusted
+entity statistics.
 Other graphs and runtimes additionally require the trusted
 `calc_flow.datafusion.active_entities` batch metadata value. Neither policy
 scans input rows. See
