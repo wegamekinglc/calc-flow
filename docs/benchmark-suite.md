@@ -83,10 +83,11 @@ The separate engine and warm-state matrices still run every decade
 through 10M rows. Dynamic pytest and Criterion inventories preserve
 benchmark cases without a second hand-written case list.
 
-The 10M-row engine shard and the Rust shard have 240-minute job budgets; other
-measurement shards have 180 minutes. This includes dependency setup,
-measurements and artifact retention. The Rust shard needs the extra time when
-its build cache misses and both sides compile from cold dependencies. All engine
+The 10M-row engine shard has a 360-minute job budget for its complete paired
+1T/4T inventory. The Rust shard has 240 minutes, and other measurement shards
+have 180 minutes. These budgets include dependency setup, measurements and
+artifact retention. The Rust shard needs the extra time when its build cache
+misses and both sides compile from cold dependencies. All engine
 tiers retain the complete case inventory, two rounds of ten samples and the +5%
 regression gate.
 

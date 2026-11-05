@@ -441,13 +441,13 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         summary = suite.split("  summary:\n", 1)[1]
         self.assertIn("needs: [prepare, build, suite]", summary)
 
-    def test_rust_shard_budget_covers_cold_dependency_builds(self):
+    def test_large_shard_budgets_cover_complete_measurements(self):
         suite = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
             encoding="utf-8"
         )
         self.assertIn(
-            "timeout-minutes: ${{ (matrix.id == 'engines-10000000' || "
-            "matrix.id == 'rust') && 240 || 180 }}",
+            "timeout-minutes: ${{ matrix.id == 'engines-10000000' && 360 || "
+            "matrix.id == 'rust' && 240 || 180 }}",
             suite,
         )
 
