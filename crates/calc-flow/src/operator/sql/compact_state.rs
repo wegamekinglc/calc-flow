@@ -4,9 +4,9 @@ mod export;
 pub(in crate::operator::sql) use super::native_expression::NativeAggregateInput;
 use super::native_expression::describe_input;
 use super::{
-    AggregateFunctionExpr, Arc, ArrayRef, CHUNK_ROWS, DataType, Field, Group, IncrementalSql,
-    MemoryReservation, RecordBatch, Result, ScalarValue, Schema, SchemaRef, checked_bytes,
-    df_error, ensure_reservation, native_grouped_result,
+    AggregateFunctionExpr, Arc, ArrayRef, CHUNK_ROWS, DataType, Field, Group, GroupAggregates,
+    IncrementalSql, MemoryReservation, RecordBatch, Result, ScalarValue, Schema, SchemaRef,
+    checked_bytes, df_error, ensure_reservation, native_grouped_result,
 };
 use datafusion::arrow::{
     array::{Array, Int64Array, LargeStringArray, StringArray, UInt64Array},
@@ -816,8 +816,12 @@ impl IncrementalSql {
         Ok(Group {
             key: Arc::from(key),
             values: Arc::from(values),
-            states,
-            results,
+            aggregates: GroupAggregates::restored(
+                self.inline_integer_sum(),
+                states,
+                results,
+                name,
+            )?,
             reservation,
         })
     }
@@ -1167,7 +1171,8 @@ fn add_group_counts(
     name: &str,
 ) -> Result<()> {
     for (index, function) in descriptor.aggregate_names.iter().enumerate() {
-        let count = match (function.as_str(), group.states[index].first()) {
+        let state = group.aggregates.state(index);
+        let count = match (function.as_str(), state.first()) {
             ("count", Some(ScalarValue::Int64(Some(count)))) => u64::try_from(*count)
                 .map_err(|_| df_error(name, "native COUNT state is negative"))?,
             ("avg", Some(ScalarValue::UInt64(count))) => count.unwrap_or(0),

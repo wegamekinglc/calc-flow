@@ -74,10 +74,19 @@ mod input_checks;
 use group_key::GroupKey;
 use native_expression::output_work;
 
+#[cfg(test)]
+#[path = "grouped_inline_tests.rs"]
+mod grouped_inline_tests;
+
+#[path = "group_aggregates.rs"]
+mod group_aggregates;
+use group_aggregates::{GroupAggregates, InlineSum, StateView};
+
 #[path = "output_order.rs"]
 mod output_order;
 
 pub(super) struct IncrementalSql {
+    inline_sum: Option<InlineSum>,
     schema: SchemaRef,
     ordered_last: bool,
     pub(in crate::operator::sql) compact_budget: Option<crate::StateBudget>,
@@ -121,8 +130,7 @@ pub(super) struct IncrementalSql {
 struct Group {
     key: Arc<[u8]>,
     values: Arc<[ScalarValue]>,
-    states: Vec<Vec<ScalarValue>>,
-    results: Vec<ScalarValue>,
+    aggregates: GroupAggregates,
     reservation: MemoryReservation,
 }
 
@@ -374,12 +382,8 @@ impl PartialGroups {
         let slots = &self.slots;
         for (index, _) in aggregates.iter().enumerate() {
             if self.sequential[index] {
-                let saved = (self.seeded..slots.len()).map(|rank| {
-                    (
-                        rank,
-                        candidates[&slots[rank]].group.states[index].as_slice(),
-                    )
-                });
+                let saved = (self.seeded..slots.len())
+                    .map(|rank| (rank, candidates[&slots[rank]].group.aggregates.state(index)));
                 self.accumulators[index].seed_batch(saved, slots.len(), name)?;
             }
         }
@@ -450,7 +454,9 @@ impl PartialGroups {
                         start + offset,
                         committed
                             .get(*slot)
-                            .map_or(&[][..], |group| group.states[index].as_slice()),
+                            .map_or(StateView::Borrowed(&[]), |group| {
+                                group.aggregates.state(index)
+                            }),
                     )
                 });
                 accumulator.seed_batch(saved, self.slots.len(), name)?;
@@ -504,34 +510,72 @@ impl PartialGroups {
         rank: usize,
         name: &str,
     ) -> Result<()> {
+        if candidate.group.aggregates.is_inline() {
+            return Self::merge_inline(candidate, states, rank, name);
+        }
         for (index, arrays) in states.iter().enumerate() {
-            if self.sequential[index] || self.accumulators[index].integer_sum() {
-                let state = arrays
-                    .iter()
-                    .map(|array| {
-                        ScalarValue::try_from_array(array, rank)
-                            .map_err(|error| df_error(name, error))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                candidate.group.results[index] = if self.accumulators[index].ordered_last() {
-                    ordered_last::result(&state, self.accumulators[index].ignore_nulls(), name)?
-                } else {
-                    grouped_sum::result(&state, name)?
-                };
-                candidate.group.states[index] = state;
-            } else {
-                let arrays = arrays
-                    .iter()
-                    .map(|array| array.slice(rank, 1))
-                    .collect::<Vec<_>>();
-                candidate.accumulators[index]
-                    .as_mut()
-                    .expect("summary accumulator")
-                    .merge_batch(&arrays)
-                    .map_err(|error| df_error(name, error))?;
-            }
+            self.merge_aggregate_rank(candidate, index, arrays, rank, name)?;
         }
         Ok(())
+    }
+
+    fn merge_inline(
+        candidate: &mut Candidate,
+        states: &[Vec<ArrayRef>],
+        rank: usize,
+        name: &str,
+    ) -> Result<()> {
+        let [arrays] = states else {
+            return Err(df_error(name, "inline SUM aggregate state count differs"));
+        };
+        let [array] = arrays.as_slice() else {
+            return Err(df_error(name, "inline SUM field count differs"));
+        };
+        let value =
+            ScalarValue::try_from_array(array, rank).map_err(|error| df_error(name, error))?;
+        candidate.group.aggregates.replace_inline(&value, name)
+    }
+
+    fn merge_aggregate_rank(
+        &self,
+        candidate: &mut Candidate,
+        index: usize,
+        arrays: &[ArrayRef],
+        rank: usize,
+        name: &str,
+    ) -> Result<()> {
+        if self.sequential[index] || self.accumulators[index].integer_sum() {
+            let state = arrays
+                .iter()
+                .map(|array| {
+                    ScalarValue::try_from_array(array, rank).map_err(|error| df_error(name, error))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let result = self.rank_result(index, &state, name)?;
+            candidate
+                .group
+                .aggregates
+                .replace(index, state, result, name)?;
+        } else {
+            let arrays = arrays
+                .iter()
+                .map(|array| array.slice(rank, 1))
+                .collect::<Vec<_>>();
+            candidate.accumulators[index]
+                .as_mut()
+                .expect("summary accumulator")
+                .merge_batch(&arrays)
+                .map_err(|error| df_error(name, error))?;
+        }
+        Ok(())
+    }
+
+    fn rank_result(&self, index: usize, state: &[ScalarValue], name: &str) -> Result<ScalarValue> {
+        if self.accumulators[index].ordered_last() {
+            ordered_last::result(state, self.accumulators[index].ignore_nulls(), name)
+        } else {
+            grouped_sum::result(state, name)
+        }
     }
 }
 
@@ -753,6 +797,7 @@ impl IncrementalSql {
         };
         let (converter, finalizer_bytes) = grouped_layout(&keys, &aggregates, name)?;
         Ok(Some(Self {
+            inline_sum: group_aggregates::bind_inline_sum(&keys, &aggregates),
             ordered_last: aggregates.iter().any(|expr| ordered_last::selected(expr)),
             variable_extrema: variable_extrema_slots(&aggregates),
             compact_budget: None,
@@ -972,22 +1017,38 @@ impl IncrementalSql {
             group: Group {
                 key,
                 values,
-                states: self
-                    .aggregates
-                    .iter()
-                    .enumerate()
-                    .map(|(index, expression)| {
-                        previous
-                            .filter(|_| self.needs_owned_history(expression))
-                            .map_or_else(Vec::new, |previous| previous.states[index].clone())
-                    })
-                    .collect(),
-                results: vec![ScalarValue::Null; self.aggregates.len()],
+                aggregates: self.candidate_values(previous),
                 reservation,
             },
             accumulators,
             variable,
         })
+    }
+
+    fn inline_integer_sum(&self) -> bool {
+        self.inline_sum.is_some()
+    }
+
+    fn candidate_values(&self, previous: Option<&Group>) -> GroupAggregates {
+        if let Some(value) = self.inline_sum {
+            return GroupAggregates::IntegerSum(value);
+        }
+        let states = self
+            .aggregates
+            .iter()
+            .enumerate()
+            .map(|(index, expression)| {
+                previous
+                    .filter(|_| self.needs_owned_history(expression))
+                    .map_or_else(Vec::new, |previous| {
+                        previous.aggregates.state(index).to_vec()
+                    })
+            })
+            .collect();
+        GroupAggregates::Generic {
+            states,
+            results: vec![ScalarValue::Null; self.aggregates.len()],
+        }
     }
 
     fn needs_owned_history(&self, expr: &AggregateFunctionExpr) -> bool {
@@ -1005,6 +1066,9 @@ impl IncrementalSql {
         previous: Option<&Group>,
         name: &str,
     ) -> Result<Vec<Option<Box<dyn Accumulator>>>> {
+        if self.inline_sum.is_some() {
+            return Ok(vec![None]);
+        }
         self.aggregates
             .iter()
             .enumerate()
@@ -1016,7 +1080,9 @@ impl IncrementalSql {
                     .create_accumulator()
                     .map_err(|error| df_error(name, error))?;
                 if let Some(previous) = previous {
-                    let arrays = previous.states[index]
+                    let arrays = previous
+                        .aggregates
+                        .state(index)
                         .iter()
                         .map(ScalarValue::to_array)
                         .collect::<datafusion::error::Result<Vec<_>>>()
@@ -1139,7 +1205,11 @@ impl IncrementalSql {
                 (
                     &self.aggregates,
                     &self.aggregate_filters,
-                    &candidate.group.states,
+                    candidate
+                        .group
+                        .aggregates
+                        .generic_states()
+                        .expect("global state is generic"),
                     self.predicate.as_ref(),
                     &self.input_checks,
                 ),
@@ -1150,8 +1220,11 @@ impl IncrementalSql {
             .await?;
         let coalesced = values.coalesced;
         for (index, state) in values.values.into_iter().enumerate() {
-            candidate.group.results[index] = global.result(index, &state, name)?;
-            candidate.group.states[index] = state;
+            let result = global.result(index, &state, name)?;
+            candidate
+                .group
+                .aggregates
+                .replace(index, state, result, name)?;
         }
         Ok(coalesced)
     }
@@ -1849,8 +1922,10 @@ impl IncrementalSql {
                     accumulator.as_mut(),
                     name,
                 )?;
-                candidate.group.states[index] = state;
-                candidate.group.results[index] = result;
+                candidate
+                    .group
+                    .aggregates
+                    .replace(index, state, result, name)?;
             }
         }
         Ok(())
@@ -2021,7 +2096,10 @@ impl IncrementalSql {
             if column < self.keys.len() {
                 group.values[column].clone()
             } else {
-                group.results[column - self.keys.len()].clone()
+                group
+                    .aggregates
+                    .result(column - self.keys.len())
+                    .into_owned()
             }
         }))
         .map_err(|error| df_error(name, error))
@@ -3564,7 +3642,7 @@ mod tests {
         let result = std::panic::AssertUnwindSafe(async {
             plan.finalize_candidates(&mut candidates, &context, "totals")
                 .await?;
-            Ok(candidates[&0].group.results[0].clone())
+            Ok(candidates[&0].group.aggregates.result(0).into_owned())
         })
         .catch_unwind()
         .await;
@@ -3689,7 +3767,10 @@ mod tests {
             .unwrap();
         collector.drain("output");
         let incremental = operator.incremental.as_mut().unwrap();
-        incremental.groups[0].states[0][0] = ScalarValue::UInt64(Some(count));
+        let GroupAggregates::Generic { states, .. } = &mut incremental.groups[0].aggregates else {
+            panic!("AVG state is generic")
+        };
+        states[0][0] = ScalarValue::UInt64(Some(count));
         let before = operator.checkpoint(crate::Epoch::INITIAL).unwrap();
         let failed = std::panic::AssertUnwindSafe(operator.process_data(
             "events",
@@ -3709,7 +3790,9 @@ mod tests {
             &after.segments["group-state"].bytes_arc()
         ));
         assert_eq!(
-            operator.incremental.as_ref().unwrap().groups[0].states[0][0],
+            operator.incremental.as_ref().unwrap().groups[0]
+                .aggregates
+                .state(0)[0],
             ScalarValue::UInt64(Some(count))
         );
         operator

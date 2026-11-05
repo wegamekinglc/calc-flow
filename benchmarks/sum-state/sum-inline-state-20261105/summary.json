@@ -1,0 +1,1885 @@
+{
+  "accepted_profile_count": 2,
+  "builds": {
+    "baseline": {
+      "binary": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/sum-inline-state-20261105/build/baseline/grouped_sum_state_benchmark",
+      "binary_sha256": "c99c5bb268f320d71f4efb957d2ac4a709ddc231751536836f1d64a9c0e2c83b",
+      "build_elapsed_seconds": 597.8614503029967,
+      "build_environment": {
+        "CARGO_BUILD_JOBS": "2",
+        "CARGO_ENCODED_RUSTFLAGS": null,
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": null,
+        "CARGO_PROFILE_RELEASE_DEBUG": null,
+        "CARGO_PROFILE_RELEASE_LTO": null,
+        "CARGO_PROFILE_RELEASE_OPT_LEVEL": null,
+        "CARGO_TARGET_DIR": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target",
+        "RUSTFLAGS": null,
+        "RUSTUP_TOOLCHAIN": null
+      },
+      "build_validation_elapsed_seconds": 0.18268285400699824,
+      "cargo_lock_sha256": "7c65baff0b6d1c9598817ae0fb92eac205e51f431054a16cabc9ab87db9ff7cb",
+      "command": [
+        "/home/wegamekinglc/.cargo/bin/cargo",
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--features",
+        "benchmark-internals",
+        "--example",
+        "grouped_sum_state_benchmark",
+        "--message-format=json"
+      ],
+      "compiler_log_sha256": "f41184a5e0b7db299cb5eb42dc495fb59ccc164ed9881c62d6590e0994225ec8",
+      "example_recompiled": true,
+      "features": [
+        "benchmark-internals"
+      ],
+      "harness_sha256": "657de3e697907e473691c2fd0d1b99967d46577333135c50176801f6faa4e04e",
+      "product_recompiled": true,
+      "release_artifact_verification": {
+        "actual_core": {
+          "executable": null,
+          "features": [
+            "benchmark-internals"
+          ],
+          "filenames": [
+            "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/release/deps/libcalc_flow-a32b795b53741fbb.rlib",
+            "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/release/deps/libcalc_flow-a32b795b53741fbb.rmeta"
+          ],
+          "fresh": false,
+          "manifest_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state-baseline/crates/calc-flow/Cargo.toml",
+          "package_id": "path+file:///home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state-baseline/crates/calc-flow#2026.11.2",
+          "profile": {
+            "debug_assertions": false,
+            "debuginfo": 0,
+            "opt_level": "3",
+            "overflow_checks": false,
+            "test": false
+          },
+          "reason": "compiler-artifact",
+          "target": {
+            "crate_types": [
+              "lib"
+            ],
+            "doc": true,
+            "doctest": true,
+            "edition": "2024",
+            "kind": [
+              "lib"
+            ],
+            "name": "calc_flow",
+            "src_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state-baseline/crates/calc-flow/src/lib.rs",
+            "test": true
+          }
+        },
+        "actual_example": {
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/release/examples/grouped_sum_state_benchmark",
+          "features": [
+            "benchmark-internals"
+          ],
+          "filenames": [
+            "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/release/examples/grouped_sum_state_benchmark"
+          ],
+          "fresh": false,
+          "manifest_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state-baseline/crates/calc-flow/Cargo.toml",
+          "package_id": "path+file:///home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state-baseline/crates/calc-flow#2026.11.2",
+          "profile": {
+            "debug_assertions": false,
+            "debuginfo": 0,
+            "opt_level": "3",
+            "overflow_checks": false,
+            "test": false
+          },
+          "reason": "compiler-artifact",
+          "target": {
+            "crate_types": [
+              "bin"
+            ],
+            "doc": false,
+            "doctest": false,
+            "edition": "2024",
+            "kind": [
+              "example"
+            ],
+            "name": "grouped_sum_state_benchmark",
+            "required-features": [
+              "benchmark-internals"
+            ],
+            "src_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state-baseline/crates/calc-flow/examples/grouped_sum_state_benchmark.rs",
+            "test": false
+          }
+        },
+        "all_compiled_sources_match_public_git_blobs_except_common_harness": true,
+        "native_datafusion_input_partitions": "default1; common657 does not call opt-in benchmark API",
+        "only_overlay": "crates/calc-flow/examples/grouped_sum_state_benchmark.rs",
+        "original_core_depfile": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/release/deps/calc_flow-a32b795b53741fbb.d",
+        "public_revision": "222f4e2d88f56b5b4ce635abab24eceed732da6d",
+        "sealed_core_depfile": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/sum-inline-state-20261105/build/baseline/core.d",
+        "sealed_core_depfile_sha256": "2139209f8339f68957b845754f54cb0814cb431454bfb35e17270bec8be69024",
+        "source_count": 1004,
+        "source_pre_post_equal": true
+      },
+      "revision": "222f4e2d88f56b5b4ce635abab24eceed732da6d",
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+      "source_root": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state-baseline"
+    },
+    "candidate": {
+      "binary": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/sum-inline-state-20261105/build/candidate/grouped_sum_state_benchmark",
+      "binary_sha256": "8378ba7b8683780868604ce70568aa626f61e0abcd1742ec84f050b95aef1ed3",
+      "build_elapsed_seconds": 548.6420385980164,
+      "build_environment": {
+        "CARGO_BUILD_JOBS": "2",
+        "CARGO_ENCODED_RUSTFLAGS": null,
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": null,
+        "CARGO_PROFILE_RELEASE_DEBUG": null,
+        "CARGO_PROFILE_RELEASE_LTO": null,
+        "CARGO_PROFILE_RELEASE_OPT_LEVEL": null,
+        "CARGO_TARGET_DIR": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target",
+        "RUSTFLAGS": null,
+        "RUSTUP_TOOLCHAIN": null
+      },
+      "build_validation_elapsed_seconds": 1.578536984976381,
+      "cargo_lock_sha256": "7c65baff0b6d1c9598817ae0fb92eac205e51f431054a16cabc9ab87db9ff7cb",
+      "command": [
+        "/home/wegamekinglc/.cargo/bin/cargo",
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--features",
+        "benchmark-internals",
+        "--example",
+        "grouped_sum_state_benchmark",
+        "--message-format=json"
+      ],
+      "compiler_log_sha256": "1679614249d0c0645b756c2705c52eb0af5e626216451f17fee2e040ef5851f5",
+      "example_recompiled": true,
+      "features": [
+        "benchmark-internals"
+      ],
+      "harness_sha256": "657de3e697907e473691c2fd0d1b99967d46577333135c50176801f6faa4e04e",
+      "product_recompiled": true,
+      "release_artifact_verification": {
+        "actual_core": {
+          "executable": null,
+          "features": [
+            "benchmark-internals"
+          ],
+          "filenames": [
+            "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/release/deps/libcalc_flow-a32b795b53741fbb.rlib",
+            "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/release/deps/libcalc_flow-a32b795b53741fbb.rmeta"
+          ],
+          "fresh": false,
+          "manifest_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state-measured/crates/calc-flow/Cargo.toml",
+          "package_id": "path+file:///home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state-measured/crates/calc-flow#2026.11.2",
+          "profile": {
+            "debug_assertions": false,
+            "debuginfo": 0,
+            "opt_level": "3",
+            "overflow_checks": false,
+            "test": false
+          },
+          "reason": "compiler-artifact",
+          "target": {
+            "crate_types": [
+              "lib"
+            ],
+            "doc": true,
+            "doctest": true,
+            "edition": "2024",
+            "kind": [
+              "lib"
+            ],
+            "name": "calc_flow",
+            "src_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state-measured/crates/calc-flow/src/lib.rs",
+            "test": true
+          }
+        },
+        "actual_example": {
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/release/examples/grouped_sum_state_benchmark",
+          "features": [
+            "benchmark-internals"
+          ],
+          "filenames": [
+            "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/release/examples/grouped_sum_state_benchmark"
+          ],
+          "fresh": false,
+          "manifest_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state-measured/crates/calc-flow/Cargo.toml",
+          "package_id": "path+file:///home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state-measured/crates/calc-flow#2026.11.2",
+          "profile": {
+            "debug_assertions": false,
+            "debuginfo": 0,
+            "opt_level": "3",
+            "overflow_checks": false,
+            "test": false
+          },
+          "reason": "compiler-artifact",
+          "target": {
+            "crate_types": [
+              "bin"
+            ],
+            "doc": false,
+            "doctest": false,
+            "edition": "2024",
+            "kind": [
+              "example"
+            ],
+            "name": "grouped_sum_state_benchmark",
+            "required-features": [
+              "benchmark-internals"
+            ],
+            "src_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state-measured/crates/calc-flow/examples/grouped_sum_state_benchmark.rs",
+            "test": false
+          }
+        },
+        "all_compiled_sources_match_public_git_blobs_except_common_harness": true,
+        "core_dependency_proof": {
+          "actual_core": {
+            "executable": null,
+            "features": [
+              "benchmark-internals"
+            ],
+            "filenames": [
+              "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/release/deps/libcalc_flow-a32b795b53741fbb.rlib",
+              "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/release/deps/libcalc_flow-a32b795b53741fbb.rmeta"
+            ],
+            "fresh": false,
+            "manifest_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state-measured/crates/calc-flow/Cargo.toml",
+            "package_id": "path+file:///home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state-measured/crates/calc-flow#2026.11.2",
+            "profile": {
+              "debug_assertions": false,
+              "debuginfo": 0,
+              "opt_level": "3",
+              "overflow_checks": false,
+              "test": false
+            },
+            "reason": "compiler-artifact",
+            "target": {
+              "crate_types": [
+                "lib"
+              ],
+              "doc": true,
+              "doctest": true,
+              "edition": "2024",
+              "kind": [
+                "lib"
+              ],
+              "name": "calc_flow",
+              "src_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state-measured/crates/calc-flow/src/lib.rs",
+              "test": true
+            }
+          },
+          "new_production_group_aggregates_dependency": true,
+          "original_depfile": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/release/deps/calc_flow-a32b795b53741fbb.d",
+          "sealed_depfile": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/sum-inline-state-20261105/build/candidate/core.d",
+          "sealed_depfile_sha256": "af46f17f7947196a8ac4d187736dfbd2c5a583bf6de5281c670ec8842919dcd7"
+        },
+        "only_overlay": "crates/calc-flow/examples/grouped_sum_state_benchmark.rs",
+        "original_builder_receipt_sha256": "35f44dae49ba373d0d14e99f307314fe3f9d09d351fb2a36045cfaa978465c7f",
+        "prebuild_proof_sha256": "6e30c23452944658949e2025c834de9fbd22ed6571ade0eaca105b1c9eae2acc",
+        "public_revision": "74a1eaf2183adfd04fcb1aeecd655c6df73ed16f",
+        "public_tree": "04b554c37f0afe8e40fa8e821b9c6b808418f558",
+        "sealed_example_depfile": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/sum-inline-state-20261105/build/candidate/example.d",
+        "sealed_example_depfile_sha256": "873bc446f2c868f58f1b8dd5c7506ed8f09387bcd99f2c1ed5de2946626a36c0",
+        "source_count": 1008,
+        "source_pre_post_equal": true
+      },
+      "revision": "74a1eaf2183adfd04fcb1aeecd655c6df73ed16f",
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+      "source_root": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state-measured"
+    }
+  },
+  "cases": [
+    {
+      "baseline": [
+        [
+          0.265162514,
+          0.259830367,
+          0.257914973,
+          0.254340277,
+          0.293786801,
+          0.264559217,
+          0.258781096,
+          0.274129269,
+          0.260881648,
+          0.303425192
+        ],
+        [
+          0.262373969,
+          0.274600598,
+          0.254885074,
+          0.255753641,
+          0.259949021,
+          0.277932494,
+          0.331520135,
+          0.277318196,
+          0.278312323,
+          0.2621222
+        ]
+      ],
+      "candidate": [
+        [
+          0.195290777,
+          0.182290164,
+          0.186680787,
+          0.184013759,
+          0.189920243,
+          0.185821119,
+          0.184964459,
+          0.184657904,
+          0.192753289,
+          0.18977973
+        ],
+        [
+          0.183772504,
+          0.208486297,
+          0.188353951,
+          0.182510584,
+          0.190247983,
+          0.190121206,
+          0.210838077,
+          0.20616706,
+          0.197576564,
+          0.18509512
+        ]
+      ],
+      "comparison": "interleaved",
+      "correctness": true,
+      "cpus": [
+        0
+      ],
+      "fixture": "stock",
+      "id": "stock-stream-1cpu",
+      "mode": "stream",
+      "partitions": 1,
+      "reason": "direct single-SUM allocation and drop target",
+      "resource_summary": {
+        "baseline": {
+          "processing_average_cores_p50": 0.9999477521470694,
+          "processing_cpu_ms_p50": 263.45320000000004,
+          "whole_process_peak_rss_p50": 242286592.0
+        },
+        "candidate": {
+          "processing_average_cores_p50": 0.9999529602483659,
+          "processing_cpu_ms_p50": 186.24259999999998,
+          "whole_process_peak_rss_p50": 238229504.0
+        }
+      },
+      "rows": 2010000,
+      "statistics": {
+        "base_p50": 0.26346659299999997,
+        "change_percent": -28.238780352695414,
+        "head_max": 0.210838077,
+        "head_min": 0.182290164,
+        "head_p50": 0.1890668405,
+        "head_p95": 0.208603886,
+        "round_changes": [
+          -29.1433673696553,
+          -28.823589028814585
+        ],
+        "round_intervals": [
+          {
+            "coverage": 0.978515625,
+            "high": -26.350533469448102,
+            "low": -35.35439905620539,
+            "median": -29.1433673696553
+          },
+          {
+            "coverage": 0.978515625,
+            "high": -25.656858088028233,
+            "low": -31.594466244742147,
+            "median": -28.823589028814585
+          }
+        ],
+        "round_min_changes": [
+          -28.328235641577127,
+          -28.39495026687988
+        ],
+        "rows_per_second": 10631160.88831029,
+        "samples": 20,
+        "verdict": "improved"
+      },
+      "wall_distribution": {
+        "baseline": {
+          "max_ms": 331.520135,
+          "min_ms": 254.34027700000001,
+          "p50_ms": 263.466593,
+          "p95_ms": 304.8299391500001
+        },
+        "candidate": {
+          "max_ms": 210.838077,
+          "min_ms": 182.290164,
+          "p50_ms": 189.0668405,
+          "p95_ms": 208.603886
+        }
+      }
+    },
+    {
+      "baseline": [
+        [
+          0.258884921,
+          0.250716009,
+          0.243259099,
+          0.246280456,
+          0.250059879,
+          0.253308738,
+          0.269541099,
+          0.252841747,
+          0.246718355,
+          0.248476334
+        ],
+        [
+          0.249760405,
+          0.253288497,
+          0.247350972,
+          0.248070142,
+          0.295110811,
+          0.251258863,
+          0.262187567,
+          0.243942659,
+          0.252078986,
+          0.245244771
+        ]
+      ],
+      "candidate": [
+        [
+          0.172319048,
+          0.169489644,
+          0.172302359,
+          0.19101278,
+          0.169076248,
+          0.167155327,
+          0.174164153,
+          0.179512113,
+          0.167653018,
+          0.17410443
+        ],
+        [
+          0.167320447,
+          0.181693056,
+          0.170460446,
+          0.169500922,
+          0.169903977,
+          0.183172647,
+          0.172678568,
+          0.186722655,
+          0.183724884,
+          0.167053428
+        ]
+      ],
+      "comparison": "interleaved",
+      "correctness": true,
+      "cpus": [
+        0,
+        2,
+        4,
+        6
+      ],
+      "fixture": "stock",
+      "id": "stock-stream-4cpu",
+      "mode": "stream",
+      "partitions": 1,
+      "reason": "same representation with current four-thread diagnostic policy",
+      "resource_summary": {
+        "baseline": {
+          "processing_average_cores_p50": 1.1894372766472883,
+          "processing_cpu_ms_p50": 297.2016,
+          "whole_process_peak_rss_p50": 255723520.0
+        },
+        "candidate": {
+          "processing_average_cores_p50": 1.2798460524555983,
+          "processing_cpu_ms_p50": 219.2305,
+          "whole_process_peak_rss_p50": 251607040.0
+        }
+      },
+      "rows": 2010000,
+      "statistics": {
+        "base_p50": 0.250387944,
+        "change_percent": -31.182507932570424,
+        "head_max": 0.19101278,
+        "head_min": 0.167053428,
+        "head_p50": 0.1723107035,
+        "head_p95": 0.18693716124999998,
+        "round_changes": [
+          -32.216247593747426,
+          -31.37888804993329
+        ],
+        "round_intervals": [
+          {
+            "coverage": 0.978515625,
+            "high": -29.00218609864296,
+            "low": -34.011227437404855,
+            "median": -32.216247593747426
+          },
+          {
+            "coverage": 0.978515625,
+            "high": -27.098035542730294,
+            "low": -34.13929959539234,
+            "median": -31.37888804993329
+          }
+        ],
+        "round_min_changes": [
+          -31.28506695652935,
+          -31.519387103179852
+        ],
+        "rows_per_second": 11664974.718184004,
+        "samples": 20,
+        "verdict": "improved"
+      },
+      "wall_distribution": {
+        "baseline": {
+          "max_ms": 295.11081099999996,
+          "min_ms": 243.25909900000002,
+          "p50_ms": 250.387944,
+          "p95_ms": 270.81958460000004
+        },
+        "candidate": {
+          "max_ms": 191.01278,
+          "min_ms": 167.053428,
+          "p50_ms": 172.3107035,
+          "p95_ms": 186.93716124999997
+        }
+      }
+    },
+    {
+      "baseline": [
+        [
+          0.027231476,
+          0.027051166,
+          0.027729144,
+          0.028111565,
+          0.028424247,
+          0.027013585,
+          0.03084585,
+          0.028159991,
+          0.02818514,
+          0.027100679
+        ],
+        [
+          0.027235803,
+          0.027106983,
+          0.02892802,
+          0.026540023,
+          0.026429832,
+          0.027235525,
+          0.02707117,
+          0.027083578,
+          0.028579882,
+          0.027723522
+        ]
+      ],
+      "candidate": [
+        [
+          0.02524123,
+          0.022871221,
+          0.026276363,
+          0.022221916,
+          0.025390223,
+          0.024348335,
+          0.023545577,
+          0.023658645,
+          0.022874772,
+          0.023976941
+        ],
+        [
+          0.025030484,
+          0.022305965,
+          0.022567472,
+          0.024081618,
+          0.023339045,
+          0.023697148,
+          0.02213999,
+          0.022699116,
+          0.023113104,
+          0.022946668
+        ]
+      ],
+      "comparison": "interleaved",
+      "correctness": true,
+      "cpus": [
+        0
+      ],
+      "fixture": "sparse",
+      "id": "sparse-stream-1cpu",
+      "mode": "stream",
+      "partitions": 1,
+      "reason": "sparse updates and retained complete-snapshot control",
+      "resource_summary": {
+        "baseline": {
+          "processing_average_cores_p50": 1.0000039093029145,
+          "processing_cpu_ms_p50": 27.23565,
+          "whole_process_peak_rss_p50": 73940992.0
+        },
+        "candidate": {
+          "processing_average_cores_p50": 1.0000057121747332,
+          "processing_cpu_ms_p50": 23.4426,
+          "whole_process_peak_rss_p50": 69732352.0
+        }
+      },
+      "rows": 12000,
+      "statistics": {
+        "base_p50": 0.027235664,
+        "change_percent": -13.927888815194667,
+        "head_max": 0.026276363,
+        "head_min": 0.02213999,
+        "head_p50": 0.023442311,
+        "head_p95": 0.02543453,
+        "round_changes": [
+          -13.489207681139476,
+          -16.709482669832596
+        ],
+        "round_intervals": [
+          {
+            "coverage": 0.978515625,
+            "high": -7.308623300477734,
+            "low": -20.950982273665662,
+            "median": -13.489207681139476
+          },
+          {
+            "coverage": 0.978515625,
+            "high": -9.263010058431377,
+            "low": -19.12806357982865,
+            "median": -16.709482669832596
+          }
+        ],
+        "round_min_changes": [
+          -17.737997381687766,
+          -16.23106041688045
+        ],
+        "rows_per_second": 511894.9236702815,
+        "samples": 20,
+        "verdict": "improved"
+      },
+      "wall_distribution": {
+        "baseline": {
+          "max_ms": 30.845850000000002,
+          "min_ms": 26.429832,
+          "p50_ms": 27.235664,
+          "p95_ms": 29.023911500000004
+        },
+        "candidate": {
+          "max_ms": 26.276363,
+          "min_ms": 22.139989999999997,
+          "p50_ms": 23.442311,
+          "p95_ms": 25.43453
+        }
+      }
+    }
+  ],
+  "cumulative_measurement_seconds": 101.9743292889907,
+  "elapsed_seconds": 101.9743292889907,
+  "environment": {
+    "controller_affinity": [
+      31
+    ],
+    "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "driver_sha256": "c942412beacfcac872ff56de4831f55d0cb7711d9944bb8dcac7b190ed4e80fd",
+    "helper_sha256": {
+      "scripts/benchmark_suite/report.py": "0daf6c205c2cc733813d2c658c6541d811f8324b502c2f2982a09de5a8dd9ff2",
+      "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
+      "scripts/benchmark_suite/sum_batch_parallel.py": "29760a53fb59634ebd2ea9e507d99a7b5be79d7d7e22cb91e808028ce18675c8",
+      "scripts/benchmark_suite/sum_followup.py": "847d6346e91cc5c8a8505cbf405840d861d2242c9087b637ef89767a6e0369a6",
+      "scripts/benchmark_suite/sum_inline_state.py": "139915940223cd1b5c1ca1362965ee639aac54e4d7c6a42e33d53cf252d1feab",
+      "scripts/benchmark_suite/sum_state.py": "c942412beacfcac872ff56de4831f55d0cb7711d9944bb8dcac7b190ed4e80fd",
+      "scripts/benchmark_suite/sum_state_profile.py": "6ef4cc3d63b3c54e1db7acb5d98061bcac5e7a6cc080b7294450f167107fdbed",
+      "scripts/benchmark_suite/sum_state_publication.py": "35f0a81ca4da6a8854d0df1f6a6198ea094c5ece53b08b6ae6d3f89695ac1fba",
+      "scripts/toolkit.py": "ef8ad17c43ea4a974e5e01a3fcaf1aec7a70e19b88286db8b82c4dcde2945d56"
+    },
+    "host_limits": "WSL host load and power state unobservable; eight logical CPUs report four core IDs",
+    "inherited_diagnostic_environment": {
+      "RUST_BACKTRACE": null,
+      "RUST_LOG": null
+    },
+    "memory_bytes": 33453572096,
+    "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "profile_tools": {
+      "perf": {
+        "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/thread-profile-20261104/tools/perf-package/usr/bin/perf",
+        "sha256": "c43fb7c12fc3c26f5962784a9b7d87001c7dd158f8cc37ab53d29bd7d2dd2721",
+        "version": "perf version 7.0.14"
+      },
+      "samply": {
+        "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/thread-profile-20261104/tools/samply-x86_64-unknown-linux-gnu/samply",
+        "sha256": "0ca59d520059aa2ee4db1860c732089829e75740ee75314e84d2b0ab8c90873e",
+        "version": "samply 0.13.1"
+      }
+    },
+    "python": "3.13.9",
+    "runtime_defaults": {
+      "benchmark_internals": true,
+      "checkpoint_interval_seconds": 60,
+      "checkpoint_timeout_seconds": 600,
+      "checkpointing": false,
+      "collect_diagnostics": true,
+      "datafusion_batch_size": 8192,
+      "dispatch_trace": "Disabled default; harness never starts recorder",
+      "edge_budget": {
+        "max_bytes": 18446744073709551615,
+        "max_rows": 1000000
+      },
+      "join_cpu_trace": "Disabled default; harness never starts recorder",
+      "retained_epochs": 2,
+      "sql_compact_state_max_bytes": 9007199254740991,
+      "sql_compact_state_max_groups": 10000,
+      "sql_snapshot_state_budget": null,
+      "sql_state_budget": null,
+      "watermarks": "Disabled"
+    },
+    "topology": "CPU CORE SOCKET ONLINE\n  0    0      0    yes\n  1    0      0    yes\n  2    1      0    yes\n  3    1      0    yes\n  4    2      0    yes\n  5    2      0    yes\n  6    3      0    yes\n  7    3      0    yes\n  8    4      0    yes\n  9    4      0    yes\n 10    5      0    yes\n 11    5      0    yes\n 12    6      0    yes\n 13    6      0    yes\n 14    7      0    yes\n 15    7      0    yes\n 16    8      0    yes\n 17    8      0    yes\n 18    9      0    yes\n 19    9      0    yes\n 20   10      0    yes\n 21   10      0    yes\n 22   11      0    yes\n 23   11      0    yes\n 24   12      0    yes\n 25   12      0    yes\n 26   13      0    yes\n 27   13      0    yes\n 28   14      0    yes\n 29   14      0    yes\n 30   15      0    yes\n 31   15      0    yes\n",
+    "verified_tool_source_sha256": {
+      "scripts/benchmark_suite/report.py": "0daf6c205c2cc733813d2c658c6541d811f8324b502c2f2982a09de5a8dd9ff2",
+      "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
+      "scripts/benchmark_suite/sum_batch_parallel.py": "29760a53fb59634ebd2ea9e507d99a7b5be79d7d7e22cb91e808028ce18675c8",
+      "scripts/benchmark_suite/sum_followup.py": "847d6346e91cc5c8a8505cbf405840d861d2242c9087b637ef89767a6e0369a6",
+      "scripts/benchmark_suite/sum_inline_state.py": "139915940223cd1b5c1ca1362965ee639aac54e4d7c6a42e33d53cf252d1feab",
+      "scripts/benchmark_suite/sum_state.py": "c942412beacfcac872ff56de4831f55d0cb7711d9944bb8dcac7b190ed4e80fd",
+      "scripts/benchmark_suite/sum_state_profile.py": "6ef4cc3d63b3c54e1db7acb5d98061bcac5e7a6cc080b7294450f167107fdbed",
+      "scripts/benchmark_suite/sum_state_publication.py": "35f0a81ca4da6a8854d0df1f6a6198ea094c5ece53b08b6ae6d3f89695ac1fba",
+      "scripts/test_sum_inline_state.py": "5cf9e0df963ff4de4315eb7f72ea77eaf07964002b24840409a28b388ba00bf1",
+      "scripts/toolkit.py": "ef8ad17c43ea4a974e5e01a3fcaf1aec7a70e19b88286db8b82c4dcde2945d56"
+    }
+  },
+  "failure": null,
+  "fixtures": {
+    "sparse": {
+      "batch_rows": [
+        10000,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100
+      ],
+      "fixture": "sparse",
+      "input_rows": 12000,
+      "input_sha256": "641effd7042bd3d0cd1be8f3fef6e6b5d7d726b47c71eaf761a6ec76f10ff3e0",
+      "schema_sha256": "a0e913e165c9b520cf4ad29c294897dda94207e0d3081256927b7d4064d9c1d5",
+      "snapshot_rows": [
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000
+      ],
+      "snapshot_schema_sha256": "13a316580158451de94c8f627faa89607bb24382d87cd7e1dc31844bee1de8c5",
+      "snapshot_sha256": [
+        "27c12eedce20a2f994a703372dd8fc29e3873f64d569d2d09bac4771453c0790",
+        "f63952ae1a403c9d40cc8c508c01b5f7a8ba5d7d39699efb2d4fd0483affd5f9",
+        "083c0a4581293f2d9aad8ee7496a49eef5e3b99acf174bcdcea03d62c38462f4",
+        "526f83c375466e37d35c2b123bce0f564b0aacb16118b60b07c8542cf319978b",
+        "39603be1cf772fdf1d0ef01a202349a2d659c8ee03e26c4b5a072939b91eb679",
+        "bebae210d904ecce4a7f941d354911cdf55bf5f5671145d52aa62419632f5f48",
+        "a51ad92a2b4cac4c4177c50e88215ad5c8346d53301a07f261d619b3ac9c5d42",
+        "aa7b857865d715f71402bbea225a22e5f1ee805c6ded6d5ddd8df987a5fcc61f",
+        "ad465198a2741a146f5a33781f6bcc35b9bd3b5d7f084004c3f2becb892aabb5",
+        "0822c710657a3e1dfb383e9fd36a7d1fb41e84bcbb3b8d7307e7814d2886161f",
+        "fa132b549ac11e9e214a93f72b0462519debe8cba66c2da334fa3605927e0db0",
+        "f05161a8595a4e1b437035734300aab28896f80da6e4bbdcbcc24e4cf0445501",
+        "b1723670bba1ed8ea454e719ff18b9209a7503a6409f9115d7c53600dadc15a5",
+        "2ee8cb647ba8ead105fed34f690f532da12a8859032c4d1a48bc4a3cacebfb3f",
+        "c0314af95533ffe37139fc486f9477f0e32d7ed240f64aa3d26e39a8d36f6b40",
+        "73705e43cb8e592895ed5909384f2323155ff1b88f9bf0df1b40d0ceb5a25b99",
+        "8ba7e8a2d3249faaafd3133d8b32049b175b875276ebdd65c6df4753eb1d9a4d",
+        "7b9c01aa3110202aa5fc0357da8aacbe0760c43a673a32c6ffecd96410815a34",
+        "720eb84fec6bd9d446f0d1e35177b7fd8b948221bb493fa1049501b5a06a551f",
+        "f999b3ceb45afe720cd6b8871a1fbd8457a95fab21b7eda9c68812e0c4f1c2e8",
+        "dc8025243282ce8d5b72f01bdde1a76e6fa8837f3e0efc980d8c50af210d523c"
+      ]
+    },
+    "stock": {
+      "batch_rows": [
+        10000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000,
+        100000
+      ],
+      "fixture": "stock",
+      "input_rows": 2010000,
+      "input_sha256": "a2d5af0e890eb8de7475be91ccbadcb21fad3c320a78e7b5639d20040d61bfab",
+      "schema_sha256": "a0e913e165c9b520cf4ad29c294897dda94207e0d3081256927b7d4064d9c1d5",
+      "snapshot_rows": [
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000,
+        10000
+      ],
+      "snapshot_schema_sha256": "13a316580158451de94c8f627faa89607bb24382d87cd7e1dc31844bee1de8c5",
+      "snapshot_sha256": [
+        "27c12eedce20a2f994a703372dd8fc29e3873f64d569d2d09bac4771453c0790",
+        "1e50bcf6458b8d8ba59565444b305fef526190fdc157f86353a3b1bca4e03e1e",
+        "ce09da77dc08a2eea660308cf1beff6b4966234d032f90e660fa6575a0b6531d",
+        "7746299025277eb54d4f267dadcde28e7e3b4a859e4226982dfbb8b551b9dc24",
+        "5e2c1696dac7e7b0614b767c4dc52cfe87617e8be053fa136b7d3dfca40ec090",
+        "0f919c0e2a1f4b96345a1af10d83b267646e6f5fbe02114823540e3479178ba0",
+        "2a5ae20a7c2833030d19524acc322b7752f535bfb660affe1e36550c47f15979",
+        "9a8a943d1d5678ac1664a60b84bbd9c19f45327758e2d2b98dbed34ed4d090ee",
+        "10cffd2614d510de575e65c2c61514717b113dc71cd193e3ba45f4ff5e943580",
+        "022bdc2b4fe6bd3872db4f173fadce5e93986b9184843869fb4bf7f28f691b6b",
+        "6b7db3636f012c654b8e456f85787cc6a3f946741be0d7e48069327f951836a9",
+        "0bfa93a21db4c511b860308ac162f11d0b06d0c53cf7f49205e06d7d930bf776",
+        "142c1869bb946b31fcd909e5babc817e8533de56abd9c8ba23842ab6730a50c1",
+        "7d6c0c8a64a2995d47991d82c7288f7a89453bb3fabbf56ef4155d41692b599c",
+        "126d2148df1205ba15191661c67251d1b3331cd9a44ce7eb1e3b6fbd98194b34",
+        "ae6f0f858e07ac0ca8840f099b14ce1ce797e560941ff2155728149b349f9902",
+        "634508bf638d5119c67c3a37b4af5d3caf6708b0232a654a38a3411df62893c2",
+        "c48a2f4f38800e1a290f164590bff5898c4a05a60e2bbe2bbfa4b0a5300c91df",
+        "9a69e00ec1ca3dc87f9c8fc4b2010375c0928f234f7d0b67b2ee083e4ced0b2f",
+        "ee489916711ada4eab1f97a29b3f6b9792298a8e0ad8b2bd9978f42c1b8dc6fd",
+        "f522ddd53f35922972bcef785662747654bbe5086630e789c9a39bafde5aa099"
+      ]
+    }
+  },
+  "helper_seals_verified": true,
+  "phase": "inline-state",
+  "profile_analysis_complete": true,
+  "profile_disposition": "accepted",
+  "profiles": [
+    {
+      "binary_sha256": "c99c5bb268f320d71f4efb957d2ac4a709ddc231751536836f1d64a9c0e2c83b",
+      "clock_alignment": {
+        "matched_sample_count": 3016,
+        "max_error_ms": 5.960464477539063e-08,
+        "offset_ms": 299982260.938721
+      },
+      "disjoint_phases": [
+        {
+          "name": "update_chunk",
+          "percent": 45.41925465838509,
+          "samples": 585
+        },
+        {
+          "name": "finish_transaction",
+          "percent": 22.82608695652174,
+          "samples": 294
+        },
+        {
+          "name": "ExpressionOperator",
+          "percent": 14.673913043478262,
+          "samples": 189
+        },
+        {
+          "name": "commit",
+          "percent": 14.673913043478262,
+          "samples": 189
+        },
+        {
+          "name": "other",
+          "percent": 2.406832298136646,
+          "samples": 31
+        }
+      ],
+      "inclusive": [
+        {
+          "name": "<calc_flow::operator::sql::SqlOperator as calc_flow::operator::stream::StreamOperator>::process_data::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 83.15217391304348,
+          "samples": 1071
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::update_with_input_owner::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 68.40062111801242,
+          "samples": 881
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::update_chunk [grouped_sum_state_benchmark]",
+          "percent": 45.41925465838509,
+          "samples": 585
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::update_chunk_input [grouped_sum_state_benchmark]",
+          "percent": 45.2639751552795,
+          "samples": 583
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::finish_transaction::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 22.82608695652174,
+          "samples": 294
+        },
+        {
+          "name": "<core::iter::adapters::GenericShunt<I,R> as core::iter::traits::iterator::Iterator>::next [grouped_sum_state_benchmark]",
+          "percent": 17.080745341614907,
+          "samples": 220
+        },
+        {
+          "name": "calc_flow::runtime::streaming::operator_task::run_operator_loop::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 14.906832298136646,
+          "samples": 192
+        },
+        {
+          "name": "calc_flow::runtime::streaming::operator_task::dispatch_or_cancel::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 14.829192546583851,
+          "samples": 191
+        },
+        {
+          "name": "core::ptr::drop_in_place<calc_flow::operator::sql::incremental::Group> [grouped_sum_state_benchmark]",
+          "percent": 14.751552795031056,
+          "samples": 190
+        },
+        {
+          "name": "<calc_flow::operator::expression::ExpressionOperator as calc_flow::operator::stream::StreamOperator>::process_data::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 14.673913043478262,
+          "samples": 189
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::commit [grouped_sum_state_benchmark]",
+          "percent": 14.673913043478262,
+          "samples": 189
+        },
+        {
+          "name": "calc_flow::datafusion::DataFusionRuntime::stream_expression::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 14.596273291925465,
+          "samples": 188
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::candidate [grouped_sum_state_benchmark]",
+          "percent": 14.440993788819876,
+          "samples": 186
+        },
+        {
+          "name": "calc_flow::datafusion_template::compiled::push [grouped_sum_state_benchmark]",
+          "percent": 14.363354037267081,
+          "samples": 185
+        },
+        {
+          "name": "calc_flow::runtime::streaming::operator_task::run_after_operator_entry::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 14.130434782608695,
+          "samples": 182
+        },
+        {
+          "name": "arrow_select::filter::filter_array [grouped_sum_state_benchmark]",
+          "percent": 11.25776397515528,
+          "samples": 145
+        },
+        {
+          "name": "calc_flow::runtime::streaming::supervisor::TaskRegistration::run::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 10.79192546583851,
+          "samples": 139
+        },
+        {
+          "name": "calc_flow::datafusion_template::compiled::filter_record [grouped_sum_state_benchmark]",
+          "percent": 10.248447204968944,
+          "samples": 132
+        },
+        {
+          "name": "arrow_select::filter::filter_bytes [grouped_sum_state_benchmark]",
+          "percent": 10.01552795031056,
+          "samples": 129
+        },
+        {
+          "name": "arrow_row::RowConverter::append [grouped_sum_state_benchmark]",
+          "percent": 9.70496894409938,
+          "samples": 125
+        },
+        {
+          "name": "arrow_row::RowConverter::convert_columns [grouped_sum_state_benchmark]",
+          "percent": 9.70496894409938,
+          "samples": 125
+        },
+        {
+          "name": "arrow_select::filter::filter_record_batch [grouped_sum_state_benchmark]",
+          "percent": 8.695652173913043,
+          "samples": 112
+        },
+        {
+          "name": "arrow_select::filter::FilterPredicate::filter_record_batch [grouped_sum_state_benchmark]",
+          "percent": 8.462732919254659,
+          "samples": 109
+        },
+        {
+          "name": "arrow_select::filter::FilterBytes<OffsetSize>::extend_idx [grouped_sum_state_benchmark]",
+          "percent": 8.307453416149068,
+          "samples": 107
+        },
+        {
+          "name": "arrow_row::variable::encode_generic_byte_array [grouped_sum_state_benchmark]",
+          "percent": 8.152173913043478,
+          "samples": 105
+        },
+        {
+          "name": "arrow_row::encode_column [grouped_sum_state_benchmark]",
+          "percent": 8.152173913043478,
+          "samples": 105
+        },
+        {
+          "name": "hashbrown::map::HashMap<K,V,S,A>::insert [grouped_sum_state_benchmark]",
+          "percent": 7.298136645962733,
+          "samples": 94
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::output_chunk [grouped_sum_state_benchmark]",
+          "percent": 5.978260869565218,
+          "samples": 77
+        },
+        {
+          "name": "0xb23b3 [libc.so.6]",
+          "percent": 5.8229813664596275,
+          "samples": 75
+        },
+        {
+          "name": "core::ptr::drop_in_place<alloc::vec::Vec<alloc::vec::Vec<datafusion_common::scalar::ScalarValue>>> [grouped_sum_state_benchmark]",
+          "percent": 5.434782608695652,
+          "samples": 70
+        },
+        {
+          "name": "arrow_row::variable::encode_one [grouped_sum_state_benchmark]",
+          "percent": 5.279503105590062,
+          "samples": 68
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::PartialGroups::merge_rank [grouped_sum_state_benchmark]",
+          "percent": 4.891304347826087,
+          "samples": 63
+        },
+        {
+          "name": "hashbrown::raw::RawTable<T,A>::reserve_rehash [grouped_sum_state_benchmark]",
+          "percent": 4.580745341614906,
+          "samples": 59
+        },
+        {
+          "name": "core::hash::BuildHasher::hash_one [grouped_sum_state_benchmark]",
+          "percent": 4.425465838509317,
+          "samples": 57
+        },
+        {
+          "name": "<datafusion_physical_expr::expressions::case::CaseExpr as datafusion_physical_expr_common::physical_expr::PhysicalExpr>::evaluate [grouped_sum_state_benchmark]",
+          "percent": 4.114906832298137,
+          "samples": 53
+        },
+        {
+          "name": "datafusion_physical_expr::projection::Projector::project_batch [grouped_sum_state_benchmark]",
+          "percent": 4.114906832298137,
+          "samples": 53
+        },
+        {
+          "name": "datafusion_common::scalar::ScalarValue::iter_to_array [grouped_sum_state_benchmark]",
+          "percent": 3.8819875776397517,
+          "samples": 50
+        },
+        {
+          "name": "datafusion_physical_expr::aggregate::AggregateFunctionExpr::field [grouped_sum_state_benchmark]",
+          "percent": 3.8043478260869565,
+          "samples": 49
+        },
+        {
+          "name": "core::iter::adapters::try_process [grouped_sum_state_benchmark]",
+          "percent": 3.7267080745341614,
+          "samples": 48
+        },
+        {
+          "name": "0xb3cec [libc.so.6]",
+          "percent": 3.6490683229813663,
+          "samples": 47
+        }
+      ],
+      "perf_data_sha256": "59f8417607d65819836dd7610d432ab97dcd93c6ea5fef699b65f792acddffb8",
+      "phase_frame_rules": [],
+      "samples": 1288,
+      "samples_per_window": [
+        258,
+        281,
+        248,
+        250,
+        251
+      ],
+      "scope": "user-mode CPU only; first job excluded; inclusive shares overlap",
+      "self": [
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::update_chunk_input [grouped_sum_state_benchmark]",
+          "percent": 5.590062111801243,
+          "samples": 72
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::finish_transaction::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 4.891304347826087,
+          "samples": 63
+        },
+        {
+          "name": "arrow_select::filter::FilterBytes<OffsetSize>::extend_idx [grouped_sum_state_benchmark]",
+          "percent": 4.580745341614906,
+          "samples": 59
+        },
+        {
+          "name": "core::hash::BuildHasher::hash_one [grouped_sum_state_benchmark]",
+          "percent": 4.3478260869565215,
+          "samples": 56
+        },
+        {
+          "name": "arrow_row::variable::encode_one [grouped_sum_state_benchmark]",
+          "percent": 4.270186335403727,
+          "samples": 55
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::candidate [grouped_sum_state_benchmark]",
+          "percent": 3.5714285714285716,
+          "samples": 46
+        },
+        {
+          "name": "core::ptr::drop_in_place<calc_flow::operator::sql::incremental::Group> [grouped_sum_state_benchmark]",
+          "percent": 3.4937888198757765,
+          "samples": 45
+        },
+        {
+          "name": "<core::iter::adapters::GenericShunt<I,R> as core::iter::traits::iterator::Iterator>::next [grouped_sum_state_benchmark]",
+          "percent": 3.4161490683229814,
+          "samples": 44
+        },
+        {
+          "name": "0x1972b2 [libc.so.6]",
+          "percent": 2.872670807453416,
+          "samples": 37
+        },
+        {
+          "name": "core::ptr::drop_in_place<datafusion_common::scalar::ScalarValue> [grouped_sum_state_benchmark]",
+          "percent": 2.872670807453416,
+          "samples": 37
+        },
+        {
+          "name": "arrow_row::variable::encode_generic_byte_array [grouped_sum_state_benchmark]",
+          "percent": 2.872670807453416,
+          "samples": 37
+        },
+        {
+          "name": "hashbrown::map::HashMap<K,V,S,A>::insert [grouped_sum_state_benchmark]",
+          "percent": 2.329192546583851,
+          "samples": 30
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::PartialGroups::merge_rank [grouped_sum_state_benchmark]",
+          "percent": 2.018633540372671,
+          "samples": 26
+        },
+        {
+          "name": "0xb3cf8 [libc.so.6]",
+          "percent": 1.9409937888198758,
+          "samples": 25
+        },
+        {
+          "name": "0xb23a9 [libc.so.6]",
+          "percent": 1.8633540372670807,
+          "samples": 24
+        },
+        {
+          "name": "arrow_select::filter::FilterBytes<OffsetSize>::extend_offsets_idx [grouped_sum_state_benchmark]",
+          "percent": 1.7080745341614907,
+          "samples": 22
+        },
+        {
+          "name": "0xb23bc [libc.so.6]",
+          "percent": 1.6304347826086956,
+          "samples": 21
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::candidate_slot [grouped_sum_state_benchmark]",
+          "percent": 1.6304347826086956,
+          "samples": 21
+        },
+        {
+          "name": "0xb2185 [libc.so.6]",
+          "percent": 1.6304347826086956,
+          "samples": 21
+        },
+        {
+          "name": "datafusion_common::scalar::ScalarValue::is_null [grouped_sum_state_benchmark]",
+          "percent": 1.4751552795031055,
+          "samples": 19
+        },
+        {
+          "name": "0xb0f93 [libc.so.6]",
+          "percent": 1.4751552795031055,
+          "samples": 19
+        },
+        {
+          "name": "0xb0f9d [libc.so.6]",
+          "percent": 1.3975155279503106,
+          "samples": 18
+        },
+        {
+          "name": "core::iter::adapters::map::map_try_fold::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 1.3975155279503106,
+          "samples": 18
+        },
+        {
+          "name": "hashbrown::raw::RawTable<T,A>::reserve_rehash [grouped_sum_state_benchmark]",
+          "percent": 1.3975155279503106,
+          "samples": 18
+        },
+        {
+          "name": "0x197a00 [libc.so.6]",
+          "percent": 1.2422360248447204,
+          "samples": 16
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::finalize_candidate [grouped_sum_state_benchmark]",
+          "percent": 1.2422360248447204,
+          "samples": 16
+        },
+        {
+          "name": "0xb3cdc [libc.so.6]",
+          "percent": 1.0869565217391304,
+          "samples": 14
+        },
+        {
+          "name": "arrow_select::filter::filter_native [grouped_sum_state_benchmark]",
+          "percent": 1.0869565217391304,
+          "samples": 14
+        },
+        {
+          "name": "free@@GLIBC_2.2.5 [libc.so.6]",
+          "percent": 1.0869565217391304,
+          "samples": 14
+        },
+        {
+          "name": "datafusion_physical_expr::aggregate::AggregateFunctionExpr::field [grouped_sum_state_benchmark]",
+          "percent": 1.0869565217391304,
+          "samples": 14
+        },
+        {
+          "name": "<datafusion_functions_aggregate_common::aggregate::groups_accumulator::prim_op::PrimitiveGroupsAccumulator<T,F> as datafusion_expr_common::groups_accumulator::GroupsAccumulator>::update_batch [grouped_sum_state_benchmark]",
+          "percent": 1.0869565217391304,
+          "samples": 14
+        },
+        {
+          "name": "0x197a85 [libc.so.6]",
+          "percent": 1.0093167701863355,
+          "samples": 13
+        },
+        {
+          "name": "arrow_row::LengthTracker::push_variable [grouped_sum_state_benchmark]",
+          "percent": 1.0093167701863355,
+          "samples": 13
+        },
+        {
+          "name": "0x197a46 [libc.so.6]",
+          "percent": 0.9316770186335404,
+          "samples": 12
+        },
+        {
+          "name": "arrow_ord::cmp::apply_op [grouped_sum_state_benchmark]",
+          "percent": 0.9316770186335404,
+          "samples": 12
+        },
+        {
+          "name": "0xb2119 [libc.so.6]",
+          "percent": 0.9316770186335404,
+          "samples": 12
+        },
+        {
+          "name": "<datafusion_common::scalar::ScalarValue as core::clone::Clone>::clone [grouped_sum_state_benchmark]",
+          "percent": 0.8540372670807453,
+          "samples": 11
+        },
+        {
+          "name": "0xb2708 [libc.so.6]",
+          "percent": 0.8540372670807453,
+          "samples": 11
+        },
+        {
+          "name": "core::ptr::drop_in_place<alloc::vec::Vec<core::option::Option<alloc::boxed::Box<dyn datafusion_expr_common::accumulator::Accumulator>>>> [grouped_sum_state_benchmark]",
+          "percent": 0.6987577639751553,
+          "samples": 9
+        },
+        {
+          "name": "<core::iter::adapters::map::Map<I,F> as core::iter::traits::iterator::Iterator>::next [grouped_sum_state_benchmark]",
+          "percent": 0.6987577639751553,
+          "samples": 9
+        }
+      ],
+      "side": "baseline",
+      "sql_worker_samples_by_window": [],
+      "symbolization": "GNU nm -n -S -C exact nonzero-sized code ranges; dynamic symbol fallback; no source-line/inline attribution",
+      "threads": [
+        {
+          "name": "tokio-rt-worker tid=84818",
+          "percent": 99.9223602484472,
+          "samples": 1287
+        },
+        {
+          "name": "grouped_sum_sta tid=84816.2",
+          "percent": 0.07763975155279502,
+          "samples": 1
+        }
+      ],
+      "unresolved_leaf_samples": 374,
+      "windows": [
+        {
+          "end_ns": 299983149902836,
+          "start_ns": 299982875658149
+        },
+        {
+          "end_ns": 299983671844192,
+          "start_ns": 299983382125003
+        },
+        {
+          "end_ns": 299984170650464,
+          "start_ns": 299983918422372
+        },
+        {
+          "end_ns": 299984654265979,
+          "start_ns": 299984402920445
+        },
+        {
+          "end_ns": 299985135435613,
+          "start_ns": 299984880963221
+        }
+      ]
+    },
+    {
+      "binary_sha256": "8378ba7b8683780868604ce70568aa626f61e0abcd1742ec84f050b95aef1ed3",
+      "clock_alignment": {
+        "matched_sample_count": 2441,
+        "max_error_ms": 5.960464477539063e-08,
+        "offset_ms": 299985878.431008
+      },
+      "disjoint_phases": [
+        {
+          "name": "update_chunk",
+          "percent": 49.772209567198175,
+          "samples": 437
+        },
+        {
+          "name": "finish_transaction",
+          "percent": 22.66514806378132,
+          "samples": 199
+        },
+        {
+          "name": "ExpressionOperator",
+          "percent": 21.070615034168565,
+          "samples": 185
+        },
+        {
+          "name": "commit",
+          "percent": 4.89749430523918,
+          "samples": 43
+        },
+        {
+          "name": "other",
+          "percent": 1.5945330296127562,
+          "samples": 14
+        }
+      ],
+      "inclusive": [
+        {
+          "name": "<calc_flow::operator::sql::SqlOperator as calc_flow::operator::stream::StreamOperator>::process_data::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 77.44874715261959,
+          "samples": 680
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::update_with_input_owner::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 72.4373576309795,
+          "samples": 636
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::update_chunk [grouped_sum_state_benchmark]",
+          "percent": 49.772209567198175,
+          "samples": 437
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::update_chunk_input [grouped_sum_state_benchmark]",
+          "percent": 49.430523917995444,
+          "samples": 434
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::finish_transaction::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 22.66514806378132,
+          "samples": 199
+        },
+        {
+          "name": "<calc_flow::operator::expression::ExpressionOperator as calc_flow::operator::stream::StreamOperator>::process_data::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 20.956719817767652,
+          "samples": 184
+        },
+        {
+          "name": "calc_flow::runtime::streaming::operator_task::run_operator_loop::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 20.842824601366743,
+          "samples": 183
+        },
+        {
+          "name": "calc_flow::runtime::streaming::operator_task::dispatch_or_cancel::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 20.842824601366743,
+          "samples": 183
+        },
+        {
+          "name": "calc_flow::datafusion::DataFusionRuntime::stream_expression::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 20.72892938496583,
+          "samples": 182
+        },
+        {
+          "name": "calc_flow::datafusion_template::compiled::push [grouped_sum_state_benchmark]",
+          "percent": 20.387243735763096,
+          "samples": 179
+        },
+        {
+          "name": "calc_flow::runtime::streaming::operator_task::run_after_operator_entry::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 20.159453302961275,
+          "samples": 177
+        },
+        {
+          "name": "arrow_select::filter::filter_array [grouped_sum_state_benchmark]",
+          "percent": 16.970387243735765,
+          "samples": 149
+        },
+        {
+          "name": "arrow_select::filter::filter_bytes [grouped_sum_state_benchmark]",
+          "percent": 15.489749430523919,
+          "samples": 136
+        },
+        {
+          "name": "<core::iter::adapters::GenericShunt<I,R> as core::iter::traits::iterator::Iterator>::next [grouped_sum_state_benchmark]",
+          "percent": 15.261958997722095,
+          "samples": 134
+        },
+        {
+          "name": "arrow_row::RowConverter::convert_columns [grouped_sum_state_benchmark]",
+          "percent": 14.69248291571754,
+          "samples": 129
+        },
+        {
+          "name": "arrow_row::RowConverter::append [grouped_sum_state_benchmark]",
+          "percent": 14.578587699316628,
+          "samples": 128
+        },
+        {
+          "name": "calc_flow::runtime::streaming::supervisor::TaskRegistration::run::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 14.123006833712983,
+          "samples": 124
+        },
+        {
+          "name": "calc_flow::datafusion_template::compiled::filter_record [grouped_sum_state_benchmark]",
+          "percent": 14.009111617312072,
+          "samples": 123
+        },
+        {
+          "name": "arrow_select::filter::FilterBytes<OffsetSize>::extend_idx [grouped_sum_state_benchmark]",
+          "percent": 13.439635535307517,
+          "samples": 118
+        },
+        {
+          "name": "arrow_select::filter::filter_record_batch [grouped_sum_state_benchmark]",
+          "percent": 12.642369020501139,
+          "samples": 111
+        },
+        {
+          "name": "arrow_row::encode_column [grouped_sum_state_benchmark]",
+          "percent": 12.300683371298405,
+          "samples": 108
+        },
+        {
+          "name": "arrow_select::filter::FilterPredicate::filter_record_batch [grouped_sum_state_benchmark]",
+          "percent": 12.186788154897494,
+          "samples": 107
+        },
+        {
+          "name": "arrow_row::variable::encode_generic_byte_array [grouped_sum_state_benchmark]",
+          "percent": 12.186788154897494,
+          "samples": 107
+        },
+        {
+          "name": "hashbrown::map::HashMap<K,V,S,A>::insert [grouped_sum_state_benchmark]",
+          "percent": 10.250569476082005,
+          "samples": 90
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::candidate [grouped_sum_state_benchmark]",
+          "percent": 8.200455580865604,
+          "samples": 72
+        },
+        {
+          "name": "arrow_row::variable::encode_one [grouped_sum_state_benchmark]",
+          "percent": 8.086560364464692,
+          "samples": 71
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::output_chunk [grouped_sum_state_benchmark]",
+          "percent": 7.403189066059226,
+          "samples": 65
+        },
+        {
+          "name": "hashbrown::raw::RawTable<T,A>::reserve_rehash [grouped_sum_state_benchmark]",
+          "percent": 6.719817767653758,
+          "samples": 59
+        },
+        {
+          "name": "<datafusion_physical_expr::expressions::case::CaseExpr as datafusion_physical_expr_common::physical_expr::PhysicalExpr>::evaluate [grouped_sum_state_benchmark]",
+          "percent": 6.264236902050114,
+          "samples": 55
+        },
+        {
+          "name": "datafusion_physical_expr::projection::Projector::project_batch [grouped_sum_state_benchmark]",
+          "percent": 6.264236902050114,
+          "samples": 55
+        },
+        {
+          "name": "datafusion_physical_expr::expressions::case::CaseBody::expr_or_expr [grouped_sum_state_benchmark]",
+          "percent": 5.808656036446469,
+          "samples": 51
+        },
+        {
+          "name": "core::hash::BuildHasher::hash_one [grouped_sum_state_benchmark]",
+          "percent": 5.353075170842825,
+          "samples": 47
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::commit [grouped_sum_state_benchmark]",
+          "percent": 4.89749430523918,
+          "samples": 43
+        },
+        {
+          "name": "datafusion_physical_expr::expressions::case::filter_record_batch [grouped_sum_state_benchmark]",
+          "percent": 4.783599088838269,
+          "samples": 42
+        },
+        {
+          "name": "core::ptr::drop_in_place<calc_flow::operator::sql::incremental::Group> [grouped_sum_state_benchmark]",
+          "percent": 4.783599088838269,
+          "samples": 42
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::PartialGroups::merge_rank [grouped_sum_state_benchmark]",
+          "percent": 3.075170842824601,
+          "samples": 27
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::candidate_slot [grouped_sum_state_benchmark]",
+          "percent": 2.847380410022779,
+          "samples": 25
+        },
+        {
+          "name": "core::iter::adapters::try_process [grouped_sum_state_benchmark]",
+          "percent": 2.847380410022779,
+          "samples": 25
+        },
+        {
+          "name": "datafusion_common::scalar::ScalarValue::iter_to_array [grouped_sum_state_benchmark]",
+          "percent": 2.847380410022779,
+          "samples": 25
+        },
+        {
+          "name": "<core::iter::adapters::map::Map<I,F> as core::iter::traits::iterator::Iterator>::next [grouped_sum_state_benchmark]",
+          "percent": 2.6195899772209565,
+          "samples": 23
+        }
+      ],
+      "perf_data_sha256": "6fdb9ffd524e40580919f8662d973caf974462ee739c87e86f6e6e143feac70d",
+      "phase_frame_rules": [],
+      "samples": 878,
+      "samples_per_window": [
+        177,
+        175,
+        175,
+        171,
+        180
+      ],
+      "scope": "user-mode CPU only; first job excluded; inclusive shares overlap",
+      "self": [
+        {
+          "name": "arrow_select::filter::FilterBytes<OffsetSize>::extend_idx [grouped_sum_state_benchmark]",
+          "percent": 8.086560364464692,
+          "samples": 71
+        },
+        {
+          "name": "arrow_row::variable::encode_one [grouped_sum_state_benchmark]",
+          "percent": 6.492027334851937,
+          "samples": 57
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::update_chunk_input [grouped_sum_state_benchmark]",
+          "percent": 6.0364464692482915,
+          "samples": 53
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::finish_transaction::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 5.353075170842825,
+          "samples": 47
+        },
+        {
+          "name": "core::hash::BuildHasher::hash_one [grouped_sum_state_benchmark]",
+          "percent": 5.353075170842825,
+          "samples": 47
+        },
+        {
+          "name": "<core::iter::adapters::GenericShunt<I,R> as core::iter::traits::iterator::Iterator>::next [grouped_sum_state_benchmark]",
+          "percent": 4.89749430523918,
+          "samples": 43
+        },
+        {
+          "name": "arrow_row::variable::encode_generic_byte_array [grouped_sum_state_benchmark]",
+          "percent": 4.100227790432802,
+          "samples": 36
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::candidate [grouped_sum_state_benchmark]",
+          "percent": 3.644646924829157,
+          "samples": 32
+        },
+        {
+          "name": "hashbrown::map::HashMap<K,V,S,A>::insert [grouped_sum_state_benchmark]",
+          "percent": 2.6195899772209565,
+          "samples": 23
+        },
+        {
+          "name": "core::ptr::drop_in_place<calc_flow::operator::sql::incremental::Group> [grouped_sum_state_benchmark]",
+          "percent": 2.6195899772209565,
+          "samples": 23
+        },
+        {
+          "name": "hashbrown::raw::RawTable<T,A>::reserve_rehash [grouped_sum_state_benchmark]",
+          "percent": 2.3917995444191344,
+          "samples": 21
+        },
+        {
+          "name": "0x1972b2 [libc.so.6]",
+          "percent": 2.3917995444191344,
+          "samples": 21
+        },
+        {
+          "name": "0x197a00 [libc.so.6]",
+          "percent": 2.277904328018223,
+          "samples": 20
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::PartialGroups::merge_rank [grouped_sum_state_benchmark]",
+          "percent": 2.277904328018223,
+          "samples": 20
+        },
+        {
+          "name": "arrow_select::filter::FilterBytes<OffsetSize>::extend_offsets_idx [grouped_sum_state_benchmark]",
+          "percent": 2.050113895216401,
+          "samples": 18
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::candidate_slot [grouped_sum_state_benchmark]",
+          "percent": 1.9362186788154898,
+          "samples": 17
+        },
+        {
+          "name": "<datafusion_functions_aggregate_common::aggregate::groups_accumulator::prim_op::PrimitiveGroupsAccumulator<T,F> as datafusion_expr_common::groups_accumulator::GroupsAccumulator>::update_batch [grouped_sum_state_benchmark]",
+          "percent": 1.5945330296127562,
+          "samples": 14
+        },
+        {
+          "name": "arrow_select::filter::filter_native [grouped_sum_state_benchmark]",
+          "percent": 1.4806378132118452,
+          "samples": 13
+        },
+        {
+          "name": "0x197a46 [libc.so.6]",
+          "percent": 1.2528473804100229,
+          "samples": 11
+        },
+        {
+          "name": "core::ptr::drop_in_place<alloc::vec::Vec<core::option::Option<alloc::boxed::Box<dyn datafusion_expr_common::accumulator::Accumulator>>>> [grouped_sum_state_benchmark]",
+          "percent": 1.2528473804100229,
+          "samples": 11
+        },
+        {
+          "name": "<calc_flow::state_memory_pool::OwnedStatePool as datafusion_execution::memory_pool::MemoryPool>::shrink [grouped_sum_state_benchmark]",
+          "percent": 1.1389521640091116,
+          "samples": 10
+        },
+        {
+          "name": "<core::iter::adapters::map::Map<I,F> as core::iter::traits::iterator::Iterator>::next [grouped_sum_state_benchmark]",
+          "percent": 1.1389521640091116,
+          "samples": 10
+        },
+        {
+          "name": "0xb23bc [libc.so.6]",
+          "percent": 1.1389521640091116,
+          "samples": 10
+        },
+        {
+          "name": "arrow_row::LengthTracker::push_variable [grouped_sum_state_benchmark]",
+          "percent": 1.1389521640091116,
+          "samples": 10
+        },
+        {
+          "name": "<calc_flow::state_memory_pool::OwnedStatePool as datafusion_execution::memory_pool::MemoryPool>::try_grow [grouped_sum_state_benchmark]",
+          "percent": 1.0250569476082005,
+          "samples": 9
+        },
+        {
+          "name": "core::iter::adapters::map::map_try_fold::{{closure}} [grouped_sum_state_benchmark]",
+          "percent": 1.0250569476082005,
+          "samples": 9
+        },
+        {
+          "name": "0x197a85 [libc.so.6]",
+          "percent": 0.9111617312072893,
+          "samples": 8
+        },
+        {
+          "name": "0xb2708 [libc.so.6]",
+          "percent": 0.9111617312072893,
+          "samples": 8
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::output_group [grouped_sum_state_benchmark]",
+          "percent": 0.9111617312072893,
+          "samples": 8
+        },
+        {
+          "name": "0x197a59 [libc.so.6]",
+          "percent": 0.7972665148063781,
+          "samples": 7
+        },
+        {
+          "name": "0x197a8b [libc.so.6]",
+          "percent": 0.7972665148063781,
+          "samples": 7
+        },
+        {
+          "name": "arrow_ord::cmp::apply_op [grouped_sum_state_benchmark]",
+          "percent": 0.7972665148063781,
+          "samples": 7
+        },
+        {
+          "name": "arrow_select::filter::FilterBuilder::optimize [grouped_sum_state_benchmark]",
+          "percent": 0.7972665148063781,
+          "samples": 7
+        },
+        {
+          "name": "core::ptr::drop_in_place<datafusion_common::scalar::ScalarValue> [grouped_sum_state_benchmark]",
+          "percent": 0.7972665148063781,
+          "samples": 7
+        },
+        {
+          "name": "0x19750a [libc.so.6]",
+          "percent": 0.7972665148063781,
+          "samples": 7
+        },
+        {
+          "name": "calc_flow::operator::sql::incremental::IncrementalSql::finalize_candidate [grouped_sum_state_benchmark]",
+          "percent": 0.7972665148063781,
+          "samples": 7
+        },
+        {
+          "name": "arrow_row::RowConverter::append [grouped_sum_state_benchmark]",
+          "percent": 0.683371298405467,
+          "samples": 6
+        },
+        {
+          "name": "0x1972b6 [libc.so.6]",
+          "percent": 0.683371298405467,
+          "samples": 6
+        },
+        {
+          "name": "0xb2727 [libc.so.6]",
+          "percent": 0.683371298405467,
+          "samples": 6
+        },
+        {
+          "name": "0x197d07 [libc.so.6]",
+          "percent": 0.5694760820045558,
+          "samples": 5
+        }
+      ],
+      "side": "candidate",
+      "sql_worker_samples_by_window": [],
+      "symbolization": "GNU nm -n -S -C exact nonzero-sized code ranges; dynamic symbol fallback; no source-line/inline attribution",
+      "threads": [
+        {
+          "name": "tokio-rt-worker tid=84844",
+          "percent": 99.65831435079727,
+          "samples": 875
+        },
+        {
+          "name": "grouped_sum_sta tid=84842.2",
+          "percent": 0.3416856492027335,
+          "samples": 3
+        }
+      ],
+      "unresolved_leaf_samples": 184,
+      "windows": [
+        {
+          "end_ns": 299986548874059,
+          "start_ns": 299986371907523
+        },
+        {
+          "end_ns": 299986953879058,
+          "start_ns": 299986778197842
+        },
+        {
+          "end_ns": 299987354922595,
+          "start_ns": 299987179703667
+        },
+        {
+          "end_ns": 299987745109029,
+          "start_ns": 299987572710725
+        },
+        {
+          "end_ns": 299988136931421,
+          "start_ns": 299987956837474
+        }
+      ]
+    }
+  ],
+  "status": "completed"
+}

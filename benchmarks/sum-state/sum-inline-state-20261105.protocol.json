@@ -1,0 +1,319 @@
+{
+  "active_helper_inventory_scope": "Fixed reviewed active helpers and focused contract test; not every transitive import or system dependency.",
+  "actual_build_receipts": {
+    "baseline": {
+      "binary_sha256": "c99c5bb268f320d71f4efb957d2ac4a709ddc231751536836f1d64a9c0e2c83b",
+      "build_seconds": 597.8614503029967,
+      "build_verification_seconds": 0.18268285400699824,
+      "cargo_lock_sha256": "7c65baff0b6d1c9598817ae0fb92eac205e51f431054a16cabc9ab87db9ff7cb",
+      "features": [
+        "benchmark-internals"
+      ],
+      "flags": {
+        "CARGO_BUILD_JOBS": "2",
+        "CARGO_ENCODED_RUSTFLAGS": null,
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": null,
+        "CARGO_PROFILE_RELEASE_DEBUG": null,
+        "CARGO_PROFILE_RELEASE_LTO": null,
+        "CARGO_PROFILE_RELEASE_OPT_LEVEL": null,
+        "CARGO_TARGET_DIR": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target",
+        "RUSTFLAGS": null,
+        "RUSTUP_TOOLCHAIN": null
+      },
+      "harness_sha256": "657de3e697907e473691c2fd0d1b99967d46577333135c50176801f6faa4e04e",
+      "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/sum-inline-state-20261105/build/baseline/build.json",
+      "revision": "222f4e2d88f56b5b4ce635abab24eceed732da6d",
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+      "sha256": "3f2dba8cac80662e357305e10adeb4af089e084e28929a4a50775214ffb3b7d2",
+      "source_count": 1004,
+      "source_root": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state-baseline"
+    },
+    "candidate": {
+      "binary_sha256": "8378ba7b8683780868604ce70568aa626f61e0abcd1742ec84f050b95aef1ed3",
+      "build_seconds": 548.6420385980164,
+      "build_verification_seconds": 1.578536984976381,
+      "cargo_lock_sha256": "7c65baff0b6d1c9598817ae0fb92eac205e51f431054a16cabc9ab87db9ff7cb",
+      "features": [
+        "benchmark-internals"
+      ],
+      "flags": {
+        "CARGO_BUILD_JOBS": "2",
+        "CARGO_ENCODED_RUSTFLAGS": null,
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": null,
+        "CARGO_PROFILE_RELEASE_DEBUG": null,
+        "CARGO_PROFILE_RELEASE_LTO": null,
+        "CARGO_PROFILE_RELEASE_OPT_LEVEL": null,
+        "CARGO_TARGET_DIR": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target",
+        "RUSTFLAGS": null,
+        "RUSTUP_TOOLCHAIN": null
+      },
+      "harness_sha256": "657de3e697907e473691c2fd0d1b99967d46577333135c50176801f6faa4e04e",
+      "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/sum-inline-state-20261105/build/candidate/build.json",
+      "revision": "74a1eaf2183adfd04fcb1aeecd655c6df73ed16f",
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+      "sha256": "49f7a0922ced5b9a599de5701a1ecb5b996f632ebb480d813b2ccf2702ff5feb",
+      "source_count": 1008,
+      "source_root": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state-measured"
+    }
+  },
+  "baseline_actual_build": {
+    "binary_sha256": "c99c5bb268f320d71f4efb957d2ac4a709ddc231751536836f1d64a9c0e2c83b",
+    "build_seconds": 597.8614503029967,
+    "core_fresh": false,
+    "example_fresh": false,
+    "receipt": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/sum-inline-state-20261105/build/baseline/build.json",
+    "source_count": 1004,
+    "validation_seconds": 0.18268285400699824
+  },
+  "baseline_reuse": {
+    "added_source": [
+      "crates/calc-flow/src/pipeline/batch/input_partition_tests.rs"
+    ],
+    "af400_compatible": false,
+    "changed_existing_source": [
+      "crates/calc-flow/Cargo.toml",
+      "crates/calc-flow/src/datafusion.rs",
+      "crates/calc-flow/src/datafusion_owned.rs",
+      "crates/calc-flow/src/operator/asof/tests/expiration_output_integration.rs",
+      "crates/calc-flow/src/pipeline/batch.rs"
+    ],
+    "decision": "Fresh current222 build required; no relabeling old binary.",
+    "old_binary_sha256": "be89d670e89c7142fdf89849ae86240d3df3b86b2bfa508b52979a525f4c96bd",
+    "old_revision": "af400b38511bc7f6255fd3549518095b51b20e0c"
+  },
+  "baseline_revision": "222f4e2d88f56b5b4ce635abab24eceed732da6d",
+  "budget_excludes": [
+    "native builds and their verification",
+    "implementation",
+    "ordinary focused functional tests"
+  ],
+  "budget_includes": [
+    "live source/binary/public-Git-object/receipt/process/resource preflight",
+    "fixture generation",
+    "native IPC preload and startup",
+    "warmup",
+    "all full per-snapshot arithmetic/schema/hash oracles",
+    "all timed graph jobs and cleanup",
+    "baseline/candidate dense1 CPU captures",
+    "clock-verified decoding/target attribution",
+    "statistics",
+    "local publication",
+    "owned process cleanup"
+  ],
+  "budget_seconds": 600,
+  "build_receipt_sha256": {
+    "baseline": "3f2dba8cac80662e357305e10adeb4af089e084e28929a4a50775214ffb3b7d2",
+    "candidate": "49f7a0922ced5b9a599de5701a1ecb5b996f632ebb480d813b2ccf2702ff5feb"
+  },
+  "builds": {
+    "baseline_actual_seconds": 597.8614503029967,
+    "candidate_actual_seconds": 548.6420385980164,
+    "candidate_public_before_build": true,
+    "cargo_target_dir": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target",
+    "estimate_seconds_per_fresh_release": [
+      600,
+      900
+    ],
+    "features": [
+      "benchmark-internals"
+    ],
+    "fresh_baseline_and_candidate": true,
+    "fresh_proof": "actual Cargo core and example compiler-artifact fresh=false, source pre/post seals, public Git blob comparison except only audited657 overlay; actual depfile/source mapping",
+    "incremental": 0,
+    "jobs": 2,
+    "total_estimate_seconds": [
+      1200,
+      1800
+    ]
+  },
+  "candidate_public_tree": "04b554c37f0afe8e40fa8e821b9c6b808418f558",
+  "candidate_revision": "74a1eaf2183adfd04fcb1aeecd655c6df73ed16f",
+  "cases": [
+    {
+      "cpus": [
+        0
+      ],
+      "fixture": "stock",
+      "id": "stock-stream-1cpu",
+      "mode": "stream",
+      "partitions": 1,
+      "reason": "direct single-SUM allocation and drop target"
+    },
+    {
+      "cpus": [
+        0,
+        2,
+        4,
+        6
+      ],
+      "fixture": "stock",
+      "id": "stock-stream-4cpu",
+      "mode": "stream",
+      "partitions": 1,
+      "reason": "same representation with current four-thread diagnostic policy"
+    },
+    {
+      "cpus": [
+        0
+      ],
+      "fixture": "sparse",
+      "id": "sparse-stream-1cpu",
+      "mode": "stream",
+      "partitions": 1,
+      "reason": "sparse updates and retained complete-snapshot control"
+    }
+  ],
+  "common_harness": {
+    "note": "Identical audited657 instrumentation overlay only in permanent frozen native source trees; development harness stays unchanged.",
+    "path": "crates/calc-flow/examples/grouped_sum_state_benchmark.rs",
+    "revision": "84186554b078e25e71003a74fedc91c63b2b7f70",
+    "sha256": "657de3e697907e473691c2fd0d1b99967d46577333135c50176801f6faa4e04e"
+  },
+  "destination": "benchmarks/sum-state/sum-inline-state-20261105",
+  "execution_order": [
+    "full runtime/provenance/global-process preflight",
+    "maintained stock/sparse fixture generation and oracle manifest freeze",
+    "required baseline and candidate dense1CPU captures, six jobs each discard first",
+    "required per-thread timestamp alignment and accepted five-window decoding",
+    "three cases in declared order, two rounds of ten alternating pairs",
+    "post-source seals/statistics/profile targets/clock evidence/local publication/cleanup"
+  ],
+  "fixture_sealing": "Native fixture generation inside600s emits full input/schema/21prefix manifest before profile/timing jobs; same immutable IPC files consumed by both products.",
+  "formal_observations": 120,
+  "generic_control": "Common657 accepts only the fixed single Int64 SUM graph. Additional query modes would require new native instrumentation/oracles; instead generic enum in-object size/capacity/allocation and byte-budget boundary tests are required, with generic latency explicitly unmeasured.",
+  "main222_policy": "New diagnostics follow explicit1T/four-worker convention. Historical8T sealed results remain unchanged and are not this comparison.",
+  "pairs_per_round": 10,
+  "performance_acceptance": "All3 cases/correctness/resources/provenance/source/profile requirements complete; at least one of dense1/dense4 exact improved; no regression on any3. Inconclusive remains uncertain, never equivalence. If unmet, archive evidence and do not claim performance benefit.",
+  "prior_measurement_seconds": 0,
+  "profiles": {
+    "callgraph": "dwarf,16384",
+    "case": "stock-stream-1cpu",
+    "event": "cpu-clock:u",
+    "evidence": "all selected stacks/counts, self/inclusive targets, per-thread/window attribution, unresolved leaves, raw timestamps and alignment embedded; large perf path/hash retained. Missing/inlined frames are not zero cost; CPU shares are not phase wall time.",
+    "exclude_first": true,
+    "gate": "Both product profiles must have five nonempty exact processing windows, matching sealed binary hashes, every imported timestamp matched within10ns, and no lost/unwind/warning diagnostics. No SQL-worker criterion applies to this serial representation change.",
+    "jobs_per_side": 6,
+    "sample_hz": 999,
+    "sides": [
+      "baseline",
+      "candidate"
+    ]
+  },
+  "resources": {
+    "controller_affinity": [
+      31
+    ],
+    "datafusion_target_partitions": 1,
+    "experimental_input_partition_opt_in": false,
+    "experimental_input_partitions": 1,
+    "min_rows_per_partition": 1,
+    "other_thread_environment": "all maintained non-Tokio thread variables1",
+    "tokio_workers": "matches affinity size",
+    "topology": "four selected logical CPUs are four reported physical-core IDs on WSL2; outside-guest host load/power unobservable",
+    "worker_affinity_1T": [
+      0
+    ],
+    "worker_affinity_4T": [
+      0,
+      2,
+      4,
+      6
+    ]
+  },
+  "rounds": 2,
+  "schema": "calc-flow.sum-inline-state.protocol.v1",
+  "slug": "sum-inline-state-20261105",
+  "source_layout": {
+    "baseline_frozen": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state-baseline",
+    "candidate_frozen": "new detached public candidate native tree; permanently keep657 overlay and source seals",
+    "development": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-inline-state"
+  },
+  "statistics": "Maintained two-round paired-median97.8515625% intervals and5% rule: regression only both lower>+5; improved only both upper<\u22125; otherwise inconclusive/no-confirmed as maintained endpoint tolerance. No invented all-CI-below+5 acceptance condition.",
+  "status": "frozen-awaiting-independent-acquisition-review",
+  "stop": "Any source/receipt/binary drift, global native conflict, invalid profile/oracle/resource or deadline failure stops and reaps owned processes, persists partial evidence; no expanded cases/samples, retries or favorable reruns.",
+  "tool_seal_enforcement": "Fixed10file inventory, SHA256 equality before setup, after native finalization, before publication and after writes. Any drift demotes durable source/raw/summary/report/manifest and performance acceptance; actual post-seals retained in raw. Helpers stay immutable during acquisition.",
+  "tool_source_sha256": {
+    "scripts/benchmark_suite/report.py": "0daf6c205c2cc733813d2c658c6541d811f8324b502c2f2982a09de5a8dd9ff2",
+    "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
+    "scripts/benchmark_suite/sum_batch_parallel.py": "29760a53fb59634ebd2ea9e507d99a7b5be79d7d7e22cb91e808028ce18675c8",
+    "scripts/benchmark_suite/sum_followup.py": "847d6346e91cc5c8a8505cbf405840d861d2242c9087b637ef89767a6e0369a6",
+    "scripts/benchmark_suite/sum_inline_state.py": "139915940223cd1b5c1ca1362965ee639aac54e4d7c6a42e33d53cf252d1feab",
+    "scripts/benchmark_suite/sum_state.py": "c942412beacfcac872ff56de4831f55d0cb7711d9944bb8dcac7b190ed4e80fd",
+    "scripts/benchmark_suite/sum_state_profile.py": "6ef4cc3d63b3c54e1db7acb5d98061bcac5e7a6cc080b7294450f167107fdbed",
+    "scripts/benchmark_suite/sum_state_publication.py": "35f0a81ca4da6a8854d0df1f6a6198ea094c5ece53b08b6ae6d3f89695ac1fba",
+    "scripts/test_sum_inline_state.py": "5cf9e0df963ff4de4315eb7f72ea77eaf07964002b24840409a28b388ba00bf1",
+    "scripts/toolkit.py": "ef8ad17c43ea4a974e5e01a3fcaf1aec7a70e19b88286db8b82c4dcde2945d56"
+  },
+  "unmeasured": [
+    "UInt64 timing",
+    "generic/noneligible aggregate latency",
+    "nullable input timing",
+    "checkpoint/recovery latency",
+    "finite mode",
+    "hot-key case",
+    "2T/8T and other scales"
+  ],
+  "warmup_invocations": 12,
+  "warmups_per_arm_per_round": 1,
+  "workload": {
+    "checkpointing": false,
+    "common657_null_boundary": "All input columns non-null; nullable behavior tested functionally, not timed.",
+    "compact_max_bytes": 9007199254740991,
+    "compact_max_groups": 10000,
+    "dense_business_rows": 2000000,
+    "dense_source_business_batches": [
+      100000,
+      100000,
+      100000,
+      100000,
+      100000,
+      100000,
+      100000,
+      100000,
+      100000,
+      100000,
+      100000,
+      100000,
+      100000,
+      100000,
+      100000,
+      100000,
+      100000,
+      100000,
+      100000,
+      100000
+    ],
+    "dense_trade_rows_per_batch": 80000,
+    "full_snapshots_per_stream": 21,
+    "primary_timer": "fresh graph/plan/execution/full retained snapshot emission and lifecycle; IPC preload and independent oracles outside native timer but inside600s",
+    "retain_all_outputs": true,
+    "retained_groups": 10000,
+    "seed_rows": 10000,
+    "sparse_business_batches": [
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100
+    ],
+    "sparse_distinct_updated_groups_total": 100,
+    "sparse_trade_rows_per_batch": 80
+  }
+}

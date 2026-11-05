@@ -11,6 +11,7 @@ use super::{
     NativeStateDescriptor, PaidNativeStateRecords, RecordBatch, Result, STATE_CHUNK_ROWS,
     ScalarValue, StateColumn, checked_bytes, df_error, ensure_reservation, validate_scalar,
 };
+use std::borrow::Cow;
 
 const STRING_STEP_BYTES: usize = 64 * 1024;
 
@@ -172,7 +173,7 @@ impl<'a> ExportCursor<'a> {
                 self.census_column,
                 self.name,
             )?;
-            self.charge_census_value(value)?;
+            self.charge_census_value(&value)?;
             self.advance_census();
         }
         #[cfg(test)]
@@ -225,26 +226,26 @@ fn census_scalar<'a>(
     column: StateColumn,
     ordinal: usize,
     name: &str,
-) -> Result<&'a ScalarValue> {
+) -> Result<Cow<'a, ScalarValue>> {
     if group.values.len() != descriptor.key_fields.len()
-        || group.states.len() != descriptor.state_fields.len()
+        || group.aggregates.len() != descriptor.state_fields.len()
     {
         return Err(df_error(name, "native group field census differs"));
     }
     if let StateColumn::Aggregate(aggregate, _) = column
-        && group.states[aggregate].len() != descriptor.state_fields[aggregate].len()
+        && group.aggregates.state(aggregate).len() != descriptor.state_fields[aggregate].len()
     {
         return Err(df_error(name, "native aggregate field census differs"));
     }
     let value = scalar(group, column);
-    validate_scalar(value, descriptor.wire_schema.field(ordinal), name)?;
+    validate_scalar(&value, descriptor.wire_schema.field(ordinal), name)?;
     Ok(value)
 }
 
-fn scalar(group: &Group, column: StateColumn) -> &ScalarValue {
+fn scalar(group: &Group, column: StateColumn) -> Cow<'_, ScalarValue> {
     match column {
-        StateColumn::Key(key) => &group.values[key],
-        StateColumn::Aggregate(aggregate, state) => &group.states[aggregate][state],
+        StateColumn::Key(key) => Cow::Borrowed(&group.values[key]),
+        StateColumn::Aggregate(aggregate, state) => group.aggregates.state_scalar(aggregate, state),
     }
 }
 
@@ -336,7 +337,7 @@ impl ColumnExport {
                 return Ok(true);
             }
             let value = scalar(groups.get(self.row), column);
-            let copied = self.copy_scalar(value, STRING_STEP_BYTES - bytes, name)?;
+            let copied = self.copy_scalar(&value, STRING_STEP_BYTES - bytes, name)?;
             bytes += copied;
             #[cfg(test)]
             super::super::super::compact::direct_async_tests::after_bytes(name, copied);

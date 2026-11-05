@@ -20,7 +20,10 @@ async fn test_compact_native_state_wire_ignores_cached_results_and_rebuilds_nati
         let saved = snapshot(&original);
         let first = original.export_native_state("codec", || Ok(())).unwrap();
         for group in &mut original.groups {
-            group.results.clear();
+            let GroupAggregates::Generic { results, .. } = &mut group.aggregates else {
+                panic!("decimal state must remain generic")
+            };
+            results.clear();
         }
         let second = original.export_native_state("codec", || Ok(())).unwrap();
         assert_eq!(first.records(), second.records());
@@ -29,7 +32,12 @@ async fn test_compact_native_state_wire_ignores_cached_results_and_rebuilds_nati
             .unwrap();
         assert_eq!(result(&restored), expected);
         assert_eq!(snapshot(&restored), saved);
-        assert!(original.groups.iter().all(|group| group.results.is_empty()));
+        assert!(
+            original
+                .groups
+                .iter()
+                .all(|group| group.aggregates.results().len() == 0)
+        );
     }
 }
 
@@ -319,7 +327,7 @@ async fn avg_null_state_case(kind: &DataType, grouped: bool, values: &[Option<i6
             alternate
                 .groups
                 .iter()
-                .all(|group| group.states[avg][0] == ScalarValue::UInt64(None))
+                .all(|group| group.aggregates.state(avg)[0] == ScalarValue::UInt64(None))
         );
         assert_eq!(result(&alternate), result(&original));
         apply(&mut alternate, kind, &[Some(4), Some(8), Some(12)]).await;
@@ -772,8 +780,16 @@ fn snapshot(plan: &IncrementalSql) -> Saved {
         .map(|group| {
             (
                 group.values.to_vec(),
-                group.states.clone(),
-                group.results.clone(),
+                group
+                    .aggregates
+                    .states()
+                    .map(|state| state.to_vec())
+                    .collect(),
+                group
+                    .aggregates
+                    .results()
+                    .map(std::borrow::Cow::into_owned)
+                    .collect(),
             )
         })
         .collect()

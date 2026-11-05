@@ -34,7 +34,9 @@ impl Bounds {
             name,
         )?;
         let total = indices.iter().try_fold(0, |total, &aggregate| {
-            let width = previous.map_or(0, |group| scalar_bytes(&group.states[aggregate][0]));
+            let width = previous.map_or(0, |group| {
+                scalar_bytes(&group.aggregates.state(aggregate)[0])
+            });
             checked_bytes(total, [(width, 1)], name)
         })?;
         ensure_reservation(
@@ -46,7 +48,9 @@ impl Bounds {
             .iter()
             .map(|&aggregate| Entry {
                 aggregate,
-                state: previous.map_or(0, |group| scalar_bytes(&group.states[aggregate][0])),
+                state: previous.map_or(0, |group| {
+                    scalar_bytes(&group.aggregates.state(aggregate)[0])
+                }),
                 partial: 0,
             })
             .collect();
@@ -155,8 +159,8 @@ fn scalar_bytes(value: &ScalarValue) -> usize {
 }
 
 pub(super) fn result_bytes(group: &Group, name: &str) -> Result<usize> {
-    group.results.iter().try_fold(0, |total, value| {
-        checked_bytes(total, [(scalar_bytes(value), 1)], name)
+    group.aggregates.results().try_fold(0, |total, value| {
+        checked_bytes(total, [(scalar_bytes(&value), 1)], name)
     })
 }
 
