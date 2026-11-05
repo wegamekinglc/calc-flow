@@ -75,6 +75,9 @@ use group_key::GroupKey;
 use native_expression::output_work;
 
 #[cfg(test)]
+#[path = "columnar_key_tests.rs"]
+mod columnar_key_tests;
+#[cfg(test)]
 #[path = "grouped_inline_tests.rs"]
 mod grouped_inline_tests;
 
@@ -82,11 +85,15 @@ mod grouped_inline_tests;
 mod group_aggregates;
 use group_aggregates::{GroupAggregates, InlineSum, StateView};
 
+#[path = "columnar_keys.rs"]
+mod columnar_keys;
+
 #[path = "output_order.rs"]
 mod output_order;
 
 pub(super) struct IncrementalSql {
     inline_sum: Option<InlineSum>,
+    columnar_keys: Option<columnar_keys::Plan>,
     schema: SchemaRef,
     ordered_last: bool,
     pub(in crate::operator::sql) compact_budget: Option<crate::StateBudget>,
@@ -125,6 +132,16 @@ pub(super) struct IncrementalSql {
     pub(super) historical_key_lookups: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     pub(super) encoded_rows: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    key_work: KeyWork,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct KeyWork {
+    encoded_bytes: std::sync::atomic::AtomicUsize,
+    workspace_peak: std::sync::atomic::AtomicUsize,
+    columnar_chunks: std::sync::atomic::AtomicUsize,
 }
 
 struct Group {
@@ -158,6 +175,7 @@ struct InputCandidates {
     groups: CandidateMap,
     new_count: usize,
     native: Option<NativeKeys>,
+    columnar: Option<Box<columnar_keys::Dictionary>>,
     partial: Option<PartialGroups>,
     proof: Option<grouped_float::Proof>,
 }
@@ -747,49 +765,34 @@ impl IncrementalSql {
         let Some((projection, aggregate)) = shape(analyzed) else {
             return Ok(None);
         };
-        let Some(PlanWork {
-            projection_nodes,
-            input_checks,
-            input_nodes,
-        }) = plan_work(
+        let Some(work) = plan_work(
             projection,
             aggregate,
             analyzed,
             normalized.as_ref(),
             &schema,
-        )
-        else {
+        ) else {
             return Ok(None);
         };
-        let plan_bytes = initial_plan_charge(
-            query,
-            aggregate,
-            &schema,
-            aggregate.group_expr.len(),
-            projection_nodes,
-            input_nodes,
-            name,
-        )?;
+        let plan_bytes = work.charge(query, aggregate, &schema, name)?;
         let reservation = plan_reservation(runtime, plan_bytes, name)?;
         let Some((plan, post_order)) = bound_plan(projection, aggregate, &schema, analyzed, name)
         else {
             return Ok(None);
         };
+        let columnar_keys = columnar_keys::Plan::bind(&plan, &work.input_checks, runtime);
         let (aggregates, projection, aggregate_filters, predicate, post_filter, keys) = plan;
         let input_columns = input_columns(&aggregates, &keys, &aggregate_filters);
         let Some(aggregate_bytes) = aggregate_bytes(&aggregates, name)? else {
             return Ok(None);
         };
-        let Some(NativeStrategy {
-            global_records,
-            sequential,
-        }) = native_strategy(
+        let Some(strategy) = native_strategy(
             runtime,
             &runtime.incremental_reservation(name),
             raw,
             &aggregates,
             &keys,
-            (predicate.is_some(), input_nodes),
+            (predicate.is_some(), work.input_nodes),
             name,
         )?
         else {
@@ -798,6 +801,7 @@ impl IncrementalSql {
         let (converter, finalizer_bytes) = grouped_layout(&keys, &aggregates, name)?;
         Ok(Some(Self {
             inline_sum: group_aggregates::bind_inline_sum(&keys, &aggregates),
+            columnar_keys,
             ordered_last: aggregates.iter().any(|expr| ordered_last::selected(expr)),
             variable_extrema: variable_extrema_slots(&aggregates),
             compact_budget: None,
@@ -814,17 +818,17 @@ impl IncrementalSql {
             projection,
             post_filter,
             post_order,
-            projection_nodes,
-            input_nodes,
-            input_checks,
+            projection_nodes: work.projection_nodes,
+            input_nodes: work.input_nodes,
+            input_checks: work.input_checks,
             input_columns,
             keys,
             variable_columns,
             converter,
             groups: Vec::new(),
             dirty: dirty::DirtyGroups::empty(reservation.new_empty()),
-            sequential,
-            global_records,
+            sequential: strategy.sequential,
+            global_records: strategy.global_records,
             container_fee: None,
             index: HashMap::with_hasher(RandomState::new()),
             reservation,
@@ -836,6 +840,8 @@ impl IncrementalSql {
             historical_key_lookups: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
             encoded_rows: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            key_work: KeyWork::default(),
         }))
     }
 
@@ -1134,6 +1140,7 @@ impl IncrementalSql {
         } else {
             self.update_records(
                 table.batches(),
+                batch.num_rows(),
                 &mut candidates,
                 (&reservation, workspace),
                 context,
@@ -1174,6 +1181,10 @@ impl IncrementalSql {
         } else {
             None
         };
+        #[cfg(test)]
+        self.key_work
+            .workspace_peak
+            .fetch_max(reservation.size(), std::sync::atomic::Ordering::SeqCst);
         Ok(Transaction {
             records,
             track_updates: input.0,
@@ -1283,6 +1294,7 @@ impl IncrementalSql {
             touched: HashMap::with_hasher(RandomState::new()),
             new_count: 0,
             native,
+            columnar: None,
             partial,
             proof: None,
         };
@@ -1360,11 +1372,26 @@ impl IncrementalSql {
     async fn update_records(
         &self,
         records: &[RecordBatch],
+        total_rows: usize,
         candidates: &mut InputCandidates,
         workspace: (&MemoryReservation, usize),
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<usize> {
+        if let Some(plan) = self.columnar_keys {
+            candidates.columnar = plan
+                .prepare(
+                    records,
+                    total_rows,
+                    self.compact_budget,
+                    self.scratch.new_empty(),
+                    context,
+                    name,
+                )
+                .await?;
+        }
+        #[cfg(test)]
+        self.observe_workspace(workspace.0, candidates);
         #[cfg(test)]
         let mut rows = 0;
         #[cfg(not(test))]
@@ -1374,6 +1401,8 @@ impl IncrementalSql {
                 context.check_cancelled()?;
                 let chunk = record.slice(offset, CHUNK_ROWS.min(record.num_rows() - offset));
                 self.update_chunk(&chunk, candidates, workspace.0, workspace.1, name)?;
+                #[cfg(test)]
+                self.observe_workspace(workspace.0, candidates);
                 #[cfg(test)]
                 {
                     rows += chunk.num_rows();
@@ -1390,6 +1419,7 @@ impl IncrementalSql {
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<()> {
+        drop(candidates.columnar.take());
         let mut native = candidates.native.take();
         if let Some(native) = native.as_mut() {
             self.native_candidates(native, candidates, context, name)
@@ -1532,6 +1562,9 @@ impl IncrementalSql {
                 name,
             );
         }
+        if self.update_columnar_chunk(&input.keys, &input.arguments, &filters, candidates, name)? {
+            return Ok(());
+        }
         if Self::update_native_chunk(
             &input.keys,
             &input.arguments,
@@ -1560,6 +1593,81 @@ impl IncrementalSql {
             candidates,
             name,
         )
+    }
+
+    fn update_columnar_chunk(
+        &self,
+        keys: &[ArrayRef],
+        arguments: &[Vec<ArrayRef>],
+        filters: &[Option<&BooleanArray>],
+        candidates: &mut InputCandidates,
+        name: &str,
+    ) -> Result<bool> {
+        let Some(mut dictionary) = candidates.columnar.take() else {
+            return Ok(false);
+        };
+        #[cfg(test)]
+        self.key_work
+            .columnar_chunks
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        dictionary.intern(keys, name)?;
+        if let Some(arrays) = dictionary.new_keys(keys, name)? {
+            self.admit_columnar_keys(&arrays, &mut dictionary, candidates, name)?;
+        }
+        self.update_partial_chunk(
+            arguments,
+            filters,
+            None,
+            dictionary.remap(name)?,
+            candidates,
+            name,
+        )?;
+        candidates.columnar = Some(dictionary);
+        Ok(true)
+    }
+
+    fn admit_columnar_keys(
+        &self,
+        arrays: &[ArrayRef],
+        dictionary: &mut columnar_keys::Dictionary,
+        candidates: &mut InputCandidates,
+        name: &str,
+    ) -> Result<()> {
+        let encoded = self
+            .converter
+            .as_ref()
+            .expect("grouped key converter")
+            .convert_columns(arrays)
+            .map_err(|error| df_error(name, error))?;
+        #[cfg(test)]
+        {
+            self.encoded_rows
+                .fetch_add(encoded.num_rows(), std::sync::atomic::Ordering::SeqCst);
+            self.key_work.encoded_bytes.fetch_add(
+                encoded.iter().map(|row| row.as_ref().len()).sum(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+        for row in 0..arrays[0].len() {
+            let key = encoded.row(row);
+            dictionary.add_rank(self.group_rank(key.as_ref(), arrays, row, candidates, name)?);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn observe_workspace(&self, reservation: &MemoryReservation, candidates: &InputCandidates) {
+        let columnar = candidates
+            .columnar
+            .as_ref()
+            .map_or(0, |dictionary| dictionary.reserved_bytes());
+        let bytes = reservation
+            .size()
+            .checked_add(columnar)
+            .expect("paid workspace sum fits usize");
+        self.key_work
+            .workspace_peak
+            .fetch_max(bytes, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn update_global_chunk(
@@ -1651,6 +1759,11 @@ impl IncrementalSql {
             .expect("grouped key converter")
             .convert_columns(key_arrays)
             .map_err(|error| df_error(name, error))?;
+        #[cfg(test)]
+        self.key_work.encoded_bytes.fetch_add(
+            encoded.iter().map(|row| row.as_ref().len()).sum(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
         let mut indices = Vec::with_capacity(rows);
         for row in 0..rows {
             if selection.is_some_and(|selection| !predicate::selected(selection, row)) {
@@ -1800,6 +1913,11 @@ impl IncrementalSql {
                 .expect("grouped key converter")
                 .convert_columns(&arrays)
                 .map_err(|error| df_error(name, error))?;
+            #[cfg(test)]
+            self.key_work.encoded_bytes.fetch_add(
+                encoded.iter().map(|row| row.as_ref().len()).sum(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
             self.native_candidate_rows(&arrays, &encoded, start, rows, candidates, name)?;
             tokio::task::yield_now().await;
         }
@@ -2912,6 +3030,26 @@ struct PlanWork {
     projection_nodes: usize,
     input_checks: Vec<Arc<dyn PhysicalExpr>>,
     input_nodes: usize,
+}
+
+impl PlanWork {
+    fn charge(
+        &self,
+        query: &ValidatedQuery,
+        aggregate: &datafusion::logical_expr::Aggregate,
+        schema: &SchemaRef,
+        name: &str,
+    ) -> Result<usize> {
+        initial_plan_charge(
+            query,
+            aggregate,
+            schema,
+            aggregate.group_expr.len(),
+            self.projection_nodes,
+            self.input_nodes,
+            name,
+        )
+    }
 }
 
 fn plan_work(
