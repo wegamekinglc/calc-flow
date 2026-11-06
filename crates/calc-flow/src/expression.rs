@@ -7,8 +7,8 @@ use datafusion::{
         parser::{DFParser, Statement as DFStatement},
         sqlparser::{
             ast::{
-                Expr, GroupByExpr, ObjectName, Query, Select, TableFactor, Visit, Visitor,
-                visit_expressions,
+                Expr, GroupByExpr, ObjectName, Query, Select, SelectFlavor, SelectItem, SetExpr,
+                Statement as SqlStatement, TableFactor, Visit, Visitor, visit_expressions,
             },
             dialect::GenericDialect,
         },
@@ -98,6 +98,146 @@ impl ValidatedQuery {
             _ => false,
         }
     }
+
+    pub(crate) fn is_simple_projection(&self) -> bool {
+        if self.has_stream_aggregate() {
+            return false;
+        }
+        let DFStatement::Statement(statement) = &self.statement else {
+            return false;
+        };
+        let SqlStatement::Query(query) = statement.as_ref() else {
+            return false;
+        };
+        simple_query(query) && row_local_statement(statement)
+    }
+}
+
+fn simple_query(query: &Query) -> bool {
+    if ![
+        query.with.is_none(),
+        query.order_by.is_none(),
+        query.limit_clause.is_none(),
+        query.fetch.is_none(),
+        query.locks.is_empty(),
+        query.for_clause.is_none(),
+        query.settings.is_none(),
+        query.format_clause.is_none(),
+        query.pipe_operators.is_empty(),
+    ]
+    .into_iter()
+    .all(std::convert::identity)
+    {
+        return false;
+    }
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return false;
+    };
+    simple_select(select)
+}
+
+fn simple_select(select: &Select) -> bool {
+    [
+        select.optimizer_hints.is_empty(),
+        select.distinct.is_none(),
+        select.select_modifiers.is_none(),
+        select.top.is_none(),
+        select.exclude.is_none(),
+        select.into.is_none(),
+        select.lateral_views.is_empty(),
+        select.prewhere.is_none(),
+        select.selection.is_none(),
+        select.connect_by.is_empty(),
+        matches!(select.group_by, GroupByExpr::Expressions(ref groups, _) if groups.is_empty()),
+        select.cluster_by.is_empty(),
+        select.distribute_by.is_empty(),
+        select.sort_by.is_empty(),
+        select.having.is_none(),
+        select.named_window.is_empty(),
+        select.qualify.is_none(),
+        select.value_table_mode.is_none(),
+        matches!(select.flavor, SelectFlavor::Standard),
+        !select.projection.is_empty(),
+        select.projection.iter().all(|item| {
+            matches!(
+                item,
+                SelectItem::UnnamedExpr(_) | SelectItem::ExprWithAlias { .. }
+            )
+        }),
+        simple_relation(select),
+    ]
+    .into_iter()
+    .all(std::convert::identity)
+}
+
+fn simple_relation(select: &Select) -> bool {
+    let [from] = select.from.as_slice() else {
+        return false;
+    };
+    if !from.joins.is_empty() {
+        return false;
+    }
+    match &from.relation {
+        TableFactor::Table {
+            args,
+            with_hints,
+            version,
+            with_ordinality,
+            partitions,
+            json_path,
+            sample,
+            index_hints,
+            ..
+        } => [
+            args.is_none(),
+            with_hints.is_empty(),
+            version.is_none(),
+            !with_ordinality,
+            partitions.is_empty(),
+            json_path.is_none(),
+            sample.is_none(),
+            index_hints.is_empty(),
+        ]
+        .into_iter()
+        .all(std::convert::identity),
+        _ => false,
+    }
+}
+
+struct RowLocalVisitor;
+
+impl Visitor for RowLocalVisitor {
+    type Break = ();
+
+    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<Self::Break> {
+        match expression {
+            Expr::Subquery(_) | Expr::Exists { .. } | Expr::InSubquery { .. } => {
+                ControlFlow::Break(())
+            }
+            Expr::Function(function) if non_row_local_function(function) => ControlFlow::Break(()),
+            _ => ControlFlow::Continue(()),
+        }
+    }
+}
+
+fn non_row_local_function(function: &datafusion::sql::sqlparser::ast::Function) -> bool {
+    if function.over.is_some() {
+        return true;
+    }
+    function
+        .name
+        .0
+        .last()
+        .and_then(|part| part.as_ident())
+        .map(|ident| ident.value.to_ascii_lowercase())
+        .is_some_and(|name| matches!(name.as_str(), "unnest" | "unnest_outer"))
+}
+
+fn row_local_statement(statement: &SqlStatement) -> bool {
+    !matches!(
+        statement.visit(&mut RowLocalVisitor),
+        ControlFlow::Break(())
+    )
 }
 
 struct AggregateVisitor {

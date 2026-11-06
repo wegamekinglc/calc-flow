@@ -701,6 +701,7 @@ async fn calc_flow_sample(
                 DataFusionParallelismMode::Fixed => "fixed",
                 DataFusionParallelismMode::Auto => "auto",
                 DataFusionParallelismMode::AutoRows => "auto_rows",
+                DataFusionParallelismMode::AutoPlan => "auto_plan",
             }
             .to_owned(),
             available_parallelism: metric.available_parallelism,

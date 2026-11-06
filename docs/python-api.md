@@ -607,8 +607,9 @@ first node executes. Other graphs and runtimes require trusted
 `calc_flow.datafusion.active_entities` batch metadata and otherwise use p1.
 Both policies avoid scanning rows. `parallelism_mode="auto_rows"` additionally
 uses input rows when no trusted active-entity metadata is supplied; entity
-statistics, when present, only lower the row-based request. Fixed p1 remains the
-default.
+statistics, when present, only lower the row-based request. `auto_plan` instead
+pins a batch graph to p1 only when every node is a proven simple row-local SQL
+projection; other graphs use the row-based policy. Fixed p1 remains the default.
 See [SQL and DataFusion performance controls](sql-datafusion-performance.md)
 for all fields, telemetry, evidence gates, and rollback steps.
 

@@ -153,6 +153,7 @@ pub struct BatchExecutionPlan {
     /// Built-in batch operators hold no run state; only external ones can.
     has_operator_state: bool,
     row_parallel_sql: bool,
+    row_local_projection: bool,
     /// Experimental benchmark-only input partition count; one in production.
     input_partitions: usize,
     pub(crate) run_lock: tokio::sync::Mutex<()>,
@@ -224,6 +225,10 @@ impl PipelineBuilder {
         let row_parallel_sql = self.nodes.values().any(
             |node| matches!(&node.operator, NodeOperator::Sql(sql) if sql.input_ports().len() > 1),
         );
+        let row_local_projection = !self.nodes.is_empty()
+            && self.nodes.values().all(|node| {
+                matches!(&node.operator, NodeOperator::Sql(sql) if sql.is_simple_projection())
+            });
         let nodes = build_nodes(self, graph.order, |definition| {
             CompiledBatchOperator::try_convert(definition)
                 .expect("batch-only nodes were validated before conversion")
@@ -238,6 +243,7 @@ impl PipelineBuilder {
             query_templates: Arc::default(),
             has_operator_state,
             row_parallel_sql,
+            row_local_projection,
             input_partitions: 1,
             run_lock: tokio::sync::Mutex::new(()),
             operation_state: StdMutex::new(OperationState::default()),
@@ -433,6 +439,26 @@ impl BatchExecutionPlan {
         lifecycle_result("reset", &failures)
     }
 
+    fn prepare_parallelism(
+        &self,
+        config: DataFusionConfig,
+        runtime: &mut DataFusionRuntime,
+        inputs: &BTreeMap<String, Batch>,
+    ) {
+        if !self.row_parallel_sql
+            && config.parallelism_mode != crate::DataFusionParallelismMode::AutoPlan
+        {
+            return;
+        }
+        let input_rows = inputs
+            .values()
+            .filter(|batch| batch.kind() == crate::BatchKind::Table)
+            .fold(0usize, |total, batch| {
+                total.saturating_add(batch.num_rows())
+            });
+        runtime.prepare_batch_sql_parallelism(input_rows, self.row_local_projection);
+    }
+
     async fn execute_unlocked(
         &self,
         inputs: BTreeMap<String, Batch>,
@@ -449,15 +475,7 @@ impl BatchExecutionPlan {
                 )?;
                 runtime.register_udfs(&table.udfs, &table.selected_udfs)?;
                 runtime.set_input_partitions(self.input_partitions)?;
-                if self.row_parallel_sql {
-                    let input_rows = inputs
-                        .values()
-                        .filter(|batch| batch.kind() == crate::BatchKind::Table)
-                        .fold(0usize, |total, batch| {
-                            total.saturating_add(batch.num_rows())
-                        });
-                    runtime.prepare_batch_sql_parallelism(input_rows);
-                }
+                self.prepare_parallelism(table.config, &mut runtime, &inputs);
                 Ok::<DataFusionRuntime, CalcFlowError>(runtime)
             })
             .transpose()?;

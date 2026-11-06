@@ -27,7 +27,7 @@ executions.
 |--------------------------|---------|----------------------------------------------------------------|
 | `batch_size`             | `8192`  | DataFusion execution batch size                                |
 | `target_partitions`      | `1`     | Requested count in `fixed` mode                                |
-| `parallelism_mode`       | `fixed` | `fixed` preserves explicit behavior; `auto` uses trusted facts; `auto_rows` uses input rows without requiring entity statistics |
+| `parallelism_mode`       | `fixed` | `fixed` preserves explicit behavior; `auto` uses trusted facts; `auto_rows` uses input rows; `auto_plan` pins proven batch row projections to p1 |
 | `max_partitions`         | `32`    | Upper bound for `auto`                                         |
 | `min_rows_per_partition` | `65536` | Work cap used by both modes                                    |
 | `small_rows_threshold`   | `10001` | Smaller auto workloads remain p1                               |
@@ -38,7 +38,7 @@ The project schema accepts non-negative numeric values for compatibility with
 external-only plans, which never create a DataFusion runtime. When a project
 does execute a table expression or SQL node, every numeric value is validated
 as positive before DataFusion is initialized. Omitted fields use their
-defaults. `parallelism_mode="auto"` and `parallelism_mode="auto_rows"` are
+defaults. `parallelism_mode="auto"`, `"auto_rows"`, and `"auto_plan"` are
 opt-in.
 
 Auto mode calculates:
@@ -88,6 +88,14 @@ use one partition. Python callers can attach the trusted count with
 engine additionally validates that the value is positive and no larger than the
 input row count. Batch graphs containing multi-input SQL use the same
 whole-run external-row policy as `auto`. The default remains `fixed`.
+
+`parallelism_mode="auto_plan"` is a separate batch opt-in. If every graph node
+is a proven simple row-local SQL projection, the run freezes one partition and
+reports `row_local_projection`. The SQL AST proof rejects filters, aggregates,
+windows, ordering, joins, subqueries, CTEs, limits, and other complex shapes;
+those workloads use the same external-row policy as `auto_rows`. Standalone and
+streaming runtimes retain the `auto_rows` fallback. No policy scans input rows
+or changes the default.
 
 Input registration is not a parallelism ceiling. With more than one effective
 target partition, DataFusion's round-robin repartition increases row-local scan

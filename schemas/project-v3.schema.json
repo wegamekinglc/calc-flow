@@ -938,6 +938,11 @@
           "const": "auto_rows",
           "description": "Choose a partition count from host capacity and input rows without\nrequiring trusted active-entity statistics. A trusted entity count,\nwhen present, can only lower the row-based request. Multi-input batch\nSQL uses the same whole-run external-row policy as [`Self::Auto`].",
           "type": "string"
+        },
+        {
+          "const": "auto_plan",
+          "description": "Use one partition for a graph proven to contain only simple row-local\nSQL projections; otherwise use the whole-run external-row policy.",
+          "type": "string"
         }
       ]
     },

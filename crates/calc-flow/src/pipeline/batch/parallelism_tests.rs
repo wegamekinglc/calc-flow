@@ -354,3 +354,68 @@ async fn batch_parallel_sql_auto_rows_multi_input_uses_run_row_policy() {
         );
     }
 }
+
+#[tokio::test]
+async fn batch_parallel_sql_auto_plan_only_pins_proven_row_projection_to_one() {
+    for (query, ordered) in [
+        ("SELECT value + 1 AS value FROM input", false),
+        ("SELECT value FROM input ORDER BY value", true),
+    ] {
+        let plan = PipelineBuilder::new("plan aware projection")
+            .unwrap()
+            .with_datafusion_config(config(DataFusionParallelismMode::AutoPlan, true))
+            .add_node(
+                "query",
+                Box::new(SqlOperator::new("query", query, vec!["input".into()], vec![]).unwrap()),
+            )
+            .unwrap()
+            .compile_batch(&UdfRegistry::new().snapshot())
+            .unwrap();
+        let result = plan
+            .execute(
+                BTreeMap::from([("input".into(), batch(64, 0))]),
+                crate::ExecutionOptions::default(),
+            )
+            .await
+            .unwrap();
+        let metric = &result.datafusion_metrics[0];
+        let available = std::thread::available_parallelism().unwrap().get();
+        assert_eq!(
+            metric.effective_target_partitions,
+            if ordered { available.min(4) } else { 1 }
+        );
+        if !ordered {
+            assert_eq!(metric.partition_limit_reason, "row_local_projection");
+        }
+    }
+}
+
+#[test]
+fn auto_plan_projection_classification_is_fail_closed() {
+    for (query, expected) in [
+        ("SELECT value FROM input", true),
+        ("SELECT value + 1 AS value FROM input", true),
+        ("SELECT value AS renamed FROM input", true),
+        ("SELECT value FROM input WHERE value > 0", false),
+        ("SELECT SUM(value) FROM input", false),
+        ("SELECT value FROM input ORDER BY value", false),
+        ("SELECT value FROM input LIMIT 1", false),
+        ("SELECT DISTINCT value FROM input", false),
+        ("SELECT AVG(value) OVER () FROM input", false),
+        (
+            "WITH selected AS (SELECT value FROM input) SELECT value FROM selected",
+            false,
+        ),
+        (
+            "SELECT value FROM input JOIN other ON input.key = other.key",
+            false,
+        ),
+        ("SELECT value FROM (SELECT value FROM input)", false),
+        ("SELECT (SELECT MAX(value) FROM other) FROM input", false),
+        ("SELECT UNNEST(value) FROM input", false),
+        ("SELECT UNNEST_OUTER(value) FROM input", false),
+    ] {
+        let query = crate::expression::parse_select_query(query).unwrap();
+        assert_eq!(query.is_simple_projection(), expected, "{}", query.text());
+    }
+}
