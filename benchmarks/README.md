@@ -74,6 +74,13 @@ mixed-mask allocations and higher uniform-mask allocations. Its runtime
 comparison stops at the environment guard before workloads, so the prototype
 is withdrawn and end-to-end performance remains unmeasured.
 
+The separately authorized [quiet-environment sign CASE retest](sum-state/sum-case-retest-20261106.md)
+completes all five fixed cases, 200 formal observations, both CPU profiles and
+4,872 full snapshot checks against main `5a66b6d5`. All maintained verdicts
+are inconclusive, with no accepted dense improvement or confirmed regression.
+The runtime prototype remains withdrawn; the earlier stopped acquisition and
+this complete comparison retain separate immutable evidence.
+
 ## Layout
 
 | Path                                               | Contents                                                         |

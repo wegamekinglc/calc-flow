@@ -9,6 +9,14 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-06: Repeat the compiled integer sign CASE experiment in a quiet
+  environment against main `5a66b6d5`. Complete five fixed cases, 200 formal
+  observations, both CPU profiles and full snapshot checks. All maintained
+  verdicts are inconclusive; neither dense case establishes the required
+  improvement. Withdraw the runtime prototype and preserve the
+  [complete retest evidence](benchmarks/sum-state/sum-case-retest-20261106.md)
+  separately from the earlier stopped acquisition.
+
 - 2026-11-06: Record a narrow compiled integer sign CASE experiment and its
   [source/allocation evidence](benchmarks/sum-state/sum-case-projection-20261106.md).
   Verify lower mixed-mask allocations and higher uniform-mask allocations.
