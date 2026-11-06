@@ -69,6 +69,11 @@ withdrawn because it did not establish the required dense improvement;
 experimental source, paired evidence and source-verification records remain
 available for reproduction.
 
+The [sign CASE study](sum-state/sum-case-projection-20261106.md) verifies lower
+mixed-mask allocations and higher uniform-mask allocations. Its runtime
+comparison stops at the environment guard before workloads, so the prototype
+is withdrawn and end-to-end performance remains unmeasured.
+
 ## Layout
 
 | Path                                               | Contents                                                         |

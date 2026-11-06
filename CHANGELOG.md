@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-06: Record a narrow compiled integer sign CASE experiment and its
+  [source/allocation evidence](benchmarks/sum-state/sum-case-projection-20261106.md).
+  Verify lower mixed-mask allocations and higher uniform-mask allocations.
+  Stop the runtime comparison at its environment guard before any workload;
+  withdraw the unmeasured runtime prototype and retain tools and evidence.
+
 - 2026-11-06: Record a bounded grouped integer SUM candidate/rank experiment.
   Remove merge-time candidate lookups in the prototype, but obtain no accepted
   dense-stream improvement across five fixed cases. Withdraw runtime changes
