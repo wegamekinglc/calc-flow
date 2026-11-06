@@ -12,8 +12,10 @@ measurements. Use the current guides for supported behavior.
 - 2026-11-07: Extend input-free DataFusion query templates from single-table
   row-local plans to multi-table immutable plans built only from
   data-independent operators (projections, filters, aggregates, unions,
-  sorts, limits, repartitions) over in-memory scans; joins keep planning
-  every run because their build side follows statistics. Template reuse is
+  sorts, repartitions) over in-memory scans; joins keep planning every run
+  because their build side follows statistics, and limited queries keep
+  planning because top-k operators carry execution-updated pruning filters.
+  Template reuse is
   keyed by query text, aliases, exact schemas, and each run's effective
   partition count, and the fixed policy now shares the plan-level cache at
   any partition count. In a two-input state-feedback stock-positions probe

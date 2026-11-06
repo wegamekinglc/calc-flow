@@ -215,9 +215,11 @@ state reuse, timings, and DataFusion metrics.
 
 Explicit batch plans also retain up to eight input-free DataFusion query templates
 for repeated immutable queries whose physical plans contain only
-data-independent operators (projections, filters, aggregates, unions, sorts,
-limits and repartitions) over in-memory scans of the registered tables. Joins
-keep planning every run because their build side is chosen from statistics.
+data-independent operators (projections, filters, aggregates, unions, sorts
+and repartitions) over in-memory scans of the registered tables. Joins keep
+planning every run because their build side is chosen from statistics, and
+limited queries keep planning because top-k operators carry execution-updated
+pruning filters.
 Reuse requires the same query, aliases, exact Arrow schemas including metadata,
 and effective partition count. The compiled graph owns its configuration and UDF
 snapshot; templates are private to that graph. Each execution binds new input

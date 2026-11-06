@@ -218,3 +218,82 @@ async fn join_queries_plan_every_run() {
         assert_eq!(plan.query_templates.len(), 0);
     }
 }
+
+#[tokio::test]
+async fn limited_queries_plan_every_run() {
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    fn nullable(rows: &[(Option<&str>, Option<i64>)]) -> Batch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, true),
+            Field::new("value", DataType::Int64, true),
+        ]));
+        let record = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(
+                    rows.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+                )) as _,
+                Arc::new(Int64Array::from(
+                    rows.iter().map(|(_, value)| *value).collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .unwrap();
+        Batch::table(vec![record], BatchMetadata::default()).unwrap()
+    }
+    // Top-k sorts carry execution-updated dynamic filters, so a bound tree
+    // would prune the second history against the first run's bounds.
+    let query = "SELECT key, SUM(value) AS total FROM events GROUP BY key \
+                 HAVING SUM(value) > 1 ORDER BY key DESC NULLS FIRST LIMIT 4";
+    let first = nullable(&[
+        (Some("A\0B"), Some(1)),
+        (Some("\u{e9}"), None),
+        (Some(""), Some(0)),
+        (None, Some(2)),
+        (Some("e\u{301}"), Some(3)),
+    ]);
+    let mut history = first.table_payload().unwrap().batches().to_vec();
+    history.extend(
+        nullable(&[
+            (Some("A\0B"), Some(2)),
+            (Some("\u{e9}"), Some(4)),
+            (Some("\u{65b0}\u{1f600}"), Some(5)),
+            (None, None),
+        ])
+        .table_payload()
+        .unwrap()
+        .batches()
+        .to_vec(),
+    );
+    let history = Batch::table(history, BatchMetadata::default()).unwrap();
+    let reused = plan(query, &["events"]);
+    for input in [first, history.clone()] {
+        let result = reused
+            .execute(
+                BTreeMap::from([("events".into(), input)]),
+                ExecutionOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.datafusion_metrics[0].physical_planning_count, 1);
+        assert_eq!(reused.query_templates.len(), 0);
+    }
+    let mut second = reused
+        .execute(
+            BTreeMap::from([("events".into(), history.clone())]),
+            ExecutionOptions::default(),
+        )
+        .await
+        .unwrap();
+    let mut fresh = plan(query, &["events"])
+        .execute(
+            BTreeMap::from([("events".into(), history)]),
+            ExecutionOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows(&second.outputs.remove("output").unwrap()),
+        rows(&fresh.outputs.remove("output").unwrap())
+    );
+}

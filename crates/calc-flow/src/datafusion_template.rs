@@ -30,7 +30,6 @@ use datafusion::{
         aggregates::AggregateExec,
         coalesce_partitions::CoalescePartitionsExec,
         filter::FilterExec,
-        limit::{GlobalLimitExec, LocalLimitExec},
         projection::ProjectionExec,
         repartition::RepartitionExec,
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
@@ -294,13 +293,18 @@ fn row_local_expression(expr: &Expr) -> bool {
 }
 
 /// Accepts only data-independent operators whose leaves are in-memory scans
-/// without scan orderings.
+/// without scan orderings. Operators carrying a fetch limit are rejected:
+/// `DataFusion` 55 gives top-k sorts and limited aggregates dynamic filters
+/// whose pruning bounds are updated by execution and shared through
+/// `with_new_children`, so a bound tree would prune later rows against the
+/// bounds of an earlier run.
 fn reusable_tree(plan: &dyn ExecutionPlan) -> bool {
     if let Some(scan) = memory_scan(plan) {
         return scan.sort_information().is_empty();
     }
     let children = plan.children();
-    data_independent_operator(plan)
+    plan.fetch().is_none()
+        && data_independent_operator(plan)
         && !children.is_empty()
         && children.iter().all(|child| reusable_tree(child.as_ref()))
 }
@@ -309,7 +313,7 @@ fn reusable_tree(plan: &dyn ExecutionPlan) -> bool {
 /// configuration, never on the rows registered when the plan was captured.
 /// Joins stay excluded because their build side is chosen from statistics.
 fn data_independent_operator(plan: &dyn ExecutionPlan) -> bool {
-    const OPERATORS: [fn(&dyn ExecutionPlan) -> bool; 11] = [
+    const OPERATORS: [fn(&dyn ExecutionPlan) -> bool; 9] = [
         is_operator::<ProjectionExec>,
         is_operator::<FilterExec>,
         is_operator::<AggregateExec>,
@@ -319,8 +323,6 @@ fn data_independent_operator(plan: &dyn ExecutionPlan) -> bool {
         is_operator::<RepartitionExec>,
         is_operator::<SortExec>,
         is_operator::<SortPreservingMergeExec>,
-        is_operator::<GlobalLimitExec>,
-        is_operator::<LocalLimitExec>,
     ];
     OPERATORS.iter().any(|is_operator| is_operator(plan))
 }
@@ -353,36 +355,38 @@ fn scan_bindings(
 }
 
 /// Registered rows reach the scan as shared Arrow arrays, so the first column
-/// of every batch identifies the alias without comparing values. All of a
-/// scan's batches must be the registered batches of exactly one alias, in the
-/// same order.
+/// of every batch identifies the alias without comparing values. A scan whose
+/// batches carry no columns is attributed by its unique schema and row layout
+/// instead. All of a scan's batches must be the registered batches of exactly
+/// one alias, in the same order.
 fn scan_alias(scan: &MemorySourceConfig, tables: &BTreeMap<String, Batch>) -> Option<String> {
-    let scan_columns = scan
-        .partitions()
-        .iter()
-        .flatten()
-        .map(|record| record.columns().first())
-        .collect::<Vec<_>>();
-    if scan_columns.is_empty() || scan_columns.iter().any(Option::is_none) {
+    let batches = scan.partitions().iter().flatten().collect::<Vec<_>>();
+    if batches.is_empty() {
         return None;
     }
     let mut matches = tables.iter().filter(|(_, batch)| {
         batch.table_payload().is_ok_and(|table| {
             *table.schema() == scan.original_schema()
-                && table.batches().len() == scan_columns.len()
+                && table.batches().len() == batches.len()
                 && table
                     .batches()
                     .iter()
-                    .zip(scan_columns.iter())
-                    .all(|(record, column)| {
-                        record.columns().first().is_some_and(|candidate| {
-                            Arc::ptr_eq(candidate, column.expect("checked"))
-                        })
-                    })
+                    .zip(&batches)
+                    .all(|(registered, scanned)| same_batch(registered, scanned))
         })
     });
     let (alias, _) = matches.next()?;
     matches.next().is_none().then(|| alias.clone())
+}
+
+/// Batches with columns are the same when they share their first array;
+/// column-less batches can only be compared by row count.
+fn same_batch(registered: &RecordBatch, scanned: &RecordBatch) -> bool {
+    match (registered.columns().first(), scanned.columns().first()) {
+        (Some(registered), Some(scanned)) => Arc::ptr_eq(registered, scanned),
+        (None, None) => registered.num_rows() == scanned.num_rows(),
+        _ => false,
+    }
 }
 
 fn memory_scan(plan: &dyn ExecutionPlan) -> Option<&MemorySourceConfig> {
