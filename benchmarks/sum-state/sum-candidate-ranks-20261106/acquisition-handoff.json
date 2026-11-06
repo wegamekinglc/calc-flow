@@ -1,0 +1,208 @@
+{
+  "status": "completed",
+  "performance_acceptance": false,
+  "owned_acquisition_session": 89179,
+  "owned_acquisition_session_exit_code": 0,
+  "maintained_acquisition_debit_seconds": 143.80610578000778,
+  "overall_acquisition_start_to_protocol_archive_verification_and_settlement_seconds": 235.56555740401382,
+  "budget_seconds": 600,
+  "formal_observations": 200,
+  "accepted_profiles": 2,
+  "retries": 0,
+  "native_build_measurement_processes_remaining": [],
+  "cases": [
+    {
+      "id": "stock-stream-1cpu",
+      "statistics": {
+        "base_p50": 0.171229692,
+        "change_percent": 0.147441426221806,
+        "head_max": 0.189429081,
+        "head_min": 0.16253651,
+        "head_p50": 0.1714821555,
+        "head_p95": 0.187954909,
+        "round_changes": [
+          -0.3311955726247262,
+          -1.4170695763487173
+        ],
+        "round_intervals": [
+          {
+            "coverage": 0.978515625,
+            "high": 3.567968025374868,
+            "low": -2.7917250168099317,
+            "median": -0.3311955726247262
+          },
+          {
+            "coverage": 0.978515625,
+            "high": 3.8224837896492447,
+            "low": -7.274812825541432,
+            "median": -1.4170695763487173
+          }
+        ],
+        "round_min_changes": [
+          -2.357392152116722,
+          -2.803989889197278
+        ],
+        "rows_per_second": 11721336.217983333,
+        "samples": 20,
+        "verdict": "no-confirmed-regression"
+      },
+      "observations": 40
+    },
+    {
+      "id": "stock-stream-4cpu",
+      "statistics": {
+        "base_p50": 0.152138432,
+        "change_percent": -3.3585205479178204,
+        "head_max": 0.169113962,
+        "head_min": 0.139016042,
+        "head_p50": 0.1470288315,
+        "head_p95": 0.16092627775,
+        "round_changes": [
+          -5.506271057068224,
+          -0.8968259422936498
+        ],
+        "round_intervals": [
+          {
+            "coverage": 0.978515625,
+            "high": 2.9900862859667976,
+            "low": -13.15181877399133,
+            "median": -5.506271057068224
+          },
+          {
+            "coverage": 0.978515625,
+            "high": 1.6481122802013193,
+            "low": -6.111812399087513,
+            "median": -0.8968259422936498
+          }
+        ],
+        "round_min_changes": [
+          -4.916537057440884,
+          -1.9145221532009038
+        ],
+        "rows_per_second": 13670788.099815646,
+        "samples": 20,
+        "verdict": "no-confirmed-regression"
+      },
+      "observations": 40
+    },
+    {
+      "id": "sparse-stream-1cpu",
+      "statistics": {
+        "base_p50": 0.0213532445,
+        "change_percent": -1.3085739733837642,
+        "head_max": 0.039141,
+        "head_min": 0.019964666,
+        "head_p50": 0.0210738215,
+        "head_p95": 0.025629945150000007,
+        "round_changes": [
+          -5.693665568342688,
+          1.7319494014439996
+        ],
+        "round_intervals": [
+          {
+            "coverage": 0.978515625,
+            "high": 1.5904419097812372,
+            "low": -7.496400186775243,
+            "median": -5.693665568342688
+          },
+          {
+            "coverage": 0.978515625,
+            "high": 18.247891606228684,
+            "low": -4.690500513423612,
+            "median": 1.7319494014439996
+          }
+        ],
+        "round_min_changes": [
+          -5.018743233988687,
+          -0.9623317381105112
+        ],
+        "rows_per_second": 569426.8597653254,
+        "samples": 20,
+        "verdict": "inconclusive"
+      },
+      "observations": 40
+    },
+    {
+      "id": "distinct-stream-1cpu",
+      "statistics": {
+        "base_p50": 0.08829084549999999,
+        "change_percent": -5.852208086511068,
+        "head_max": 0.098004911,
+        "head_min": 0.081117046,
+        "head_p50": 0.0831238815,
+        "head_p95": 0.09189565670000001,
+        "round_changes": [
+          -4.913806841990986,
+          -6.356409674773261
+        ],
+        "round_intervals": [
+          {
+            "coverage": 0.978515625,
+            "high": -1.7351157480280488,
+            "low": -6.994147429816932,
+            "median": -4.913806841990986
+          },
+          {
+            "coverage": 0.978515625,
+            "high": -1.7191083296341003,
+            "low": -9.766825737100781,
+            "median": -6.356409674773261
+          }
+        ],
+        "round_min_changes": [
+          -3.195625314293382,
+          -4.762955498142518
+        ],
+        "rows_per_second": 2526349.7831246005,
+        "samples": 20,
+        "verdict": "no-confirmed-regression"
+      },
+      "observations": 40
+    },
+    {
+      "id": "repeat2-stream-1cpu",
+      "statistics": {
+        "base_p50": 0.096153506,
+        "change_percent": -4.5695083650928,
+        "head_max": 0.1071207,
+        "head_min": 0.088618698,
+        "head_p50": 0.0917597635,
+        "head_p95": 0.09627377765000002,
+        "round_changes": [
+          -3.2927062999587866,
+          -5.2085832729250825
+        ],
+        "round_intervals": [
+          {
+            "coverage": 0.978515625,
+            "high": -0.5414871573684477,
+            "low": -12.01680001665496,
+            "median": -3.2927062999587866
+          },
+          {
+            "coverage": 0.978515625,
+            "high": -2.772973320732375,
+            "low": -12.155271846985883,
+            "median": -5.2085832729250825
+          }
+        ],
+        "round_min_changes": [
+          -5.055295880204557,
+          -5.410969120166287
+        ],
+        "rows_per_second": 4468189.37147762,
+        "samples": 20,
+        "verdict": "no-confirmed-regression"
+      },
+      "observations": 40
+    }
+  ],
+  "manifest_sha256": "1acb6b0129045f66e22411e395fc077d28358fb6e386aec5a143226e6c93b375",
+  "protocol_archive": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-candidate-ranks/benchmarks/sum-state/sum-candidate-ranks-20261106.protocol.json",
+  "protocol_archive_sha256": "75d53e62d98989e28c598bf4b43f402512adb32648363403647be23e3b4cecee",
+  "portable_build_record_integrity": true,
+  "raw_and_collector_manifest_unchanged": true,
+  "source_verification_sidecar_copy": "parent-owned; separate from collector outputs",
+  "publication": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/sum-candidate-ranks/benchmarks/sum-state/sum-candidate-ranks-20261106",
+  "decision": "not accepted: neither dense target has exact maintained improved verdict; no additional measurements authorized"
+}

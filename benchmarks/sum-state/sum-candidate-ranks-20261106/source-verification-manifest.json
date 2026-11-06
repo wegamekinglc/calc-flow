@@ -1,0 +1,31 @@
+{
+  "acquisition_manifest": {
+    "bytes": 1815,
+    "path": "benchmarks/sum-state/sum-candidate-ranks-20261106/evidence-manifest.json",
+    "sha256": "1acb6b0129045f66e22411e395fc077d28358fb6e386aec5a143226e6c93b375"
+  },
+  "budget_seconds": 600,
+  "collector_debit_seconds": 143.80610578000778,
+  "component_predeclared_in_frozen_protocol": true,
+  "files": [
+    {
+      "bytes": 15252,
+      "path": "benchmarks/sum-state/sum-candidate-ranks-20261106/component-evidence.json.gz",
+      "sha256": "f81bd81f06642f8ad82e584088109ad47c21fde1c51cf88b1544075e7de7b17d"
+    },
+    {
+      "bytes": 6515,
+      "path": "benchmarks/sum-state/sum-candidate-ranks-20261106/acquisition-handoff.json",
+      "sha256": "41e56666c56a31296b08f58bb7e0289920ee90681942382db14992e8048fa754"
+    }
+  ],
+  "frozen_protocol": {
+    "bytes": 3089441,
+    "path": "benchmarks/sum-state/sum-candidate-ranks-20261106.protocol.json",
+    "sha256": "75d53e62d98989e28c598bf4b43f402512adb32648363403647be23e3b4cecee"
+  },
+  "kind": "separate_source_verification_and_archival_handoff",
+  "same_original_start_to_archival_verification_and_settlement_seconds": 235.56555740401382,
+  "scope": "Existing component evidence prepared before acquisition, and post-collector archival verification/settlement handoff. No new workload, statistical calculation or modification of collector outputs.",
+  "source_verification_packaging_is_separate": true
+}

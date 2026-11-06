@@ -9,6 +9,13 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-06: Record a bounded grouped integer SUM candidate/rank experiment.
+  Remove merge-time candidate lookups in the prototype, but obtain no accepted
+  dense-stream improvement across five fixed cases. Withdraw runtime changes
+  and preserve current main. Publish the
+  [complete study](benchmarks/sum-state/sum-candidate-ranks-20261106.md),
+  paired intervals, CPU profiles, correctness evidence and reproducible tools.
+
 - 2026-11-05: Pin `arrow-data` and its required buffer/schema dependencies to
   59.3.2 to address `RUSTSEC-2026-0442`. Reject RunEndEncoded arrays whose run
   ends do not cover their logical offset plus length. Preserve the audit gates

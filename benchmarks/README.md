@@ -63,6 +63,12 @@ The [UTF-8 grouped-output follow-up](sum-state/sum-followup-columnar-20261104/RE
 tracks current-version profiling, the original finite control and separately
 sealed candidate comparisons under one cumulative measurement budget.
 
+The [candidate/rank SUM study](sum-state/sum-candidate-ranks-20261106.md)
+records five fresh-baseline cases and both profiles. The runtime prototype is
+withdrawn because it did not establish the required dense improvement;
+experimental source, paired evidence and source-verification records remain
+available for reproduction.
+
 ## Layout
 
 | Path                                               | Contents                                                         |

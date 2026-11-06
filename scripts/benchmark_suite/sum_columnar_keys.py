@@ -8,7 +8,7 @@ import json
 import re
 import time
 from collections import Counter
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pyarrow as pa
@@ -95,6 +95,32 @@ PROFILE_ANCHORS = (
 WORK_ANCHORS = (PROFILE_ANCHORS[0], PROFILE_ANCHORS[2])
 
 
+@dataclass(frozen=True, slots=True)
+class SumContract:
+    slug: str
+    baseline: str
+    cases: tuple
+    controls: dict
+    tools: tuple
+    report_lines: tuple = ()
+
+    @property
+    def phase(self):
+        return self.slug[4:].rsplit("-", 1)[0]
+
+
+COLUMNAR = SumContract(SLUG, BASELINE, CASES, CONTROL_FIXTURES, TOOL_FILES)
+
+
+@dataclass(frozen=True, slots=True)
+class StudyFollowup(followup.Followup):
+    contract: SumContract
+
+
+def study_contract(context):
+    return context.contract if isinstance(context, StudyFollowup) else COLUMNAR
+
+
 def canonical_symbol(name):
     return re.sub(r"::h[0-9a-f]{16}$", "", name.rsplit(" [", 1)[0])
 
@@ -157,22 +183,26 @@ def route_evidence(destination, builds, complete_profiles):
     }
 
 
-def helper_seals():
-    return {name: helper_seal(maintained.ROOT / name) for name in TOOL_FILES}
+def helper_seals(contract=COLUMNAR):
+    return {name: helper_seal(maintained.ROOT / name) for name in contract.tools}
 
 
-def validate_tool_seals(protocol):
+def validate_tool_seals(protocol, contract=COLUMNAR):
     expected = protocol["tool_source_sha256"]
-    if set(expected) != set(TOOL_FILES):
+    if set(expected) != set(contract.tools):
         raise ValueError("frozen measurement helper inventory differs")
     maintained.compare_fields(
-        helper_seals(), expected, TOOL_FILES, "measurement helper", required=True
+        helper_seals(contract),
+        expected,
+        contract.tools,
+        "measurement helper",
+        required=True,
     )
 
 
 def verify_helper_seals(context, acquisition):
     try:
-        validate_tool_seals(context.protocol)
+        validate_tool_seals(context.protocol, study_contract(context))
     except ValueError as error:
         previous = acquisition.get("failure")
         reason = f"{previous}; {error!r}" if previous else repr(error)
@@ -181,43 +211,43 @@ def verify_helper_seals(context, acquisition):
     return True
 
 
-def validate_protocol(protocol):
+def validate_protocol(protocol, contract=COLUMNAR):
     expected = {
-        "slug": SLUG,
-        "baseline_revision": BASELINE,
+        "slug": contract.slug,
+        "baseline_revision": contract.baseline,
         "budget_seconds": 600,
         "rounds": 2,
         "pairs_per_round": 10,
         "warmups_per_arm_per_round": 1,
-        "cases": list(CASES),
-        "control_fixtures": CONTROL_FIXTURES,
-        "profile_route_anchors": list(PROFILE_ANCHORS),
+        "cases": list(contract.cases),
+        "control_fixtures": contract.controls,
+        "profile_route_anchors": list(PROFILE_ANCHORS) if contract.slug == SLUG else [],
     }
     maintained.compare_fields(
-        protocol, expected, expected, "columnar-key protocol", required=True
+        protocol, expected, expected, f"{contract.phase} protocol", required=True
     )
     revision = protocol["candidate_revision"]
     if (
         not isinstance(revision, str)
         or not re.fullmatch(r"[0-9a-f]{40}", revision)
-        or revision == BASELINE
+        or revision == contract.baseline
     ):
         raise ValueError("a new public candidate revision is required")
 
 
-def validate_products(builds, protocol):
-    if builds["baseline"]["revision"] != BASELINE:
-        raise ValueError("fresh latest22f baseline is required; P74 is incompatible")
+def validate_products(builds, protocol, contract=COLUMNAR):
+    if builds["baseline"]["revision"] != contract.baseline:
+        raise ValueError(f"fresh public {contract.baseline} baseline is required")
     if builds["candidate"]["revision"] != protocol["candidate_revision"]:
         raise ValueError("candidate differs from frozen public source")
     for build in builds.values():
         validate_fresh_build(build)
 
 
-def prepare_context(args, started):
+def prepare_context(args, started, contract=COLUMNAR):
     protocol = publication.read(args.protocol)
-    validate_protocol(protocol)
-    validate_tool_seals(protocol)
+    validate_protocol(protocol, contract)
+    validate_tool_seals(protocol, contract)
     validate_receipt_seals(args, protocol)
     options = argparse.Namespace(
         **{
@@ -230,17 +260,23 @@ def prepare_context(args, started):
     collection = maintained.collection_context(options, started)
     scope = {
         **collection.scope,
-        "cases": CASES,
+        "cases": contract.cases,
         "profile_sides": ("baseline", "candidate"),
         "profile_min_remaining_seconds": 0,
     }
     collection = replace(collection, scope=scope)
-    validate_products(collection.builds, protocol)
-    validate_symbol_anchors(collection.builds)
+    validate_products(collection.builds, protocol, contract)
+    if contract.slug == SLUG:
+        validate_symbol_anchors(collection.builds)
     for build in collection.builds.values():
         evidence.source_equivalence(build, build["revision"], collection.deadline)
-    return followup.Followup(
-        collection, protocol, maintained.sha(args.protocol), "columnar-keys", None
+    return StudyFollowup(
+        collection,
+        protocol,
+        maintained.sha(args.protocol),
+        contract.phase,
+        None,
+        contract,
     )
 
 
@@ -338,11 +374,11 @@ def control_fixture(source, destination, copies, deadline=None):
     }
 
 
-def prepare_fixtures(collection):
+def prepare_fixtures(collection, contract=COLUMNAR):
     measurement = maintained.prepare_fixture(collection)
     fixtures = dict(measurement.fixture)
     root = collection.args.output / "fixture"
-    for name, spec in CONTROL_FIXTURES.items():
+    for name, spec in contract.controls.items():
         fixtures[name] = control_fixture(
             root / "stock.arrow",
             root / (name + ".arrow"),
@@ -355,7 +391,7 @@ def prepare_fixtures(collection):
 
 def collect(context, acquisition):
     collection = context.collection
-    measurement = prepare_fixtures(collection)
+    measurement = prepare_fixtures(collection, study_contract(context))
     maintained.collect_profiles(measurement, acquisition)
     validate_profiles(
         followup.accepted_profiles(context, acquisition), collection.builds
@@ -363,7 +399,7 @@ def collect(context, acquisition):
     for case in collection.scope["cases"]:
         maintained.collect_case(measurement, case, acquisition)
     if time.monotonic() > collection.deadline:
-        raise TimeoutError("columnar-key SUM measurement deadline")
+        raise TimeoutError(f"{study_contract(context).phase} SUM measurement deadline")
     acquisition["status"] = "completed"
 
 
@@ -375,9 +411,9 @@ def accepted_verdicts(verdicts):
     )
 
 
-def performance_acceptance(status, cases):
+def performance_acceptance(status, cases, contract=COLUMNAR):
     if status != "completed" or [case["id"] for case in cases] != [
-        case["id"] for case in CASES
+        case["id"] for case in contract.cases
     ]:
         return False
     return accepted_verdicts(
@@ -385,7 +421,51 @@ def performance_acceptance(status, cases):
     )
 
 
-def report(summary):
+def study_report(summary, contract):
+    rows, intervals, resources = publication.rendered_rows(summary)
+    accepted = performance_acceptance(summary["status"], summary["cases"], contract)
+    return "\n".join(
+        [
+            f"# {contract.slug}",
+            "",
+            f"Status: **{summary['status']}**.",
+            f"Performance acceptance: **{accepted}**.",
+            "",
+            publication.table(
+                ["Case", "Baseline P50 ms", "Candidate P50 ms", "Change", "Verdict"],
+                rows,
+            ),
+            "",
+            publication.table(
+                ["Case", "Round", "Paired median", "Median interval", "Coverage"],
+                intervals,
+            ),
+            "",
+            publication.table(
+                [
+                    "Case",
+                    "Side",
+                    "P95 ms",
+                    "CPU P50 ms",
+                    "Cores P50",
+                    "Peak RSS P50 MiB",
+                ],
+                resources,
+            ),
+            "",
+            f"Accepted profiles: {summary.get('accepted_profile_count', 0)}.",
+            "",
+            *contract.report_lines,
+            "",
+            f"Stopped reason: {summary['failure']}",
+            "",
+        ]
+    )
+
+
+def report(summary, contract=COLUMNAR):
+    if contract.slug != SLUG:
+        return study_report(summary, contract)
     rows, intervals, resources = publication.rendered_rows(summary)
     accepted = performance_acceptance(summary["status"], summary["cases"])
     return "\n".join(
@@ -490,7 +570,9 @@ def validate_publication(context, acquisition, profiles):
     if acquisition["status"] != "completed":
         return
     try:
-        publication.validate_inventory(acquisition, [case["id"] for case in CASES])
+        publication.validate_inventory(
+            acquisition, [case["id"] for case in study_contract(context).cases]
+        )
         validate_profiles(profiles, context.collection.builds)
     except ValueError as error:
         acquisition["status"], acquisition["failure"] = "stopped", repr(error)
@@ -504,7 +586,7 @@ def write_metadata(data, now):
         data.raw,
     )
     collection = context.collection
-    raw["helper_source_sha256_after"] = helper_seals()
+    raw["helper_source_sha256_after"] = helper_seals(study_contract(context))
     publication.update_timing(
         collection.args, acquisition, collection.started, collection.deadline, now
     )
@@ -525,15 +607,17 @@ def write_metadata(data, now):
         gzip.compress(json.dumps(raw, separators=(",", ":")).encode(), mtime=0)
     )
     write_json(destination / "summary.json", summary)
-    (destination / "README.md").write_text(report(summary))
+    (destination / "README.md").write_text(report(summary, study_contract(context)))
 
 
 def write_receipt(data, now):
     value = {
         **followup.receipt(data, now),
-        "slug": SLUG,
+        "slug": study_contract(data.context).slug,
         "performance_acceptance": performance_acceptance(
-            data.acquisition["status"], data.summary["cases"]
+            data.acquisition["status"],
+            data.summary["cases"],
+            study_contract(data.context),
         ),
         "current_profile_analysis_complete": data.summary["profile_analysis_complete"],
         "current_profiles": data.summary["accepted_profile_count"],
@@ -558,16 +642,19 @@ def publish(context, acquisition, plan, machine):
         ),
         "helper_seals_verified": verify_helper_seals(context, acquisition),
     }
-    routes = route_evidence(
-        context.collection.args.publish_directory,
-        context.collection.builds,
-        complete_profiles,
-    )
-    summary["columnar_route_evidence"] = routes
-    write_json(context.collection.args.publish_directory / "profile-route.json", routes)
+    if study_contract(context).slug == SLUG:
+        routes = route_evidence(
+            context.collection.args.publish_directory,
+            context.collection.builds,
+            complete_profiles,
+        )
+        summary["columnar_route_evidence"] = routes
+        write_json(
+            context.collection.args.publish_directory / "profile-route.json", routes
+        )
+        raw["profile_route_evidence"] = routes
     raw = {
         **raw,
-        "profile_route_evidence": routes,
         "profile_clock_evidence": evidence.clock_evidence(context, acquisition),
     }
     data = followup.PublishedFollowup(context, acquisition, summary, raw)
@@ -581,19 +668,19 @@ def publish(context, acquisition, plan, machine):
     if final > context.collection.deadline:
         write_metadata(data, final)
         write_receipt(data, time.monotonic())
-        raise TimeoutError("columnar-key SUM publication deadline")
+        raise TimeoutError(f"{study_contract(context).phase} SUM publication deadline")
     print(json.dumps(value), flush=True)
 
 
 def plan_and_machine(context):
     plan = maintained.collection_plan(context.collection)
     plan["study"] = {
-        "slug": SLUG,
+        "slug": study_contract(context).slug,
         "protocol": context.protocol,
         "protocol_sha256": context.protocol_sha256,
     }
     machine = maintained.machine_identity(context.collection)
-    machine["verified_tool_source_sha256"] = helper_seals()
+    machine["verified_tool_source_sha256"] = helper_seals(study_contract(context))
     for path in (Path(__file__), Path(followup.__file__), Path(evidence.__file__)):
         machine["helper_sha256"][str(path.relative_to(maintained.ROOT))] = (
             maintained.sha(path)
@@ -601,9 +688,9 @@ def plan_and_machine(context):
     return plan, machine
 
 
-def run(args):
+def run(args, contract=COLUMNAR):
     started = time.monotonic()
-    context = prepare_context(args, started)
+    context = prepare_context(args, started, contract)
     plan, machine = plan_and_machine(context)
     collection = context.collection
     write_json(args.output / "plan.json", plan)
@@ -629,8 +716,8 @@ def run(args):
         raise RuntimeError(acquisition["failure"])
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(contract=COLUMNAR):
+    parser = argparse.ArgumentParser(description=contract.slug)
     for name in (
         "protocol",
         "baseline-build",
@@ -644,7 +731,7 @@ def main():
             "--" + name, required=True, type=lambda value: Path(value).resolve()
         )
     parser.add_argument("--perf-library", type=lambda value: Path(value).resolve())
-    run(parser.parse_args())
+    run(parser.parse_args(), contract)
 
 
 if __name__ == "__main__":
