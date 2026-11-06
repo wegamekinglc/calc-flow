@@ -151,8 +151,15 @@ pub(super) fn take_asof_output_rows() -> usize {
     ASOF_OUTPUT_ROWS.with(|count| count.replace(0))
 }
 
-type AsofEntries = std::collections::HashMap<i64, (Option<u64>, usize), RandomState>;
-type AsofMap = std::collections::HashMap<String, AsofEntries, RandomState>;
+#[derive(Clone, Copy, Debug)]
+struct AsofEntry {
+    time: i64,
+    sequence: Option<u64>,
+    row: usize,
+}
+
+type AsofEntries = Vec<AsofEntry>;
+type AsofMap = hashbrown::HashMap<String, AsofEntries, RandomState>;
 
 struct AsofState {
     schema: SchemaRef,
@@ -168,26 +175,7 @@ struct AsofState {
 }
 
 fn asof_entries<'a>(latest: &'a mut AsofMap, key: &str) -> &'a mut AsofEntries {
-    if !latest.contains_key(key) {
-        latest.insert(
-            key.to_owned(),
-            std::collections::HashMap::with_hasher(RandomState::new()),
-        );
-    }
-    latest.get_mut(key).expect("ASOF key was just inserted")
-}
-
-fn replace_asof_entry(entries: &mut AsofEntries, time: i64, sequence: Option<u64>, row: usize) {
-    let replace = entries
-        .get(&time)
-        .is_none_or(|(current, _)| match (sequence, *current) {
-            (Some(next), Some(current)) => next > current,
-            (None, Some(_)) => true,
-            _ => false,
-        });
-    if replace {
-        entries.insert(time, (sequence, row));
-    }
+    latest.entry_ref(key).or_default()
 }
 
 fn asof_right_inputs<'a>(
@@ -210,19 +198,23 @@ fn asof_right_inputs<'a>(
 
 fn build_asof_latest(right: &RecordBatch, spec: &AsofSpec) -> DataFusionResult<AsofMap> {
     let (right_keys, right_times, right_sequences) = asof_right_inputs(right, spec)?;
-    let mut latest: AsofMap = std::collections::HashMap::with_hasher(RandomState::new());
+    let mut latest = AsofMap::with_hasher(RandomState::new());
     for (row, time) in right_times.iter().copied().enumerate() {
         if right_keys.is_null(row) || time.is_none() {
             continue;
         }
         let sequence = (!right_sequences.is_null(row)).then(|| right_sequences.value(row));
-        let entries = asof_entries(&mut latest, right_keys.value(row));
-        replace_asof_entry(
-            entries,
-            time.expect("checked non-null timestamp"),
+        asof_entries(&mut latest, right_keys.value(row)).push(AsofEntry {
+            time: time.expect("checked non-null timestamp"),
             sequence,
             row,
-        );
+        });
+    }
+    for entries in latest.values_mut() {
+        entries.sort_unstable_by_key(|entry| {
+            (entry.time, entry.sequence.map(std::cmp::Reverse), entry.row)
+        });
+        entries.dedup_by_key(|entry| entry.time);
     }
     Ok(latest)
 }
@@ -266,8 +258,12 @@ impl AsofState {
                 let time = self.left_times[row]?;
                 self.latest
                     .get(self.left_keys.value(row))
-                    .and_then(|by_time| by_time.get(&time))
-                    .and_then(|(_, right_row)| u64::try_from(*right_row).ok())
+                    .and_then(|entries| {
+                        let index = entries
+                            .binary_search_by_key(&time, |entry| entry.time)
+                            .ok()?;
+                        u64::try_from(entries[index].row).ok()
+                    })
             })
             .collect::<Vec<_>>();
         #[cfg(test)]
