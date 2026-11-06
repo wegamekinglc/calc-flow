@@ -206,6 +206,47 @@ impl Phases {
     }
 }
 
+/// Executes one input batch against the previous full result and returns the
+/// new full result, folding the run's query phases into `phases`.
+async fn run_batch(
+    plan: &BatchExecutionPlan,
+    input: &Batch,
+    previous: &Batch,
+    phases: &mut Phases,
+) -> ProbeResult<Batch> {
+    let mut result = plan
+        .execute(
+            BTreeMap::from([
+                ("input".to_owned(), input.clone()),
+                ("previous_positions".to_owned(), previous.clone()),
+            ]),
+            ExecutionOptions::default(),
+        )
+        .await?;
+    for metric in &result.datafusion_metrics {
+        phases.add(metric);
+    }
+    result
+        .outputs
+        .remove("output")
+        .ok_or_else(|| "missing output".into())
+}
+
+/// Rejects a timing whose final positions differ from the independent oracle.
+fn verify_positions(latest: &Batch, total_rows: usize, label: &str) -> ProbeResult<()> {
+    let observed = observed_positions(latest)?;
+    let expected = expected_positions(total_rows);
+    if observed == expected {
+        return Ok(());
+    }
+    Err(format!(
+        "final positions differ for {label}: {} observed vs {} expected keys",
+        observed.len(),
+        expected.len()
+    )
+    .into())
+}
+
 async fn measure(total_rows: usize, batch_rows: usize, partitions: usize) -> ProbeResult<()> {
     let plan = plan(partitions)?;
     let batches = total_rows.div_ceil(batch_rows);
@@ -222,37 +263,20 @@ async fn measure(total_rows: usize, batch_rows: usize, partitions: usize) -> Pro
     let mut phases = Phases::default();
     let started = Instant::now();
     for input in &inputs {
-        let mut result = plan
-            .execute(
-                BTreeMap::from([
-                    ("input".to_owned(), input.clone()),
-                    ("previous_positions".to_owned(), latest.clone()),
-                ]),
-                ExecutionOptions::default(),
-            )
-            .await?;
-        for metric in &result.datafusion_metrics {
-            phases.add(metric);
-        }
-        latest = result.outputs.remove("output").ok_or("missing output")?;
+        latest = run_batch(&plan, input, &latest, &mut phases).await?;
     }
     let elapsed = started.elapsed();
-    let wall_ms = elapsed.as_secs_f64() * 1_000.0;
-    let per_batch_us = elapsed.as_micros() / batches.max(1) as u128;
-    let observed = observed_positions(&latest)?;
-    let expected = expected_positions(total_rows);
-    if observed != expected {
-        return Err(format!(
-            "final positions differ for batch_rows={batch_rows} partitions={partitions}: {} observed vs {} expected keys",
-            observed.len(),
-            expected.len()
-        )
-        .into());
-    }
+    verify_positions(
+        &latest,
+        total_rows,
+        &format!("batch_rows={batch_rows} partitions={partitions}"),
+    )?;
     println!(
-        "batch_rows={batch_rows} partitions={partitions} batches={batches} wall_ms={wall_ms:.1} \
-         per_batch_us={per_batch_us} session_us={} register_us={} parse_us={} logical_us={} \
+        "batch_rows={batch_rows} partitions={partitions} batches={batches} wall_ms={:.1} \
+         per_batch_us={} session_us={} register_us={} parse_us={} logical_us={} \
          physical_us={} execution_us={} wrap_us={} physical_plans={}",
+        elapsed.as_secs_f64() * 1_000.0,
+        elapsed.as_micros() / batches.max(1) as u128,
         phases.per_run_us(phases.session_create_ns),
         phases.per_run_us(phases.register_ns),
         phases.per_run_us(phases.parse_ns),

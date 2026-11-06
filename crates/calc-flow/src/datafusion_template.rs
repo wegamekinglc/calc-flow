@@ -309,17 +309,24 @@ fn reusable_tree(plan: &dyn ExecutionPlan) -> bool {
 /// configuration, never on the rows registered when the plan was captured.
 /// Joins stay excluded because their build side is chosen from statistics.
 fn data_independent_operator(plan: &dyn ExecutionPlan) -> bool {
-    plan.downcast_ref::<ProjectionExec>().is_some()
-        || plan.downcast_ref::<FilterExec>().is_some()
-        || plan.downcast_ref::<AggregateExec>().is_some()
-        || plan.downcast_ref::<UnionExec>().is_some()
-        || plan.downcast_ref::<InterleaveExec>().is_some()
-        || plan.downcast_ref::<CoalescePartitionsExec>().is_some()
-        || plan.downcast_ref::<RepartitionExec>().is_some()
-        || plan.downcast_ref::<SortExec>().is_some()
-        || plan.downcast_ref::<SortPreservingMergeExec>().is_some()
-        || plan.downcast_ref::<GlobalLimitExec>().is_some()
-        || plan.downcast_ref::<LocalLimitExec>().is_some()
+    const OPERATORS: [fn(&dyn ExecutionPlan) -> bool; 11] = [
+        is_operator::<ProjectionExec>,
+        is_operator::<FilterExec>,
+        is_operator::<AggregateExec>,
+        is_operator::<UnionExec>,
+        is_operator::<InterleaveExec>,
+        is_operator::<CoalescePartitionsExec>,
+        is_operator::<RepartitionExec>,
+        is_operator::<SortExec>,
+        is_operator::<SortPreservingMergeExec>,
+        is_operator::<GlobalLimitExec>,
+        is_operator::<LocalLimitExec>,
+    ];
+    OPERATORS.iter().any(|is_operator| is_operator(plan))
+}
+
+fn is_operator<T: ExecutionPlan>(plan: &dyn ExecutionPlan) -> bool {
+    plan.downcast_ref::<T>().is_some()
 }
 
 /// Attributes each in-memory scan, in plan traversal order, to the registered
