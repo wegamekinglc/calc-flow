@@ -78,6 +78,10 @@ use native_expression::output_work;
 #[path = "grouped_inline_tests.rs"]
 mod grouped_inline_tests;
 
+#[cfg(test)]
+#[path = "snapshot_key_cache_tests.rs"]
+mod snapshot_key_cache_tests;
+
 #[path = "group_aggregates.rs"]
 mod group_aggregates;
 use group_aggregates::{GroupAggregates, InlineSum, StateView};
@@ -85,12 +89,17 @@ use group_aggregates::{GroupAggregates, InlineSum, StateView};
 #[path = "output_order.rs"]
 mod output_order;
 
+#[path = "snapshot_keys.rs"]
+mod snapshot_keys;
+
 pub(super) struct IncrementalSql {
     inline_sum: Option<InlineSum>,
     schema: SchemaRef,
     ordered_last: bool,
     pub(in crate::operator::sql) compact_budget: Option<crate::StateBudget>,
     scratch: MemoryReservation,
+    /// Key columns shared by repeated full snapshots.
+    snapshot_keys: snapshot_keys::SnapshotKeys,
     aggregate_schema: SchemaRef,
     output_schema: SchemaRef,
     aggregates: Vec<Arc<AggregateFunctionExpr>>,
@@ -729,6 +738,14 @@ impl IncrementalSql {
         )
     }
 
+    fn normalized_plans<'a>(
+        raw: &'a LogicalPlan,
+        analyzed: &'a LogicalPlan,
+        normalized: Option<&'a normalize_groups::Plans>,
+    ) -> (&'a LogicalPlan, &'a LogicalPlan) {
+        normalized.map_or((raw, analyzed), |plans| (&plans.raw, &plans.analyzed))
+    }
+
     pub(super) fn from_plan(
         runtime: &DataFusionRuntime,
         query: &ValidatedQuery,
@@ -738,9 +755,7 @@ impl IncrementalSql {
         name: &str,
     ) -> Result<Option<Self>> {
         let normalized = normalize_groups::plans(runtime, query, raw, analyzed, &schema, name)?;
-        let (raw, analyzed) = normalized
-            .as_ref()
-            .map_or((raw, analyzed), |plans| (&plans.raw, &plans.analyzed));
+        let (raw, analyzed) = Self::normalized_plans(raw, analyzed, normalized.as_ref());
         let Some(variable_columns) = plan_inputs(raw, &schema, name)? else {
             return Ok(None);
         };
@@ -802,6 +817,7 @@ impl IncrementalSql {
             variable_extrema: variable_extrema_slots(&aggregates),
             compact_budget: None,
             scratch: runtime.incremental_reservation(name),
+            snapshot_keys: snapshot_keys::SnapshotKeys::new(reservation.new_empty()),
             schema,
             aggregate_schema: Arc::new(aggregate.schema.as_arrow().clone()),
             output_schema: Arc::new(analyzed.schema().as_arrow().clone()),
@@ -1236,6 +1252,7 @@ impl IncrementalSql {
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<PreparedTransaction> {
+        self.snapshot_keys.begin();
         let count = self.output_count(&candidates, name)?;
         let records = self
             .output_records(count, &candidates.groups, reservation, context, name)
@@ -2057,30 +2074,48 @@ impl IncrementalSql {
         candidates: &CandidateMap,
         name: &str,
     ) -> Result<RecordBatch> {
-        let borrowed = self
-            .keys
+        let groups = (start..end)
+            .map(|slot| self.output_group(slot, candidates))
+            .collect::<Vec<_>>();
+        let key_columns = self.snapshot_key_columns(start, &groups, name)?;
+        let aggregate_columns = (self.keys.len()..self.keys.len() + self.aggregates.len())
+            .map(|column| self.scalar_output_column(groups.iter().copied(), column, name));
+        let columns = key_columns
             .iter()
-            .any(|key| key.field.data_type() == &DataType::Utf8)
-            .then(|| {
-                (start..end)
-                    .map(|slot| self.output_group(slot, candidates))
-                    .collect::<Vec<_>>()
-            });
-        let columns = (0..self.keys.len() + self.aggregates.len())
-            .map(|column| {
-                if let Some(groups) = &borrowed {
-                    self.borrowed_output_column(groups, column, name)
-                } else {
-                    self.scalar_output_column(
-                        (start..end).map(|slot| self.output_group(slot, candidates)),
-                        column,
-                        name,
-                    )
-                }
-            })
+            .cloned()
+            .map(Ok)
+            .chain(aggregate_columns)
             .collect::<Result<Vec<ArrayRef>>>()?;
         RecordBatch::try_new(self.aggregate_schema.clone(), columns)
             .map_err(|error| df_error(name, error))
+    }
+
+    /// Key columns of one output chunk, shared across snapshots while the
+    /// chunk's groups are unchanged; a changed chunk is rebuilt and cached.
+    fn snapshot_key_columns(
+        &self,
+        start: usize,
+        groups: &[&Group],
+        name: &str,
+    ) -> Result<Arc<[ArrayRef]>> {
+        let Some(first) = groups.first().filter(|_| !self.keys.is_empty()) else {
+            return Ok(Arc::from(Vec::new()));
+        };
+        let chunk = start / CHUNK_ROWS;
+        if let Some(columns) = self.snapshot_keys.get(chunk, groups.len(), &first.key) {
+            return Ok(columns);
+        }
+        let columns = (0..self.keys.len())
+            .map(|column| self.borrowed_output_column(groups, column, name))
+            .collect::<Result<Vec<_>>>()?;
+        let columns = Arc::<[ArrayRef]>::from(columns);
+        self.snapshot_keys.stage(
+            chunk,
+            groups.len(),
+            Arc::clone(&first.key),
+            Arc::clone(&columns),
+        );
+        Ok(columns)
     }
 
     fn output_group<'a>(&'a self, slot: usize, candidates: &'a CandidateMap) -> &'a Group {
@@ -2336,6 +2371,7 @@ impl IncrementalSql {
             self.index.insert(group.key.clone(), slot);
             self.groups.push(group);
         }
+        self.snapshot_keys.install_staged();
     }
 
     pub(super) fn clear_checkpoint_changes(&mut self) {
