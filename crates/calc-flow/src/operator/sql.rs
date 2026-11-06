@@ -469,6 +469,10 @@ impl SqlOperator {
         &self.query
     }
 
+    pub(crate) fn is_simple_projection(&self) -> bool {
+        self.validated.is_simple_projection()
+    }
+
     /// Plans the exact SQL output schema without processing rows.
     ///
     /// This internal adapter seam uses built-in SQL functions and named Arrow

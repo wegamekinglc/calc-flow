@@ -64,6 +64,9 @@ pub enum DataFusionParallelismMode {
     /// when present, can only lower the row-based request. Multi-input batch
     /// SQL uses the same whole-run external-row policy as [`Self::Auto`].
     AutoRows,
+    /// Use one partition for a graph proven to contain only simple row-local
+    /// SQL projections; otherwise use the whole-run external-row policy.
+    AutoPlan,
 }
 
 /// Batch metadata key carrying a trusted positive active-entity count.
@@ -922,10 +925,16 @@ impl DataFusionRuntime {
     }
 
     /// Freeze a whole-batch policy without eagerly creating the session.
-    pub(crate) fn prepare_batch_sql_parallelism(&mut self, input_rows: usize) {
+    pub(crate) fn prepare_batch_sql_parallelism(
+        &mut self,
+        input_rows: usize,
+        row_local_projection: bool,
+    ) {
         if !matches!(
             self.config.parallelism_mode,
-            DataFusionParallelismMode::Auto | DataFusionParallelismMode::AutoRows
+            DataFusionParallelismMode::Auto
+                | DataFusionParallelismMode::AutoRows
+                | DataFusionParallelismMode::AutoPlan
         ) {
             return;
         }
@@ -933,7 +942,15 @@ impl DataFusionRuntime {
             let available = std::thread::available_parallelism()
                 .map(std::num::NonZero::get)
                 .unwrap_or(1);
-            batch_sql_parallelism_decision(&self.config, input_rows, available)
+            let mut decision = batch_sql_parallelism_decision(&self.config, input_rows, available);
+            if row_local_projection
+                && self.config.parallelism_mode == DataFusionParallelismMode::AutoPlan
+            {
+                decision.requested_partitions = 1;
+                decision.effective_partitions = 1;
+                decision.limit_reason = "row_local_projection";
+            }
+            decision
         });
     }
 
@@ -1214,9 +1231,9 @@ fn parallelism_decision(
     let available_parallelism = available_parallelism.max(1);
     let requested_partitions = match config.parallelism_mode {
         DataFusionParallelismMode::Fixed => config.target_partitions,
-        DataFusionParallelismMode::Auto | DataFusionParallelismMode::AutoRows => {
-            available_parallelism.min(config.max_partitions)
-        }
+        DataFusionParallelismMode::Auto
+        | DataFusionParallelismMode::AutoRows
+        | DataFusionParallelismMode::AutoPlan => available_parallelism.min(config.max_partitions),
     };
     let decision = |effective_partitions, limit_reason| DataFusionParallelismDecision {
         requested_partitions,
@@ -1260,7 +1277,10 @@ fn parallelism_decision(
         };
         return decision(effective_partitions, reason);
     }
-    if config.parallelism_mode == DataFusionParallelismMode::AutoRows {
+    if matches!(
+        config.parallelism_mode,
+        DataFusionParallelismMode::AutoRows | DataFusionParallelismMode::AutoPlan
+    ) {
         if input_rows < config.small_rows_threshold {
             return decision(1, "small_input");
         }

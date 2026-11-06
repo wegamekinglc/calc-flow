@@ -128,10 +128,12 @@ create no DataFusion session or UDF snapshot.
 `target_partitions=1` as its compatible default. Opt-in `Auto` freezes a
 whole-run external-row policy for batch graphs containing multi-input SQL, and
 opt-in `AutoRows` derives the request from input rows without requiring trusted
-entity statistics.
-Other graphs and runtimes additionally require the trusted
-`calc_flow.datafusion.active_entities` batch metadata value. Neither policy
-scans input rows. See
+entity statistics. `AutoPlan` additionally pins a batch graph to one partition
+when every node is a proven simple row-local SQL projection, and otherwise uses
+the external-row policy. Other `Auto` graphs and runtimes additionally require
+the trusted `calc_flow.datafusion.active_entities` batch metadata value;
+`AutoRows` and the standalone/streaming `AutoPlan` fallback use input rows
+instead. No policy scans input rows. See
 [SQL and DataFusion performance controls](sql-datafusion-performance.md) for
 the complete configuration, telemetry, benchmark, and rollback contract.
 

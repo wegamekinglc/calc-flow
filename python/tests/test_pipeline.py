@@ -298,6 +298,16 @@ def test_datafusion_configuration_accepts_auto_rows_mode() -> None:
     assert configured.project["graph"]["datafusion"]["parallelism_mode"] == "auto_rows"
 
 
+def test_datafusion_configuration_accepts_auto_plan_mode() -> None:
+    configured = PipelineBuilder("auto-plan-datafusion").with_datafusion_config(
+        parallelism_mode="auto_plan",
+        max_partitions=4,
+        min_rows_per_partition=65_536,
+    )
+
+    assert configured.project["graph"]["datafusion"]["parallelism_mode"] == "auto_plan"
+
+
 def test_datafusion_configuration_is_functional_and_exposes_auto_controls() -> None:
     original = PipelineBuilder("auto-datafusion")
     configured = original.with_datafusion_config(
@@ -329,7 +339,7 @@ def test_datafusion_configuration_is_functional_and_exposes_auto_controls() -> N
     [
         ("batch_size", 0, "positive integer"),
         ("max_partitions", True, "positive integer"),
-        ("parallelism_mode", "dynamic", "fixed, auto, or auto_rows"),
+        ("parallelism_mode", "dynamic", "fixed, auto, auto_rows, or auto_plan"),
         ("enable_rolling_rewrite", 1, "exact bool"),
     ],
 )

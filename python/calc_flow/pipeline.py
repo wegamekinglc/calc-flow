@@ -919,7 +919,7 @@ class PipelineBuilder:
         *,
         batch_size: int = 8_192,
         target_partitions: int = 1,
-        parallelism_mode: Literal["fixed", "auto", "auto_rows"] = "fixed",
+        parallelism_mode: Literal["fixed", "auto", "auto_rows", "auto_plan"] = "fixed",
         max_partitions: int = 32,
         min_rows_per_partition: int = 65_536,
         small_rows_threshold: int = 10_001,
@@ -928,12 +928,14 @@ class PipelineBuilder:
     ) -> PipelineBuilder:
         """Return a builder with an immutable run-scoped DataFusion policy.
 
-        ``auto`` and ``auto_rows`` are opt-in. Batch graphs containing multi-input
-        SQL select a run-scoped budget from external table rows and host capacity.
-        Other ``auto`` graphs require trusted
+        ``auto``, ``auto_rows``, and ``auto_plan`` are opt-in. Batch graphs
+        containing multi-input SQL select a run-scoped budget from external table
+        rows and host capacity. Other ``auto`` graphs require trusted
         ``calc_flow.datafusion.active_entities`` batch metadata and fall back to
         one partition when it is absent or invalid; ``auto_rows`` uses input rows
         instead and treats entity metadata as an optional upper bound.
+        ``auto_plan`` uses one partition only for a batch graph proven to contain
+        solely simple row-local SQL projections and otherwise uses the row policy.
         """
         integers = {
             "batch_size": batch_size,
@@ -949,8 +951,10 @@ class PipelineBuilder:
                 raise ValueError(f"{field_name} must be a positive integer")
         if type(parallelism_mode) is not str:
             raise TypeError("parallelism_mode must be a string")
-        if parallelism_mode not in {"fixed", "auto", "auto_rows"}:
-            raise ValueError("parallelism_mode must be fixed, auto, or auto_rows")
+        if parallelism_mode not in {"fixed", "auto", "auto_rows", "auto_plan"}:
+            raise ValueError(
+                "parallelism_mode must be fixed, auto, auto_rows, or auto_plan"
+            )
         for field_name, value in {
             "enable_rolling_rewrite": enable_rolling_rewrite,
             "collect_diagnostics": collect_diagnostics,
