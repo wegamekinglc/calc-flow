@@ -439,6 +439,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_asof_out_of_order_times_match_plain_datafusion() {
+        let right = batch(&[
+            (2_000_000, 2, "S0", Some(20.0)),
+            (0, 3, "S0", Some(30.0)),
+            (2_000_000, 5, "S0", Some(50.0)),
+            (0, 1, "S0", Some(10.0)),
+            (1_000_000, 1, "S1", Some(100.0)),
+        ]);
+        let left = batch(&[
+            (0, 100, "S0", Some(999.0)),
+            (2_000_000, 101, "S0", Some(999.0)),
+            (1_000_000, 102, "S1", Some(999.0)),
+            (0, 103, "S2", Some(999.0)),
+        ]);
+        let (runtime, output) = execute(ASOF_SQL, &left, &right).await;
+        let actual = combined(&output);
+        assert_eq!(
+            asof_rows(&actual),
+            vec![
+                (100, Some(30.0)),
+                (101, Some(50.0)),
+                (102, Some(100.0)),
+                (103, None),
+            ]
+        );
+        assert_eq!(
+            asof_rows(&actual),
+            asof_rows(&reference(ASOF_SQL, &left, &right).await)
+        );
+        assert!(
+            runtime.metrics()[0]
+                .physical_plan
+                .contains("CalcFlowAsofJoinExec")
+        );
+    }
+
+    #[tokio::test]
     async fn native_interval_band_join_matches_plain_datafusion() {
         let right = batch(&[
             (0, 0, "S0", Some(2.0)),

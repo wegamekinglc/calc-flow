@@ -4,8 +4,6 @@ use datafusion::arrow::array::{Int64Array, StringArray};
 
 const GROUPS: usize = 256;
 
-#[path = "grouped_candidate_rank_tests.rs"]
-mod candidate_ranks;
 #[path = "grouped_inline_semantic_tests.rs"]
 mod semantics;
 #[path = "grouped_inline_storage_tests.rs"]
@@ -150,10 +148,8 @@ async fn test_grouped_inline_sum_has_no_finalizer_vector() {
 async fn test_grouped_inline_sum_skips_empty_finalizer_pass() {
     let fixture = allocation_fixture(true).await;
     let candidate = updated_candidate(&fixture, &fixture.plan.groups[0], 0);
-    let mut candidates = CandidateGroups::new(false);
-    candidates
-        .insert(0, candidate, "inline-allocation")
-        .unwrap();
+    let mut candidates = CandidateMap::default();
+    candidates.insert(0, candidate);
     let job = StreamJobContext::new(
         972,
         "inline-allocation",

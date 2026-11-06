@@ -364,7 +364,7 @@ async fn test_utf8_key_output_avoids_per_group_string_allocations() {
     let transaction = plan.update(&batch, &context, "utf8-output").await.unwrap();
     plan.commit(transaction);
     assert_eq!(plan.groups.len(), 256);
-    let candidates = CandidateGroups::new(false);
+    let candidates = CandidateMap::with_hasher(RandomState::new());
     let reservation = plan.scratch.new_empty();
     let charge = plan
         .output_charge(256, &candidates, &context, "utf8-output")
@@ -568,7 +568,7 @@ async fn assert_utf8_output_fits_charge(input: Batch) {
     let context = StreamOperatorContext::new(&job, "utf8-charge", None);
     let transaction = plan.update(&input, &context, "utf8-charge").await.unwrap();
     plan.commit(transaction);
-    let candidates = CandidateGroups::new(false);
+    let candidates = CandidateMap::with_hasher(RandomState::new());
     let count = plan.groups.len();
     let charge = plan
         .output_charge(count, &candidates, &context, "utf8-charge")

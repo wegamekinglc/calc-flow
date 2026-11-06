@@ -1,0 +1,53 @@
+{
+  "budget_seconds": 600,
+  "cumulative_measurement_seconds": 143.80610578000778,
+  "current_binary_sha256": "d2ce2a6644ab0934a8cf46e8f3c8d370eea3ba610fe91dbfa084fc96c176dd61",
+  "current_profile_analysis_complete": true,
+  "current_profiles": 2,
+  "failure": null,
+  "files": {
+    "README.md": {
+      "bytes": 5239,
+      "sha256": "caf371b76a6cda918bea095acc273ca2ab773b9f7818a694d718a5e675e34a24"
+    },
+    "baseline-stacks.json.gz": {
+      "bytes": 4452,
+      "sha256": "d1441e197c5a52232faa13b2e5bc2710c69e7197512632e8f8cd9c81fd815de5"
+    },
+    "candidate-stacks.json.gz": {
+      "bytes": 4938,
+      "sha256": "e25daff9329739f4e804a022e853a71aa0cd97c4f706530dfe477eda57196c6c"
+    },
+    "complete-evidence.json.gz": {
+      "bytes": 1187059,
+      "sha256": "d6827f49e2baf599df9578f4550e2cd1d895c9636969483f2f9941670aa89338"
+    },
+    "profile-summary.json": {
+      "bytes": 33020,
+      "sha256": "588086b96440ccf1d86d03178ce04f119a500bb8cea9dbaf57b05841f0e83b01"
+    },
+    "profile-targets.json": {
+      "bytes": 9669,
+      "sha256": "7cac2c178183490d2ebb04940b75234035f8a99b54e9f081723df20caa8d5bb1"
+    },
+    "samples.csv": {
+      "bytes": 29700,
+      "sha256": "47339198cc4d14c12075b4c080617bba69eac7dd3e703a0cb2ba4a2ba00592f0"
+    },
+    "summary.json": {
+      "bytes": 380097,
+      "sha256": "8c9f14740af36bbb26dacd8fccbdf4872cda7cfbaba4505d875756fce25cdfdc"
+    }
+  },
+  "formal_observations": 200,
+  "performance_acceptance": false,
+  "phase": "candidate-ranks",
+  "phase_seconds": 143.80610578000778,
+  "phase_stopped_monotonic": 388942.457198905,
+  "prior_measurement_seconds": 0,
+  "profile_records": 2,
+  "protocol_sha256": "75d53e62d98989e28c598bf4b43f402512adb32648363403647be23e3b4cecee",
+  "retries": 0,
+  "slug": "sum-candidate-ranks-20261106",
+  "status": "completed"
+}

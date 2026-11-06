@@ -2,8 +2,9 @@
 
 ## Scope and checkpoint
 
-**Source and focused local verification PASS. Public candidate/build admission,
-measurement acceptance and final merge approval remain pending.**
+**The completed campaign failed performance acceptance; the runtime prototype
+is withdrawn. Evidence, documentation and latest-main integration PASS review.
+Required final-head CI and final merge approval remain pending.**
 
 - Base: `1fcafde11a247b1be275d3cb6ab41a59476d6832`, branch
   `feature/sum-candidate-ranks`.
@@ -372,3 +373,197 @@ No unresolved source, style or focused-test blocker remains. There is no PR/CI
 snapshot at this branch-stage gate. Public candidate/build/protocol review,
 the parent's explicit acquisition GO, complete measured acceptance, final
 documentation review and green required final-head CI still precede merge.
+
+## Actual acquisition-packet admission
+
+**PASS at the exact frozen protocol below.** The parent must issue the unique
+acquisition GO separately, and the in-budget live global quiet guard must pass.
+This gate neither starts acquisition nor establishes a performance result.
+
+- Public candidate P: `ec1a629f3a4d7e12f53407f795666d58cee91bb8`, tree
+  `7ae05ed4d3ed0fcb9db4445cb81aa73f6ad70739`, identical to the reviewed source
+  tree. Baseline remains public `1fcafde1`, main at study start.
+- Candidate build receipt SHA256:
+  `2bc036a64425cd19b68f81132cde5d3d069653af9ffa8c22fee9126d10bc59b4`;
+  binary SHA256
+  `d2ce2a6644ab0934a8cf46e8f3c8d370eea3ba610fe91dbfa084fc96c176dd61`.
+  Its ordinary wrapper attempt completed with exit zero and precise build time
+  805.830162640952 seconds; the original normal receipt remains preserved.
+- Final protocol `target/sum-candidate-ranks-20261106/protocol-final.json`:
+  3,089,441 bytes, SHA256
+  `75d53e62d98989e28c598bf4b43f402512adb32648363403647be23e3b4cecee`.
+  Recovered baseline receipt remains the already admitted immutable `e781654b`.
+  Its missing return code and precise duration remain null, with Cargo's
+  rounded 1283 seconds and recovery/aborted-attempt costs separately qualified.
+
+The reviewer read actual candidate sealing code, receipts and final protocol.
+Independent read-only checks verified all 2022 source entries across both arms
+(1010 baseline, 1012 candidate), current/before/after inventories, per-file
+public Git identities and SHA256s. Common657 from public `84186554` is the sole
+native overlay. The seven product/test source differences are exactly the
+reviewed files. Both compiler streams contain actual fresh core/example
+artifacts and a final successful build record; all 292 registry compiler
+identities, locked dependencies, vendor/config/support files, compiler identity
+and effective build flags agree. Captured live compiler environments agree,
+including fields beyond the maintained normal receipt's smaller field list.
+Copied depfiles include the new candidate module; binary and cached-symbol
+seals match. No native build, test, fixture, profile or workload was repeated.
+
+The portable build proof embeds 25 exact UTF8 record payloads, including both
+compiler streams/logs, before/after inventories, copied depfiles, original
+normal/recovered receipts, environment observations and recovery qualifications.
+Each encoded payload matches its original bytes and SHA256. Its per-file Git
+audit matches both public revisions. Native binaries, raw perf recordings and
+symbol tables remain explicit sealed persistent local artifacts; they are not
+claimed to be embedded. The separate source-verification archive is 15,252
+bytes, SHA256 `f81bd81f06642f8ad82e584088109ad47c21fde1c51cf88b1544075e7de7b17d`.
+Its 20 exact records and seven final public source identities were independently
+checked. It explicitly preserves the unavailable original RED test-payload and
+local-commit limitations, and is predeclared separately from acquisition.
+
+All thirteen active/helper/test seals match current and public P source. The
+maintained build helper's separately embedded source matches its seal. Original
+proposal and draft protocol hashes remain unchanged. The final contract keeps
+the same five cases, two rounds of ten alternating pairs, 200 formal samples,
+twenty warmups and twelve dense-1T profile jobs, excluding each first job and
+requiring five accepted windows per arm. Repeat2 is a low-repetition control,
+not an admission threshold. No columnar-route or worker-parallelism requirement
+is introduced; missing/inlined frames remain uncertainty. Acceptance requires
+complete evidence, at least one exact maintained dense improved verdict and
+no confirmed regression in the five cases.
+
+The single 600-second acquisition has prior debit zero. Fixtures, preflight,
+oracles, profiles/decoding, samples/resources/statistics, native post-seals,
+owned-process cleanup, local publication and helper post-publication/deadline
+checks share its original deadline. Publication or helper drift revokes a
+completed result. Acquisition and publication directories were absent at
+admission. No extra cases, samples, retries or deadline renewal are authorized.
+
+Main's later `70e88cc7` changes ASOF-only build/probe helpers, with no direct
+SUM admission/candidate/store/harness/dependency overlap found. All measured
+claims remain bound to the fixed `1fcafde1`/P cohort. Subsequent integration
+must preserve that main change and pass independent review/required CI; the
+integrated binary's timing remains unmeasured. A source-only supplementary
+manifest may bind the predeclared component archive after the outcome without
+modifying the collector's sealed acquisition manifests or raw archive.
+
+## Branch delivery review: feature/sum-candidate-ranks to main
+
+**Delivery base:** `70e88cc70016a24807a8cbe46287070a9a501717`.
+There is no PR/check-run or prior GitHub review snapshot at this prepublication
+handoff. The final delivery commit/file inventory and required CI are pending.
+
+### Summary
+
+The fixed campaign completed but neither dense target met the maintained
+`improved` rule. The parent restored all seven prototype Rust paths, removed
+the two added modules and integrated latest main's separate ASOF change.
+Independent comparison confirms the entire delivered `crates/calc-flow` tree
+equals `70e88cc7`, with no untracked or retained ranked modules. The delivery
+therefore preserves the experiment's tools, evidence and documentation while
+shipping no candidate-rank runtime change. Measured P remains public and its
+frozen source/build trees remain preserved; integrated-product timing is
+unmeasured.
+
+### Build and Test Results
+
+- Rust: **Passed** for the recorded experimental-source focused gates
+  (30 tests, strict scoped Clippy/formatting and maximum CCN eight); production
+  core is **Not touched** relative to latest main. No local full matrix or
+  integrated-product benchmark was run.
+- Python product: **Not touched**. The unchanged measurement-tool review
+  retains its 37 passing helper controls and focused CI-registration evidence.
+  Final required CI remains pending, including combined 90% Rust coverage,
+  cross-platform and other required repository gates.
+- New unresolved failures: **None** in the reviewed evidence. Historical TDD
+  failures and corrected lint failures are retained as such.
+- Regressions: **None confirmed** among measured cases. Sparse remains
+  inconclusive; neither that nor the other verdicts proves equivalence.
+
+### Blocking Issues
+
+No unresolved source, evidence, documentation or integration issue remains.
+Green required checks on the final delivery head remain a merge prerequisite;
+this handoff does not claim CI success or merge readiness.
+
+### Style Issues
+
+None introduced in the reviewed delivery. The narrative, index/changelog
+changes, linked evidence and aligned tables are consistent with repository
+conventions. Collector outputs remain immutable.
+
+### Test Coverage and evidence integrity
+
+The reviewer independently matched all eight collector files to manifest
+SHA256s and byte lengths. The collector manifest SHA256 is
+`1acb6b0129045f66e22411e395fc077d28358fb6e386aec5a143226e6c93b375`;
+the complete raw archive SHA256 is
+`d6827f49e2baf599df9578f4550e2cd1d895c9636969483f2f9941670aa89338`.
+The separately archived protocol remains exact `75d53e62` and its embedded
+protocol, helper seals, build identities and portable proofs agree.
+
+All five cases retain forty formal observations in the exact alternating
+two-round/ten-pair order. Each observation equals its original stdout and
+resource receipt, and its argv binds the correct binary, CPU affinity and
+sample count. There are exactly 200 formal jobs, twenty warmups and twelve
+profile jobs: **232 benchmark jobs and 4872 complete snapshot checks**.
+The profile jobs share two six-job processes; adding 220 timing processes and
+one fixture-preparation process gives **223 physical native invocations**,
+all with recorded reaped receipts. Every benchmark job reports natural end,
+zero live tasks/errors, empty edge occupancy and checkpointing disabled.
+The final settlement handoff records no remaining owned native processes.
+
+Both profiles retain five nonempty processing windows after excluding their
+first jobs, with 798/840 accepted user-CPU samples and 142/167 unresolved leaf
+samples. All 2205/2322 raw timestamps match imported clocks; maximum recorded
+error is below 6e-8 milliseconds. No loss/unwind/warning diagnostic appears.
+Published stack counts, target records, windows and binary/perf hashes agree
+with the raw evidence. CPU shares overlap, generic symbols combine callers,
+and missing/inlined frames do not establish zero cost or causal speedup.
+
+The recorded pooled changes and exact maintained verdicts are:
+
+- Dense one CPU: +0.147441426221806%, `no-confirmed-regression`.
+- Dense four CPUs: -3.3585205479178204%, `no-confirmed-regression`.
+- Sparse one CPU: -1.3085739733837642%, `inconclusive`.
+- Distinct one CPU: -5.852208086511068%, `no-confirmed-regression`.
+- Repeat2 one CPU: -4.5695083650928%, `no-confirmed-regression`.
+
+The reviewer checked the recorded intervals against the unchanged maintained
+5% verdict branches, without rerunning statistical estimation. Both dense
+cases have interval upper endpoints above -5%; sparse's second upper endpoint
+is +18.247891606228684%. The negative pooled medians are descriptive. The
+unchanged acceptance rule correctly returns false, requiring withdrawal
+without another campaign, case expansion or favorable retry.
+
+### Documentation Consistency
+
+The final narrative, benchmark indexes and changelog correctly lead with
+rejection/withdrawal and preserve narrow allocation, causal, scope and
+recovered-build qualifications. The independently verified core restoration
+matches their delivery statements. Subsequent research directions are marked
+as hypotheses rather than measured improvements. Product guides need no new
+API/behavior update because the runtime equals latest main.
+
+Budget accounting retains all original timestamps. The raw acquisition and
+summary snapshots record 143.64614346902817 seconds before final publication;
+the immutable final collector manifest stops at **143.80610578000778 seconds**.
+The separate read-only integrity/protocol-archival/settlement handoff completes
+at **235.56555740401382 seconds from the same original start**, below 600.
+It performs no new workload or statistical calculation and does not rewrite
+the collector stop or sealed files. Independent specialist review occurs after
+that sealed handoff; it does not rerun acquisition.
+
+The separately added source-verification manifest SHA256 is
+`678408f1cc596117885f2f902890617679945504ff4893ead084086107d7f9d5`.
+Its byte/hash bindings for component `f81bd81f`, archival handoff, collector
+manifest and exact protocol all match. The component was predeclared before
+GO, and the supplementary manifest leaves collector artifacts unchanged.
+
+### Verdict
+
+**Comment Only: evidence/documentation/integration PASS; final required CI
+pending.** The rejected runtime is correctly withdrawn. The parent may commit
+and publish this reviewable delivery; final reviewer approval and merge still
+require green required checks on that actual final head. No new native tests,
+profiles, fixture workloads or statistics were run during this outcome review.

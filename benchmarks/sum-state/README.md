@@ -1,5 +1,10 @@
 # Grouped integer SUM state measurements
 
+[Rejected 2026-11-06 candidate/rank experiment](sum-candidate-ranks-20261106.md)
+records five fixed cases, 200 formal observations and both CPU profiles.
+Removing merge-time candidate lookups did not establish the required dense
+improvement; the runtime prototype is withdrawn and current main is retained.
+
 [Rejected 2026-11-05 composite-key experiment](sum-columnar-keys-20261105.md)
 records five cases, 200 formal observations, both CPU profiles and complete
 snapshot checks. Allocation reductions did not establish dense-stream speedups;

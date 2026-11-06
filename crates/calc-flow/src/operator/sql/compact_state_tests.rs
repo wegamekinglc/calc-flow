@@ -1,4 +1,4 @@
-use super::super::CandidateGroups;
+use super::super::{CandidateMap, RandomState};
 use super::*;
 use crate::{
     Batch, BatchMetadata, CalcFlowError, CancellationToken, DataFusionConfig, DataFusionRuntime,
@@ -807,8 +807,13 @@ fn result(plan: &IncrementalSql) -> RecordBatch {
         )
         .unwrap();
     }
-    plan.output_chunk(0, plan.groups.len(), &CandidateGroups::new(false), "codec")
-        .unwrap()
+    plan.output_chunk(
+        0,
+        plan.groups.len(),
+        &CandidateMap::with_hasher(RandomState::new()),
+        "codec",
+    )
+    .unwrap()
 }
 
 fn pool(runtime: &DataFusionRuntime) -> Arc<dyn MemoryPool> {

@@ -82,10 +82,6 @@ mod grouped_inline_tests;
 mod group_aggregates;
 use group_aggregates::{GroupAggregates, InlineSum, StateView};
 
-#[path = "candidate_groups.rs"]
-mod candidate_groups;
-use candidate_groups::CandidateGroups;
-
 #[path = "output_order.rs"]
 mod output_order;
 
@@ -159,7 +155,7 @@ struct Candidate {
 
 struct InputCandidates {
     touched: KeyIndex,
-    groups: CandidateGroups,
+    groups: CandidateMap,
     new_count: usize,
     native: Option<NativeKeys>,
     partial: Option<PartialGroups>,
@@ -279,8 +275,6 @@ struct PartialGroups {
     state_fields: usize,
     variable_bytes: usize,
     reservation: MemoryReservation,
-    #[cfg(test)]
-    candidate_slot_lookups: usize,
 }
 
 impl PartialGroups {
@@ -317,8 +311,6 @@ impl PartialGroups {
             state_fields,
             variable_bytes: 0,
             reservation,
-            #[cfg(test)]
-            candidate_slot_lookups: 0,
         })
     }
 
@@ -380,7 +372,7 @@ impl PartialGroups {
 
     fn seed(
         &mut self,
-        candidates: &CandidateGroups,
+        candidates: &CandidateMap,
         aggregates: &[Arc<AggregateFunctionExpr>],
         name: &str,
     ) -> Result<()> {
@@ -390,17 +382,8 @@ impl PartialGroups {
         let slots = &self.slots;
         for (index, _) in aggregates.iter().enumerate() {
             if self.sequential[index] {
-                let saved = (self.seeded..slots.len()).map(|rank| {
-                    (
-                        rank,
-                        candidates
-                            .get(slots[rank])
-                            .expect("seed candidate")
-                            .group
-                            .aggregates
-                            .state(index),
-                    )
-                });
+                let saved = (self.seeded..slots.len())
+                    .map(|rank| (rank, candidates[&slots[rank]].group.aggregates.state(index)));
                 self.accumulators[index].seed_batch(saved, slots.len(), name)?;
             }
         }
@@ -485,7 +468,7 @@ impl PartialGroups {
 
     async fn merge(
         &mut self,
-        candidates: &mut CandidateGroups,
+        candidates: &mut CandidateMap,
         committed: &[Group],
         context: &StreamOperatorContext<'_>,
         name: &str,
@@ -496,33 +479,15 @@ impl PartialGroups {
         }
         self.merge_integer_history(committed, context, name).await?;
         let states = self.emit_states(name)?;
-        self.merge_candidates(candidates, &states, context, name)
-            .await
-    }
-
-    async fn merge_candidates(
-        &mut self,
-        candidates: &mut CandidateGroups,
-        states: &[Vec<ArrayRef>],
-        context: &StreamOperatorContext<'_>,
-        name: &str,
-    ) -> Result<()> {
         for (rank, slot) in self.slots.iter().enumerate() {
             if rank % 128 == 0 {
                 context.check_cancelled()?;
                 tokio::task::yield_now().await;
             }
-            let candidate = match candidates {
-                CandidateGroups::Ranked(groups) => &mut groups.values[rank],
-                CandidateGroups::Generic(groups) => {
-                    #[cfg(test)]
-                    {
-                        self.candidate_slot_lookups += 1;
-                    }
-                    groups.get_mut(slot).expect("candidate for partial group")
-                }
-            };
-            self.merge_rank(candidate, states, rank, name)?;
+            let candidate = candidates
+                .get_mut(slot)
+                .expect("candidate for partial group");
+            self.merge_rank(candidate, &states, rank, name)?;
         }
         Ok(())
     }
@@ -1160,7 +1125,7 @@ impl IncrementalSql {
                 .update_global_records(
                     table.batches(),
                     input_owner,
-                    candidates.groups.get_mut(0).expect("global candidate"),
+                    candidates.groups.get_mut(&0).expect("global candidate"),
                     context,
                     name,
                 )
@@ -1314,7 +1279,7 @@ impl IncrementalSql {
             self.native_keys(rows, name)?
         };
         let mut candidates = InputCandidates {
-            groups: CandidateGroups::new(self.inline_sum.is_some()),
+            groups: HashMap::with_hasher(RandomState::new()),
             touched: HashMap::with_hasher(RandomState::new()),
             new_count: 0,
             native,
@@ -1322,11 +1287,9 @@ impl IncrementalSql {
             proof: None,
         };
         if self.keys.is_empty() {
-            candidates.groups.insert(
-                0,
-                self.candidate(self.groups.first(), &[], None, name)?,
-                name,
-            )?;
+            candidates
+                .groups
+                .insert(0, self.candidate(self.groups.first(), &[], None, name)?);
         }
         Ok((reservation, workspace, candidates))
     }
@@ -1436,9 +1399,6 @@ impl IncrementalSql {
             partial
                 .merge(&mut candidates.groups, &self.groups, context, name)
                 .await?;
-            candidates
-                .groups
-                .take_slots(std::mem::take(&mut partial.slots));
         }
         drop(native);
         self.finalize_candidates(&mut candidates.groups, context, name)
@@ -1606,10 +1566,10 @@ impl IncrementalSql {
         rows: usize,
         arguments: &[Vec<ArrayRef>],
         filters: &[Option<&BooleanArray>],
-        candidates: &mut CandidateGroups,
+        candidates: &mut CandidateMap,
         name: &str,
     ) -> Result<()> {
-        let candidate = candidates.get_mut(0).expect("global candidate");
+        let candidate = candidates.get_mut(&0).expect("global candidate");
         if let Some(variable) = candidate.variable.as_mut() {
             for row in 0..rows {
                 variable.observe(arguments, filters, row, &candidate.group.reservation, name)?;
@@ -1732,7 +1692,7 @@ impl IncrementalSql {
             .expect("grouped partial accumulators")
             .add_slot(slot, name)?;
         candidates.touched.insert(candidate.group.key.clone(), rank);
-        candidates.groups.insert(slot, candidate, name)?;
+        candidates.groups.insert(slot, candidate);
         candidates.new_count = new_count;
         Ok(rank)
     }
@@ -1776,7 +1736,7 @@ impl IncrementalSql {
                 selection,
                 indices,
                 &partial.slots,
-                candidates.groups.generic_mut(),
+                &mut candidates.groups,
                 name,
             )?;
             partial.reserve_variable(growth, name)?;
@@ -1870,7 +1830,7 @@ impl IncrementalSql {
                 .expect("grouped partial accumulators")
                 .add_slot(slot, name)?;
             debug_assert_eq!(rank, start + row);
-            candidates.groups.insert(slot, candidate, name)?;
+            candidates.groups.insert(slot, candidate);
             candidates.new_count = new_count;
         }
         Ok(())
@@ -1933,7 +1893,7 @@ impl IncrementalSql {
 
     async fn finalize_candidates(
         &self,
-        candidates: &mut CandidateGroups,
+        candidates: &mut CandidateMap,
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<()> {
@@ -1977,7 +1937,7 @@ impl IncrementalSql {
     async fn output_records(
         &self,
         count: usize,
-        candidates: &CandidateGroups,
+        candidates: &CandidateMap,
         reservation: &MemoryReservation,
         context: &StreamOperatorContext<'_>,
         name: &str,
@@ -1994,7 +1954,7 @@ impl IncrementalSql {
     async fn output_chunks(
         &self,
         count: usize,
-        candidates: &CandidateGroups,
+        candidates: &CandidateMap,
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<Vec<RecordBatch>> {
@@ -2044,7 +2004,7 @@ impl IncrementalSql {
     async fn output_charge(
         &self,
         count: usize,
-        candidates: &CandidateGroups,
+        candidates: &CandidateMap,
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<usize> {
@@ -2075,7 +2035,7 @@ impl IncrementalSql {
         &self,
         start: usize,
         end: usize,
-        candidates: &CandidateGroups,
+        candidates: &CandidateMap,
         name: &str,
     ) -> Result<RecordBatch> {
         let aggregate = self.aggregate_output_chunk(start, end, candidates, name)?;
@@ -2094,7 +2054,7 @@ impl IncrementalSql {
         &self,
         start: usize,
         end: usize,
-        candidates: &CandidateGroups,
+        candidates: &CandidateMap,
         name: &str,
     ) -> Result<RecordBatch> {
         let borrowed = self
@@ -2123,9 +2083,9 @@ impl IncrementalSql {
             .map_err(|error| df_error(name, error))
     }
 
-    fn output_group<'a>(&'a self, slot: usize, candidates: &'a CandidateGroups) -> &'a Group {
+    fn output_group<'a>(&'a self, slot: usize, candidates: &'a CandidateMap) -> &'a Group {
         candidates
-            .get(slot)
+            .get(&slot)
             .map_or_else(|| &self.groups[slot], |candidate| &candidate.group)
     }
 
@@ -2221,7 +2181,7 @@ impl IncrementalSql {
 
     fn prepare_container(
         &self,
-        candidates: &CandidateGroups,
+        candidates: &CandidateMap,
         count: usize,
         name: &str,
     ) -> Result<GroupContainer> {
@@ -2254,7 +2214,7 @@ impl IncrementalSql {
         index.extend(
             candidates
                 .iter()
-                .map(|(slot, candidate)| (candidate.group.key.clone(), slot)),
+                .map(|(&slot, candidate)| (candidate.group.key.clone(), slot)),
         );
         Ok(GroupContainer {
             groups,
@@ -2272,7 +2232,11 @@ impl IncrementalSql {
 
     fn reserve_groups(&mut self, new_count: usize, count: usize, name: &str) -> Result<()> {
         if self.sequential.is_some() {
-            let container = self.prepare_container(&CandidateGroups::new(false), count, name)?;
+            let container = self.prepare_container(
+                &CandidateMap::with_hasher(RandomState::new()),
+                count,
+                name,
+            )?;
             self.install_container(container);
             return Ok(());
         }
@@ -2313,7 +2277,7 @@ impl IncrementalSql {
 
     async fn prepare_groups(
         &self,
-        candidates: CandidateGroups,
+        candidates: CandidateMap,
         new_count: usize,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedGroups> {
@@ -2939,10 +2903,10 @@ pub(super) fn ensure_reservation(
 fn update_global(
     arguments: &[Vec<ArrayRef>],
     filters: &[Option<&BooleanArray>],
-    candidates: &mut CandidateGroups,
+    candidates: &mut CandidateMap,
     name: &str,
 ) -> Result<()> {
-    let candidate = candidates.get_mut(0).expect("global candidate");
+    let candidate = candidates.get_mut(&0).expect("global candidate");
     for (index, (arguments, accumulator)) in arguments
         .iter()
         .zip(&mut candidate.accumulators)
@@ -3690,8 +3654,8 @@ mod tests {
                 sum.to_array().unwrap(),
             ])
             .unwrap();
-        let mut candidates = CandidateGroups::new(false);
-        candidates.insert(0, candidate, "totals").unwrap();
+        let mut candidates = CandidateMap::with_hasher(RandomState::new());
+        candidates.insert(0, candidate);
         let job = crate::StreamJobContext::new(
             1,
             "boundary",
@@ -3704,13 +3668,7 @@ mod tests {
         let result = std::panic::AssertUnwindSafe(async {
             plan.finalize_candidates(&mut candidates, &context, "totals")
                 .await?;
-            Ok(candidates
-                .get(0)
-                .unwrap()
-                .group
-                .aggregates
-                .result(0)
-                .into_owned())
+            Ok(candidates[&0].group.aggregates.result(0).into_owned())
         })
         .catch_unwind()
         .await;
