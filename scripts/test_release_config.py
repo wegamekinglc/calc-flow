@@ -637,6 +637,7 @@ class ReleaseConfigTests(unittest.TestCase):
             "scripts.test_sum_batch_parallel",
             "scripts.test_sum_inline_state",
             "scripts.test_sum_columnar_keys",
+            "scripts.test_sum_candidate_ranks",
         ):
             self.assertIn(module, lint)
             self.assertNotIn(module, package)

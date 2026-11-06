@@ -42,10 +42,12 @@ async fn full_container_case(single: bool) -> allocation_counter::AllocationInfo
     let fixture = allocation_fixture(single).await;
     let mut retained = None;
     let allocations = allocation_counter::measure(|| {
-        let mut candidates = CandidateMap::with_hasher(RandomState::new());
+        let mut candidates = CandidateGroups::new(false);
         for (rank, previous) in fixture.plan.groups.iter().enumerate() {
             let candidate = updated_candidate(&fixture, previous, rank);
-            candidates.insert(rank, candidate);
+            candidates
+                .insert(rank, candidate, "inline-container")
+                .unwrap();
         }
         let container = fixture
             .plan
@@ -53,7 +55,7 @@ async fn full_container_case(single: bool) -> allocation_counter::AllocationInfo
             .unwrap();
         retained = Some((candidates, container));
     });
-    let (candidates, container) = retained.unwrap();
+    let (mut candidates, container) = retained.unwrap();
     let paid = candidates
         .values()
         .map(|candidate| candidate.group.reservation.size())
@@ -61,7 +63,7 @@ async fn full_container_case(single: bool) -> allocation_counter::AllocationInfo
         + container.reservation.size();
     eprintln!(
         "Full staged inline={single}: heap={allocations:?}, paid={paid}, map_capacity={}, group_capacity={}, index_capacity={}",
-        candidates.capacity(),
+        candidates.generic_mut().capacity(),
         container.groups.capacity(),
         container.index.capacity()
     );
