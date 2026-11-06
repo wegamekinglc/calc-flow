@@ -1,0 +1,74 @@
+{
+  "adjacent_interfaces_checked": [
+    "crates/calc-flow/src/datafusion_template.rs",
+    "crates/calc-flow/src/datafusion.rs",
+    "crates/calc-flow/src/operator/expression.rs",
+    "crates/calc-flow/src/operator/expression",
+    "crates/calc-flow/Cargo.toml",
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "schemas/project-v3.schema.json"
+  ],
+  "algorithm_or_test_changes": false,
+  "branch": "feature/expression-case-retest-20261106",
+  "compatibility_conclusion": "No adjacent interface or dependency change; only unrelated rolling argmax source differs. Fresh whole-core baseline/candidate Release builds and the new end-to-end experiment remain owned by performancer.",
+  "complete_core_working_delta": [
+    "crates/calc-flow/src/datafusion_template/compiled.rs",
+    "crates/calc-flow/src/datafusion_template/compiled/sign_case.rs",
+    "crates/calc-flow/src/datafusion_template/compiled/sign_case_tests.rs"
+  ],
+  "current_main_baseline": "5a66b6d5cb3f9fa2f6c5d6c8d7ce03db0cea565f",
+  "dev": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/expression-case-retest-20261106",
+  "files": {
+    "crates/calc-flow/src/datafusion_template/compiled.rs": {
+      "baseline_blob": "ddaa7d89e7657757d6450193740e210096631b69",
+      "baseline_equals_original_study": true,
+      "baseline_present": true,
+      "bytes": 8983,
+      "exact_public_and_historical_match": true,
+      "historical_sha256": "13f13fe803f1eeeee6b063b18ea7af88a534dbff79a43212536cf13dab72b7a9",
+      "public_experiment_blob": "2bd07e9ffe604059375657ed308d446557f32dfc",
+      "restored_sha256": "13f13fe803f1eeeee6b063b18ea7af88a534dbff79a43212536cf13dab72b7a9"
+    },
+    "crates/calc-flow/src/datafusion_template/compiled/sign_case.rs": {
+      "baseline_blob": null,
+      "baseline_equals_original_study": true,
+      "baseline_present": false,
+      "bytes": 3187,
+      "exact_public_and_historical_match": true,
+      "historical_sha256": "ef0b1937df4435f873b803383a636b9726a76ff26775591210c51ec27c42557d",
+      "public_experiment_blob": "bc173d3a5a609f460da691cf9b2acf5b026bc06b",
+      "restored_sha256": "ef0b1937df4435f873b803383a636b9726a76ff26775591210c51ec27c42557d"
+    },
+    "crates/calc-flow/src/datafusion_template/compiled/sign_case_tests.rs": {
+      "baseline_blob": null,
+      "baseline_equals_original_study": true,
+      "baseline_present": false,
+      "bytes": 38894,
+      "exact_public_and_historical_match": true,
+      "historical_sha256": "133a913ed9bf57b77b92c5664673443e074ec4356d453d8c6a5d3e71f5cb4a3b",
+      "public_experiment_blob": "adfa127a00e1a200d79e98d063f53e134dae4c0c",
+      "restored_sha256": "133a913ed9bf57b77b92c5664673443e074ec4356d453d8c6a5d3e71f5cb4a3b"
+    }
+  },
+  "full_core_base_delta_from_original": [
+    "crates/calc-flow/src/datafusion_rolling/argmax.rs"
+  ],
+  "full_core_tracked_inventory_entries": 868,
+  "full_core_working_files_checked": 870,
+  "historical_evidence": "Retained genuine b263 baseline RED, final5 new+1 existing GREEN, strict Clippy and committed canonical review reference exactly these three SHA256 values; no claim of a new native check on the newer core.",
+  "interfaces_unchanged_from_original_study": true,
+  "native_builds": 0,
+  "native_profiles": 0,
+  "native_tests": 0,
+  "original_study_baseline": "dc8393d2f33771706b32492e9c4fa5436c6baf12",
+  "public_experiment": "b0a9633f44356022fd1aa169b4efa6b077bc2f7b",
+  "recorded_utc": "2026-11-06T08:49:54.169978+00:00",
+  "staged_committed_pushed": false,
+  "status": "restored_exact_public_prototype_static_only",
+  "tracked_git_diff_name_status": "M\tcrates/calc-flow/src/datafusion_template/compiled.rs\n",
+  "unrelated_argmax_current_baseline_preserved": true,
+  "untracked_restored_new_modules_included_in_full_scan": true,
+  "whitespace_exit_code": 0
+}

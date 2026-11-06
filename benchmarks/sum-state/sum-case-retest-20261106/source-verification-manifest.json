@@ -1,0 +1,45 @@
+{
+  "collector_status": "completed",
+  "experimental_candidate": "9a3c45174be6aac02bbd405a5205e76238826b62",
+  "files": {
+    "../sum-case-retest-20261106.protocol.json": {
+      "bytes": 4423226,
+      "sha256": "567df88938c7aa72b33f2c657d01fef7bf72dd47bd7db217ba351d67d15e48fb"
+    },
+    "acquisition-handoff.json": {
+      "bytes": 47253,
+      "sha256": "5e7cc4f0cce36f22ee1feac0a9a52e0f285cceff47b5fd5de7b9517eebddac38"
+    },
+    "evidence-manifest.json": {
+      "bytes": 1807,
+      "sha256": "4fe552053ab9520e8091b8f8ce711248bd7de736e28991a4f4b71cbf45093cf1"
+    },
+    "exact-prototype-restoration.json": {
+      "bytes": 3824,
+      "sha256": "c7135ff2b12972682d930ff551d996e017ad8a3f7adf7c02de4c91fd203230a3"
+    },
+    "runtime-withdrawal.json": {
+      "bytes": 353120,
+      "sha256": "25c6f7728a428fae2f27e41e6c79bca8f5bb714ef2f7ef5986a42f7c3664f7aa"
+    }
+  },
+  "formal_observations": 200,
+  "historical_component_only": {
+    "bytes": 202469,
+    "commit": "5a66b6d5cb3f9fa2f6c5d6c8d7ce03db0cea565f",
+    "git_blob": "34b5e20cc9ea80fff3da257c09e8ecc602740ee8",
+    "not_current_product_provenance": true,
+    "path": "benchmarks/sum-state/sum-case-projection-20261106/component-evidence.json.gz",
+    "sha256": "bfad68fff1f38849cb365c5f46e4f1f3c949ed8741c0bee40a475b1e7fdc9773"
+  },
+  "immutable_collector_debit_seconds": 139.48779931600438,
+  "kind": "delivery_verification",
+  "no_new_observations_or_statistics": true,
+  "original_collector_files_unchanged": true,
+  "original_collector_manifest_files": 8,
+  "performance_acceptance": false,
+  "protocol_sha256": "567df88938c7aa72b33f2c657d01fef7bf72dd47bd7db217ba351d67d15e48fb",
+  "runtime_withdrawn": true,
+  "source_baseline": "5a66b6d5cb3f9fa2f6c5d6c8d7ce03db0cea565f",
+  "withdrawal_core_matches_study_baseline": true
+}

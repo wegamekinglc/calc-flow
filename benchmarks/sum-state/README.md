@@ -1,5 +1,12 @@
 # Grouped integer SUM state measurements
 
+[Complete 2026-11-06 sign CASE retest](sum-case-retest-20261106.md) records
+five fixed cases, 200 formal observations, both CPU profiles and 4,872 full
+snapshot checks in a quiet environment. All five maintained verdicts are
+inconclusive; neither dense case establishes the required improvement.
+The runtime prototype is withdrawn. This is a separate acquisition from the
+earlier zero-workload attempt below.
+
 [Unmeasured 2026-11-06 sign CASE experiment](sum-case-projection-20261106.md)
 records a verified allocation tradeoff and a runtime comparison stopped by
 competing builds before any workload. The prototype is withdrawn; no new
