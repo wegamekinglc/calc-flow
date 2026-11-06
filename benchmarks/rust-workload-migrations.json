@@ -140,6 +140,13 @@
       "candidate_sha256": "3ce00d0be9ababbdbd2c0b508a21113713fab0481463a8c5931ca93a071c36eb",
       "reason": "Exact composed migration from the retained dependency-upgrade workload anchor through PR #539 and PR #542: current runs use only fixed 1T/4T or explicit one-thread controls, and the result metadata additionally reports opt-in auto_rows. No fixture, query, sample count or timing-boundary equivalence is added beyond those exact declared changes.",
       "reference": "PR #539 and PR #542; retained c212cb0f dependency-migration workload anchor"
+    },
+    {
+      "target": "sql_datafusion_performance",
+      "baseline_sha256": "edeac3050279be916529bcddb23e039afba1be2afd3bfaf005cc1b973c86083b",
+      "candidate_sha256": "0e0a25159e20e4a1a28d5851fe15e8221c26c1e83140cc528e2bcfc7ec486579",
+      "reason": "Exact composed migration from the retained dependency-upgrade workload anchor through PR #539, PR #542 and PR #549: current runs use only fixed 1T/4T or explicit one-thread controls, and the result metadata additionally reports opt-in auto_rows and auto_plan. No fixture, query, sample count or timing-boundary equivalence is added beyond those exact declared changes.",
+      "reference": "PR #549; Complete benchmark suite run 42193907645 preflight diagnosis"
     }
   ]
 }
