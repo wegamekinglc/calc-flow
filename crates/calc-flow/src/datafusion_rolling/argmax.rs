@@ -12,7 +12,11 @@ use datafusion::{
         datatypes::DataType,
     },
     common::{DataFusionError, ScalarValue},
-    functions_aggregate::{array_agg::ArrayAgg, count::Count as CountAggregate, min_max::Max},
+    functions_aggregate::{
+        array_agg::ArrayAgg,
+        count::Count as CountAggregate,
+        min_max::{Max, Min},
+    },
     logical_expr::{
         Accumulator, AggregateUDF, AggregateUDFImpl, Expr, LogicalPlan, Operator, Projection,
         Signature, Volatility, Window, WindowFrameUnits, WindowFunctionDefinition,
@@ -22,22 +26,34 @@ use datafusion::{
 };
 use datafusion_functions_nested::position::ArrayPosition;
 
-#[derive(Debug, PartialEq, Eq, Hash)]
-struct SqlArgmax {
-    signature: Signature,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+enum SqlExtremum {
+    #[default]
+    Maximum,
+    Minimum,
 }
 
-impl SqlArgmax {
-    fn new() -> Self {
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct SqlExtremumAge {
+    signature: Signature,
+    extremum: SqlExtremum,
+}
+
+impl SqlExtremumAge {
+    fn new(extremum: SqlExtremum) -> Self {
         Self {
             signature: Signature::uniform(1, vec![DataType::Float64], Volatility::Immutable),
+            extremum,
         }
     }
 }
 
-impl AggregateUDFImpl for SqlArgmax {
+impl AggregateUDFImpl for SqlExtremumAge {
     fn name(&self) -> &'static str {
-        "calc_flow_sql_argmax"
+        match self.extremum {
+            SqlExtremum::Maximum => "calc_flow_sql_argmax",
+            SqlExtremum::Minimum => "calc_flow_sql_argmin",
+        }
     }
 
     fn signature(&self) -> &Signature {
@@ -47,7 +63,7 @@ impl AggregateUDFImpl for SqlArgmax {
     fn return_type(&self, arg_types: &[DataType]) -> datafusion::common::Result<DataType> {
         if arg_types != [DataType::Float64] {
             return Err(DataFusionError::Plan(
-                "calc_flow_sql_argmax requires one Float64 input".to_owned(),
+                "calc_flow_sql_extremum_age requires one Float64 input".to_owned(),
             ));
         }
         Ok(DataType::Float64)
@@ -57,28 +73,36 @@ impl AggregateUDFImpl for SqlArgmax {
         &self,
         _args: AccumulatorArgs,
     ) -> datafusion::common::Result<Box<dyn Accumulator>> {
-        Ok(Box::new(SqlArgmaxAccumulator::default()))
+        Ok(Box::new(SqlExtremumAgeAccumulator::new(self.extremum)))
     }
 
     fn create_sliding_accumulator(
         &self,
         _args: AccumulatorArgs,
     ) -> datafusion::common::Result<Box<dyn Accumulator>> {
-        Ok(Box::new(SqlArgmaxAccumulator::default()))
+        Ok(Box::new(SqlExtremumAgeAccumulator::new(self.extremum)))
     }
 }
 
 #[derive(Debug, Default)]
-struct SqlArgmaxAccumulator {
+struct SqlExtremumAgeAccumulator {
     next_row: u64,
     retracted_rows: u64,
-    maxima: VecDeque<(u64, f64)>,
+    extrema: VecDeque<(u64, f64)>,
+    extremum: SqlExtremum,
 }
 
-impl SqlArgmaxAccumulator {
+impl SqlExtremumAgeAccumulator {
+    fn new(extremum: SqlExtremum) -> Self {
+        Self {
+            extremum,
+            ..Self::default()
+        }
+    }
+
     #[expect(clippy::cast_precision_loss)]
     fn current(&self) -> ScalarValue {
-        if let Some((row, _)) = self.maxima.front() {
+        if let Some((row, _)) = self.extrema.front() {
             return ScalarValue::Float64(Some((self.next_row - 1 - row) as f64));
         }
         if self.next_row == self.retracted_rows {
@@ -88,34 +112,38 @@ impl SqlArgmaxAccumulator {
     }
 }
 
-fn sql_max_cmp(left: f64, right: f64) -> Ordering {
+fn sql_extremum_cmp(left: f64, right: f64) -> Ordering {
     left.total_cmp(&right)
 }
 
-impl Accumulator for SqlArgmaxAccumulator {
+impl Accumulator for SqlExtremumAgeAccumulator {
     fn update_batch(&mut self, values: &[ArrayRef]) -> datafusion::common::Result<()> {
         let [values] = values else {
             return Err(DataFusionError::Execution(
-                "calc_flow_sql_argmax requires one input array".to_owned(),
+                "calc_flow_sql_extremum_age requires one input array".to_owned(),
             ));
         };
         let values = values
             .as_any()
             .downcast_ref::<Float64Array>()
             .ok_or_else(|| {
-                DataFusionError::Execution("calc_flow_sql_argmax input is not Float64".to_owned())
+                DataFusionError::Execution(
+                    "calc_flow_sql_extremum_age input is not Float64".to_owned(),
+                )
             })?;
         for row in 0..values.len() {
             if !values.is_null(row) {
                 let value = values.value(row);
-                while self
-                    .maxima
-                    .back()
-                    .is_some_and(|(_, current)| sql_max_cmp(value, *current) == Ordering::Greater)
-                {
-                    self.maxima.pop_back();
+                while self.extrema.back().is_some_and(|(_, current)| {
+                    let ordering = sql_extremum_cmp(value, *current);
+                    match self.extremum {
+                        SqlExtremum::Maximum => ordering == Ordering::Greater,
+                        SqlExtremum::Minimum => ordering == Ordering::Less,
+                    }
+                }) {
+                    self.extrema.pop_back();
                 }
-                self.maxima.push_back((self.next_row, value));
+                self.extrema.push_back((self.next_row, value));
             }
             self.next_row += 1;
         }
@@ -125,17 +153,17 @@ impl Accumulator for SqlArgmaxAccumulator {
     fn retract_batch(&mut self, values: &[ArrayRef]) -> datafusion::common::Result<()> {
         let [values] = values else {
             return Err(DataFusionError::Execution(
-                "calc_flow_sql_argmax requires one input array".to_owned(),
+                "calc_flow_sql_extremum_age requires one input array".to_owned(),
             ));
         };
         for row in 0..values.len() {
             if !values.is_null(row)
                 && self
-                    .maxima
+                    .extrema
                     .front()
                     .is_some_and(|(current, _)| *current == self.retracted_rows)
             {
-                self.maxima.pop_front();
+                self.extrema.pop_front();
             }
             self.retracted_rows += 1;
         }
@@ -144,7 +172,7 @@ impl Accumulator for SqlArgmaxAccumulator {
 
     fn merge_batch(&mut self, _states: &[ArrayRef]) -> datafusion::common::Result<()> {
         Err(DataFusionError::Execution(
-            "calc_flow_sql_argmax only supports ordered window evaluation".to_owned(),
+            "calc_flow_sql_extremum_age only supports ordered window evaluation".to_owned(),
         ))
     }
 
@@ -161,13 +189,14 @@ impl Accumulator for SqlArgmaxAccumulator {
     }
 
     fn size(&self) -> usize {
-        size_of_val(self) + self.maxima.capacity() * size_of::<(u64, f64)>()
+        size_of_val(self) + self.extrema.capacity() * size_of::<(u64, f64)>()
     }
 }
 
 struct ArgmaxShape {
     input: datafusion::common::Column,
     parameters: WindowFunctionParams,
+    extremum: SqlExtremum,
     sources: [Expr; 3],
 }
 
@@ -194,7 +223,7 @@ pub(super) fn is_rewritten(expression: &Expr) -> bool {
     let WindowFunctionDefinition::AggregateUDF(function) = &window.fun else {
         return false;
     };
-    function.inner().downcast_ref::<SqlArgmax>().is_some()
+    function.inner().downcast_ref::<SqlExtremumAge>().is_some()
 }
 
 fn rewrite_projection(node: &LogicalPlan) -> datafusion::common::Result<Option<LogicalPlan>> {
@@ -210,7 +239,7 @@ fn rewrite_projection(node: &LogicalPlan) -> datafusion::common::Result<Option<L
     if !float_input(window, &shape.input) {
         return Ok(None);
     }
-    let next_window = argmax_window(window, shape.parameters)?;
+    let next_window = argmax_window(window, shape.parameters, shape.extremum)?;
     let Some(expressions) = projection_expressions(projection, window, &next_window, index) else {
         return Ok(None);
     };
@@ -258,9 +287,12 @@ fn float_input(window: &Window, input: &datafusion::common::Column) -> bool {
 fn argmax_window(
     window: &Window,
     parameters: WindowFunctionParams,
+    extremum: SqlExtremum,
 ) -> datafusion::common::Result<LogicalPlan> {
     let replacement = Expr::WindowFunction(Box::new(WindowFunction {
-        fun: WindowFunctionDefinition::AggregateUDF(Arc::new(AggregateUDF::from(SqlArgmax::new()))),
+        fun: WindowFunctionDefinition::AggregateUDF(Arc::new(AggregateUDF::from(
+            SqlExtremumAge::new(extremum),
+        ))),
         params: parameters,
     }));
     Ok(LogicalPlan::Window(Window::try_new(
@@ -297,9 +329,7 @@ fn argmax_shape(expression: &Expr, window: &Window) -> Option<ArgmaxShape> {
     let (count_reference, position_expression) = outer_age(expression)?;
     let count = resolve_window(count_reference, window)?;
     let (array, maximum) = position_windows(position_expression, window)?;
-    if !valid_aggregates(&count, &array, &maximum) {
-        return None;
-    }
+    let extremum = valid_aggregates(&count, &array, &maximum)?;
     bounded_ordered_frame(&array.params)?;
     let input = shared_input(&array, &maximum)?;
     let mut parameters = array.params.clone();
@@ -307,6 +337,7 @@ fn argmax_shape(expression: &Expr, window: &Window) -> Option<ArgmaxShape> {
     Some(ArgmaxShape {
         input,
         parameters,
+        extremum,
         sources: [
             Expr::WindowFunction(Box::new(count)),
             Expr::WindowFunction(Box::new(array)),
@@ -359,12 +390,19 @@ fn valid_aggregates(
     count: &WindowFunction,
     array: &WindowFunction,
     maximum: &WindowFunction,
-) -> bool {
-    is_count_all(count)
-        && is_aggregate(array)
-        && is_max(maximum)
-        && same_window(count, array)
-        && same_window(array, maximum)
+) -> Option<SqlExtremum> {
+    if !is_count_all(count)
+        || !is_aggregate(array)
+        || !same_window(count, array)
+        || !same_window(array, maximum)
+    {
+        return None;
+    }
+    if is_max(maximum) {
+        Some(SqlExtremum::Maximum)
+    } else {
+        is_min(maximum).then_some(SqlExtremum::Minimum)
+    }
 }
 
 fn shared_input(
@@ -444,6 +482,13 @@ fn is_max(window: &WindowFunction) -> bool {
     function.inner().downcast_ref::<Max>().is_some() && supported_options(&window.params)
 }
 
+fn is_min(window: &WindowFunction) -> bool {
+    let WindowFunctionDefinition::AggregateUDF(function) = &window.fun else {
+        return false;
+    };
+    function.inner().downcast_ref::<Min>().is_some() && supported_options(&window.params)
+}
+
 fn supported_options(parameters: &WindowFunctionParams) -> bool {
     parameters.filter.is_none() && !parameters.distinct && parameters.null_treatment.is_none()
 }
@@ -481,7 +526,7 @@ mod tests {
             Some(1.0),
             Some(8.0),
         ]));
-        let mut accumulator = SqlArgmaxAccumulator::default();
+        let mut accumulator = SqlExtremumAgeAccumulator::default();
         let mut actual = Vec::new();
         for row in 0..values.len() {
             accumulator.update_batch(&[values.slice(row, 1)]).unwrap();
@@ -501,7 +546,7 @@ mod tests {
     #[test]
     fn sliding_argmax_uses_oldest_null_when_no_nonnull_value_remains() {
         let values: ArrayRef = Arc::new(Float64Array::from(vec![None, None]));
-        let mut accumulator = SqlArgmaxAccumulator::default();
+        let mut accumulator = SqlExtremumAgeAccumulator::default();
         assert_eq!(accumulator.evaluate().unwrap(), ScalarValue::Float64(None));
         accumulator
             .update_batch(std::slice::from_ref(&values))
@@ -520,7 +565,7 @@ mod tests {
 
     #[test]
     fn sliding_argmax_distinguishes_signed_zero_maxima() {
-        let mut accumulator = SqlArgmaxAccumulator::default();
+        let mut accumulator = SqlExtremumAgeAccumulator::default();
         for (row, value) in [-0.0, 0.0, -1.0].into_iter().enumerate() {
             if row == 2 {
                 accumulator
