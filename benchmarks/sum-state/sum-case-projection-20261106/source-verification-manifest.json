@@ -1,0 +1,38 @@
+{
+  "acquisition_manifest": {
+    "bytes": 9143,
+    "path": "benchmarks/sum-state/sum-case-projection-20261106/evidence-manifest.json",
+    "sha256": "f25ecf6aa2d24f7169b32bcb953bdebb5a7139e3f81e81cf262a62352b808920"
+  },
+  "actual_formal_observations": 0,
+  "actual_profile_jobs": 0,
+  "actual_snapshot_checks": 0,
+  "budget_seconds": 600,
+  "collector_status": "stopped_unsuitable_environment",
+  "component_predeclared_in_frozen_protocol": true,
+  "earlier_outer_start_to_same_tail_seconds": 507.997293981025,
+  "files": [
+    {
+      "bytes": 202469,
+      "path": "benchmarks/sum-state/sum-case-projection-20261106/component-evidence.json.gz",
+      "sha256": "bfad68fff1f38849cb365c5f46e4f1f3c949ed8741c0bee40a475b1e7fdc9773"
+    },
+    {
+      "bytes": 29286,
+      "path": "benchmarks/sum-state/sum-case-projection-20261106/acquisition-handoff.json",
+      "sha256": "b0a9b32c0c339cb28014379fd4380065e2d0641a7c3f18ecab6dc8590672c72b"
+    }
+  ],
+  "final_collector_debit_seconds": 4.2318943699938245,
+  "frozen_protocol": {
+    "bytes": 4621039,
+    "path": "benchmarks/sum-state/sum-case-projection-20261106.protocol.json",
+    "sha256": "1fc506250e379baee916f38dc862a64ade9776825f87c19de8d461966045632d"
+  },
+  "kind": "separate_source_verification_and_stopped_run_handoff",
+  "outer_startup_inclusive_controller_seconds": 4.748112839995883,
+  "same_original_start_to_archive_integrity_settlement_seconds": 507.54136232601013,
+  "scope": "Existing predeclared component proof and unchanged orchestration/archival handoff; no additional workload or statistical calculation, no modification to collector outputs.",
+  "source_verification_packaging_is_separate": true,
+  "summary_snapshot_seconds": 4.079536221979652
+}

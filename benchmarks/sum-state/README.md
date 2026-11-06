@@ -1,5 +1,10 @@
 # Grouped integer SUM state measurements
 
+[Unmeasured 2026-11-06 sign CASE experiment](sum-case-projection-20261106.md)
+records a verified allocation tradeoff and a runtime comparison stopped by
+competing builds before any workload. The prototype is withdrawn; no new
+end-to-end timings or profiles are claimed.
+
 [Rejected 2026-11-06 candidate/rank experiment](sum-candidate-ranks-20261106.md)
 records five fixed cases, 200 formal observations and both CPU profiles.
 Removing merge-time candidate lookups did not establish the required dense

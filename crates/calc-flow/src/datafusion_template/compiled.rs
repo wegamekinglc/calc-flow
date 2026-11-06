@@ -22,8 +22,6 @@ use crate::{
 
 use super::memory_scan;
 
-mod sign_case;
-
 pub(crate) struct CompiledExpression {
     steps: Vec<Step>,
     schema: SchemaRef,
@@ -114,9 +112,10 @@ fn append_steps(plan: &dyn ExecutionPlan, steps: &mut Vec<Step>) -> Option<()> {
 
 fn compile_step(plan: &dyn ExecutionPlan, input: &dyn ExecutionPlan) -> Option<Step> {
     if let Some(projection) = plan.downcast_ref::<ProjectionExec>() {
-        let schema = input.schema();
-        let projector = projection.projection_expr().make_projector(&schema).ok()?;
-        let projector = sign_case::rewrite(&projector, &schema).unwrap_or(projector);
+        let projector = projection
+            .projection_expr()
+            .make_projector(&input.schema())
+            .ok()?;
         return (projector.output_schema() == &plan.schema()).then_some(Step::Project(projector));
     }
     let filter = plan.downcast_ref::<FilterExec>()?;
@@ -168,8 +167,6 @@ fn push(
             push(tail, record, output, node_id, context)
         }
         Step::Project(projector) => {
-            #[cfg(test)]
-            sign_case_tests::note_evaluation(projector);
             let record = projector
                 .project_batch(&record)
                 .map_err(|error| datafusion_error(Some(node_id), error))?;
@@ -279,6 +276,3 @@ pub(crate) async fn check_arrow_error_envelope(context: &StreamOperatorContext<'
         datafusion_error(Some("compiled"), expected).to_string()
     );
 }
-
-#[cfg(test)]
-mod sign_case_tests;

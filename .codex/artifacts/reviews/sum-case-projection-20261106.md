@@ -2,9 +2,12 @@
 
 ## Scope and checkpoint
 
-**Candidate SOURCE and focused local verification PASS. Public candidate
-build/final-protocol admission, acquisition/acceptance, final documentation and
-required CI remain pending.** Review branch
+**Source-only delivery and partial-evidence audits PASS. The runtime prototype
+is withdrawn and the delivered core equals latest main f78a7660. The only
+acquisition stops before any fixture or workload; all five cases are unmeasured.
+No performance acceptance is established. Committed-artifact integrity and
+green required final-head CI remain merge gates.**
+Review branch
 `feature/expression-case-projection` against study-start main
 `dc8393d2f33771706b32492e9c4fa5436c6baf12` using the
 [study specification](../specs/sum-case-projection-20261106.md).
@@ -440,3 +443,204 @@ cross-platform, connector, packaging and combined 90% coverage gates were not
 run locally and remain required final-head CI. Source clearance permits public
 candidate preparation; it does not bypass candidate build/helper/protocol
 admission, parent acquisition GO, measured acceptance or final review/CI.
+
+## Final acquisition-packet admission
+
+**PASS**, with acquisition still at zero seconds and requiring the parent's
+explicit GO. The public measured candidate is
+`b0a9633f44356022fd1aa169b4efa6b077bc2f7b`, tree
+`07faa398d04efca2013913ae52d91f2378cef27c`. The development worktree was clean
+at that commit before this review-only update. This audit starts no native
+build, test, fixture, workload, profile or statistical calculation.
+
+The candidate receipt `build/candidate/build.json` has SHA256
+`26dece05230e874c36a657342ffb9e93c1d5d880457cbb67b2a0bc1d2f690778`;
+its linked and copied binary both have SHA256
+`de6ab7db510c0aabd70dd046d8998873ea883a5074f7096e545baca8d5b88a45`.
+All 1,012 candidate native inputs agree before/after/receipt/current and match
+public Git blobs, with common657 the sole harness overlay. Original compiler
+JSON shows rebuilt core and example artifacts, both `fresh=false`, and terminal
+build success. All 292 registry semantic artifact records match the baseline.
+Copied depfiles, compiler log, nm output, original maintained receipt and
+driver-result hashes match their receipts. The core depfile names the actual
+`compiled/sign_case.rs` relative to the verified rustc cwd; the example points
+at the exact frozen common harness.
+
+The actual Cargo and both rustc observations share the complete fourteen-field
+compiler environment. Baseline and candidate differ only in their declared
+per-arm `CARGO_TARGET_DIR`; each target matches its own receipt. Compiler,
+lock, features, vendor and shared-support compatibility pass. The baseline
+receipt e87d3acb and copied baseline binary remain unchanged. The candidate
+cache copy is recorded separately at 12.329258648969699 seconds, using an
+ordinary copy without hardlinks and retaining the old cache metadata.
+
+Cargo exits zero in 887.2990134509746 seconds and the maintained helper exits
+zero in 888.2408762819832 seconds. Those actual outcomes were atomically saved
+before postproof. The original outer wrapper exits one because its static
+depfile expectation omitted `compiled/`; its original traceback, failure,
+driver and maintained receipt remain retained. A separate static correction
+checks the real public module path and all proofs, completing in
+8.153216684004292 seconds including finalization. It performs no rebuild or
+source/binary change. This is a successful native build with a disclosed failed
+postproof wrapper and successful corrected static proof, not an all-zero
+wrapper history. Final ownership records contain no remaining build processes.
+
+The frozen `protocol-final.json` is 4,621,039 bytes, SHA256
+`1fc506250e379baee916f38dc862a64ade9776825f87c19de8d461966045632d`.
+The reviewer runs only the pure/static protocol, helper, current-build,
+compatibility and fresh-product validators; all pass. Actual CONTRACT case/
+control descriptions, thirteen helper seals and public P Git identities match
+their embedded UTF-8 payloads byte-for-byte. Both profile executables match
+their retained version-record hashes; active tool identities are checked again
+inside the acquisition budget. No profile has yet run.
+
+The protocol retains exactly five cases, two rounds of ten alternating pairs,
+200 formal observations, twenty warmups and twelve profile jobs. Both dense
+one-CPU profiles require five admitted windows after excluding the first of
+six jobs. One 600-second deadline starts with the controller; parent GO is
+before the live in-budget quiet guard. Fixtures, captures/decoding, correctness,
+resources, statistics, seals, publication and cleanup remain inside that same
+deadline. Prior debit is zero. No case, sample, threshold, retry or residual
+campaign is added. The unchanged maintained decision rule requires a dense
+`improved` verdict, complete evidence and no confirmed regression on any case;
+inconclusive intervals establish neither equivalence nor a confirmed regression.
+
+Portable baseline/candidate proofs have SHA256
+`73d53bd1fca6ba4082962a7f9855cfa3eb78bc31f24756a78007d0a72a3816ab`
+and `a04f6e01c44cef2d228bea25f04c5f29ea746cd8051a9523187cd9b766ec9250`.
+All 31/32 embedded records, gzip round-trips, external binary/nm seals and
+public helper identities match retained originals. Both proofs equal their
+final-protocol embedded objects, including the failed wrapper and correction.
+The separate source-only component archive is 202,469 bytes, SHA256
+`bfad68fff1f38849cb365c5f46e4f1f3c949ed8741c0bee40a475b1e7fdc9773`.
+It preserves all original 56 entries and ten public source identities, adding
+only exact initial/final Python complexity reports for 58 entries. The original
+ca53 archive is retained. Its missing original Python RED payload limitation
+remains explicit. Neither portable builds nor component records count as
+formal observations. Original proposal/draft hashes remain unchanged, and no
+acquisition or publication directory exists at this gate.
+
+### Main advancement and delivery qualification
+
+Read-only inspection finds that main advanced from dc8393d2 to
+`f78a7660fd905e7cf4143358497420e411ce06e0`. Its exact two-file diff changes
+`datafusion_rolling/argmax.rs` and the corresponding Python tests, extending a
+guarded Float64 ordered-window rewrite to minimum as well as maximum. It does
+not change physical CASE kernels, compiled-template admission, sessions,
+dependencies or these five fixtures. The stock/SUM graph has no matching
+Window-to-Projection shape. There is no direct overlap blocking this frozen
+controlled campaign.
+
+Keep dc/P sources, receipts and protocol unchanged for this single comparison.
+After acquisition, integrate latest main and preserve that rolling fix; review
+the integration and require green final-head CI. All observed timings must
+remain attributed to dc/P. The integrated binary is unmeasured, with no baseline
+relabeling or extra residual-budget experiment. Pre-acquisition admission is
+not measured acceptance, final source-integration approval or merge approval.
+
+## Stopped acquisition and partial-evidence audit
+
+**Partial evidence PASS; end-to-end performance UNMEASURED.** The parent grants
+one GO for the frozen protocol. The single controller exits one when the live
+global quiet guard detects unrelated Maturin 54831, Cargo 54863 and rustc 54875
+builds. The retained traceback reaches `prepare_fixture` and then
+`guard(context.builds)` before the prepare invocation. No unrelated process is
+terminated. No retry, additional case or residual-budget campaign occurs.
+
+The actual counts are zero formal observations, warmups, profile jobs,
+accepted profiles, benchmark jobs, snapshot checks and physical workload
+invocations. All five planned case IDs are explicitly unmeasured. Fixture,
+prepare, timing and profile directories are absent; the sample CSV has only its
+header. Raw cases, fixtures, profiles, invocation receipts, targets and profile
+clock evidence are empty. `performance_acceptance=false` records missing
+evidence, not a confirmed slowdown, equivalence or proof that the hypothesis
+cannot improve performance.
+
+The immutable final manifest SHA256 is
+`f25ecf6aa2d24f7169b32bcb953bdebb5a7139e3f81e81cf262a62352b808920`.
+Its final collector debit is 4.2318943699938245 seconds out of 600, with prior
+debit zero. Raw/summary 4.079536221979652 seconds is an earlier publication
+snapshot, not the final stopped clock. The outer controller takes
+4.748112839995883 seconds including process startup and is reaped; its PID
+55706 is absent at this audit. Owned build/measurement remainders are empty.
+
+Protocol copying, read-only integrity checks and settlement reach
+507.54136232601013 seconds from the same original maintained start, or
+507.997293981025 seconds from the earlier outer launch start. Both remain
+within the original 600-second deadline. These separately disclosed archival
+tail intervals do not replace or rewrite the immutable final collector debit,
+authorize a retry or create a second budget.
+
+Complete raw evidence SHA256 is
+`06e04536ca09a58050934834b20da8336fab355c9553aa345fc224616ac9ccbb`.
+The reviewer checks every manifest file's exact bytes/hash, the archived
+protocol's unchanged 1fc50625 identity, and raw embedded protocol/build objects.
+Both permanently detached source trees retain all 1,010/1,012 native input
+hashes and copied binary identities. Thirteen scientific helpers match the
+machine pre-seals, raw post-seals and embedded public payloads. All 63 portable
+build records still match their retained originals, and component bfad remains
+unchanged. No native execution or statistical recomputation is repeated.
+
+The handoff SHA256 is
+`b0a9b32c0c339cb28014379fd4380065e2d0641a7c3f18ecab6dc8590672c72b`.
+Its five exact UTF-8 orchestration records retain `acquire-once.py`, the frozen
+argv/cwd and actual launch/outcome/stdout/stderr. They match local original
+bytes, sizes and hashes. The launcher owns one standard Popen and an earlier
+outer deadline; it does not change the thirteen scientific helpers, recipes or
+statistics. Retain this handoff separately in final portable publication and
+bind it through the separate source/publication manifest, without changing
+collector-generated files.
+
+The predeclared unproven-result policy therefore withdraws the runtime
+prototype while retaining public P, source/unit evidence, focused tooling and
+the exact stopped packet. Production rollback, latest-main preservation,
+source-only documentation and final-head CI remain the next delivery gates.
+
+## Source-only delivery review
+
+**PASS for the reviewed final working-tree content**, pending committed-artifact
+integrity, actual final PR-head review and required CI. Withdrawal commit
+`d13a6e07d86bc549d4a2707d0aec07c62604c636` restores the existing compiled
+module and removes both prototype modules. Latest main f78a7660 is integrated
+by merge `96458d29f2aa8754d8137c0c6d50e56944eb9610`. The reviewer independently
+checks `git diff --exit-code origin/main -- crates/calc-flow`: the complete
+delivered core equals main, including its rolling-extrema change. This final
+delivery adds no runtime optimization, dependency or public surface.
+
+The retained Python delta is the reviewed optional immutable side override,
+fixed CASE study adapter and focused tests. The only workflow/release-helper
+changes register the new test module in the maintained Linux SUM helper step
+and its configuration assertion. Existing reviewed RED/GREEN and lint receipts
+cover those unchanged bytes. Experimental Rust verification remains evidence
+about public P, not a claim that its withdrawn rewrite is enabled in delivery.
+No native checks or CI snapshots are repeated at this pre-PR documentation
+handoff. Full final-head regression, platform and coverage gates remain CI work.
+
+The reviewer reads the complete manual study and SUM index, checks the changed
+benchmark-index and changelog context, and cross-checks their claims against
+the source and actual receipts. The manual report separates zero observations
+from the frozen plan, explains all four clock scopes, preserves the missing
+Python RED payload qualification and failed static-wrapper history, and reports
+both uniform allocation increases and the 712-byte envelope difference from
+the DataFusion reference. It qualifies planning-only predicate probes and
+keeps all runtime claims unmeasured. One wording issue is fixed: the correction
+is a static verifier, not a read-only verifier, because it writes evidence
+while preserving native source and binary bytes.
+
+The separate `source-verification-manifest.json`, SHA256
+`fd75c9564952f8b8d35e85155b06f5e1a0fac8cb85c197281861a6bdc64ecee9`,
+binds exact unchanged collector f25ecf6a, frozen protocol 1fc50625, component
+bfad68ff and orchestration handoff b0a9b32c. Published component/handoff copies
+equal their original bytes. All 58 component records, ten public source
+identities and five orchestration payloads remain separate from the immutable
+collector packet; no collector file or its acquisition manifest is rewritten.
+The source-manifest bindings and every collector file seal pass again after
+packaging. All 49 relative links in the four manual documentation files exist;
+newlines, whitespace, both new table alignments and generated-schema drift
+checks pass. No unresolved content, style, source-integration or partial-evidence
+blocker remains at this checkpoint.
+
+This approves retention of tools, source/allocation evidence and the stopped
+attempt. It does not approve a runtime performance change, establish a result
+for any of the five cases, authorize another acquisition or declare the branch
+merge-ready before its committed evidence and required checks are verified.
