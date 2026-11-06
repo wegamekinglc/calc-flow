@@ -325,11 +325,37 @@ def validate_control_manifest(manifest, groups, copies):
         raise ValueError("control keys must remain in the retained seed set")
 
 
-def control_fixture(source, destination, copies, deadline=None):
+def control_side(record, side):
+    if side not in (None, "buy", "sell"):
+        raise ValueError("uniform control side must be buy or sell")
+    if side is None:
+        return record
+    index = record.schema.get_field_index("side")
+    if index < 0:
+        raise ValueError("uniform control requires the side field")
+    values = pa.array([side] * record.num_rows, type=record.column(index).type)
+    return record.set_column(index, record.schema.field(index), values)
+
+
+def control_description(copies, side):
+    if side is None:
+        return (
+            "distinct" if copies == 1 else "edge",
+            f"seed unchanged; cycles index%10, {copies} cycle(s), all trade",
+        )
+    return (
+        f"uniform-{side}",
+        f"cycles index%10, {copies} cycle(s), all trade; "
+        f"side={side} on seed and business",
+    )
+
+
+def control_fixture(source, destination, copies, deadline=None, *, side=None):
     if source.resolve() == destination.resolve():
         raise FileExistsError("never overwrite the maintained fixture")
+    name, mapping = control_description(copies, side)
     manifest = {
-        "fixture": "distinct" if copies == 1 else "edge",
+        "fixture": name,
         "batch_rows": [],
         "snapshot_rows": [],
         "snapshot_sha256": [],
@@ -351,6 +377,7 @@ def control_fixture(source, destination, copies, deadline=None):
                     if index == 0
                     else control_record(record, index - 1, groups, copies)
                 )
+                transformed = control_side(transformed, side)
                 positions = evidence.append_reference(manifest, positions, transformed)
                 writer.write_batch(transformed)
             validate_control_manifest(manifest, groups, copies)
@@ -370,7 +397,7 @@ def control_fixture(source, destination, copies, deadline=None):
         "input_sha256": maintained.sha(destination),
         "snapshot_schema_sha256": evidence.schema_hash(output_schema),
         "source_stock_sha256": maintained.sha(source),
-        "mapping": f"seed unchanged; cycles index%10, {copies} cycle(s), all trade",
+        "mapping": mapping,
     }
 
 
@@ -384,6 +411,7 @@ def prepare_fixtures(collection, contract=COLUMNAR):
             root / (name + ".arrow"),
             spec["copies"],
             collection.deadline,
+            side=spec.get("side"),
         )
     write_json(collection.args.output / "fixture-manifest.json", fixtures)
     return replace(measurement, fixture=fixtures)
