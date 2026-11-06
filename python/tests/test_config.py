@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import pickle
 import subprocess
 import sys
 from collections import UserDict
-from copy import deepcopy
+from copy import copy, deepcopy
 from types import MappingProxyType
 
 import pytest
@@ -39,6 +40,43 @@ def _assert_json_error(project: object, message: str) -> None:
         (error["type"], error["loc"], error["msg"])
         for error in caught.value.errors(include_url=False)
     ] == [("value_error", (), f"Value error, {message}")]
+
+
+@pytest.mark.parametrize(
+    "round_trip", [copy, deepcopy, lambda value: pickle.loads(pickle.dumps(value))]
+)
+def test_project_validation_error_preserves_details_when_copied(round_trip) -> None:
+    error = ValidationError(
+        "ProjectDocument",
+        [
+            {
+                "type": "value_error",
+                "loc": ("data_sources", 0, "data"),
+                "msg": "Value error, invalid input",
+                "input": {"value": [1, None]},
+                "ctx": {"error": ValueError("invalid input")},
+            }
+        ],
+    )
+    error.source_tag = "project-import"
+    if hasattr(error, "add_note"):
+        error.add_note("input document could not be imported")
+
+    restored = round_trip(error)
+
+    assert type(restored) is ValidationError
+    assert restored is not error
+    assert restored.args == error.args == ()
+    assert restored.title == error.title
+    assert restored.source_tag == "project-import"
+    assert getattr(restored, "__notes__", None) == getattr(error, "__notes__", None)
+    assert restored.error_count() == error.error_count() == 1
+    assert str(restored) == str(error)
+    assert restored.errors(include_context=False) == error.errors(include_context=False)
+    assert str(restored.errors()[0]["ctx"]["error"]) == "invalid input"
+    returned = restored.errors()
+    returned[0]["msg"] = "changed"
+    assert restored.errors()[0]["msg"] == error.errors()[0]["msg"]
 
 
 def test_project_document_works_without_pydantic_installed() -> None:

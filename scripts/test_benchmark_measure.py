@@ -11,6 +11,23 @@ from scripts.benchmark_suite.legacy import observe_workers
 
 
 class BenchmarkMeasureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_successful_round_settles_all_workers_after_cleanup_failure(self):
+        first_error = OSError("baseline cleanup failed")
+        workers = {
+            "baseline": SimpleNamespace(close=AsyncMock(side_effect=first_error)),
+            "candidate": SimpleNamespace(
+                close=AsyncMock(side_effect=RuntimeError("candidate cleanup failed"))
+            ),
+        }
+
+        with self.assertRaises(OSError) as raised:
+            await measure._close_workers(workers, None)
+
+        self.assertIs(raised.exception, first_error)
+        for worker in workers.values():
+            worker.close.assert_awaited_once()
+        self.assertIn("candidate cleanup failed", first_error.__notes__[0])
+
     async def test_failed_round_keeps_partial_samples_and_primary_error(self):
         case = {"id": "recovery", "family": "warm", "backend": "calc-flow"}
         release = {"native_sha256": "a" * 64}

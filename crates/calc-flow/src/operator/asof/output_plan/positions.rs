@@ -78,6 +78,10 @@ impl Builder {
         self.compact.is_some()
     }
 
+    pub fn compact_source(&self) -> Option<usize> {
+        self.compact.as_ref()?.source
+    }
+
     pub fn requires_promotion(&self, source: Option<usize>) -> bool {
         self.compact
             .as_ref()

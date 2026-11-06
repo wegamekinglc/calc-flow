@@ -346,7 +346,10 @@ A dynamic input accepts a materialized Arrow `Table`, `RecordBatch`, table
 `Batch`, a non-empty sequence of those values, an `AsyncIterable` of those
 values, or a `SourceBinding`. Sequences are schema-checked and concatenated into
 one materialized input, so they keep the native source and record boundaries
-without a Python source call per batch.
+without a Python source call per batch. Each supplied RecordBatch, including an
+empty one, keeps its boundary; Tables use their Arrow-exported boundaries.
+Zero-column inputs keep their row counts. The stream call captures sequence
+item references immediately, independently of later changes to the caller's list.
 Materialized inputs are imported once and sliced by a native source within
 `config.edge_budget`, except complete relations feeding snapshot ingress,
 which must fit the budget whole. They do not call a Python source per batch. If

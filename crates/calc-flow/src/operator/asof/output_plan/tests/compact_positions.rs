@@ -172,6 +172,98 @@ fn test_mixed_source_fixed_positions_preserve_legacy_raw_accounting() {
     assert_eq!(raw_bytes(true), raw_bytes(false));
 }
 
+fn differently_nullable_source_credit(
+    compact: bool,
+    first_has_nulls: bool,
+    promote: bool,
+) -> (u64, usize) {
+    fn right_payload(has_nulls: bool, ordinal: u64) -> RowPayload {
+        let values = if has_nulls {
+            Int64Array::from(vec![None, Some(1)])
+        } else {
+            Int64Array::from(vec![0, 1])
+        };
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            true,
+        )]));
+        RowPayload {
+            batch: Arc::new(PayloadBatch {
+                key: (1, ordinal),
+                record: Arc::new(RecordBatch::try_new(schema, vec![Arc::new(values)]).unwrap()),
+                body_bytes: 0,
+                encoded_charge_bytes: 0,
+                encoded: OnceLock::new(),
+            }),
+            row: 0,
+        }
+    }
+
+    let left = rows_payload(4, 0);
+    let first = right_payload(first_has_nulls, 0);
+    let second = right_payload(!first_has_nulls, 1);
+    assert_eq!(first.batch.record.schema(), second.batch.record.schema());
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut credit = MemoryConsumer::new("source-validity-credit").register(&pool);
+    let mut builder =
+        OutputPlanBuilder::new_for_owner(4, None, &mut credit, "asof", compact).unwrap();
+    let left_source = builder
+        .left_source(left.view(), &mut credit, "asof")
+        .unwrap();
+    let first_source = builder
+        .right_source(first.view(), &mut credit, "asof")
+        .unwrap();
+    builder.left_position(left_source, 0, "asof").unwrap();
+    builder.push_right_source(None, "asof").unwrap();
+    for row in 0..2 {
+        builder.left_position(left_source, row + 1, "asof").unwrap();
+        builder
+            .push_right_source(Some((first_source, row)), "asof")
+            .unwrap();
+    }
+    let second_source = builder
+        .right_source(second.view(), &mut credit, "asof")
+        .unwrap();
+    if promote {
+        builder.left_position(left_source, 3, "asof").unwrap();
+        builder
+            .push_right_source(Some((second_source, 0)), "asof")
+            .unwrap();
+    }
+    let plan = builder
+        .finish(&first.batch.record.schema(), &mut credit, "asof")
+        .unwrap();
+    assert_eq!(plan.matched, 2 + u64::from(promote));
+    assert_eq!(plan.len, 3 + usize::from(promote));
+    let result = (plan.raw_bytes, credit.size());
+    drop((plan, credit));
+    assert_eq!(pool.reserved(), 0);
+    result
+}
+
+#[test]
+fn test_fixed_right_promotion_charges_original_source_validity() {
+    for first_has_nulls in [true, false] {
+        assert_eq!(
+            differently_nullable_source_credit(true, first_has_nulls, true),
+            differently_nullable_source_credit(false, first_has_nulls, true),
+            "compact prefix must charge its original source; first_has_nulls={first_has_nulls}"
+        );
+    }
+}
+
+#[test]
+fn test_fixed_right_finish_ignores_unused_registered_source() {
+    for first_has_nulls in [true, false] {
+        assert_eq!(
+            differently_nullable_source_credit(true, first_has_nulls, false),
+            differently_nullable_source_credit(false, first_has_nulls, false),
+            "unused registered source must not change output credit; first_has_nulls={first_has_nulls}"
+        );
+    }
+}
+
 fn pending_promotion(
     rows: usize,
 ) -> (

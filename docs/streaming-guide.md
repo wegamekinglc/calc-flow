@@ -697,7 +697,11 @@ A non-empty list or tuple of Table, RecordBatch and table Batch values is also
 accepted for one dynamic input. The sequence is schema-checked and concatenated
 into one materialized input whose chunks reuse the caller's immutable buffers;
 it then uses the same native source, so no Python source call happens per batch.
-Each input record batch remains a source record boundary. Empty sequences,
+The stream call captures the sequence's item references immediately, so later
+changes to the caller's list do not change that stream. Each supplied RecordBatch,
+including an empty one, remains a source record boundary; Tables use their
+Arrow-exported record boundaries. Zero-column inputs preserve their row counts.
+Empty sequences,
 mismatched schemas and non-Arrow items are rejected; snapshot SQL and
 source-provided watermarks keep their single-complete-table rules.
 
