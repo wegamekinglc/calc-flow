@@ -827,7 +827,9 @@ impl DataFusionRuntime {
         tables: &BTreeMap<String, Batch>,
         node_id: Option<&str>,
     ) -> Result<PlannedQuery<'a>> {
-        if let Some((template, batches)) = self.templates.find(query.text(), tables) {
+        if self.input_partitions == 1
+            && let Some((template, batches)) = self.templates.find(query.text(), tables)
+        {
             return bind_template(context, &template, batches, node_id);
         }
         let (registrations, input_adapter_ns, table_register_ns) =
@@ -886,14 +888,16 @@ impl DataFusionRuntime {
         };
         let audit_ns = nanos(audit_start.elapsed());
         let physical_planning_ns = nanos(physical_planning_start.elapsed());
-        self.templates.capture(&TemplateCandidate {
-            query: query.text(),
-            tables,
-            logical: dataframe.logical_plan(),
-            physical: &physical_plan,
-            logical_plan: &logical_plan,
-            physical_plan_text: &physical_plan_text,
-        });
+        if self.input_partitions == 1 {
+            self.templates.capture(&TemplateCandidate {
+                query: query.text(),
+                tables,
+                logical: dataframe.logical_plan(),
+                physical: &physical_plan,
+                logical_plan: &logical_plan,
+                physical_plan_text: &physical_plan_text,
+            });
+        }
         Ok(PlannedQuery {
             task_ctx: Arc::new(dataframe.task_ctx()),
             physical_plan,

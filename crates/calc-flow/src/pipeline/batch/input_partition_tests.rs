@@ -182,3 +182,28 @@ async fn changing_input_partitions_invalidates_a_warmed_template() {
     );
     assert_eq!(result.datafusion_metrics[0].output_partition_count, 4);
 }
+
+#[tokio::test]
+async fn configured_input_partitions_follow_each_input_batch_layout() {
+    let plan = plan().with_input_partitions(4).unwrap();
+    let initial = plan
+        .execute(
+            BTreeMap::from([("input".to_owned(), input(800, 1))]),
+            crate::ExecutionOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(initial.datafusion_metrics[0].output_partition_count, 1);
+    let changed = plan
+        .execute(
+            BTreeMap::from([("input".to_owned(), input(800, 8))]),
+            crate::ExecutionOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        values(&initial.outputs["output"]),
+        values(&changed.outputs["output"])
+    );
+    assert_eq!(changed.datafusion_metrics[0].output_partition_count, 4);
+}

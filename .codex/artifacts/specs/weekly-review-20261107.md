@@ -56,11 +56,11 @@ captured main and the eventual frozen fix commit. Reuse `EngineCase` for the
 first three workloads and the maintained Program fixture/declaration/oracle
 for the fourth; no complete benchmark suite or optional extra case is selected.
 
-| Case                     | Input                  | Connection to the change                         |
-|--------------------------|------------------------|--------------------------------------------------|
-| sql-asof-1000            | 1,000 rows             | Canonical native ASOF admission and metrics      |
-| sql-interval-1000        | 1,000 rows             | Canonical native interval admission             |
-| stream-asof-10000        | 10,000 rows; batch 1024 | Projected fixed-width compact output accounting  |
+| Case                     | Input                   | Connection to the change                        |
+|--------------------------|-------------------------|-------------------------------------------------|
+| sql-asof-1000            | 1,000 rows              | Canonical native ASOF admission and metrics     |
+| sql-interval-1000        | 1,000 rows              | Canonical native interval admission             |
+| stream-asof-10000        | 10,000 rows; batch 1024 | Projected fixed-width compact output accounting |
 | sequence-projection-1000 | 1,000 rows; 640/360     | List capture and ordinary Arrow sequence replay |
 
 Every case uses two rounds of ten alternating pairs through maintained
@@ -88,6 +88,10 @@ more than an invalid shortcut. The ordinary benchmark controls remain admitted.
 The nullable-buffer accounting case is covered by exact byte/budget tests;
 its normal ASOF performance control uses nonnull prices. Configuration-error
 serialization and the benchmark-only setter are outside ordinary hot paths.
+The experimental multi-input-partition mode replans instead of binding a
+single-partition template; future partition experiments must distinguish that
+planning cost from execution time. Default single-partition template reuse
+is unchanged.
 
 Reject a confirmed maintained regression; retain inconclusive results and do
 not label them equivalence. Future algorithm proposals need a new explicit

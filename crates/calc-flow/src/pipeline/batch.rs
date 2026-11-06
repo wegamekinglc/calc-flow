@@ -280,10 +280,7 @@ impl BatchExecutionPlan {
                 message: "must be positive".into(),
             });
         }
-        if self.input_partitions != partitions {
-            self.query_templates = Arc::default();
-            self.input_partitions = partitions;
-        }
+        self.input_partitions = partitions;
         Ok(self)
     }
 

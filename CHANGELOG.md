@@ -10,8 +10,8 @@ measurements. Use the current guides for supported behavior.
 ## 2026-11
 
 - 2026-11-07: Repair native SQL join admission for nested CTEs and column
-  aliases, isolate rolling rewrite metrics per query, and invalidate warmed
-  benchmark plans when input partitioning changes. Charge compact ASOF output
+  aliases, isolate rolling rewrite metrics per query, and bypass cached
+  single-partition templates in experimental multi-partition runs. Charge ASOF output
   using its actual source buffers. Preserve zero-column rows, explicit empty
   records and captured materialized sequence inputs in Python streams; retain
   validation exception details when copied or serialized. Settle every
