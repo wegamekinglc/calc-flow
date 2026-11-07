@@ -1,5 +1,9 @@
 # Weekly implementation review and performance controls
 
+The [PR 556 follow-up](pr556-repair.md) records integration with newer main,
+cleared CI findings, exact-wheel verification and two later resource preflight
+stops. The material below preserves the original review checkpoint.
+
 The review covers 36 mainline commits from 2026-10-31 00:00 Asia/Shanghai
 through main `1b91bcc00a0623d5ece37ac654bf6e2a4f045939`. The preceding mainline
 commit is `ce313488017d63fc626731f9731a4bec931fc343`. Scope and fixed controls
