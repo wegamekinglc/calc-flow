@@ -335,10 +335,10 @@ async fn test_global_float_where_refusal_preserves_tail_and_once_retry() {
             .runtime()
             .unwrap()
             .incremental_memory_pool();
-        let basis = pool.reserved();
+        let basis = settled_reserved(&job, &pool).await;
         let pressure = MemoryConsumer::new("global-where-pressure").register(&pool);
         pressure.try_grow((1 << 30) - basis - 1).unwrap();
-        let held = pool.reserved();
+        let held = settled_reserved(&job, &pool).await;
         let next = vec![vec![Some(LARGE); 4095], vec![Some(NEG_LARGE), Some(ONE)]];
         let incoming = selected_input(&dtype, &next, 1);
         let weak = weak_arrays(&incoming);
@@ -351,7 +351,7 @@ async fn test_global_float_where_refusal_preserves_tail_and_once_retry() {
         );
         assert!(collector.drain("output").is_empty());
         assert!(weak.iter().all(|array| array.upgrade().is_none()));
-        assert_eq!(pool.reserved(), held);
+        assert_eq!(settled_reserved(&job, &pool).await, held);
         drop(pressure);
         same_snapshot(&before, &state.checkpoint(Epoch::INITIAL).unwrap());
         let incoming = selected_input(&dtype, &next, 1);
@@ -360,7 +360,7 @@ async fn test_global_float_where_refusal_preserves_tail_and_once_retry() {
             matches!(state.process_data("events", incoming, &context, &mut Reject).await, Err(CalcFlowError::Operator { node_id, .. }) if node_id == "reject-extrema")
         );
         assert!(weak.iter().all(|array| array.upgrade().is_none()));
-        assert_eq!(pool.reserved(), basis);
+        assert_eq!(settled_reserved(&job, &pool).await, basis);
         same_snapshot(&before, &state.checkpoint(Epoch::INITIAL).unwrap());
         let actual = process(&mut state, selected_input(&dtype, &next, 1), &context).await;
         let prefix = selected_oracle(&actual, &dtype, query, &[first, next]).await;

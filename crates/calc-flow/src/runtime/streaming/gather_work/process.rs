@@ -714,6 +714,17 @@ impl TestService {
             .load(Ordering::Acquire)
     }
 
+    pub(crate) fn hold_worker_permit(&self) -> OwnedSemaphorePermit {
+        self.control
+            .as_ref()
+            .unwrap()
+            .service
+            .workers
+            .clone()
+            .try_acquire_owned()
+            .unwrap()
+    }
+
     pub(crate) fn available_capacity(&self) -> (usize, usize, usize) {
         let service = &self.control.as_ref().unwrap().service;
         (

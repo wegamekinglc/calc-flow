@@ -44,6 +44,9 @@ pages explain how the implementation provides those behaviors.
 4. [Rust runtime reference](rust-api.md): internal types, operator traits, and
    examples for runtime contributors and extension authors.
 
+The [Rust release guide](rust-release.md) covers crates.io packaging, external
+consumer checks, and publication gates.
+
 The [project schema](../schemas/project-v3.schema.json) defines the serialized
 project contract.
 

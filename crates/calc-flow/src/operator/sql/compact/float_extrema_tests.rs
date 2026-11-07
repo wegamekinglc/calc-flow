@@ -11,6 +11,7 @@ use datafusion::{
         record_batch::RecordBatch,
     },
     common::ScalarValue,
+    execution::memory_pool::MemoryPool,
 };
 use serde_json::json;
 
@@ -113,6 +114,13 @@ fn job() -> StreamJobContext {
         None,
         CancellationToken::new(),
     )
+}
+
+// Executor generations may retire under pressure from other jobs. Compare state
+// reservations after the same retirement boundary without discarding any state.
+async fn settled_reserved(job: &StreamJobContext, pool: &Arc<dyn MemoryPool>) -> usize {
+    job.gather_owner().retire_idle_generation_for_test().await;
+    pool.reserved()
 }
 
 #[derive(Debug, PartialEq)]

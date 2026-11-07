@@ -1,0 +1,104 @@
+name: Rust crate release
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "crates/calc-flow/**"
+      - "scripts/*rust_release*"
+      - "scripts/verify_python_release.py"
+      - ".github/workflows/release-rust.yml"
+  workflow_dispatch:
+  push:
+    tags:
+      - "calc-flow-v*"
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+jobs:
+  verify:
+    name: Package and external Rust consumer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@dc08e2af391d489dff6d14cf743e574f7d1229c5 # 1.94.0
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      - name: Validate version and release tag
+        shell: bash
+        run: |
+          args=(--version-only)
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            git fetch --no-tags origin main
+            test "$(git rev-parse FETCH_HEAD)" = "${GITHUB_SHA}"
+            test "$(git cat-file -t "${GITHUB_REF}")" = "tag"
+            args+=(--tag "${GITHUB_REF_NAME}")
+          fi
+          python scripts/verify_rust_release.py "${args[@]}"
+          python -m unittest scripts.test_verify_rust_release
+      - name: Package and rehearse upload
+        run: |
+          cargo package -p calc-flow --locked
+          cargo publish -p calc-flow --locked --dry-run
+      - name: Inspect distribution and run external consumer
+        run: python scripts/verify_rust_release.py --consumer
+      - name: Compile packaged optional features
+        shell: bash
+        run: |
+          version=$(python scripts/verify_rust_release.py --version-only)
+          cargo check --manifest-path "target/package/calc-flow-${version}/Cargo.toml" --target-dir target --locked --all-features
+      - name: Retain crate and registry lockfile
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: rust-crate
+          path: |
+            target/package/*.crate
+            target/package/calc-flow-*/Cargo.lock
+          if-no-files-found: error
+          retention-days: 30
+
+  audit:
+    name: Audit published dependency graph
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rust-crate
+          path: target/package
+      - uses: taiki-e/install-action@537c30d2b45cc3aa3fb35e2bbcfb61ef93fd6f02 # v2.62.52
+        with:
+          tool: cargo-audit@0.22.2
+      - name: Audit the registry lockfile without workspace patches
+        shell: bash
+        run: |
+          lockfiles=(target/package/calc-flow-*/Cargo.lock)
+          test "${#lockfiles[@]}" -eq 1
+          cargo audit --file "${lockfiles[0]}" \
+            --ignore RUSTSEC-2026-0176 --ignore RUSTSEC-2026-0177 --ignore RUSTSEC-2026-0235
+
+  publish:
+    name: Publish calc-flow to crates.io
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [verify, audit]
+    runs-on: ubuntu-latest
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/calc-flow
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@dc08e2af391d489dff6d14cf743e574f7d1229c5 # 1.94.0
+      - name: Publish core crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          test -n "${CARGO_REGISTRY_TOKEN}"
+          cargo publish -p calc-flow --locked

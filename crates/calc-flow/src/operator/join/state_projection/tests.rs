@@ -714,6 +714,7 @@ async fn cold_checkpoint(
     let direct_pool = restored.runtime.runtime()?.incremental_memory_pool();
     let managed_pool = managed.runtime.runtime()?.incremental_memory_pool();
     drop((restored, managed, snapshot));
+    job.gather_owner().retire_idle_generation_for_test().await;
     assert_eq!(direct_pool.reserved(), 0);
     assert_eq!(managed_pool.reserved(), 0);
     Ok(layout)
