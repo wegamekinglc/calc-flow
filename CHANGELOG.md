@@ -9,6 +9,18 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-07: Withdraw the key-sharded compact grouped SUM prototype after
+  measurement. Sharding by the complete group key removed the rejected lane
+  design's cross-group merges and produced byte-identical snapshots in unit
+  tests, but paired AB/BA runs of the streaming stock-positions example
+  (10M rows, checkpoints disabled, four pinned CPUs) measured +10.15% at
+  100,000-row batches and +8.43% at 1,000,000-row batches: the routing pass
+  and per-fragment state round-trips outweigh what four-thread parallelism
+  saves on the already-optimized serial update. Preserve the prototype on
+  `feature/sum-key-sharding` and the
+  [complete study](benchmarks/sum-state/sum-key-sharding-20261107.md); the
+  serial path remains delivered.
+
 - 2026-11-07: Repair native SQL join admission for nested CTEs and column
   aliases, isolate rolling rewrite metrics per query, and bypass cached
   single-partition templates in experimental multi-partition runs. Charge ASOF output
