@@ -27,6 +27,10 @@ On this page:
 
 ## Build and document
 
+The [Rust package quickstart](../crates/calc-flow/README.md) covers Cargo
+dependencies, the MSRV, and a native calculation. The first crates.io release
+is prepared through the checks in the [release guide](rust-release.md).
+
 Work from the repository root for the current native runtime and its examples.
 Choose focused local checks under [Verification](../AGENTS.md#verification);
 the full crate commands are:
