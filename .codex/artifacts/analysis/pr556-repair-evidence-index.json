@@ -1,0 +1,263 @@
+{
+  "archive": "pr556-repair-evidence.tar.gz",
+  "sha256": "860decb046b8dad2c08d515bbbe665bf16e84ac5af8c568f22f4e3f1e7894ea6",
+  "bytes": 60615,
+  "files": [
+    {
+      "path": "after-resource-wait/perf-controller.py",
+      "bytes": 6626,
+      "sha256": "892c6bd2f4c111e10e05f042fa44f06bed7be7662b15c524273841f1af083ab3"
+    },
+    {
+      "path": "after-resource-wait/perf-launch.py",
+      "bytes": 5844,
+      "sha256": "6af5f9e4c1e9d075fa1158044c34145f43b670df465a6f352ac66f555c699b1d"
+    },
+    {
+      "path": "after-resource-wait/perf-worker.py",
+      "bytes": 9456,
+      "sha256": "4f5f7395880355a58206142afdbe4955409cc4c56deb051b2d0e3250142024b3"
+    },
+    {
+      "path": "after-resource-wait/performance/summary.json",
+      "bytes": 720,
+      "sha256": "98d79a1790b37d8d6e72b1008d7b774e8b401339282dc598e791df19313fd805"
+    },
+    {
+      "path": "after-resource-wait/performance-controller.log",
+      "bytes": 1255,
+      "sha256": "f78ad20614ce52bcbdfe70c9c7e1f7937bd363147841e6a52bd1134c18cc6965"
+    },
+    {
+      "path": "after-resource-wait/performance-handoff.json",
+      "bytes": 512,
+      "sha256": "1a0aa3c9965da1224ec29217e5807e27faa2157ec31773c2cb7053314e2b55b4"
+    },
+    {
+      "path": "after-resource-wait/performance-protocol.draft.json",
+      "bytes": 27889,
+      "sha256": "db3564cfaa99df35fc59b027f5277489eb252fd160366f709baed77f607f2874"
+    },
+    {
+      "path": "after-resource-wait/performance-protocol.json",
+      "bytes": 28035,
+      "sha256": "382de1ab169249609bdcdcb3da069abec914a08576f3f7b485516aac660ddf6d"
+    },
+    {
+      "path": "archive-evidence.py",
+      "bytes": 2142,
+      "sha256": "1ca45443b7203770558a72b559fcec4ea9608dc0d2284b063408cdb4d7b83954"
+    },
+    {
+      "path": "baseline-cache-copy.json",
+      "bytes": 662,
+      "sha256": "25f7beaf9f7d67b79062a979a746a33bb3f7d22d6bf1037a310f2f6cc879e505"
+    },
+    {
+      "path": "baseline-release/build.json",
+      "bytes": 1429,
+      "sha256": "216cc3f38250f30bdd6ef964102c6a8088d1b185731c9620eca45ad290f4009d"
+    },
+    {
+      "path": "baseline-release/build.log",
+      "bytes": 2655,
+      "sha256": "dfe43dc95efae852a7b838dfd9adc209b510f39fc5c61571aded92eae1267ab2"
+    },
+    {
+      "path": "baseline-release/outer-build.json",
+      "bytes": 564,
+      "sha256": "bf51d21fe26d32ba9c5e40d6ecea9a2aa01f0cfe12aa6a10f6ab3fe9e07249d6"
+    },
+    {
+      "path": "baseline-release/release.json",
+      "bytes": 1309,
+      "sha256": "e6277f2638cb8ad3842fb23c17055f2ea1a8cfd4730944e7eafb43b5c721a3a9"
+    },
+    {
+      "path": "candidate-preparation-withdrawal.json",
+      "bytes": 647,
+      "sha256": "7d4c6adf54a43389bda75a7cc712af4bf739e5e6366196d01345da74093d0521"
+    },
+    {
+      "path": "candidate-release/build.log",
+      "bytes": 648,
+      "sha256": "a113b829d0c218c92efee8d840a0bbdde1062b7b7ae900d772ae259b389dd39d"
+    },
+    {
+      "path": "candidate-v2-cache-copy.json",
+      "bytes": 682,
+      "sha256": "a82beb629984cf6eaa0aa77c1a45696c47a7e047e5d6f5bf4378cd6a4213a044"
+    },
+    {
+      "path": "candidate-v2-release/build.json",
+      "bytes": 1438,
+      "sha256": "ee2884b09067182797fb9db6047664bcdd8b82c3befd6027600fb40b2b96c6a8"
+    },
+    {
+      "path": "candidate-v2-release/build.log",
+      "bytes": 2664,
+      "sha256": "70862d41b3e11fa4e3ce190c14a6436e3e818f8d3334433d39be79ea9d2208e5"
+    },
+    {
+      "path": "candidate-v2-release/outer-build.json",
+      "bytes": 569,
+      "sha256": "d604fe1bce98a7c45dd5fb71a332a9a4e1563519c849756a9fffac17e5bc4b06"
+    },
+    {
+      "path": "candidate-v2-release/release.json",
+      "bytes": 1314,
+      "sha256": "0c1ec1f2a05a6172ab741d6d56637eb63179de6ea4100b4bb5c1d91a246f6fe0"
+    },
+    {
+      "path": "check-pr556.py",
+      "bytes": 2737,
+      "sha256": "88484b86f3c16eccfb366903c14034835926c8f0bfe95489ebed26f43c1ae781"
+    },
+    {
+      "path": "exact-wheel-tests/install.command.json",
+      "bytes": 837,
+      "sha256": "8f45d554e230485757549a034be5d3655ee2883096e15c30b0ed419f9683ec81"
+    },
+    {
+      "path": "exact-wheel-tests/install.log",
+      "bytes": 420,
+      "sha256": "39c412a8408020a27a15f397612f8403b70c6fce62a178374d498c31d68a5c21"
+    },
+    {
+      "path": "exact-wheel-tests/pytest.command.json",
+      "bytes": 1368,
+      "sha256": "7ec0813b96ba0c019a3f21cb80c913614a143ed6c11d547d395aa03ff3309abc"
+    },
+    {
+      "path": "exact-wheel-tests/pytest.log",
+      "bytes": 593,
+      "sha256": "af5ea712fd83680bd27f260257d86508688f4d6d433d6285381265ce9f75ebc5"
+    },
+    {
+      "path": "exact-wheel-tests/receipt.json",
+      "bytes": 1757,
+      "sha256": "81dac08d7fc71f3283856f13953eace18c4826798c17cd7bd4b24fef7a4d6e58"
+    },
+    {
+      "path": "join-green.json",
+      "bytes": 667,
+      "sha256": "7e5e2e1205968de2a6a83c8ead50babd48abb5fc6b7a71d2e07ca3f5d6b6c2fb"
+    },
+    {
+      "path": "join-green.log",
+      "bytes": 3025,
+      "sha256": "b7fd3c5db4b6899f387807600cb5f990f75516293be1f288330197c8b49e8476"
+    },
+    {
+      "path": "native-build.json",
+      "bytes": 604,
+      "sha256": "760531f9a12ef7b5156cfb364bd44d9c4667fc7c7e8be8d11a485caf836ef0ef"
+    },
+    {
+      "path": "native-build.log",
+      "bytes": 287537,
+      "sha256": "d91978af9f516198177abd92f2c472ca1e0cfe320cbd71712b5e790f025ca86a"
+    },
+    {
+      "path": "native-checks.py",
+      "bytes": 2963,
+      "sha256": "ee00c09237d6ea26c7ca09a60c1630ba6e90a61efde8654f582a3cba7a71c468"
+    },
+    {
+      "path": "native-final-source.json",
+      "bytes": 1041,
+      "sha256": "e195a313a0ba1a2192c146f8a565e368ad3a0399ae87513ef072f1e8b5776889"
+    },
+    {
+      "path": "partition-green.json",
+      "bytes": 672,
+      "sha256": "403d53077084cc9f79af76e6affea37c290419e5538c8c0998c4d1cdc3a29301"
+    },
+    {
+      "path": "partition-green.log",
+      "bytes": 839,
+      "sha256": "d21aec74f23e56e897f9e1fa369c6f489f090ff75efe2cba461fc7e4512409bd"
+    },
+    {
+      "path": "perf-controller.py",
+      "bytes": 6230,
+      "sha256": "bc0e7e35fa469f08ae15b4d3a0d7df24cc85024394f5d589dfc05ee74d78838c"
+    },
+    {
+      "path": "perf-launch.py",
+      "bytes": 5844,
+      "sha256": "bdcf893383a881462f8d98166b364feb0cbe50d54738886da9d4ea0f0b5e0183"
+    },
+    {
+      "path": "perf-worker.py",
+      "bytes": 9456,
+      "sha256": "4f5f7395880355a58206142afdbe4955409cc4c56deb051b2d0e3250142024b3"
+    },
+    {
+      "path": "performance/summary.json",
+      "bytes": 727,
+      "sha256": "d82397c4831975d9f1e53c00c188c10ce5b4ee6896825bcc47cb722b90bbc9f7"
+    },
+    {
+      "path": "performance-controller.log",
+      "bytes": 1194,
+      "sha256": "44947ccc3761c07fae61108e504f5582ac03fa4bcea53ba1ab6554a31fceb8fa"
+    },
+    {
+      "path": "performance-handoff.json",
+      "bytes": 653,
+      "sha256": "244d9523dca4f6bf275e36ce38e89e3bcef5050be03eef2b879ff827e112ada6"
+    },
+    {
+      "path": "performance-protocol.draft.json",
+      "bytes": 24653,
+      "sha256": "240980eacd20e2f1aac31f3a88dd9b4ccf47f4a997906fbfccf8d555e0c5dcff"
+    },
+    {
+      "path": "performance-protocol.json",
+      "bytes": 26318,
+      "sha256": "8529c3d271d9d7a7c739ad81106716225f9fa29725be0534258007fbcab03183"
+    },
+    {
+      "path": "preparation-process-snapshot.json",
+      "bytes": 3360,
+      "sha256": "d47bcceb71effdde546c05cc096aa4fc4d954606aa5d73b8a6291c9b8592f00d"
+    },
+    {
+      "path": "prepare-candidate.py",
+      "bytes": 1354,
+      "sha256": "f0854ef2f5850449f2b76365654c2abb7693a46098d45c8460e3d9add0f45a66"
+    },
+    {
+      "path": "state.json",
+      "bytes": 9627,
+      "sha256": "2b71ee1f9431e3e44df9dc4c7535462c924c333b7fad90732d22fbac2b987235"
+    },
+    {
+      "path": "template-green.json",
+      "bytes": 666,
+      "sha256": "58bc7911105728d2da7873f101e6c56a5a4c4276dce8df8cf9563891414555f1"
+    },
+    {
+      "path": "template-green.log",
+      "bytes": 556,
+      "sha256": "692e1f24e6ec4e650380b1048ec04e70d310a0f30bb2f0b28cf7484936fc983a"
+    },
+    {
+      "path": "test-fixes-pytest.log",
+      "bytes": 251,
+      "sha256": "8d3299680a4ad1035a4080ff360f18345755d9f2c956059fab03780c40667c89"
+    },
+    {
+      "path": "test-fixes.json",
+      "bytes": 2167,
+      "sha256": "ad2219d6de040bf5a91c7b5933389ae8faca1aa0258525229b9ac72c010797b2"
+    },
+    {
+      "path": "verify-wheel.py",
+      "bytes": 2390,
+      "sha256": "2f6b969005b17e1e11bfe3eb08f3432138bccf8ff61e451d777447a79016a099"
+    }
+  ],
+  "excluded": "Build caches, installed packages, wheels, native binaries, bytecode and later CI snapshots"
+}

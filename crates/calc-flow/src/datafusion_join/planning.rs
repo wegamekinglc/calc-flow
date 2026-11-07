@@ -88,6 +88,12 @@ fn named_table(factor: &TableFactor) -> Option<(String, String)> {
     let TableFactor::Table { name, alias, .. } = factor else {
         return None;
     };
+    if alias
+        .as_ref()
+        .is_some_and(|alias| !alias.columns.is_empty())
+    {
+        return None;
+    }
     let table = name.0.last()?.as_ident()?.value.clone();
     let qualifier = alias
         .as_ref()
@@ -105,10 +111,11 @@ fn derived_table(factor: &TableFactor) -> Option<(&Query, String)> {
     else {
         return None;
     };
-    if *lateral || sample.is_some() {
+    let alias = alias.as_ref()?;
+    if *lateral || sample.is_some() || subquery.with.is_some() || !alias.columns.is_empty() {
         return None;
     }
-    Some((subquery, alias.as_ref()?.name.value.clone()))
+    Some((subquery, alias.name.value.clone()))
 }
 
 fn column(expr: &Expr) -> Option<ColumnRef<'_>> {
@@ -197,23 +204,6 @@ fn addition(expr: &Expr) -> Option<(&Expr, &Expr)> {
 
 fn qualified(column: ColumnRef<'_>, qualifier: &str, name: &str) -> bool {
     column.name == name && column.qualifier == Some(qualifier)
-}
-
-fn column_equality(
-    left: &Expr,
-    right: &Expr,
-    left_qualifier: &str,
-    right_qualifier: &str,
-    name: &str,
-) -> bool {
-    let Some((left, right)) = equality(left).or_else(|| equality(right)) else {
-        return false;
-    };
-    let (Some(left), Some(right)) = (column(left), column(right)) else {
-        return false;
-    };
-    (qualified(left, left_qualifier, name) && qualified(right, right_qualifier, name))
-        || (qualified(right, left_qualifier, name) && qualified(left, right_qualifier, name))
 }
 
 fn column_pair_equality(
@@ -369,10 +359,10 @@ fn asof_predicate(
     terms.len() == 3
         && terms
             .iter()
-            .any(|term| column_equality(term, term, left_alias, right_alias, key))
+            .any(|term| column_pair_equality(term, left_alias, right_alias, key, key))
         && terms
             .iter()
-            .any(|term| column_equality(term, term, left_alias, right_alias, event_time))
+            .any(|term| column_pair_equality(term, left_alias, right_alias, event_time, event_time))
         && terms
             .iter()
             .any(|term| position_one(term, right_alias, position))

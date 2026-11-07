@@ -656,6 +656,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_join_admission_preserves_asof_nested_cte() {
+        let right = batch(&[(0, 1, "S0", Some(10.0))]);
+        let left = batch(&[(0, 100, "S0", Some(999.0))]);
+        let query = ASOF_SQL.replace(
+            "(SELECT symbol",
+            "(WITH reference AS (SELECT * FROM reference WHERE FALSE) SELECT symbol",
+        );
+        let (runtime, output) = execute(&query, &left, &right).await;
+        assert_eq!(
+            asof_rows(&combined(&output)),
+            asof_rows(&reference(&query, &left, &right).await)
+        );
+        assert!(
+            !runtime.metrics()[0]
+                .physical_plan
+                .contains("CalcFlowAsofJoinExec")
+        );
+    }
+
+    #[tokio::test]
+    async fn native_join_admission_preserves_interval_nested_cte() {
+        let right = batch(&[(0, 1, "S0", Some(2.0))]);
+        let left = batch(&[(0, 100, "S0", Some(11.0))]);
+        let query = INTERVAL_SQL.replace(
+            "JOIN (SELECT input.sequence",
+            "JOIN (WITH input AS (SELECT * FROM input WHERE FALSE) SELECT input.sequence",
+        );
+        let (runtime, output) = execute(&query, &left, &right).await;
+        assert_eq!(
+            interval_rows(&combined(&output)),
+            interval_rows(&reference(&query, &left, &right).await)
+        );
+        assert!(
+            !runtime.metrics()[0]
+                .physical_plan
+                .contains("CalcFlowBandJoinExec")
+        );
+    }
+
+    #[tokio::test]
+    async fn native_join_admission_preserves_derived_column_aliases() {
+        let right = batch(&[(0, 1, "S0", Some(10.0))]);
+        let left = batch(&[(0, 100, "S0", Some(999.0))]);
+        let query = ASOF_SQL
+            .replace(
+                "event_time, price, ROW_NUMBER()",
+                "event_time, price, price * 2 AS adjusted, ROW_NUMBER()",
+            )
+            .replace(
+                ") AS reference ON",
+                ") AS reference(symbol, event_time, adjusted, price, position) ON",
+            );
+        let (runtime, output) = execute(&query, &left, &right).await;
+        assert_eq!(
+            asof_rows(&combined(&output)),
+            asof_rows(&reference(&query, &left, &right).await)
+        );
+        assert!(
+            !runtime.metrics()[0]
+                .physical_plan
+                .contains("CalcFlowAsofJoinExec")
+        );
+    }
+
+    #[tokio::test]
+    async fn native_join_admission_preserves_table_column_aliases() {
+        let right = combined(&batch(&[(0, 1, "S0", Some(10.0))]));
+        let right = Batch::table(
+            vec![
+                RecordBatch::try_new(
+                    Arc::new(Schema::new(
+                        right
+                            .schema()
+                            .fields()
+                            .iter()
+                            .cloned()
+                            .chain([Arc::new(Field::new("adjusted", DataType::Float64, false))])
+                            .collect::<Vec<_>>(),
+                    )),
+                    right
+                        .columns()
+                        .iter()
+                        .cloned()
+                        .chain([Arc::new(Float64Array::from(vec![20.0])) as ArrayRef])
+                        .collect(),
+                )
+                .unwrap(),
+            ],
+            BatchMetadata::default(),
+        )
+        .unwrap();
+        let left = batch(&[(0, 100, "S0", Some(999.0))]);
+        let query = ASOF_SQL.replace(
+            "FROM reference) AS reference",
+            "FROM reference AS source(event_time, sequence, symbol, adjusted, price)) AS reference",
+        );
+        let (runtime, output) = execute(&query, &left, &right).await;
+        assert_eq!(
+            asof_rows(&combined(&output)),
+            asof_rows(&reference(&query, &left, &right).await)
+        );
+        assert!(
+            !runtime.metrics()[0]
+                .physical_plan
+                .contains("CalcFlowAsofJoinExec")
+        );
+    }
+
+    #[tokio::test]
+    async fn native_join_admission_does_not_reuse_rolling_audit() {
+        let input = batch(&[(0, 1, "S0", Some(10.0)), (1_000_000, 2, "S0", Some(20.0))]);
+        let tables = BTreeMap::from([("input".into(), input.clone()), ("reference".into(), input)]);
+        let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+        runtime
+            .sql(
+                "SELECT AVG(price) OVER (PARTITION BY symbol ORDER BY event_time, sequence \
+                 ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS average FROM input",
+                &tables,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(runtime.metrics()[0].rolling_candidate_windows, 1);
+        for query in [ASOF_SQL, INTERVAL_SQL] {
+            runtime.sql(query, &tables, None).await.unwrap();
+            let metrics = runtime.metrics();
+            let metric = metrics.last().unwrap();
+            assert_eq!(metric.rolling_candidate_windows, 0);
+            assert_eq!(metric.rolling_rewritten_windows, 0);
+            assert!(metric.rolling_fallback_reasons.is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn native_interval_limited_offsets_use_datafusion_fallback() {
         let right = batch(&[(0, 1, "S0", Some(2.0))]);
         let left = batch(&[(0, 100, "S0", Some(11.0))]);

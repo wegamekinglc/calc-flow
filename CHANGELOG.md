@@ -9,6 +9,15 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-07: Repair native SQL join admission for nested CTEs and column
+  aliases, isolate rolling rewrite metrics per query, and bypass cached
+  single-partition templates in experimental multi-partition runs. Charge ASOF output
+  using its actual source buffers. Preserve zero-column rows, explicit empty
+  records and captured materialized sequence inputs in Python streams; retain
+  validation exception details when copied or serialized. Settle every
+  benchmark worker when cleanup raises. Remove duplicate SQL predicate
+  matching without changing admitted canonical queries.
+
 - 2026-11-07: Extend input-free DataFusion query templates from single-table
   row-local plans to multi-table immutable plans built only from
   data-independent operators (projections, filters, aggregates, unions,

@@ -24,6 +24,7 @@ from calc_flow._stream_inputs import (
     StreamInput as StreamInput,
 )
 from calc_flow._stream_inputs import (
+    _capture_stream_inputs,
     _capture_watermarks,
     _IterableSource,
     _selected_policies,
@@ -484,7 +485,11 @@ def _stream_program(
         raise TypeError("stream.inputs: expected a mapping by declared input name")
     return StreamResults(
         _StreamRequest(
-            program, dict(inputs), runtime, config, _capture_watermarks(watermarks)
+            program,
+            _capture_stream_inputs(inputs),
+            runtime,
+            config,
+            _capture_watermarks(watermarks),
         ),
         table_output=False,
     )
@@ -503,7 +508,11 @@ def _stream_table(
     )
     return StreamResults(
         _StreamRequest(
-            program, dict(mapped), runtime, config, _capture_watermarks(watermarks)
+            program,
+            _capture_stream_inputs(mapped),
+            runtime,
+            config,
+            _capture_watermarks(watermarks),
         ),
         table_output=True,
     )

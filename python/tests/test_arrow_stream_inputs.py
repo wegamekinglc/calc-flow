@@ -165,6 +165,68 @@ def test_materialized_sequence_rejects_invalid_input() -> None:
     asyncio.run(rejects([1, 2], TypeError, "materialized sequence"))
 
 
+def _materialized_records(zero_columns: bool) -> list[pa.RecordBatch]:
+    records = [
+        pa.record_batch([pa.array(range(count), type=pa.int64())], names=["value"])
+        for count in (2, 0, 3, 0)
+    ]
+    if zero_columns:
+        records = [record.select([]) for record in records]
+    return [
+        record.replace_schema_metadata({b"origin": b"caller"}) for record in records
+    ]
+
+
+@pytest.mark.parametrize("zero_columns", [False, True])
+def test_materialized_sequence_preserves_rows_and_empty_record_boundaries(
+    zero_columns,
+) -> None:
+    records = _materialized_records(zero_columns)
+    supplied = [
+        records[0],
+        pa.Table.from_batches([records[1]]),
+        cf.Batch.from_pyarrow(records[2]),
+        records[3],
+    ]
+    source = cf.table_input("events", schema=records[0].schema)
+    output = source.select(one=cf.lit(1))
+
+    async def run():
+        async with output.stream(supplied) as results:
+            tables = [table async for table in results]
+        assert results.job.status()["task_count"] == 0
+        return tables
+
+    tables = asyncio.run(run())
+    assert [table.num_rows for table in tables] == [2, 0, 3, 0]
+    assert [value for table in tables for value in table["one"].to_pylist()] == [1] * 5
+    assert [record.num_rows for record in records] == [2, 0, 3, 0]
+    assert all(record.schema.metadata == {b"origin": b"caller"} for record in records)
+
+
+@pytest.mark.parametrize("named", [False, True])
+def test_materialized_sequence_captures_items_before_context_entry(named) -> None:
+    first = pa.table({"value": [1, 2]})
+    second = pa.table({"value": [3]})
+    supplied = [first, second]
+    source = cf.table_input("events", schema=first.schema)
+    if named:
+        owner = cf.Program("capture", engine="streaming", outputs={"result": source})
+        results = owner.stream({"events": supplied})
+    else:
+        results = source.stream(supplied)
+    supplied[:] = [pa.table({"value": [99]})]
+
+    async def run():
+        async with results:
+            return [event.table if named else event async for event in results]
+
+    tables = asyncio.run(run())
+    assert [table.num_rows for table in tables] == [2, 1]
+    assert pa.concat_tables(tables).to_pydict() == {"value": [1, 2, 3]}
+    assert supplied[0].to_pydict() == {"value": [99]}
+
+
 def test_materialized_stream_delivers_results_without_python_sink_calls(
     monkeypatch,
 ) -> None:

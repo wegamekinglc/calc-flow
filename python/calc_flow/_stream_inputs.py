@@ -48,6 +48,17 @@ _MATERIALIZED_ITEMS = (pa.Table, pa.RecordBatch, Batch)
 _POLICIES = (SourceProvidedWatermarks, BoundedOutOfOrderness, DisabledWatermarks)
 
 
+def _capture_stream_inputs(
+    inputs: Mapping[str, StreamInput | TableData],
+) -> dict[str, StreamInput | TableData]:
+    return {
+        name: tuple(value)
+        if isinstance(value, Sequence) and not isinstance(value, _MATERIALIZED_ITEMS)
+        else value
+        for name, value in inputs.items()
+    }
+
+
 def _capture_watermarks(
     watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None,
 ) -> WatermarkPolicy | dict[str, WatermarkPolicy] | None:
@@ -302,6 +313,23 @@ def _validate_materialized_sequence(data: Sequence[TableData], path: str) -> Non
         )
 
 
+def _sequence_batch(tables: list[pa.Table], schema: pa.Schema) -> Batch:
+    records = [
+        record
+        for table in tables
+        for record in (
+            table.to_batches()
+            or [
+                pa.RecordBatch.from_arrays(
+                    [column.combine_chunks() for column in table.columns],
+                    schema=schema,
+                )
+            ]
+        )
+    ]
+    return Batch.from_pyarrow(pa.RecordBatchReader.from_batches(schema, records))
+
+
 def _materialized_sequence_binding(
     data: Sequence[TableData], config: _IterableConfig, complete_snapshot: bool
 ) -> tuple[SourceBinding, _IterableSource | None]:
@@ -316,6 +344,11 @@ def _materialized_sequence_binding(
     for table in tables:
         if not table.schema.equals(config.schema):
             raise ValueError(f"{path}.schema: expected declared Arrow schema")
+    if not config.schema or any(table.num_rows == 0 for table in tables):
+        # Table concatenation loses zero-column rows and trailing empty records.
+        return _materialized_binding(
+            _sequence_batch(tables, config.schema), config, complete_snapshot
+        )
     merged = tables[0] if len(tables) == 1 else pa.concat_tables(tables)
     return _materialized_binding(merged, config, complete_snapshot)
 

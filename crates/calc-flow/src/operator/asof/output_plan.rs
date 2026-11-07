@@ -260,15 +260,7 @@ impl<'a> OutputPlanBuilder<'a> {
         if self.matched == 0 || self.right.run.is_some() {
             return None;
         }
-        let compact = self
-            .right
-            .positions
-            .as_ref()
-            .is_some_and(positions::Builder::is_compact);
-        if !compact {
-            return None;
-        }
-        let (_, source) = self.right.recent?;
+        let source = self.right.positions.as_ref()?.compact_source()?;
         self.right.columns[source]
             .is_fixed_width()
             .then_some(source)

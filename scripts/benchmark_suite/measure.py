@@ -222,13 +222,17 @@ async def _round(
 
 
 async def _close_workers(workers: dict, primary: BaseException | None) -> None:
+    failure = primary
     for worker in workers.values():
         try:
             await worker.close()
         except BaseException as error:
-            if primary is None:
-                raise
-            primary.add_note(f"worker cleanup: {type(error).__name__}: {error}")
+            if failure is None:
+                failure = error
+            else:
+                failure.add_note(f"worker cleanup: {type(error).__name__}: {error}")
+    if primary is None and failure is not None:
+        raise failure
 
 
 async def measure_case(

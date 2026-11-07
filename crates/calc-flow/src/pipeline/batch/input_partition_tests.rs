@@ -147,3 +147,63 @@ async fn partitioned_input_preserves_results_and_reports_partitions() {
         "four input partitions must reach the physical plan"
     );
 }
+
+#[tokio::test]
+async fn changing_input_partitions_invalidates_a_warmed_template() {
+    let plan = plan();
+    let inputs = BTreeMap::from([("input".to_owned(), input(800, 8))]);
+    let initial = plan
+        .execute(inputs.clone(), crate::ExecutionOptions::default())
+        .await
+        .unwrap();
+    let warmed = plan
+        .execute(inputs.clone(), crate::ExecutionOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(warmed.datafusion_metrics[0].physical_planning_count, 0);
+    let unchanged = plan.with_input_partitions(1).unwrap();
+    let unchanged_result = unchanged
+        .execute(inputs.clone(), crate::ExecutionOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        unchanged_result.datafusion_metrics[0].physical_planning_count,
+        0
+    );
+
+    let partitioned = unchanged.with_input_partitions(4).unwrap();
+    let result = partitioned
+        .execute(inputs, crate::ExecutionOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        values(&initial.outputs["output"]),
+        values(&result.outputs["output"])
+    );
+    assert_eq!(result.datafusion_metrics[0].output_partition_count, 4);
+}
+
+#[tokio::test]
+async fn configured_input_partitions_follow_each_input_batch_layout() {
+    let plan = plan().with_input_partitions(4).unwrap();
+    let initial = plan
+        .execute(
+            BTreeMap::from([("input".to_owned(), input(800, 1))]),
+            crate::ExecutionOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(initial.datafusion_metrics[0].output_partition_count, 1);
+    let changed = plan
+        .execute(
+            BTreeMap::from([("input".to_owned(), input(800, 8))]),
+            crate::ExecutionOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        values(&initial.outputs["output"]),
+        values(&changed.outputs["output"])
+    );
+    assert_eq!(changed.datafusion_metrics[0].output_partition_count, 4);
+}

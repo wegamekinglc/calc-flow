@@ -60,6 +60,11 @@ class ProjectValidationError(ValueError):
     def error_count(self) -> int:
         return len(self._errors)
 
+    def __reduce__(
+        self,
+    ) -> tuple[object, tuple[str, list[dict[str, Any]]], dict[str, Any]]:
+        return type(self), (self.title, self.errors()), self.__dict__.copy()
+
     def __str__(self) -> str:
         count = len(self._errors)
         lines = [

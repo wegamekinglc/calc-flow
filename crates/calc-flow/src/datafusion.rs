@@ -874,12 +874,14 @@ impl DataFusionRuntime {
 
         let physical_planning_start = Instant::now();
         let partitions = context.task_ctx().session_config().target_partitions();
-        let physical_plan = match datafusion_join::plan(
+        let native_plan = datafusion_join::plan(
             query,
             tables,
             Arc::new(dataframe.schema().as_arrow().clone()),
             partitions,
-        ) {
+        );
+        let is_native_join = native_plan.is_some();
+        let physical_plan = match native_plan {
             Some(plan) => plan,
             None => dataframe
                 .create_physical_plan()
@@ -890,7 +892,11 @@ impl DataFusionRuntime {
             displayable(physical_plan.as_ref()).indent(true).to_string()
         });
         let audit_start = Instant::now();
-        let rolling_audit = self.rolling_rewrite_audit.snapshot();
+        let rolling_audit = if is_native_join {
+            RollingRewriteAuditSnapshot::default()
+        } else {
+            self.rolling_rewrite_audit.snapshot()
+        };
         let audit_ns = nanos(audit_start.elapsed());
         let physical_planning_ns = nanos(physical_planning_start.elapsed());
         if self.input_partitions == 1 {
