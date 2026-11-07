@@ -11,9 +11,11 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 
+import numpy as np
 import pyarrow as pa
 import pytest
 
+from benchmarks.rolling_indicator_comparison import expected_rolling_mean
 from benchmarks.support import (
     BenchmarkFixture,
     benchmark_group,
@@ -44,6 +46,7 @@ SCENARIOS = (
     "expression",
     "sql",
     "rolling_state",
+    "rolling_arithmetic_filter",
     "rolling_scan_64",
     "rolling_scan_256",
     "cross_section",
@@ -127,6 +130,10 @@ def _program(scenario: str, input_rows: int) -> Program:
             average=ts.average(price),
             ewma=ts.ewma(price, span=20),
         )
+    elif scenario == "rolling_arithmetic_filter":
+        indicators = source.with_columns(mean=ts.mean(price, window=rows(20)))
+        filtered = indicators.filter(indicators["symbol"] < "S008")
+        output = filtered.select("sequence", value=filtered["mean"] * 2.0 + 1.0)
     elif scenario.startswith("rolling_scan_"):
         output = _scan_output(source, int(scenario.rsplit("_", 1)[1]))
     elif scenario == "cross_section":
@@ -196,6 +203,23 @@ async def _run(program: Program, parts: tuple[pa.Table, ...], joined: bool) -> p
 
 
 def _validate(scenario: str, output: pa.Table, source: pa.Table) -> None:
+    if scenario == "rolling_arithmetic_filter":
+        sequence = source["sequence"].to_numpy()
+        retained = sequence % ENTITIES < ENTITIES // 2
+        ordered = output.sort_by("sequence")
+        np.testing.assert_array_equal(
+            ordered["sequence"].to_numpy(), sequence[retained]
+        )
+        means = expected_rolling_mean(
+            source["price"].to_numpy(), entities=ENTITIES, window=20
+        )
+        np.testing.assert_allclose(
+            ordered["value"].to_numpy(),
+            (means * 2.0 + 1.0)[retained],
+            rtol=1e-10,
+            atol=1e-10,
+        )
+        return
     expected_rows = (
         source.num_rows // WINDOW_TICKS
         if scenario == "window_aggregate"
@@ -241,6 +265,8 @@ def test_stream_operator_lifecycle(
         "output_rows": (
             source.num_rows // WINDOW_TICKS
             if scenario == "window_aggregate"
+            else source.num_rows // 2
+            if scenario == "rolling_arithmetic_filter"
             else source.num_rows
         ),
         "stream_batch_rows": BATCH_ROWS,

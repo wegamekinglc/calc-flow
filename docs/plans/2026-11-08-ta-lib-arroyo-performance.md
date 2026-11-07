@@ -14,8 +14,10 @@
 ## 执行记录
 
 - P0：研究基线已重新确认；实现基线为 `8d8be7d9`，记录随 P1a PR 交付。
-- P1a：实现已冻结；10项新增测试通过，融合模块36 passed、1 existing ignored；
-  crate lib/tests Clippy 与格式检查通过。复用现有融合执行器，扩展算术/过滤表达式准入。
+- P1a：[PR #563](https://github.com/wegamekinglc/calc-flow/pull/563) 为草稿；
+  10项新增测试通过，融合模块36 passed、1 existing ignored；
+  crate lib/tests Clippy 与格式检查通过。Codacy 的测试复杂度修复已通过本地单测试与 Clippy，等待服务复验。
+  复用现有融合执行器，扩展算术/过滤表达式准入；性能与完整 CI 尚未验收。
   性能协议选择维护中的 warm-stream 固定 30 对：H=10240、append=64、entities=64、
   GC=False；目标为 rolling mean 后接算术与过滤，对照为原 rolling mean。
   独立审查另识别持续输入阶段重叠风险，采集前增加一个维护工具的吞吐对照；
@@ -25,7 +27,7 @@
   warm 工具不提供 release 的 verdict；本次目标要求 paired median speedup >1.05，
   且 bootstrap 95% CI 下界 >1；对照 CI 上界 <1/1.05 才认定超过5%的已确认变慢，
   其他情况如实报告区间，不宣称等价。不修改维护工具的统计计算。
-- P2：主规格与首轮 critique 已完成；具体误差认证与恢复技术设计进行中。
+- P2：主规格与首轮 critique 已完成；具体误差认证与恢复设计已获 critic 放行，进入 test-first 实现。
 - P1b、P3、P4：尚未开始。
 - C1–C4：尚未达到进入条件，按各项条件评估。
 - D1/D2：尚未开始协议设计，单独验收。

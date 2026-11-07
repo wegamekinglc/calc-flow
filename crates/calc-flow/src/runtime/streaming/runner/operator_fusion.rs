@@ -376,6 +376,91 @@ mod tests {
         expression
     }
 
+    fn reject_schema_variant(variant: usize, parts: &mut crate::pipeline::StreamRuntimePlanParts) {
+        match variant {
+            0 => {
+                parts.nodes[0].output_ports.insert(
+                    "output".into(),
+                    Port::new("output", BatchKind::Table, false, None).unwrap(),
+                );
+            }
+            1 => {
+                parts.nodes[1].input_ports.insert(
+                    "input".into(),
+                    Port::new("input", BatchKind::Table, true, None).unwrap(),
+                );
+            }
+            2 => {
+                parts.nodes[1].output_ports.insert(
+                    "output".into(),
+                    Port::new("output", BatchKind::Table, false, None).unwrap(),
+                );
+            }
+            3 | 4 => {
+                let schema = parts.nodes[1].output_ports["output"].schema().unwrap();
+                let fields = schema
+                    .fields()
+                    .iter()
+                    .map(|field| field.as_ref().clone())
+                    .collect::<Vec<_>>();
+                let mut changed = Schema::new_with_metadata(fields, schema.metadata().clone());
+                if variant == 3 {
+                    changed = changed.with_metadata(
+                        [("different".into(), "metadata".into())]
+                            .into_iter()
+                            .collect(),
+                    );
+                } else {
+                    changed = Schema::new_with_metadata(
+                        vec![
+                            changed.field(0).clone().with_nullable(false),
+                            changed.field(1).clone(),
+                        ],
+                        changed.metadata().clone(),
+                    );
+                }
+                parts.nodes[1].output_ports.insert(
+                    "output".into(),
+                    Port::with_schema_ref(
+                        "output",
+                        BatchKind::Table,
+                        false,
+                        Some(Arc::new(changed)),
+                    )
+                    .unwrap(),
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn reject_topology_variant(
+        variant: usize,
+        parts: &mut crate::pipeline::StreamRuntimePlanParts,
+    ) {
+        match variant {
+            5 => {
+                parts.nodes[0]
+                    .output_edges
+                    .get_mut("output")
+                    .unwrap()
+                    .push("another-sink".into());
+            }
+            6 => {
+                parts.nodes[1]
+                    .ingress_edges
+                    .insert("another".into(), "another-source".into());
+            }
+            7 => {
+                parts.nodes[1]
+                    .ingress_edges
+                    .insert("input".into(), "different-edge".into());
+            }
+            12 => parts.nodes.swap(0, 1),
+            _ => unreachable!(),
+        }
+    }
+
     #[test]
     fn fusion_rejects_unproved_schemas_nonlocal_queries_udfs_and_topology() {
         use crate::pipeline::CompiledStreamOperator;
@@ -383,75 +468,8 @@ mod tests {
         for variant in 0..13 {
             let mut parts = plan().into_runtime_parts(EdgeBudget::default()).unwrap();
             match variant {
-                0 => {
-                    parts.nodes[0].output_ports.insert(
-                        "output".into(),
-                        Port::new("output", BatchKind::Table, false, None).unwrap(),
-                    );
-                }
-                1 => {
-                    parts.nodes[1].input_ports.insert(
-                        "input".into(),
-                        Port::new("input", BatchKind::Table, true, None).unwrap(),
-                    );
-                }
-                2 => {
-                    parts.nodes[1].output_ports.insert(
-                        "output".into(),
-                        Port::new("output", BatchKind::Table, false, None).unwrap(),
-                    );
-                }
-                3 | 4 => {
-                    let schema = parts.nodes[1].output_ports["output"].schema().unwrap();
-                    let fields = schema
-                        .fields()
-                        .iter()
-                        .map(|field| field.as_ref().clone())
-                        .collect::<Vec<_>>();
-                    let mut changed = Schema::new_with_metadata(fields, schema.metadata().clone());
-                    if variant == 3 {
-                        changed = changed.with_metadata(
-                            [("different".into(), "metadata".into())]
-                                .into_iter()
-                                .collect(),
-                        );
-                    } else {
-                        changed = Schema::new_with_metadata(
-                            vec![
-                                changed.field(0).clone().with_nullable(false),
-                                changed.field(1).clone(),
-                            ],
-                            changed.metadata().clone(),
-                        );
-                    }
-                    parts.nodes[1].output_ports.insert(
-                        "output".into(),
-                        Port::with_schema_ref(
-                            "output",
-                            BatchKind::Table,
-                            false,
-                            Some(Arc::new(changed)),
-                        )
-                        .unwrap(),
-                    );
-                }
-                5 => {
-                    parts.nodes[0]
-                        .output_edges
-                        .get_mut("output")
-                        .unwrap()
-                        .push("another-sink".into());
-                }
-                6 => {
-                    parts.nodes[1]
-                        .ingress_edges
-                        .insert("another".into(), "another-source".into());
-                }
-                7 => {
-                    parts.nodes[1]
-                        .ingress_edges
-                        .insert("input".into(), "different-edge".into());
-                }
+                0..=4 => reject_schema_variant(variant, &mut parts),
+                5..=7 | 12 => reject_topology_variant(variant, &mut parts),
                 8..=11 => {
                     parts.nodes[1].operator =
                         CompiledStreamOperator::Expression(rejected_expression(
@@ -460,7 +478,6 @@ mod tests {
                             parts.nodes[1].output_ports["output"].clone(),
                         ));
                 }
-                12 => parts.nodes.swap(0, 1),
                 _ => unreachable!(),
             }
             assert!(
