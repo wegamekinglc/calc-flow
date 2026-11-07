@@ -92,8 +92,20 @@ mod output_order;
 #[path = "snapshot_keys.rs"]
 mod snapshot_keys;
 
+#[path = "grouped_delegation.rs"]
+pub(super) mod grouped_delegation;
+
+#[cfg(test)]
+#[path = "grouped_delegation_tests.rs"]
+mod grouped_delegation_tests;
+
 pub(super) struct IncrementalSql {
     inline_sum: Option<InlineSum>,
+    /// Parsed delegated delta-aggregation query; `None` marks a shape that
+    /// never delegates. Built lazily on the first eligible batch.
+    delegation_query: std::sync::OnceLock<Option<ValidatedQuery>>,
+    #[cfg(test)]
+    pub(super) delegation_disabled: std::sync::atomic::AtomicBool,
     schema: SchemaRef,
     ordered_last: bool,
     pub(in crate::operator::sql) compact_budget: Option<crate::StateBudget>,
@@ -738,6 +750,32 @@ impl IncrementalSql {
         )
     }
 
+    fn delegation_defaults() -> std::sync::OnceLock<Option<ValidatedQuery>> {
+        std::sync::OnceLock::new()
+    }
+
+    fn plan_workspace(
+        runtime: &DataFusionRuntime,
+        query: &ValidatedQuery,
+        aggregate: &datafusion::logical_expr::Aggregate,
+        schema: &SchemaRef,
+        projection_nodes: usize,
+        input_nodes: usize,
+        name: &str,
+    ) -> Result<(MemoryReservation, usize)> {
+        let plan_bytes = initial_plan_charge(
+            query,
+            aggregate,
+            schema,
+            aggregate.group_expr.len(),
+            projection_nodes,
+            input_nodes,
+            name,
+        )?;
+        let reservation = plan_reservation(runtime, plan_bytes, name)?;
+        Ok((reservation, plan_bytes))
+    }
+
     fn normalized_plans<'a>(
         raw: &'a LogicalPlan,
         analyzed: &'a LogicalPlan,
@@ -776,22 +814,20 @@ impl IncrementalSql {
         else {
             return Ok(None);
         };
-        let plan_bytes = initial_plan_charge(
+        let (reservation, plan_bytes) = Self::plan_workspace(
+            runtime,
             query,
             aggregate,
             &schema,
-            aggregate.group_expr.len(),
             projection_nodes,
             input_nodes,
             name,
         )?;
-        let reservation = plan_reservation(runtime, plan_bytes, name)?;
         let Some((plan, post_order)) = bound_plan(projection, aggregate, &schema, analyzed, name)
         else {
             return Ok(None);
         };
         let (aggregates, projection, aggregate_filters, predicate, post_filter, keys) = plan;
-        let input_columns = input_columns(&aggregates, &keys, &aggregate_filters);
         let Some(aggregate_bytes) = aggregate_bytes(&aggregates, name)? else {
             return Ok(None);
         };
@@ -813,6 +849,9 @@ impl IncrementalSql {
         let (converter, finalizer_bytes) = grouped_layout(&keys, &aggregates, name)?;
         Ok(Some(Self {
             inline_sum: group_aggregates::bind_inline_sum(&keys, &aggregates),
+            delegation_query: Self::delegation_defaults(),
+            #[cfg(test)]
+            delegation_disabled: std::sync::atomic::AtomicBool::new(false),
             ordered_last: aggregates.iter().any(|expr| ordered_last::selected(expr)),
             variable_extrema: variable_extrema_slots(&aggregates),
             compact_budget: None,
@@ -821,6 +860,7 @@ impl IncrementalSql {
             schema,
             aggregate_schema: Arc::new(aggregate.schema.as_arrow().clone()),
             output_schema: Arc::new(analyzed.schema().as_arrow().clone()),
+            input_columns: input_columns(&aggregates, &keys, &aggregate_filters),
             aggregates,
             aggregate_filters,
             predicate,
@@ -833,7 +873,6 @@ impl IncrementalSql {
             projection_nodes,
             input_nodes,
             input_checks,
-            input_columns,
             keys,
             variable_columns,
             converter,
@@ -853,6 +892,19 @@ impl IncrementalSql {
             #[cfg(test)]
             encoded_rows: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }))
+    }
+
+    /// Cached delegated delta-aggregation query for eligible shapes.
+    pub(super) fn delegation_query(&self) -> Option<&ValidatedQuery> {
+        self.delegation_query
+            .get_or_init(|| grouped_delegation::build_query(self))
+            .as_ref()
+    }
+
+    #[cfg(test)]
+    pub(super) fn disable_delegation_for_test(&mut self) {
+        self.delegation_disabled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub(super) fn requires_ordered_last_proof(&self) -> bool {

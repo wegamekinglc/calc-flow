@@ -151,7 +151,7 @@ async fn observe(
     let query = parse_select_query(QUERY).unwrap();
     let tables = BTreeMap::from([("events".into(), batch.clone())]);
     let planned = runtime
-        .prepare_query(context, &query, &tables, Some(label))
+        .prepare_query(context, 1, &query, &tables, Some(label))
         .await
         .unwrap();
     let plan = planned.physical_plan.clone();

@@ -25,7 +25,13 @@ impl DataFusionRuntime {
         let context = self.context_for_rows(input.num_rows(), None, "not_evaluated");
         let tables = BTreeMap::from([(alias.to_owned(), input.clone())]);
         let planned = self
-            .prepare_query(context, query, &tables, Some(node))
+            .prepare_query(
+                context,
+                self.active_partitions().unwrap_or(1),
+                query,
+                &tables,
+                Some(node),
+            )
             .await?;
         let mut actual = Vec::new();
         projections(planned.physical_plan.as_ref(), false, &mut actual);

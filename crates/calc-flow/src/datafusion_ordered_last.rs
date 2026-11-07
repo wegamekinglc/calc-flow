@@ -59,6 +59,7 @@ impl DataFusionRuntime {
         let planned = self
             .prepare_query(
                 self.context_for_rows(input.num_rows(), None, "not_evaluated"),
+                self.active_partitions().unwrap_or(1),
                 query,
                 &BTreeMap::from([(alias.to_owned(), input.clone())]),
                 Some(node),

@@ -29,6 +29,14 @@ impl SqlOperator {
             .expect("proved native SQL plan");
         let _descriptor = activation_descriptor(native, newly_initialized, &self.name)?;
         let runtime = self.stream_state.runtime()?;
+        let batch = match incremental::grouped_delegation::pre_aggregate(
+            native, runtime, &batch, context, &self.name,
+        )
+        .await?
+        {
+            Some(mini) => mini,
+            None => batch,
+        };
         let transaction = native
             .update_with_input_owner(
                 &batch,

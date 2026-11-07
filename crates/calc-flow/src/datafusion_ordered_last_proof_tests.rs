@@ -346,6 +346,7 @@ async fn admission(runtime: &DataFusionRuntime, sql: &str, input: &Batch) -> Adm
     let plan = runtime
         .prepare_query(
             context,
+            1,
             &query,
             &BTreeMap::from([("input".into(), input.clone())]),
             Some("ordered-proof"),
@@ -473,6 +474,7 @@ impl Model {
         let plan = runtime
             .prepare_query(
                 runtime.context_for_rows(input.num_rows(), None, "not_evaluated"),
+                1,
                 &query,
                 &BTreeMap::from([("input".into(), input.clone())]),
                 Some("native-model"),
@@ -926,6 +928,7 @@ async fn test_ordered_last_physical_certificate_rejects_partial_reverse_and_inpu
     let plan = runtime
         .prepare_query(
             runtime.context_for_rows(input.num_rows(), None, "not_evaluated"),
+            1,
             &query,
             &tables,
             Some("physical-proof"),

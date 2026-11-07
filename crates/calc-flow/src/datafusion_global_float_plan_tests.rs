@@ -120,7 +120,7 @@ impl DataFusionRuntime {
         let query = parse_select_query(query).unwrap();
         let tables = BTreeMap::from([("events".into(), input.clone())]);
         let planned = self
-            .prepare_query(context, &query, &tables, Some("global-state-oracle"))
+            .prepare_query(context, 1, &query, &tables, Some("global-state-oracle"))
             .await
             .unwrap();
         let mut census = [0, 0];
@@ -198,7 +198,7 @@ async fn test_global_float_executed_source_splits_each_original_record() {
             let query = parse_select_query(query).unwrap();
             let tables = BTreeMap::from([("events".into(), batch.clone())]);
             let planned = runtime
-                .prepare_query(context, &query, &tables, Some("global-source-split"))
+                .prepare_query(context, 1, &query, &tables, Some("global-source-split"))
                 .await
                 .unwrap();
             let mut census = [0, 0];
@@ -261,7 +261,7 @@ async fn test_global_float_default_single_plan_preserves_original_records() {
                 let query = parse_select_query(query).unwrap();
                 let tables = BTreeMap::from([("events".into(), batch.clone())]);
                 let planned = runtime
-                    .prepare_query(context, &query, &tables, Some("global-plan"))
+                    .prepare_query(context, 1, &query, &tables, Some("global-plan"))
                     .await
                     .unwrap();
                 let mut census = [0, 0];

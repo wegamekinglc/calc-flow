@@ -86,7 +86,7 @@ impl DataFusionRuntime {
         let context = self.context_for_rows(input.num_rows(), None, "not_evaluated");
         let tables = BTreeMap::from([(alias.to_owned(), input.clone())]);
         let planned = self
-            .prepare_query(context, query, &tables, Some(node))
+            .prepare_query(context, 1, query, &tables, Some(node))
             .await?;
         let mut census = Census::default();
         let valid = inspect(planned.physical_plan.as_ref(), input, false, &mut census)?;

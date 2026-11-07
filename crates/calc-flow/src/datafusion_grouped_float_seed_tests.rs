@@ -85,7 +85,7 @@ async fn assert_plain_seed_mismatch(dtype: DataType, maximum: bool) {
     let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
     let context = runtime.context_for_rows(2, None, "not_evaluated");
     let planned = runtime
-        .prepare_query(context, &query, &tables, Some("native-seed-control"))
+        .prepare_query(context, 1, &query, &tables, Some("native-seed-control"))
         .await
         .unwrap();
     let aggregate = aggregate(planned.physical_plan.as_ref());

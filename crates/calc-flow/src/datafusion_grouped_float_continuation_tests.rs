@@ -95,7 +95,7 @@ async fn expressions(dtype: &DataType) -> Vec<Arc<AggregateFunctionExpr>> {
     let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
     let context = runtime.context_for_rows(1, None, "not_evaluated");
     let planned = runtime
-        .prepare_query(context, &query, &tables, Some("seed-continuation"))
+        .prepare_query(context, 1, &query, &tables, Some("seed-continuation"))
         .await
         .unwrap();
     let expressions = aggregate(planned.physical_plan.as_ref())

@@ -226,6 +226,10 @@ pub struct DataFusionRuntime {
     input_partitions: usize,
     runtime_env: Arc<RuntimeEnv>,
     context: OnceLock<SessionContext>,
+    /// Session reserved for the compact operator's delegated delta
+    /// aggregation. Kept separate because plan-time schema analysis freezes
+    /// the main session at a zero-row partition decision.
+    delegation: OnceLock<(SessionContext, usize)>,
     selected_udfs: Vec<(UdfReference, Arc<ScalarUDF>)>,
     #[cfg(not(test))]
     query_lock: AsyncMutex<()>,
@@ -332,6 +336,7 @@ impl DataFusionRuntime {
             )),
             runtime_env,
             context: OnceLock::new(),
+            delegation: OnceLock::new(),
             selected_udfs: Vec::new(),
             #[cfg(not(test))]
             query_lock: AsyncMutex::new(()),
@@ -705,7 +710,11 @@ impl DataFusionRuntime {
                 ..planned
             }
         } else {
-            self.prepare_query(context, query, tables, node_id).await?
+            let partitions = self
+                .active_partitions()
+                .expect("the session decision precedes preparation");
+            self.prepare_query(context, partitions, query, tables, node_id)
+                .await?
         };
         let planning_ns = sql_parse_ns
             .saturating_add(planned.logical_planning_ns)
@@ -827,17 +836,86 @@ impl DataFusionRuntime {
         self.closed.store(true, Ordering::Release);
     }
 
+    /// The partition count a delegated fixed-policy aggregation of `rows`
+    /// input rows would use; zero marks an ineligible configuration.
+    pub(crate) fn delegation_partition_count(&self, rows: usize) -> usize {
+        if self.config.parallelism_mode != DataFusionParallelismMode::Fixed {
+            return 0;
+        }
+        let rows_per_partition = self.config.min_rows_per_partition.max(1);
+        self.config
+            .target_partitions
+            .min(rows.div_ceil(rows_per_partition))
+            .max(1)
+    }
+
+    /// Runs one delegated aggregation on a session whose partition count is
+    /// chosen from the aggregation's own row count rather than the plan-time
+    /// schema analysis that freezes the main session. The first caller fixes
+    /// the delegated session's partition count; template capture and reuse
+    /// stay keyed to that frozen context. Metrics describe only the main
+    /// session's queries.
+    pub(crate) async fn sql_delegated(
+        &self,
+        query: &ValidatedQuery,
+        tables: &BTreeMap<String, Batch>,
+        partitions: usize,
+        node_id: Option<&str>,
+    ) -> Result<Batch> {
+        self.ensure_open()?;
+        require_tables(tables)?;
+        // Declared before planning so alias cleanup runs before unlock.
+        let _query_guard = self.query_lock.lock().await;
+        self.ensure_open()?;
+        let (context, effective) = self.delegation_session(partitions);
+        let planned = self
+            .prepare_query(context, effective, query, tables, node_id)
+            .await?;
+        let schema = planned.physical_plan.schema();
+        let stream = execute_stream(planned.physical_plan, Arc::clone(&planned.task_ctx))
+            .map_err(|error| datafusion_error(node_id, error))?;
+        let collected = collect_bounded(stream, schema, Instant::now(), node_id, None).await?;
+        Batch::table(collected.batches, merged_metadata(tables))
+    }
+
+    fn delegation_session(&self, partitions: usize) -> (&SessionContext, usize) {
+        let locked = self.delegation.get_or_init(|| {
+            let effective = partitions.max(1);
+            let session = SessionConfig::new()
+                .with_batch_size(self.config.batch_size)
+                .with_target_partitions(effective);
+            let state = SessionStateBuilder::new()
+                .with_runtime_env(Arc::clone(&self.runtime_env))
+                .with_config(session)
+                .with_default_features()
+                .with_optimizer_rule(Arc::new(UInt64ModuloPredicate))
+                .with_optimizer_rule(Arc::new(TimestampIntervalArithmetic))
+                .build();
+            let context = SessionContext::new_with_state(state);
+            context.register_udf(
+                datafusion_functions_nested::position::array_position_udf()
+                    .as_ref()
+                    .clone(),
+            );
+            for (_, udf) in &self.selected_udfs {
+                context.register_udf(udf.as_ref().clone());
+            }
+            (context, effective)
+        });
+        (&locked.0, locked.1)
+    }
+
     /// Binds a cached template when one matches; otherwise registers the
     /// tables and plans the query.
     async fn prepare_query<'a>(
         &self,
         context: &'a SessionContext,
+        partitions: usize,
         query: &ValidatedQuery,
         tables: &BTreeMap<String, Batch>,
         node_id: Option<&str>,
     ) -> Result<PlannedQuery<'a>> {
         if self.input_partitions == 1
-            && let Some(partitions) = self.active_partitions()
             && let Some(template) = self.templates.find(query.text(), tables, partitions)
         {
             return bind_template(context, &template, tables, node_id);
