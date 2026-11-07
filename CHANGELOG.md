@@ -27,6 +27,21 @@ measurements. Use the current guides for supported behavior.
   falling from one plan per batch to one plan total; all four paired
   verdicts were `improved` and outputs matched an independent accumulator.
 
+- 2026-11-07: Share snapshot key columns across repeated compact-SQL
+  snapshots. Group slots are append-only and group keys never change, so the
+  key columns of a sealed output chunk are rebuilt in every full snapshot for
+  nothing: staging new columns per transaction and installing them at commit
+  lets every later snapshot reuse the committed Arrow arrays while a chunk's
+  row count and first group are unchanged. A refused or failed output leaves
+  nothing staged, and installed bytes are reserved from the incremental
+  memory pool. In the streaming stock-positions example (2,000,000 business
+  rows, 100x100 keys, checkpoints disabled) paired AB/BA runs improved
+  -34.35% at 1,000-row batches on four pinned CPUs (wall 1541.5 to 1012.0 ms,
+  child CPU 1.876 to 1.315 s) and -43.83% at 1,000-row batches on one pinned
+  CPU (1755.5 to 986.0 ms); 10,000-row batches measured -9.19% and
+  100,000-row batches stayed inconclusive (+3.02%, both round intervals
+  spanning zero) with unchanged CPU time.
+
 - 2026-11-06: Repeat the compiled integer sign CASE experiment in a quiet
   environment against main `5a66b6d5`. Complete five fixed cases, 200 formal
   observations, both CPU profiles and full snapshot checks. All maintained
