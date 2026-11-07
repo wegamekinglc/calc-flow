@@ -9,6 +9,18 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-07: Withdraw the delegated delta-aggregation prototype after
+  measurement. Large compact-SUM batches ran their delta aggregation as a
+  partitioned, template-reused DataFusion GROUP BY on a dedicated session
+  and fed the grouped result through the ordinary kernel; the mechanism
+  worked (800k-row batches aggregated in 6.7-8.9 ms at four partitions,
+  content-equal to the serial path), but paired AB/BA runs measured -2.03%
+  at 1M-row batches, 0.00% at 100k-row batches and -0.08% below the
+  admission floor, all short of improvement: the inline kernel is already
+  as fast as the delegated aggregate, so the large-batch gap lives in other
+  serial stages. Preserve the prototype on `feature/sum-delta-delegation`
+  and the [complete study](benchmarks/sum-state/sum-delta-delegation-20261107.md);
+  this closes the third and final measured parallel-aggregate route.
 - 2026-11-07: Record an explicitly requested both-engine core-count sweep
   (1/4/8/16/32 pinned CPUs, 10M-row stock positions, disclosed concurrent
   load). The SQL engine's large-batch aggregation scales 3.5x to sixteen
