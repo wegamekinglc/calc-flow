@@ -1,0 +1,41 @@
+{
+  "schema": "calc-flow.p1b-evidence.v1",
+  "candidate": "6d22a508eff3b2c18fbc43554c54296f179455f3",
+  "baseline": "8d8be7d907a095dbc0dc2b73dafcfdd842979cdf",
+  "status": "complete, valid; acceptance failed",
+  "files": {
+    "complete-evidence.json.gz": {
+      "bytes": 1417468,
+      "sha256": "365e6d55dafa002f7be1e29f70f446132621c66731eafbf49e976049c9bfd5a9"
+    },
+    "environment.json": {
+      "bytes": 3121,
+      "sha256": "c8d3556f45a0746ed880f1e32e6b568ecb95bc6b8ce12a0329240505db5bf104"
+    },
+    "fixture-manifest.json": {
+      "bytes": 27726,
+      "sha256": "691b776566593a3f4e52a870302332f1419830e9afc4eac669b47774a9f70c3c"
+    },
+    "plan.json": {
+      "bytes": 281783,
+      "sha256": "b8788940d5d3de5924b77dbb9fcba67586d6d6113a3c2a09f660334ddcc43b5f"
+    },
+    "samples.csv": {
+      "bytes": 12602,
+      "sha256": "ed1eeb0b65ebb74c1433b32ba5fe61f2a1017beada5d776385885356ebb23b08",
+      "line_endings": "LF; only CRLF normalized for repository whitespace checks",
+      "original_bytes_sha256": "c34977375b33c6c26b9b83a10e57314d3a5a3d56a13e943162bd0f3aacd93cc2",
+      "original_bytes_file": "samples-original.csv.gz"
+    },
+    "summary.json": {
+      "bytes": 5849,
+      "sha256": "61c0ed3c33694cbdf71ff862a382c70ca06dee6d8b817b66281b47268a184398"
+    },
+    "samples-original.csv.gz": {
+      "bytes": 2544,
+      "sha256": "8a5f858da6101f815d9e9dab9ababb25e798176f2d2aa48bcfce67cc43b1ace2",
+      "uncompressed_bytes": 12683,
+      "uncompressed_sha256": "c34977375b33c6c26b9b83a10e57314d3a5a3d56a13e943162bd0f3aacd93cc2"
+    }
+  }
+}

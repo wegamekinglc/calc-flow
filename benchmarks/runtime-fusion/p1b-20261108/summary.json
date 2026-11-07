@@ -1,0 +1,238 @@
+{
+  "cases": [
+    {
+      "baseline": [
+        [
+          0.144901236,
+          0.143015875,
+          0.139490763,
+          0.154232531,
+          0.145148805,
+          0.141263949,
+          0.161939833,
+          0.143057308,
+          0.138267825,
+          0.144632699
+        ],
+        [
+          0.146990768,
+          0.148235084,
+          0.142233985,
+          0.145379364,
+          0.142460832,
+          0.143624712,
+          0.141287242,
+          0.14246251,
+          0.141799477,
+          0.146830948
+        ]
+      ],
+      "batch_size": 1000,
+      "candidate": [
+        [
+          0.159570648,
+          0.164894331,
+          0.167672426,
+          0.167125216,
+          0.168157688,
+          0.165521197,
+          0.170790573,
+          0.168324638,
+          0.171540899,
+          0.165585653
+        ],
+        [
+          0.167615526,
+          0.171249321,
+          0.175216095,
+          0.169536188,
+          0.166217342,
+          0.167356696,
+          0.173624802,
+          0.175969042,
+          0.181020199,
+          0.172709331
+        ]
+      ],
+      "comparison": "interleaved",
+      "correctness": true,
+      "cpus": [
+        0,
+        2,
+        4,
+        6
+      ],
+      "fixture": "stock-batch1000",
+      "id": "stock-stream-4cpu-batch1000",
+      "mode": "stream",
+      "partitions": 4,
+      "reason": "Expression CASE/filter to compact SUM with frequent full snapshots",
+      "resource_summary": {
+        "baseline": {
+          "processing_average_cores_p50": 1.4009551887986618,
+          "processing_cpu_ms_p50": 200.7137,
+          "whole_process_peak_rss_p50": 110366720.0
+        },
+        "candidate": {
+          "processing_average_cores_p50": 1.170983553747641,
+          "processing_cpu_ms_p50": 197.5466,
+          "whole_process_peak_rss_p50": 112887808.0
+        }
+      },
+      "rows": 266000,
+      "statistics": {
+        "base_p50": 0.14334101,
+        "change_percent": 17.37126939457174,
+        "head_max": 0.181020199,
+        "head_min": 0.159570648,
+        "head_p50": 0.168241163,
+        "head_p95": 0.17622159985,
+        "round_changes": [
+          15.57492428295375,
+          17.150214687441867
+        ],
+        "round_intervals": [
+          {
+            "coverage": 0.978515625,
+            "high": 20.20324671964122,
+            "low": 8.359251395543765,
+            "median": 15.57492428295375
+          },
+          {
+            "coverage": 0.978515625,
+            "high": 23.51954349253007,
+            "low": 15.525499348049099,
+            "median": 17.150214687441867
+          }
+        ],
+        "round_min_changes": [
+          15.406927099634338,
+          17.644976041078063
+        ],
+        "rows_per_second": 1581063.7257660897,
+        "samples": 20,
+        "verdict": "regression"
+      }
+    },
+    {
+      "baseline": [
+        [
+          0.038408109,
+          0.037124925,
+          0.037373482,
+          0.036688764,
+          0.037210893,
+          0.03645471,
+          0.039146882,
+          0.037884811,
+          0.037307562,
+          0.037332263
+        ],
+        [
+          0.035731793,
+          0.038611636,
+          0.036260152,
+          0.041783028,
+          0.035681794,
+          0.038231389,
+          0.037133286,
+          0.037174207,
+          0.037642356,
+          0.040957002
+        ]
+      ],
+      "batch_size": 64000,
+      "candidate": [
+        [
+          0.040625805,
+          0.041918902,
+          0.040570695,
+          0.037941209,
+          0.040277347,
+          0.041850199,
+          0.040560664,
+          0.039877804,
+          0.039116981,
+          0.037968193
+        ],
+        [
+          0.040607535,
+          0.041505104,
+          0.040104582,
+          0.042197273,
+          0.041525648,
+          0.040987396,
+          0.040697767,
+          0.042225848,
+          0.03797711,
+          0.041687981
+        ]
+      ],
+      "comparison": "interleaved",
+      "correctness": true,
+      "cpus": [
+        0,
+        2,
+        4,
+        6
+      ],
+      "fixture": "stock-batch64000",
+      "id": "stock-stream-4cpu-batch64000",
+      "mode": "stream",
+      "partitions": 4,
+      "reason": "larger batches expose lost pipeline overlap on the same graph",
+      "resource_summary": {
+        "baseline": {
+          "processing_average_cores_p50": 1.2555208562215445,
+          "processing_cpu_ms_p50": 47.1082,
+          "whole_process_peak_rss_p50": 93376512.0
+        },
+        "candidate": {
+          "processing_average_cores_p50": 1.177892418396537,
+          "processing_cpu_ms_p50": 47.85645,
+          "whole_process_peak_rss_p50": 95137792.0
+        }
+      },
+      "rows": 266000,
+      "statistics": {
+        "base_p50": 0.037319912499999996,
+        "change_percent": 8.833776070616462,
+        "head_max": 0.042225848,
+        "head_min": 0.037941209,
+        "head_p50": 0.04061667,
+        "head_p95": 0.04219870175,
+        "round_changes": [
+          5.517347853332232,
+          8.546462627070461
+        ],
+        "round_intervals": [
+          {
+            "coverage": 0.978515625,
+            "high": 12.913095447330857,
+            "low": 3.413701807997671,
+            "median": 5.517347853332232
+          },
+          {
+            "coverage": 0.978515625,
+            "high": 13.645388575938533,
+            "low": 0.9914192911054664,
+            "median": 8.546462627070461
+          }
+        ],
+        "round_min_changes": [
+          4.077659649466403,
+          6.432737098364494
+        ],
+        "rows_per_second": 6549035.162163712,
+        "samples": 20,
+        "verdict": "inconclusive"
+      }
+    }
+  ],
+  "cumulative_measurement_seconds": 71.62588277796749,
+  "elapsed_seconds": 71.62588277796749,
+  "failure": null,
+  "prior_measurement_seconds": 0,
+  "profiles": [],
+  "status": "completed"
+}

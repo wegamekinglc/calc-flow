@@ -1,0 +1,49 @@
+{
+  "controller_affinity": [
+    31
+  ],
+  "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900HX",
+  "driver_sha256": "c942412beacfcac872ff56de4831f55d0cb7711d9944bb8dcac7b190ed4e80fd",
+  "fixture_source_sha256": "38fc4be730007297b414a5ecd8fe0531daaa3dc3071daed19a9e2b7041d8187f",
+  "focused_adapter_sha256": "8173ca1c5b9a80623d62d83a2caf6a5aea0529e1d974e41af015e3b2bb5f97f9",
+  "helper_sha256": {
+    "examples/stock_account_data.py": "38fc4be730007297b414a5ecd8fe0531daaa3dc3071daed19a9e2b7041d8187f",
+    "scripts/benchmark_suite/fusion_sum.py": "8173ca1c5b9a80623d62d83a2caf6a5aea0529e1d974e41af015e3b2bb5f97f9",
+    "scripts/benchmark_suite/report.py": "0daf6c205c2cc733813d2c658c6541d811f8324b502c2f2982a09de5a8dd9ff2",
+    "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
+    "scripts/benchmark_suite/sum_state.py": "c942412beacfcac872ff56de4831f55d0cb7711d9944bb8dcac7b190ed4e80fd",
+    "scripts/benchmark_suite/sum_state_profile.py": "6ef4cc3d63b3c54e1db7acb5d98061bcac5e7a6cc080b7294450f167107fdbed",
+    "scripts/benchmark_suite/sum_state_publication.py": "35f0a81ca4da6a8854d0df1f6a6198ea094c5ece53b08b6ae6d3f89695ac1fba",
+    "scripts/toolkit.py": "ef8ad17c43ea4a974e5e01a3fcaf1aec7a70e19b88286db8b82c4dcde2945d56"
+  },
+  "host_limits": "WSL host load and power remain unobservable",
+  "inherited_diagnostic_environment": {
+    "RUST_BACKTRACE": null,
+    "RUST_LOG": null
+  },
+  "memory_bytes": 33453572096,
+  "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+  "pyarrow_version": "24.0.0",
+  "python": "3.13.9",
+  "runtime_defaults": {
+    "benchmark_internals": true,
+    "checkpoint_interval_seconds": 60,
+    "checkpoint_timeout_seconds": 600,
+    "checkpointing": false,
+    "collect_diagnostics": true,
+    "datafusion_batch_size": 8192,
+    "dispatch_trace": "Disabled default; harness never starts recorder",
+    "edge_budget": {
+      "max_bytes": 18446744073709551615,
+      "max_rows": 1000000
+    },
+    "join_cpu_trace": "Disabled default; harness never starts recorder",
+    "retained_epochs": 2,
+    "sql_compact_state_max_bytes": 9007199254740991,
+    "sql_compact_state_max_groups": 10000,
+    "sql_snapshot_state_budget": null,
+    "sql_state_budget": null,
+    "watermarks": "Disabled"
+  },
+  "topology": "CPU CORE SOCKET ONLINE\n  0    0      0    yes\n  1    0      0    yes\n  2    1      0    yes\n  3    1      0    yes\n  4    2      0    yes\n  5    2      0    yes\n  6    3      0    yes\n  7    3      0    yes\n  8    4      0    yes\n  9    4      0    yes\n 10    5      0    yes\n 11    5      0    yes\n 12    6      0    yes\n 13    6      0    yes\n 14    7      0    yes\n 15    7      0    yes\n 16    8      0    yes\n 17    8      0    yes\n 18    9      0    yes\n 19    9      0    yes\n 20   10      0    yes\n 21   10      0    yes\n 22   11      0    yes\n 23   11      0    yes\n 24   12      0    yes\n 25   12      0    yes\n 26   13      0    yes\n 27   13      0    yes\n 28   14      0    yes\n 29   14      0    yes\n 30   15      0    yes\n 31   15      0    yes\n"
+}
