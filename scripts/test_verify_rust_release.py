@@ -5,8 +5,9 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from scripts.verify_rust_release import inspect_crate, validate_tag
+from scripts.verify_rust_release import inspect_crate, run_consumer, validate_tag
 
 
 class RustReleaseTests(unittest.TestCase):
@@ -74,6 +75,50 @@ class RustReleaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 inspect_crate(archive, "2026.11.3")
 
+    def test_consumer_uses_the_resolved_cargo_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = self._consumer_archive(root)
+            cargo = root / "toolchain/cargo"
+            with (
+                patch("scripts.verify_rust_release.ROOT", root),
+                patch("shutil.which", return_value=str(cargo)),
+                patch("scripts.verify_rust_release.subprocess.run") as run,
+            ):
+                run_consumer(archive, "2026.11.2")
+
+            self.assertEqual(run.call_count, 1)
+            command = run.call_args.args[0]
+            self.assertEqual(command[:3], [str(cargo), "run", "--manifest-path"])
+            self.assertTrue(Path(command[0]).is_absolute())
+            self.assertEqual(Path(command[3]).parent, run.call_args.kwargs["cwd"])
+            self.assertTrue(run.call_args.kwargs["check"])
+            self.assertEqual(
+                run.call_args.kwargs["env"]["CARGO_TARGET_DIR"], str(root / "target")
+            )
+
+    def test_consumer_rejects_a_missing_cargo_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = self._consumer_archive(root)
+            with (
+                patch("scripts.verify_rust_release.ROOT", root),
+                patch("shutil.which", return_value=None),
+                patch("scripts.verify_rust_release.subprocess.run") as run,
+            ):
+                with self.assertRaises(FileNotFoundError):
+                    run_consumer(archive, "2026.11.2")
+                self.assertEqual(run.call_count, 0)
+
+    @staticmethod
+    def _consumer_archive(directory: Path) -> Path:
+        (directory / "target").mkdir()
+        (directory / "Cargo.toml").write_text(
+            '[workspace.dependencies.datafusion]\nversion = "=55.0.0"\n',
+            encoding="utf-8",
+        )
+        return RustReleaseTests._archive(directory)
+
     @staticmethod
     def _archive(
         directory: Path,
@@ -91,7 +136,7 @@ class RustReleaseTests(unittest.TestCase):
             ),
             "Cargo.lock": "version = 4\n",
             "LICENSE": "Apache License\nVersion 2.0, January 2004\n",
-            "README.md": "Calc Flow Rust usage\n",
+            "README.md": "Calc Flow Rust usage\n\n```rust\nfn main() {}\n```\n",
             "src/lib.rs": "",
             "examples/example.rs": "",
             "benches/core.rs": "",

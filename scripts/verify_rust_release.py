@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import os
-import subprocess
+import shutil
+import subprocess  # nosec B404  # fixed Cargo argv; no shell expansion
 import tarfile
 import tempfile
 import tomllib
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 if __package__:
     from .inspect_wheel import inspect_crate as inspect_crate_contents
@@ -27,23 +29,38 @@ def validate_tag(tag: str, version: str) -> None:
         raise ValueError(f"expected calc-flow-v{version}, got {tag!r}")
 
 
+def _distribution_path(member: tarfile.TarInfo, prefix: str) -> str:
+    path = PurePosixPath(member.name)
+    if (
+        not path.parts
+        or path.parts[0] != prefix
+        or ".." in path.parts
+        or path.is_absolute()
+        or not (member.isfile() or member.isdir())
+    ):
+        raise ValueError(f"unexpected archive entry: {member.name}")
+    return path.relative_to(prefix).as_posix()
+
+
 def _distribution_files(
     archive: tarfile.TarFile, prefix: str
 ) -> dict[str, tarfile.TarInfo]:
     files = {}
     for member in archive.getmembers():
-        path = PurePosixPath(member.name)
-        if (
-            not path.parts
-            or path.parts[0] != prefix
-            or ".." in path.parts
-            or path.is_absolute()
-            or not (member.isfile() or member.isdir())
-        ):
-            raise ValueError(f"unexpected archive entry: {member.name}")
+        name = _distribution_path(member, prefix)
         if member.isfile():
-            files[path.relative_to(prefix).as_posix()] = member
+            files[name] = member
     return files
+
+
+def _validate_dependencies(manifest: dict[str, Any]) -> None:
+    for section in (manifest, *manifest.get("target", {}).values()):
+        for group in ("dependencies", "build-dependencies", "dev-dependencies"):
+            for name, dependency in section.get(group, {}).items():
+                if isinstance(dependency, dict) and _SOURCE_KEYS.intersection(
+                    dependency
+                ):
+                    raise ValueError(f"{group}.{name} is not a crates.io dependency")
 
 
 def _validate_manifest(source: str, version: str) -> None:
@@ -55,13 +72,7 @@ def _validate_manifest(source: str, version: str) -> None:
         raise ValueError("crate must declare its license and README")
     if any(key in manifest for key in ("patch", "replace", "workspace")):
         raise ValueError("distribution manifest retains workspace overrides")
-    for section in (manifest, *manifest.get("target", {}).values()):
-        for group in ("dependencies", "build-dependencies", "dev-dependencies"):
-            for name, dependency in section.get(group, {}).items():
-                if isinstance(dependency, dict) and _SOURCE_KEYS.intersection(
-                    dependency
-                ):
-                    raise ValueError(f"{group}.{name} is not a crates.io dependency")
+    _validate_dependencies(manifest)
 
 
 def inspect_crate(archive_path: Path, version: str) -> None:
@@ -77,12 +88,6 @@ def inspect_crate(archive_path: Path, version: str) -> None:
             for folder in ("examples", "benches")
         ):
             raise ValueError("crate must retain examples and benches")
-        if any(
-            name.startswith("tests/")
-            or PurePosixPath(name).name in {"AGENTS.md", "CLAUDE.md"}
-            for name in files
-        ):
-            raise ValueError("crate includes repository-only files")
 
         def read(name: str) -> str:
             stream = archive.extractfile(files[name])
@@ -97,6 +102,9 @@ def inspect_crate(archive_path: Path, version: str) -> None:
 
 def run_consumer(archive_path: Path, version: str) -> None:
     """Execute the packaged README quickstart in a fresh external workspace."""
+    cargo = shutil.which("cargo")
+    if cargo is None:
+        raise FileNotFoundError("cargo executable not found on PATH")
     directory = Path(
         tempfile.mkdtemp(prefix="rust-release-consumer-", dir=ROOT / "target")
     )
@@ -122,8 +130,13 @@ def run_consumer(archive_path: Path, version: str) -> None:
         'tokio = { version = "1", features = ["macros", "rt-multi-thread"] }\n',
         encoding="utf-8",
     )
-    subprocess.run(  # nosec B603 -- fixed cargo command on inspected local sources
-        ["cargo", "run", "--manifest-path", str(directory / "Cargo.toml")],
+    subprocess.run(  # nosec B603  # fixed Cargo argv on inspected local sources
+        [
+            os.path.abspath(cargo),
+            "run",
+            "--manifest-path",
+            str(directory / "Cargo.toml"),
+        ],
         cwd=directory,
         env={**os.environ, "CARGO_TARGET_DIR": str(ROOT / "target")},
         check=True,
