@@ -664,3 +664,16 @@ passed; the existing full-integer-range/snapshot status test also passed.
 These focused checks do not establish performance acceptance or CI success.
 The reproducible old-source fixture patch uses zero-context hunks and is
 validated against its pinned baseline with `git apply --check --unidiff-zero`.
+
+The final expanded attempted-work test initially failed after a rejected output
+because it sent only another watermark. This callback-level retry requires
+replaying the original input batch before reissuing its watermark, consistent
+with the existing refusal/replay test. The failure log is retained as
+`target/p2-decay-work-final-green.log`: 13m20s build, one test failed with 13
+actual transitions versus an incorrectly constructed retry expectation of 18.
+The first failed-attempt assertions already passed: guard count 1, guard slots
+3, and unchanged installed state, cache credit and output sequence. The
+subsequent test-only correction replays the same five-row Arrow batch and
+keeps all expected assertions: transitions 18, guard count 2 and COW slots 8.
+No runtime code or threshold changed. This corrected test has not yet been
+recompiled or executed; do not describe the final focused check as green.

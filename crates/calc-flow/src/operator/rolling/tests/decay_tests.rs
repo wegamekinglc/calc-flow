@@ -649,20 +649,17 @@ async fn p2_work_counts_actual_copy_reference_seed_and_certified_attempts() {
     let before_sequence = operator.state.next_output_sequence;
     let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(8)));
     let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+    let retry_input = float64_fast_record(&[
+        (13, "a", 13, Some(1.0)),
+        (12, "a", 12, Some(1.0)),
+        (11, "a", 11, Some(1.0)),
+        (10, "a", 10, Some(1e20)),
+        (9, "a", 9, Some(1.0)),
+    ]);
     operator
         .process_data(
             "input",
-            Batch::table(
-                vec![float64_fast_record(&[
-                    (13, "a", 13, Some(1.0)),
-                    (12, "a", 12, Some(1.0)),
-                    (11, "a", 11, Some(1.0)),
-                    (10, "a", 10, Some(1e20)),
-                    (9, "a", 9, Some(1.0)),
-                ])],
-                BatchMetadata::default(),
-            )
-            .unwrap(),
+            Batch::table(vec![retry_input.clone()], BatchMetadata::default()).unwrap(),
             &context,
             &mut output,
         )
@@ -695,6 +692,15 @@ async fn p2_work_counts_actual_copy_reference_seed_and_certified_attempts() {
         failed["watermark"]["_decay_work"]["guard_reseed_samples"],
         3
     );
+    operator
+        .process_data(
+            "input",
+            Batch::table(vec![retry_input], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut output,
+        )
+        .await
+        .unwrap();
     let callback = store.begin(RollingCallback::Watermark, crate::CancellationToken::new());
     let observed = context.with_rolling_metrics(callback.recorder());
     let result = operator
