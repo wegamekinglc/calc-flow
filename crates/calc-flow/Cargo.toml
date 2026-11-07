@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Rust core for stateful DataFusion calculation pipelines"
+readme = "README.md"
+documentation = "https://docs.rs/calc-flow"
+keywords = ["datafusion", "arrow", "streaming", "pipeline", "data-processing"]
+categories = ["data-structures", "asynchronous"]
+publish = ["crates-io"]
 exclude = ["tests/**"]
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -30,7 +30,7 @@ async fn test_throwing_cte_projection_precedes_aggregate_filter_and_is_atomic() 
         .runtime()
         .unwrap()
         .incremental_memory_pool();
-    let basis = pool.reserved();
+    let basis = settled_reserved(&job, &pool).await;
     let prefix = post_input(&dtype, &[vec![Some(ONE)], vec![Some(TWO); 3]], 1);
     assert!(
         DataFusionRuntime::new(DataFusionConfig::default())
@@ -54,7 +54,7 @@ async fn test_throwing_cte_projection_precedes_aggregate_filter_and_is_atomic() 
     );
     assert!(collector.drain("output").is_empty());
     assert!(weak.iter().all(|array| array.upgrade().is_none()));
-    assert_eq!(pool.reserved(), basis);
+    assert_eq!(settled_reserved(&job, &pool).await, basis);
     same_snapshot(&accepted, &state.checkpoint(Epoch::INITIAL).unwrap());
     let actual = process(
         &mut state,

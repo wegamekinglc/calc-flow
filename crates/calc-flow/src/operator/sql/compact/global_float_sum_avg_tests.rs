@@ -245,7 +245,7 @@ async fn test_global_float_sum_average_rejected_emit_refund_then_once_retry() {
             .runtime()
             .unwrap()
             .incremental_memory_pool();
-        let reserved = pool.reserved();
+        let reserved = settled_reserved(&job, &pool).await;
         let next = vec![vec![Some(NEG_LARGE), Some(ONE), None]];
         let rejected = input(&dtype, &next, 1);
         let weak = weak_arrays(&rejected);
@@ -256,7 +256,7 @@ async fn test_global_float_sum_average_rejected_emit_refund_then_once_retry() {
             matches!(failure, Err(CalcFlowError::Operator { node_id, .. }) if node_id == "reject-extrema")
         );
         assert!(weak.iter().all(|array| array.upgrade().is_none()));
-        assert_eq!(pool.reserved(), reserved);
+        assert_eq!(settled_reserved(&job, &pool).await, reserved);
         same_snapshot(&before, &state.checkpoint(Epoch::INITIAL).unwrap());
         let actual = process(&mut state, input(&dtype, &next, 1), &context).await;
         let all = first.into_iter().chain(next).collect::<Vec<_>>();

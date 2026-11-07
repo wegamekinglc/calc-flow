@@ -90,7 +90,7 @@ async fn test_input_arithmetic_errors_and_refusal_preserve_state_and_retry() {
         .runtime()
         .unwrap()
         .incremental_memory_pool();
-    let basis = pool.reserved();
+    let basis = settled_reserved(&job, &pool).await;
     let invalid = post_input(&dtype, &[vec![Some(TWO); 2]], 1);
     let expected = DataFusionRuntime::new(DataFusionConfig::default())
         .unwrap()
@@ -114,7 +114,7 @@ async fn test_input_arithmetic_errors_and_refusal_preserve_state_and_retry() {
     );
     assert!(collector.drain("output").is_empty());
     assert!(weak.iter().all(|array| array.upgrade().is_none()));
-    assert_eq!(pool.reserved(), basis);
+    assert_eq!(settled_reserved(&job, &pool).await, basis);
     same_snapshot(&before, &state.checkpoint(Epoch::INITIAL).unwrap());
     let next = post_input(&dtype, &[vec![Some(TWO)]], 1);
     let weak = weak_arrays(&next);
@@ -123,7 +123,7 @@ async fn test_input_arithmetic_errors_and_refusal_preserve_state_and_retry() {
         Err(CalcFlowError::Operator { node_id, .. }) if node_id == "reject-extrema")
     );
     assert!(weak.iter().all(|array| array.upgrade().is_none()));
-    assert_eq!(pool.reserved(), basis);
+    assert_eq!(settled_reserved(&job, &pool).await, basis);
     same_snapshot(&before, &state.checkpoint(Epoch::INITIAL).unwrap());
     let actual = process(
         &mut state,

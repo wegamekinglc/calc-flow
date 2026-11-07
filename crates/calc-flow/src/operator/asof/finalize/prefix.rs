@@ -278,8 +278,22 @@ mod tests {
         assert_eq!(operator.checkpoint_log.retention_bytes, 0);
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn dropped_compaction_worker_retains_input_reservation_until_exit() {
+    #[test]
+    fn dropped_compaction_worker_retains_input_reservation_until_exit() {
+        let service = crate::runtime::streaming::gather_work::TestService::new(1, 1).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(compaction_worker_retention(&service));
+        drop(runtime);
+        service.shutdown();
+    }
+
+    async fn compaction_worker_retention(
+        service: &crate::runtime::streaming::gather_work::TestService,
+    ) {
+        let admission = service.hold_worker_permit();
         let (operator, _) = cpu::fixture();
         let job = crate::StreamJobContext::new(
             1,
@@ -287,7 +301,8 @@ mod tests {
             crate::JsonMap::new(),
             None,
             crate::CancellationToken::new(),
-        );
+        )
+        .with_gather_owner(service.owner("compaction-retention".into()));
         let context = StreamOperatorContext::new(&job, "asof", None);
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(8_192));
         let workspace = MemoryConsumer::new("drain-test").register(&pool);
@@ -312,13 +327,33 @@ mod tests {
             &context,
         ));
         assert!(futures::poll!(future.as_mut()).is_pending());
-        started_rx.await.unwrap();
+        assert_eq!(service.waiting_requests(), 1);
+        drop(admission);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::select! {
+                started = started_rx => started.unwrap(),
+                result = future.as_mut() => {
+                    result.unwrap();
+                    panic!("compaction finished before its worker was released");
+                }
+            }
+        })
+        .await
+        .expect("compaction worker did not start after admission was released");
         drop(future);
         drop(owner);
         assert!(weak.upgrade().is_some());
         assert_eq!(pool.reserved(), 4_096);
         release_tx.send(()).unwrap();
-        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                job.gather_owner().close_and_drain(),
+            )
+            .await
+            .expect("compaction worker did not drain after release")
+            .is_empty()
+        );
         assert_eq!(pool.reserved(), 0);
         assert!(weak.upgrade().is_none());
     }

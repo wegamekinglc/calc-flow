@@ -266,6 +266,7 @@ async fn test_prepared_current_checkpoint_snapshot_is_paid_without_installing() 
         )
         .await;
         let pool = pool(&operator);
+        job.gather_owner().retire_idle_generation_for_test().await;
         let before = pool.reserved();
         let prepared = operator.prepare_checkpoint_work(&|| Ok(())).unwrap();
         let snapshot = prepared.snapshot().unwrap();

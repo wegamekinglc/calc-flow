@@ -104,7 +104,7 @@ async fn test_having_errors_and_refusals_preserve_state_and_retry() {
         .runtime()
         .unwrap()
         .incremental_memory_pool();
-    let basis = pool.reserved();
+    let basis = settled_reserved(&job, &pool).await;
     let expected = DataFusionRuntime::new(DataFusionConfig::default())
         .unwrap()
         .sql(
@@ -128,7 +128,7 @@ async fn test_having_errors_and_refusals_preserve_state_and_retry() {
     );
     assert!(collector.drain("output").is_empty());
     assert!(weak.iter().all(|array| array.upgrade().is_none()));
-    assert_eq!(pool.reserved(), basis);
+    assert_eq!(settled_reserved(&job, &pool).await, basis);
     same_snapshot(&before, &state.checkpoint(Epoch::INITIAL).unwrap());
     let next = input(&dtype, &[vec![Some(TWO)]], 1);
     let weak = weak_arrays(&next);
@@ -136,11 +136,11 @@ async fn test_having_errors_and_refusals_preserve_state_and_retry() {
         matches!(state.process_data("events", next, &context, &mut Reject).await, Err(CalcFlowError::Operator { node_id, .. }) if node_id == "reject-extrema")
     );
     assert!(weak.iter().all(|array| array.upgrade().is_none()));
-    assert_eq!(pool.reserved(), basis);
+    assert_eq!(settled_reserved(&job, &pool).await, basis);
     same_snapshot(&before, &state.checkpoint(Epoch::INITIAL).unwrap());
     let pressure = MemoryConsumer::new("having-pressure").register(&pool);
     pressure.try_grow((1 << 30) - basis - 1).unwrap();
-    let held = pool.reserved();
+    let held = settled_reserved(&job, &pool).await;
     let next = input(&dtype, &[vec![Some(TWO)]], 1);
     let weak = weak_arrays(&next);
     assert!(
@@ -151,7 +151,7 @@ async fn test_having_errors_and_refusals_preserve_state_and_retry() {
     );
     assert!(collector.drain("output").is_empty());
     assert!(weak.iter().all(|array| array.upgrade().is_none()));
-    assert_eq!(pool.reserved(), held);
+    assert_eq!(settled_reserved(&job, &pool).await, held);
     drop(pressure);
     same_snapshot(&before, &state.checkpoint(Epoch::INITIAL).unwrap());
     let actual = process(&mut state, input(&dtype, &[vec![Some(TWO)]], 1), &context).await;
