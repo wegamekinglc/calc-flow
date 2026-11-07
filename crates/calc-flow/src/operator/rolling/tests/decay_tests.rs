@@ -41,26 +41,33 @@ fn assert_equivalent_columns(actual: &RecordBatch, expected: &RecordBatch) {
     assert_eq!(actual.num_rows(), expected.num_rows());
     for (index, (actual, expected)) in actual.columns().iter().zip(expected.columns()).enumerate() {
         if index >= kernel_schema().fields().len() && actual.data_type() == &DataType::Float64 {
-            let actual = actual.as_any().downcast_ref::<Float64Array>().unwrap();
-            let expected = expected.as_any().downcast_ref::<Float64Array>().unwrap();
-            for (actual, expected) in actual.iter().zip(expected.iter()) {
-                match (actual, expected) {
-                    (None, None) => {}
-                    (Some(actual), Some(expected)) if expected.is_nan() => assert!(actual.is_nan()),
-                    (Some(actual), Some(expected)) if expected.is_infinite() || expected == 0.0 => {
-                        assert_eq!(actual.to_bits(), expected.to_bits())
-                    }
-                    (Some(actual), Some(expected)) => assert!(
-                        (actual - expected).abs()
-                            <= 1e-12 + 1e-12 * actual.abs().max(expected.abs()),
-                        "actual={actual}, expected={expected}"
-                    ),
-                    values => panic!("different null positions: {values:?}"),
-                }
-            }
+            assert_equivalent_float_columns(actual, expected);
         } else {
             assert_eq!(actual.to_data(), expected.to_data());
         }
+    }
+}
+
+fn assert_equivalent_float_columns(actual: &ArrayRef, expected: &ArrayRef) {
+    let actual = actual.as_any().downcast_ref::<Float64Array>().unwrap();
+    let expected = expected.as_any().downcast_ref::<Float64Array>().unwrap();
+    for (actual, expected) in actual.iter().zip(expected.iter()) {
+        assert_equivalent_float_value(actual, expected);
+    }
+}
+
+fn assert_equivalent_float_value(actual: Option<f64>, expected: Option<f64>) {
+    match (actual, expected) {
+        (None, None) => {}
+        (Some(actual), Some(expected)) if expected.is_nan() => assert!(actual.is_nan()),
+        (Some(actual), Some(expected)) if expected.is_infinite() || expected == 0.0 => {
+            assert_eq!(actual.to_bits(), expected.to_bits())
+        }
+        (Some(actual), Some(expected)) => assert!(
+            (actual - expected).abs() <= 1e-12 + 1e-12 * actual.abs().max(expected.abs()),
+            "actual={actual}, expected={expected}"
+        ),
+        values => panic!("different null positions: {values:?}"),
     }
 }
 

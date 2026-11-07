@@ -666,9 +666,12 @@ The reproducible old-source fixture patch uses zero-context hunks and is
 validated against its pinned baseline with `git apply --check --unidiff-zero`.
 
 The final expanded attempted-work test initially failed after a rejected output
-because it sent only another watermark. This callback-level retry requires
-replaying the original input batch before reissuing its watermark, consistent
-with the existing refusal/replay test. The failure log is retained as
+because it sent only another watermark. This direct-operator unit test rejects
+the first chunk before delivery, then explicitly replays the same input batch
+and watermark to exercise a second attempted transition. It does not promise
+live StreamingRunner callback retries: a managed send failure still terminates
+the job, and recovery uses the last compatible durable cut. The failure log is
+retained as
 `target/p2-decay-work-final-green.log`: 13m20s build, one test failed with 13
 actual transitions versus an incorrectly constructed retry expectation of 18.
 The first failed-attempt assertions already passed: guard count 1, guard slots

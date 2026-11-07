@@ -194,6 +194,10 @@ impl OwnedDecay {
             self.summary.add(value, self.counts.valid);
         }
         self.since_seed += 1;
+        self.refresh_latest();
+    }
+
+    fn refresh_latest(&mut self) {
         if self.counts.valid == 0 {
             self.work.add(RollingWork::DecayShortcutRows, 1);
             self.summary = Summary::default();
@@ -313,6 +317,11 @@ fn exact_denominator(window: usize, count: usize) -> Option<f64> {
     if window as u128 > EXACT_INTEGER || count == 0 || count > window {
         return None;
     }
+    let total = exact_weight_total(window, count)?;
+    (total <= EXACT_INTEGER).then_some(total as f64)
+}
+
+fn exact_weight_total(window: usize, count: usize) -> Option<u128> {
     let mut left = count as u128;
     let mut right = (window as u128)
         .checked_mul(2)?
@@ -323,8 +332,7 @@ fn exact_denominator(window: usize, count: usize) -> Option<f64> {
     } else {
         right /= 2;
     }
-    let total = left.checked_mul(right)?;
-    (total <= EXACT_INTEGER).then_some(total as f64)
+    left.checked_mul(right)
 }
 
 fn reference_error(count: usize, absolute: f64, denominator: f64) -> Option<f64> {
@@ -410,25 +418,27 @@ pub(super) fn legacy_fallback_reason(
     if let Err(reason) = super::compile_typed_groups(schema, groups) {
         return Some(reason);
     }
-    for output in outputs {
-        let CompiledEvaluation::Scan(scan) = output.evaluation else {
-            continue;
-        };
-        if output.input_type != DataType::Float64 {
-            return Some("typed scan requires Float64 input".into());
-        }
-        let CompiledFrame::Rows(rows) = scan.frame else {
-            return Some("typed scan requires a row frame".into());
-        };
-        if usize::try_from(rows).is_err() {
-            return Some("scan row window does not fit the platform usize".into());
-        }
-        if !matches!(
-            scan.kind,
-            ScanKind::Argmax | ScanKind::Argmin | ScanKind::UniqueCount
-        ) {
-            return Some("typed scan requires argmax, argmin, or unique_count".into());
-        }
+    outputs.iter().find_map(legacy_scan_fallback_reason)
+}
+
+fn legacy_scan_fallback_reason(output: &CompiledRollingOutput) -> Option<String> {
+    let CompiledEvaluation::Scan(scan) = output.evaluation else {
+        return None;
+    };
+    if output.input_type != DataType::Float64 {
+        return Some("typed scan requires Float64 input".into());
+    }
+    let CompiledFrame::Rows(rows) = scan.frame else {
+        return Some("typed scan requires a row frame".into());
+    };
+    if usize::try_from(rows).is_err() {
+        return Some("scan row window does not fit the platform usize".into());
+    }
+    if !matches!(
+        scan.kind,
+        ScanKind::Argmax | ScanKind::Argmin | ScanKind::UniqueCount
+    ) {
+        return Some("typed scan requires argmax, argmin, or unique_count".into());
     }
     None
 }
@@ -465,98 +475,175 @@ pub(super) fn prepare_inputs(
     let Some(pool) = &plan.decay_pool else {
         return Ok(());
     };
-    let mut work = DecayWork::default();
-    let result = (|| {
+    let mut preparation = DecayInputPreparation {
+        plan,
+        input,
+        histories,
+        node,
+        observer,
+        pool,
+        references: BTreeMap::new(),
+        work: DecayWork::default(),
+    };
+    let result = preparation.prepare(fill);
+    if let Some(recorder) = observer {
+        recorder.add_decay(&preparation.work);
+    }
+    result
+}
+
+struct DecayInputPreparation<'a> {
+    plan: &'a RollingKernelPlan,
+    input: &'a datafusion::arrow::record_batch::RecordBatch,
+    histories: Option<&'a RollingHistories>,
+    node: &'a str,
+    observer: Option<&'a RollingMetricsRecorder>,
+    pool: &'a Arc<dyn MemoryPool>,
+    references: BTreeMap<usize, ReferenceBuffers>,
+    work: DecayWork,
+}
+
+impl DecayInputPreparation<'_> {
+    fn prepare(&mut self, fill: &mut PreparedTypedFill) -> Result<()> {
         let mut entity_rows = BTreeMap::<usize, Vec<usize>>::new();
         for (row, entity) in fill.stream.entity_ids.iter().enumerate() {
             entity_rows.entry(*entity).or_default().push(row);
         }
-        let mut references = BTreeMap::<usize, ReferenceBuffers>::new();
         for (entity_id, indices) in entity_rows {
             let entity = Arc::make_mut(&mut fill.stream.state.states[entity_id]);
             for (ordinal, group) in entity.groups.iter_mut().enumerate() {
-                let TypedWindowState::Decay(cache) = group else {
-                    continue;
-                };
-                let TypedGroupPlan::Scan {
-                    input_index,
-                    window,
-                    kind: ScanKind::Decay,
-                } = plan.groups[ordinal]
-                else {
-                    return Err(internal_error("typed decay cache has no matching plan"));
-                };
-                let previous = cache.clone();
-                let state_stage =
-                    observer.map(|recorder| recorder.stage(RollingStage::StatePreparation));
-                let history = if previous.is_none() {
-                    Some(history_values(
-                        plan,
-                        input,
-                        histories,
-                        indices[0],
-                        input_index,
-                        window,
+                if let TypedWindowState::Decay(cache) = group {
+                    self.prepare_cache(
+                        cache,
+                        ordinal,
                         entity.transition_count,
-                        node,
-                        observer,
-                        &mut work,
-                    )?)
-                } else {
-                    None
-                };
-                let owned = if let Some(previous) = previous.as_ref() {
-                    previous.try_clone_for_batch(indices.len())
-                } else {
-                    let values = history.as_ref().expect("reference history was read");
-                    let mut owned = OwnedDecay::try_new(
-                        window,
-                        values.len().saturating_add(indices.len()),
-                        Arc::clone(pool),
-                    );
-                    if let Some(owned) = &mut owned {
-                        owned.seed(values.iter().copied());
-                    }
-                    owned
-                };
-                *cache = owned.map(|mut owned| {
-                    work.merge(std::mem::take(&mut owned.work));
-                    Arc::new(owned)
-                });
-                drop(state_stage);
-                let needs_output = plan.outputs.iter().any(|output| {
-                    output.group == ordinal && output.kind == TypedOutputKind::Scan(ScanKind::Decay)
-                });
-                if cache.is_none() && needs_output {
-                    let _stage =
-                        observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
-                    let history = match previous.as_ref() {
-                        Some(previous) => {
-                            work.add(
-                                RollingWork::DecayReferenceHistorySamples,
-                                previous.rows.len(),
-                            );
-                            previous.rows.clone()
-                        }
-                        None => history.expect("reference history was read"),
-                    };
-                    let TypedGroupInput::Single(values) = &fill.columns[ordinal] else {
-                        return Err(internal_error("typed decay source is not Float64"));
-                    };
-                    let target = references
-                        .entry(ordinal)
-                        .or_insert_with(|| ReferenceBuffers::new(input.num_rows()));
-                    fill_reference(target, history, values, &indices, window, &mut work);
+                        &indices,
+                        &fill.columns,
+                    )?;
                 }
             }
         }
-        let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
-        finish_references(fill, references)
-    })();
-    if let Some(recorder) = observer {
-        recorder.add_decay(&work);
+        let _stage = self
+            .observer
+            .map(|recorder| recorder.stage(RollingStage::ArrowOutput));
+        finish_references(fill, std::mem::take(&mut self.references))
     }
-    result
+
+    fn prepare_cache(
+        &mut self,
+        cache: &mut Option<Arc<OwnedDecay>>,
+        ordinal: usize,
+        transitions: u64,
+        indices: &[usize],
+        columns: &[TypedGroupInput],
+    ) -> Result<()> {
+        let TypedGroupPlan::Scan {
+            input_index,
+            window,
+            kind: ScanKind::Decay,
+        } = self.plan.groups[ordinal]
+        else {
+            return Err(internal_error("typed decay cache has no matching plan"));
+        };
+        let previous = cache.clone();
+        let state_stage = self
+            .observer
+            .map(|recorder| recorder.stage(RollingStage::StatePreparation));
+        let history = if previous.is_none() {
+            Some(history_values(
+                self.plan,
+                self.input,
+                self.histories,
+                indices[0],
+                input_index,
+                window,
+                transitions,
+                self.node,
+                self.observer,
+                &mut self.work,
+            )?)
+        } else {
+            None
+        };
+        let owned = prepare_owned_cache(
+            previous.as_deref(),
+            history.as_ref(),
+            window,
+            indices.len(),
+            self.pool,
+        );
+        *cache = owned.map(|mut owned| {
+            self.work.merge(std::mem::take(&mut owned.work));
+            Arc::new(owned)
+        });
+        drop(state_stage);
+        let needs_output = self.plan.outputs.iter().any(|output| {
+            output.group == ordinal && output.kind == TypedOutputKind::Scan(ScanKind::Decay)
+        });
+        if cache.is_none() && needs_output {
+            self.prepare_reference(
+                columns,
+                ordinal,
+                previous.as_deref(),
+                history,
+                indices,
+                window,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn prepare_reference(
+        &mut self,
+        columns: &[TypedGroupInput],
+        ordinal: usize,
+        previous: Option<&OwnedDecay>,
+        history: Option<VecDeque<Option<f64>>>,
+        indices: &[usize],
+        window: usize,
+    ) -> Result<()> {
+        let _stage = self
+            .observer
+            .map(|recorder| recorder.stage(RollingStage::NumericUpdate));
+        let history = match previous {
+            Some(previous) => {
+                self.work.add(
+                    RollingWork::DecayReferenceHistorySamples,
+                    previous.rows.len(),
+                );
+                previous.rows.clone()
+            }
+            None => history.expect("reference history was read"),
+        };
+        let TypedGroupInput::Single(values) = &columns[ordinal] else {
+            return Err(internal_error("typed decay source is not Float64"));
+        };
+        let target = self
+            .references
+            .entry(ordinal)
+            .or_insert_with(|| ReferenceBuffers::new(self.input.num_rows()));
+        fill_reference(target, history, values, indices, window, &mut self.work);
+        Ok(())
+    }
+}
+
+fn prepare_owned_cache(
+    previous: Option<&OwnedDecay>,
+    history: Option<&VecDeque<Option<f64>>>,
+    window: usize,
+    rows: usize,
+    pool: &Arc<dyn MemoryPool>,
+) -> Option<OwnedDecay> {
+    if let Some(previous) = previous {
+        return previous.try_clone_for_batch(rows);
+    }
+    let values = history.expect("reference history was read");
+    let mut owned =
+        OwnedDecay::try_new(window, values.len().saturating_add(rows), Arc::clone(pool));
+    if let Some(owned) = &mut owned {
+        owned.seed(values.iter().copied());
+    }
+    owned
 }
 
 fn finish_references(
@@ -624,8 +711,23 @@ fn history_values(
         }
         return Ok(values);
     };
-    let key = plan
-        .partition_columns
+    let key = history_entity_key(plan, input, first, node, observer)?;
+    let Some(history) = histories.by_entity.get(&key) else {
+        return Ok(values);
+    };
+    append_scalar_history(&mut values, history, input_index, window, work)?;
+    append_columnar_history(&mut values, history, input_index, window, work)?;
+    Ok(values)
+}
+
+fn history_entity_key(
+    plan: &RollingKernelPlan,
+    input: &datafusion::arrow::record_batch::RecordBatch,
+    first: usize,
+    node: &str,
+    observer: Option<&RollingMetricsRecorder>,
+) -> Result<Vec<Option<KeyValue>>> {
+    plan.partition_columns
         .iter()
         .map(|&index| {
             let value =
@@ -637,17 +739,33 @@ fn history_values(
             }
             KeyValue::from_nullable_scalar(&value, node)
         })
-        .collect::<Result<Vec<_>>>()?;
-    let Some(history) = histories.by_entity.get(&key) else {
-        return Ok(values);
-    };
+        .collect()
+}
+
+fn append_scalar_history(
+    values: &mut VecDeque<Option<f64>>,
+    history: &super::super::EntityRollingState,
+    input_index: usize,
+    window: usize,
+    work: &mut DecayWork,
+) -> Result<()> {
     for row in &history.rows {
         let ScalarValue::Float64(value) = &row[input_index] else {
             return Err(internal_error("decay history is not Float64"));
         };
         work.add(RollingWork::DecayReferenceHistorySamples, 1);
-        push_history(&mut values, value.filter(|value| !value.is_nan()), window);
+        push_history(values, value.filter(|value| !value.is_nan()), window);
     }
+    Ok(())
+}
+
+fn append_columnar_history(
+    values: &mut VecDeque<Option<f64>>,
+    history: &super::super::EntityRollingState,
+    input_index: usize,
+    window: usize,
+    work: &mut DecayWork,
+) -> Result<()> {
     for record in &history.columnar.records {
         let source = record
             .column(input_index)
@@ -656,10 +774,10 @@ fn history_values(
             .ok_or_else(|| internal_error("columnar decay history is not Float64"))?;
         for value in source {
             work.add(RollingWork::DecayReferenceHistorySamples, 1);
-            push_history(&mut values, value.filter(|value| !value.is_nan()), window);
+            push_history(values, value.filter(|value| !value.is_nan()), window);
         }
     }
-    Ok(values)
+    Ok(())
 }
 
 fn push_history(values: &mut VecDeque<Option<f64>>, value: Option<f64>, window: usize) {
@@ -824,25 +942,29 @@ mod tests {
                     rebuilt.seed(state.rows.iter().copied());
                     recovered = Some(rebuilt);
                 }
-                let valid = state.rows.iter().flatten().count();
-                if valid > 0 {
-                    let mut sum = 0.0;
-                    let mut denominator = 0.0;
-                    for (ordinal, value) in state.rows.iter().flatten().enumerate() {
-                        let weight = weight(window - valid + ordinal + 1);
-                        sum += weight * *value;
-                        denominator += weight;
-                    }
-                    close(state.latest.unwrap(), sum / denominator);
-                } else {
-                    assert!(state.latest.is_none());
-                }
+                assert_reference_readout(&state, window);
             }
             assert!(
                 state.scanned < 8 * (4 * window + 17),
                 "window={window}, samples={}",
                 state.scanned
             );
+        }
+    }
+
+    fn assert_reference_readout(state: &OwnedDecay, window: usize) {
+        let valid = state.rows.iter().flatten().count();
+        if valid > 0 {
+            let mut sum = 0.0;
+            let mut denominator = 0.0;
+            for (ordinal, value) in state.rows.iter().flatten().enumerate() {
+                let weight = weight(window - valid + ordinal + 1);
+                sum += weight * *value;
+                denominator += weight;
+            }
+            close(state.latest.unwrap(), sum / denominator);
+        } else {
+            assert!(state.latest.is_none());
         }
     }
 
