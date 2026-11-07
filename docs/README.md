@@ -73,6 +73,9 @@ project contract.
    the frozen join semantics, implementation split, and exit gates.
 8. [Streaming ASOF acceleration plan, dated 2026-09-30](plans/2026-09-30-streaming-asof-acceleration.md):
    the measured Polars gap, root causes, phased optimizations, and gates.
+9. [TA-Lib and Arroyo performance development plan, dated 2026-11-08](plans/2026-11-08-ta-lib-arroyo-performance.md):
+   runtime fusion, incremental rolling kernels, shared history, and conditional
+   output and checkpoint work with compatibility and measurement gates.
 
 ## History and maintenance
 

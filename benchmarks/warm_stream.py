@@ -6,7 +6,8 @@ import asyncio
 import gc
 import statistics
 import time
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,7 @@ from calc_flow import (
     StreamRuntimeConfig,
     Watermark,
 )
+from calc_flow.symbolic import Program, rows, ts
 
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
 BASE_MICROS = np.int64(int(BASE.timestamp() * 1_000_000))
@@ -50,6 +52,22 @@ SCHEMA = pa.schema(
 )
 RTOL = 1e-10
 ATOL = 1e-10
+DECAY_INDICATORS = ("rolling_decay", "decay_mean")
+
+
+def expected_decay(prices: np.ndarray, *, entities: int, window: int) -> np.ndarray:
+    """Independently fold finite fixture frames in the reference weight order."""
+    expected = np.empty(len(prices), dtype=np.float64)
+    for entity in range(entities):
+        history = deque(maxlen=window)
+        for position in range(entity, len(prices), entities):
+            history.append(float(prices[position]))
+            numerator = denominator = 0.0
+            for weight, value in enumerate(history, window - len(history) + 1):
+                numerator += float(weight) * value
+                denominator += float(weight)
+            expected[position] = numerator / denominator
+    return expected
 
 
 def _prices(sequence: np.ndarray, entities: int) -> np.ndarray:
@@ -204,7 +222,9 @@ def _expected(
     context_start = start - context_rows
     sequence = np.arange(context_start, start + rows, dtype=np.uint64)
     prices = _prices(sequence, config.entities)
-    if config.indicator == "dual_sma_spread":
+    if config.indicator in DECAY_INDICATORS:
+        values = expected_decay(prices, entities=config.entities, window=config.window)
+    elif config.indicator == "dual_sma_spread":
         values = expected_dual_sma_spread(
             prices,
             entities=config.entities,
@@ -266,7 +286,11 @@ def _validate_output(
     if table.num_rows != rows:
         raise RuntimeError(f"expected {rows} output rows, observed {table.num_rows}")
     output_column = (
-        "dual_sma_spread" if config.indicator == "dual_sma_spread" else "moving_average"
+        "decay"
+        if config.indicator in DECAY_INDICATORS
+        else "dual_sma_spread"
+        if config.indicator == "dual_sma_spread"
+        else "moving_average"
     )
     sequence = table["sequence"].combine_chunks().to_numpy(zero_copy_only=False)
     order = np.arange(rows)
@@ -277,7 +301,10 @@ def _validate_output(
         raise RuntimeError("stream output identity columns changed")
     actual = table[output_column].combine_chunks().to_numpy(zero_copy_only=False)[order]
     expected = _expected(config, start=start, rows=rows)
-    close = np.isclose(actual, expected, rtol=RTOL, atol=ATOL, equal_nan=True)
+    tolerance = (1e-12, 1e-12) if config.indicator in DECAY_INDICATORS else (RTOL, ATOL)
+    close = np.isclose(
+        actual, expected, rtol=tolerance[0], atol=tolerance[1], equal_nan=True
+    )
     absolute = np.abs(actual - expected)
     result = {
         "passed": bool(np.all(close)),
@@ -286,6 +313,10 @@ def _validate_output(
     }
     if not result["passed"]:
         raise RuntimeError(f"strict incremental correctness failed: {result}")
+    if config.indicator == "decay_mean":
+        _validate_output(
+            table, replace(config, indicator="rolling_mean"), start=start, rows=rows
+        )
     return result
 
 
@@ -354,8 +385,36 @@ class ScenarioConfig:
             )
         if self.fast_window > self.window:
             raise ValueError("fast_window must not exceed window")
-        if self.indicator not in ("rolling_mean", "dual_sma_spread"):
+        if self.indicator not in ("rolling_mean", "dual_sma_spread", *DECAY_INDICATORS):
             raise ValueError("unsupported warm indicator")
+        if self.indicator in DECAY_INDICATORS and self.append_entities is not None:
+            raise ValueError("decay profiling requires full entity ticks")
+
+
+def _warm_program(config: ScenarioConfig) -> Program:
+    indicator = (
+        "rolling_mean" if config.indicator in DECAY_INDICATORS else config.indicator
+    )
+    program = _native_program(
+        config.window,
+        indicator=indicator,
+        fast_window=config.fast_window,
+        engine="streaming",
+    )
+    if config.indicator not in DECAY_INDICATORS:
+        return program
+    quotes = program.inputs[0]
+    features = {"decay": ts.decay(quotes["price"], window=rows(config.window))}
+    if config.indicator == "decay_mean":
+        features["moving_average"] = ts.mean(
+            quotes["price"], window=rows(config.window)
+        )
+    return Program(
+        f"warm-{config.indicator}",
+        engine="streaming",
+        inputs=program.inputs,
+        outputs=(("indicators", quotes.with_columns(features)),),
+    )
 
 
 class WarmScenario:
@@ -378,12 +437,7 @@ class WarmScenario:
 
     @classmethod
     async def start(cls, config: ScenarioConfig, state_root: Path) -> WarmScenario:
-        plan = _native_program(
-            config.window,
-            indicator=config.indicator,
-            fast_window=config.fast_window,
-            engine="streaming",
-        ).compile_stream(Runtime())
+        plan = _warm_program(config).compile_stream(Runtime())
         maximum = max(config.history_segment_rows, config.append_rows)
         source = _InteractiveSource(max_batch_rows=maximum)
         sink = _QueueSink()

@@ -168,6 +168,14 @@
       "datafusion": false,
       "typed_transition": "scan",
       "complexity": "amortized_constant"
+    },
+    {
+      "primitive": "decay",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": "scan",
+      "complexity": "amortized_constant"
     }
   ]
 }

@@ -307,6 +307,7 @@ mod tests {
             estimated_state_bytes_per_entity: 0,
             fingerprint: "test-kernel".to_owned(),
             checkpoint_fingerprint: None,
+            decay_pool: None,
         }
     }
 

@@ -402,13 +402,25 @@ impl RollingOperator {
             .entity_work()
             .filter(|_| was_warm && plan.supports_entity_parallel(input))
         else {
-            return plan.prepare_ordered_stream(prior, input, context.operator_id(), observer);
+            return plan.prepare_ordered_stream_with_history(
+                prior,
+                input,
+                Some(&self.state.histories),
+                context.operator_id(),
+                observer,
+            );
         };
         let cpus = context.job().gather_owner().parallelism();
         #[cfg(test)]
         let cpus = client.parallelism(cpus);
         if cpus < 2 {
-            return plan.prepare_ordered_stream(prior, input, context.operator_id(), observer);
+            return plan.prepare_ordered_stream_with_history(
+                prior,
+                input,
+                Some(&self.state.histories),
+                context.operator_id(),
+                observer,
+            );
         }
         let prepared =
             plan.prepare_ordered_stream_inputs(prior, input, context.operator_id(), observer)?;
