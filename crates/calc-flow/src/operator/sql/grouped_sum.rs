@@ -134,6 +134,29 @@ impl PartialAccumulator {
         self.native.state(emit_to)
     }
 
+    /// Merges per-group partial states into the groups named by `indices`.
+    /// The integer-sum accumulator needs one empty update first so its group
+    /// slots exist before the native merge addresses them.
+    pub fn merge_batch(
+        &mut self,
+        values: &[ArrayRef],
+        indices: &[usize],
+        count: usize,
+    ) -> DataFusionResult<()> {
+        if self.integer_sum()
+            && let Some(first) = values.first()
+        {
+            let empty = new_empty_array(first.data_type());
+            self.native.update_batch(
+                &[empty],
+                &[],
+                Some(&BooleanArray::from(Vec::<bool>::new())),
+                count,
+            )?;
+        }
+        self.native.merge_batch(values, indices, count)
+    }
+
     pub fn size(&self) -> usize {
         self.native.size()
     }

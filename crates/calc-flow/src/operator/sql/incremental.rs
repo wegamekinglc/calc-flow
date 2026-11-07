@@ -82,6 +82,13 @@ mod grouped_inline_tests;
 #[path = "snapshot_key_cache_tests.rs"]
 mod snapshot_key_cache_tests;
 
+#[path = "grouped_key_sharding.rs"]
+mod grouped_key_sharding;
+
+#[cfg(test)]
+#[path = "grouped_key_sharding_tests.rs"]
+mod grouped_key_sharding_tests;
+
 #[path = "group_aggregates.rs"]
 mod group_aggregates;
 use group_aggregates::{GroupAggregates, InlineSum, StateView};
@@ -94,6 +101,7 @@ mod snapshot_keys;
 
 pub(super) struct IncrementalSql {
     inline_sum: Option<InlineSum>,
+    parallel_scratch: bool,
     schema: SchemaRef,
     ordered_last: bool,
     pub(in crate::operator::sql) compact_budget: Option<crate::StateBudget>,
@@ -813,6 +821,7 @@ impl IncrementalSql {
         let (converter, finalizer_bytes) = grouped_layout(&keys, &aggregates, name)?;
         Ok(Some(Self {
             inline_sum: group_aggregates::bind_inline_sum(&keys, &aggregates),
+            parallel_scratch: grouped_key_sharding::unbounded(runtime),
             ordered_last: aggregates.iter().any(|expr| ordered_last::selected(expr)),
             variable_extrema: variable_extrema_slots(&aggregates),
             compact_budget: None,
@@ -853,6 +862,11 @@ impl IncrementalSql {
             #[cfg(test)]
             encoded_rows: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }))
+    }
+
+    #[cfg(test)]
+    pub(super) fn disable_parallel_scratch_for_test(&mut self) {
+        self.parallel_scratch = false;
     }
 
     pub(super) fn requires_ordered_last_proof(&self) -> bool {
@@ -1382,6 +1396,12 @@ impl IncrementalSql {
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<usize> {
+        if grouped_key_sharding::update(self, records, candidates, context, name).await? {
+            return records.iter().try_fold(0usize, |rows, record| {
+                rows.checked_add(record.num_rows())
+                    .ok_or_else(|| df_error(name, "SQL input row count overflow"))
+            });
+        }
         #[cfg(test)]
         let mut rows = 0;
         #[cfg(not(test))]
