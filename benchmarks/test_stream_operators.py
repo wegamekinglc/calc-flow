@@ -279,6 +279,8 @@ def test_stream_operator_lifecycle(
             "scope": "program-stream-lifecycle-to-arrow",
             "backend": "calc-flow-stream",
             "scale": selected_scale().name,
+            "input_rows": benchmark.extra_info["input_rows"],
+            "output_rows": benchmark.extra_info["output_rows"],
             "rows_per_input": source.num_rows,
             "batch_rows": BATCH_ROWS,
             "entities": ENTITIES,

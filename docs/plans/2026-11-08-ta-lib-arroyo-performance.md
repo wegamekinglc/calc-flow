@@ -1,6 +1,6 @@
 # Calc Flow 借鉴 TA-Lib 与 Arroyo 的性能开发计划
 
-日期：2026-11-08。状态：执行中；P1a 正确性与本地检查已通过，待性能与 CI 验收。
+日期：2026-11-08。状态：执行中；P1a 按性能停止规则撤回，P1b/P2 继续开发。
 
 目标是降低已有计算和流式应用的实际执行成本，同时保持数值、输出、资源和恢复契约。
 优先开发跨算子运行时融合、`ts.decay` 增量内核和多窗口共享历史。
@@ -14,21 +14,18 @@
 ## 执行记录
 
 - P0：研究基线已重新确认；实现基线为 `8d8be7d9`，记录随 P1a PR 交付。
-- P1a：[PR #563](https://github.com/wegamekinglc/calc-flow/pull/563) 为草稿；
-  10项新增测试通过，融合模块36 passed、1 existing ignored；
-  crate lib/tests Clippy 与格式检查通过。Codacy 的测试复杂度修复已通过本地单测试与 Clippy，等待服务复验。
-  复用现有融合执行器，扩展算术/过滤表达式准入；性能与完整 CI 尚未验收。
-  性能协议选择维护中的 warm-stream 固定 30 对：H=10240、append=64、entities=64、
-  GC=False；目标为 rolling mean 后接算术与过滤，对照为原 rolling mean。
-  独立审查另识别持续输入阶段重叠风险，采集前增加一个维护工具的吞吐对照；
-  共三个 case 合计预算 600 秒，两种维护统计合同分别报告，不拼接判定。
-  基线候选复用封存构建 `7a2463a8`：其产品 SOURCE_PATHS 与 `8d8be7d9` 完全一致，
-  保留构建实际 SHA、seal 和源码等价证据；候选重新封存构建。
-  warm 工具不提供 release 的 verdict；本次目标要求 paired median speedup >1.05，
-  且 bootstrap 95% CI 下界 >1；对照 CI 上界 <1/1.05 才认定超过5%的已确认变慢，
-  其他情况如实报告区间，不宣称等价。不修改维护工具的统计计算。
+- P1a：[PR #563](https://github.com/wegamekinglc/calc-flow/pull/563) 撤回，不合并运行时改动。
+  融合模块36 passed、1 existing ignored，10项新测试、本地 Clippy/Codacy 通过；
+  但唯一预登记测量的目标 speedup=0.966894，95% CI=[0.896492,1.080038]，未证明提速。
+  对照 speedup=0.941725，95% CI=[0.890114,0.993488]，不构成已确认超过5%的回退，亦不证明等价。
+  第三场景 descriptor 缺少行数字段，被身份校验拒绝，没有有效吞吐 verdict；
+  已修元数据并补正确性测试，原失败证据保留，未补跑、增样本或调整负载。
+  真实图静态追踪满足全部准入条件；没有物理 driver 直接 instrumentation，保留该限制。
+  来源、原始样本与停止结论见 PR 分支的 `benchmarks/runtime-fusion/p1a-20261108.md` 及 raw JSON。
+- P1b：独立规格/critique 已通过，基于最新 main 的 Expression→SQL 实现进行中；
+  不合入 P1a 未证明受益的独立算术/过滤准入。
 - P2：主规格与首轮 critique 已完成；具体误差认证与恢复设计已获 critic 放行，进入 test-first 实现。
-- P1b、P3、P4：尚未开始。
+- P3：共享历史所有权规格准备中；P4 尚未开始。
 - C1–C4：尚未达到进入条件，按各项条件评估。
 - D1/D2：尚未开始协议设计，单独验收。
 - 合并门槛：真实性能提升、受影响正确性与恢复检查、CI/Codacy、最终 specialist review。
