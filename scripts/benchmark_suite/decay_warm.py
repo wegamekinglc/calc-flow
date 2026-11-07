@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 import os
 import time
 from pathlib import Path
@@ -114,10 +115,19 @@ def acceptance(cases):
     }
 
 
+def phase_budget(value):
+    budget = float(value)
+    if not math.isfinite(budget) or not 70 < budget <= 600:
+        raise argparse.ArgumentTypeError("phase budget must be finite and in (70, 600]")
+    return budget
+
+
 async def collect(args):
+    budget = phase_budget(args.budget_seconds)
     started = time.monotonic()
     args.output.mkdir(parents=True, exist_ok=False)
-    deadline = started + 530
+    total_deadline = started + budget
+    deadline = total_deadline - 70
     report = {"status": "running", "cases": []}
     write_json(args.output / "report.json", report)
     try:
@@ -137,8 +147,8 @@ async def collect(args):
                 "sample_pairs": 30,
                 "gc": "normal",
                 "numerical_profile": "stable_v1 (default)",
-                "budget_seconds": 600,
-                "acquisition_timeout_seconds": 530,
+                "budget_seconds": budget,
+                "acquisition_timeout_seconds": budget - 70,
                 "cleanup_reserve_seconds": 70,
                 "harness_sha256": original_harness,
                 "compiler_processes": compilers,
@@ -152,8 +162,10 @@ async def collect(args):
             raise ValueError("competing compiler at acquisition preflight")
         await asyncio.wait_for(
             collect_cases(args, manifests, report),
-            timeout=max(1, deadline - time.monotonic()),
+            timeout=max(0, deadline - time.monotonic()),
         )
+        if time.monotonic() > total_deadline:
+            raise TimeoutError("phase budget exhausted during cleanup")
         if harness_identity() != original_harness:
             raise ValueError("shared measurement harness changed")
         report["status"] = "completed"
@@ -172,6 +184,7 @@ async def collect_cases(args, manifests, report):
         case, environments = await profile._fresh_case(
             manifests, config, 30, False, profile.WorkerPairOptions(args.output)
         )
+        profile._require_worker_receipts(case.get("worker_receipts"))
         if "environments" not in report:
             report.update(profile._new_report(manifests, environments, 30))
         elif report["environments"] != environments:
@@ -192,6 +205,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline-build", required=True, type=Path)
     parser.add_argument("--candidate-build", required=True, type=Path)
+    parser.add_argument("--budget-seconds", type=phase_budget, default=600)
     parser.add_argument(
         "--output", required=True, type=lambda path: Path(path).resolve()
     )

@@ -3,26 +3,27 @@
 **Author:** wegamekinglc (Cheng Li)
 **Branch:** `feature/ta-arroyo-p2-decay` → `main` | **Files:** 30
 **Base:** `8d8be7d907a095dbc0dc2b73dafcfdd842979cdf`
-**Reviewed published head:** `3bd354494378f7fc81210792b48a2d256e2d01c3`
-**Reviewed published tree:** `c99900e580f4d95bd2423ba913f85ab93a902cd0`
-**Additional reviewed dirty scope:** only
-`scripts/benchmark_suite/decay_warm.py`, extracting `_phase_work` from
-`total_work`. Previously reviewed counter guards, Rust helpers and final
-test-style changes are incorporated in this published head. No Rust,
-protocol, case, threshold or test assertion changes accompany this extraction.
+**Reviewed published head:** `b9171fbf44aa86c9d799961b658039175085c38d`
+**Reviewed published tree:** `4cf524386e662c0f181f3f3e558bb79a3eb13e55`
+**Additional reviewed dirty scope:** Rust history-context arity repair;
+worker exit receipts/owned close and their tests in `profile_warm_stream`;
+receipt enforcement/remaining-phase budget and their tests in the Decay adapter.
+The results document and archived evidence were read for provenance boundaries;
+this is not the final independent performance verdict.
 
-The current adapter SHA-256 and the three previously verified file SHA-256
-values are recorded by path:
+The reviewed five source/test file SHA-256 values are:
 
 ```text
 scripts/benchmark_suite/decay_warm.py
-62e52e13a4e54940898259ba28074efde15a49629c03152f2e2bf5fd6230f108
+2db78fbde4168ae0297f6878e877332929f706ba41025d1ad98ef885553c4546
 benchmarks/test_decay_warm.py
-bc3821f55237413d6461ff8d6519a5d49e53c9ba468e800c2b050edbedb58453
+7574375699334b9b6336bcb2f47628783799b02a60eb9f1f519c00ef39e39e98
 crates/calc-flow/src/operator/rolling/kernel/decay.rs
-da7fc50409d87e79b101c5adabc43e7d85fc717809cb244aab7595d466f5fed2
-crates/calc-flow/src/operator/rolling/tests/decay_tests.rs
-04a822a71e5abf7b8cbfe9ec85961555aeb35f0b1f375ed5a1f6f37ec20eaddd
+30010dc67de00b6397c2e838f7e14807a6eac1e56197dcaf184c82a67d35aa60
+scripts/profile_warm_stream.py
+5fe67d33c6722948e32df10df010ec466fd7a351442ed65bf1c5eeea24c12f34
+scripts/test_profile_warm_stream.py
+5f7845e256a7dd58da3734a7f224944ba02347d22e6966ea04dbb009653c91ae
 ```
 
 ### Summary
@@ -44,14 +45,17 @@ or remote review was created. The PR remains a draft.
 - Rust: **Focused checks passed, including the final test-style delta.** The
   reviewer read terminal author logs without repeating tests, compiling native
   code or acquiring timings. This is not a full-workspace green claim.
-- Python: **Focused author checks passed; candidate runtime measurement pending.**
-  Old-native tests establish harness/lowering behavior only.
+- Python: **Focused checks passed; new cancellation coverage is required below.**
+  Mock harness checks are not actual OS process evidence from an acquisition.
 - Resolved failure: the work-counter replay test's historical 13-versus-18
   failure is fixed and passed at `37e7d7d`, including 18/guard2/COW8 assertions.
 - Resolved check: the scoped library/test Clippy's 13 new-test issues were fixed
   without weakening assertions. Final scoped Clippy and all four directly
   affected tests passed against the unchanged reviewed file hashes.
-- Performance regressions: **Unmeasured.** No P2 timing verdict exists.
+- Performance: the earlier four-case positive acquisition belongs exclusively
+  to `b9171fbf`. The repaired final source has no release wheel or timing yet.
+  This handoff does not independently approve those earlier timing results or
+  transfer them to different native bytes.
 
 | Evidence                                        | Actual result and scope                                                                                    |
 |-------------------------------------------------|------------------------------------------------------------------------------------------------------------|
@@ -86,46 +90,77 @@ New handoff evidence, all under the repository root `target/`:
 - `p2-counter-complexity-green.log`: **3 passed, 5 deselected**, 0.45s,
   after the final adapter-only `_phase_work` extraction. The reviewer read the
   terminal log; no new pytest/native/build execution was started for review.
+- `p2-history-context-focused-green.log`: **5 passed**, 4m18s build/0.03s run;
+  history/reference/quota, buffered mixed profiles, old snapshot continuation
+  and actual-work paths. `p2-history-context-clippy-green.log`: terminal core
+  library/test Clippy **passed**, 2m28s.
+- `p2-complexity-ratchet-red.log`: actual 0→1 `too_many_arguments` allowance
+  failure; `p2-complexity-ratchet-green.log` and `-final.log`: ratchet holds.
+  No baseline or numerical precision-proof allowance was weakened.
+- `p2-worker-exits-final-green.log`: **11 passed, 33 deselected**, 0.46s;
+  normal/nonzero/forced close, stdin-error settling, two-worker ordinary-error
+  cleanup/receipts and adapter receipt rejection. It does not cover cancellation
+  while installing or repeated cancellation during owned pair cleanup.
+- `p2-phase-budget-red.log`: 9 failed/1 passed before implementation;
+  `p2-phase-budget-green.log`: **10 passed, 11 deselected**, 0.51s.
+- `p2-installer-recancel-red.log`: installer Task.cancel lacked terminate/wait,
+  **1 failed, 1 passed**. `p2-installer-recancel-green.log`: **2 passed,
+  33 deselected**, 0.38s. The second test repeatedly cancels pair cleanup,
+  checks both children are reaped before return and propagates the first cancel.
+- `p2-final-controller-mock.log`: **3 pure mock tests passed**. These exercise
+  normal/deadline/unsettled outcomes, not an actual final-source acquisition.
 
 Historical logs above remain historical; their filenames are not verdicts.
 The reviewer ran
 `git diff --exit-code 8d8be7d9 -- schemas/project-v3.schema.json` and
 whitespace diff checks; neither changed source. The new terminal logs verify
 the final test-style source separately from the earlier published-product run.
-At the prior runtime handoff, all four then-reviewed hashes were independently
-rechecked. This narrower handoff reviews and hashes only the changed adapter;
-it does not repeat closed Rust, binding or test-style reviews/checks.
+Closed prior Rust/binding/test-style checks were not repeated. The current
+five changed files were read and hashed; the reviewer ran no native build,
+pytest or timing during this follow-up.
 
 The handoff reuses the parent's non-blocking CI snapshot rather than polling.
-The earlier seven runtime/test complexity findings were resolved. Canonical
-Codacy run `128515950230` for `3bd35449` is **ACTION_REQUIRED**, solely for
-adapter `total_work` complexity 9 versus limit 8. The reviewed extraction fixes
-that source finding without altering validation, but the new commit still needs
-its actual Codacy result. Earlier success at `37e7d7d` does not prove a later
-head green. Other required CI remains unresolved; no workspace coverage or
-cross-platform green claim is made. The combined 90% line gate remains required.
+The earlier seven complexity findings and adapter complexity were resolved;
+canonical Codacy for `b9171fbf` succeeded. All 30 checks for that published head
+are terminal: 28 succeeded, while the unit complexity-ratchet job and its Linux
+aggregate gate failed. The genuine cause is the newly added arity allowance,
+not a pre-existing failure. The reviewed Rust fix removes that allowance, but
+local focused evidence does not prove a new head's required CI green. The
+combined 90% workspace line gate remains required.
 
 ### Blocking Issues
 
 Must resolve before performance acceptance and merge:
 
-1. **Final source/build identity:** commit and freeze the reviewed adapter
-   extraction and this report before building the
-   candidate. Record the resulting actual SHA and recheck Codacy for that head;
-   do not treat `3bd35449`'s action-required status as success. Production,
-   harness and test source have no remaining review blocker for this fixed-source
-   build. Do not build from a moving/dirty checkout or relabel an older wheel.
-2. **Performance/CI acceptance:** no candidate measurement or final required
-   CI success exists. After build authorization, execute only the fixed four
-   workloads within budget. Actual benefit, complete controls, numerical and
-   native-work evidence, current-head required CI/Codacy and final specialist
-   review remain merge gates. Typed admission or zero scans do not prove benefit.
+1. **Target `collect-final.py` — final seals before success:** controller
+   `child` validates source/builds/helpers before `exec`, but there is no
+   post-acquisition source/build/native/helper verification gate before outer
+   success. Execute the final seal checks under the same supervised absolute
+   phase deadline, before acceptance. Do not move mandatory verification to an
+   uncounted manual post-run step; the helper map must include the warm-profile
+   module as well as the maintained benchmark identity map.
+2. **Target `collect-final.py` — exception cleanup:** `main`'s monitor-error
+   handler kills the tree, waits only for the direct collector, and immediately
+   scans descendants once. A descendant still exiting can outlive that return
+   even while phase time remains. Reuse the ownership monitor or a small loop
+   to wait for the known owned tree to become empty within the original absolute
+   deadline; do not reset its budget. Unsettled ownership or timeout must remain
+   a failure. Keep the original controller error as the primary failure.
+3. **Final identity/performance/CI:** after these focused fixes, freeze the
+   actual source/helper identities, obtain that head's Codacy/required checks,
+   and build its real native. Any authorized final-source acquisition uses
+   only the unchanged four cases/30 pairs and remaining 574.654709 seconds as
+   a separate evidence set. Do not pool, overwrite or relabel old `b917` data.
 
 The previous missing-field, overflow, replay and helper-review findings are
 closed by the reviewed fixes and evidence below. Final test-style verification
-is also closed. No source, harness or test correctness/style defect remains
-open in this reviewed scope. The remaining entries are provenance and later
-performance/merge gates, not requests for additional implementation.
+is also closed. Installer ownership and repeated-cancellation coverage are now
+closed: `Worker.start` catches BaseException around installation, waits for the
+existing owned stop helper and preserves the original error through
+`_raise_command_error`. The real Task.cancel red/green and repeated-cancel test
+verify the missing paths. No additional Rust correctness defect was found;
+the remaining target-controller evidence/cleanup findings are separate from
+algorithm tuning or a request for more timing cases.
 
 No additional runtime correctness defect was found in the reviewed production
 snapshot. These are unresolved evidence, harness and quality gates; they do not
@@ -185,6 +220,35 @@ points. Existing assertions, D13 tolerance and the 18/2/8 counts remain intact.
 
 The arithmetic judgment assumes ordinary IEEE round-to-nearest, gradual
 underflow and no fast-math execution. It is not a timing result.
+
+The CI arity repair moves the old free history reader into the existing
+`DecayInputPreparation` context. Every former per-call argument maps to that
+same invocation's plan/input/histories/node/observer/work field; first row,
+input index, window and transition count remain explicit. History absence and
+entity-key errors retain priority, followed by scalar then columnar visits into
+the same local queue. No new record, allocation, reference replay, credit owner
+or stage lifetime is introduced. `prepare_inputs` still merges work after an
+ordinary error. The removed `too_many_arguments` allowance is the real CI fix;
+the precision-loss proof annotations and numerical contract are unchanged.
+
+The new worker close path records actual wait results and rejects nonzero or
+forced termination, including a forced child returning zero. `_fresh_case`
+closes both known workers concurrently using gather with exception collection;
+its shield/owned helper waits before rethrowing a primary measurement failure.
+Receipts are written outside temporary roots and kept out of environment
+identity comparison. The added installer stop and cancellation tests now close
+the worker lifecycle findings; final controller gates remain as listed above.
+
+The reviewer read the complete target controller and independently checked its
+SHA-256 as `ffb2ea0b3dd54a8d3ea5177c3207c3afc8231704859a28aa827164090a35fe4c`.
+Its single start precedes child source/build/quiet preflight; the child shares
+the collector PID across exec. SIGINT at 504.654709 seconds cancels acquisition;
+TERM at total-minus-5 and KILL at total-minus-3 operate on the owned group and
+tracked escaped descendants. PID/create-time tracking, polling/reaping the
+collector, and rejecting nonzero exits, leftovers, cancellation or elapsed
+overrun are appropriate. Raw case success separately requires two normal,
+reaped exit-zero worker receipts per case. These correct paths do not replace
+the missing post-seal and exception-tree-wait gates.
 
 ### Resource and Work Evidence
 
@@ -282,11 +346,22 @@ still produce None/unavailable rather than zero work. The focused red/green
 checks close both earlier evidence blockers. No speedup, final CI success,
 coverage floor or merge readiness is claimed.
 
+The initial archived acquisition reports positive medians of about
+2.49/7.80/8.26/1.13 for the four cases, bound to `b9171fbf`. The reviewer checked
+the archived gzip SHA-256 equals
+`d57c682db5d656a5663d3594097b578a0652e3d5db798457722ad2de658569aa`;
+this hash check is not the final paired-statistics review. The document correctly
+states that the original harness preserved eight native terminal statuses and
+awaited closure, but did not persist eight OS PID/exit-code receipts. The new
+receipt instrumentation cannot retroactively provide those missing facts.
+The first phase consumed 25.345291 seconds; any authorized final-source phase
+retains the separate 574.654709-second remainder and original workload contract.
+
 ### Verdict
 
-**Comment Only — production, harness and test source clear for a frozen-source
-candidate-wheel build. Final commit/build provenance, actual performance and
-current-head required CI/Codacy remain pending; this is not merge approval.**
+**Request Changes — Rust and worker lifecycle fixes are clear; outer-controller
+post-seal and exception-tree-wait gates remain before final collection signoff.
+Final-source performance and required CI/Codacy remain merge gates.**
 
 This is a source/harness review handoff, not final PR approval. Preserve the
 fixed acquisition contract and review the eventual candidate identity/results.

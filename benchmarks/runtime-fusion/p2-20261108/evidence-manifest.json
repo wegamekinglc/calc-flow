@@ -1,0 +1,42 @@
+{
+  "schema": "calc-flow.p2-decay-evidence.v1",
+  "candidate": "b9171fbf44aa86c9d799961b658039175085c38d",
+  "baseline_actual": "7a2463a89a2f4340a64cbdec90c97d7db05097ba",
+  "baseline_product_equivalent_main": "8d8be7d907a095dbc0dc2b73dafcfdd842979cdf",
+  "status": "complete, valid; performance acceptance passed; CI/review are independent",
+  "files": {
+    "audit.json": {
+      "bytes": 2588,
+      "sha256": "c3ef12eec4c452fdc56e9d44ba6843355a2e5dad252986f1055f6f9ac4ec6934"
+    },
+    "complete-evidence.json.gz": {
+      "bytes": 543270,
+      "sha256": "d57c682db5d656a5663d3594097b578a0652e3d5db798457722ad2de658569aa"
+    },
+    "protocol.json": {
+      "bytes": 16195,
+      "sha256": "58a88036ea30942ce0215f967245a4297027c3c18752a63744a00a7f1716d0f0"
+    },
+    "report.json": {
+      "bytes": 307599,
+      "sha256": "0ffd0aca0d6c6e2f26dd8665b19292a8e68640c5edba3abc203d4fe2023d692a"
+    },
+    "samples.csv": {
+      "bytes": 26198,
+      "sha256": "dd3e6d583035e2f08fed956f147aba3f1d6d00aa43ce6dccc3bb4225617bf6c0",
+      "line_endings": "LF; derived readable export differs only by CRLF normalization",
+      "original_bytes_sha256": "ca38375be2741f7ded7942467f868d527ae881c9485aa59ecdc311547a3aa148",
+      "original_bytes_file": "samples-original.csv.gz"
+    },
+    "summary.json": {
+      "bytes": 11848,
+      "sha256": "210b2f3a1f0a16f508ada592eedc3156fd3515c179ddb45fdb45df476b19178d"
+    },
+    "samples-original.csv.gz": {
+      "bytes": 7656,
+      "sha256": "6641d93fbd8c59e0ade085e6964e44f94cb8901b4d537881986c002dd0569e96",
+      "uncompressed_bytes": 26439,
+      "uncompressed_sha256": "ca38375be2741f7ded7942467f868d527ae881c9485aa59ecdc311547a3aa148"
+    }
+  }
+}

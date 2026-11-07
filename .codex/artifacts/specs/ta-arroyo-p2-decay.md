@@ -693,5 +693,22 @@ terminal logs and unchanged reviewed source/harness hashes.
 
 The exact twelve-field and metric-overflow evidence guards also passed their
 focused RED/GREEN checks. Source/harness review is clear for a frozen candidate
-build after final publication and that commit's Codacy verification. No native
-performance measurement or final CI/merge acceptance is claimed here.
+build after final publication and that commit's Codacy verification.
+
+The first measured source, `b9171fbf`, completed the fixed four-case campaign:
+target paired speedups were 2.4947x, 7.8026x and 8.2650x; the one-row control
+was 1.1325x. That source passed its numerical/work checks but its CI complexity
+ratchet rejected a new `too_many_arguments` allowance on `history_values`.
+The allowance is removed by using the existing borrowed Preparation context;
+the five affected history/reference/recovery tests, scoped Clippy and actual
+complexity ratchet passed without changing arithmetic or its thresholds.
+
+The final harness records and validates normal worker OS exits, settles an
+installer cancelled during setup, and retains the original error while both
+workers are reaped. Its phase budget can only shrink from the default 600
+seconds and retains 70 seconds for cleanup. Initial collection used 25.345291
+seconds, leaving 574.654709 seconds for independent final-source verification.
+The original results and their process-evidence limits remain sealed in the
+initial archive; they are not pooled with a new source's samples. Final-source
+build, controlled post-seal verification, performance and required CI remain
+separate merge gates.

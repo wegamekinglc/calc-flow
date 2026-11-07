@@ -550,18 +550,7 @@ impl DecayInputPreparation<'_> {
             .observer
             .map(|recorder| recorder.stage(RollingStage::StatePreparation));
         let history = if previous.is_none() {
-            Some(history_values(
-                self.plan,
-                self.input,
-                self.histories,
-                indices[0],
-                input_index,
-                window,
-                transitions,
-                self.node,
-                self.observer,
-                &mut self.work,
-            )?)
+            Some(self.history_values(indices[0], input_index, window, transitions)?)
         } else {
             None
         };
@@ -591,6 +580,31 @@ impl DecayInputPreparation<'_> {
             )?;
         }
         Ok(())
+    }
+
+    fn history_values(
+        &mut self,
+        first: usize,
+        input_index: usize,
+        window: usize,
+        transitions: u64,
+    ) -> Result<VecDeque<Option<f64>>> {
+        let mut values = VecDeque::new();
+        let Some(histories) = self.histories else {
+            if transitions > 0 {
+                return Err(internal_error(
+                    "reference decay requires authoritative retained history",
+                ));
+            }
+            return Ok(values);
+        };
+        let key = history_entity_key(self.plan, self.input, first, self.node, self.observer)?;
+        let Some(history) = histories.by_entity.get(&key) else {
+            return Ok(values);
+        };
+        append_scalar_history(&mut values, history, input_index, window, &mut self.work)?;
+        append_columnar_history(&mut values, history, input_index, window, &mut self.work)?;
+        Ok(values)
     }
 
     fn prepare_reference(
@@ -684,40 +698,6 @@ pub(super) fn record_work(
     if let Some(recorder) = observer {
         recorder.add_decay(&work);
     }
-}
-
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the fallback binds one entity's read-only history to its exact source plan"
-)]
-fn history_values(
-    plan: &RollingKernelPlan,
-    input: &datafusion::arrow::record_batch::RecordBatch,
-    histories: Option<&RollingHistories>,
-    first: usize,
-    input_index: usize,
-    window: usize,
-    transitions: u64,
-    node: &str,
-    observer: Option<&RollingMetricsRecorder>,
-    work: &mut DecayWork,
-) -> Result<VecDeque<Option<f64>>> {
-    let mut values = VecDeque::new();
-    let Some(histories) = histories else {
-        if transitions > 0 {
-            return Err(internal_error(
-                "reference decay requires authoritative retained history",
-            ));
-        }
-        return Ok(values);
-    };
-    let key = history_entity_key(plan, input, first, node, observer)?;
-    let Some(history) = histories.by_entity.get(&key) else {
-        return Ok(values);
-    };
-    append_scalar_history(&mut values, history, input_index, window, work)?;
-    append_columnar_history(&mut values, history, input_index, window, work)?;
-    Ok(values)
 }
 
 fn history_entity_key(
