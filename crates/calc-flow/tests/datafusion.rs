@@ -897,29 +897,53 @@ async fn repeated_row_local_query_rebinds_its_physical_plan_template() {
 #[tokio::test]
 async fn data_dependent_queries_are_planned_for_every_batch() {
     let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
-    for query in [
-        "SELECT count(*) AS rows FROM input",
-        "SELECT a FROM input ORDER BY a DESC",
-        "SELECT a, CAST(now() AS BIGINT) * 0 AS zero FROM input",
-    ] {
+    let limited = "SELECT a FROM input ORDER BY a DESC LIMIT 1";
+    assert_eq!(run(&runtime, limited, vec![1, 2]).await.num_rows(), 1);
+    assert_eq!(run(&runtime, limited, vec![3, 4, 5]).await.num_rows(), 1);
+    let volatile = "SELECT a, CAST(now() AS BIGINT) * 0 AS zero FROM input";
+    assert_eq!(run(&runtime, volatile, vec![1, 2]).await.num_rows(), 2);
+    assert_eq!(run(&runtime, volatile, vec![3, 4, 5]).await.num_rows(), 3);
+    assert!(
+        runtime
+            .metrics()
+            .iter()
+            .all(|metric| metric.physical_planning_count == 1),
+        "volatile functions and fetch-limited sorts carry execution state"
+    );
+}
+
+#[tokio::test]
+async fn grouped_and_sorted_queries_reuse_their_templates() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let grouped = "SELECT a, SUM(a) AS total FROM input GROUP BY a";
+    let sorted = "SELECT a FROM input ORDER BY a DESC";
+    for query in [grouped, sorted] {
         let first = run(&runtime, query, vec![1, 2]).await;
         let second = run(&runtime, query, vec![3, 4, 5]).await;
-        assert_eq!(
-            first.num_rows(),
-            if query.contains("count") { 1 } else { 2 }
-        );
-        assert_eq!(
-            second.num_rows(),
-            if query.contains("count") { 1 } else { 3 }
-        );
+        assert_eq!(first.num_rows(), 2, "{query}");
+        assert_eq!(second.num_rows(), 3, "{query}");
     }
     assert_eq!(
-        column_values(
-            &run(&runtime, "SELECT count(*) AS rows FROM input", vec![7; 4]).await,
-            "rows"
-        ),
-        [4]
+        column_values(&run(&runtime, grouped, vec![7; 4]).await, "total"),
+        [28]
     );
+    let metrics = runtime.metrics();
+    let counts = metrics
+        .iter()
+        .map(|metric| metric.physical_planning_count)
+        .collect::<Vec<_>>();
+    assert_eq!(counts, [1, 0, 1, 0, 0]);
+}
+
+#[tokio::test]
+async fn statistics_folded_queries_plan_every_run() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    // count(*) over exact row statistics is folded into a literal with no
+    // scan; such plans embed data and must never be reused.
+    for _ in 0..2 {
+        let folded = run(&runtime, "SELECT count(*) AS rows FROM input", vec![7; 4]).await;
+        assert_eq!(column_values(&folded, "rows"), [4]);
+    }
     assert!(
         runtime
             .metrics()
