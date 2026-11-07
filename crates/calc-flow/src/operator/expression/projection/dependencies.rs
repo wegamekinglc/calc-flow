@@ -21,6 +21,14 @@ pub(in super::super) fn required_columns(
     query: &ValidatedQuery,
     input: &SchemaRef,
 ) -> Option<Vec<usize>> {
+    dependencies(query, Some(input))
+}
+
+pub(in super::super) fn immutable_row_local(query: &ValidatedQuery) -> bool {
+    dependencies(query, None).is_some()
+}
+
+fn dependencies(query: &ValidatedQuery, input: Option<&SchemaRef>) -> Option<Vec<usize>> {
     if query.has_stream_aggregate() {
         return None;
     }
@@ -77,7 +85,7 @@ fn row_local_select(statement: &Statement) -> Option<&Select> {
 }
 
 struct Dependencies<'a> {
-    input: &'a SchemaRef,
+    input: Option<&'a SchemaRef>,
     columns: BTreeSet<usize>,
 }
 
@@ -93,9 +101,11 @@ impl Dependencies<'_> {
     }
 
     fn column(&mut self, name: &Ident) -> ControlFlow<()> {
+        let Some(input) = self.input else {
+            return ControlFlow::Continue(());
+        };
         let name = super::identifier(name);
-        let mut fields = self
-            .input
+        let mut fields = input
             .fields()
             .iter()
             .enumerate()

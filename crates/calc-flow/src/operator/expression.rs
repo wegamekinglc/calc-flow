@@ -197,6 +197,19 @@ impl ExpressionOperator {
         projection::required_columns(&self.query, self.input_ports[0].schema()?)
     }
 
+    pub(crate) fn is_immutable_row_local(&self) -> bool {
+        self.udfs.is_empty()
+            && self
+                .stream_state
+                .resources
+                .as_ref()
+                .is_none_or(|(_, _, selected)| selected.is_empty())
+            && self.input_ports[0].schema().map_or_else(
+                || projection::immutable_row_local(&self.query),
+                |schema| projection::required_columns(&self.query, schema).is_some(),
+            )
+    }
+
     pub(crate) fn source_replay_projection(&self) -> Option<Self> {
         let input = self.input_ports[0].schema()?;
         if !self.is_exact_column_projection(input, self.output_ports[0].schema()) {

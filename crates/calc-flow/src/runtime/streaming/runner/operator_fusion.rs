@@ -4,6 +4,8 @@ mod allocation_evidence;
 mod asof_chain_entry_tests;
 #[cfg(test)]
 mod asof_chain_tests;
+#[cfg(test)]
+mod sql_chain_tests;
 
 use std::collections::BTreeMap;
 
@@ -101,7 +103,8 @@ fn eligible_link(
     producer: &RuntimeProducer,
 ) -> bool {
     kind == RuntimeEdgeKind::Internal
-        && ingress == "input"
+        && second.ingress_edges.contains_key(ingress)
+        && second.input_ports.contains_key(ingress)
         && producer
             == &(RuntimeProducer::Node {
                 node_id: first.node_id.clone(),
@@ -111,39 +114,25 @@ fn eligible_link(
 }
 
 pub(super) fn eligible_pair(first: &RuntimeStreamNode, second: &RuntimeStreamNode) -> bool {
-    let CompiledStreamOperator::Expression(expression) = &second.operator else {
-        return false;
-    };
-    let head_schema = match &first.operator {
-        CompiledStreamOperator::Rolling(operator) => operator.output_ports()[0].schema().cloned(),
-        CompiledStreamOperator::StreamAsofJoin(operator) => {
-            operator.output_ports()[0].schema().cloned()
+    match (&first.operator, &second.operator) {
+        (_, CompiledStreamOperator::Expression(expression)) => {
+            eligible_projection_pair(first, second, expression)
         }
-        CompiledStreamOperator::Expression(operator) => {
-            let Some(input) = first
-                .input_ports
-                .get("input")
-                .and_then(|port| port.schema())
-            else {
-                return false;
-            };
-            let Some(output) = first
-                .output_ports
-                .get("output")
-                .and_then(|port| port.schema())
-            else {
-                return false;
-            };
-            if !operator.is_exact_column_projection(input, Some(output)) {
-                return false;
-            }
-            Some(output.clone())
+        (CompiledStreamOperator::Expression(expression), CompiledStreamOperator::Sql(sql)) => {
+            eligible_expression_sql(first, second, expression, sql)
         }
-        _ => return false,
-    };
-    if !directly_connected(first, second) {
-        return false;
+        _ => false,
     }
+}
+
+fn eligible_projection_pair(
+    first: &RuntimeStreamNode,
+    second: &RuntimeStreamNode,
+    expression: &crate::ExpressionOperator,
+) -> bool {
+    let Some(head_schema) = projection_head_schema(first) else {
+        return false;
+    };
     let Some(input) = first
         .output_ports
         .get("output")
@@ -154,7 +143,8 @@ pub(super) fn eligible_pair(first: &RuntimeStreamNode, second: &RuntimeStreamNod
     let Some(output) = second.output_ports.get("output") else {
         return false;
     };
-    head_schema.as_ref() == Some(input)
+    directly_connected(first, second, "input")
+        && head_schema == *input
         && second
             .input_ports
             .get("input")
@@ -163,7 +153,80 @@ pub(super) fn eligible_pair(first: &RuntimeStreamNode, second: &RuntimeStreamNod
         && expression.is_exact_column_projection(input, output.schema())
 }
 
-fn directly_connected(first: &RuntimeStreamNode, second: &RuntimeStreamNode) -> bool {
+fn projection_head_schema(
+    first: &RuntimeStreamNode,
+) -> Option<datafusion::arrow::datatypes::SchemaRef> {
+    match &first.operator {
+        CompiledStreamOperator::Rolling(operator) => operator.output_ports()[0].schema().cloned(),
+        CompiledStreamOperator::StreamAsofJoin(operator) => {
+            operator.output_ports()[0].schema().cloned()
+        }
+        CompiledStreamOperator::Expression(operator) => {
+            let input = first.input_ports.get("input")?.schema()?;
+            let output = first.output_ports.get("output")?.schema()?;
+            operator
+                .is_exact_column_projection(input, Some(output))
+                .then(|| output.clone())
+        }
+        _ => None,
+    }
+}
+
+fn eligible_expression_sql(
+    first: &RuntimeStreamNode,
+    second: &RuntimeStreamNode,
+    expression: &crate::ExpressionOperator,
+    sql: &crate::SqlOperator,
+) -> bool {
+    let Some(alias) = sql.grouped_sum_fusion_alias() else {
+        return false;
+    };
+    if !first.late_output_ports.is_empty()
+        || !second.late_output_ports.is_empty()
+        || !directly_connected(first, second, alias)
+        || second.output_edges.get("output").map(Vec::len) != Some(1)
+    {
+        return false;
+    }
+    expression_sql_ports_match(first, second, expression, sql, alias)
+        && expression.is_immutable_row_local()
+}
+
+fn expression_sql_ports_match(
+    first: &RuntimeStreamNode,
+    second: &RuntimeStreamNode,
+    expression: &crate::ExpressionOperator,
+    sql: &crate::SqlOperator,
+    alias: &str,
+) -> bool {
+    let input = &expression.input_ports()[0];
+    let output = &expression.output_ports()[0];
+    let sql_input = &sql.input_ports()[0];
+    let sql_output = &sql.output_ports()[0];
+    matching_port(first.input_ports.get("input"), input)
+        && matching_port(first.output_ports.get("output"), output)
+        && matching_port(second.input_ports.get(alias), sql_input)
+        && matching_port(second.output_ports.get("output"), sql_output)
+        && output
+            .schema()
+            .zip(sql_input.schema())
+            .is_none_or(|(first, second)| first == second)
+}
+
+fn matching_port(runtime: Option<&crate::Port>, declared: &crate::Port) -> bool {
+    runtime.is_some_and(|runtime| {
+        runtime.name() == declared.name()
+            && runtime.kind() == declared.kind()
+            && runtime.required() == declared.required()
+            && runtime.schema() == declared.schema()
+    })
+}
+
+fn directly_connected(
+    first: &RuntimeStreamNode,
+    second: &RuntimeStreamNode,
+    ingress: &str,
+) -> bool {
     let head_inputs = if matches!(first.operator, CompiledStreamOperator::StreamAsofJoin(_)) {
         2
     } else {
@@ -180,7 +243,7 @@ fn directly_connected(first: &RuntimeStreamNode, second: &RuntimeStreamNode) -> 
     let Some([edge]) = first.output_edges.get("output").map(Vec::as_slice) else {
         return false;
     };
-    second.ingress_edges.get("input") == Some(edge)
+    second.ingress_edges.get(ingress) == Some(edge)
 }
 
 fn single_projection_consumer(node: &RuntimeStreamNode) -> bool {
@@ -467,6 +530,119 @@ mod tests {
                 "variant {variant}"
             );
         }
+    }
+
+    fn late_derived_sql_plan() -> StreamExecutionPlan {
+        use crate::{LatePolicySpec, SqlOperator};
+        let mut spec = rolling().spec().clone();
+        spec.late_policy = LatePolicySpec::SideOutput {
+            metrics_version: 1,
+            schema_version: 1,
+        };
+        let head = RollingOperator::new("rolling", input_schema(), spec).unwrap();
+        let main_schema = head.output_ports()[0].schema().unwrap().clone();
+        let late_schema = head
+            .output_ports()
+            .iter()
+            .find(|port| port.name() == "late")
+            .unwrap()
+            .schema()
+            .unwrap()
+            .clone();
+        let main = ExpressionOperator::new("main", "", vec!["price".into()], None, vec![]).unwrap();
+        let main = main
+            .with_ports(
+                Port::with_schema_ref("input", BatchKind::Table, true, Some(main_schema)).unwrap(),
+                Port::new("output", BatchKind::Table, false, None).unwrap(),
+            )
+            .unwrap();
+        let deltas = ExpressionOperator::new(
+            "deltas",
+            "",
+            vec![
+                "symbol AS account".into(),
+                "'s' AS stock".into(),
+                "price AS delta".into(),
+            ],
+            None,
+            vec![],
+        )
+        .unwrap();
+        let deltas = deltas
+            .with_ports(
+                Port::with_schema_ref("input", BatchKind::Table, true, Some(late_schema)).unwrap(),
+                Port::new("output", BatchKind::Table, false, None).unwrap(),
+            )
+            .unwrap();
+        let positions = SqlOperator::new(
+            "positions",
+            "SELECT account, stock, SUM(delta) AS position FROM input GROUP BY account, stock",
+            vec!["input".into()],
+            vec![],
+        )
+        .unwrap();
+        PipelineBuilder::new("late-derived-sql-fusion-refusal")
+            .unwrap()
+            .add_node("rolling", Box::new(head))
+            .unwrap()
+            .add_node("main", Box::new(main))
+            .unwrap()
+            .add_node("deltas", Box::new(deltas))
+            .unwrap()
+            .add_node("positions", Box::new(positions))
+            .unwrap()
+            .connect(Edge::new(
+                PortEndpoint::new("rolling", "output").unwrap(),
+                PortEndpoint::new("main", "input").unwrap(),
+            ))
+            .unwrap()
+            .connect(Edge::new(
+                PortEndpoint::new("rolling", "late").unwrap(),
+                PortEndpoint::new("deltas", "input").unwrap(),
+            ))
+            .unwrap()
+            .connect(Edge::new(
+                PortEndpoint::new("deltas", "output").unwrap(),
+                PortEndpoint::new("positions", "input").unwrap(),
+            ))
+            .unwrap()
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements::default(),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn p1b_real_late_derived_expression_sql_chain_is_not_grouped() {
+        use crate::pipeline::CompiledStreamOperator;
+        let plan = late_derived_sql_plan();
+        let parts = plan.into_runtime_parts(EdgeBudget::default()).unwrap();
+        let first = parts
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "deltas")
+            .unwrap();
+        let second = parts
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "positions")
+            .unwrap();
+        assert!(first.late_output_ports.contains("output"));
+        assert!(second.late_output_ports.contains("output"));
+        let CompiledStreamOperator::Expression(expression) = &first.operator else {
+            panic!("expression missing")
+        };
+        let CompiledStreamOperator::Sql(sql) = &second.operator else {
+            panic!("SQL missing")
+        };
+        assert!(expression.is_immutable_row_local());
+        assert_eq!(sql.grouped_sum_fusion_alias(), Some("input"));
+        assert_eq!(first.input_ports.len(), 1);
+        assert_eq!(second.input_ports.len(), 1);
+        assert!(!eligible_pair(first, second));
+        assert!(super::plan_fusion(&parts).is_empty());
+        assert_eq!(parts.sink_routes.len(), 2);
     }
 
     struct CallbackProbe {

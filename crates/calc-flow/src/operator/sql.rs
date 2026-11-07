@@ -36,6 +36,7 @@ mod compact_budget;
 #[cfg(test)]
 mod current_checkpoint_tests;
 mod current_retained;
+mod fusion;
 mod incremental;
 pub(super) mod ipc;
 pub(super) mod metadata;
@@ -471,6 +472,20 @@ impl SqlOperator {
 
     pub(crate) fn is_simple_projection(&self) -> bool {
         self.validated.is_simple_projection()
+    }
+
+    pub(crate) fn grouped_sum_fusion_alias(&self) -> Option<&str> {
+        let [alias] = self.aliases.as_slice() else {
+            return None;
+        };
+        (self.udfs.is_empty()
+            && self
+                .stream_state
+                .resources
+                .as_ref()
+                .is_none_or(|(_, _, selected)| selected.is_empty())
+            && fusion::grouped_sum_candidate(&self.validated, alias))
+        .then_some(alias)
     }
 
     /// Plans the exact SQL output schema without processing rows.

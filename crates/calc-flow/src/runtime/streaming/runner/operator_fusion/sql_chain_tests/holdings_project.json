@@ -1,0 +1,304 @@
+{
+  "data_sources": [],
+  "format_version": 3,
+  "id": "stock-positions",
+  "name": "stock-positions",
+  "runtime": {
+    "mode": "stream",
+    "options": {}
+  },
+  "graph": {
+    "edges": [
+      {
+        "source_node": "trades",
+        "source_port": "output",
+        "target_node": "cf_sql_3365ffa6e9867ca97f490167",
+        "target_port": "input"
+      },
+      {
+        "source_node": "cf_sql_3365ffa6e9867ca97f490167",
+        "source_port": "output",
+        "target_node": "cf_sql_99f49fe879b217fcf109f67b",
+        "target_port": "input"
+      },
+      {
+        "source_node": "cf_sql_99f49fe879b217fcf109f67b",
+        "source_port": "output",
+        "target_node": "positions",
+        "target_port": "input"
+      }
+    ],
+    "name": "stock-positions",
+    "nodes": [
+      {
+        "id": "trades",
+        "operator": {
+          "kind": "expression",
+          "expression": "",
+          "select": [
+            "\"account\"",
+            "\"stock\"",
+            "\"quantity\"",
+            "\"side\"",
+            "\"price\"",
+            "\"flow_type\""
+          ],
+          "filter": null,
+          "udfs": []
+        },
+        "input_ports": [
+          {
+            "name": "input",
+            "kind": "table",
+            "required": true,
+            "schema": [
+              {
+                "name": "account",
+                "data_type": "string",
+                "nullable": true
+              },
+              {
+                "name": "stock",
+                "data_type": "string",
+                "nullable": true
+              },
+              {
+                "name": "quantity",
+                "data_type": "int64",
+                "nullable": true
+              },
+              {
+                "name": "side",
+                "data_type": "string",
+                "nullable": true
+              },
+              {
+                "name": "price",
+                "data_type": "float64",
+                "nullable": true
+              },
+              {
+                "name": "flow_type",
+                "data_type": "string",
+                "nullable": true
+              }
+            ]
+          }
+        ],
+        "output_ports": [
+          {
+            "name": "output",
+            "kind": "table",
+            "required": true,
+            "schema": [
+              {
+                "name": "account",
+                "data_type": "string",
+                "nullable": true
+              },
+              {
+                "name": "stock",
+                "data_type": "string",
+                "nullable": true
+              },
+              {
+                "name": "quantity",
+                "data_type": "int64",
+                "nullable": true
+              },
+              {
+                "name": "side",
+                "data_type": "string",
+                "nullable": true
+              },
+              {
+                "name": "price",
+                "data_type": "float64",
+                "nullable": true
+              },
+              {
+                "name": "flow_type",
+                "data_type": "string",
+                "nullable": true
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "cf_sql_3365ffa6e9867ca97f490167",
+        "operator": {
+          "kind": "expression",
+          "expression": "",
+          "select": [
+            "\"account\"",
+            "\"stock\"",
+            "(CASE WHEN (\"side\" = 'buy') THEN \"quantity\" ELSE (-\"quantity\") END) AS \"delta\""
+          ],
+          "filter": "(\"flow_type\" = 'trade')",
+          "udfs": []
+        },
+        "input_ports": [
+          {
+            "name": "input",
+            "kind": "table",
+            "required": true,
+            "schema": [
+              {
+                "name": "account",
+                "data_type": "string",
+                "nullable": true
+              },
+              {
+                "name": "stock",
+                "data_type": "string",
+                "nullable": true
+              },
+              {
+                "name": "quantity",
+                "data_type": "int64",
+                "nullable": true
+              },
+              {
+                "name": "side",
+                "data_type": "string",
+                "nullable": true
+              },
+              {
+                "name": "price",
+                "data_type": "float64",
+                "nullable": true
+              },
+              {
+                "name": "flow_type",
+                "data_type": "string",
+                "nullable": true
+              }
+            ]
+          }
+        ],
+        "output_ports": [
+          {
+            "name": "output",
+            "kind": "table",
+            "required": true,
+            "schema": [
+              {
+                "name": "account",
+                "data_type": "string",
+                "nullable": true
+              },
+              {
+                "name": "stock",
+                "data_type": "string",
+                "nullable": true
+              },
+              {
+                "name": "delta",
+                "data_type": "int64",
+                "nullable": true
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "cf_sql_99f49fe879b217fcf109f67b",
+        "input_ports": [
+          {
+            "name": "input",
+            "kind": "table",
+            "required": true,
+            "schema": [
+              {
+                "name": "account",
+                "data_type": "string",
+                "nullable": true
+              },
+              {
+                "name": "stock",
+                "data_type": "string",
+                "nullable": true
+              },
+              {
+                "name": "delta",
+                "data_type": "int64",
+                "nullable": true
+              }
+            ]
+          }
+        ],
+        "operator": {
+          "kind": "sql",
+          "query": "SELECT account, stock, SUM(delta) AS position FROM input GROUP BY account, stock",
+          "aliases": [
+            "input"
+          ],
+          "udfs": []
+        },
+        "output_ports": [
+          {
+            "name": "output",
+            "kind": "table",
+            "required": true,
+            "schema": [
+              {
+                "name": "account",
+                "data_type": "string",
+                "nullable": true
+              },
+              {
+                "name": "stock",
+                "data_type": "string",
+                "nullable": true
+              },
+              {
+                "name": "position",
+                "data_type": "int64",
+                "nullable": true
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "positions",
+        "operator": {
+          "kind": "expression",
+          "expression": "",
+          "select": [
+            "\"account\"",
+            "\"stock\"",
+            "\"position\""
+          ],
+          "filter": null,
+          "udfs": []
+        },
+        "input_ports": [
+          {
+            "name": "input",
+            "kind": "table",
+            "required": true,
+            "schema": [
+              {
+                "name": "account",
+                "data_type": "string",
+                "nullable": true
+              },
+              {
+                "name": "stock",
+                "data_type": "string",
+                "nullable": true
+              },
+              {
+                "name": "position",
+                "data_type": "int64",
+                "nullable": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
