@@ -42,6 +42,7 @@ use crate::{
 
 mod cumulative;
 mod mean;
+mod numeric_rows;
 use cumulative::TypedCumulativeState;
 mod sorted;
 pub(super) use sorted::SortedRollingState;
@@ -49,6 +50,13 @@ pub(super) mod entity_parallel;
 
 #[cfg(test)]
 pub(super) mod entity_parallel_tests;
+
+#[cfg(test)]
+pub(super) fn shared_rows_test_pool(
+    pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
+) -> impl Drop {
+    numeric_rows::test_pool_scope(pool)
+}
 
 const ROLLING_KERNEL_PLAN_VERSION: u32 = 1;
 
@@ -82,6 +90,7 @@ pub(super) struct RollingKernelPlan {
     sequence_columns: Vec<usize>,
     nan_as_value: bool,
     groups: Vec<TypedGroupPlan>,
+    shared_rows: Option<numeric_rows::SharedRowsShape>,
     outputs: Vec<TypedOutputPlan>,
     fallback_reason: Option<String>,
     estimated_state_bytes_per_entity: usize,
@@ -709,7 +718,7 @@ impl RollingKernelPlan {
         let checkpoint_fingerprint = identity_reason
             .as_deref()
             .map(|reason| checkpoint_kernel_fingerprint(fingerprint_input, reason));
-        Self {
+        let mut plan = Self {
             version: ROLLING_KERNEL_PLAN_VERSION,
             state_layout_version,
             numerical_profile,
@@ -720,13 +729,24 @@ impl RollingKernelPlan {
             partition_columns,
             sequence_columns,
             nan_as_value: false,
+            shared_rows: None,
             groups,
             outputs: typed_outputs,
             fallback_reason,
             estimated_state_bytes_per_entity,
             fingerprint,
             checkpoint_fingerprint,
-        }
+        };
+        plan.shared_rows = plan.shared_rows_shape().filter(|_| {
+            matches!(plan.groups.first(), Some(TypedGroupPlan::Numeric { input_index, .. })
+                if input_schema.field(*input_index).data_type() == &DataType::Float64)
+        });
+        plan
+    }
+
+    fn shared_rows_shape(&self) -> Option<numeric_rows::SharedRowsShape> {
+        mean::MeanKernel::compile(self)?;
+        numeric_rows::SharedRowsShape::compile(&self.groups)
     }
 
     pub(super) const fn selection(&self) -> KernelSelection {
@@ -1429,6 +1449,23 @@ fn cast_primitive(array: &ArrayRef, target: &DataType, node_id: &str) -> Result<
 }
 
 impl RollingKernelState {
+    #[cfg(test)]
+    pub(super) fn shared_rows_count(&self) -> usize {
+        self.states
+            .iter()
+            .filter(|entity| entity.shared_rows.is_some())
+            .count()
+    }
+
+    #[cfg(test)]
+    pub(super) fn shared_rows_owner_addresses(&self) -> Vec<usize> {
+        self.states
+            .iter()
+            .filter_map(|entity| entity.shared_rows.as_ref())
+            .map(|owner| Arc::as_ptr(owner) as usize)
+            .collect()
+    }
+
     fn prepare_stream_entities(
         &self,
         routing: EntityRouting,
@@ -1540,14 +1577,11 @@ fn fill_typed_rows(
     node_id: &str,
     observer: Option<&RollingMetricsRecorder>,
 ) -> Result<()> {
+    numeric_rows::prepare_typed_entities(plan.shared_rows, states, inputs.entity_ids, observer);
     let mut processed = 0;
     let result = (|| {
         for (row_index, &entity_id) in inputs.entity_ids.iter().enumerate() {
-            let copied = observer.is_some() && Arc::strong_count(&states[entity_id]) > 1;
-            let entity = Arc::make_mut(&mut states[entity_id]);
-            if copied && let Some(recorder) = observer {
-                recorder.add(RollingWork::CopiedEntities, 1);
-            }
+            let entity = typed_entity_for_row(states, entity_id, observer);
             entity.transition_count = entity.transition_count.checked_add(1).ok_or_else(|| {
                 operator_error(node_id, "rolling entity transition count overflowed")
             })?;
@@ -1571,6 +1605,19 @@ fn fill_typed_rows(
     result
 }
 
+fn typed_entity_for_row<'a>(
+    states: &'a mut [Arc<TypedEntityState>],
+    entity_id: usize,
+    observer: Option<&RollingMetricsRecorder>,
+) -> &'a mut TypedEntityState {
+    let copied = observer.is_some() && Arc::strong_count(&states[entity_id]) > 1;
+    let entity = Arc::make_mut(&mut states[entity_id]);
+    if copied && let Some(recorder) = observer {
+        recorder.add(RollingWork::CopiedEntities, 1);
+    }
+    entity
+}
+
 fn update_typed_groups(
     inputs: &[TypedGroupInput],
     event_time: i64,
@@ -1580,6 +1627,16 @@ fn update_typed_groups(
     nan_as_value: bool,
     node_id: &str,
 ) -> Result<()> {
+    if entity.shared_rows.is_some() {
+        return numeric_rows::update_shared_groups(
+            entity,
+            inputs,
+            row_index,
+            numerical_profile,
+            nan_as_value,
+            node_id,
+        );
+    }
     for (state, input) in entity.groups.iter_mut().zip(inputs) {
         state.update(
             event_time,
@@ -2301,6 +2358,7 @@ fn encoded_keys(
 #[derive(Clone, Debug)]
 struct TypedEntityState {
     groups: Vec<TypedWindowState>,
+    shared_rows: Option<Arc<numeric_rows::RowsTape>>,
     transition_count: u64,
 }
 
@@ -2312,10 +2370,14 @@ impl TypedEntityState {
                 .map(|group| TypedWindowState::new(*group, entity_rows))
                 .collect(),
             transition_count: 0,
+            shared_rows: None,
         }
     }
 
     fn force_stable_v2_rebase(&mut self, node_id: &str) -> Result<()> {
+        if self.shared_rows.is_some() {
+            return self.rebase_shared_rows(node_id);
+        }
         for group in &mut self.groups {
             group.force_stable_v2_rebase(node_id)?;
         }
@@ -2329,6 +2391,7 @@ impl TypedEntityState {
                 .iter()
                 .map(TypedWindowState::estimated_bytes)
                 .sum::<usize>()
+            + self.shared_rows.as_ref().map_or(0, |tape| tape.bytes())
     }
 }
 
@@ -4174,7 +4237,7 @@ mod tests {
         outputs: Vec<TypedOutputPlan>,
         numerical_profile: RollingNumericalProfile,
     ) -> RollingKernelPlan {
-        RollingKernelPlan {
+        let mut plan = RollingKernelPlan {
             version: ROLLING_KERNEL_PLAN_VERSION,
             state_layout_version: 3,
             numerical_profile,
@@ -4185,13 +4248,16 @@ mod tests {
             partition_columns: vec![2],
             sequence_columns: vec![1],
             nan_as_value: false,
+            shared_rows: None,
             groups,
             outputs,
             fallback_reason: None,
             estimated_state_bytes_per_entity: 0,
             fingerprint: "test-kernel".to_owned(),
             checkpoint_fingerprint: None,
-        }
+        };
+        plan.shared_rows = plan.shared_rows_shape();
+        plan
     }
 
     fn numeric_plan(profile: RollingNumericalProfile) -> RollingKernelPlan {

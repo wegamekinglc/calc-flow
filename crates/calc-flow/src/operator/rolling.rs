@@ -256,14 +256,23 @@ impl DataFusionRollingKernel {
         plan.supports_typed_transition().then_some(Self { plan })
     }
 
+    #[cfg(test)]
     pub(crate) fn update_and_fill(
         &self,
         state: &DataFusionRollingState,
         input: &RecordBatch,
     ) -> Result<DataFusionRollingBatch> {
+        self.update_and_fill_owned(state.clone(), input)
+    }
+
+    pub(crate) fn update_and_fill_owned(
+        &self,
+        state: DataFusionRollingState,
+        input: &RecordBatch,
+    ) -> Result<DataFusionRollingBatch> {
         let execution =
             self.plan
-                .update_sorted_and_fill(&state.inner, input, "datafusion.rolling")?;
+                .update_sorted_and_fill_owned(state.inner, input, "datafusion.rolling")?;
         let metrics = execution.metrics;
         Ok(DataFusionRollingBatch {
             columns: execution.columns,

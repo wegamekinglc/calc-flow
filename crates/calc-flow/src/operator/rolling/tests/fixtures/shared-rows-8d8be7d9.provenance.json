@@ -1,0 +1,41 @@
+{
+  "runtime_source_commit": "8d8be7d907a095dbc0dc2b73dafcfdd842979cdf",
+  "generator_patch_sha256": "50588772b47dbbb70e557e459a63adadc720f0ee888b9138938daa353f0939ec",
+  "generator_only_files": [
+    "crates/calc-flow/src/operator/rolling/tests.rs",
+    "crates/calc-flow/src/operator/rolling/tests/shared_rows.rs"
+  ],
+  "profiles": [
+    "stable_v1",
+    "stable_v2"
+  ],
+  "windows": [
+    5,
+    80
+  ],
+  "entities": 2,
+  "prefix_record_batches": [
+    64,
+    100
+  ],
+  "checkpoint_watermark": 160,
+  "pending_rows": 4,
+  "continuation_append_rows": 68,
+  "continuation_output_rows_per_profile_route": 72,
+  "candidate_source_worktree": "target/worktrees/ta-arroyo-p3",
+  "performance_measurement": false,
+  "build_expected_minutes": [
+    4,
+    7
+  ],
+  "build_elapsed_seconds": 405,
+  "capture_passed": 1,
+  "capture_runtime_seconds": 0.03,
+  "old_binary": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/ta-arroyo-p3-legacy-debug-cargo/debug/deps/calc_flow-0ca7ddf2781199aa",
+  "old_binary_sha256": "b618e0dd2ba26352311a5ec1954db725fd311da053358e29eff076574cd0b719",
+  "fixture_sha256": "b14aae9b7b9d65e1e01d0d144e481bfad7a7feafaaf3111991f4364493888825",
+  "cargo_lock_sha256": "c84da76d6ef02aec794afdb6b4f12d266d7a1bc76e7e36f8a7585332443eac1f",
+  "baseline_tree": "2ba59a8addaed573b7c53f57d341f152e51f0897",
+  "original_context_patch_sha256": "f991f32ad98cb6b4ac7d1e215cfe16770887a2912d688c9d0f8a094e86a78d44",
+  "generator_patch_format": "zero-context; apply with git apply --unidiff-zero"
+}
