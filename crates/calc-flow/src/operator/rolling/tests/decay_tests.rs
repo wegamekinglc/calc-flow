@@ -16,6 +16,16 @@ fn decay_spec(window: u64, with_mean: bool) -> RollingSpec {
     kernel_spec(json!(outputs))
 }
 
+fn decay_job() -> crate::StreamJobContext {
+    crate::StreamJobContext::new(
+        7,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    )
+}
+
 #[test]
 fn p2_decay_and_mean_use_the_typed_kernel() {
     for with_mean in [false, true] {
@@ -61,7 +71,7 @@ fn assert_equivalent_float_value(actual: Option<f64>, expected: Option<f64>) {
         (None, None) => {}
         (Some(actual), Some(expected)) if expected.is_nan() => assert!(actual.is_nan()),
         (Some(actual), Some(expected)) if expected.is_infinite() || expected == 0.0 => {
-            assert_eq!(actual.to_bits(), expected.to_bits())
+            assert_eq!(actual.to_bits(), expected.to_bits());
         }
         (Some(actual), Some(expected)) => assert!(
             (actual - expected).abs() <= 1e-12 + 1e-12 * actual.abs().max(expected.abs()),
@@ -417,7 +427,7 @@ async fn p2_extra_rejected_or_cancelled_repair_releases_private_credit_and_retri
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();
-        assert_eq!(decayed.value(0), 1.0);
+        assert_eq!(decayed.value(0).to_bits(), 1.0_f64.to_bits());
         assert_eq!(operator.state.next_output_sequence, sequence + 1);
     }
 }
@@ -485,13 +495,7 @@ async fn p2_buffered_profiles_mix_cache_reference_and_recover_without_rephasing_
         cached.set_state_budget(budget).unwrap();
         reference.set_state_budget(budget).unwrap();
         let fingerprint = cached.compiled.kernel_plan.fingerprint().to_owned();
-        let job = crate::StreamJobContext::new(
-            7,
-            TEST_FINGERPRINT,
-            JsonMap::new(),
-            None,
-            crate::CancellationToken::new(),
-        );
+        let job = decay_job();
         let store = RollingMetricsStore::default();
         let reference_store = RollingMetricsStore::default();
         let prefix = (1..=63_u32)
@@ -579,15 +583,10 @@ async fn p2_buffered_profiles_mix_cache_reference_and_recover_without_rephasing_
 #[tokio::test]
 async fn p2_work_counts_actual_copy_reference_seed_and_certified_attempts() {
     use crate::operator::rolling_metrics::RollingMetricsStore;
+    use datafusion::execution::memory_pool::MemoryConsumer;
     let mut operator =
         RollingOperator::new("rolling", Arc::new(kernel_schema()), decay_spec(3, false)).unwrap();
-    let job = crate::StreamJobContext::new(
-        7,
-        TEST_FINGERPRINT,
-        JsonMap::new(),
-        None,
-        crate::CancellationToken::new(),
-    );
+    let job = decay_job();
     let store = RollingMetricsStore::default();
     for (rows, watermark) in [
         (vec![(2, "a", 2, Some(2.0)), (1, "a", 1, Some(1.0))], 2),
@@ -610,7 +609,6 @@ async fn p2_work_counts_actual_copy_reference_seed_and_certified_attempts() {
     assert_eq!(work["scheduled_reseed_samples"], 3);
     assert_eq!(work["cache_copied_samples"], 2);
     assert_eq!(work["reference_scan_samples"], 0);
-    use datafusion::execution::memory_pool::MemoryConsumer;
     let pool = operator.compiled.kernel_plan.decay_pool_for_test();
     let pressure = MemoryConsumer::new("count reference work").register(&pool);
     pressure.try_grow((64 << 20) - pool.reserved()).unwrap();
@@ -643,6 +641,17 @@ async fn p2_work_counts_actual_copy_reference_seed_and_certified_attempts() {
     assert_eq!(work["initial_seed_samples"], 9);
     assert_eq!(work["reference_history_samples"], 6);
     assert_eq!(work["cache_copied_samples"], 2);
+    assert_rejected_work_is_counted_and_replay_commits_once(&mut operator, &job, &store, &pool)
+        .await;
+}
+
+async fn assert_rejected_work_is_counted_and_replay_commits_once(
+    operator: &mut RollingOperator,
+    job: &crate::StreamJobContext,
+    store: &crate::operator::rolling_metrics::RollingMetricsStore,
+    pool: &Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
+) {
+    use crate::operator::rolling_metrics::RollingCallback;
     struct Reject;
     #[async_trait]
     impl StreamCollector for Reject {
@@ -650,11 +659,10 @@ async fn p2_work_counts_actual_copy_reference_seed_and_certified_attempts() {
             Err(internal_error("expected work-count output refusal"))
         }
     }
-    use crate::operator::rolling_metrics::RollingCallback;
     let before_state = format!("{:?}", operator.state.typed_kernel_state);
     let before_credit = pool.reserved();
     let before_sequence = operator.state.next_output_sequence;
-    let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(8)));
+    let context = StreamOperatorContext::new(job, "rolling", Some(EventTime::from_micros(8)));
     let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
     let retry_input = float64_fast_record(&[
         (13, "a", 13, Some(1.0)),
@@ -673,7 +681,7 @@ async fn p2_work_counts_actual_copy_reference_seed_and_certified_attempts() {
         .await
         .unwrap();
     let callback = store.begin(RollingCallback::Watermark, crate::CancellationToken::new());
-    let observed = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(8)))
+    let observed = StreamOperatorContext::new(job, "rolling", Some(EventTime::from_micros(8)))
         .with_rolling_metrics(callback.recorder());
     let result = operator
         .on_watermark(EventTime::from_micros(13), &observed, &mut Reject)

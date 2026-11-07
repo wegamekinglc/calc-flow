@@ -50,8 +50,8 @@ WORK_FIELDS = (
 
 
 def valid_counters(work):
-    if set(work) - set(WORK_FIELDS):
-        raise ValueError("unexpected native decay counter")
+    if set(work) != set(WORK_FIELDS):
+        raise ValueError("native decay counter fields do not match schema")
     if any(type(value) is not int or value < 0 for value in work.values()):
         raise ValueError("invalid native decay counter")
     return work
@@ -65,6 +65,8 @@ def total_work(status):
             work = node.get(phase, {}).get("_decay_work")
             if work is None:
                 continue
+            if node.get("overflowed", False):
+                raise ValueError("native decay node metrics overflowed")
             available = True
             for name, value in valid_counters(work).items():
                 totals[name] += value

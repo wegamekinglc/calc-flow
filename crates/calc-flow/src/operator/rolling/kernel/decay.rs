@@ -914,11 +914,20 @@ mod tests {
 
     #[test]
     fn p2_decay_rounding_radius_handles_ieee_boundaries() {
-        assert_eq!(rounding_radius(0.0), f64::from_bits(1));
-        assert_eq!(rounding_radius(f64::from_bits(1)), f64::from_bits(1));
-        assert_eq!(rounding_radius(f64::MIN_POSITIVE), f64::from_bits(1));
-        assert_eq!(rounding_radius(1.0), 2.0_f64.powi(-53));
-        assert_eq!(rounding_radius(f64::MAX), 2.0_f64.powi(970));
+        assert_eq!(rounding_radius(0.0).to_bits(), f64::from_bits(1).to_bits());
+        assert_eq!(
+            rounding_radius(f64::from_bits(1)).to_bits(),
+            f64::from_bits(1).to_bits()
+        );
+        assert_eq!(
+            rounding_radius(f64::MIN_POSITIVE).to_bits(),
+            f64::from_bits(1).to_bits()
+        );
+        assert_eq!(rounding_radius(1.0).to_bits(), 2.0_f64.powi(-53).to_bits());
+        assert_eq!(
+            rounding_radius(f64::MAX).to_bits(),
+            2.0_f64.powi(970).to_bits()
+        );
     }
 
     #[test]

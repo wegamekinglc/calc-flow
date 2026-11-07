@@ -3,11 +3,22 @@
 **Author:** wegamekinglc (Cheng Li)
 **Branch:** `feature/ta-arroyo-p2-decay` → `main` | **Files:** 30
 **Base:** `8d8be7d907a095dbc0dc2b73dafcfdd842979cdf`
-**Reviewed head:** `77db7583ded5c0d017edf0fa8c9b88eb91ed0dc2`
-**Reviewed tree:** `ec15ae7199bfac32bc22b1eaf277abf35190cc7b`
-**Additional reviewed delta:** root's uncommitted specification paragraph
-qualifying the direct-operator replay test. No product change is in that delta.
-Future Codacy helper extraction is outside this reviewed snapshot.
+**Reviewed published head:** `37e7d7d136f5f07da94e6a69d50a60df934cf0da`
+**Reviewed published tree:** `f700a4099073c80ac8255a335040a24d606974fb`
+**Additional reviewed dirty scope:** `scripts/benchmark_suite/decay_warm.py`
+and `benchmarks/test_decay_warm.py` counter guards; test-only style changes in
+`kernel/decay.rs` and `tests/decay_tests.rs`. Production helpers remain those
+of the published head. Final scoped Clippy and affected-test checks completed
+successfully; all four hashes below still match the prior static review.
+
+The reviewed dirty file SHA-256 values, in the order above, are:
+
+```text
+19643f270e5d6ceef691a53c67587e1ffd98f59ab79c84fb4fe5fc3d22fa8876
+bc3821f55237413d6461ff8d6519a5d49e53c9ba468e800c2b050edbedb58453
+da7fc50409d87e79b101c5adabc43e7d85fc717809cb244aab7595d466f5fed2
+04a822a71e5abf7b8cbfe9ec85961555aeb35f0b1f375ed5a1f6f37ec20eaddd
+```
 
 ### Summary
 
@@ -25,13 +36,16 @@ or remote review was created. The PR remains a draft.
 
 ### Build and Test Results
 
-- Rust: **Partially verified; final retry test remains unresolved.** Existing
-  author logs establish the results below. The reviewer did not repeat tests,
-  compile native code or acquire timings.
+- Rust: **Focused checks passed, including the final test-style delta.** The
+  reviewer read terminal author logs without repeating tests, compiling native
+  code or acquiring timings. This is not a full-workspace green claim.
 - Python: **Focused author checks passed; candidate runtime measurement pending.**
   Old-native tests establish harness/lowering behavior only.
-- New failure: the final expanded work-counter test failed with 13 transitions
-  versus an expected 18. Its corrected test has not been compiled or run.
+- Resolved failure: the work-counter replay test's historical 13-versus-18
+  failure is fixed and passed at `37e7d7d`, including 18/guard2/COW8 assertions.
+- Resolved check: the scoped library/test Clippy's 13 new-test issues were fixed
+  without weakening assertions. Final scoped Clippy and all four directly
+  affected tests passed against the unchanged reviewed file hashes.
 - Performance regressions: **Unmeasured.** No P2 timing verdict exists.
 
 | Evidence                                        | Actual result and scope                                                                                    |
@@ -46,49 +60,60 @@ or remote review was created. The PR remains a draft.
 | Author's Python/generator evidence              | Generator 3 and optimizer 11 passed; later focused explanation and harness checks reported passed          |
 | Reviewer contract/whitespace checks             | Baseline schema diff and whitespace diff checks returned success                                           |
 
-Logs reside under the repository root `target/`. The reviewer ran
+New handoff evidence, all under the repository root `target/`:
+
+- `p2-decay-codacy-green.log`: **13 passed, 0 failed**, comprising 12 P2
+  tests and one existing intentional-worker-panic diagnostic; 3m09s build,
+  0.09s execution. This includes the corrected replay and both-profile buffered
+  mixed-quota/legacy/numerical checks.
+- `p2-counter-guards-red.log`: two focused tests failed because the missing
+  field/overflow conditions did not raise. `p2-counter-guards-green.log`:
+  **3 passed, 5 deselected**, including the existing unavailable-baseline control.
+- `p2-decay-codacy-clippy-tests.log`: **Failed**, 13 new-test style issues;
+  no reported production lint. Superseded by the final scoped check below.
+- `p2-decay-tests-clippy-green.log`: **Passed**, terminal core library/test
+  Clippy, 2m24s. The parent confirmed exit success and the reviewed log ends at
+  `Finished dev profile`; no pending process is used as passing evidence.
+- `p2-decay-tests-focused-green.log`: **4 passed, 0 failed**, 4m06s build and
+  0.01s execution. The final radius-bits, refusal/cancellation replay,
+  actual-work 18/guard2/COW8, and dual-profile buffered resource/Mean tests all
+  passed. These are the four tests affected by the last style-only extraction.
+
+Historical logs above remain historical; their filenames are not verdicts.
+The reviewer ran
 `git diff --exit-code 8d8be7d9 -- schemas/project-v3.schema.json` and
-`git diff --check 8d8be7d9`; neither changed source. Passing evidence from the
-parent commit does not prove the corrected final test passes.
+whitespace diff checks; neither changed source. The new terminal logs verify
+the final test-style source separately from the earlier published-product run.
+SHA-256 of all four reviewed dirty files was independently rechecked and matches
+the recorded values exactly; no additional source review or test rerun was needed.
 
 The handoff reuses the parent's non-blocking CI snapshot rather than polling:
-Codacy run `128506874897` reports action required with seven complexity issues;
-other required CI is unresolved. No workspace coverage or cross-platform green
-claim is made. The combined 90% line gate remains required.
+Codacy run `128510602794` is **SUCCESS, 0 issues** for `37e7d7d`, superseding
+the earlier seven findings. It does not verify the dirty test-style/harness
+delta. Other required CI remains unresolved. No workspace coverage or
+cross-platform green claim is made; the combined 90% line gate remains required.
 
 ### Blocking Issues
 
 Must resolve before performance acceptance and merge:
 
-1. **`decay_tests.rs` —
-   `p2_work_counts_actual_copy_reference_seed_and_certified_attempts`:** the
-   corrected final test has not run. After the coordinated quiet window, run
-   only the affected focused check, preserve the failed log, and record the
-   actual result. Static validity does not close this verification blocker.
-2. **`scripts/benchmark_suite/decay_warm.py` — `valid_counters` / `total_work`:**
-   missing native fields are silently filled with zero. For example, removing
-   `cache_copied_samples` passes the current validator and can hide COW work.
-   Require the exact complete 12-field set for each present `_decay_work`;
-   keep an entirely absent baseline witness unavailable. Add a focused metadata
-   regression for a missing field before acquisition.
-3. **`scripts/benchmark_suite/decay_warm.py` — `total_work`:** the enclosing
-   `RollingMetrics.overflowed=true` is ignored. The core contract excludes such
-   observations from evidence even if partial counts happen to satisfy row
-   classification. Reject overflowed native observations and add a focused
-   metadata regression before acquisition.
-4. **New Decay helpers/tests — Codacy:** address the seven reported complexity
-   failures without exclusions or weaker checks: `OwnedDecay::advance` (10),
-   `exact_denominator` (9), `legacy_fallback_reason` (10), `prepare_inputs` (19),
-   `history_values` (13),
-   `p2_extra_decay_normal_work_and_recovered_candidates_remain_certified` (9),
-   and `assert_equivalent_columns` (12). Re-review factoring at the actual new
-   head and verify directly affected behavior.
-5. **Performance/CI acceptance:** no candidate measurement or final required
-   CI/Codacy success exists. Freeze the corrected common harness and candidate,
-   then execute only the preregistered four workloads within their budget.
-   Actual benefit, complete controls, numerical/resource/work evidence and final
-   specialist review remain independent gates. Typed admission or zero scan
-   counts do not establish benefit.
+1. **Final source/build identity:** commit and freeze the reviewed four-file
+   delta together with the evidence/documentation updates before building the
+   candidate. Record the resulting actual SHA and recheck Codacy for that head;
+   `37e7d7d`'s success cannot be generalized to a future commit. Production,
+   harness and test source have no remaining review blocker for this fixed-source
+   build. Do not build from a moving/dirty checkout or relabel an older wheel.
+2. **Performance/CI acceptance:** no candidate measurement or final required
+   CI success exists. After build authorization, execute only the fixed four
+   workloads within budget. Actual benefit, complete controls, numerical and
+   native-work evidence, current-head required CI/Codacy and final specialist
+   review remain merge gates. Typed admission or zero scans do not prove benefit.
+
+The previous missing-field, overflow, replay and helper-review findings are
+closed by the reviewed fixes and evidence below. Final test-style verification
+is also closed. No source, harness or test correctness/style defect remains
+open in this reviewed scope. The remaining entries are provenance and later
+performance/merge gates, not requests for additional implementation.
 
 No additional runtime correctness defect was found in the reviewed production
 snapshot. These are unresolved evidence, harness and quality gates; they do not
@@ -125,10 +150,26 @@ identical batch before watermark 13 therefore constructs a second five-row
 attempt; watermark-only repetition performs none.
 
 This establishes the test construction statically, with its retained expected
-18 transitions, two guard repairs and eight copied slots. It does not establish
-a passing test result or promise a live StreamingRunner retry: a managed send
-failure terminates the job and recovery uses the last compatible durable cut.
-The reviewed specification paragraph now states that boundary explicitly.
+18 transitions, two guard repairs and eight copied slots. The published-product
+run now verifies those assertions. It does not promise a live StreamingRunner
+retry: a managed send failure terminates the job and recovery uses the last
+compatible durable cut. The specification states that boundary explicitly.
+
+The seven Codacy helper extractions preserve operation and validation order.
+`refresh_latest` moves the original branch chain after the same updates;
+`exact_weight_total` retains checked integer operations and the final Float64
+conversion stays after the same admission checks. The legacy iterator keeps
+group-before-scan and declared-output order. `DecayInputPreparation` retains
+the previous allocation owner through each cache preparation, the same stage
+drop boundary, scalar-before-columnar history order and pool admission/release
+points. The outer wrapper merges attempted work after both successful and
+ordinary-error preparation results; numeric-fill error draining is unchanged.
+
+The dirty test-style delta changes the six positive finite exact comparisons
+to bit equality, preserving strictness. `decay_job` creates the identical fresh
+context per invocation. The replay helper borrows operator/job/store/the pool
+Arc; it does not move allocation owners or change pressure/old-owner drop
+points. Existing assertions, D13 tolerance and the 18/2/8 counts remain intact.
 
 The arithmetic judgment assumes ordinary IEEE round-to-nearest, gradual
 underflow and no fast-math execution. It is not a timing result.
@@ -169,13 +210,23 @@ D13, the explanation supplement and protocol disclose these limits. The generic
 `amortized_constant` label must be read with the adjacent Decay qualification,
 not as unconditional whole-stream complexity.
 
+### Style Issues
+
+The seven published Codacy complexity findings were resolved through reviewed
+helper extraction. The subsequent 13 library/test Clippy findings were resolved
+with strict bit comparisons, declaration placement, the original job fixture
+and a borrowing test helper; no tolerance, assertion, pool-owner lifetime or
+drop point was weakened. Final scoped Clippy passed. No open style finding
+remains in the reviewed files; future-head required checks remain independent.
+
 ### Test Coverage
 
 Coverage includes mixed Mean/Decay, both profiles, missing values, magnitude
 eviction, finite weighted overflow, infinities, subnormal/signed-zero behavior,
 repair, cached/Reference transitions, allocation-owner/COW credit, cancellation
 and refusal, buffered multi-entity recovery and future batches after restore.
-The expanded failed-attempt/replay assertion remains the unverified delta.
+The corrected failed-attempt/replay assertion passed with the published product
+and again after final style factoring in the four directly affected tests.
 
 Five pinned-old-source snapshots cover real writer layouts 3 and 4: both
 profiles, mixed Mean, cumulative state and an earlier unsupported group. The
@@ -195,19 +246,26 @@ Generated manifests and the optimizer admit the shape without changing Project
 JSON/fingerprint. Same-old-native comparisons prove that Python export boundary
 only. D13 now assigns weighted Decay rtol=atol1e-12; its table pipe positions
 align. The clarified replay paragraph agrees with the streaming-guide failure
-boundary. The PR title/body follow repository format and accurately retain the
-failed/unrun final test.
+boundary. The PR title/body follow repository format. Evidence summaries must
+distinguish the historical failed/unrun snapshot, the passing published product,
+and the now-completed four-test/final-Clippy style verification. Final source
+identity and performance results must be added when they actually exist.
 
 The protocol keeps four fixed cases, a 600-second inclusive budget, 30 advancing
 AB/BA pairs per case, a COW control, an original-fold oracle and native work
-witnesses. The two witness validation gaps must close before acquisition. No
-speedup, final CI success, coverage floor or merge readiness is claimed.
+witnesses. `valid_counters` now requires exactly all 12 fields, preserving real
+zeros while rejecting absent copy counters. `total_work` rejects an overflowed
+node whenever it contributes a witness. Entirely absent old-baseline metrics
+still produce None/unavailable rather than zero work. The focused red/green
+checks close both earlier evidence blockers. No speedup, final CI success,
+coverage floor or merge readiness is claimed.
 
 ### Verdict
 
-**Request Changes — no new runtime correctness defect found; final test,
-native-witness guards, Codacy and performance/CI gates remain unresolved.**
+**Comment Only — production, harness and test source clear for a frozen-source
+candidate-wheel build. Final commit/build provenance, actual performance and
+current-head required CI/Codacy remain pending; this is not merge approval.**
 
-Finish the focused corrections after the coordinated quiet window, then review
-the actual new head. Future helper extraction is not approved by this report.
+This is a source/harness review handoff, not final PR approval. Preserve the
+fixed acquisition contract and review the eventual candidate identity/results.
 No repeated test, native build or performance run was started by the reviewer.

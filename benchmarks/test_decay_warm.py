@@ -59,6 +59,27 @@ def test_native_decay_witness_separates_arithmetic_and_copy_work():
     }
 
 
+def test_native_decay_witness_rejects_missing_copy_counter():
+    counters = dict.fromkeys(decay_warm.WORK_FIELDS, 0)
+    counters.update(transitions=1, certified_rows=1)
+    del counters["cache_copied_samples"]
+    status = {"rolling_metrics": {"roll": {"data": {"_decay_work": counters}}}}
+    with pytest.raises(ValueError, match="fields"):
+        decay_warm.total_work(status)
+
+
+def test_native_decay_witness_rejects_overflowed_node():
+    counters = dict.fromkeys(decay_warm.WORK_FIELDS, 0)
+    counters.update(transitions=1, certified_rows=1)
+    status = {
+        "rolling_metrics": {
+            "roll": {"overflowed": True, "data": {"_decay_work": counters}}
+        }
+    }
+    with pytest.raises(ValueError, match="overflow"):
+        decay_warm.total_work(status)
+
+
 def test_decay_and_mixed_mean_advance_the_old_reference_runtime(tmp_path):
     async def exercise(indicator, directory):
         config = warm_stream.ScenarioConfig(

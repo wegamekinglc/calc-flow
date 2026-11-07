@@ -678,5 +678,20 @@ The first failed-attempt assertions already passed: guard count 1, guard slots
 3, and unchanged installed state, cache credit and output sequence. The
 subsequent test-only correction replays the same five-row Arrow batch and
 keeps all expected assertions: transitions 18, guard count 2 and COW slots 8.
-No runtime code or threshold changed. This corrected test has not yet been
-recompiled or executed; do not describe the final focused check as green.
+No runtime code or threshold changed. The corrected retry passed in the
+13-test focused run for the production tree published as `37e7d7d`, including
+the unchanged transitions 18, guard count 2 and COW slots 8 assertions.
+
+The subsequent library-and-tests Clippy run found test-style issues, retained
+in `target/p2-decay-codacy-clippy-tests.log`. Test-only fixes use exact bit
+comparisons and borrowed fixture/assertion helpers without moving allocation
+owners or weakening assertions. Final scoped Clippy passed in 2m24s
+(`target/p2-decay-tests-clippy-green.log`). The four directly affected tests
+then passed after a 4m06s build and 0.01s execution
+(`target/p2-decay-tests-focused-green.log`). Independent review verified those
+terminal logs and unchanged reviewed source/harness hashes.
+
+The exact twelve-field and metric-overflow evidence guards also passed their
+focused RED/GREEN checks. Source/harness review is clear for a frozen candidate
+build after final publication and that commit's Codacy verification. No native
+performance measurement or final CI/merge acceptance is claimed here.
