@@ -952,7 +952,11 @@ filtering. Evaluation uses the planned output schema and SQL visible-slice
 collection limits. The cache holds at most eight templates and no input rows;
 filter buffers belong to each call. Selected UDFs, non-immutable functions,
 non-row-local plans, limits, ordered scans and unsupported templates retain the
-SQL path. Compiled evaluation checks cancellation/deadlines at record boundaries
+SQL path. SQL fallback calls bind the same input-free physical-plan templates
+as explicit batch plans when the query, aliases, exact schemas and effective
+partition count match a plan made only of data-independent operators over
+in-memory scans; joins plan every call. Compiled evaluation checks
+cancellation/deadlines at record boundaries
 and before emission, yielding between multiple input record batches. Private
 stream SQL-query metrics describe only SQL fallback calls. Runner callback
 metrics cover both execution paths.

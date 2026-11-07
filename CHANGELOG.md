@@ -9,6 +9,24 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-07: Extend input-free DataFusion query templates from single-table
+  row-local plans to multi-table immutable plans built only from
+  data-independent operators (projections, filters, aggregates, unions,
+  sorts, repartitions) over in-memory scans; joins keep planning every run
+  because their build side follows statistics, and limited queries keep
+  planning because top-k operators carry execution-updated pruning filters.
+  Template reuse is
+  keyed by query text, aliases, exact schemas, and each run's effective
+  partition count, and the fixed policy now shares the plan-level cache at
+  any partition count. In a two-input state-feedback stock-positions probe
+  (`UNION ALL` plus grouped `SUM`, one million rows, 100x100 keys, pinned
+  four CPUs, two rounds of five alternating pairs), repeated batch SQL
+  execution improved -41.03% (1,000-row batches, fixed p1), -33.37%
+  (10,000-row batches, fixed p1), -27.76% (1,000-row batches, fixed p4), and
+  -12.84% (100,000-row batches, fixed p1), with physical planning counts
+  falling from one plan per batch to one plan total; all four paired
+  verdicts were `improved` and outputs matched an independent accumulator.
+
 - 2026-11-07: Share snapshot key columns across repeated compact-SQL
   snapshots. Group slots are append-only and group keys never change, so the
   key columns of a sealed output chunk are rebuilt in every full snapshot for

@@ -1,13 +1,15 @@
-//! Reusable physical plans for repeated single-table row-local queries.
+//! Reusable physical plans for repeated read-only queries.
 //!
-//! Stream operators run the same read-only query over every batch. When the
-//! planned physical tree contains only data-independent row-local nodes over
-//! one in-memory scan, and every function is immutable, the plan is kept as a
-//! template. Later batches with the same query text, alias, and exact schema
-//! reuse the template instead of parsing, registering, and planning again.
-//! Finite SQL queries bind rows into a fresh plan tree with fresh execution
-//! metrics. Eligible stream expressions and row-local stream SQL compile the
-//! template into immutable steps with filtering state owned by each evaluation.
+//! Stream operators and repeated batch runs execute the same read-only query
+//! over every batch. When the planned physical tree contains only
+//! data-independent operators over in-memory scans of the registered tables,
+//! and every function is immutable, the plan is kept as a template. Later
+//! runs with the same query text, aliases, exact schemas, and partition count
+//! bind their rows into the cached tree instead of registering tables and
+//! planning again. Finite SQL queries bind rows into a fresh plan tree with
+//! fresh execution metrics. Eligible single-table stream expressions and
+//! row-local stream SQL compile the template into immutable steps with
+//! filtering state owned by each evaluation.
 
 use std::{
     collections::BTreeMap,
@@ -23,11 +25,20 @@ use datafusion::{
     },
     error::{DataFusionError, Result as DataFusionResult},
     logical_expr::{Expr, LogicalPlan, Volatility},
-    physical_plan::{ExecutionPlan, filter::FilterExec, projection::ProjectionExec},
+    physical_plan::{
+        ExecutionPlan,
+        aggregates::AggregateExec,
+        coalesce_partitions::CoalescePartitionsExec,
+        filter::FilterExec,
+        projection::ProjectionExec,
+        repartition::RepartitionExec,
+        sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
+        union::{InterleaveExec, UnionExec},
+    },
 };
 use parking_lot::Mutex;
 
-use crate::Batch;
+use crate::{Batch, datafusion::split_record_batches};
 
 mod compiled;
 pub(crate) use compiled::CompiledExpression;
@@ -37,11 +48,15 @@ pub(crate) use compiled::check_arrow_error_envelope;
 /// Bounded so a runtime planning many distinct queries keeps constant memory.
 const MAX_TEMPLATES: usize = 8;
 
-/// One cached single-table physical plan and its diagnostic plan text.
+/// One cached physical plan, its input identity, and diagnostic plan text.
 pub(crate) struct QueryTemplate {
     query: String,
-    alias: String,
-    schema: SchemaRef,
+    /// Registered aliases with their exact schemas, in alias order.
+    inputs: Vec<(String, SchemaRef)>,
+    partitions: usize,
+    /// The alias and partition count of each in-memory scan, in plan
+    /// traversal order.
+    scans: Vec<(String, usize)>,
     plan: Arc<dyn ExecutionPlan>,
     pub(crate) logical_plan: String,
     pub(crate) physical_plan_text: String,
@@ -49,21 +64,58 @@ pub(crate) struct QueryTemplate {
 }
 
 impl QueryTemplate {
+    /// Compiled row-local steps for a single-table template, when eligible.
     pub(crate) fn compiled_expression(&self) -> Option<Arc<CompiledExpression>> {
+        if self.inputs.len() != 1 {
+            return None;
+        }
         self.compiled
             .get_or_init(|| CompiledExpression::try_new(&self.plan).map(Arc::new))
             .clone()
     }
 
-    /// Returns a fresh plan tree reading `batches` in the template's scan.
-    pub(crate) fn bind(&self, batches: &[RecordBatch]) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+    /// Returns a fresh plan tree whose scans read each alias's current rows.
+    pub(crate) fn bind(
+        &self,
+        tables: &BTreeMap<String, Batch>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        let mut scans = self.scans.iter();
         Arc::clone(&self.plan)
-            .transform_up(|node| rebind_scan(node, batches))
+            .transform_up(|node| {
+                if memory_scan(node.as_ref()).is_none() {
+                    return Ok(Transformed::no(node));
+                }
+                let scan = scans.next().ok_or_else(|| {
+                    DataFusionError::Internal("reusable query template scan count changed".into())
+                })?;
+                let table = tables
+                    .get(scan.0.as_str())
+                    .and_then(|batch| batch.table_payload().ok())
+                    .ok_or_else(|| {
+                        DataFusionError::Internal(format!(
+                            "reusable query template input {} is not a registered table",
+                            scan.0
+                        ))
+                    })?;
+                rebind_scan(node, table.batches(), scan.1)
+            })
             .map(|transformed| transformed.data)
     }
 
-    fn matches(&self, query: &str, alias: &str, schema: &SchemaRef) -> bool {
-        self.query == query && self.alias == alias && self.schema == *schema
+    fn matches(&self, query: &str, tables: &BTreeMap<String, Batch>, partitions: usize) -> bool {
+        self.query == query
+            && self.partitions == partitions
+            && self.inputs.len() == tables.len()
+            && self
+                .inputs
+                .iter()
+                .zip(tables)
+                .all(|((alias, schema), (name, batch))| {
+                    alias == name
+                        && batch
+                            .table_payload()
+                            .is_ok_and(|table| table.schema() == schema)
+                })
     }
 }
 
@@ -71,6 +123,7 @@ impl QueryTemplate {
 pub(crate) struct TemplateCandidate<'a> {
     pub(crate) query: &'a str,
     pub(crate) tables: &'a BTreeMap<String, Batch>,
+    pub(crate) partitions: usize,
     pub(crate) logical: &'a LogicalPlan,
     pub(crate) physical: &'a Arc<dyn ExecutionPlan>,
     pub(crate) logical_plan: &'a str,
@@ -84,19 +137,18 @@ pub(crate) struct QueryTemplates {
 }
 
 impl QueryTemplates {
-    /// Finds a template for a single-table query and returns its table rows.
-    pub(crate) fn find<'a>(
+    /// Finds the template planned for these aliases, schemas, and partitions.
+    pub(crate) fn find(
         &self,
         query: &str,
-        tables: &'a BTreeMap<String, Batch>,
-    ) -> Option<(Arc<QueryTemplate>, &'a [RecordBatch])> {
-        let (alias, batch) = single_table(tables)?;
-        let table = batch.table_payload().ok()?;
+        tables: &BTreeMap<String, Batch>,
+        partitions: usize,
+    ) -> Option<Arc<QueryTemplate>> {
         self.entries
             .lock()
             .iter()
-            .find(|template| template.matches(query, alias, table.schema()))
-            .map(|template| (Arc::clone(template), table.batches()))
+            .find(|template| template.matches(query, tables, partitions))
+            .cloned()
     }
 
     /// Captures an eligible plan; ineligible plans are ignored.
@@ -144,29 +196,35 @@ impl QueryTemplates {
     }
 }
 
-fn single_table(tables: &BTreeMap<String, Batch>) -> Option<(&str, &Batch)> {
-    let mut entries = tables.iter();
-    let (alias, batch) = entries.next()?;
-    entries.next().is_none().then_some((alias.as_str(), batch))
-}
-
 fn template_for(candidate: &TemplateCandidate<'_>) -> Option<QueryTemplate> {
-    let (alias, batch) = single_table(candidate.tables)?;
-    let schema = Arc::clone(batch.table_payload().ok()?.schema());
-    let eligible = only_immutable_functions(candidate.logical)
-        && reusable_tree(candidate.physical.as_ref(), &schema);
+    let inputs = candidate
+        .tables
+        .iter()
+        .map(|(alias, batch)| {
+            let schema = Arc::clone(batch.table_payload().ok()?.schema());
+            Some((alias.clone(), schema))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let eligible =
+        only_immutable_functions(candidate.logical) && reusable_tree(candidate.physical.as_ref());
     if !eligible {
         return None;
     }
-    // An empty scan keeps the cached tree from retaining the first input rows.
+    let scans = scan_bindings(candidate.physical, candidate.tables)?;
+    // Empty scans keep the cached tree from retaining the first input rows.
     let plan = Arc::clone(candidate.physical)
-        .transform_up(|node| rebind_scan(node, &[]))
+        .transform_up(|node| {
+            let partitions =
+                memory_scan(node.as_ref()).map_or(1, |scan| scan.partitions().len().max(1));
+            rebind_scan(node, &[], partitions)
+        })
         .ok()?
         .data;
     Some(QueryTemplate {
         query: candidate.query.to_owned(),
-        alias: alias.to_owned(),
-        schema,
+        inputs,
+        partitions: candidate.partitions,
+        scans,
         plan,
         logical_plan: candidate.logical_plan.to_owned(),
         physical_plan_text: candidate.physical_plan_text.to_owned(),
@@ -192,11 +250,15 @@ fn only_immutable_functions(plan: &LogicalPlan) -> bool {
     immutable
 }
 
-/// Registered scalar UDFs are `Expr::ScalarFunction` in `DataFusion` 54. Any
-/// expression kind outside the known row-local set is treated as mutable.
+/// Registered scalar UDFs are `Expr::ScalarFunction` and aggregates are
+/// `Expr::AggregateFunction` in `DataFusion` 55. Any expression kind outside
+/// the known data-independent set is treated as mutable.
 fn mutable_function(expr: &Expr) -> bool {
     match expr {
         Expr::ScalarFunction(function) => {
+            function.func.signature().volatility != Volatility::Immutable
+        }
+        Expr::AggregateFunction(function) => {
             function.func.signature().volatility != Volatility::Immutable
         }
         _ => !row_local_expression(expr),
@@ -230,16 +292,101 @@ fn row_local_expression(expr: &Expr) -> bool {
     )
 }
 
-/// Accepts only data-independent row-local operators over exactly one
-/// in-memory scan of the registered table schema.
-fn reusable_tree(plan: &dyn ExecutionPlan, schema: &SchemaRef) -> bool {
+/// Accepts only data-independent operators whose leaves are in-memory scans
+/// without scan orderings. Operators carrying a fetch limit are rejected:
+/// `DataFusion` 55 gives top-k sorts and limited aggregates dynamic filters
+/// whose pruning bounds are updated by execution and shared through
+/// `with_new_children`, so a bound tree would prune later rows against the
+/// bounds of an earlier run.
+fn reusable_tree(plan: &dyn ExecutionPlan) -> bool {
     if let Some(scan) = memory_scan(plan) {
-        return scan.original_schema() == *schema && scan.partitions().len() == 1;
+        return scan.sort_information().is_empty();
     }
-    let row_local = plan.downcast_ref::<ProjectionExec>().is_some()
-        || plan.downcast_ref::<FilterExec>().is_some();
     let children = plan.children();
-    row_local && children.len() == 1 && reusable_tree(children[0].as_ref(), schema)
+    plan.fetch().is_none()
+        && data_independent_operator(plan)
+        && !children.is_empty()
+        && children.iter().all(|child| reusable_tree(child.as_ref()))
+}
+
+/// Operators whose planned state depends only on the query and session
+/// configuration, never on the rows registered when the plan was captured.
+/// Joins stay excluded because their build side is chosen from statistics.
+fn data_independent_operator(plan: &dyn ExecutionPlan) -> bool {
+    const OPERATORS: [fn(&dyn ExecutionPlan) -> bool; 9] = [
+        is_operator::<ProjectionExec>,
+        is_operator::<FilterExec>,
+        is_operator::<AggregateExec>,
+        is_operator::<UnionExec>,
+        is_operator::<InterleaveExec>,
+        is_operator::<CoalescePartitionsExec>,
+        is_operator::<RepartitionExec>,
+        is_operator::<SortExec>,
+        is_operator::<SortPreservingMergeExec>,
+    ];
+    OPERATORS.iter().any(|is_operator| is_operator(plan))
+}
+
+fn is_operator<T: ExecutionPlan>(plan: &dyn ExecutionPlan) -> bool {
+    plan.downcast_ref::<T>().is_some()
+}
+
+/// Attributes each in-memory scan, in plan traversal order, to the registered
+/// alias whose rows it reads, with the scan's partition count. A scan that
+/// does not read exactly one alias's rows makes the plan ineligible.
+fn scan_bindings(
+    plan: &Arc<dyn ExecutionPlan>,
+    tables: &BTreeMap<String, Batch>,
+) -> Option<Vec<(String, usize)>> {
+    let mut bindings = Vec::new();
+    let mut attributable = true;
+    let _ = plan.apply(|node| {
+        let Some(scan) = memory_scan(node.as_ref()) else {
+            return Ok(TreeNodeRecursion::Continue);
+        };
+        let Some(alias) = scan_alias(scan, tables) else {
+            attributable = false;
+            return Ok(TreeNodeRecursion::Stop);
+        };
+        bindings.push((alias, scan.partitions().len().max(1)));
+        Ok(TreeNodeRecursion::Continue)
+    });
+    attributable.then_some(bindings)
+}
+
+/// Registered rows reach the scan as shared Arrow arrays, so the first column
+/// of every batch identifies the alias without comparing values. A scan whose
+/// batches carry no columns is attributed by its unique schema and row layout
+/// instead. All of a scan's batches must be the registered batches of exactly
+/// one alias, in the same order.
+fn scan_alias(scan: &MemorySourceConfig, tables: &BTreeMap<String, Batch>) -> Option<String> {
+    let batches = scan.partitions().iter().flatten().collect::<Vec<_>>();
+    if batches.is_empty() {
+        return None;
+    }
+    let mut matches = tables.iter().filter(|(_, batch)| {
+        batch.table_payload().is_ok_and(|table| {
+            *table.schema() == scan.original_schema()
+                && table.batches().len() == batches.len()
+                && table
+                    .batches()
+                    .iter()
+                    .zip(&batches)
+                    .all(|(registered, scanned)| same_batch(registered, scanned))
+        })
+    });
+    let (alias, _) = matches.next()?;
+    matches.next().is_none().then(|| alias.clone())
+}
+
+/// Batches with columns are the same when they share their first array;
+/// column-less batches can only be compared by row count.
+fn same_batch(registered: &RecordBatch, scanned: &RecordBatch) -> bool {
+    match (registered.columns().first(), scanned.columns().first()) {
+        (Some(registered), Some(scanned)) => Arc::ptr_eq(registered, scanned),
+        (None, None) => registered.num_rows() == scanned.num_rows(),
+        _ => false,
+    }
 }
 
 fn memory_scan(plan: &dyn ExecutionPlan) -> Option<&MemorySourceConfig> {
@@ -251,6 +398,7 @@ fn memory_scan(plan: &dyn ExecutionPlan) -> Option<&MemorySourceConfig> {
 fn rebind_scan(
     node: Arc<dyn ExecutionPlan>,
     batches: &[RecordBatch],
+    partitions: usize,
 ) -> DataFusionResult<Transformed<Arc<dyn ExecutionPlan>>> {
     let Some(scan) = memory_scan(node.as_ref()) else {
         return Ok(Transformed::no(node));
@@ -261,7 +409,7 @@ fn rebind_scan(
         ));
     }
     let source = MemorySourceConfig::try_new(
-        &[batches.to_vec()],
+        &split_record_batches(batches, partitions.max(1)),
         scan.original_schema(),
         scan.projection().clone(),
     )?

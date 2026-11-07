@@ -214,14 +214,19 @@ plans are neither reused nor reset. Use explicit plans for snapshot/restore/rese
 state reuse, timings, and DataFusion metrics.
 
 Explicit batch plans also retain up to eight input-free DataFusion query templates
-for repeated single-table, immutable filter/projection queries with a fixed
-single-partition policy. Reuse requires the same query, alias and exact Arrow
-schema, including metadata. The compiled graph owns its configuration and UDF
+for repeated immutable queries whose physical plans contain only
+data-independent operators (projections, filters, aggregates, unions, sorts
+and repartitions) over in-memory scans of the registered tables. Joins keep
+planning every run because their build side is chosen from statistics, and
+limited queries keep planning because top-k operators carry execution-updated
+pruning filters.
+Reuse requires the same query, aliases, exact Arrow schemas including metadata,
+and effective partition count. The compiled graph owns its configuration and UDF
 snapshot; templates are private to that graph. Each execution binds new input
 rows into a fresh physical tree and retains its own session, memory accounting,
-metrics and cancellation. Other partition policies and ineligible queries retain
-normal planning. The first execution prepares the template; convenience
-collection calls keep creating fresh plans as described above.
+metrics and cancellation. Ineligible queries retain normal planning. The first
+execution prepares the template; convenience collection calls keep creating
+fresh plans as described above.
 
 Project export saves the native graph and data-only input placeholders. It does
 not save data, builder functions, Python expression objects, logical aliases, or
