@@ -21,9 +21,30 @@ from typing import Any
 import numpy as np
 
 try:
-    from scripts.toolkit import sha256_file, wheel_native_sha256, worker_environment
+    from scripts.benchmark_suite.process import (
+        _complete_owned,
+        _raise_command_error,
+        stop,
+    )
+    from scripts.toolkit import (
+        sha256_file,
+        wheel_native_sha256,
+        worker_environment,
+        write_json,
+    )
 except ImportError:  # direct execution puts only scripts/ on sys.path
-    from toolkit import sha256_file, wheel_native_sha256, worker_environment
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from scripts.benchmark_suite.process import (
+        _complete_owned,
+        _raise_command_error,
+        stop,
+    )
+    from scripts.toolkit import (
+        sha256_file,
+        wheel_native_sha256,
+        worker_environment,
+        write_json,
+    )
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 HISTORY_ROWS = (10_240, 102_400, 1_024_000, 10_240_000)
@@ -314,6 +335,7 @@ class Worker:
 
     def __init__(self, process: asyncio.subprocess.Process) -> None:
         self.process = process
+        self.close_receipt: dict[str, Any] | None = None
 
     @classmethod
     async def start(
@@ -335,7 +357,14 @@ class Worker:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        await _command_output(installer)
+        try:
+            await _command_output(installer)
+        except BaseException as error:
+            try:
+                await _complete_owned(asyncio.create_task(stop(installer)))
+            except BaseException as cleanup_error:
+                _raise_command_error(error, cleanup_error)
+            raise
         env = _python_environment(
             _configured_worker_environment(
                 dict(
@@ -375,15 +404,68 @@ class Worker:
             raise RuntimeError(parsed["error"])
         return parsed
 
-    async def close(self) -> None:
-        if self.process.returncode is None:
+    async def close(self) -> dict[str, Any]:
+        self.close_receipt = {
+            "pid": self.process.pid,
+            "exit_code": None,
+            "reaped": False,
+            "close_result": "pending",
+        }
+        try:
             if self.process.stdin is not None:
                 self.process.stdin.close()
+            code, result = await _wait_for_worker_exit(self.process)
+        except BaseException as error:
             try:
-                await asyncio.wait_for(self.process.wait(), timeout=30)
-            except TimeoutError:
-                self.process.terminate()
-                await self.process.wait()
+                await _complete_owned(asyncio.create_task(stop(self.process)))
+            except BaseException as cleanup_error:
+                _raise_command_error(error, cleanup_error)
+            self.close_receipt = {
+                **self.close_receipt,
+                "exit_code": await self.process.wait(),
+                "reaped": True,
+                "close_result": "aborted",
+            }
+            raise
+        self.close_receipt = {
+            **self.close_receipt,
+            "exit_code": code,
+            "reaped": True,
+            "close_result": result,
+        }
+        _require_worker_exit(self.close_receipt)
+        return self.close_receipt
+
+
+async def _wait_for_worker_exit(process) -> tuple[int, str]:
+    try:
+        return await asyncio.wait_for(process.wait(), timeout=30), "normal"
+    except TimeoutError:
+        await stop(process)
+        return await process.wait(), "terminated"
+
+
+def _require_worker_exit(receipt) -> None:
+    if not isinstance(receipt, dict):
+        raise ValueError("missing worker exit receipt")
+    pid = receipt.get("pid")
+    if type(pid) is not int or pid <= 0:
+        raise ValueError("invalid worker exit receipt PID")
+    valid = (
+        type(receipt.get("exit_code")) is int,
+        receipt.get("exit_code") == 0,
+        receipt.get("reaped") is True,
+        receipt.get("close_result") == "normal",
+    )
+    if not all(valid):
+        raise RuntimeError(f"worker did not close cleanly: {receipt}")
+
+
+def _require_worker_receipts(receipts) -> None:
+    if not isinstance(receipts, list) or len(receipts) != 2:
+        raise ValueError("two worker exit receipts are required")
+    for receipt in receipts:
+        _require_worker_exit(receipt)
 
 
 def _configured_worker_environment(
@@ -702,6 +784,39 @@ class WorkerPairOptions:
     thread_counts: tuple[int, int] | None = None
 
 
+async def _close_workers(workers, path):
+    results = await asyncio.gather(
+        *(worker.close() for worker in workers), return_exceptions=True
+    )
+    receipts = [getattr(worker, "close_receipt", None) for worker in workers]
+    write_json(
+        path,
+        {
+            "workers": receipts,
+            "close_errors": [
+                repr(result) if isinstance(result, BaseException) else None
+                for result in results
+            ],
+        },
+    )
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+    return receipts
+
+
+async def _owned_close_workers(workers, path):
+    task = asyncio.create_task(_close_workers(workers, path))
+    try:
+        return await asyncio.shield(task)
+    except BaseException as error:
+        try:
+            await _complete_owned(task)
+        except BaseException as cleanup_error:
+            _raise_command_error(error, cleanup_error)
+        raise
+
+
 async def _fresh_case(
     manifests: list[dict[str, Any]],
     config: dict[str, Any],
@@ -714,6 +829,8 @@ async def _fresh_case(
     with tempfile.TemporaryDirectory(
         prefix="warm-paired-", dir=options.directory
     ) as temporary:
+        receipt_path = options.directory / f"{Path(temporary).name}-workers.json"
+        primary_error = None
         try:
             for index, manifest in enumerate(manifests):
                 root = Path(temporary) / str(index)
@@ -724,10 +841,22 @@ async def _fresh_case(
                 workers, manifests, thread_counts=thread_counts
             )
             case = await _measure_case(workers, config, samples, collect_gc)
-            return case, environments
+        except BaseException as error:
+            primary_error = error
+            raise
         finally:
-            for worker in workers:
-                await worker.close()
+            try:
+                receipts = await _owned_close_workers(workers, receipt_path)
+            except BaseException as cleanup_error:
+                if primary_error is not None:
+                    _raise_command_error(primary_error, cleanup_error)
+                raise
+        _require_worker_receipts(receipts)
+        return {
+            **case,
+            "worker_receipts": receipts,
+            "worker_receipt_path": str(receipt_path.resolve()),
+        }, environments
 
 
 def _validate_scheduler_builds(

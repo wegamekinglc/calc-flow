@@ -1198,7 +1198,7 @@ pub(super) fn build_typed_stream_output(
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
         build_input_record(rows, input_schema, node_id)?
     };
-    let mut update = prepare_typed_stream(compiled, &prior, &input, node_id, observer)?;
+    let mut update = prepare_typed_stream(compiled, &prior, &input, histories, node_id, observer)?;
     let columns = update.take_columns();
     let record = {
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
@@ -1219,12 +1219,13 @@ fn prepare_typed_stream(
     compiled: &CompiledRollingSpec,
     prior: &RollingKernelState,
     input: &RecordBatch,
+    histories: &RollingHistories,
     node_id: &str,
     observer: Option<&RollingMetricsRecorder>,
 ) -> Result<StreamKernelUpdate> {
     compiled
         .kernel_plan
-        .prepare_stream(prior, input, node_id, observer)?
+        .prepare_stream_with_history(prior, input, Some(histories), node_id, observer)?
         .ok_or_else(|| {
             internal_error("typed rolling stream rows did not satisfy canonical ordering")
         })

@@ -44,6 +44,7 @@ EXPECTED_PRIMITIVES = (
     "argmax",
     "argmin",
     "unique_count",
+    "decay",
 )
 TRANSITIONS = {
     "numeric": "Numeric",

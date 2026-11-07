@@ -41,6 +41,7 @@ use crate::{
 };
 
 mod cumulative;
+mod decay;
 mod mean;
 use cumulative::TypedCumulativeState;
 mod sorted;
@@ -87,6 +88,7 @@ pub(super) struct RollingKernelPlan {
     estimated_state_bytes_per_entity: usize,
     fingerprint: String,
     checkpoint_fingerprint: Option<String>,
+    decay_pool: Option<Arc<dyn datafusion::execution::memory_pool::MemoryPool>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -259,6 +261,7 @@ impl OutputStorage {
 }
 
 enum TypedGroupInput {
+    DecayReference(Box<decay::ReferenceInput>),
     Single(Float64Array),
     Signed(Int64Array),
     Unsigned(UInt64Array),
@@ -538,6 +541,7 @@ impl RollingKernelPlan {
     /// Prepares a private ordered-buffer transition without cloning resident
     /// state for inactive entities. The caller has already validated order,
     /// duplicates, required values, and finality while buffering these columns.
+    #[cfg(test)]
     pub(super) fn prepare_ordered_stream(
         &self,
         state: &RollingKernelState,
@@ -545,8 +549,20 @@ impl RollingKernelPlan {
         node_id: &str,
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<StreamKernelUpdate> {
+        self.prepare_ordered_stream_with_history(state, input, None, node_id, observer)
+    }
+
+    pub(super) fn prepare_ordered_stream_with_history(
+        &self,
+        state: &RollingKernelState,
+        input: &RecordBatch,
+        histories: Option<&super::RollingHistories>,
+        node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
+    ) -> Result<StreamKernelUpdate> {
         let stream = self.prepare_ordered_stream_state(state, input, node_id, observer)?;
-        let fill = self.prepare_typed_fill(input, stream, node_id, observer)?;
+        let mut fill = self.prepare_typed_fill(input, stream, node_id, observer)?;
+        decay::prepare_inputs(self, &mut fill, input, histories, node_id, observer)?;
         self.finish_typed_fill(fill, node_id, observer)
             .map(|execution| StreamKernelUpdate { execution })
     }
@@ -690,7 +706,8 @@ impl RollingKernelPlan {
                 ),
             )
         });
-        let identity_reason = cumulative::legacy_fallback_reason(input_schema, window_groups);
+        let identity_reason = cumulative::legacy_fallback_reason(input_schema, window_groups)
+            .or_else(|| decay::legacy_fallback_reason(input_schema, outputs, window_groups));
         let fingerprint_input = KernelFingerprintInput {
             input_schema,
             state_layout_version,
@@ -709,6 +726,18 @@ impl RollingKernelPlan {
         let checkpoint_fingerprint = identity_reason
             .as_deref()
             .map(|reason| checkpoint_kernel_fingerprint(fingerprint_input, reason));
+        let decay_pool = groups
+            .iter()
+            .any(|group| {
+                matches!(
+                    group,
+                    TypedGroupPlan::Scan {
+                        kind: ScanKind::Decay,
+                        ..
+                    }
+                )
+            })
+            .then(decay::cache_pool);
         Self {
             version: ROLLING_KERNEL_PLAN_VERSION,
             state_layout_version,
@@ -726,7 +755,25 @@ impl RollingKernelPlan {
             estimated_state_bytes_per_entity,
             fingerprint,
             checkpoint_fingerprint,
+            decay_pool,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn decay_pool_for_test(
+        &self,
+    ) -> Arc<dyn datafusion::execution::memory_pool::MemoryPool> {
+        self.decay_pool
+            .as_ref()
+            .expect("decay plan owns a cache pool")
+            .clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_decay_pool_for_test(&mut self, bytes: usize) {
+        self.decay_pool = Some(Arc::new(
+            datafusion::execution::memory_pool::GreedyMemoryPool::new(bytes),
+        ));
     }
 
     pub(super) const fn selection(&self) -> KernelSelection {
@@ -955,6 +1002,7 @@ impl RollingKernelPlan {
     /// Watermark delivery can split equal event-time peers across envelopes,
     /// so only the current finalized batch has a global canonical-order proof.
     /// Per-entity transition order remains guaranteed by the rolling buffer.
+    #[cfg(test)]
     pub(super) fn prepare_stream(
         &self,
         state: &RollingKernelState,
@@ -962,11 +1010,25 @@ impl RollingKernelPlan {
         node_id: &str,
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<Option<StreamKernelUpdate>> {
+        self.prepare_stream_with_history(state, input, None, node_id, observer)
+    }
+
+    pub(super) fn prepare_stream_with_history(
+        &self,
+        state: &RollingKernelState,
+        input: &RecordBatch,
+        histories: Option<&super::RollingHistories>,
+        node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
+    ) -> Result<Option<StreamKernelUpdate>> {
         let Some(proof) = self.prove_batch(state, input, false, node_id, observer)? else {
             return Ok(None);
         };
         let resolved = self.prepare_touched_entities(state, input, node_id, observer)?;
-        self.fill_typed(input, proof.prepare(resolved, input), node_id, observer)
+        let mut fill =
+            self.prepare_typed_fill(input, proof.prepare(resolved, input), node_id, observer)?;
+        decay::prepare_inputs(self, &mut fill, input, histories, node_id, observer)?;
+        self.finish_typed_fill(fill, node_id, observer)
             .map(|execution| Some(StreamKernelUpdate { execution }))
     }
 
@@ -1173,7 +1235,8 @@ impl RollingKernelPlan {
         node_id: &str,
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<RollingKernelExecution> {
-        let fill = self.prepare_typed_fill(input, stream, node_id, observer)?;
+        let mut fill = self.prepare_typed_fill(input, stream, node_id, observer)?;
+        decay::prepare_inputs(self, &mut fill, input, None, node_id, observer)?;
         self.finish_typed_fill(fill, node_id, observer)
     }
 
@@ -1230,28 +1293,26 @@ impl RollingKernelPlan {
             event_times: &event_times,
             entity_ids: &entity_ids,
         };
-        let (columns, kernel_ns, output_build_ns) = match mean::MeanKernel::compile(self) {
-            Some(kernel) => {
-                let kernel_start = Instant::now();
-                let _stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
-                let (columns, output_build_ns) = mean::fill_mean_rows(
-                    self,
-                    &kernel,
-                    inputs,
-                    &mut state.states,
-                    node_id,
-                    observer,
-                )?;
-                let elapsed = nanos(kernel_start.elapsed());
-                (
-                    columns,
-                    elapsed.saturating_sub(output_build_ns),
-                    output_build_ns,
-                )
+        let (columns, kernel_ns, output_build_ns) = if let Some(kernel) =
+            mean::MeanKernel::compile(self)
+        {
+            let kernel_start = Instant::now();
+            let _stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
+            let (columns, output_build_ns) =
+                mean::fill_mean_rows(self, &kernel, inputs, &mut state.states, node_id, observer)?;
+            let elapsed = nanos(kernel_start.elapsed());
+            (
+                columns,
+                elapsed.saturating_sub(output_build_ns),
+                output_build_ns,
+            )
+        } else {
+            let result =
+                self.fill_generic_columns(inputs, &mut state.states, row_count, node_id, observer);
+            if self.decay_pool.is_some() {
+                decay::record_work(&mut state.states, &entity_ids, &entity_rows, observer);
             }
-            None => {
-                self.fill_generic_columns(inputs, &mut state.states, row_count, node_id, observer)?
-            }
+            result?
         };
         let state_bytes = state
             .states
@@ -1561,7 +1622,14 @@ fn fill_typed_rows(
                 plan.nan_as_value,
                 node_id,
             )?;
-            append_typed_outputs(&plan.outputs, builders, entity, node_id)?;
+            append_typed_outputs(
+                &plan.outputs,
+                builders,
+                entity,
+                inputs.columns,
+                row_index,
+                node_id,
+            )?;
         }
         Ok(())
     })();
@@ -1598,10 +1666,21 @@ fn append_typed_outputs(
     outputs: &[TypedOutputPlan],
     builders: &mut [DerivedBuilder],
     entity: &TypedEntityState,
+    inputs: &[TypedGroupInput],
+    row_index: usize,
     node_id: &str,
 ) -> Result<()> {
     for (builder, output) in builders.iter_mut().zip(outputs) {
-        builder.append(&entity.groups, output, node_id)?;
+        if output.kind == TypedOutputKind::Scan(ScanKind::Decay)
+            && matches!(
+                entity.groups.get(output.group),
+                Some(TypedWindowState::Decay(None))
+            )
+        {
+            decay::append_reference(builder, output, &inputs[output.group], row_index)?;
+        } else {
+            builder.append(&entity.groups, output, node_id)?;
+        }
     }
     Ok(())
 }
@@ -1627,7 +1706,7 @@ fn compile_typed_plan(
             .max(1);
         if !matches!(
             scan.kind,
-            ScanKind::Argmax | ScanKind::Argmin | ScanKind::UniqueCount
+            ScanKind::Argmax | ScanKind::Argmin | ScanKind::UniqueCount | ScanKind::Decay
         ) {
             return Err("typed scan requires argmax, argmin, or unique_count".into());
         }
@@ -1839,7 +1918,11 @@ fn compile_scan_output(
     Ok(TypedOutputPlan {
         group,
         kind: TypedOutputKind::Scan(scan.kind),
-        storage: OutputStorage::Count,
+        storage: if scan.kind == ScanKind::Decay {
+            OutputStorage::Float64
+        } else {
+            OutputStorage::Count
+        },
         min_periods: scan.min_periods,
         ddof: 0,
     })
@@ -1850,6 +1933,7 @@ fn scan_primitive(kind: ScanKind) -> std::result::Result<&'static str, String> {
         ScanKind::Argmax => "argmax",
         ScanKind::Argmin => "argmin",
         ScanKind::UniqueCount => "unique_count",
+        ScanKind::Decay => "decay",
         _ => return Err("unsupported typed scan".into()),
     })
 }
@@ -2341,6 +2425,7 @@ enum TypedWindowState {
     Pair(Float64PairState),
     Ewma(TypedEwmaState),
     Scan(TypedScanState),
+    Decay(Option<Arc<decay::OwnedDecay>>),
 }
 
 #[derive(Clone, Debug)]
@@ -2396,6 +2481,10 @@ impl TypedWindowState {
             TypedGroupPlan::Ewma {
                 alpha, cumulative, ..
             } => Self::Ewma(TypedEwmaState::new(alpha, cumulative)),
+            TypedGroupPlan::Scan {
+                kind: ScanKind::Decay,
+                ..
+            } => Self::Decay(None),
             TypedGroupPlan::Scan { kind, window, .. } => {
                 Self::Scan(TypedScanState::new(kind, window))
             }
@@ -2444,6 +2533,19 @@ impl TypedWindowState {
             (Self::Scan(state), TypedGroupInput::Single(input)) => {
                 state.update(valid_float64(input, row_index, false), node_id)
             }
+            (Self::Decay(state), input) => {
+                if let Some(state) = state {
+                    let values = match input {
+                        TypedGroupInput::Single(values) => values,
+                        TypedGroupInput::DecayReference(reference) => &reference.source,
+                        _ => return Err(internal_error("typed decay input mismatch")),
+                    };
+                    Arc::get_mut(state)
+                        .expect("decay cache is privately admitted before fill")
+                        .advance(valid_float64(values, row_index, false));
+                }
+                Ok(())
+            }
             _ => Err(internal_error(
                 "typed rolling group state does not match its input plan",
             )),
@@ -2458,6 +2560,7 @@ impl TypedWindowState {
             | Self::Extrema(_)
             | Self::Ewma(_)
             | Self::Scan(_)
+            | Self::Decay(_)
             | Self::Cumulative(_) => Ok(()),
         }
     }
@@ -2473,6 +2576,7 @@ impl TypedWindowState {
             Self::Scan(state) => {
                 size_of::<TypedScanState>().saturating_add(state.scan.estimated_bytes())
             }
+            Self::Decay(state) => state.as_ref().map_or(0, |state| state.bytes()),
         }
     }
 }
@@ -2515,7 +2619,7 @@ fn update_extrema_input(
         TypedGroupInput::Unsigned(input) => input
             .is_valid(row)
             .then(|| ExtremaValue::Unsigned(input.value(row))),
-        TypedGroupInput::Pair(..) => {
+        TypedGroupInput::Pair(..) | TypedGroupInput::DecayReference(_) => {
             return Err(internal_error(
                 "typed rolling group state does not match its input plan",
             ));
@@ -3536,6 +3640,11 @@ impl DerivedBuilder {
         let state = states
             .get(output.group)
             .ok_or_else(|| internal_error("typed rolling output group is out of bounds"))?;
+        if matches!(state, TypedWindowState::Decay(None)) {
+            return Err(internal_error(
+                "reference decay requires its prepared input",
+            ));
+        }
         if typed_valid_count(state) < output.min_periods {
             self.append_null();
             return Ok(());
@@ -3557,6 +3666,16 @@ impl DerivedBuilder {
             TypedWindowState::Pair(state) => self.append_pair(state, output),
             TypedWindowState::Ewma(state) => self.append_ewma(state, output),
             TypedWindowState::Scan(state) => self.append_scan(state, output),
+            TypedWindowState::Decay(Some(state)) => match (self, output.kind) {
+                (Self::Float(builder, _), TypedOutputKind::Scan(ScanKind::Decay)) => {
+                    builder.append_option(state.latest);
+                    Ok(())
+                }
+                _ => Err(typed_output_mismatch()),
+            },
+            TypedWindowState::Decay(None) => Err(internal_error(
+                "reference decay requires its prepared input",
+            )),
         }
     }
 
@@ -3759,6 +3878,7 @@ fn typed_valid_count(state: &TypedWindowState) -> u64 {
         TypedWindowState::Scan(state) => {
             u64::try_from(state.scan.valid_count()).unwrap_or(u64::MAX)
         }
+        TypedWindowState::Decay(state) => state.as_ref().map_or(0, |state| state.valid_count()),
     }
 }
 
@@ -4191,6 +4311,7 @@ mod tests {
             estimated_state_bytes_per_entity: 0,
             fingerprint: "test-kernel".to_owned(),
             checkpoint_fingerprint: None,
+            decay_pool: None,
         }
     }
 

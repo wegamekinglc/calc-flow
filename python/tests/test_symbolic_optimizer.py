@@ -404,3 +404,30 @@ def test_explain_reports_fused_array_provider_and_copy_boundaries() -> None:
         "    providers output numpy:symbolic_matrix@1 calls_per_microbatch=1"
         in explanation
     )
+
+
+def test_decay_explain_uses_typed_scan_group_without_mutating_the_project() -> None:
+    output = {"kind": "decay", "input": "x", "frame": {"kind": "rows", "size": 20}}
+    assert _rolling_group_key(output) == ("scan", "decay", "x", "rows", 20)
+    assert _rolling_kernel_fallback(output, {"x": "float64"}) is None
+    quotes = _ordered()
+    features = quotes.with_columns(
+        FeatureSet((("weighted", ts.decay(quotes["x"], window=rows(20))),))
+    )
+    program = Program(
+        "decay-explain",
+        engine="sql",
+        inputs=(quotes,),
+        outputs=(("features", features),),
+    )
+    runtime = Runtime()
+    before = lower_program_document(program, runtime, "batch")
+    fingerprint = program.fingerprint
+    explanation = program.explain(runtime)
+    assert "selected=ordered_primitive" in explanation
+    assert "shared_state_groups=1" in explanation
+    assert "certified arithmetic O(1)/row" in explanation
+    assert "guard/reference O(W)/row" in explanation
+    assert "cache copy O(W)/entity/batch" in explanation
+    assert program.fingerprint == fingerprint
+    assert lower_program_document(program, runtime, "batch") == before

@@ -1,0 +1,39 @@
+{
+  "status": "complete, valid; performance acceptance passed; CI/review remain separate",
+  "cases": 4,
+  "pairs": 120,
+  "timed_appends": 240,
+  "native_job_lifetimes": 8,
+  "worker_lifetimes": 8,
+  "worker_evidence": "Four completed _fresh_case results; each creates two independent processes, awaits both closures and removes its temporary root. Maintained raw report does not persist individual worker PIDs or exit codes. All eight native terminal statuses are retained.",
+  "validated_output_rows_including_history": 192380,
+  "strict_decay_oracle_rtol": 1e-12,
+  "strict_decay_oracle_atol": 1e-12,
+  "all_240_sample_oracles_passed": true,
+  "sequence_and_identity_validation": "Every start row matches frozen fixtures; source/sink counters match exact rows and 31 batches per job; shared validator checks every identity column and output sequence.",
+  "all_native_terminals_completed_natural_end": true,
+  "all_terminal_tasks_errors_overflows_zero": true,
+  "all_12_field_candidate_counters_valid": true,
+  "raw_statistics_exactly_reproduced": true,
+  "post_build_source_helper_native_seals_valid": true,
+  "complete_harness_seals": 104,
+  "legacy_report_harness_seals": 4,
+  "baseline_native_work": "unavailable, not zero",
+  "remaining_owned_processes": [],
+  "collector_elapsed_seconds": 24.15686873497907,
+  "outer_elapsed_seconds": 25.345291340025142,
+  "attempts": 1,
+  "performance_retries": 0,
+  "acceptance": {
+    "accepted": true,
+    "confirmed_regressions": [],
+    "improved_targets": [
+      0,
+      1,
+      2
+    ]
+  },
+  "topology": "CPU CORE SOCKET ONLINE\n  0    0      0    yes\n  1    0      0    yes\n  2    1      0    yes\n  3    1      0    yes\n  4    2      0    yes\n  5    2      0    yes\n  6    3      0    yes\n  7    3      0    yes\n  8    4      0    yes\n  9    4      0    yes\n 10    5      0    yes\n 11    5      0    yes\n 12    6      0    yes\n 13    6      0    yes\n 14    7      0    yes\n 15    7      0    yes\n 16    8      0    yes\n 17    8      0    yes\n 18    9      0    yes\n 19    9      0    yes\n 20   10      0    yes\n 21   10      0    yes\n 22   11      0    yes\n 23   11      0    yes\n 24   12      0    yes\n 25   12      0    yes\n 26   13      0    yes\n 27   13      0    yes\n 28   14      0    yes\n 29   14      0    yes\n 30   15      0    yes\n 31   15      0    yes\n",
+  "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900HX",
+  "environment_limit": "WSL host scheduling/load/power unobservable; visible competing compiler/benchmark list empty; maintained warm contract, no standalone same-ref spread"
+}

@@ -1,3 +1,4 @@
+mod decay_tests;
 mod late;
 
 #[tokio::test]

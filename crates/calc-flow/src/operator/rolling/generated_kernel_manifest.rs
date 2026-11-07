@@ -196,6 +196,14 @@ pub(super) const GENERATED_KERNEL_CAPABILITIES: &[GeneratedKernelCapability] = &
         typed_transition: Some(GeneratedTransition::Scan),
         complexity: GeneratedComplexity::AmortizedConstant,
     },
+    GeneratedKernelCapability {
+        primitive: "decay",
+        batch: true,
+        stream: true,
+        datafusion: false,
+        typed_transition: Some(GeneratedTransition::Scan),
+        complexity: GeneratedComplexity::AmortizedConstant,
+    },
 ];
 
 pub(super) fn generated_kernel_capability(

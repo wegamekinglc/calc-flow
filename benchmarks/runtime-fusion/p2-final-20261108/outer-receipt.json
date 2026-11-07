@@ -1,0 +1,31 @@
+{
+  "collector_pid": 34207,
+  "exit_code": 0,
+  "collector_reaped": true,
+  "remaining_owned": [],
+  "observed_owned_pids": [
+    34207,
+    34239,
+    34271,
+    34330,
+    34369,
+    34371,
+    34443,
+    34509,
+    34548,
+    34589,
+    34756,
+    34758,
+    34797,
+    34928,
+    34967,
+    35008,
+    35115,
+    35126
+  ],
+  "cancel_reason": null,
+  "events": [],
+  "elapsed_seconds": 25.354389399988577,
+  "accepted_outer_completion": true,
+  "postseals_verified_inside_phase": true
+}

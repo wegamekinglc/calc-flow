@@ -1,0 +1,44 @@
+{
+  "status": "complete, valid; final-source performance acceptance passed; final CI/review remain separate",
+  "candidate": "cc6e33e00acd6a8f1feba7a7776f208c29e71638",
+  "cases": 4,
+  "pairs": 120,
+  "timed_appends": 240,
+  "distinct_worker_pids": [
+    34369,
+    34443,
+    34548,
+    34589,
+    34756,
+    34797,
+    34967,
+    35008
+  ],
+  "all_8_os_receipts_normal_reaped_exit0": true,
+  "all_8_native_terminals_completed_natural_end": true,
+  "all_terminal_tasks_errors_overflows_zero": true,
+  "strict_decay_rtol": 1e-12,
+  "strict_decay_atol": 1e-12,
+  "all_sample_oracles_sequence_identity_passed": true,
+  "validated_output_rows_including_history": 192380,
+  "all_12_field_candidate_work_counters_valid": true,
+  "statistics_recomputed_exactly": true,
+  "same_absolute_phase_postseals_passed": true,
+  "remaining_owned_processes": [],
+  "final_phase_seconds": 25.354389399988577,
+  "first_phase_seconds": 25.345291340025142,
+  "cumulative_measurement_seconds": 50.69968074001372,
+  "total_task_budget_seconds": 600,
+  "first_and_final_statistics_pooled": false,
+  "final_acquisitions": 1,
+  "favorable_retries": 0,
+  "acceptance": {
+    "accepted": true,
+    "confirmed_regressions": [],
+    "improved_targets": [
+      0,
+      1,
+      2
+    ]
+  }
+}

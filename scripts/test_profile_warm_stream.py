@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -22,6 +23,164 @@ import psutil  # noqa: E402
 from scripts import profile_warm_stream as profile  # noqa: E402
 from scripts import toolkit  # noqa: E402
 from scripts.profile_warm_stream import matrix_points, paired_summary  # noqa: E402
+
+
+def exit_worker(pid, code):
+    return profile.Worker(
+        SimpleNamespace(
+            pid=pid,
+            returncode=None,
+            stdin=Mock(),
+            wait=AsyncMock(return_value=code),
+            terminate=Mock(),
+        )
+    )
+
+
+async def fresh_workers(workers, directory, measurement):
+    with (
+        patch.object(profile.Worker, "start", AsyncMock(side_effect=workers)),
+        patch.object(profile, "_worker_environments", AsyncMock(return_value=[])),
+        patch.object(profile, "_measure_case", measurement),
+    ):
+        return await profile._fresh_case(
+            [{}, {}], {}, 2, False, profile.WorkerPairOptions(Path(directory))
+        )
+
+
+class WarmWorkerExitTests(unittest.IsolatedAsyncioTestCase):
+    async def test_installer_is_reaped_when_installation_is_cancelled(self):
+        entered = asyncio.Event()
+        installer = SimpleNamespace(returncode=None, terminate=Mock(), kill=Mock())
+
+        async def communicate():
+            entered.set()
+            await asyncio.Event().wait()
+
+        async def reap():
+            installer.returncode = -15
+            return -15
+
+        installer.communicate = AsyncMock(side_effect=communicate)
+        installer.wait = AsyncMock(side_effect=reap)
+        with tempfile.TemporaryDirectory() as directory:
+            wheel = Path(directory) / "test.whl"
+            wheel.touch()
+            with patch.object(
+                profile.asyncio,
+                "create_subprocess_exec",
+                AsyncMock(return_value=installer),
+            ) as spawn:
+                task = asyncio.create_task(
+                    profile.Worker.start({"wheel": str(wheel)}, Path(directory))
+                )
+                await entered.wait()
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+        installer.terminate.assert_called_once()
+        installer.wait.assert_awaited_once()
+        self.assertEqual(installer.returncode, -15)
+        self.assertEqual(spawn.await_count, 1)
+
+    async def test_parent_recancellation_still_reaps_both_workers(self):
+        entered = asyncio.Queue()
+        release = asyncio.Event()
+
+        async def wait():
+            entered.put_nowait(None)
+            await release.wait()
+            return 0
+
+        workers = [exit_worker(41, 0), exit_worker(42, 0)]
+        for worker in workers:
+            worker.process.wait.side_effect = wait
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receipts.json"
+            task = asyncio.create_task(profile._owned_close_workers(workers, path))
+            await entered.get()
+            await entered.get()
+            task.cancel("first cancellation")
+            await asyncio.sleep(0)
+            task.cancel("second cancellation")
+            await asyncio.sleep(0)
+            self.assertFalse(task.done())
+            release.set()
+            with self.assertRaisesRegex(asyncio.CancelledError, "first cancellation"):
+                await task
+            receipts = json.loads(path.read_text())["workers"]
+            self.assertEqual([r["pid"] for r in receipts], [41, 42])
+            self.assertTrue(all(r["reaped"] and r["exit_code"] == 0 for r in receipts))
+
+    async def test_normal_close_returns_actual_reaped_exit_receipt(self):
+        worker = exit_worker(41, 0)
+        self.assertEqual(
+            await worker.close(),
+            {"pid": 41, "exit_code": 0, "reaped": True, "close_result": "normal"},
+        )
+        worker.process.wait.assert_awaited_once()
+
+    async def test_normal_close_rejects_nonzero_exit(self):
+        worker = exit_worker(41, 7)
+        with self.assertRaisesRegex(RuntimeError, "close cleanly"):
+            await worker.close()
+
+    async def test_close_reaps_worker_when_stdin_close_fails(self):
+        worker = exit_worker(41, 0)
+        original = OSError("pipe close failed")
+        worker.process.stdin.close.side_effect = original
+        with (
+            patch.object(profile, "stop", AsyncMock()) as stop,
+            self.assertRaises(OSError) as caught,
+        ):
+            await worker.close()
+        self.assertIs(caught.exception, original)
+        stop.assert_awaited_once_with(worker.process)
+        self.assertTrue(worker.close_receipt["reaped"])
+
+    async def test_forced_close_cannot_pass_with_zero_exit(self):
+        worker = exit_worker(41, 0)
+        worker.process.wait.side_effect = [TimeoutError(), 0]
+        with (
+            patch.object(profile, "stop", AsyncMock(), create=True),
+            self.assertRaisesRegex(RuntimeError, "close cleanly"),
+        ):
+            await worker.close()
+
+    async def test_fresh_case_persists_both_successful_worker_receipts(self):
+        workers = [exit_worker(41, 0), exit_worker(42, 0)]
+        with tempfile.TemporaryDirectory() as directory:
+            case, environments = await fresh_workers(
+                workers, directory, AsyncMock(return_value={})
+            )
+            receipts = case["worker_receipts"]
+            self.assertEqual([r["pid"] for r in receipts], [41, 42])
+            self.assertEqual([r["exit_code"] for r in receipts], [0, 0])
+            journal = json.loads(Path(case["worker_receipt_path"]).read_text())
+            self.assertEqual(journal["workers"], receipts)
+            self.assertEqual(environments, [])
+
+    async def test_fresh_case_settles_second_worker_after_first_exit_failure(self):
+        workers = [exit_worker(41, 7), exit_worker(42, 0)]
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RuntimeError, "close cleanly"):
+                await fresh_workers(workers, directory, AsyncMock(return_value={}))
+            journal = json.loads(
+                next(Path(directory).glob("*-workers.json")).read_text()
+            )
+            self.assertEqual([r["exit_code"] for r in journal["workers"]], [7, 0])
+        for worker in workers:
+            worker.process.wait.assert_awaited_once()
+
+    async def test_fresh_case_preserves_measurement_error_after_exit_failure(self):
+        workers = [exit_worker(41, 7), exit_worker(42, 0)]
+        original = ValueError("invalid sample")
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(ValueError) as caught:
+                await fresh_workers(workers, directory, AsyncMock(side_effect=original))
+            self.assertIs(caught.exception, original)
+        for worker in workers:
+            worker.process.wait.assert_awaited_once()
 
 
 class WarmProfileTests(unittest.TestCase):
