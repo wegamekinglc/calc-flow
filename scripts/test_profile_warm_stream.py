@@ -25,6 +25,22 @@ from scripts.profile_warm_stream import matrix_points, paired_summary  # noqa: E
 
 
 class WarmProfileTests(unittest.TestCase):
+    def test_exact_matrix_does_not_add_the_default_history_sweep(self) -> None:
+        args = SimpleNamespace(
+            history_rows=[10_240],
+            append_rows=[64],
+            append_entities=None,
+            indicators=["rolling_mean", "rolling_mean_arithmetic_filter"],
+            gc_modes=["normal"],
+            seed=7,
+            exact_matrix=True,
+        )
+        cases = profile.matrix_cases(args)
+        self.assertEqual(len(cases), 2)
+        self.assertEqual({config["history_rows"] for config, _ in cases}, {10_240})
+        self.assertEqual({config["append_rows"] for config, _ in cases}, {64})
+        self.assertTrue(all("append_entities" not in config for config, _ in cases))
+
     def test_benchmark_wheel_name_comes_from_each_source_revision(self) -> None:
         for project_name in ("calc-flow", "calc-flow-python"):
             with tempfile.TemporaryDirectory() as temporary:

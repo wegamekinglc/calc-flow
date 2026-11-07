@@ -181,6 +181,17 @@ impl ExpressionOperator {
             .map(|(indices, _)| indices)
     }
 
+    pub(crate) fn is_fusible_stream_expression(
+        &self,
+        input: &SchemaRef,
+        output: Option<&SchemaRef>,
+    ) -> bool {
+        self.is_exact_column_projection(input, output)
+            || (self.input_ports[0].schema() == Some(input)
+                && self.output_ports[0].schema() == output
+                && self.stream_required_columns().is_some())
+    }
+
     pub(crate) fn stream_required_columns(&self) -> Option<Vec<usize>> {
         if let Some(columns) = self.stream_projection_columns() {
             return Some(columns);

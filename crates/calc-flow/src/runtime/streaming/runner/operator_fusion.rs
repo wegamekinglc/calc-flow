@@ -134,7 +134,7 @@ pub(super) fn eligible_pair(first: &RuntimeStreamNode, second: &RuntimeStreamNod
             else {
                 return false;
             };
-            if !operator.is_exact_column_projection(input, Some(output)) {
+            if !operator.is_fusible_stream_expression(input, Some(output)) {
                 return false;
             }
             Some(output.clone())
@@ -160,7 +160,7 @@ pub(super) fn eligible_pair(first: &RuntimeStreamNode, second: &RuntimeStreamNod
             .get("input")
             .and_then(|port| port.schema())
             == Some(input)
-        && expression.is_exact_column_projection(input, output.schema())
+        && expression.is_fusible_stream_expression(input, output.schema())
 }
 
 fn directly_connected(first: &RuntimeStreamNode, second: &RuntimeStreamNode) -> bool {
@@ -173,7 +173,7 @@ fn directly_connected(first: &RuntimeStreamNode, second: &RuntimeStreamNode) -> 
         || first.ingress_edges.len() != head_inputs
         || first.output_ports.len() != 1
         || first.output_edges.len() != 1
-        || !single_projection_consumer(second)
+        || !single_expression_consumer(second)
     {
         return false;
     }
@@ -183,12 +183,13 @@ fn directly_connected(first: &RuntimeStreamNode, second: &RuntimeStreamNode) -> 
     second.ingress_edges.get("input") == Some(edge)
 }
 
-fn single_projection_consumer(node: &RuntimeStreamNode) -> bool {
+fn single_expression_consumer(node: &RuntimeStreamNode) -> bool {
     node.input_ports.len() == 1 && node.ingress_edges.len() == 1 && node.output_ports.len() == 1
 }
 
 #[cfg(test)]
 mod tests {
+    mod row_local_tests;
     use std::{collections::BTreeMap, sync::Arc};
 
     use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -351,11 +352,11 @@ mod tests {
             "project",
             "",
             if variant == 8 {
-                vec!["price + 1 AS current".into(), "previous".into()]
+                vec!["random() AS current".into(), "previous".into()]
             } else {
                 vec!["price AS current".into(), "previous".into()]
             },
-            (variant == 9).then(|| "price IS NOT NULL".into()),
+            (variant == 9).then(|| "price IN (SELECT price FROM input)".into()),
             if variant == 10 {
                 vec![selected.clone()]
             } else {
@@ -376,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn fusion_rejects_unproved_schemas_computation_udfs_and_topology() {
+    fn fusion_rejects_unproved_schemas_nonlocal_queries_udfs_and_topology() {
         use crate::pipeline::CompiledStreamOperator;
 
         for variant in 0..13 {
@@ -681,13 +682,40 @@ mod tests {
         restores: BTreeMap<String, crate::runtime::streaming::operator_task::OperatorRestoreState>,
         transaction: Option<Arc<crate::state::ManifestTransaction>>,
     ) -> GraphHarness {
-        let mut parts = plan().into_runtime_parts(budget).unwrap();
+        graph_harness_for_plan(plan(), fused, budget, restores, transaction).await
+    }
+
+    async fn graph_harness_for_plan(
+        plan: StreamExecutionPlan,
+        fused: bool,
+        budget: EdgeBudget,
+        restores: BTreeMap<String, crate::runtime::streaming::operator_task::OperatorRestoreState>,
+        transaction: Option<Arc<crate::state::ManifestTransaction>>,
+    ) -> GraphHarness {
+        graph_harness_for_parts(
+            plan.into_runtime_parts(budget).unwrap(),
+            fused,
+            restores,
+            transaction,
+        )
+        .await
+    }
+
+    async fn graph_harness_for_parts(
+        mut parts: crate::pipeline::StreamRuntimePlanParts,
+        fused: bool,
+        restores: BTreeMap<String, crate::runtime::streaming::operator_task::OperatorRestoreState>,
+        transaction: Option<Arc<crate::state::ManifestTransaction>>,
+    ) -> GraphHarness {
+        let logical_nodes = parts.nodes.len();
         // A private unknown-schema proof selects the unchanged unfused route.
         if !fused {
-            parts.nodes[1].input_ports.insert(
-                "input".into(),
-                Port::new("input", BatchKind::Table, true, None).unwrap(),
-            );
+            for node in parts.nodes.iter_mut().skip(1) {
+                node.input_ports.insert(
+                    "input".into(),
+                    Port::new("input", BatchKind::Table, true, None).unwrap(),
+                );
+            }
         }
         let cancellation = CancellationToken::new();
         let context = StreamJobContext::new(
@@ -742,7 +770,7 @@ mod tests {
         };
         assert_eq!(
             runtime.supervisor.physical_driver_count(),
-            if fused { 1 } else { 2 }
+            if fused { 1 } else { logical_nodes }
         );
         assert_eq!(
             runtime.supervisor.ready_pair_spawn_count(),

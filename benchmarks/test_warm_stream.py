@@ -49,6 +49,35 @@ def test_warm_oracle_uses_only_window_context() -> None:
         assert np.isfinite(values).all()
 
 
+def test_warm_arithmetic_filter_validates_values_and_retained_identity() -> None:
+    config = ScenarioConfig(indicator="rolling_mean_arithmetic_filter")
+    start, rows = 1_024, 64
+    base = _segment(start, rows, 64)
+    mean = _expected(ScenarioConfig(), start=start, rows=rows)
+    selected = np.flatnonzero(np.arange(rows) < 32)
+    table = base.take(pa.array(selected)).append_column(
+        "arithmetic_mean", pa.array((mean * 2.0 + 1.0)[selected])
+    )
+    assert _validate_output(table, config, start=start, rows=rows)["passed"]
+    broken = table.set_column(4, "arithmetic_mean", pa.array(np.zeros(32)))
+    with pytest.raises(RuntimeError, match="correctness"):
+        _validate_output(broken, config, start=start, rows=rows)
+    with pytest.raises(RuntimeError, match="output rows"):
+        _validate_output(table.slice(1), config, start=start, rows=rows)
+    broken = table.set_column(1, "sequence", pa.array(np.zeros(32, dtype=np.uint64)))
+    with pytest.raises(RuntimeError, match="sequence"):
+        _validate_output(broken, config, start=start, rows=rows)
+
+
+def test_warm_arithmetic_filter_rejects_sparse_shape_before_start() -> None:
+    with pytest.raises(ValueError, match="full entity ticks"):
+        ScenarioConfig(
+            indicator="rolling_mean_arithmetic_filter",
+            append_rows=1,
+            append_entities=64,
+        )
+
+
 def test_warm_summary_reports_tail_latency_and_original_samples() -> None:
     samples = [0.001, 0.002, 0.003, 0.004]
     summary = _summary(samples, 64)
@@ -79,7 +108,10 @@ def test_warm_validation_rejects_changed_identity_and_values() -> None:
         _validate_output(broken, **kwargs)
 
 
-@pytest.mark.parametrize("indicator", ("rolling_mean", "dual_sma_spread"))
+@pytest.mark.parametrize(
+    "indicator",
+    ("rolling_mean", "dual_sma_spread", "rolling_mean_arithmetic_filter"),
+)
 def test_warm_scenario_advances_one_runner_and_validates_every_append(
     tmp_path, indicator
 ) -> None:

@@ -42,7 +42,7 @@ fn input_schema() -> SchemaRef {
     ))
 }
 
-fn asof() -> StreamAsofJoinOperator {
+pub(super) fn asof() -> StreamAsofJoinOperator {
     let side = |prefix: &str| {
         AsofJoinSide::new(
             vec!["symbol".into()],
@@ -281,7 +281,7 @@ async fn a13_nonadjacent_asof_chain_preserves_topological_logical_task_ids() {
     assert_eq!(observed.drivers, 2);
 }
 
-fn input_batch(left: bool) -> Batch {
+pub(super) fn input_batch(left: bool) -> Batch {
     let prices = if left {
         vec![Some(10.0), Some(20.0), None, Some(40.0)]
     } else {

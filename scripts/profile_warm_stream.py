@@ -69,7 +69,7 @@ def matrix_points(
 def matrix_cases(args: argparse.Namespace) -> list[tuple[dict[str, Any], str]]:
     points = (
         product(args.history_rows, args.append_rows)
-        if args.append_entities is not None
+        if args.append_entities is not None or getattr(args, "exact_matrix", False)
         else matrix_points(tuple(args.history_rows), tuple(args.append_rows))
     )
     cases = []
@@ -847,6 +847,11 @@ def main() -> None:
     paired.add_argument("--history-rows", type=int, nargs="*", default=HISTORY_ROWS)
     paired.add_argument("--append-rows", type=int, nargs="*", default=APPEND_ROWS)
     paired.add_argument("--append-entities", type=int, nargs="+")
+    paired.add_argument(
+        "--exact-matrix",
+        action="store_true",
+        help="use only the explicit history/append combinations, without the sweep",
+    )
     paired.add_argument("--seed", type=int, default=20260905)
     paired.add_argument(
         "--worker-threads", type=int, nargs=2, metavar=("BASELINE", "CANDIDATE")
@@ -854,7 +859,7 @@ def main() -> None:
     paired.add_argument(
         "--indicators",
         nargs="+",
-        choices=("rolling_mean", "dual_sma_spread"),
+        choices=("rolling_mean", "dual_sma_spread", "rolling_mean_arithmetic_filter"),
         default=("rolling_mean", "dual_sma_spread"),
     )
     paired.add_argument(
@@ -873,7 +878,7 @@ def main() -> None:
     diagnostic.add_argument("--append-entities", type=int)
     diagnostic.add_argument(
         "--indicator",
-        choices=("rolling_mean", "dual_sma_spread"),
+        choices=("rolling_mean", "dual_sma_spread", "rolling_mean_arithmetic_filter"),
         default="rolling_mean",
     )
     diagnostic.add_argument("--samples", type=int, default=30)

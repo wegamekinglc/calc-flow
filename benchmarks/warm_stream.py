@@ -37,6 +37,7 @@ from calc_flow import (
     StreamRuntimeConfig,
     Watermark,
 )
+from calc_flow.symbolic import Program
 
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
 BASE_MICROS = np.int64(int(BASE.timestamp() * 1_000_000))
@@ -50,6 +51,7 @@ SCHEMA = pa.schema(
 )
 RTOL = 1e-10
 ATOL = 1e-10
+ARITHMETIC_FILTER = "rolling_mean_arithmetic_filter"
 
 
 def _prices(sequence: np.ndarray, entities: int) -> np.ndarray:
@@ -199,7 +201,16 @@ def _expected(
     rows: int,
 ) -> np.ndarray:
     if config.append_entities is not None and start >= config.history_rows:
-        return _sparse_expected(config, start, rows)
+        values = _sparse_expected(config, start, rows)
+    else:
+        values = _dense_expected(config, start, rows)
+    if config.indicator == ARITHMETIC_FILTER:
+        selected = _retained_input(config, start, rows)["sequence"].to_numpy()
+        return (values * 2.0 + 1.0)[(selected - start).astype(np.int64)]
+    return values
+
+
+def _dense_expected(config: ScenarioConfig, start: int, rows: int) -> np.ndarray:
     context_rows = min(start, (config.window - 1) * config.entities)
     context_start = start - context_rows
     sequence = np.arange(context_start, start + rows, dtype=np.uint64)
@@ -263,17 +274,21 @@ def _validate_output(
     start: int,
     rows: int,
 ) -> dict[str, Any]:
-    if table.num_rows != rows:
-        raise RuntimeError(f"expected {rows} output rows, observed {table.num_rows}")
-    output_column = (
-        "dual_sma_spread" if config.indicator == "dual_sma_spread" else "moving_average"
-    )
+    wanted_input = _retained_input(config, start, rows)
+    if table.num_rows != wanted_input.num_rows:
+        raise RuntimeError(
+            f"expected {wanted_input.num_rows} output rows, observed {table.num_rows}"
+        )
+    output_column = {
+        "dual_sma_spread": "dual_sma_spread",
+        ARITHMETIC_FILTER: "arithmetic_mean",
+    }.get(config.indicator, "moving_average")
     sequence = table["sequence"].combine_chunks().to_numpy(zero_copy_only=False)
-    order = np.arange(rows)
-    wanted_sequence = np.arange(start, start + rows, dtype=np.uint64)
+    order = np.arange(wanted_input.num_rows)
+    wanted_sequence = wanted_input["sequence"].to_numpy()
     if not np.array_equal(sequence[order], wanted_sequence):
         raise RuntimeError("stream output sequence does not match appended rows")
-    if not table.select(SCHEMA.names).equals(_input_table(config, start, rows)):
+    if not table.select(SCHEMA.names).equals(wanted_input):
         raise RuntimeError("stream output identity columns changed")
     actual = table[output_column].combine_chunks().to_numpy(zero_copy_only=False)[order]
     expected = _expected(config, start=start, rows=rows)
@@ -287,6 +302,14 @@ def _validate_output(
     if not result["passed"]:
         raise RuntimeError(f"strict incremental correctness failed: {result}")
     return result
+
+
+def _retained_input(config: ScenarioConfig, start: int, rows: int) -> pa.Table:
+    source = _input_table(config, start, rows)
+    if config.indicator != ARITHMETIC_FILTER:
+        return source
+    symbols = source["symbol"].to_numpy(zero_copy_only=False)
+    return source.take(pa.array(np.flatnonzero(symbols < "S032")))
 
 
 def _percentile(samples: list[float], percentile: float) -> float:
@@ -354,8 +377,36 @@ class ScenarioConfig:
             )
         if self.fast_window > self.window:
             raise ValueError("fast_window must not exceed window")
-        if self.indicator not in ("rolling_mean", "dual_sma_spread"):
+        if self.indicator not in ("rolling_mean", "dual_sma_spread", ARITHMETIC_FILTER):
             raise ValueError("unsupported warm indicator")
+        if self.indicator == ARITHMETIC_FILTER and self.append_entities is not None:
+            raise ValueError("arithmetic/filter indicator requires full entity ticks")
+
+
+def _warm_program(config: ScenarioConfig) -> Program:
+    indicator = (
+        "rolling_mean" if config.indicator == ARITHMETIC_FILTER else config.indicator
+    )
+    program = _native_program(
+        config.window,
+        indicator=indicator,
+        fast_window=config.fast_window,
+        engine="streaming",
+    )
+    if config.indicator != ARITHMETIC_FILTER:
+        return program
+    indicators = program.outputs[0][1]
+    filtered = indicators.filter(indicators["symbol"] < "S032")
+    output = filtered.select(
+        *SCHEMA.names,
+        arithmetic_mean=filtered["moving_average"] * 2.0 + 1.0,
+    )
+    return Program(
+        "warm-rolling-arithmetic-filter",
+        engine="streaming",
+        inputs=program.inputs,
+        outputs=(("indicators", output),),
+    )
 
 
 class WarmScenario:
@@ -378,12 +429,7 @@ class WarmScenario:
 
     @classmethod
     async def start(cls, config: ScenarioConfig, state_root: Path) -> WarmScenario:
-        plan = _native_program(
-            config.window,
-            indicator=config.indicator,
-            fast_window=config.fast_window,
-            engine="streaming",
-        ).compile_stream(Runtime())
+        plan = _warm_program(config).compile_stream(Runtime())
         maximum = max(config.history_segment_rows, config.append_rows)
         source = _InteractiveSource(max_batch_rows=maximum)
         sink = _QueueSink()
