@@ -93,6 +93,7 @@ class RustReleaseTests(unittest.TestCase):
             self.assertTrue(Path(command[0]).is_absolute())
             self.assertEqual(Path(command[3]).parent, run.call_args.kwargs["cwd"])
             self.assertTrue(run.call_args.kwargs["check"])
+            self.assertFalse(run.call_args.kwargs.get("shell", False))
             self.assertEqual(
                 run.call_args.kwargs["env"]["CARGO_TARGET_DIR"], str(root / "target")
             )

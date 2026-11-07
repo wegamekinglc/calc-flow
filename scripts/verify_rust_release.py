@@ -130,7 +130,9 @@ def run_consumer(archive_path: Path, version: str) -> None:
         'tokio = { version = "1", features = ["macros", "rt-multi-thread"] }\n',
         encoding="utf-8",
     )
-    subprocess.run(  # nosec B603  # fixed Cargo argv on inspected local sources
+    # Runner-selected Cargo, fixed flags, and an owned manifest; never a shell.
+    # nosemgrep: dangerous-subprocess-use-audit
+    subprocess.run(  # nosec B603
         [
             os.path.abspath(cargo),
             "run",
@@ -140,6 +142,7 @@ def run_consumer(archive_path: Path, version: str) -> None:
         cwd=directory,
         env={**os.environ, "CARGO_TARGET_DIR": str(ROOT / "target")},
         check=True,
+        shell=False,
     )
 
 
