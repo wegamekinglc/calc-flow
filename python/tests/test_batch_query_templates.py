@@ -70,21 +70,27 @@ def test_batch_query_templates_match_exact_schema_and_metadata():
 
 
 @pytest.mark.parametrize(
-    "config",
-    ({"target_partitions": 2}, {"parallelism_mode": "auto"}),
+    ("config", "counts"),
+    (
+        ({"target_partitions": 2}, (1, 0)),
+        ({"parallelism_mode": "auto"}, (1, 1)),
+    ),
 )
-def test_batch_query_templates_preserve_other_partition_policies(config):
+def test_batch_query_templates_follow_partition_policies(config, counts):
     plan = _builder().with_datafusion_config(**config).compile_batch()
     batch, _ = _batch([1, 2])
-    for _ in range(2):
+    for count in counts:
         result = plan.execute({"input": batch})
-        assert _planned(result) == 1
+        assert _planned(result) == count
         assert _result(result)["result"].to_pylist() == [2, 3]
 
 
 @pytest.mark.parametrize(
     "query",
-    ("SELECT SUM(value) AS result FROM input", "SELECT now() AS result FROM input"),
+    (
+        "SELECT value FROM input ORDER BY value LIMIT 1",
+        "SELECT now() AS result FROM input",
+    ),
 )
 def test_ineligible_batch_queries_keep_planning(query):
     plan = _builder(query).compile_batch()
