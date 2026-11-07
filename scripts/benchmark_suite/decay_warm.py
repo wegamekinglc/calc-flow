@@ -57,18 +57,25 @@ def valid_counters(work):
     return work
 
 
+def _phase_work(node, phase):
+    work = node.get(phase, {}).get("_decay_work")
+    if work is None:
+        return None
+    if node.get("overflowed", False):
+        raise ValueError("native decay node metrics overflowed")
+    return valid_counters(work)
+
+
 def total_work(status):
     totals = dict.fromkeys(WORK_FIELDS, 0)
     available = False
     for node in status.get("rolling_metrics", {}).values():
         for phase in ("data", "watermark", "end"):
-            work = node.get(phase, {}).get("_decay_work")
+            work = _phase_work(node, phase)
             if work is None:
                 continue
-            if node.get("overflowed", False):
-                raise ValueError("native decay node metrics overflowed")
             available = True
-            for name, value in valid_counters(work).items():
+            for name, value in work.items():
                 totals[name] += value
     if sum(totals[name] for name in ROW_FIELDS) != totals["transitions"]:
         raise ValueError("native decay row classes do not cover transitions")

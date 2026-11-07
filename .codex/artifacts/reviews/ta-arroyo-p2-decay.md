@@ -3,20 +3,25 @@
 **Author:** wegamekinglc (Cheng Li)
 **Branch:** `feature/ta-arroyo-p2-decay` → `main` | **Files:** 30
 **Base:** `8d8be7d907a095dbc0dc2b73dafcfdd842979cdf`
-**Reviewed published head:** `37e7d7d136f5f07da94e6a69d50a60df934cf0da`
-**Reviewed published tree:** `f700a4099073c80ac8255a335040a24d606974fb`
-**Additional reviewed dirty scope:** `scripts/benchmark_suite/decay_warm.py`
-and `benchmarks/test_decay_warm.py` counter guards; test-only style changes in
-`kernel/decay.rs` and `tests/decay_tests.rs`. Production helpers remain those
-of the published head. Final scoped Clippy and affected-test checks completed
-successfully; all four hashes below still match the prior static review.
+**Reviewed published head:** `3bd354494378f7fc81210792b48a2d256e2d01c3`
+**Reviewed published tree:** `c99900e580f4d95bd2423ba913f85ab93a902cd0`
+**Additional reviewed dirty scope:** only
+`scripts/benchmark_suite/decay_warm.py`, extracting `_phase_work` from
+`total_work`. Previously reviewed counter guards, Rust helpers and final
+test-style changes are incorporated in this published head. No Rust,
+protocol, case, threshold or test assertion changes accompany this extraction.
 
-The reviewed dirty file SHA-256 values, in the order above, are:
+The current adapter SHA-256 and the three previously verified file SHA-256
+values are recorded by path:
 
 ```text
-19643f270e5d6ceef691a53c67587e1ffd98f59ab79c84fb4fe5fc3d22fa8876
+scripts/benchmark_suite/decay_warm.py
+62e52e13a4e54940898259ba28074efde15a49629c03152f2e2bf5fd6230f108
+benchmarks/test_decay_warm.py
 bc3821f55237413d6461ff8d6519a5d49e53c9ba468e800c2b050edbedb58453
+crates/calc-flow/src/operator/rolling/kernel/decay.rs
 da7fc50409d87e79b101c5adabc43e7d85fc717809cb244aab7595d466f5fed2
+crates/calc-flow/src/operator/rolling/tests/decay_tests.rs
 04a822a71e5abf7b8cbfe9ec85961555aeb35f0b1f375ed5a1f6f37ec20eaddd
 ```
 
@@ -78,29 +83,36 @@ New handoff evidence, all under the repository root `target/`:
   0.01s execution. The final radius-bits, refusal/cancellation replay,
   actual-work 18/guard2/COW8, and dual-profile buffered resource/Mean tests all
   passed. These are the four tests affected by the last style-only extraction.
+- `p2-counter-complexity-green.log`: **3 passed, 5 deselected**, 0.45s,
+  after the final adapter-only `_phase_work` extraction. The reviewer read the
+  terminal log; no new pytest/native/build execution was started for review.
 
 Historical logs above remain historical; their filenames are not verdicts.
 The reviewer ran
 `git diff --exit-code 8d8be7d9 -- schemas/project-v3.schema.json` and
 whitespace diff checks; neither changed source. The new terminal logs verify
 the final test-style source separately from the earlier published-product run.
-SHA-256 of all four reviewed dirty files was independently rechecked and matches
-the recorded values exactly; no additional source review or test rerun was needed.
+At the prior runtime handoff, all four then-reviewed hashes were independently
+rechecked. This narrower handoff reviews and hashes only the changed adapter;
+it does not repeat closed Rust, binding or test-style reviews/checks.
 
-The handoff reuses the parent's non-blocking CI snapshot rather than polling:
-Codacy run `128510602794` is **SUCCESS, 0 issues** for `37e7d7d`, superseding
-the earlier seven findings. It does not verify the dirty test-style/harness
-delta. Other required CI remains unresolved. No workspace coverage or
-cross-platform green claim is made; the combined 90% line gate remains required.
+The handoff reuses the parent's non-blocking CI snapshot rather than polling.
+The earlier seven runtime/test complexity findings were resolved. Canonical
+Codacy run `128515950230` for `3bd35449` is **ACTION_REQUIRED**, solely for
+adapter `total_work` complexity 9 versus limit 8. The reviewed extraction fixes
+that source finding without altering validation, but the new commit still needs
+its actual Codacy result. Earlier success at `37e7d7d` does not prove a later
+head green. Other required CI remains unresolved; no workspace coverage or
+cross-platform green claim is made. The combined 90% line gate remains required.
 
 ### Blocking Issues
 
 Must resolve before performance acceptance and merge:
 
-1. **Final source/build identity:** commit and freeze the reviewed four-file
-   delta together with the evidence/documentation updates before building the
+1. **Final source/build identity:** commit and freeze the reviewed adapter
+   extraction and this report before building the
    candidate. Record the resulting actual SHA and recheck Codacy for that head;
-   `37e7d7d`'s success cannot be generalized to a future commit. Production,
+   do not treat `3bd35449`'s action-required status as success. Production,
    harness and test source have no remaining review blocker for this fixed-source
    build. Do not build from a moving/dirty checkout or relabel an older wheel.
 2. **Performance/CI acceptance:** no candidate measurement or final required
@@ -218,6 +230,16 @@ with strict bit comparisons, declaration placement, the original job fixture
 and a borrowing test helper; no tolerance, assertion, pool-owner lifetime or
 drop point was weakened. Final scoped Clippy passed. No open style finding
 remains in the reviewed files; future-head required checks remain independent.
+
+The latest adapter-only extraction was also reviewed independently. `_phase_work`
+first returns None for an absent phase witness, then rejects node overflow,
+then applies the unchanged exact-12-field/integer/nonnegative validator. Missing
+baseline metrics remain unavailable, and overflow still takes priority over
+malformed-present-counter validation. `total_work` retains node/phase traversal,
+summation, row-class coverage and its final available/None result. Moving
+validation before the local `available=True` assignment changes no observable
+error path. Three existing guard/witness tests passed; canonical Codacy for
+the eventual new commit remains pending.
 
 ### Test Coverage
 
