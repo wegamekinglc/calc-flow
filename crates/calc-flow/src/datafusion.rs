@@ -293,11 +293,11 @@ impl DataFusionRuntime {
         templates: Arc<QueryTemplates>,
     ) -> Result<Self> {
         let mut runtime = Self::new(config)?;
-        // Other partition policies can choose different physical layouts as
-        // row counts or trusted entity statistics change between runs.
-        if config.parallelism_mode == DataFusionParallelismMode::Fixed
-            && config.target_partitions == 1
-        {
+        // Adaptive partition policies can choose different physical layouts as
+        // row counts or trusted entity statistics change between runs; the
+        // fixed policy shares the cache because template reuse is keyed by the
+        // effective partition count of each run.
+        if config.parallelism_mode == DataFusionParallelismMode::Fixed {
             runtime.templates = templates;
         }
         Ok(runtime)
@@ -652,13 +652,22 @@ impl DataFusionRuntime {
     ) -> Result<Batch> {
         self.ensure_open()?;
         if self.selected_udfs.is_empty()
-            && let Some((template, _)) = self.templates.find(query.text(), tables)
+            && let Some(partitions) = self.active_partitions()
+            && let Some(template) = self.templates.find(query.text(), tables, partitions)
             && let Some(compiled) = template.compiled_expression()
         {
             let input = tables.values().next().expect("single-table template");
             return compiled.evaluate(input, node_id, context).await;
         }
         self.sql_validated(query, tables, Some(node_id)).await
+    }
+
+    /// The partition count the open session plans with; templates captured
+    /// under one count are never bound under another.
+    fn active_partitions(&self) -> Option<usize> {
+        self.parallelism_decision
+            .get()
+            .map(|decision| decision.effective_partitions)
     }
 
     #[allow(
@@ -828,9 +837,10 @@ impl DataFusionRuntime {
         node_id: Option<&str>,
     ) -> Result<PlannedQuery<'a>> {
         if self.input_partitions == 1
-            && let Some((template, batches)) = self.templates.find(query.text(), tables)
+            && let Some(partitions) = self.active_partitions()
+            && let Some(template) = self.templates.find(query.text(), tables, partitions)
         {
-            return bind_template(context, &template, batches, node_id);
+            return bind_template(context, &template, tables, node_id);
         }
         let (registrations, input_adapter_ns, table_register_ns) =
             register_tables(context, tables, node_id, self.input_partitions)?;
@@ -863,11 +873,12 @@ impl DataFusionRuntime {
         let logical_planning_ns = nanos(logical_planning_start.elapsed());
 
         let physical_planning_start = Instant::now();
+        let partitions = context.task_ctx().session_config().target_partitions();
         let native_plan = datafusion_join::plan(
             query,
             tables,
             Arc::new(dataframe.schema().as_arrow().clone()),
-            context.task_ctx().session_config().target_partitions(),
+            partitions,
         );
         let is_native_join = native_plan.is_some();
         let physical_plan = match native_plan {
@@ -892,6 +903,7 @@ impl DataFusionRuntime {
             self.templates.capture(&TemplateCandidate {
                 query: query.text(),
                 tables,
+                partitions,
                 logical: dataframe.logical_plan(),
                 physical: &physical_plan,
                 logical_plan: &logical_plan,
@@ -1596,12 +1608,12 @@ async fn collect_bounded(
 fn bind_template<'a>(
     context: &'a SessionContext,
     template: &QueryTemplate,
-    batches: &[RecordBatch],
+    tables: &BTreeMap<String, Batch>,
     node_id: Option<&str>,
 ) -> Result<PlannedQuery<'a>> {
     let physical_planning_start = Instant::now();
     let physical_plan = template
-        .bind(batches)
+        .bind(tables)
         .map_err(|error| datafusion_error(node_id, error))?;
     Ok(PlannedQuery {
         task_ctx: context.task_ctx(),

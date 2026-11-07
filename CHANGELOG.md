@@ -18,6 +18,39 @@ measurements. Use the current guides for supported behavior.
   benchmark worker when cleanup raises. Remove duplicate SQL predicate
   matching without changing admitted canonical queries.
 
+- 2026-11-07: Extend input-free DataFusion query templates from single-table
+  row-local plans to multi-table immutable plans built only from
+  data-independent operators (projections, filters, aggregates, unions,
+  sorts, repartitions) over in-memory scans; joins keep planning every run
+  because their build side follows statistics, and limited queries keep
+  planning because top-k operators carry execution-updated pruning filters.
+  Template reuse is
+  keyed by query text, aliases, exact schemas, and each run's effective
+  partition count, and the fixed policy now shares the plan-level cache at
+  any partition count. In a two-input state-feedback stock-positions probe
+  (`UNION ALL` plus grouped `SUM`, one million rows, 100x100 keys, pinned
+  four CPUs, two rounds of five alternating pairs), repeated batch SQL
+  execution improved -41.03% (1,000-row batches, fixed p1), -33.37%
+  (10,000-row batches, fixed p1), -27.76% (1,000-row batches, fixed p4), and
+  -12.84% (100,000-row batches, fixed p1), with physical planning counts
+  falling from one plan per batch to one plan total; all four paired
+  verdicts were `improved` and outputs matched an independent accumulator.
+
+- 2026-11-07: Share snapshot key columns across repeated compact-SQL
+  snapshots. Group slots are append-only and group keys never change, so the
+  key columns of a sealed output chunk are rebuilt in every full snapshot for
+  nothing: staging new columns per transaction and installing them at commit
+  lets every later snapshot reuse the committed Arrow arrays while a chunk's
+  row count and first group are unchanged. A refused or failed output leaves
+  nothing staged, and installed bytes are reserved from the incremental
+  memory pool. In the streaming stock-positions example (2,000,000 business
+  rows, 100x100 keys, checkpoints disabled) paired AB/BA runs improved
+  -34.35% at 1,000-row batches on four pinned CPUs (wall 1541.5 to 1012.0 ms,
+  child CPU 1.876 to 1.315 s) and -43.83% at 1,000-row batches on one pinned
+  CPU (1755.5 to 986.0 ms); 10,000-row batches measured -9.19% and
+  100,000-row batches stayed inconclusive (+3.02%, both round intervals
+  spanning zero) with unchanged CPU time.
+
 - 2026-11-06: Repeat the compiled integer sign CASE experiment in a quiet
   environment against main `5a66b6d5`. Complete five fixed cases, 200 formal
   observations, both CPU profiles and full snapshot checks. All maintained

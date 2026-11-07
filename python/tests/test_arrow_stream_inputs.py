@@ -165,19 +165,23 @@ def test_materialized_sequence_rejects_invalid_input() -> None:
     asyncio.run(rejects([1, 2], TypeError, "materialized sequence"))
 
 
-@pytest.mark.parametrize("zero_columns", [False, True])
-def test_materialized_sequence_preserves_rows_and_empty_record_boundaries(
-    zero_columns,
-) -> None:
+def _materialized_records(zero_columns: bool) -> list[pa.RecordBatch]:
     records = [
         pa.record_batch([pa.array(range(count), type=pa.int64())], names=["value"])
         for count in (2, 0, 3, 0)
     ]
     if zero_columns:
         records = [record.select([]) for record in records]
-    records = [
+    return [
         record.replace_schema_metadata({b"origin": b"caller"}) for record in records
     ]
+
+
+@pytest.mark.parametrize("zero_columns", [False, True])
+def test_materialized_sequence_preserves_rows_and_empty_record_boundaries(
+    zero_columns,
+) -> None:
+    records = _materialized_records(zero_columns)
     supplied = [
         records[0],
         pa.Table.from_batches([records[1]]),

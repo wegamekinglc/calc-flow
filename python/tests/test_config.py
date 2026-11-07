@@ -42,9 +42,13 @@ def _assert_json_error(project: object, message: str) -> None:
     ] == [("value_error", (), f"Value error, {message}")]
 
 
-@pytest.mark.parametrize(
-    "round_trip", [copy, deepcopy, lambda value: pickle.loads(pickle.dumps(value))]
-)
+def _pickle_round_trip(value: ValidationError) -> ValidationError:
+    # Deserialize only the bytes generated here from this test's own exception.
+    serialized = pickle.dumps(value)
+    return pickle.loads(serialized)  # nosemgrep
+
+
+@pytest.mark.parametrize("round_trip", [copy, deepcopy, _pickle_round_trip])
 def test_project_validation_error_preserves_details_when_copied(round_trip) -> None:
     error = ValidationError(
         "ProjectDocument",
