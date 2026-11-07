@@ -42,9 +42,13 @@ fn candidate(query: &ValidatedQuery, alias: &str) -> Option<bool> {
     if query.to_string() != format!("SELECT {projection} FROM {name} GROUP BY {group_text}") {
         return None;
     }
+    projected_sums(select, &keys, alias)
+}
+
+fn projected_sums(select: &Select, keys: &[String], alias: &str) -> Option<bool> {
     let mut has_sum = false;
     for item in &select.projection {
-        has_sum |= projected_sum(item, &keys, alias)?;
+        has_sum |= projected_sum(item, keys, alias)?;
     }
     Some(has_sum)
 }

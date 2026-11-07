@@ -162,14 +162,21 @@ fn projection_head_schema(
             operator.output_ports()[0].schema().cloned()
         }
         CompiledStreamOperator::Expression(operator) => {
-            let input = first.input_ports.get("input")?.schema()?;
-            let output = first.output_ports.get("output")?.schema()?;
-            operator
-                .is_exact_column_projection(input, Some(output))
-                .then(|| output.clone())
+            exact_expression_output_schema(first, operator)
         }
         _ => None,
     }
+}
+
+fn exact_expression_output_schema(
+    first: &RuntimeStreamNode,
+    operator: &crate::ExpressionOperator,
+) -> Option<datafusion::arrow::datatypes::SchemaRef> {
+    let input = first.input_ports.get("input")?.schema()?;
+    let output = first.output_ports.get("output")?.schema()?;
+    operator
+        .is_exact_column_projection(input, Some(output))
+        .then(|| output.clone())
 }
 
 fn eligible_expression_sql(

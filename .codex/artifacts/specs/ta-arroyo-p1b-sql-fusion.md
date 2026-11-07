@@ -148,7 +148,7 @@ fusion/task/checkpoint fixtures; no product-wide test matrix is needed locally.
 
 - [ ] Admission: the real Rust example's filter/CASE→grouped SUM graph with
   absent port schemas fuses; the actual Python holdings graph also fuses.
-  A non-`input` SQL alias is preserved. Existing P1a chains remain admitted.
+  A non-`input` SQL alias is preserved. Baseline Rolling/ASOF exact-projection chains remain admitted.
   Fan-out, late, UDF/volatile, unsupported
   SQL and incorrect topology/schema candidates remain safely unfused/rejected.
 - [ ] Data: fused/unfused executions of the same graph produce every identical
