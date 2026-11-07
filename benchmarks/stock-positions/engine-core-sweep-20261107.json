@@ -1,0 +1,112 @@
+[
+  {
+    "cores": 1,
+    "batch_rows": 1000000,
+    "streaming_wall_p50_s": 1.669,
+    "streaming_wall_min_s": 1.628,
+    "streaming_cpu_s": 1.6924170000000003,
+    "sql_wall_p50_s": 0.42869999999999997,
+    "sql_wall_min_s": 0.4153,
+    "sql_cpu_s": 3.417961000000002,
+    "gap_ratio": 3.8931653837182183
+  },
+  {
+    "cores": 1,
+    "batch_rows": 100000,
+    "streaming_wall_p50_s": 2.03,
+    "streaming_wall_min_s": 2.014,
+    "streaming_cpu_s": 2.07029,
+    "sql_wall_p50_s": 0.5789,
+    "sql_wall_min_s": 0.5619,
+    "sql_cpu_s": 3.4599000000000046,
+    "gap_ratio": 3.506650544135429
+  },
+  {
+    "cores": 4,
+    "batch_rows": 1000000,
+    "streaming_wall_p50_s": 1.19,
+    "streaming_wall_min_s": 1.15,
+    "streaming_cpu_s": 1.843939000000006,
+    "sql_wall_p50_s": 0.16319999999999998,
+    "sql_wall_min_s": 0.15530000000000002,
+    "sql_cpu_s": 3.4402660000000083,
+    "gap_ratio": 7.291666666666667
+  },
+  {
+    "cores": 4,
+    "batch_rows": 100000,
+    "streaming_wall_p50_s": 1.152,
+    "streaming_wall_min_s": 1.109,
+    "streaming_cpu_s": 2.324033,
+    "sql_wall_p50_s": 0.3835,
+    "sql_wall_min_s": 0.3777,
+    "sql_cpu_s": 3.851085999999995,
+    "gap_ratio": 3.0039113428943933
+  },
+  {
+    "cores": 8,
+    "batch_rows": 1000000,
+    "streaming_wall_p50_s": 1.199,
+    "streaming_wall_min_s": 1.174,
+    "streaming_cpu_s": 1.8587170000000128,
+    "sql_wall_p50_s": 0.1495,
+    "sql_wall_min_s": 0.1403,
+    "sql_cpu_s": 3.5142179999999996,
+    "gap_ratio": 8.020066889632108
+  },
+  {
+    "cores": 8,
+    "batch_rows": 100000,
+    "streaming_wall_p50_s": 1.159,
+    "streaming_wall_min_s": 1.123,
+    "streaming_cpu_s": 2.367048000000011,
+    "sql_wall_p50_s": 0.3783,
+    "sql_wall_min_s": 0.3669,
+    "sql_cpu_s": 4.299816000000021,
+    "gap_ratio": 3.063706053396775
+  },
+  {
+    "cores": 16,
+    "batch_rows": 1000000,
+    "streaming_wall_p50_s": 1.21,
+    "streaming_wall_min_s": 1.161,
+    "streaming_cpu_s": 1.8379970000000014,
+    "sql_wall_p50_s": 0.12390000000000001,
+    "sql_wall_min_s": 0.1182,
+    "sql_cpu_s": 3.8171959999999956,
+    "gap_ratio": 9.76594027441485
+  },
+  {
+    "cores": 16,
+    "batch_rows": 100000,
+    "streaming_wall_p50_s": 1.098,
+    "streaming_wall_min_s": 1.072,
+    "streaming_cpu_s": 2.1736879999999985,
+    "sql_wall_p50_s": 0.3916,
+    "sql_wall_min_s": 0.3758,
+    "sql_cpu_s": 5.0488619999999855,
+    "gap_ratio": 2.8038815117466807
+  },
+  {
+    "cores": 32,
+    "batch_rows": 1000000,
+    "streaming_wall_p50_s": 1.184,
+    "streaming_wall_min_s": 1.144,
+    "streaming_cpu_s": 1.8192249999999888,
+    "sql_wall_p50_s": 0.18059999999999998,
+    "sql_wall_min_s": 0.177,
+    "sql_cpu_s": 4.321383999999966,
+    "gap_ratio": 6.55592469545958
+  },
+  {
+    "cores": 32,
+    "batch_rows": 100000,
+    "streaming_wall_p50_s": 1.145,
+    "streaming_wall_min_s": 1.111,
+    "streaming_cpu_s": 2.2763370000000123,
+    "sql_wall_p50_s": 0.5488999999999999,
+    "sql_wall_min_s": 0.535,
+    "sql_cpu_s": 5.6875799999999685,
+    "gap_ratio": 2.085990162142467
+  }
+]

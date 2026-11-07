@@ -9,6 +9,15 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-07: Record an explicitly requested both-engine core-count sweep
+  (1/4/8/16/32 pinned CPUs, 10M-row stock positions, disclosed concurrent
+  load). The SQL engine's large-batch aggregation scales 3.5x to sixteen
+  cores while the streaming engine stays flat beyond four, and the SQL
+  curve bounds the withdrawn delta-delegation route: large at four or more
+  cores, free of the rejected sharding prototypes' routing and state
+  round-trips, at the cost of the SQL engine's higher CPU budget. See the
+  [sweep table](benchmarks/stock-positions/engine-core-sweep-20261107.md).
+
 - 2026-11-07: Withdraw the key-sharded compact grouped SUM prototype after
   measurement. Sharding by the complete group key removed the rejected lane
   design's cross-group merges and produced byte-identical snapshots in unit
