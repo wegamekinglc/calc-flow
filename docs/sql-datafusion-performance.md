@@ -23,16 +23,16 @@ executions.
 `PipelineBuilder::with_datafusion_config`. Python builders use the immutable
 `with_datafusion_config(...)` method.
 
-| Field                    | Default | Meaning                                                        |
-|--------------------------|---------|----------------------------------------------------------------|
-| `batch_size`             | `8192`  | DataFusion execution batch size                                |
-| `target_partitions`      | `1`     | Requested count in `fixed` mode                                |
-| `parallelism_mode`       | `fixed` | `fixed` preserves explicit behavior; `auto` uses trusted facts; `auto_rows` uses input rows; `auto_plan` pins proven batch row projections to p1 |
-| `max_partitions`         | `32`    | Upper bound for `auto`                                         |
-| `min_rows_per_partition` | `65536` | Work cap used by both modes                                    |
-| `small_rows_threshold`   | `10001` | Smaller auto workloads remain p1                               |
-| `enable_rolling_rewrite` | `true`  | Enables supported bounded SQL rolling rewrites                |
-| `collect_diagnostics`    | `true`  | Collects plan strings and physical metric traversal            |
+| Field                      | Default   | Meaning                                                                                                                                          |
+|----------------------------|-----------|--------------------------------------------------------------------------------------------------------------------------------------------------|
+| `batch_size`               | `8192`    | DataFusion execution batch size                                                                                                                  |
+| `target_partitions`        | `1`       | Requested count in `fixed` mode                                                                                                                  |
+| `parallelism_mode`         | `fixed`   | `fixed` preserves explicit behavior; `auto` uses trusted facts; `auto_rows` uses input rows; `auto_plan` pins proven batch row projections to p1 |
+| `max_partitions`           | `32`      | Requested-partition cap for `auto`, `auto_rows`, and `auto_plan`                                                                                 |
+| `min_rows_per_partition`   | `65536`   | Row-based work cap in every mode, including `fixed`                                                                                              |
+| `small_rows_threshold`     | `10001`   | Smaller automatic-policy workloads remain p1                                                                                                     |
+| `enable_rolling_rewrite`   | `true`    | Enables supported bounded SQL rolling rewrites                                                                                                   |
+| `collect_diagnostics`      | `true`    | Collects plan strings and physical metric traversal                                                                                              |
 
 The project schema accepts non-negative numeric values for compatibility with
 external-only plans, which never create a DataFusion runtime. When a project

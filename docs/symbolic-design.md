@@ -189,8 +189,14 @@ for the type matrix, composition limits, and lateness-option ownership.
 kernel for batch and stream execution. Compatible outputs share retained rows
 and accumulators; readout choices such as `min_periods` do not create duplicate
 state. EWMA and cumulative mean retain a valid count and binary64 recurrence
-value. Order statistics, distinct counts, and linear decay scan only the
-retained frame history, which the existing checkpoint layout preserves.
+value. Order statistics and distinct counts scan retained frame history.
+Float64 row-window linear decay uses a certified incremental weighted summary
+when admitted, with reseeding and the reference fold for unsupported or
+uncertified cases. Its transactional queue copy can still visit the retained
+window once per touched entity and batch; this is not an unconditional linear
+whole-job cost guarantee. Duration frames and other input types retain the
+reference path. Retained history remains authoritative for recovery; see the
+[decay kernel](../crates/calc-flow/src/operator/rolling/kernel/decay.rs).
 
 Project declarations carry the validated configuration and declaration layout
 versions. Operators without cumulative sum/min/max/variance write columnar state layout `3`, with

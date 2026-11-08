@@ -1,0 +1,4040 @@
+{
+  "base_commit": "d94d9e5bcbd3f584184cb21b5c0d45f9e9f96ffd",
+  "verified_main_again": "git ls-remote origin refs/heads/main; git fetch origin main; same d94d9e5bcbd3f584184cb21b5c0d45f9e9f96ffd",
+  "recorded_at_utc": "2026-11-08T09:06:14.292631+00:00",
+  "branch": "fix/dal-507-documentation-audit-2026-11-08",
+  "environment": {
+    "python": "3.13.9",
+    "markdown_it_py": "4.0.0",
+    "PyYAML": "6.0.3",
+    "requests": "2.34.2"
+  },
+  "commands": [
+    {
+      "command": "python -m unittest scripts.test_codex_agents -v",
+      "exit_code": 0,
+      "result": "10 guidance/configuration tests passed; recorded from foreground execution; no product tests"
+    },
+    {
+      "command": "python scripts/run_examples.py --help",
+      "exit_code": 0,
+      "result": "help returned without running examples/tests/coverage"
+    },
+    {
+      "command": "python scripts/run_rust_tests.py --help",
+      "exit_code": 0,
+      "result": "help returned without running examples/tests/coverage"
+    },
+    {
+      "command": "python scripts/run_rust_coverage.py --help",
+      "exit_code": 0,
+      "result": "help returned without running examples/tests/coverage"
+    },
+    {
+      "command": "python scripts/verify_python_release.py --version-only",
+      "exit_code": 0,
+      "stdout": "2026.11.2"
+    },
+    {
+      "command": "python scripts/verify_rust_release.py --version-only",
+      "exit_code": 0,
+      "stdout": "2026.11.2"
+    },
+    {
+      "command": "cargo metadata --offline --no-deps --format-version 1",
+      "exit_code": 0,
+      "result": "workspace target/feature inventory; no compilation"
+    },
+    {
+      "command": "python audit_documents.py before; python audit_documents.py after",
+      "exit_code": 0,
+      "result": "367 baseline, 368 candidate; zero missing local links/anchors, trailing whitespace or missing final newlines"
+    },
+    {
+      "command": "python audit_contracts.py",
+      "exit_code": 0,
+      "result": "183 full code-block parses, 6 shell templates and 5 JSON member fragments parsed with recorded normalization; zero unresolved current cf root names or snippet modules"
+    },
+    {
+      "command": "python audit_external_links.py",
+      "exit_code": 0,
+      "result": "224 bounded single GET attempts; failed HTTP/network results retained individually"
+    },
+    {
+      "command": "git diff --check",
+      "exit_code": 0,
+      "result": "passed on documentation repairs before evidence additions; final staged check recorded in handoff"
+    },
+    {
+      "command": "git diff --exit-code -- schemas/project-v3.schema.json",
+      "exit_code": 0,
+      "result": "no generated schema drift"
+    }
+  ],
+  "counts": {
+    "baseline_markdown": 367,
+    "candidate_markdown": 368,
+    "by_root_baseline": {
+      "(root)": 4,
+      ".agents": 1,
+      ".claude": 14,
+      ".codex": 257,
+      "benchmarks": 33,
+      "crates": 7,
+      "design": 2,
+      "docs": 36,
+      "examples": 1,
+      "fuzz": 1,
+      "scripts": 2,
+      "tests": 1,
+      "vendor": 8
+    },
+    "candidate_links_by_kind": {
+      "relative": 1580,
+      "external": 284
+    },
+    "remaining_findings_by_kind": {
+      "unaligned-table": 76,
+      "python-snippet": 3
+    }
+  },
+  "remaining_static_findings": [
+    {
+      "path": ".codex/artifacts/analysis/issue431-join-chunk-state.md",
+      "line": 63,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/issue467-columnar-state-admission.md",
+      "line": 73,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/join-cpu-pipeline.md",
+      "line": 33,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/join-cpu-pipeline.md",
+      "line": 41,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/join-cpu-pipeline.md",
+      "line": 70,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/join-cpu-pipeline.md",
+      "line": 96,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/join-cpu-pipeline.md",
+      "line": 119,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/join-cpu-pipeline.md",
+      "line": 142,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/join-cpu-pipeline.md",
+      "line": 155,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/join-cpu-pipeline.md",
+      "line": 234,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/join-remaining-gaps-2026-10-17.md",
+      "line": 14,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/join-remaining-gaps-2026-10-17.md",
+      "line": 36,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/join-remaining-gaps-2026-10-17.md",
+      "line": 52,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/join-remaining-gaps-2026-10-17.md",
+      "line": 67,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/multithreading-research/verification/active-entities/README.md",
+      "line": 30,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/multithreading-research/verification/active-entities/README.md",
+      "line": 38,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/multithreading-research/verification/auto-rows/README.md",
+      "line": 52,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/multithreading-research/verification/materialized-sequence/README.md",
+      "line": 26,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/pr482-remediation.md",
+      "line": 9,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/pr482-remediation.md",
+      "line": 19,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/pr482-remediation.md",
+      "line": 31,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/analysis/stream-join-columnar-state.md",
+      "line": 267,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/api-notes/bounded-backward-asof-join.md",
+      "line": 36,
+      "kind": "python-snippet",
+      "message": "Invalid star expression"
+    },
+    {
+      "path": ".codex/artifacts/api-notes/native-array-runtime.md",
+      "line": 116,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/api-notes/symbolic-exponential-indicators.md",
+      "line": 8,
+      "kind": "python-snippet",
+      "message": "Invalid star expression"
+    },
+    {
+      "path": ".codex/artifacts/arrow-ipc-audit/ARROYO-RESULTS.md",
+      "line": 37,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/arrow-ipc-audit/ARROYO-RESULTS.md",
+      "line": 109,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/arrow-ipc-audit/ARROYO-RESULTS.md",
+      "line": 124,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/arrow-ipc-audit/BENCHMARK-AUDIT.md",
+      "line": 43,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/arrow-ipc-audit/README.md",
+      "line": 17,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/arrow-ipc-audit/README.md",
+      "line": 34,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/arrow-ipc-audit/REPORT.md",
+      "line": 101,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/arrow-ipc-audit/REPORT.md",
+      "line": 117,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/arrow-wrapping/README.md",
+      "line": 7,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/arrow-wrapping/README.md",
+      "line": 46,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/arroyo-attribution/REPORT.md",
+      "line": 75,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/arroyo-attribution/REPORT.md",
+      "line": 152,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/arroyo-attribution/REPORT.md",
+      "line": 172,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/arroyo-attribution/REPORT.md",
+      "line": 195,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/arroyo-attribution/REPORT.md",
+      "line": 231,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/arroyo-comparison/REPORT.md",
+      "line": 27,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/arroyo-comparison/REPORT.md",
+      "line": 87,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/arroyo-comparison/REPORT.md",
+      "line": 125,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/reviews/array-api-rust-ta-lib-assessment.md",
+      "line": 26,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/reviews/array-api-rust-ta-lib-assessment.md",
+      "line": 129,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/reviews/array-api-rust-ta-lib-assessment.md",
+      "line": 155,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/specs/native-array-runtime.md",
+      "line": 25,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/specs/native-array-runtime.md",
+      "line": 84,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/specs/native-array-runtime.md",
+      "line": 205,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/specs/native-array-runtime.md",
+      "line": 290,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/specs/native-array-runtime.md",
+      "line": 340,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/specs/symbolic-event-window-aggregation.md",
+      "line": 102,
+      "kind": "python-snippet",
+      "message": "invalid syntax"
+    },
+    {
+      "path": ".codex/artifacts/specs/symbolic-event-window-aggregation.md",
+      "line": 194,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/specs/symbolic-event-window-aggregation.md",
+      "line": 357,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/specs/symbolic-event-window-aggregation.md",
+      "line": 456,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/specs/symbolic-event-window-aggregation.md",
+      "line": 581,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/specs/symbolic-event-window-aggregation.md",
+      "line": 606,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/sql-arrow-comparison/RESULTS.md",
+      "line": 14,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/sql-arrow-comparison/RESULTS.md",
+      "line": 22,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/sql-arrow-comparison/RESULTS.md",
+      "line": 29,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/sql-arrow-comparison/RESULTS.md",
+      "line": 48,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/sql-arrow-comparison/RESULTS.md",
+      "line": 55,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/sql-arrow-comparison/RESULTS.md",
+      "line": 73,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/sql-arrow-comparison/RESULTS.md",
+      "line": 86,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/sql-arrow-comparison/RESULTS.md",
+      "line": 102,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/sql-arrow-comparison/RESULTS.md",
+      "line": 139,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/stream-dispatch/README.md",
+      "line": 8,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": ".codex/artifacts/stream-dispatch/README.md",
+      "line": 53,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": "benchmarks/stock-positions/engine-core-sweep-20261107.md",
+      "line": 18,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": "benchmarks/sum-state/sum-delta-delegation-20261107.md",
+      "line": 43,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": "benchmarks/sum-state/sum-key-sharding-20261107.md",
+      "line": 32,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": "benchmarks/symbolic/SCE16.md",
+      "line": 40,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": "docs/plans/2026-09-30-streaming-asof-acceleration.md",
+      "line": 55,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": "docs/plans/2026-09-30-streaming-asof-acceleration.md",
+      "line": 77,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": "docs/plans/2026-09-30-streaming-asof-acceleration.md",
+      "line": 237,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": "docs/plans/2026-11-08-ta-lib-arroyo-performance.md",
+      "line": 50,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": "docs/plans/2026-11-08-ta-lib-arroyo-performance.md",
+      "line": 75,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": "docs/plans/2026-11-08-ta-lib-arroyo-performance.md",
+      "line": 123,
+      "kind": "unaligned-table"
+    },
+    {
+      "path": "docs/plans/2026-11-08-ta-lib-arroyo-performance.md",
+      "line": 372,
+      "kind": "unaligned-table"
+    }
+  ],
+  "finding_disposition": {
+    "unaligned-table": "76 preserved historical/specification/measurement/vendor table-format observations; current changed tables and new summary aligned",
+    "python-snippet": "3 pre-existing proposal signatures or pseudocode snippets, not executable current examples; no product build/import performed"
+  },
+  "source_configuration_facts": {
+    "package_version": "2026.11.2",
+    "cargo_version": "2026.11.2",
+    "python_requires": ">=3.9",
+    "rust_msrv": "1.94.0",
+    "exact_binding_core_dependency": "=2026.11.2",
+    "datafusion_dependency": {
+      "version": "=55.0.0",
+      "default-features": false,
+      "features": [
+        "datetime_expressions",
+        "regex_expressions",
+        "sql",
+        "unicode_expressions"
+      ]
+    },
+    "default_native_python_features": [
+      "connector-file"
+    ],
+    "connector_identities": {
+      "file": {
+        "source": "crates/calc-flow-connectors/src/file_sink.rs",
+        "version": "2.0.0",
+        "document_matches": true
+      },
+      "kafka": {
+        "source": "crates/calc-flow-connectors/src/kafka.rs",
+        "version": "2.0.0",
+        "document_matches": true
+      },
+      "postgresql": {
+        "source": "crates/calc-flow-connectors/src/postgresql.rs",
+        "version": "2.0.0",
+        "document_matches": true
+      },
+      "mysql": {
+        "source": "crates/calc-flow-connectors/src/mysql/mod.rs",
+        "version": "1.0.0",
+        "document_matches": true
+      },
+      "clickhouse": {
+        "source": "crates/calc-flow-connectors/src/clickhouse.rs",
+        "version": "2.0.0",
+        "document_matches": true
+      },
+      "http": {
+        "source": "crates/calc-flow-connectors/src/http.rs",
+        "version": "2.0.0",
+        "document_matches": true
+      },
+      "websocket": {
+        "source": "crates/calc-flow-connectors/src/websocket.rs",
+        "version": "2.0.0",
+        "document_matches": true
+      }
+    }
+  },
+  "code_block_checks": [
+    {
+      "path": ".claude/agents/cf-implementer.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 111,
+          "status": "template-parse-pass",
+          "diagnostic": "bash: line 2: syntax error near unexpected token `newline'\nbash: line 2: `cargo test -p calc-flow <test_name>          # targeted red/green loop'",
+          "expansion": "replace documented angle-bracket placeholders with AUDIT_VALUE; syntax only"
+        },
+        {
+          "language": "bash",
+          "line": 121,
+          "status": "template-parse-pass",
+          "diagnostic": "bash: line 3: syntax error near unexpected token `newline'\nbash: line 3: `JAX_PLATFORMS=cpu uv run pytest python/tests -q -k <test_name>   # targeted'",
+          "expansion": "replace documented angle-bracket placeholders with AUDIT_VALUE; syntax only"
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": ".claude/agents/cf-performancer.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 35,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": ".claude/agents/cf-reviewer.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 34,
+          "status": "template-parse-pass",
+          "diagnostic": "bash: line 2: syntax error near unexpected token `newline'\nbash: line 2: `gh pr diff <PR_NUMBER>'",
+          "expansion": "replace documented angle-bracket placeholders with AUDIT_VALUE; syntax only"
+        },
+        {
+          "language": "bash",
+          "line": 41,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 49,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 209,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": ".claude/agents/cf-spec-writer.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 40,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": ".claude/api-notes/docs-examples.md",
+      "blocks": [
+        {
+          "language": "python",
+          "line": 62,
+          "status": "parse-pass",
+          "package_imports": [
+            "calc_flow"
+          ],
+          "missing_modules": []
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": ".codex/artifacts/README.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 12,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "AGENTS.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 21,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 79,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 373,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "README.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 21,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 27,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "python",
+          "line": 39,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "bash",
+          "line": 181,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "benchmarks/README.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 105,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 116,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 337,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 356,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 366,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 401,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 467,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 497,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "benchmarks/polars-operators/README.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 161,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 185,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 205,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 255,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "benchmarks/risingwave/README.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 230,
+          "status": "template-parse-pass",
+          "diagnostic": "bash: line 4: syntax error near unexpected token `newline'\nbash: line 4: `  --output <新的证据目录>'",
+          "expansion": "replace documented angle-bracket placeholders with AUDIT_VALUE; syntax only"
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "benchmarks/sql-operators/README.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 87,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 99,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "benchmarks/sum-state/README.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 101,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 125,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 178,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "benchmarks/symbolic/BASELINE.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 21,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "benchmarks/symbolic/SCE05.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 50,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 59,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "benchmarks/symbolic/SCE08.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 53,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 63,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "benchmarks/symbolic/SCE14.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 77,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 87,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "benchmarks/symbolic/SCE16.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 61,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 71,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "crates/calc-flow/examples/README.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 10,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 94,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 114,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 126,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 141,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 156,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/api-reference.md",
+      "blocks": [
+        {
+          "language": "python",
+          "line": 33,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "bash",
+          "line": 475,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/array-guide.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 16,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 53,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 75,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/asof-join-guide.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 18,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "python",
+          "line": 24,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 47,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/batch-guide.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 15,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "python",
+          "line": 22,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 92,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 155,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 189,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "bash",
+          "line": 242,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 268,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 294,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/benchmark-suite.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 438,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 499,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 534,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 802,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 936,
+          "status": "template-parse-pass",
+          "diagnostic": "bash: line 4: syntax error near unexpected token `newline'\nbash: line 4: `  --expected-main-sha <observed-main-SHA>'",
+          "expansion": "replace documented angle-bracket placeholders with AUDIT_VALUE; syntax only"
+        },
+        {
+          "language": "bash",
+          "line": 1097,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 1138,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 1154,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/connectors/README.md",
+      "blocks": [
+        {
+          "language": "python",
+          "line": 67,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "bash",
+          "line": 104,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 159,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 166,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "json",
+          "line": 225,
+          "status": "parse-pass"
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/connectors/clickhouse.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 27,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 34,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 61,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 89,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "json",
+          "line": 106,
+          "status": "member-fragment-parse-pass",
+          "diagnostic": "Extra data: line 1 column 10 (char 9)",
+          "expansion": "wrap documented JSON object members in braces"
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/connectors/file.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 24,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "json",
+          "line": 48,
+          "status": "parse-pass"
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/connectors/http.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 25,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 31,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "json",
+          "line": 65,
+          "status": "parse-pass"
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/connectors/kafka.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 36,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 56,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "json",
+          "line": 81,
+          "status": "member-fragment-parse-pass",
+          "diagnostic": "Extra data: line 1 column 10 (char 9)",
+          "expansion": "wrap documented JSON object members in braces"
+        },
+        {
+          "language": "json",
+          "line": 138,
+          "status": "parse-pass"
+        },
+        {
+          "language": "bash",
+          "line": 172,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "json",
+          "line": 194,
+          "status": "parse-pass"
+        },
+        {
+          "language": "python",
+          "line": 244,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "bash",
+          "line": 291,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 308,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 334,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "json",
+          "line": 347,
+          "status": "parse-pass"
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/connectors/mysql.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 28,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 35,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 63,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 92,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "json",
+          "line": 111,
+          "status": "parse-pass"
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/connectors/postgresql.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 27,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 34,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 60,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 86,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "json",
+          "line": 101,
+          "status": "member-fragment-parse-pass",
+          "diagnostic": "Extra data: line 1 column 10 (char 9)",
+          "expansion": "wrap documented JSON object members in braces"
+        },
+        {
+          "language": "json",
+          "line": 111,
+          "status": "member-fragment-parse-pass",
+          "diagnostic": "Extra data: line 1 column 10 (char 9)",
+          "expansion": "wrap documented JSON object members in braces"
+        },
+        {
+          "language": "json",
+          "line": 125,
+          "status": "member-fragment-parse-pass",
+          "diagnostic": "Extra data: line 1 column 10 (char 9)",
+          "expansion": "wrap documented JSON object members in braces"
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/connectors/websocket.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 25,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 31,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "json",
+          "line": 63,
+          "status": "parse-pass"
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/getting-started.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 53,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 76,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 118,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 183,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "python",
+          "line": 204,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "bash",
+          "line": 220,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/introduction.md",
+      "blocks": [
+        {
+          "language": "python",
+          "line": 66,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/projects-guide.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 14,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "python",
+          "line": 35,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "json",
+          "line": 162,
+          "status": "parse-pass"
+        },
+        {
+          "language": "json",
+          "line": 177,
+          "status": "parse-pass"
+        },
+        {
+          "language": "json",
+          "line": 208,
+          "status": "parse-pass"
+        },
+        {
+          "language": "json",
+          "line": 282,
+          "status": "parse-pass"
+        },
+        {
+          "language": "json",
+          "line": 311,
+          "status": "parse-pass"
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/python-api.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 40,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 54,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "python",
+          "line": 61,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 520,
+          "status": "parse-pass",
+          "package_imports": [
+            "calc_flow"
+          ],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 556,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 601,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 626,
+          "status": "parse-pass",
+          "package_imports": [
+            "calc_flow"
+          ],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 670,
+          "status": "parse-pass",
+          "package_imports": [
+            "calc_flow"
+          ],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 825,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 956,
+          "status": "parse-pass",
+          "package_imports": [
+            "calc_flow"
+          ],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 1006,
+          "status": "parse-pass",
+          "package_imports": [
+            "calc_flow"
+          ],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 1049,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 1087,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 1153,
+          "status": "parse-pass",
+          "package_imports": [
+            "calc_flow"
+          ],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 1206,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 1223,
+          "status": "parse-pass",
+          "package_imports": [
+            "calc_flow"
+          ],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 1333,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/python-release.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 88,
+          "status": "template-parse-pass",
+          "diagnostic": "bash: line 2: syntax error near unexpected token `newline'\nbash: line 2: `git push origin calc-flow-python-v<version>'",
+          "expansion": "replace documented angle-bracket placeholders with AUDIT_VALUE; syntax only"
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/rust-api.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 42,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 947,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/rust-release.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 13,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 74,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/sql-datafusion-performance.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 141,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 202,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/streaming-guide.md",
+      "blocks": [
+        {
+          "language": "python",
+          "line": 62,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 139,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "bash",
+          "line": 193,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 202,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 247,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 257,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "python",
+          "line": 278,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 310,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 408,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "bash",
+          "line": 643,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "python",
+          "line": 684,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 945,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 978,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "bash",
+          "line": 1117,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "python",
+          "line": 1161,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 1225,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 1292,
+          "status": "parse-pass",
+          "package_imports": [
+            "calc_flow"
+          ],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 1605,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 1639,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "bash",
+          "line": 1660,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/symbolic-api.md",
+      "blocks": [
+        {
+          "language": "python",
+          "line": 57,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        },
+        {
+          "language": "python",
+          "line": 666,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/symbolic-workflows.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 112,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 127,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 150,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 197,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 230,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "python",
+          "line": 237,
+          "status": "parse-pass",
+          "package_imports": [],
+          "missing_modules": []
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/verification.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 25,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 81,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 107,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "docs/warm-stream-performance.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 55,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 84,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 122,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 154,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "examples/README.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 26,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 32,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "fuzz/README.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 9,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    },
+    {
+      "path": "scripts/groupby_diagnostic/README.md",
+      "blocks": [
+        {
+          "language": "bash",
+          "line": 6,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 94,
+          "status": "parse-pass",
+          "diagnostic": ""
+        },
+        {
+          "language": "bash",
+          "line": 106,
+          "status": "parse-pass",
+          "diagnostic": ""
+        }
+      ],
+      "unresolved_current_root_names": []
+    }
+  ],
+  "cargo_target_references": [
+    {
+      "path": ".claude/api-notes/docs-examples.md",
+      "kind": "example",
+      "name": "sql_join",
+      "exists": false
+    },
+    {
+      "path": ".claude/api-notes/docs-examples.md",
+      "kind": "example",
+      "name": "expression_pipeline",
+      "exists": true
+    },
+    {
+      "path": ".claude/api-notes/docs-examples.md",
+      "kind": "example",
+      "name": "sql_join",
+      "exists": false
+    },
+    {
+      "path": ".claude/api-notes/docs-examples.md",
+      "kind": "example",
+      "name": "micro_batch_recovery",
+      "exists": false
+    },
+    {
+      "path": "crates/calc-flow/examples/README.md",
+      "kind": "example",
+      "name": "01_datafusion_pipeline",
+      "exists": true
+    },
+    {
+      "path": "crates/calc-flow/examples/README.md",
+      "kind": "example",
+      "name": "03_registered_udf",
+      "exists": true
+    },
+    {
+      "path": "crates/calc-flow/examples/README.md",
+      "kind": "example",
+      "name": "10_symbolic_streaming_recovery",
+      "exists": true
+    },
+    {
+      "path": "crates/calc-flow/examples/README.md",
+      "kind": "example",
+      "name": "29_sql_stream_switch",
+      "exists": true
+    },
+    {
+      "path": "crates/calc-flow/examples/README.md",
+      "kind": "example",
+      "name": "15_file_source",
+      "exists": true
+    },
+    {
+      "path": "crates/calc-flow/examples/README.md",
+      "kind": "example",
+      "name": "16_kafka_source",
+      "exists": true
+    },
+    {
+      "path": "crates/calc-flow/examples/README.md",
+      "kind": "example",
+      "name": "17_postgresql_source",
+      "exists": true
+    },
+    {
+      "path": "crates/calc-flow/examples/README.md",
+      "kind": "example",
+      "name": "24_mysql_sink",
+      "exists": true
+    },
+    {
+      "path": "crates/calc-flow/examples/README.md",
+      "kind": "example",
+      "name": "20_http_source",
+      "exists": true
+    },
+    {
+      "path": "crates/calc-flow/examples/README.md",
+      "kind": "example",
+      "name": "websocket_orders",
+      "exists": true
+    },
+    {
+      "path": "crates/calc-flow/examples/README.md",
+      "kind": "example",
+      "name": "21_websocket_source",
+      "exists": true
+    },
+    {
+      "path": "crates/calc-flow/examples/README.md",
+      "kind": "example",
+      "name": "27_kafka_protobuf_source",
+      "exists": true
+    },
+    {
+      "path": "crates/calc-flow/examples/README.md",
+      "kind": "example",
+      "name": "30_streaming_stock_positions",
+      "exists": true
+    },
+    {
+      "path": "crates/calc-flow/examples/README.md",
+      "kind": "example",
+      "name": "31_streaming_account_market_values",
+      "exists": true
+    },
+    {
+      "path": "crates/calc-flow/examples/README.md",
+      "kind": "example",
+      "name": "export_schema",
+      "exists": true
+    },
+    {
+      "path": "crates/calc-flow/examples/README.md",
+      "kind": "example",
+      "name": "gen_v3_schema",
+      "exists": true
+    },
+    {
+      "path": "docs/benchmark-suite.md",
+      "kind": "bench",
+      "name": "stream_asof_perf",
+      "exists": true
+    },
+    {
+      "path": "docs/benchmark-suite.md",
+      "kind": "bench",
+      "name": "stream_asof_perf",
+      "exists": true
+    },
+    {
+      "path": "docs/benchmark-suite.md",
+      "kind": "bench",
+      "name": "stream_asof_e2e",
+      "exists": true
+    },
+    {
+      "path": "docs/benchmark-suite.md",
+      "kind": "bench",
+      "name": "stream_asof_e2e",
+      "exists": true
+    },
+    {
+      "path": "docs/benchmark-suite.md",
+      "kind": "bench",
+      "name": "stream_join_materialization",
+      "exists": true
+    },
+    {
+      "path": "docs/benchmark-suite.md",
+      "kind": "bench",
+      "name": "stream_join_materialization",
+      "exists": true
+    },
+    {
+      "path": "docs/connectors/kafka.md",
+      "kind": "example",
+      "name": "27_kafka_protobuf_source",
+      "exists": true
+    },
+    {
+      "path": "docs/connectors/kafka.md",
+      "kind": "example",
+      "name": "28_kafka_custom_decoder",
+      "exists": true
+    },
+    {
+      "path": "docs/rust-api.md",
+      "kind": "example",
+      "name": "expression_pipeline",
+      "exists": true
+    },
+    {
+      "path": "docs/rust-api.md",
+      "kind": "example",
+      "name": "02_sql_join",
+      "exists": true
+    },
+    {
+      "path": "docs/rust-api.md",
+      "kind": "example",
+      "name": "04_continuous_runtime",
+      "exists": true
+    },
+    {
+      "path": "docs/rust-api.md",
+      "kind": "example",
+      "name": "windowed_streaming",
+      "exists": true
+    },
+    {
+      "path": "docs/sql-datafusion-performance.md",
+      "kind": "bench",
+      "name": "sql_datafusion_performance",
+      "exists": true
+    },
+    {
+      "path": "docs/streaming-guide.md",
+      "kind": "example",
+      "name": "late_output_recovery",
+      "exists": true
+    },
+    {
+      "path": "docs/streaming-guide.md",
+      "kind": "example",
+      "name": "late_output_recovery",
+      "exists": true
+    },
+    {
+      "path": "docs/streaming-guide.md",
+      "kind": "example",
+      "name": "late_output_recovery",
+      "exists": true
+    },
+    {
+      "path": "docs/streaming-guide.md",
+      "kind": "example",
+      "name": "windowed_streaming",
+      "exists": true
+    },
+    {
+      "path": "examples/README.md",
+      "kind": "example",
+      "name": "NAME",
+      "exists": false
+    },
+    {
+      "path": "examples/README.md",
+      "kind": "example",
+      "name": "late_output_recovery",
+      "exists": true
+    }
+  ],
+  "target_disposition": "three legacy target references are in the historical docs-examples API note mirror; examples/README NAME is a placeholder; all remaining 35 literal target references exist",
+  "external_links": {
+    "checked_at": "2026-11-08T08:56:47.527145+00:00",
+    "method": "single streamed GET, redirect follow, connect timeout 4s/read timeout 6s, no retry",
+    "url_count": 224,
+    "results": [
+      {
+        "url": "http://www.apache.org/licenses/LICENSE-2.0",
+        "status": 200,
+        "final_url": "https://www.apache.org/licenses/LICENSE-2.0",
+        "result": "reachable"
+      },
+      {
+        "url": "https://app.codacy.com/gh/wegamekinglc/calc-flow/dashboard",
+        "status": 200,
+        "final_url": "https://app.codacy.com/gh/wegamekinglc/calc-flow/dashboard",
+        "result": "reachable"
+      },
+      {
+        "url": "https://app.codacy.com/project/badge/Grade/7416ea8873544e599089cf63aba3717d",
+        "status": 200,
+        "final_url": "https://app.codacy.com/project/badge/Grade/7416ea8873544e599089cf63aba3717d",
+        "result": "reachable"
+      },
+      {
+        "url": "https://arrow.apache.org/",
+        "status": 200,
+        "final_url": "https://arrow.apache.org/",
+        "result": "reachable"
+      },
+      {
+        "url": "https://arrow.apache.org/docs/format/Columnar.html",
+        "status": 200,
+        "final_url": "https://arrow.apache.org/docs/format/Columnar.html",
+        "result": "reachable"
+      },
+      {
+        "url": "https://arrow.apache.org/rust/parquet/index.html",
+        "status": 200,
+        "final_url": "https://arrow.apache.org/rust/parquet/index.html",
+        "result": "reachable"
+      },
+      {
+        "url": "https://coveralls.io/builds/82398704",
+        "status": 403,
+        "final_url": "https://coveralls.io/builds/82398704",
+        "result": "http-failure"
+      },
+      {
+        "url": "https://coveralls.io/github/wegamekinglc/calc-flow?branch=main",
+        "status": 403,
+        "final_url": "https://coveralls.io/github/wegamekinglc/calc-flow?branch=main",
+        "result": "http-failure"
+      },
+      {
+        "url": "https://coveralls.io/repos/github/wegamekinglc/calc-flow/badge.svg?branch=main",
+        "status": 200,
+        "final_url": "https://s3.amazonaws.com/assets.coveralls.io/badges/coveralls_94.svg",
+        "result": "reachable"
+      },
+      {
+        "url": "https://crates.io/crates/arrow",
+        "status": 404,
+        "final_url": "https://crates.io/crates/arrow",
+        "result": "http-failure"
+      },
+      {
+        "url": "https://crates.io/crates/parquet",
+        "status": 404,
+        "final_url": "https://crates.io/crates/parquet",
+        "result": "http-failure"
+      },
+      {
+        "url": "https://crates.io/crates/pgwire-replication",
+        "status": 404,
+        "final_url": "https://crates.io/crates/pgwire-replication",
+        "result": "http-failure"
+      },
+      {
+        "url": "https://crates.io/crates/simdutf8",
+        "status": 404,
+        "final_url": "https://crates.io/crates/simdutf8",
+        "result": "http-failure"
+      },
+      {
+        "url": "https://doc.arroyo.dev/architecture/",
+        "status": 200,
+        "final_url": "https://doc.arroyo.dev/architecture/",
+        "result": "reachable"
+      },
+      {
+        "url": "https://doc.arroyo.dev/connectors/",
+        "status": 200,
+        "final_url": "https://doc.arroyo.dev/connectors/",
+        "result": "reachable"
+      },
+      {
+        "url": "https://doc.arroyo.dev/connectors/filesystem/",
+        "status": 200,
+        "final_url": "https://doc.arroyo.dev/connectors/filesystem/",
+        "result": "reachable"
+      },
+      {
+        "url": "https://doc.arroyo.dev/deployment/pipeline-clusters/",
+        "status": 200,
+        "final_url": "https://doc.arroyo.dev/deployment/pipeline-clusters/",
+        "result": "reachable"
+      },
+      {
+        "url": "https://doc.arroyo.dev/sql/joins/",
+        "status": 200,
+        "final_url": "https://doc.arroyo.dev/sql/joins/",
+        "result": "reachable"
+      },
+      {
+        "url": "https://doc.arroyo.dev/sql/updating-tables/",
+        "status": 200,
+        "final_url": "https://doc.arroyo.dev/sql/updating-tables/",
+        "result": "reachable"
+      },
+      {
+        "url": "https://doc.arroyo.dev/sql/window-functions/",
+        "status": 200,
+        "final_url": "https://doc.arroyo.dev/sql/window-functions/",
+        "result": "reachable"
+      },
+      {
+        "url": "https://doc.arroyo.dev/sql/windows/",
+        "status": 200,
+        "final_url": "https://doc.arroyo.dev/sql/windows/",
+        "result": "reachable"
+      },
+      {
+        "url": "https://doc.arroyo.dev/udfs/",
+        "status": 200,
+        "final_url": "https://doc.arroyo.dev/udfs/",
+        "result": "reachable"
+      },
+      {
+        "url": "https://doc.arroyo.dev/udfs/rust/async-udfs/",
+        "status": 200,
+        "final_url": "https://doc.arroyo.dev/udfs/rust/async-udfs/",
+        "result": "reachable"
+      },
+      {
+        "url": "https://doc.rust-lang.org/cargo/commands/cargo-package.html",
+        "status": 200,
+        "final_url": "https://doc.rust-lang.org/cargo/commands/cargo-package.html",
+        "result": "reachable"
+      },
+      {
+        "url": "https://doc.rust-lang.org/cargo/reference/external-tools.html",
+        "status": 200,
+        "final_url": "https://doc.rust-lang.org/cargo/reference/external-tools.html",
+        "result": "reachable"
+      },
+      {
+        "url": "https://doc.rust-lang.org/cargo/reference/semver.html",
+        "status": 200,
+        "final_url": "https://doc.rust-lang.org/cargo/reference/semver.html",
+        "result": "reachable"
+      },
+      {
+        "url": "https://doc.rust-lang.org/std/env/fn.current_exe.html",
+        "status": 200,
+        "final_url": "https://doc.rust-lang.org/std/env/fn.current_exe.html",
+        "result": "reachable"
+      },
+      {
+        "url": "https://docs.astral.sh/uv/",
+        "status": 200,
+        "final_url": "https://docs.astral.sh/uv/",
+        "result": "reachable"
+      },
+      {
+        "url": "https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow",
+        "status": 200,
+        "final_url": "https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow",
+        "result": "reachable"
+      },
+      {
+        "url": "https://docs.risingwave.com/get-started/architecture",
+        "status": 200,
+        "final_url": "https://docs.risingwave.com/get-started/architecture",
+        "result": "reachable"
+      },
+      {
+        "url": "https://docs.risingwave.com/get-started/connectors",
+        "status": 200,
+        "final_url": "https://docs.risingwave.com/get-started/connectors",
+        "result": "reachable"
+      },
+      {
+        "url": "https://docs.risingwave.com/get-started/premium-features",
+        "status": 200,
+        "final_url": "https://docs.risingwave.com/get-started/premium-features",
+        "result": "reachable"
+      },
+      {
+        "url": "https://docs.risingwave.com/processing/emit-on-window-close",
+        "status": 200,
+        "final_url": "https://docs.risingwave.com/processing/emit-on-window-close",
+        "result": "reachable"
+      },
+      {
+        "url": "https://docs.risingwave.com/processing/watermarks",
+        "status": 200,
+        "final_url": "https://docs.risingwave.com/processing/watermarks",
+        "result": "reachable"
+      },
+      {
+        "url": "https://docs.risingwave.com/sql/commands/sql-flush",
+        "status": 200,
+        "final_url": "https://docs.risingwave.com/sql/commands/sql-flush",
+        "result": "reachable"
+      },
+      {
+        "url": "https://docs.rs/arrow-ipc/latest",
+        "status": 200,
+        "final_url": "https://docs.rs/arrow-ipc/latest/arrow_ipc/",
+        "result": "reachable"
+      },
+      {
+        "url": "https://docs.rs/parquet/latest",
+        "status": 200,
+        "final_url": "https://docs.rs/parquet/latest/parquet/",
+        "result": "reachable"
+      },
+      {
+        "url": "https://docs.rs/parquet/latest/parquet/",
+        "status": 200,
+        "final_url": "https://docs.rs/parquet/latest/parquet/",
+        "result": "reachable"
+      },
+      {
+        "url": "https://docs.rs/pgwire-replication",
+        "status": 200,
+        "final_url": "https://docs.rs/pgwire-replication/latest/pgwire_replication/",
+        "result": "reachable"
+      },
+      {
+        "url": "https://docs.rs/pgwire-replication/badge.svg",
+        "status": 200,
+        "final_url": "https://img.shields.io/docsrs/pgwire-replication/latest",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/ArroyoSystems/arroyo/blob/4ef15f6336a596651f10cf27c1ee29c29bf81577/crates/arroyo-connectors/src/lib.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/ArroyoSystems/arroyo/blob/4ef15f6336a596651f10cf27c1ee29c29bf81577/crates/arroyo-connectors/src/stdout/operator.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/ArroyoSystems/arroyo/blob/4ef15f6336a596651f10cf27c1ee29c29bf81577/crates/arroyo-connectors/src/websocket/operator.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/ArroyoSystems/arroyo/blob/4ef15f6336a596651f10cf27c1ee29c29bf81577/crates/arroyo-worker/src/arrow/watermark_generator.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/ArroyoSystems/arroyo/blob/eac7541f061c467c729549caabd6658d00ce9b23/crates/arroyo-datastream/src/optimizers.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/ArroyoSystems/arroyo/blob/eac7541f061c467c729549caabd6658d00ce9b23/crates/arroyo-formats/src/lib.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/ArroyoSystems/arroyo/blob/eac7541f061c467c729549caabd6658d00ce9b23/crates/arroyo-operator/src/operator.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/ArroyoSystems/arroyo/blob/eac7541f061c467c729549caabd6658d00ce9b23/crates/arroyo-state/src/tables/table_manager.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/ArroyoSystems/arroyo/blob/eac7541f061c467c729549caabd6658d00ce9b23/crates/arroyo-worker/src/arrow/incremental_aggregator.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/ArroyoSystems/arroyo/blob/eac7541f061c467c729549caabd6658d00ce9b23/crates/arroyo-worker/src/arrow/sliding_aggregating_window.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/ArroyoSystems/arroyo/releases/tag/v0.15.0",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/TA-Lib/ta-lib-python/tree/v0.7.1",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/TA-Lib/ta-lib/blob/58160778ecaab21e90eafd6e5462f6e833100af9/docs/streaming-api-design.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/TA-Lib/ta-lib/blob/58160778ecaab21e90eafd6e5462f6e833100af9/ta_codegen/generator/src/backends/c_stream.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/TA-Lib/ta-lib/blob/58160778ecaab21e90eafd6e5462f6e833100af9/ta_codegen/input/max/max.c",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/TA-Lib/ta-lib/blob/58160778ecaab21e90eafd6e5462f6e833100af9/ta_codegen/input/wma/wma.c",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/TA-Lib/ta-lib/blob/58160778ecaab21e90eafd6e5462f6e833100af9/ta_codegen/output/rust/library/Cargo.toml",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/TA-Lib/ta-lib/blob/58160778ecaab21e90eafd6e5462f6e833100af9/ta_codegen/output/rust/library/src/lib.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/TA-Lib/ta-lib/blob/58160778ecaab21e90eafd6e5462f6e833100af9/ta_codegen/output/rust/library/src/ta_func/ema.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/TA-Lib/ta-lib/blob/58160778ecaab21e90eafd6e5462f6e833100af9/ta_codegen/output/rust/library/src/ta_func/max.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/TA-Lib/ta-lib/blob/58160778ecaab21e90eafd6e5462f6e833100af9/ta_codegen/output/rust/library/src/ta_func/rsi.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/TA-Lib/ta-lib/blob/58160778ecaab21e90eafd6e5462f6e833100af9/ta_codegen/output/rust/library/src/ta_func/sma.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/TA-Lib/ta-lib/blob/58160778ecaab21e90eafd6e5462f6e833100af9/ta_codegen/output/rust/library/src/ta_func/var.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/TA-Lib/ta-lib/blob/58160778ecaab21e90eafd6e5462f6e833100af9/ta_func_list.txt",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/TA-Lib/ta-lib/commit/58160778ecaab21e90eafd6e5462f6e833100af9",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/alpha-miner/Finance-Python/tree/3e33d3e70c3458b4c6dcf76b88df6148229b402c/PyFin/tests/Analysis",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/apache/arrow-rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/apache/arrow-rs/blob/main/SECURITY.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/apache/arrow-rs/issues/11587",
+        "status": 200,
+        "final_url": "https://github.com/apache/arrow-rs/issues/11587",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/apache/arrow-rs/tree/main/parquet/src/bin",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/apache/parquet-format/blob/master/VariantEncoding.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/containers/bubblewrap/blob/v0.11.1/README.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/dtolnay/cargo-expand",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/risingwavelabs/risingwave/blob/45baf6460ea942e4ff57a5aa057d5b8db7f3b563/src/cmd_all/src/single_node.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/risingwavelabs/risingwave/blob/45baf6460ea942e4ff57a5aa057d5b8db7f3b563/src/frontend/src/handler/flush.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/risingwavelabs/risingwave/blob/45baf6460ea942e4ff57a5aa057d5b8db7f3b563/src/storage/compactor/src/server.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/risingwavelabs/risingwave/blob/45baf6460ea942e4ff57a5aa057d5b8db7f3b563/src/stream/src/executor/watermark_filter.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/rust-lang/rust-clippy/issues/13774",
+        "status": 200,
+        "final_url": "https://github.com/rust-lang/rust-clippy/issues/13774",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/semgrep/semgrep-rules/blob/17e31e11ebac99fb7dfe1cd288f7a32151b6f3f9/python/lang/security/audit/dangerous-asyncio-create-exec-audit.yaml",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/semgrep/semgrep-rules/blob/develop/rust/lang/security/args-os.yml",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/semgrep/semgrep-rules/blob/develop/rust/lang/security/current-exe.yml",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/vnvo/pgwire-replication",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/vnvo/pgwire-replication/actions/workflows/ci.yml",
+        "status": 200,
+        "final_url": "https://github.com/vnvo/pgwire-replication/actions/workflows/ci.yml",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/vnvo/pgwire-replication/actions/workflows/ci.yml/badge.svg",
+        "status": 200,
+        "final_url": "https://github.com/vnvo/pgwire-replication/actions/workflows/ci.yml/badge.svg",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow-studio",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/37974396930/job/113968941964",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/37974396930/job/113968941964",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38178694560",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38178694560",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38193911010",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38193911010",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38209692076",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38209692076",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38228597721",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38228597721",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38228597776",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38228597776",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38228629578",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38228629578",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38228629578/artifacts/11742858650",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38231970645",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38231970645",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38234579540",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38234579540",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38234579578",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38234579578",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38235513830",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38235513830",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38254036436",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38254036436",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38314145431",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38314145431",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38334954225",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38334954225",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38777032052/job/116578428023",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38777032052/job/116578428023",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38786091579/job/116598420211",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38786091579/job/116598420211",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38818949674/job/116719799042",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38818949674/job/116719799042",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38818949763/job/116711806030",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38818949763/job/116711806030",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38829651552/job/116753370202",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/38829651552/job/116753370202",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/39107510462/job/117616482758",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/39107510462/job/117616482758",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/39358081556",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/39358081556",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/39640281625",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/39640281625",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/runs/40216341910/job/121238214507",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/40216341910/job/121238214507",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/benchmark-suite.yml",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/benchmark-suite.yml",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/benchmark-suite.yml/badge.svg?branch=main",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/benchmark-suite.yml/badge.svg?branch=main",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-linux.yml",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-linux.yml",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-linux.yml/badge.svg?branch=main",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-linux.yml/badge.svg?branch=main",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml/badge.svg?branch=main",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml/badge.svg?branch=main",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/0401d4b7849bcf8af203b77ca42a9e8e51795bab/.codex/artifacts/analysis/issue406-asof-admission-bulk.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/audits/2026-08-19-continuous-streaming-v3-current-main.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/plans/2026-08-22-symbolic-computation-engine.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/specs/2026-08-22-symbolic-computation-engine-design.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/crates/calc-flow-python/src/provider.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/crates/calc-flow/examples/06_numpy_array.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/crates/calc-flow/examples/support/matrix.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/crates/calc-flow/rolling-kernels.json",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/crates/calc-flow/src/batch.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/crates/calc-flow/src/operator/rolling/kernel.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/docs/plans/2026-11-08-ta-lib-arroyo-performance.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/docs/symbolic-api.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/docs/symbolic-design.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/python/calc_flow/array.py",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/python/calc_flow/symbolic/analyzer.py",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/python/calc_flow/symbolic/expr.py",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/python/calc_flow/symbolic/lower/strategies.py",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/python/calc_flow/symbolic/ops.py",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/python/tests/test_array.py",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/python/tests/test_sql_pipeline.py",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/python/tests/test_symbolic_event_window_lowering.py",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/python/tests/test_symbolic_matrix.py",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/8b9154103614bd3608d13dd30a45b2657af7ea73/crates/calc-flow/src/operator/join.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/8b9154103614bd3608d13dd30a45b2657af7ea73/crates/calc-flow/src/operator/join/native_lookup.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/8d8be7d907a095dbc0dc2b73dafcfdd842979cdf/benchmarks/sum-state/sum-batch-parallel-20261104.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/8d8be7d907a095dbc0dc2b73dafcfdd842979cdf/benchmarks/sum-state/sum-delta-delegation-20261107.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/8d8be7d907a095dbc0dc2b73dafcfdd842979cdf/benchmarks/sum-state/sum-key-sharding-20261107.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/8d8be7d907a095dbc0dc2b73dafcfdd842979cdf/crates/calc-flow/src/operator/rolling.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/8d8be7d907a095dbc0dc2b73dafcfdd842979cdf/crates/calc-flow/src/operator/rolling/kernel.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/8d8be7d907a095dbc0dc2b73dafcfdd842979cdf/crates/calc-flow/src/operator/rolling/tests.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/8d8be7d907a095dbc0dc2b73dafcfdd842979cdf/crates/calc-flow/src/operator/sql/incremental.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/8d8be7d907a095dbc0dc2b73dafcfdd842979cdf/crates/calc-flow/src/operator/window.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/8d8be7d907a095dbc0dc2b73dafcfdd842979cdf/crates/calc-flow/src/runtime/streaming/runner/operator_fusion.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/b9a10d4fa4b109b810d2f5839951912b92e597f8/crates/calc-flow-python/src/runtime.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/b9a10d4fa4b109b810d2f5839951912b92e597f8/crates/calc-flow-python/src/runtime/profile.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/b9a10d4fa4b109b810d2f5839951912b92e597f8/crates/calc-flow/src/datafusion.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/b9a10d4fa4b109b810d2f5839951912b92e597f8/crates/calc-flow/src/operator/expression.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/b9a10d4fa4b109b810d2f5839951912b92e597f8/crates/calc-flow/src/operator/window.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/b9a10d4fa4b109b810d2f5839951912b92e597f8/crates/calc-flow/src/pipeline/batch.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/b9a10d4fa4b109b810d2f5839951912b92e597f8/docs/connectors/websocket.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/b9a10d4fa4b109b810d2f5839951912b92e597f8/python/calc_flow/compute.py",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/b9a10d4fa4b109b810d2f5839951912b92e597f8/python/calc_flow/stream.py",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/b9a10d4fa4b109b810d2f5839951912b92e597f8/python/calc_flow/symbolic/program.py",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/dab98a559314bd46d866ed7a6489abcdd3810afe/crates/calc-flow/src/operator/sql/compact.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/dab98a559314bd46d866ed7a6489abcdd3810afe/crates/calc-flow/src/operator/window.rs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/dab98a559314bd46d866ed7a6489abcdd3810afe/docs/asof-join-guide.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/dab98a559314bd46d866ed7a6489abcdd3810afe/docs/connectors/README.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/dab98a559314bd46d866ed7a6489abcdd3810afe/docs/connectors/websocket.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/dab98a559314bd46d866ed7a6489abcdd3810afe/docs/introduction.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/dab98a559314bd46d866ed7a6489abcdd3810afe/docs/python-api.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/dab98a559314bd46d866ed7a6489abcdd3810afe/docs/streaming-guide.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/dab98a559314bd46d866ed7a6489abcdd3810afe/docs/symbolic-workflows.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/e4302f4101f609c8a58ce191beef32bf909519ed/web-ui/backend/src/calc_flow_studio/models.py",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/e4302f4101f609c8a58ce191beef32bf909519ed/web-ui/backend/src/calc_flow_studio/run_manager.py",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/e4302f4101f609c8a58ce191beef32bf909519ed/web-ui/openapi.json",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/main/docs/rust-api.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/blob/main/docs/rust-release.md",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/commit/74a1eaf2183adfd04fcb1aeecd655c6df73ed16f",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/commit/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/commit/84186554b078e25e71003a74fedc91c63b2b7f70",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/commit/b0a9633f44356022fd1aa169b4efa6b077bc2f7b",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/commit/e492158c4d7109c779b7b52aac87cf6ffd3e1613",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/commit/ec1a629f3a4d7e12f53407f795666d58cee91bb8",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/commit/fe0e86ad220bd88ae3aeb1ae6c384e3a72e0a792",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/issues/168",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/issues/168",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/issues/172",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/issues/172",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/issues/175",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/issues/175",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/issues/181",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/issues/181",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/issues/220",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/issues/220",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/issues/363",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/issues/363",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/issues/406",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/issues/406",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/pull/221",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/pull/221",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/pull/243",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/pull/243",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/pull/260",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/pull/260",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/pull/321",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/pull/321",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/pull/322",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/pull/322",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/pull/365",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/pull/365",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/pull/366",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/pull/366",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/pull/367",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/pull/367",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/pull/368",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/pull/368",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/pull/369",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/pull/369",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/pull/370",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/pull/370",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/pull/394",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/pull/394",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/pull/482",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/pull/482",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/pull/537",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/pull/537",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/pull/542",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/pull/542",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/pull/556",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/pull/556",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/pull/563",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/pull/563",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/pull/564",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/pull/564",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/pull/565",
+        "status": 200,
+        "final_url": "https://github.com/wegamekinglc/calc-flow/pull/565",
+        "result": "reachable"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/tree/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://github.com/wegamekinglc/calc-flow/tree/main/crates/calc-flow/examples",
+        "result": "network-failure",
+        "error": "ReadTimeout"
+      },
+      {
+        "url": "https://img.shields.io/badge/MSRV-1.88-blue.svg",
+        "status": 200,
+        "final_url": "https://img.shields.io/badge/MSRV-1.88-blue.svg",
+        "result": "reachable"
+      },
+      {
+        "url": "https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg",
+        "status": 200,
+        "final_url": "https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg",
+        "result": "reachable"
+      },
+      {
+        "url": "https://img.shields.io/crates/v/parquet.svg",
+        "status": 200,
+        "final_url": "https://img.shields.io/crates/v/parquet.svg",
+        "result": "reachable"
+      },
+      {
+        "url": "https://img.shields.io/crates/v/pgwire-replication.svg",
+        "status": 200,
+        "final_url": "https://img.shields.io/crates/v/pgwire-replication.svg",
+        "result": "reachable"
+      },
+      {
+        "url": "https://img.shields.io/docsrs/parquet.svg",
+        "status": 200,
+        "final_url": "https://img.shields.io/docsrs/parquet.svg",
+        "result": "reachable"
+      },
+      {
+        "url": "https://man7.org/linux/man-pages/man1/perf-record.1.html",
+        "status": 200,
+        "final_url": "https://man7.org/linux/man-pages/man1/perf-record.1.html",
+        "result": "reachable"
+      },
+      {
+        "url": "https://man7.org/linux/man-pages/man7/network_namespaces.7.html",
+        "status": 200,
+        "final_url": "https://man7.org/linux/man-pages/man7/network_namespaces.7.html",
+        "result": "reachable"
+      },
+      {
+        "url": "https://man7.org/linux/man-pages/man7/pid_namespaces.7.html",
+        "status": 200,
+        "final_url": "https://man7.org/linux/man-pages/man7/pid_namespaces.7.html",
+        "result": "reachable"
+      },
+      {
+        "url": "https://nvlpubs.nist.gov/nistpubs/TechnicalNotes/NIST.TN.2119.pdf",
+        "status": 200,
+        "final_url": "https://nvlpubs.nist.gov/nistpubs/TechnicalNotes/NIST.TN.2119.pdf",
+        "result": "reachable"
+      },
+      {
+        "url": "https://parquet.apache.org/",
+        "status": 200,
+        "final_url": "https://parquet.apache.org/",
+        "result": "reachable"
+      },
+      {
+        "url": "https://parquet.apache.org/docs/file-format/implementationstatus/",
+        "status": 200,
+        "final_url": "https://parquet.apache.org/docs/file-format/implementationstatus/",
+        "result": "reachable"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/RustSec/advisory-db/main/crates/arrow-data/RUSTSEC-2026-0442.md",
+        "status": 200,
+        "final_url": "https://raw.githubusercontent.com/RustSec/advisory-db/main/crates/arrow-data/RUSTSEC-2026-0442.md",
+        "result": "reachable"
+      },
+      {
+        "url": "https://rustsec.org/advisories/RUSTSEC-2026-0391.html",
+        "status": 200,
+        "final_url": "https://rustsec.org/advisories/RUSTSEC-2026-0391.html",
+        "result": "reachable"
+      },
+      {
+        "url": "https://rustsec.org/advisories/RUSTSEC-2026-0398.html",
+        "status": 200,
+        "final_url": "https://rustsec.org/advisories/RUSTSEC-2026-0398.html",
+        "result": "reachable"
+      },
+      {
+        "url": "https://rustsec.org/advisories/RUSTSEC-2026-0403.html",
+        "status": 200,
+        "final_url": "https://rustsec.org/advisories/RUSTSEC-2026-0403.html",
+        "result": "reachable"
+      },
+      {
+        "url": "https://ta-lib.org/api/rust/",
+        "status": 200,
+        "final_url": "https://ta-lib.org/api/rust/",
+        "result": "reachable"
+      },
+      {
+        "url": "https://ta-lib.org/api/rust/stream/",
+        "status": 200,
+        "final_url": "https://ta-lib.org/api/rust/stream/",
+        "result": "reachable"
+      }
+    ]
+  },
+  "external_github_git_object_checks": [
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/0401d4b7849bcf8af203b77ca42a9e8e51795bab/.codex/artifacts/analysis/issue406-asof-admission-bulk.md",
+      "http_result": "network-failure",
+      "git_object": "0401d4b7849bcf8af203b77ca42a9e8e51795bab:.codex/artifacts/analysis/issue406-asof-admission-bulk.md",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/audits/2026-08-19-continuous-streaming-v3-current-main.md",
+      "http_result": "network-failure",
+      "git_object": "1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3:docs/superpowers/audits/2026-08-19-continuous-streaming-v3-current-main.md",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/plans/2026-08-22-symbolic-computation-engine.md",
+      "http_result": "network-failure",
+      "git_object": "1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3:docs/superpowers/plans/2026-08-22-symbolic-computation-engine.md",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/specs/2026-08-22-symbolic-computation-engine-design.md",
+      "http_result": "network-failure",
+      "git_object": "1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3:docs/superpowers/specs/2026-08-22-symbolic-computation-engine-design.md",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/crates/calc-flow-python/src/provider.rs",
+      "http_result": "network-failure",
+      "git_object": "7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75:crates/calc-flow-python/src/provider.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/crates/calc-flow/examples/06_numpy_array.rs",
+      "http_result": "network-failure",
+      "git_object": "7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75:crates/calc-flow/examples/06_numpy_array.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/crates/calc-flow/examples/support/matrix.rs",
+      "http_result": "network-failure",
+      "git_object": "7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75:crates/calc-flow/examples/support/matrix.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/crates/calc-flow/rolling-kernels.json",
+      "http_result": "network-failure",
+      "git_object": "7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75:crates/calc-flow/rolling-kernels.json",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/crates/calc-flow/src/batch.rs",
+      "http_result": "network-failure",
+      "git_object": "7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75:crates/calc-flow/src/batch.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/crates/calc-flow/src/operator/rolling/kernel.rs",
+      "http_result": "network-failure",
+      "git_object": "7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75:crates/calc-flow/src/operator/rolling/kernel.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/docs/plans/2026-11-08-ta-lib-arroyo-performance.md",
+      "http_result": "network-failure",
+      "git_object": "7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75:docs/plans/2026-11-08-ta-lib-arroyo-performance.md",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/docs/symbolic-api.md",
+      "http_result": "network-failure",
+      "git_object": "7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75:docs/symbolic-api.md",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/docs/symbolic-design.md",
+      "http_result": "network-failure",
+      "git_object": "7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75:docs/symbolic-design.md",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/python/calc_flow/array.py",
+      "http_result": "network-failure",
+      "git_object": "7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75:python/calc_flow/array.py",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/python/calc_flow/symbolic/analyzer.py",
+      "http_result": "network-failure",
+      "git_object": "7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75:python/calc_flow/symbolic/analyzer.py",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/python/calc_flow/symbolic/expr.py",
+      "http_result": "network-failure",
+      "git_object": "7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75:python/calc_flow/symbolic/expr.py",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/python/calc_flow/symbolic/lower/strategies.py",
+      "http_result": "network-failure",
+      "git_object": "7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75:python/calc_flow/symbolic/lower/strategies.py",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/python/calc_flow/symbolic/ops.py",
+      "http_result": "network-failure",
+      "git_object": "7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75:python/calc_flow/symbolic/ops.py",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/python/tests/test_array.py",
+      "http_result": "network-failure",
+      "git_object": "7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75:python/tests/test_array.py",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/python/tests/test_sql_pipeline.py",
+      "http_result": "network-failure",
+      "git_object": "7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75:python/tests/test_sql_pipeline.py",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/python/tests/test_symbolic_event_window_lowering.py",
+      "http_result": "network-failure",
+      "git_object": "7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75:python/tests/test_symbolic_event_window_lowering.py",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75/python/tests/test_symbolic_matrix.py",
+      "http_result": "network-failure",
+      "git_object": "7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75:python/tests/test_symbolic_matrix.py",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/8b9154103614bd3608d13dd30a45b2657af7ea73/crates/calc-flow/src/operator/join.rs",
+      "http_result": "network-failure",
+      "git_object": "8b9154103614bd3608d13dd30a45b2657af7ea73:crates/calc-flow/src/operator/join.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/8b9154103614bd3608d13dd30a45b2657af7ea73/crates/calc-flow/src/operator/join/native_lookup.rs",
+      "http_result": "network-failure",
+      "git_object": "8b9154103614bd3608d13dd30a45b2657af7ea73:crates/calc-flow/src/operator/join/native_lookup.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/8d8be7d907a095dbc0dc2b73dafcfdd842979cdf/benchmarks/sum-state/sum-batch-parallel-20261104.md",
+      "http_result": "network-failure",
+      "git_object": "8d8be7d907a095dbc0dc2b73dafcfdd842979cdf:benchmarks/sum-state/sum-batch-parallel-20261104.md",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/8d8be7d907a095dbc0dc2b73dafcfdd842979cdf/benchmarks/sum-state/sum-delta-delegation-20261107.md",
+      "http_result": "network-failure",
+      "git_object": "8d8be7d907a095dbc0dc2b73dafcfdd842979cdf:benchmarks/sum-state/sum-delta-delegation-20261107.md",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/8d8be7d907a095dbc0dc2b73dafcfdd842979cdf/benchmarks/sum-state/sum-key-sharding-20261107.md",
+      "http_result": "network-failure",
+      "git_object": "8d8be7d907a095dbc0dc2b73dafcfdd842979cdf:benchmarks/sum-state/sum-key-sharding-20261107.md",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/8d8be7d907a095dbc0dc2b73dafcfdd842979cdf/crates/calc-flow/src/operator/rolling.rs",
+      "http_result": "network-failure",
+      "git_object": "8d8be7d907a095dbc0dc2b73dafcfdd842979cdf:crates/calc-flow/src/operator/rolling.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/8d8be7d907a095dbc0dc2b73dafcfdd842979cdf/crates/calc-flow/src/operator/rolling/kernel.rs",
+      "http_result": "network-failure",
+      "git_object": "8d8be7d907a095dbc0dc2b73dafcfdd842979cdf:crates/calc-flow/src/operator/rolling/kernel.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/8d8be7d907a095dbc0dc2b73dafcfdd842979cdf/crates/calc-flow/src/operator/rolling/tests.rs",
+      "http_result": "network-failure",
+      "git_object": "8d8be7d907a095dbc0dc2b73dafcfdd842979cdf:crates/calc-flow/src/operator/rolling/tests.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/8d8be7d907a095dbc0dc2b73dafcfdd842979cdf/crates/calc-flow/src/operator/sql/incremental.rs",
+      "http_result": "network-failure",
+      "git_object": "8d8be7d907a095dbc0dc2b73dafcfdd842979cdf:crates/calc-flow/src/operator/sql/incremental.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/8d8be7d907a095dbc0dc2b73dafcfdd842979cdf/crates/calc-flow/src/operator/window.rs",
+      "http_result": "network-failure",
+      "git_object": "8d8be7d907a095dbc0dc2b73dafcfdd842979cdf:crates/calc-flow/src/operator/window.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/8d8be7d907a095dbc0dc2b73dafcfdd842979cdf/crates/calc-flow/src/runtime/streaming/runner/operator_fusion.rs",
+      "http_result": "network-failure",
+      "git_object": "8d8be7d907a095dbc0dc2b73dafcfdd842979cdf:crates/calc-flow/src/runtime/streaming/runner/operator_fusion.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/b9a10d4fa4b109b810d2f5839951912b92e597f8/crates/calc-flow-python/src/runtime.rs",
+      "http_result": "network-failure",
+      "git_object": "b9a10d4fa4b109b810d2f5839951912b92e597f8:crates/calc-flow-python/src/runtime.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/b9a10d4fa4b109b810d2f5839951912b92e597f8/crates/calc-flow-python/src/runtime/profile.rs",
+      "http_result": "network-failure",
+      "git_object": "b9a10d4fa4b109b810d2f5839951912b92e597f8:crates/calc-flow-python/src/runtime/profile.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/b9a10d4fa4b109b810d2f5839951912b92e597f8/crates/calc-flow/src/datafusion.rs",
+      "http_result": "network-failure",
+      "git_object": "b9a10d4fa4b109b810d2f5839951912b92e597f8:crates/calc-flow/src/datafusion.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/b9a10d4fa4b109b810d2f5839951912b92e597f8/crates/calc-flow/src/operator/expression.rs",
+      "http_result": "network-failure",
+      "git_object": "b9a10d4fa4b109b810d2f5839951912b92e597f8:crates/calc-flow/src/operator/expression.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/b9a10d4fa4b109b810d2f5839951912b92e597f8/crates/calc-flow/src/operator/window.rs",
+      "http_result": "network-failure",
+      "git_object": "b9a10d4fa4b109b810d2f5839951912b92e597f8:crates/calc-flow/src/operator/window.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/b9a10d4fa4b109b810d2f5839951912b92e597f8/crates/calc-flow/src/pipeline/batch.rs",
+      "http_result": "network-failure",
+      "git_object": "b9a10d4fa4b109b810d2f5839951912b92e597f8:crates/calc-flow/src/pipeline/batch.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/b9a10d4fa4b109b810d2f5839951912b92e597f8/docs/connectors/websocket.md",
+      "http_result": "network-failure",
+      "git_object": "b9a10d4fa4b109b810d2f5839951912b92e597f8:docs/connectors/websocket.md",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/b9a10d4fa4b109b810d2f5839951912b92e597f8/python/calc_flow/compute.py",
+      "http_result": "network-failure",
+      "git_object": "b9a10d4fa4b109b810d2f5839951912b92e597f8:python/calc_flow/compute.py",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/b9a10d4fa4b109b810d2f5839951912b92e597f8/python/calc_flow/stream.py",
+      "http_result": "network-failure",
+      "git_object": "b9a10d4fa4b109b810d2f5839951912b92e597f8:python/calc_flow/stream.py",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/b9a10d4fa4b109b810d2f5839951912b92e597f8/python/calc_flow/symbolic/program.py",
+      "http_result": "network-failure",
+      "git_object": "b9a10d4fa4b109b810d2f5839951912b92e597f8:python/calc_flow/symbolic/program.py",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/dab98a559314bd46d866ed7a6489abcdd3810afe/crates/calc-flow/src/operator/sql/compact.rs",
+      "http_result": "network-failure",
+      "git_object": "dab98a559314bd46d866ed7a6489abcdd3810afe:crates/calc-flow/src/operator/sql/compact.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/dab98a559314bd46d866ed7a6489abcdd3810afe/crates/calc-flow/src/operator/window.rs",
+      "http_result": "network-failure",
+      "git_object": "dab98a559314bd46d866ed7a6489abcdd3810afe:crates/calc-flow/src/operator/window.rs",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/dab98a559314bd46d866ed7a6489abcdd3810afe/docs/asof-join-guide.md",
+      "http_result": "network-failure",
+      "git_object": "dab98a559314bd46d866ed7a6489abcdd3810afe:docs/asof-join-guide.md",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/dab98a559314bd46d866ed7a6489abcdd3810afe/docs/connectors/README.md",
+      "http_result": "network-failure",
+      "git_object": "dab98a559314bd46d866ed7a6489abcdd3810afe:docs/connectors/README.md",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/dab98a559314bd46d866ed7a6489abcdd3810afe/docs/connectors/websocket.md",
+      "http_result": "network-failure",
+      "git_object": "dab98a559314bd46d866ed7a6489abcdd3810afe:docs/connectors/websocket.md",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/dab98a559314bd46d866ed7a6489abcdd3810afe/docs/introduction.md",
+      "http_result": "network-failure",
+      "git_object": "dab98a559314bd46d866ed7a6489abcdd3810afe:docs/introduction.md",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/dab98a559314bd46d866ed7a6489abcdd3810afe/docs/python-api.md",
+      "http_result": "network-failure",
+      "git_object": "dab98a559314bd46d866ed7a6489abcdd3810afe:docs/python-api.md",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/dab98a559314bd46d866ed7a6489abcdd3810afe/docs/streaming-guide.md",
+      "http_result": "network-failure",
+      "git_object": "dab98a559314bd46d866ed7a6489abcdd3810afe:docs/streaming-guide.md",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/dab98a559314bd46d866ed7a6489abcdd3810afe/docs/symbolic-workflows.md",
+      "http_result": "network-failure",
+      "git_object": "dab98a559314bd46d866ed7a6489abcdd3810afe:docs/symbolic-workflows.md",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/e4302f4101f609c8a58ce191beef32bf909519ed/web-ui/backend/src/calc_flow_studio/models.py",
+      "http_result": "network-failure",
+      "git_object": "e4302f4101f609c8a58ce191beef32bf909519ed:web-ui/backend/src/calc_flow_studio/models.py",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/e4302f4101f609c8a58ce191beef32bf909519ed/web-ui/backend/src/calc_flow_studio/run_manager.py",
+      "http_result": "network-failure",
+      "git_object": "e4302f4101f609c8a58ce191beef32bf909519ed:web-ui/backend/src/calc_flow_studio/run_manager.py",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/e4302f4101f609c8a58ce191beef32bf909519ed/web-ui/openapi.json",
+      "http_result": "network-failure",
+      "git_object": "e4302f4101f609c8a58ce191beef32bf909519ed:web-ui/openapi.json",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/main/docs/rust-api.md",
+      "http_result": "network-failure",
+      "git_object": "origin/main:docs/rust-api.md",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/main/docs/rust-release.md",
+      "http_result": "network-failure",
+      "git_object": "origin/main:docs/rust-release.md",
+      "git_object_resolves": true,
+      "object_type": "blob"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/commit/74a1eaf2183adfd04fcb1aeecd655c6df73ed16f",
+      "http_result": "network-failure",
+      "git_object": "74a1eaf2183adfd04fcb1aeecd655c6df73ed16f",
+      "git_object_resolves": true,
+      "object_type": "commit"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/commit/7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75",
+      "http_result": "network-failure",
+      "git_object": "7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75",
+      "git_object_resolves": true,
+      "object_type": "commit"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/commit/84186554b078e25e71003a74fedc91c63b2b7f70",
+      "http_result": "network-failure",
+      "git_object": "84186554b078e25e71003a74fedc91c63b2b7f70",
+      "git_object_resolves": true,
+      "object_type": "commit"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/commit/b0a9633f44356022fd1aa169b4efa6b077bc2f7b",
+      "http_result": "network-failure",
+      "git_object": "b0a9633f44356022fd1aa169b4efa6b077bc2f7b",
+      "git_object_resolves": true,
+      "object_type": "commit"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/commit/e492158c4d7109c779b7b52aac87cf6ffd3e1613",
+      "http_result": "network-failure",
+      "git_object": "e492158c4d7109c779b7b52aac87cf6ffd3e1613",
+      "git_object_resolves": true,
+      "object_type": "commit"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/commit/ec1a629f3a4d7e12f53407f795666d58cee91bb8",
+      "http_result": "network-failure",
+      "git_object": "ec1a629f3a4d7e12f53407f795666d58cee91bb8",
+      "git_object_resolves": true,
+      "object_type": "commit"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/commit/fe0e86ad220bd88ae3aeb1ae6c384e3a72e0a792",
+      "http_result": "network-failure",
+      "git_object": "fe0e86ad220bd88ae3aeb1ae6c384e3a72e0a792",
+      "git_object_resolves": true,
+      "object_type": "commit"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/tree/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs",
+      "http_result": "network-failure",
+      "git_object": "1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3:docs",
+      "git_object_resolves": true,
+      "object_type": "tree"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/tree/main/crates/calc-flow/examples",
+      "http_result": "network-failure",
+      "git_object": "origin/main:crates/calc-flow/examples",
+      "git_object_resolves": true,
+      "object_type": "tree"
+    }
+  ],
+  "agent_synchronization": {
+    "agents_checked": 10,
+    "changed_text_fields": {
+      "cf-performancer": [
+        "instructions"
+      ]
+    },
+    "claude_descriptions_match": 10,
+    "claude_semantics": "canonical; documented client tool/worktree/style adaptations preserved",
+    "protected_configuration_hashes_equal": true,
+    "squad_configuration_written": false
+  },
+  "scope_limits": [
+    "No product build/test, full regression, coverage or performance measurement",
+    "External HTTP: 108 network failures, 2 Coveralls HTTP 403, 4 crates.io HTTP 404; external fragments not fully verified; no guessed URL rewrites",
+    "Missing historical seven-engine stock-positions table; existing sweep JSON cannot establish the historical cross-engine figures",
+    "Independent reviewer not yet dispatched by coordinator; no review approval claimed",
+    "No PR, remote push or merge in this batch"
+  ]
+}
