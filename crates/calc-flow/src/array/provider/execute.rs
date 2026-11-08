@@ -1,9 +1,12 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use super::{
     budget,
     infer::{self, Descriptor, Plan, Shape},
-    ir::{Binary, Input, Node, Reduce, Unary},
+    ir::{Binary, Input, Node, Unary},
 };
 use crate::{
     Batch, BatchMetadata, Result,
@@ -47,6 +50,7 @@ struct Run<'a> {
     plan: &'a Plan,
     values: Vec<Option<Batch>>,
     retained: usize,
+    observed: BTreeSet<usize>,
 }
 impl Run<'_> {
     fn step(
@@ -76,10 +80,17 @@ impl Run<'_> {
         let array = evaluate(node, self.plan, &self.values, &options, check)?;
         self.retained = budget::add_retained(
             self.retained,
-            array.retained_buffer_bytes(),
+            self.array_charge(&array),
             self.plan.program.execution.max_allocation_bytes,
         )?;
         Batch::external(Arc::new(array), BatchMetadata::default())
+    }
+    fn array_charge(&mut self, array: &NativeArray) -> usize {
+        if self.observed.insert(Arc::as_ptr(array.as_arrow()).addr()) {
+            array.retained_buffer_bytes()
+        } else {
+            size_of_val(array.shape())
+        }
     }
     fn publish(&self) -> Result<BTreeMap<String, Batch>> {
         self.plan
@@ -113,6 +124,7 @@ pub(super) fn run(
         plan,
         values: vec![None; plan.program.nodes.len()],
         retained: 0,
+        observed: borrowed_data(inputs)?,
     };
     for &index in &plan.order {
         check()?;
@@ -120,6 +132,15 @@ pub(super) fn run(
     }
     check()?;
     run.publish()
+}
+
+fn borrowed_data(inputs: &BTreeMap<String, Batch>) -> Result<BTreeSet<usize>> {
+    inputs
+        .values()
+        .map(|batch| {
+            native(batch, "inputs.backend").map(|array| Arc::as_ptr(array.as_arrow()).addr())
+        })
+        .collect()
 }
 
 fn inputs_descriptors(
@@ -134,12 +155,14 @@ fn inputs_descriptors(
         let batch = inputs
             .get(&input.name)
             .ok_or_else(|| invalid("inputs", "input names differ from declarations"))?;
-        descriptors.insert(input.name.clone(), input_descriptor(input, batch)?);
+        descriptors.insert(
+            input.name.clone(),
+            input_descriptor(input, batch, plan.program.ir_version)?,
+        );
     }
     Ok(descriptors)
 }
-
-fn input_descriptor(input: &Input, batch: &Batch) -> Result<Descriptor> {
+fn input_descriptor(input: &Input, batch: &Batch, version: u8) -> Result<Descriptor> {
     let field = format!("inputs.{}", input.name);
     let value = native(batch, &format!("{field}.backend"))?;
     if value.dtype() != input.dtype.native() {
@@ -148,13 +171,26 @@ fn input_descriptor(input: &Input, batch: &Batch) -> Result<Descriptor> {
             "dtype differs from declaration",
         ));
     }
-    let shape = native_shape(value.shape(), &field)?;
+    let shape = input_shape(version, value.shape(), &field)?;
     validate_input_shape(&input.shape, shape, &field)?;
     Ok(Descriptor {
         dtype: input.dtype,
         shape,
         nullable: value.as_arrow().null_count() != 0,
+        validity: value.as_arrow().nulls().is_some(),
     })
+}
+fn input_shape(version: u8, shape: &[usize], field: &str) -> Result<Shape> {
+    if version == 1 {
+        return native_shape(shape, field);
+    }
+    if shape.len() > 2 {
+        return Err(invalid(
+            &format!("{field}.shape"),
+            "native IR version 2 requires rank zero through two",
+        ));
+    }
+    Shape::known(shape)
 }
 
 pub(super) fn native_shape(shape: &[usize], field: &str) -> Result<Shape> {
@@ -169,10 +205,11 @@ pub(super) fn native_shape(shape: &[usize], field: &str) -> Result<Shape> {
 }
 
 fn validate_input_shape(expected: &[Option<usize>], shape: Shape, field: &str) -> Result<()> {
-    let matches = match (Shape::from_declaration(expected), shape) {
-        (Shape::Scalar, Shape::Scalar) | (Shape::Vector(None), Shape::Vector(_)) => true,
-        (left, right) => left == right,
-    };
+    let matches = expected.len() == shape.rank()
+        && expected
+            .iter()
+            .zip(shape.dimensions())
+            .all(|(declared, actual)| declared.is_none() || *declared == actual);
     if matches {
         Ok(())
     } else {
@@ -217,15 +254,25 @@ fn evaluate(
             left,
             right,
             ..
-        } => binary(
-            *function,
-            get(left)?.view(),
-            get(right)?.view(),
-            options,
-            check,
-        ),
+        } => binary_operands(*function, left, right, &get, options, check),
         _ => structural(node, &get, options, check),
     }
+}
+fn binary_operands<'a>(
+    function: Binary,
+    left: &str,
+    right: &str,
+    get: &impl Fn(&str) -> Result<&'a NativeArray>,
+    options: &ArrayExecutionOptions,
+    check: Check<'_>,
+) -> Result<NativeArray> {
+    binary(
+        function,
+        get(left)?.view(),
+        get(right)?.view(),
+        options,
+        check,
+    )
 }
 fn copy_literal(
     value: ArrayView<'_>,
@@ -270,15 +317,10 @@ fn stateful<'a>(
     check: Check<'_>,
 ) -> Result<NativeArray> {
     match node {
-        Node::Reduce {
-            function,
-            input,
-            skip_nulls,
-            ..
-        } => reduce(*function, get(input)?, *skip_nulls, options, check),
+        Node::Reduce { input, .. } => reduce(node, get(input)?, options, check),
         Node::RollingMean { input, .. } => rolling_mean(node, get(input)?, options, check),
         Node::Ewma { input, .. } => ewma(node, get(input)?, options, check),
-        _ => unreachable!("input and pointwise nodes are handled separately"),
+        _ => layout(node, get, options, check),
     }
 }
 fn rolling_mean(
@@ -400,22 +442,52 @@ fn comparison(
     operation(left, right, options, check)
 }
 fn reduce(
-    function: Reduce,
+    node: &Node,
     input: &NativeArray,
-    skip_nulls: bool,
     execution: &ArrayExecutionOptions,
     check: Check<'_>,
 ) -> Result<NativeArray> {
-    let operation = match function {
-        Reduce::Sum => array::reduction::sum_checked,
-        Reduce::Mean => array::reduction::mean_checked,
-        Reduce::Min => array::reduction::min_checked,
-        Reduce::Max => array::reduction::max_checked,
+    let Node::Reduce {
+        function,
+        skip_nulls,
+        axis,
+        keepdims,
+        ..
+    } = node
+    else {
+        unreachable!("reduction node was selected")
     };
-    operation(
-        input.float_view()?,
-        array::ReductionOptions::default().with_skip_nulls(skip_nulls),
-        execution,
-        check,
-    )
+    let operation = function.native();
+    let options = array::ReductionOptions::default()
+        .with_skip_nulls(*skip_nulls)
+        .with_axis(*axis)
+        .with_keepdims(*keepdims);
+    array::reduction::reduce_checked(input.view(), operation, options, execution, check)
+}
+
+fn layout<'a>(
+    node: &Node,
+    get: &impl Fn(&str) -> Result<&'a NativeArray>,
+    options: &ArrayExecutionOptions,
+    check: Check<'_>,
+) -> Result<NativeArray> {
+    match node {
+        Node::Matmul { left, right, .. } => matmul(left, right, get, options, check),
+        Node::Reshape { input, shape, .. } => {
+            array::matrix::reshape_checked(get(input)?, shape, options, check)
+        }
+        Node::Transpose { input, .. } => {
+            array::matrix::transpose_checked(get(input)?, options, check)
+        }
+        _ => unreachable!("other node categories were handled separately"),
+    }
+}
+fn matmul<'a>(
+    left: &str,
+    right: &str,
+    get: &impl Fn(&str) -> Result<&'a NativeArray>,
+    options: &ArrayExecutionOptions,
+    check: Check<'_>,
+) -> Result<NativeArray> {
+    array::matrix::matmul_checked(get(left)?.view(), get(right)?.view(), options, check)
 }

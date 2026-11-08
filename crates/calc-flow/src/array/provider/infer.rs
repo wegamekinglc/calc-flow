@@ -6,37 +6,14 @@ use super::{
 };
 use crate::Result;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Shape {
-    Scalar,
-    Vector(Option<usize>),
-}
-impl Shape {
-    pub(super) fn from_declaration(shape: &[Option<usize>]) -> Self {
-        shape
-            .first()
-            .map_or(Self::Scalar, |extent| Self::Vector(*extent))
-    }
-    pub(super) fn len(self) -> Result<usize> {
-        match self {
-            Self::Scalar => Ok(1),
-            Self::Vector(Some(len)) => Ok(len),
-            Self::Vector(None) => Err(invalid("nodes.shape", "runtime extent must be concrete")),
-        }
-    }
-    pub(super) const fn rank(self) -> usize {
-        match self {
-            Self::Scalar => 0,
-            Self::Vector(_) => 1,
-        }
-    }
-}
+pub(super) use super::shape::Shape;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Descriptor {
     pub dtype: DType,
     pub shape: Shape,
     pub nullable: bool,
+    pub validity: bool,
 }
 
 pub(super) struct Plan {
@@ -86,8 +63,39 @@ fn topology(plan: &Plan) -> Result<Vec<usize>> {
 }
 
 fn validate_outputs(plan: &Plan) -> Result<()> {
-    let inputs = plan
-        .program
+    let inputs = abstract_inputs(plan);
+    let descriptors = infer(plan, &inputs)?;
+    for output in &plan.program.outputs {
+        if let Some(assertion) = &output.assertion {
+            let result = descriptors[lookup(plan, &output.node)?];
+            if result.dtype != assertion.dtype
+                || result.shape != Shape::from_declaration(&assertion.shape)
+            {
+                return Err(invalid(
+                    "options.outputs",
+                    "declared descriptor differs from inference",
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub(super) fn query_outputs(plan: &Plan) -> Result<crate::JsonMap> {
+    let inputs = abstract_inputs(plan);
+    let descriptors = infer(plan, &inputs)?;
+    let outputs=plan.program.outputs.iter().map(|output|{
+        let descriptor=descriptors[plan.indices[&output.node]];
+        serde_json::json!({"name":output.name,"node":output.node,"dtype":descriptor.dtype.spelling(),"shape":descriptor.shape.dimensions()})
+    }).collect::<Vec<_>>();
+    Ok(BTreeMap::from([(
+        "outputs".into(),
+        serde_json::Value::Array(outputs),
+    )]))
+}
+fn abstract_inputs(plan: &Plan) -> BTreeMap<String, Descriptor> {
+    plan.program
         .inputs
         .iter()
         .map(|input| {
@@ -97,21 +105,11 @@ fn validate_outputs(plan: &Plan) -> Result<()> {
                     dtype: input.dtype,
                     shape: Shape::from_declaration(&input.shape),
                     nullable: true,
+                    validity: true,
                 },
             )
         })
-        .collect();
-    let descriptors = infer(plan, &inputs)?;
-    for output in &plan.program.outputs {
-        let result = descriptors[lookup(plan, &output.node)?];
-        if result.dtype != output.dtype || result.shape != Shape::from_declaration(&output.shape) {
-            return Err(invalid(
-                "options.outputs",
-                "declared descriptor differs from inference",
-            ));
-        }
-    }
-    Ok(())
+        .collect()
 }
 
 fn lookup(plan: &Plan, id: &str) -> Result<usize> {
@@ -172,13 +170,16 @@ pub(super) fn infer(plan: &Plan, inputs: &BTreeMap<String, Descriptor>) -> Resul
         Descriptor {
             dtype: DType::Bool,
             shape: Shape::Scalar,
-            nullable: false
+            nullable: false,
+            validity: false
         };
         plan.program.nodes.len()
     ];
     for &index in &plan.order {
         let operand = |id: &str| lookup(plan, id).map(|index| descriptors[index]);
-        descriptors[index] = node(&plan.program.nodes[index], inputs, &operand, plan)?;
+        let descriptor = node(&plan.program.nodes[index], inputs, &operand, plan)?;
+        descriptor.shape.elements()?;
+        descriptors[index] = descriptor;
     }
     Ok(descriptors)
 }
@@ -215,6 +216,7 @@ fn constant(dtype: DType, value: &serde_json::Value) -> Result<Descriptor> {
         dtype,
         shape: Shape::Scalar,
         nullable: false,
+        validity: false,
     })
 }
 fn unary_operand(function: Unary, input: &str, operand: Operand<'_>) -> Result<Descriptor> {
@@ -238,10 +240,22 @@ fn nonpointwise(node: &Node, operand: Operand<'_>) -> Result<Descriptor> {
             ..
         } => select_operands(condition, if_true, if_false, operand),
         Node::Reduce {
-            function, input, ..
-        } => reduction(*function, operand(input)?),
+            function,
+            input,
+            axis,
+            keepdims,
+            ..
+        } => reduction(*function, operand(input)?, *axis, *keepdims),
         Node::RollingMean { .. } => rolling_operand(node, operand),
         Node::Ewma { .. } => ewma_operand(node, operand),
+        _ => layout(node, operand),
+    }
+}
+fn layout(node: &Node, operand: Operand<'_>) -> Result<Descriptor> {
+    match node {
+        Node::Matmul { left, right, .. } => matmul_operands(left, right, operand),
+        Node::Reshape { input, shape, .. } => reshape_operand(input, shape, operand),
+        Node::Transpose { input, .. } => transpose_operand(input, operand),
         _ => unreachable!("pointwise nodes were handled separately"),
     }
 }
@@ -283,6 +297,33 @@ fn ewma_operand(node: &Node, operand: Operand<'_>) -> Result<Descriptor> {
     rolling(operand(input)?)
 }
 
+fn matmul_operands(left: &str, right: &str, operand: Operand<'_>) -> Result<Descriptor> {
+    let left = operand(left)?;
+    let right = operand(right)?;
+    require_numeric(left.dtype)?;
+    require_numeric(right.dtype)?;
+    Ok(Descriptor {
+        dtype: promote(left.dtype, right.dtype)?,
+        shape: left.shape.matmul(right.shape)?,
+        nullable: false,
+        validity: false,
+    })
+}
+fn reshape_operand(input: &str, target: &[usize], operand: Operand<'_>) -> Result<Descriptor> {
+    let input = operand(input)?;
+    Ok(Descriptor {
+        shape: input.shape.reshape(target)?,
+        ..input
+    })
+}
+fn transpose_operand(input: &str, operand: Operand<'_>) -> Result<Descriptor> {
+    let input = operand(input)?;
+    Ok(Descriptor {
+        shape: input.shape.transpose(),
+        ..input
+    })
+}
+
 fn require_numeric(dtype: DType) -> Result<()> {
     if dtype == DType::Bool {
         Err(invalid(
@@ -309,23 +350,18 @@ fn promote(left: DType, right: DType) -> Result<DType> {
     Ok(DType::Float64)
 }
 fn shape(left: Shape, right: Shape) -> Result<Shape> {
-    match (left, right) {
-        (Shape::Scalar, other) | (other, Shape::Scalar) => Ok(other),
-        (Shape::Vector(Some(left)), Shape::Vector(Some(right))) if left != right => {
-            Err(invalid("options.nodes.shape", "vector extents must agree"))
-        }
-        (Shape::Vector(Some(len)), _) | (_, Shape::Vector(Some(len))) => {
-            Ok(Shape::Vector(Some(len)))
-        }
-        _ => Ok(Shape::Vector(None)),
-    }
+    left.broadcast(right)
 }
+
 fn unary(function: Unary, input: Descriptor) -> Result<Descriptor> {
     match function {
         Unary::LogicalNot => require_bool(input.dtype)?,
         _ => require_numeric(input.dtype)?,
     }
-    Ok(input)
+    Ok(Descriptor {
+        validity: input.nullable,
+        ..input
+    })
 }
 fn binary(
     function: Binary,
@@ -338,11 +374,11 @@ fn binary(
     if matches!(function, Binary::Pow) {
         exponent(&plan.program.nodes[lookup(plan, right_id)?])?;
     }
-    Ok(Descriptor {
+    Ok(computed(
         dtype,
-        shape: shape(left.shape, right.shape)?,
-        nullable: left.nullable || right.nullable,
-    })
+        shape(left.shape, right.shape)?,
+        &[left, right],
+    ))
 }
 fn binary_dtype(function: Binary, left: DType, right: DType) -> Result<DType> {
     match function {
@@ -372,29 +408,44 @@ fn numeric_binary_dtype(function: Binary, left: DType, right: DType) -> Result<D
 }
 fn selection(condition: Descriptor, yes: Descriptor, no: Descriptor) -> Result<Descriptor> {
     require_bool(condition.dtype)?;
-    Ok(Descriptor {
-        dtype: promote(yes.dtype, no.dtype)?,
-        shape: shape(shape(condition.shape, yes.shape)?, no.shape)?,
-        nullable: condition.nullable || yes.nullable || no.nullable,
-    })
+    let dtype = promote(yes.dtype, no.dtype)?;
+    let output_shape = shape(shape(condition.shape, yes.shape)?, no.shape)?;
+    Ok(computed(dtype, output_shape, &[condition, yes, no]))
 }
-fn reduction(function: Reduce, input: Descriptor) -> Result<Descriptor> {
+fn computed(dtype: DType, shape: Shape, inputs: &[Descriptor]) -> Descriptor {
+    let nullable = inputs.iter().any(|input| input.nullable);
+    Descriptor {
+        dtype,
+        shape,
+        nullable,
+        validity: nullable,
+    }
+}
+fn reduction(
+    function: Reduce,
+    input: Descriptor,
+    axis: Option<usize>,
+    keepdims: bool,
+) -> Result<Descriptor> {
     require_numeric(input.dtype)?;
     let dtype = if matches!(function, Reduce::Sum | Reduce::Mean) {
         DType::Float64
     } else {
         input.dtype
     };
+    let shape = input.shape.reduced(axis, keepdims)?;
+    let nullable = input.nullable || input.shape.lane_width(axis)?.is_none_or(|width| width == 0);
     Ok(Descriptor {
         dtype,
-        shape: Shape::Scalar,
-        nullable: input.nullable
-            || !matches!(input.shape, Shape::Scalar | Shape::Vector(Some(1..))),
+        shape,
+        nullable,
+        validity: nullable,
     })
 }
+
 fn rolling(input: Descriptor) -> Result<Descriptor> {
     require_numeric(input.dtype)?;
-    if input.shape == Shape::Scalar {
+    if input.shape.rank() != 1 {
         return Err(invalid(
             "options.nodes.shape",
             "rolling input must be a vector",
@@ -403,6 +454,7 @@ fn rolling(input: Descriptor) -> Result<Descriptor> {
     Ok(Descriptor {
         dtype: DType::Float64,
         nullable: true,
+        validity: true,
         ..input
     })
 }

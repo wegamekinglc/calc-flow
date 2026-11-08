@@ -399,6 +399,7 @@ fn test_capability_schema_exposes_strict_ir_variants_and_bounds_as_canonical_jso
     let text = descriptor["options_json_schema"].as_str().unwrap();
     let schema: Value = serde_json::from_str(text).unwrap();
     assert_eq!(calc_flow::canonical_json(&schema).unwrap(), text);
+    let schema = &schema["oneOf"][0];
     assert_eq!(schema["properties"]["inputs"]["maxItems"], 32);
     assert_eq!(schema["properties"]["outputs"]["maxItems"], 16);
     assert_eq!(schema["properties"]["nodes"]["maxItems"], 128);

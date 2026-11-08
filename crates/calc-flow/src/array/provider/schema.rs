@@ -15,8 +15,8 @@ fn identifier() -> Value {
 fn dtype() -> Value {
     json!({"enum":["bool","float32","float64"]})
 }
-fn shape() -> Value {
-    json!({"type":"array","maxItems":1,"items":{"anyOf":[{"type":"null"},{"type":"integer","minimum":0,"maximum":usize::MAX}]}})
+fn shape(rank: u8) -> Value {
+    json!({"type":"array","maxItems":rank,"items":{"anyOf":[{"type":"null"},{"type":"integer","minimum":0,"maximum":usize::MAX}]}})
 }
 fn positive() -> Value {
     json!({"type":"integer","minimum":1,"maximum":u64::MAX})
@@ -26,23 +26,23 @@ fn optional_count() -> Value {
     value["default"] = json!(1);
     value
 }
-fn input() -> Value {
+fn input(rank: u8) -> Value {
     object(
         vec![
             ("name", identifier()),
             ("dtype", dtype()),
-            ("shape", shape()),
+            ("shape", shape(rank)),
         ],
         &["name", "dtype", "shape"],
     )
 }
-fn output() -> Value {
+fn output(rank: u8) -> Value {
     object(
         vec![
             ("name", identifier()),
             ("node", identifier()),
             ("dtype", dtype()),
-            ("shape", shape()),
+            ("shape", shape(rank)),
         ],
         &["name", "node", "dtype", "shape"],
     )
@@ -118,17 +118,9 @@ fn pointwise() -> Vec<Value> {
         ),
     ]
 }
-fn aggregates() -> Vec<Value> {
+fn aggregates(version: u8) -> Vec<Value> {
     vec![
-        node(
-            "reduce",
-            vec![
-                ("function", json!({"enum":["sum","mean","min","max"]})),
-                ("input", identifier()),
-                ("skip_nulls", json!({"type":"boolean","default":false})),
-            ],
-            &["function", "input"],
-        ),
+        reduction(version),
         node(
             "rolling_mean",
             vec![
@@ -153,6 +145,42 @@ fn aggregates() -> Vec<Value> {
         ),
     ]
 }
+fn reduction(version: u8) -> Value {
+    let mut fields = vec![
+        ("function", json!({"enum":["sum","mean","min","max"]})),
+        ("input", identifier()),
+        ("skip_nulls", json!({"type":"boolean","default":false})),
+    ];
+    if version == 2 {
+        fields.push((
+            "axis",
+            json!({"anyOf":[{"type":"null"},{"enum":[0,1]}],"default":null}),
+        ));
+        fields.push(("keepdims", json!({"type":"boolean","default":false})));
+    }
+    node("reduce", fields, &["function", "input"])
+}
+fn layouts() -> Vec<Value> {
+    vec![
+        node(
+            "matmul",
+            vec![("left", identifier()), ("right", identifier())],
+            &["left", "right"],
+        ),
+        node(
+            "reshape",
+            vec![
+                ("input", identifier()),
+                (
+                    "shape",
+                    json!({"type":"array","maxItems":2,"items":{"type":"integer","minimum":0,"maximum":usize::MAX}}),
+                ),
+            ],
+            &["input", "shape"],
+        ),
+        node("transpose", vec![("input", identifier())], &["input"]),
+    ]
+}
 fn execution() -> Value {
     object(
         vec![
@@ -168,21 +196,24 @@ fn execution() -> Value {
         &[],
     )
 }
-fn schema() -> Value {
+fn program(version: u8) -> Value {
     let mut nodes = vec![node("input", vec![("name", identifier())], &["name"])];
     nodes.extend(literals());
     nodes.extend(pointwise());
-    nodes.extend(aggregates());
-    let mut schema = object(
+    nodes.extend(aggregates(version));
+    if version == 2 {
+        nodes.extend(layouts());
+    }
+    object(
         vec![
-            ("ir_version", json!({"const":1})),
+            ("ir_version", json!({"const":version})),
             (
                 "inputs",
-                json!({"type":"array","minItems":1,"maxItems":32,"items":input()}),
+                json!({"type":"array","minItems":1,"maxItems":32,"items":input(version)}),
             ),
             (
                 "outputs",
-                json!({"type":"array","minItems":1,"maxItems":16,"items":output()}),
+                json!({"type":"array","minItems":1,"maxItems":16,"items":output(version)}),
             ),
             (
                 "nodes",
@@ -191,12 +222,25 @@ fn schema() -> Value {
             ("execution", execution()),
         ],
         &["ir_version", "inputs", "nodes", "outputs"],
+    )
+}
+fn schema() -> Value {
+    let mut schema = object(
+        vec![
+            ("ir_version", json!({})),
+            ("inputs", json!({})),
+            ("nodes", json!({})),
+            ("outputs", json!({})),
+            ("execution", json!({})),
+        ],
+        &["ir_version", "inputs", "nodes", "outputs"],
     );
+    schema["oneOf"] = json!([program(1), program(2)]);
     schema["$schema"] = json!("https://json-schema.org/draft/2020-12/schema");
     schema["x-calc-flow-max-compact-json-bytes"] = json!(65536);
     schema["x-calc-flow-max-node-depth"] = json!(24);
     schema["description"] = json!(
-        "native:array_expr@1 batch-only rank-0/1 IR. Node references must be acyclic and reachable. Output assertions must equal abstract inference. Pow requires a finite numeric literal exponent of magnitude <=64 before float32 conversion. Runtime concrete extents and shared owned allocation are revalidated."
+        "native:array_expr@1 batch-only IR1 rank-0/1 and IR2 packed rank-0/1/2 programs. IR2 permits at most one matmul; concrete shapes use checked element counts and scalar-or-identical-shape broadcasting. Node references must be acyclic and reachable. Output assertions must equal abstract inference. Pow requires a finite numeric literal exponent of magnitude <=64 before float32 conversion. Runtime concrete extents and shared owned allocation are revalidated."
     );
     schema
 }
@@ -213,7 +257,7 @@ pub(super) fn descriptor() -> JsonMap {
         "deterministic":true, "replay_safe":true,
         "array_rules":{"supported_dtypes":["bool","float32","float64"],
             "safe_dtype_rule":{"name":"native_float_bool_dtype","version":"1"},
-            "shape_rules":[{"name":"native_scalar_vector_broadcast","version":"1"}]}
+            "shape_rules":[{"name":"native_scalar_vector_broadcast","version":"1"},{"name":"native_packed_rank2","version":"1"},{"name":"native_matmul","version":"1"},{"name":"native_axis_reduction","version":"1"}]}
     }))
     .expect("fixed capability descriptor is an object")
 }
