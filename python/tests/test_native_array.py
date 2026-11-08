@@ -298,4 +298,7 @@ assert not any(
     for name in sys.modules
 )
 """
-    subprocess.run([sys.executable, "-c", program], check=True)
+    # The interpreter and source are test-owned; no shell or caller input is used.
+    subprocess.run(  # noqa: E501  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit.dangerous-subprocess-use-audit
+        [sys.executable, "-c", program], check=True
+    )

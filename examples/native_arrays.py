@@ -15,8 +15,10 @@ def main() -> None:
     result = cfa.where_(cfa.greater_equal(average, threshold), average, zero)
     exported = result.to_arrow()
     total = cfa.sum(result).to_arrow()[0].as_py()
-    assert exported.to_pylist() == [0.0, 0.0, 4.0, 6.0]
-    assert total == 10.0
+    if exported.to_pylist() != [0.0, 0.0, 4.0, 6.0]:
+        raise AssertionError("native selection did not match the expected rows")
+    if total != 10.0:
+        raise AssertionError("native sum did not match the expected total")
     print(f"Native values: {exported.to_pylist()}")
     print(f"Native sum: {total}")
 
