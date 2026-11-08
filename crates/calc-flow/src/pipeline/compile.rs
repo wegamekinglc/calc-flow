@@ -23,6 +23,8 @@ pub(crate) struct NodeDefinition {
     pub(crate) node_id: String,
     pub(crate) operator: NodeOperator,
     pub(crate) checkpoint_capability: OperatorCheckpointCapability,
+    #[cfg(test)]
+    pub(crate) checkpoint_test_override: bool,
 }
 
 pub(crate) struct CompiledNode<O> {

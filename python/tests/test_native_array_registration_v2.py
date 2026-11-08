@@ -11,9 +11,12 @@ from calc_flow import Batch, CapabilityRule, Runtime, _native
 
 
 def _bundle() -> list[dict[str, object]]:
-    array = _native._native_array_capability()
-    table = {
+    array = {
         **_native._native_array_capability(),
+        "state_layouts": [],
+    }
+    table = {
+        **array,
         "name": "table_array",
         "modes": ["batch", "stream"],
         "finality": "per_row_final",
@@ -22,7 +25,28 @@ def _bundle() -> list[dict[str, object]]:
         "supports_static_inputs": True,
         "partition_contract": "row_axis_independent",
     }
-    return [array, table]
+    sequence = {
+        **array,
+        "name": "array_sequence",
+        "input_ports": [{"name": "input", "kind": "array", "required": True}],
+        "output_ports": [{"name": "output", "kind": "array", "required": True}],
+        "modes": ["stream"],
+        "stateful": True,
+        "microbatch_invariant": True,
+        "finality": "per_row_final",
+        "checkpoint_support": "checkpointed_stateful",
+        "state_version": 1,
+        "state_layouts": [1],
+        "supports_static_inputs": False,
+        "partition_contract": "single_ordered_sequence",
+        "port_binding": "fixed",
+        "array_rules": {
+            "supported_dtypes": ["float32", "float64"],
+            "safe_dtype_rule": {"name": "native_float_dtype", "version": "1"},
+            "shape_rules": [{"name": "native_sequence_vector", "version": "1"}],
+        },
+    }
+    return [array, sequence, table]
 
 
 class _NativeInsertion:
@@ -33,7 +57,7 @@ class _NativeInsertion:
         self.calls += 1
 
 
-def test_native_registration_bundle_publishes_two_records_and_one_generation(
+def test_native_registration_bundle_publishes_three_records_and_one_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(_native, "_native_array_capabilities", _bundle, raising=False)
@@ -45,14 +69,17 @@ def test_native_registration_bundle_publishes_two_records_and_one_generation(
     cfa.register_native(runtime)
 
     snapshot, records = runtime.capability_registration_snapshot()
-    assert snapshot.scope.revision == 2
+    assert snapshot.scope.revision == 3
     assert tuple(item.name for item in snapshot.providers) == (
         "array_expr",
+        "array_sequence",
         "table_array",
     )
-    assert snapshot.providers[1].modes == ("batch", "stream")
-    assert snapshot.providers[1].checkpoint_support == "stateless"
+    assert snapshot.providers[2].modes == ("batch", "stream")
+    assert snapshot.providers[2].checkpoint_support == "stateless"
+    assert snapshot.providers[1].state_layouts == (1,)
     assert all(record["kind"] == "native_provider" for record in records)
+    assert all("callback" not in record and "root" not in record for record in records)
     assert inner.calls == runtime._symbolic_cache_generation == 1
     assert runtime._symbolic_compile_cache == runtime._symbolic_schema_cache == {}
 
@@ -109,8 +136,10 @@ def test_m2_native_rules_are_explicit_new_versioned_identities(name: str) -> Non
         CapabilityRule(name, "2")
 
 
+@pytest.mark.parametrize("incomplete", [False, True])
 def test_documented_registration_replay_installs_the_native_bundle_once(
     monkeypatch: pytest.MonkeyPatch,
+    incomplete: bool,
     tmp_path: Path,
 ) -> None:
     class Probe:
@@ -135,22 +164,45 @@ def test_documented_registration_replay_installs_the_native_bundle_once(
 
     monkeypatch.setattr(calc_flow, "Runtime", runtime)
     monkeypatch.setattr(_native, "_native_array_capabilities", _bundle, raising=False)
+    if incomplete:
+        original_snapshot = Runtime.capability_registration_snapshot
+
+        def without_sequence(self: Runtime) -> object:
+            snapshot, records = original_snapshot(self)
+            return snapshot, tuple(
+                record for record in records if record["name"] != "array_sequence"
+            )
+
+        monkeypatch.setattr(
+            Runtime, "capability_registration_snapshot", without_sequence
+        )
     document = (Path(__file__).resolve().parents[2] / "docs/python-api.md").read_text()
     section = document.split("The example registers a mapping provider", 1)[1]
     snippet = section.split("```python\n", 1)[1].split("```", 1)[0]
     script = tmp_path / "registration_replay.py"
     script.write_text(snippet, encoding="utf-8")
-    runpy.run_path(str(script))
-    assert [probe.calls for probe in probes] == [1, 1]
+    if incomplete:
+        with pytest.raises(ValueError, match="native capability bundle"):
+            runpy.run_path(str(script))
+        assert [probe.calls for probe in probes] == [1]
+    else:
+        runpy.run_path(str(script))
+        assert [probe.calls for probe in probes] == [1, 1]
 
 
 def test_real_native_bundle_descriptors_preserve_lifecycle_contracts() -> None:
     descriptors = _native._native_array_capabilities()
     assert [descriptor["name"] for descriptor in descriptors] == [
         "array_expr",
+        "array_sequence",
         "table_array",
     ]
-    array, table = descriptors
+    array, sequence, table = descriptors
+    assert sequence["modes"] == ["stream"]
+    assert sequence["checkpoint_support"] == "checkpointed_stateful"
+    assert sequence["state_layouts"] == [1]
+    assert sequence["partition_contract"] == "single_ordered_sequence"
+    assert sequence["supports_static_inputs"] is False
     assert array == _native._native_array_capability()
     assert array["modes"] == ["batch"]
     assert array["checkpoint_support"] == "unproven"
@@ -164,8 +216,14 @@ def test_real_native_bundle_descriptors_preserve_lifecycle_contracts() -> None:
     runtime = Runtime()
     cfa.register_native(runtime)
     snapshot, records = runtime.capability_registration_snapshot()
-    assert snapshot.scope.revision == len(records) == 2
+    assert snapshot.scope.revision == len(records) == 3
     assert runtime._symbolic_cache_generation == 1
+    from calc_flow import CalcFlowError, PipelineBuilder
+
+    with pytest.raises(CalcFlowError, match=r"\[missing_provider\]"):
+        PipelineBuilder("sequence-batch").external(
+            "calc", "native", "array_sequence", "1", {}
+        ).compile_batch(runtime)
 
 
 class _CollisionProvider:
@@ -176,12 +234,19 @@ class _CollisionProvider:
         return None
 
 
+_NATIVE_REGISTRY_KEYS = (
+    ("array_expr", "batch"),
+    ("table_array", "batch"),
+    ("table_array", "stream"),
+    ("array_sequence", "stream"),
+)
+
+
 @pytest.mark.parametrize(
     "name,mode,absent",
     [
-        ("array_expr", "batch", (("table_array", "batch"), ("table_array", "stream"))),
-        ("table_array", "batch", (("array_expr", "batch"), ("table_array", "stream"))),
-        ("table_array", "stream", (("array_expr", "batch"), ("table_array", "batch"))),
+        (name, mode, tuple(key for key in _NATIVE_REGISTRY_KEYS if key != (name, mode)))
+        for name, mode in _NATIVE_REGISTRY_KEYS
     ],
 )
 def test_real_native_bundle_collision_preserves_all_factories_and_python_state(

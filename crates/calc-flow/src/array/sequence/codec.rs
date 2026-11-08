@@ -1,0 +1,415 @@
+use sha2::{Digest as _, Sha256};
+
+use super::{ArrayStateOptions, EwmaState, RollingMeanState};
+use crate::{
+    CalcFlowError, Result, RollingNumericalProfile,
+    array::{ArrayDType, ArrayExecutionOptions, EwmaOptions, RollingMeanOptions},
+};
+
+mod ewma;
+mod mean;
+
+const MAGIC: &[u8; 8] = b"CFASEQ\0\0";
+const VERSION: u32 = 1;
+const EWMA_BYTES: usize = 92;
+
+#[derive(Clone, Copy)]
+pub(in crate::array) enum KernelOptions {
+    Mean(RollingMeanOptions),
+    Ewma(EwmaOptions),
+}
+
+impl KernelOptions {
+    fn document(self) -> serde_json::Value {
+        match self {
+            Self::Mean(options) => {
+                serde_json::json!({"function":"rolling_mean", "window":options.window(),
+                "min_periods":options.min_periods(), "numerical_profile":profile_name(options.numerical_profile())})
+            }
+            Self::Ewma(options) => {
+                serde_json::json!({"function":"ewma", "span":options.span(), "min_periods":options.min_periods()})
+            }
+        }
+    }
+}
+
+fn profile_name(profile: RollingNumericalProfile) -> &'static str {
+    match profile {
+        RollingNumericalProfile::StableV1 => "stable_v1",
+        RollingNumericalProfile::StableV2Preview => "stable_v2",
+    }
+}
+
+pub(in crate::array) struct SequenceSpec {
+    dtype: ArrayDType,
+    kernel: KernelOptions,
+    fingerprint: [u8; 32],
+}
+
+impl SequenceSpec {
+    pub(in crate::array) fn new(dtype: ArrayDType, kernel: KernelOptions) -> Result<Self> {
+        let dtype_name = match dtype {
+            ArrayDType::Float32 => "float32",
+            ArrayDType::Float64 => "float64",
+            ArrayDType::Boolean => {
+                return Err(super::super::invalid(
+                    "options.input_dtype",
+                    "requires float32 or float64",
+                ));
+            }
+        };
+        let document = serde_json::json!({
+            "identity": "native:array_sequence@1", "input_dtype": dtype_name,
+            "kernel": kernel.document(), "layout": 1, "numeric_semantics": 1,
+        });
+        let bytes = crate::json::canonical_json(&document)
+            .map_err(|error| super::super::invalid("options.kernel", error.to_string()))?;
+        Ok(Self {
+            dtype,
+            kernel,
+            fingerprint: Sha256::digest(bytes.as_bytes()).into(),
+        })
+    }
+
+    pub(in crate::array) const fn fingerprint(&self) -> &[u8; 32] {
+        &self.fingerprint
+    }
+
+    pub(in crate::array) const fn dtype(&self) -> ArrayDType {
+        self.dtype
+    }
+
+    fn markers(&self) -> [u8; 4] {
+        let dtype = match self.dtype {
+            ArrayDType::Float32 => 1,
+            _ => 2,
+        };
+        match self.kernel {
+            KernelOptions::Mean(options) => [
+                1,
+                dtype,
+                if options.numerical_profile() == RollingNumericalProfile::StableV1 {
+                    1
+                } else {
+                    2
+                },
+                0,
+            ],
+            KernelOptions::Ewma(_) => [2, dtype, 0, 0],
+        }
+    }
+
+    fn parameters(&self) -> (u64, u64) {
+        match self.kernel {
+            KernelOptions::Mean(options) => (options.window(), options.min_periods()),
+            KernelOptions::Ewma(options) => (options.span(), options.min_periods()),
+        }
+    }
+
+    fn validate_state(&self, state: &SequenceState) -> Result<()> {
+        let matches = match (&self.kernel, state) {
+            (KernelOptions::Mean(expected), SequenceState::Mean(state)) => {
+                state.options == *expected
+            }
+            (KernelOptions::Ewma(expected), SequenceState::Ewma(state)) => {
+                state.options == *expected
+            }
+            _ => false,
+        };
+        if !matches {
+            return Err(mismatch("parameters", "state and configured kernel differ"));
+        }
+        Ok(())
+    }
+}
+
+pub(in crate::array) enum SequenceState {
+    Mean(RollingMeanState),
+    Ewma(EwmaState),
+}
+
+impl SequenceState {
+    pub(in crate::array) fn new(spec: &SequenceSpec, limits: ArrayStateOptions) -> Result<Self> {
+        match spec.kernel {
+            KernelOptions::Mean(options) => RollingMeanState::new(options, limits).map(Self::Mean),
+            KernelOptions::Ewma(options) => EwmaState::new(options, limits).map(Self::Ewma),
+        }
+    }
+
+    pub(in crate::array) const fn state_bytes(&self) -> usize {
+        match self {
+            Self::Mean(state) => state.state_bytes(),
+            Self::Ewma(state) => state.state_bytes(),
+        }
+    }
+
+    pub(in crate::array) fn reset(&mut self) {
+        match self {
+            Self::Mean(state) => state.reset(),
+            Self::Ewma(state) => state.reset(),
+        }
+    }
+
+    pub(in crate::array) fn prepare_checked(
+        &self,
+        input: crate::array::ArrayView<'_>,
+        execution: &ArrayExecutionOptions,
+        captures: usize,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<super::Prepared<Self>> {
+        match self {
+            Self::Mean(state) => {
+                let prepared = state.prepare_checked(input, execution, captures, check)?;
+                Ok(super::Prepared {
+                    candidate: prepared.candidate.map(Self::Mean),
+                    output: prepared.output,
+                })
+            }
+            Self::Ewma(state) => {
+                let prepared = state.prepare_checked(input, execution, captures, check)?;
+                Ok(super::Prepared {
+                    candidate: prepared.candidate.map(Self::Ewma),
+                    output: prepared.output,
+                })
+            }
+        }
+    }
+
+    fn positions(&self) -> u64 {
+        match self {
+            Self::Mean(state) => state.kernel.positions(),
+            Self::Ewma(state) => state.positions,
+        }
+    }
+
+    pub(super) fn encoded_bytes(&self) -> Result<usize> {
+        match self {
+            Self::Mean(state) => mean::encoded_bytes(state.kernel.history_len()),
+            Self::Ewma(_) => Ok(EWMA_BYTES),
+        }
+    }
+}
+
+pub(in crate::array) fn mismatch(field: &str, message: &str) -> CalcFlowError {
+    CalcFlowError::CheckpointMismatch {
+        message: format!("native:array_sequence@1 state.{field}: {message}"),
+    }
+}
+
+pub(in crate::array) fn admit(execution: &ArrayExecutionOptions, charges: &[usize]) -> Result<()> {
+    let peak = charges
+        .iter()
+        .try_fold(0_usize, |total, bytes| total.checked_add(*bytes))
+        .ok_or_else(|| mismatch("peak_bytes", "live byte count overflowed usize"))?;
+    if peak > execution.max_allocation_bytes() {
+        return Err(mismatch(
+            "peak_bytes",
+            "live state/encoded bytes exceed the allocation limit",
+        ));
+    }
+    Ok(())
+}
+
+pub(in crate::array) fn encode(
+    spec: &SequenceSpec,
+    state: &SequenceState,
+    execution: &ArrayExecutionOptions,
+    captures: usize,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<Vec<u8>> {
+    check()?;
+    spec.validate_state(state)?;
+    let mut bytes = allocate(state, execution, captures)?;
+    write_header(spec, state.positions(), &mut bytes);
+    match state {
+        SequenceState::Mean(state) => mean::write(state, &mut bytes, check)?,
+        SequenceState::Ewma(state) => ewma::write(state, &mut bytes),
+    }
+    check()?;
+    Ok(bytes)
+}
+
+fn allocate(
+    state: &SequenceState,
+    execution: &ArrayExecutionOptions,
+    captures: usize,
+) -> Result<Vec<u8>> {
+    let len = state.encoded_bytes()?;
+    admit(
+        execution,
+        &[state.state_bytes(), len, captures, size_of::<u64>()],
+    )?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(len)
+        .map_err(|error| mismatch("bytes", &error.to_string()))?;
+    admit(
+        execution,
+        &[
+            state.state_bytes(),
+            bytes.capacity(),
+            captures,
+            size_of::<u64>(),
+        ],
+    )?;
+    Ok(bytes)
+}
+
+fn write_header(spec: &SequenceSpec, positions: u64, bytes: &mut Vec<u8>) {
+    bytes.extend_from_slice(MAGIC);
+    bytes.extend_from_slice(&VERSION.to_le_bytes());
+    bytes.extend_from_slice(&VERSION.to_le_bytes());
+    bytes.extend_from_slice(&spec.markers());
+    bytes.extend_from_slice(spec.fingerprint());
+    let (window, minimum) = spec.parameters();
+    word(bytes, window);
+    word(bytes, minimum);
+    word(bytes, positions);
+}
+
+fn word(bytes: &mut Vec<u8>, value: u64) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+#[derive(Clone, Copy)]
+struct Reader<'a> {
+    bytes: &'a [u8],
+    position: usize,
+}
+
+impl Reader<'_> {
+    fn take<const N: usize>(&mut self) -> Result<[u8; N]> {
+        let end = self
+            .position
+            .checked_add(N)
+            .ok_or_else(|| mismatch("bytes", "byte offset overflowed"))?;
+        let bytes = self
+            .bytes
+            .get(self.position..end)
+            .ok_or_else(|| mismatch("bytes", "truncated segment"))?;
+        self.position = end;
+        bytes
+            .try_into()
+            .map_err(|_| mismatch("bytes", "invalid field length"))
+    }
+
+    fn u64(&mut self) -> Result<u64> {
+        Ok(u64::from_le_bytes(self.take()?))
+    }
+
+    fn require<const N: usize>(&mut self, expected: &[u8; N], field: &str) -> Result<()> {
+        if &self.take::<N>()? != expected {
+            return Err(mismatch(field, "unexpected value"));
+        }
+        Ok(())
+    }
+}
+
+fn read_header(spec: &SequenceSpec, reader: &mut Reader<'_>) -> Result<u64> {
+    reader.require(MAGIC, "magic")?;
+    reader.require(&VERSION.to_le_bytes(), "layout")?;
+    reader.require(&VERSION.to_le_bytes(), "numeric_semantics")?;
+    reader.require(&spec.markers(), "kernel/dtype/profile")?;
+    read_identity(spec, reader)
+}
+
+fn read_identity(spec: &SequenceSpec, reader: &mut Reader<'_>) -> Result<u64> {
+    reader.require(spec.fingerprint(), "fingerprint")?;
+    let (window, minimum) = spec.parameters();
+    reader.require(&window.to_le_bytes(), "window_or_span")?;
+    reader.require(&minimum.to_le_bytes(), "min_periods")?;
+    reader.u64()
+}
+
+pub(in crate::array) struct RestoreLimits<'a> {
+    pub(in crate::array) state: ArrayStateOptions,
+    pub(in crate::array) execution: &'a ArrayExecutionOptions,
+    pub(in crate::array) old: usize,
+    pub(in crate::array) captures: usize,
+    pub(in crate::array) encoded: usize,
+}
+
+impl RestoreLimits<'_> {
+    fn input(&self, length: usize) -> Result<()> {
+        if self.encoded < length {
+            return Err(mismatch(
+                "encoded_bytes",
+                "encoded allocation charge is below the segment length",
+            ));
+        }
+        admit(self.execution, &[self.old, self.encoded, self.captures, 32])
+    }
+
+    fn candidate(&self, bytes: usize, scratch: usize) -> Result<()> {
+        self.state
+            .validate(bytes)
+            .map_err(|_| mismatch("max_state_bytes", "decoded state exceeds retained limit"))?;
+        admit(
+            self.execution,
+            &[self.old, bytes, self.encoded, self.captures, scratch],
+        )
+    }
+}
+
+pub(in crate::array) fn preflight_encoded(
+    spec: &SequenceSpec,
+    length: usize,
+    limits: &RestoreLimits<'_>,
+) -> Result<()> {
+    limits.input(length)?;
+    let (candidate, scratch) = encoded_requirements(spec, length)?;
+    limits.candidate(candidate, scratch)
+}
+pub(in crate::array) fn validate_encoded_storage(
+    spec: &SequenceSpec,
+    length: usize,
+    state: ArrayStateOptions,
+) -> Result<()> {
+    let (candidate, _) = encoded_requirements(spec, length)?;
+    state
+        .validate(candidate)
+        .map_err(|_| mismatch("max_state_bytes", "encoded state exceeds retained limit"))
+}
+fn encoded_requirements(spec: &SequenceSpec, length: usize) -> Result<(usize, usize)> {
+    match spec.kernel {
+        KernelOptions::Mean(options) => mean::encoded_requirements(options, length),
+        KernelOptions::Ewma(_) => ewma_encoded_requirements(length),
+    }
+}
+fn ewma_encoded_requirements(length: usize) -> Result<(usize, usize)> {
+    if length != EWMA_BYTES {
+        return Err(mismatch(
+            "encoded_bytes",
+            "EWMA requires exactly 92 encoded bytes",
+        ));
+    }
+    Ok((24, 32))
+}
+
+pub(in crate::array) fn decode(
+    spec: &SequenceSpec,
+    bytes: &[u8],
+    limits: &RestoreLimits<'_>,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<SequenceState> {
+    check()?;
+    limits.input(bytes.len())?;
+    let mut reader = Reader { bytes, position: 0 };
+    let positions = read_header(spec, &mut reader)?;
+    let state = read_state(spec, positions, reader, limits, check)?;
+    check()?;
+    Ok(state)
+}
+
+fn read_state(
+    spec: &SequenceSpec,
+    positions: u64,
+    mut reader: Reader<'_>,
+    limits: &RestoreLimits<'_>,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<SequenceState> {
+    match spec.kernel {
+        KernelOptions::Mean(options) => mean::read(options, positions, reader, limits, check),
+        KernelOptions::Ewma(options) => ewma::read(options, positions, &mut reader, limits),
+    }
+}

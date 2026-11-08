@@ -210,6 +210,17 @@ pub(in crate::array) struct EwmaKernel {
 }
 
 impl EwmaKernel {
+    pub(in crate::array) const fn parts(&self) -> (u64, f64) {
+        (self.valid_count, self.previous)
+    }
+
+    pub(in crate::array) const fn from_parts(valid_count: u64, previous: f64) -> Self {
+        Self {
+            valid_count,
+            previous,
+        }
+    }
+
     #[cfg(test)]
     pub(in crate::array) fn set_test_valid_count(&mut self, valid_count: u64) {
         self.valid_count = valid_count;

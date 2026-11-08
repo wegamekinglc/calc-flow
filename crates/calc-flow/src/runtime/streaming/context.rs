@@ -30,6 +30,7 @@ pub struct StreamJobContext {
     join_cpu_trace: crate::benchmark_internals::JoinCpuTraceOwner,
 }
 
+#[derive(Clone)]
 pub(crate) struct StreamJobControl {
     job_id: u64,
     deadline: Option<DateTime<Utc>>,

@@ -172,6 +172,7 @@ pub(super) struct ValidatedCheckpointRuntime {
 
 pub(super) struct OpenedCheckpointRuntime {
     pub(super) transaction: Arc<ManifestTransaction>,
+    pub(super) native_sequences: Option<Arc<crate::array::NativeSequenceInventory>>,
     pub(super) join_preload_reader: Option<Arc<crate::state::LocalStateLineageBackend>>,
     pub(super) _managed_storage: Option<OpenedManagedCheckpointRuntime>,
     pub(super) identity: PreparedManifestIdentity,

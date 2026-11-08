@@ -252,7 +252,7 @@ pub(super) fn descriptor() -> JsonMap {
         "port_binding":"options", "input_ports":[], "output_ports":[],
         "options_schema":null, "options_json_schema":schema,
         "modes":["batch"], "stateful":false, "microbatch_invariant":false,
-        "requires_watermark":false, "checkpoint_support":"unproven", "state_version":null,
+        "requires_watermark":false, "checkpoint_support":"unproven", "state_version":null, "state_layouts":[],
         "supports_static_inputs":true, "partition_contract":"none", "finality":"unproven",
         "deterministic":true, "replay_safe":true,
         "array_rules":{"supported_dtypes":["bool","float32","float64"],

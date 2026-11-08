@@ -46,9 +46,14 @@ axis means and owned reshape/transpose with allocation limits.
 [`native_array_state.rs`](native_array_state.rs) advances owned rolling-mean and
 EWMA states across chunks, verifies continuity and retains output after reset.
 
+[`native_sequence_stream.rs`](native_sequence_stream.rs) uses the checkpointed
+EWMA factory and validates a fresh managed terminal restart without reopening
+the source.
+
 ```bash
 cargo run -p calc-flow --example native_arrays
 cargo run -p calc-flow --example native_array_state
+cargo run -p calc-flow --example native_sequence_stream
 ```
 
 ## Python-to-Rust inventory

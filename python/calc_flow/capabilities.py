@@ -23,15 +23,18 @@ CheckpointSupport = TypeAliasType(
     "CheckpointSupport", Literal["stateless", "checkpointed_stateful", "unproven"]
 )
 PartitionContract = TypeAliasType(
-    "PartitionContract", Literal["none", "row_axis_independent"]
+    "PartitionContract",
+    Literal["none", "row_axis_independent", "single_ordered_sequence"],
 )
 
-CAPABILITY_SCHEMA_VERSION = 4
+CAPABILITY_SCHEMA_VERSION = 5
 
 _EXECUTION_MODES = frozenset(("batch", "stream"))
 _OUTPUT_FINALITIES = frozenset(("per_row_final", "group_final_append_only", "unproven"))
 _CHECKPOINT_SUPPORTS = frozenset(("stateless", "checkpointed_stateful", "unproven"))
-_PARTITION_CONTRACTS = frozenset(("none", "row_axis_independent"))
+_PARTITION_CONTRACTS = frozenset(
+    ("none", "row_axis_independent", "single_ordered_sequence")
+)
 _CAPABILITY_RULES = frozenset(
     (
         ("array_api_safe_dtype", "1"),
@@ -44,6 +47,8 @@ _CAPABILITY_RULES = frozenset(
         ("native_matmul", "1"),
         ("native_axis_reduction", "1"),
         ("native_table_static_rhs", "1"),
+        ("native_float_dtype", "1"),
+        ("native_sequence_vector", "1"),
     )
 )
 
@@ -454,9 +459,7 @@ def _require_provider_port_binding(capability: ProviderCapability) -> None:
         )
     if capability.port_binding == "fixed":
         if capability.options_json_schema is not None:
-            raise ValueError(
-                "provider fixed port_binding requires options_json_schema=None"
-            )
+            _require_json_options_schema(capability)
         return
     _require_options_bound_ports(capability)
 
@@ -466,6 +469,10 @@ def _require_options_bound_ports(capability: ProviderCapability) -> None:
         raise ValueError(
             "provider options port_binding requires empty input_ports/output_ports"
         )
+    _require_json_options_schema(capability)
+
+
+def _require_json_options_schema(capability: ProviderCapability) -> None:
     if capability.options_schema is not None:
         raise ValueError(
             "provider options_schema and options_json_schema are exclusive"
@@ -497,6 +504,7 @@ class ProviderCapability:
     array_rules: ProviderArrayRules | None
     port_binding: Literal["fixed", "options"] = "fixed"
     options_json_schema: str | None = None
+    state_layouts: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         _require_exact_str("provider capability", "provider", self.provider)
@@ -526,8 +534,9 @@ class ProviderCapability:
             )
         if self.partition_contract not in _PARTITION_CONTRACTS:
             raise ValueError(
-                "provider capability partition_contract must be none or "
-                f"row_axis_independent; found {self.partition_contract!r}"
+                "provider capability partition_contract must be none, "
+                "row_axis_independent or single_ordered_sequence; "
+                f"found {self.partition_contract!r}"
             )
         if self.array_rules is not None and not isinstance(
             self.array_rules, ProviderArrayRules
@@ -543,10 +552,14 @@ class ProviderCapability:
             self.stateful,
         )
 
+        _require_state_layouts(
+            "provider capability", self.checkpoint_support, self.state_layouts
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class RuntimeCapabilities:
-    schema_version: Literal[4]
+    schema_version: Literal[5]
     scope: RuntimeSessionScope
     package_version: str
     project_format_versions: tuple[int, ...]
@@ -572,6 +585,16 @@ def _descriptor_list(raw: object) -> list[Any]:
     return raw
 
 
+def _descriptor_port(raw: object) -> ProviderPort:
+    port = _descriptor_object(raw, frozenset(("name", "kind", "required")))
+    _require_exact_str("native capability port", "name", port["name"])
+    _require_exact_str("native capability port", "kind", port["kind"])
+    _require_exact_bool("native capability port", "required", port["required"])
+    if port["kind"] not in {"table", "array"}:
+        raise ValueError("native capability port kind must be table or array")
+    return ProviderPort(**port)
+
+
 def _descriptor_rule(raw: object) -> CapabilityRule:
     rule = _descriptor_object(raw, frozenset(("name", "version")))
     return CapabilityRule(**rule)
@@ -590,6 +613,77 @@ def _descriptor_array_rules(raw: object) -> ProviderArrayRules:
     )
 
 
+def _require_native_capability_fields(
+    capability: ProviderCapability, expected: Mapping[str, object]
+) -> None:
+    for field, required in expected.items():
+        if getattr(capability, field) != required:
+            raise ValueError(
+                f"native {capability.name} capability {field} contradicts its contract"
+            )
+
+
+def _require_native_regular_capability(capability: ProviderCapability) -> None:
+    modes, support, partition = {
+        "array_expr": (("batch",), "unproven", "none"),
+        "table_array": (("batch", "stream"), "stateless", "row_axis_independent"),
+    }[capability.name]
+    _require_native_capability_fields(
+        capability,
+        {
+            "modes": modes,
+            "checkpoint_support": support,
+            "stateful": False,
+            "state_layouts": (),
+            "partition_contract": partition,
+            "port_binding": "options",
+        },
+    )
+
+
+def _require_native_sequence_capability(capability: ProviderCapability) -> None:
+    expected = {
+        "input_ports": (ProviderPort("input", "array", True),),
+        "output_ports": (ProviderPort("output", "array", True),),
+        "options_schema": None,
+        "port_binding": "fixed",
+        "modes": ("stream",),
+        "stateful": True,
+        "microbatch_invariant": True,
+        "requires_watermark": False,
+        "finality": "per_row_final",
+        "checkpoint_support": "checkpointed_stateful",
+        "state_version": 1,
+        "state_layouts": (1,),
+        "deterministic": True,
+        "replay_safe": True,
+        "supports_static_inputs": False,
+        "partition_contract": "single_ordered_sequence",
+        "array_rules": ProviderArrayRules(
+            supported_dtypes=("float32", "float64"),
+            safe_dtype_rule=CapabilityRule("native_float_dtype", "1"),
+            shape_rules=(CapabilityRule("native_sequence_vector", "1"),),
+        ),
+    }
+    _require_native_capability_fields(capability, expected)
+    if capability.options_json_schema is None:
+        raise ValueError(
+            "native array_sequence capability requires options_json_schema"
+        )
+
+
+def _require_native_factory_capability(capability: ProviderCapability) -> None:
+    if (capability.provider, capability.version) != (
+        "native",
+        "1",
+    ) or capability.name not in {"array_expr", "array_sequence", "table_array"}:
+        raise ValueError("native array capability must describe a native array factory")
+    if capability.name == "array_sequence":
+        _require_native_sequence_capability(capability)
+    else:
+        _require_native_regular_capability(capability)
+
+
 def _native_array_provider_capability(value: object) -> ProviderCapability:
     raw = _descriptor_object(
         value, frozenset(field.name for field in fields(ProviderCapability))
@@ -597,17 +691,18 @@ def _native_array_provider_capability(value: object) -> ProviderCapability:
     capability = ProviderCapability(
         **{
             **raw,
-            "input_ports": tuple(_descriptor_list(raw["input_ports"])),
-            "output_ports": tuple(_descriptor_list(raw["output_ports"])),
+            "input_ports": tuple(
+                _descriptor_port(port) for port in _descriptor_list(raw["input_ports"])
+            ),
+            "output_ports": tuple(
+                _descriptor_port(port) for port in _descriptor_list(raw["output_ports"])
+            ),
+            "state_layouts": tuple(_descriptor_list(raw["state_layouts"])),
             "modes": tuple(_descriptor_list(raw["modes"])),
             "array_rules": _descriptor_array_rules(raw["array_rules"]),
         }
     )
-    if (capability.provider, capability.version) != (
-        "native",
-        "1",
-    ) or capability.name not in {"array_expr", "table_array"}:
-        raise ValueError("native array capability must describe a native array factory")
+    _require_native_factory_capability(capability)
     return capability
 
 
@@ -617,14 +712,46 @@ def _native_array_provider_capabilities(
     capabilities = tuple(
         _native_array_provider_capability(raw) for raw in _descriptor_list(value)
     )
+    return _native_capability_bundle(capabilities)
+
+
+def _native_capability_bundle(
+    capabilities: tuple[ProviderCapability, ...],
+) -> tuple[ProviderCapability, ...]:
     if sorted(capability.name for capability in capabilities) != [
         "array_expr",
+        "array_sequence",
         "table_array",
     ]:
         raise ValueError(
-            "native capability bundle requires array_expr and table_array exactly once"
+            "native capability bundle requires array_expr, array_sequence "
+            "and table_array exactly once"
         )
     return tuple(sorted(capabilities, key=lambda capability: capability.name))
+
+
+def _native_record_capability(record: Mapping[str, Any]) -> ProviderCapability:
+    capability = record.get("capability")
+    if type(capability) is not ProviderCapability:
+        raise TypeError("native record requires a frozen ProviderCapability")
+    for field in ("provider", "name", "version"):
+        _require_exact_str("native record", field, record.get(field))
+        if record[field] != getattr(capability, field):
+            raise ValueError(f"native record {field} contradicts its capability")
+    _require_native_factory_capability(capability)
+    return capability
+
+
+def _require_native_registration_bundle(
+    registrations: Sequence[Mapping[str, Any]],
+) -> None:
+    capabilities = tuple(
+        _native_record_capability(record)
+        for record in registrations
+        if record["kind"] == "native_provider"
+    )
+    if capabilities:
+        _native_capability_bundle(capabilities)
 
 
 def runtime_capabilities(
@@ -635,6 +762,8 @@ def runtime_capabilities(
     registrations: Sequence[Mapping[str, Any]],
 ) -> RuntimeCapabilities:
     from calc_flow import _native
+
+    _require_native_registration_bundle(registrations)
 
     udfs = tuple(
         sorted(

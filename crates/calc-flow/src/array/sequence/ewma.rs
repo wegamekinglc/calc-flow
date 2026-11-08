@@ -1,4 +1,4 @@
-use super::{ArrayStateOptions, Budget, Output, sample, validate_input};
+use super::{ArrayStateOptions, Budget, Output, Prepared, sample, validate_input};
 use crate::{
     Result,
     array::{
@@ -22,10 +22,10 @@ use crate::{
 /// # }
 /// ```
 pub struct EwmaState {
-    options: EwmaOptions,
-    limits: ArrayStateOptions,
-    kernel: EwmaKernel,
-    positions: u64,
+    pub(super) options: EwmaOptions,
+    pub(super) limits: ArrayStateOptions,
+    pub(super) kernel: EwmaKernel,
+    pub(super) positions: u64,
 }
 
 impl EwmaState {
@@ -66,19 +66,46 @@ impl EwmaState {
         execution: &ArrayExecutionOptions,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<NativeArray> {
+        let prepared = self.prepare_checked(input, execution, 0, check)?;
+        Ok(prepared.commit(self))
+    }
+
+    pub(in crate::array) fn prepare_checked(
+        &self,
+        input: ArrayView<'_>,
+        execution: &ArrayExecutionOptions,
+        captures: usize,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Prepared<Self>> {
         let positions = self.validate(input, check)?;
-        let budget = self.budget(input.len(), execution);
+        let budget = self.budget(input.len(), execution, captures);
         let mut output = Output::allocate(&budget, check)?;
         if input.is_empty() {
-            return control::finish(output.finish(true), check);
+            let output = output.finish(true)?;
+            return control::finish(
+                Ok(Prepared {
+                    candidate: None,
+                    output,
+                }),
+                check,
+            );
         }
-        let mut next = self.kernel;
-        self.evaluate(&mut next, input, &mut output, check)?;
-        let result = output.finish(true)?;
-        check()?;
-        self.kernel = next;
-        self.positions = positions;
-        Ok(result)
+        let mut kernel = self.kernel;
+        self.evaluate(&mut kernel, input, &mut output, check)?;
+        let output = output.finish(true)?;
+        let candidate = Self {
+            options: self.options,
+            limits: self.limits,
+            kernel,
+            positions,
+        };
+        control::finish(
+            Ok(Prepared {
+                candidate: Some(candidate),
+                output,
+            }),
+            check,
+        )
     }
 
     fn validate(&self, input: ArrayView<'_>, check: &mut dyn FnMut() -> Result<()>) -> Result<u64> {
@@ -87,10 +114,16 @@ impl EwmaState {
         super::next_positions(self.positions, input.len())
     }
 
-    fn budget<'a>(&self, len: usize, execution: &'a ArrayExecutionOptions) -> Budget<'a> {
+    fn budget<'a>(
+        &self,
+        len: usize,
+        execution: &'a ArrayExecutionOptions,
+        captures: usize,
+    ) -> Budget<'a> {
         Budget {
             old: self.state_bytes(),
             candidate: if len == 0 { 0 } else { 24 },
+            captures,
             scratch: 0,
             len,
             execution,

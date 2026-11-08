@@ -854,6 +854,7 @@ fn _infer_native_array_program(program_json: &str) -> PyResult<String> {
 fn _native_array_capabilities(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
     let descriptors = [
         calc_flow::array::NativeArrayFactory::capability_descriptor(),
+        calc_flow::array::NativeArraySequenceFactory::capability_descriptor(),
         calc_flow::array::NativeTableArrayFactory::capability_descriptor(),
     ];
     let value = serde_json::Value::Array(

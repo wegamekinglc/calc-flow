@@ -909,3 +909,27 @@ which separate native JSON strings from whole-document serialization, and
 which own backend retention-history maintenance. Existing examples, selected
 checks and final implementation review must verify the complete feature under
 normal repository policy; this clarification supplies no performance claim.
+
+
+## Managed Python error projection clarification
+
+The A6 error paragraph's `CheckpointMismatch -> CheckpointError` statement
+describes the generic direct-core exception conversion. It does not replace
+the existing managed streaming exception boundary.
+
+For managed `StreamingRunner` startup/recovery, preserve the existing frozen
+`StreamingRuntimeError`: native codec or state-identity failures retain
+`category="checkpoint_mismatch"`, `component_kind="operator"`, the actual
+`component_id`, and the safe state field (for example `state.layout`) in the
+message. No new exception class, hierarchy or native-only conversion is added.
+The direct-core conversion continues to use `CheckpointError` where it already
+applies; cancellation identities and underlying managed I/O categories retain
+their existing projections.
+
+This qualification follows the actual `continuous.rs` managed mapper and
+`error.rs` generic mapper. It corrects the earlier shorthand while preserving
+the requirement to reject invalid native state before source/sink opening or
+terminal success. Acceptance must exercise a real managed restart with valid
+outer state/manifest integrity and corrupt inner native codec, asserting the
+public managed exception category, operator and state field. Custom provider
+errors retain their existing redaction boundary.

@@ -22,8 +22,8 @@ pub(crate) use transaction::{
     reason = "M5 state transaction types are consumed by the private checkpoint runtime"
 )]
 pub(crate) use transaction::{
-    ManifestPublication, ManifestTransaction, PreparedEpochManifest, PreparedManifestIdentity,
-    SelectedManifest, StagedOperatorState, WorkingStatePins,
+    ManifestPublication, ManifestTransaction, NativeRecoveryError, PreparedEpochManifest,
+    PreparedManifestIdentity, SelectedManifest, StagedOperatorState, WorkingStatePins,
 };
 
 pub(crate) use segment::{
@@ -32,7 +32,9 @@ pub(crate) use segment::{
 
 pub use backend::{StateBackend, StateHandle, StateLineageBackend, StateLineageKey};
 pub use local::LocalStateBackend;
-pub(crate) use local::LocalStateLineageBackend;
+#[cfg(test)]
+pub(crate) use local::NativeIoPoint;
+pub(crate) use local::{LocalStateLineageBackend, NativeSegmentIo, NativeSegmentReader};
 pub use manifest::{
     CheckpointManifest, CheckpointManifestFields, CursorManifestEntry, MANIFEST_FORMAT_VERSION,
     MAX_MANIFEST_DOCUMENT_BYTES, ManifestExpectation, ManifestIngressState,

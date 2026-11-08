@@ -627,6 +627,9 @@ fn safe_failure_fields(
             &failure.error,
             format!("operator {node_id:?} entry failed"),
         ),
+        FailureOrigin::NativeSequenceRecovery { node_id } => {
+            native_sequence_recovery_fields(node_id, &failure.error)
+        }
         FailureOrigin::SourceOpen { binding_id } => {
             connector_failure_fields(ComponentKind::Source, binding_id, "source", "open")
         }
@@ -657,6 +660,63 @@ fn safe_failure_fields(
             "streaming metrics accounting failed".into(),
             Some(ComponentKind::Job),
             None,
+        ),
+    }
+}
+
+fn native_sequence_recovery_fields(
+    node_id: &str,
+    error: &CalcFlowError,
+) -> (
+    StreamingErrorCategory,
+    String,
+    Option<ComponentKind>,
+    Option<String>,
+) {
+    let (category, message) = native_sequence_recovery_detail(node_id, error);
+    (
+        category,
+        message,
+        Some(ComponentKind::Operator),
+        Some(node_id.into()),
+    )
+}
+fn native_sequence_recovery_detail(
+    node_id: &str,
+    error: &CalcFlowError,
+) -> (StreamingErrorCategory, String) {
+    match error {
+        CalcFlowError::CheckpointMismatch { message } => (
+            StreamingErrorCategory::CheckpointMismatch,
+            format!("operator {node_id:?} {message}"),
+        ),
+        CalcFlowError::InvalidArgument { field, message } => (
+            StreamingErrorCategory::CheckpointMismatch,
+            format!("operator {node_id:?} {field}: {message}"),
+        ),
+        _ => native_sequence_storage_detail(node_id, error),
+    }
+}
+fn native_sequence_storage_detail(
+    node_id: &str,
+    error: &CalcFlowError,
+) -> (StreamingErrorCategory, String) {
+    match error {
+        CalcFlowError::Io { .. } => (
+            StreamingErrorCategory::Io,
+            format!("operator {node_id:?} native state I/O failed"),
+        ),
+        CalcFlowError::Cancelled { .. } => (
+            StreamingErrorCategory::Cancelled,
+            format!("operator {node_id:?} native state recovery was cancelled"),
+        ),
+        CalcFlowError::NotFound { .. } | CalcFlowError::Format { .. } => (
+            StreamingErrorCategory::CheckpointMismatch,
+            format!("operator {node_id:?} state.reader: invalid native state file"),
+        ),
+        _ => (
+            StreamingErrorCategory::Internal,
+            format!("operator {node_id:?} native state recovery failed"),
         ),
     }
 }

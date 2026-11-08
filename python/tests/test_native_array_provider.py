@@ -65,7 +65,7 @@ def test_options_bound_capability_uses_immutable_json_schema() -> None:
         ({"port_binding": "dynamic"}, ValueError, "port_binding"),
         ({"port_binding": None}, TypeError, "port_binding"),
         ({"port_binding": "options"}, ValueError, "options_json_schema"),
-        ({"options_json_schema": "{}"}, ValueError, "port_binding"),
+        ({"options_json_schema": "{}"}, ValueError, "options_json_schema"),
         (
             {"port_binding": "options", "options_json_schema": {}},
             TypeError,
@@ -118,8 +118,8 @@ def test_options_json_schema_rejects_non_strict_json(schema: str) -> None:
         )
 
 
-def test_capability_schema_four_preserves_fixed_port_defaults() -> None:
-    assert Runtime().capabilities().schema_version == 4
+def test_capability_schema_five_preserves_fixed_port_defaults() -> None:
+    assert Runtime().capabilities().schema_version == 5
     capability = ProviderCapability(**_capability_arguments())
     assert capability.port_binding == "fixed"
     assert capability.options_json_schema is None
@@ -148,6 +148,7 @@ def _descriptor() -> dict[str, object]:
         "output_ports": [],
         "modes": ["batch"],
         "supports_static_inputs": True,
+        "state_layouts": [],
         "port_binding": "options",
         "options_json_schema": (
             '{"additionalProperties":false,"properties":{},"type":"object"}'
@@ -170,7 +171,28 @@ def _descriptors(first: dict[str, object] | None = None) -> list[dict[str, objec
         "microbatch_invariant": True,
         "partition_contract": "row_axis_independent",
     }
-    return [_descriptor() if first is None else first, table]
+    sequence = {
+        **_descriptor(),
+        "name": "array_sequence",
+        "input_ports": [{"name": "input", "kind": "array", "required": True}],
+        "output_ports": [{"name": "output", "kind": "array", "required": True}],
+        "modes": ["stream"],
+        "stateful": True,
+        "microbatch_invariant": True,
+        "finality": "per_row_final",
+        "checkpoint_support": "checkpointed_stateful",
+        "state_version": 1,
+        "state_layouts": [1],
+        "supports_static_inputs": False,
+        "partition_contract": "single_ordered_sequence",
+        "port_binding": "fixed",
+        "array_rules": {
+            "supported_dtypes": ["float32", "float64"],
+            "safe_dtype_rule": {"name": "native_float_dtype", "version": "1"},
+            "shape_rules": [{"name": "native_sequence_vector", "version": "1"}],
+        },
+    }
+    return [_descriptor() if first is None else first, sequence, table]
 
 
 class _NativeRegistration:
@@ -203,8 +225,8 @@ def test_native_registration_commits_one_frozen_capability_bundle(
 
     snapshot, records = runtime.capability_registration_snapshot()
     capability = snapshot.providers[0]
-    assert snapshot.scope.revision == 2
-    assert len(records) == 2
+    assert snapshot.scope.revision == 3
+    assert len(records) == 3
     assert inner.calls == 1
     assert runtime._symbolic_cache_generation == 1
     assert runtime._symbolic_compile_cache == runtime._symbolic_schema_cache == {}

@@ -3,8 +3,19 @@ use datafusion::arrow::buffer::{BooleanBuffer, Buffer, NullBuffer};
 use super::{ArrayDType, ArrayExecutionOptions, ArrayView, NativeArray, control, invalid};
 use crate::Result;
 
+pub(in crate::array) mod capture;
+pub(in crate::array) mod codec;
 mod ewma;
 mod mean;
+
+#[cfg(test)]
+mod codec_tests;
+
+#[cfg(test)]
+mod candidate_tests;
+
+#[cfg(test)]
+mod capture_tests;
 
 pub use ewma::EwmaState;
 pub use mean::RollingMeanState;
@@ -84,9 +95,24 @@ fn history_charge(capacity: usize) -> Result<usize> {
         })
 }
 
+pub(in crate::array) struct Prepared<T> {
+    pub(in crate::array) candidate: Option<T>,
+    pub(in crate::array) output: NativeArray,
+}
+
+impl<T> Prepared<T> {
+    fn commit(self, state: &mut T) -> NativeArray {
+        if let Some(candidate) = self.candidate {
+            *state = candidate;
+        }
+        self.output
+    }
+}
+
 struct Budget<'a> {
     old: usize,
     candidate: usize,
+    captures: usize,
     scratch: usize,
     len: usize,
     execution: &'a ArrayExecutionOptions,
@@ -95,10 +121,16 @@ struct Budget<'a> {
 impl Budget<'_> {
     fn admit(&self, output: usize) -> Result<()> {
         self.execution.validate_allocation(self.len, output, 0)?;
-        let peak = [self.old, self.candidate, self.scratch, output]
-            .into_iter()
-            .try_fold(0_usize, usize::checked_add)
-            .ok_or_else(|| invalid("state.peak_bytes", "live byte count overflowed usize"))?;
+        let peak = [
+            self.old,
+            self.candidate,
+            self.scratch,
+            output,
+            self.captures,
+        ]
+        .into_iter()
+        .try_fold(0_usize, usize::checked_add)
+        .ok_or_else(|| invalid("state.peak_bytes", "live byte count overflowed usize"))?;
         if peak > self.execution.max_allocation_bytes() {
             return Err(invalid(
                 "state.peak_bytes",

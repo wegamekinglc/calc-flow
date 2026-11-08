@@ -157,6 +157,39 @@ pub(super) struct MeanKernel {
 }
 
 impl MeanKernel {
+    pub(super) const fn positions(&self) -> u64 {
+        self.positions
+    }
+
+    pub(super) const fn summary(&self) -> &FloatSummary {
+        &self.summary
+    }
+
+    pub(super) fn history_len(&self) -> usize {
+        self.history.len
+    }
+
+    pub(super) fn history(&self) -> impl Iterator<Item = Option<f64>> + '_ {
+        self.history.iter()
+    }
+
+    pub(super) fn from_parts(
+        values: Vec<Option<f64>>,
+        summary: FloatSummary,
+        positions: u64,
+    ) -> Self {
+        let len = values.len();
+        Self {
+            history: RowsHistory {
+                values,
+                start: 0,
+                len,
+            },
+            summary,
+            positions,
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn set_test_positions(&mut self, positions: u64) {
         self.positions = positions;

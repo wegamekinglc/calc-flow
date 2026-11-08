@@ -143,3 +143,116 @@ fn create_segment_directory(path: &Path, directories: &mut SegmentDirectories) -
     }
     Ok(())
 }
+
+pub(super) fn publish_native_file(
+    handle: &StateHandle,
+    paths: &ManagedSegmentPaths,
+    validated: bool,
+    directories: &SyncMutex<SegmentDirectories>,
+    check: &mut dyn FnMut() -> Result<()>,
+    #[cfg(test)] hook: Option<&PublicationHook>,
+) -> Result<()> {
+    check()?;
+    prepare_native_committed(
+        paths,
+        directories,
+        #[cfg(test)]
+        hook,
+    )?;
+    if !super::native_io::matches_file(&paths.committed, handle, check)? {
+        publish_native_staging(
+            paths,
+            handle,
+            validated,
+            directories,
+            check,
+            #[cfg(test)]
+            hook,
+        )?;
+    }
+    finish_native_publication(
+        paths,
+        #[cfg(test)]
+        hook,
+    )
+}
+fn prepare_native_committed(
+    paths: &ManagedSegmentPaths,
+    directories: &SyncMutex<SegmentDirectories>,
+    #[cfg(test)] hook: Option<&PublicationHook>,
+) -> Result<()> {
+    let (root, lineage, _, operator) = managed_segment_components(paths)?;
+    prepare_committed_directories(
+        root,
+        &lineage,
+        &operator,
+        &mut directories.lock(),
+        #[cfg(test)]
+        hook,
+    )
+}
+fn prepare_native_staging(
+    paths: &ManagedSegmentPaths,
+    directories: &SyncMutex<SegmentDirectories>,
+    #[cfg(test)] hook: Option<&PublicationHook>,
+) -> Result<()> {
+    let (root, lineage, epoch, operator) = managed_segment_components(paths)?;
+    prepare_staging_directories(
+        root,
+        &lineage,
+        &epoch,
+        &operator,
+        &mut directories.lock(),
+        #[cfg(test)]
+        hook,
+    )
+}
+fn publish_native_staging(
+    paths: &ManagedSegmentPaths,
+    handle: &StateHandle,
+    validated: bool,
+    directories: &SyncMutex<SegmentDirectories>,
+    check: &mut dyn FnMut() -> Result<()>,
+    #[cfg(test)] hook: Option<&PublicationHook>,
+) -> Result<()> {
+    if !validated {
+        return Err(CalcFlowError::Conflict {
+            resource: "validated state segment".into(),
+            key: handle.segment_id().into(),
+        });
+    }
+    prepare_native_staging(
+        paths,
+        directories,
+        #[cfg(test)]
+        hook,
+    )?;
+    rename_native_staging(
+        paths,
+        handle,
+        check,
+        #[cfg(test)]
+        hook,
+    )
+}
+fn rename_native_staging(
+    paths: &ManagedSegmentPaths,
+    handle: &StateHandle,
+    check: &mut dyn FnMut() -> Result<()>,
+    #[cfg(test)] hook: Option<&PublicationHook>,
+) -> Result<()> {
+    super::native_io::verify_file(&paths.staging, handle, check)?;
+    #[cfg(test)]
+    observe(hook, Operation::Rename, &paths.committed)?;
+    check()?;
+    std::fs::rename(&paths.staging, &paths.committed)
+        .map_err(|source| io_error(&paths.committed, source))
+}
+fn finish_native_publication(
+    paths: &ManagedSegmentPaths,
+    #[cfg(test)] hook: Option<&PublicationHook>,
+) -> Result<()> {
+    #[cfg(test)]
+    observe(hook, Operation::PublishSync, &paths.committed_parent)?;
+    sync_directory(&paths.committed_parent)
+}

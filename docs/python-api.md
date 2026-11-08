@@ -697,7 +697,7 @@ runtime.register_provider(
 )
 snapshot = runtime.capabilities()
 
-assert snapshot.schema_version == 4
+assert snapshot.schema_version == 5
 assert snapshot.scope.kind == "runtime_session"
 assert snapshot.scope.revision == 1
 assert snapshot.providers[0].name == "normalize"
@@ -713,20 +713,25 @@ fields. `options_schema=None` means no declarative editor is available; it
 does not mean every option is valid. The provider callback remains
 authoritative during compilation.
 
-Capability schema version 4 preserves the lifecycle fields introduced by
-version 3 and adds option-defined provider ports. `OperatorCapability` and
+Capability schema version 5 adds `ProviderCapability.state_layouts` to the
+closed provider record. Version 4 introduced option-defined provider ports;
+consumers must adopt the version-5 record explicitly. Project and manifest
+formats remain 3. `OperatorCapability` and
 `ProviderCapability` report
 `modes`, `finality`, `stateful`, `microbatch_invariant`, `requires_watermark`,
 `checkpoint_support`, `state_version`, `deterministic`, and `replay_safe`;
-operators additionally report `state_layouts`, the advertised checkpoint layout
-inventory. Inspect the native operator contract when evaluating checkpoint
-compatibility; the rolling catalog limitation is described below. Providers additionally report
+both report `state_layouts`, the advertised checkpoint layout inventory.
+Inspect the native operator contract when evaluating checkpoint compatibility;
+the rolling catalog limitation is described below. Providers additionally report
 `supports_static_inputs`, `partition_contract`,
 and optional `array_rules`. The vocabularies are closed: execution modes are
 `batch` and `stream`; output finality is `per_row_final`,
 `group_final_append_only`, or `unproven`; checkpoint support is `stateless`,
 `checkpointed_stateful`, or `unproven`; and a provider partition contract is
-`none` or `row_axis_independent`. `state_version` is a positive integer
+`none`, `row_axis_independent` or `single_ordered_sequence`. The last means one
+state owner consumes vector positions in single-ingress arrival order, without
+independent partitions or implicit input alignment. `state_version` is a
+positive integer
 exactly when `checkpoint_support` is `checkpointed_stateful` and `None`
 otherwise, a `stateless` capability must set `stateful=False`, and
 `state_layouts` is a strictly ascending tuple of positive integers. It must
@@ -744,15 +749,21 @@ required names, kinds and flags come from `options.inputs` and
 `options.outputs`. This mode requires immutable strict JSON Schema text in
 `options_json_schema`, and `options_schema` must be `None`. The two schema
 fields cannot be combined. Empty tuples in this mode do not mean zero ports.
+Fixed-port capabilities may also carry strict `options_json_schema` text when
+`options_schema is None`; their explicit port tuples remain authoritative.
+Old fixed-port records without JSON Schema retain their defaults.
 
 `CapabilityRule` identities are closed and versioned. The accepted identities
 are `array_api_safe_dtype@1`, `elementwise_broadcast@1`,
 `feature_axis_reduction@1`, `table_matmul_static_rhs@1`,
 `native_float_bool_dtype@1`, `native_scalar_vector_broadcast@1`,
-`native_packed_rank2@1`, `native_matmul@1`, and `native_axis_reduction@1`; any
-other name/version pair fails construction. The last three describe IR2 packed
-matrix shapes, matrix multiplication and axis reductions; IR1 retains its
-scalar/vector shape rules. `ProviderArrayRules` pairs the exact
+`native_packed_rank2@1`, `native_matmul@1`, `native_axis_reduction@1`,
+`native_table_static_rhs@1`, `native_float_dtype@1` and
+`native_sequence_vector@1`; any other name/version pair fails construction.
+The three matrix rules describe IR2 packed shapes, multiplication and axis
+reductions; IR1 retains its scalar/vector shape rules. The two sequence rules
+describe one f32/f64 vector ingress and aligned f64 output; they do not establish
+table lineage or a general array stream API. `ProviderArrayRules` pairs the exact
 `supported_dtypes` tuple with a `safe_dtype_rule` and `shape_rules`, and
 stores both tuples sorted by identity.
 
@@ -819,9 +830,11 @@ so an arbitrary Python callback remains batch-only rather than acquiring this
 proof from caller-supplied metadata.
 
 `calc_flow.array.register_native(runtime)` atomically registers the Rust
-`native:array_expr@1` batch factory and `native:table_array@1` batch/stream
-bridge. Their frozen capabilities, complete IR JSON Schemas and option-defined
-ports come from Rust. The array factory supports native Boolean/float32/float64
+`native:array_expr@1` batch factory, `native:table_array@1` batch/stream
+bridge and `native:array_sequence@1` stateful stream factory. These are four
+lifecycle entries under three identities. Their frozen capabilities and complete
+options JSON Schemas come from Rust. The array/table factories use option-defined
+ports; the sequence factory has explicit fixed ports. The array factory supports native Boolean/float32/float64
 scalars, vectors and packed matrices. Only true scalars broadcast; `[1]` remains
 a vector, and non-scalar operands require matching shapes. Numeric promotion
 preserves float32 unless an operand is float64. IR version 1 retains its original
@@ -833,21 +846,31 @@ The array factory reports `modes=("batch",)`, `stateful=False`,
 `checkpoint_support="unproven"`, `state_version=None`,
 `supports_static_inputs=True`, `partition_contract="none"` and
 `finality="unproven"`. Static inputs here cover finite batch parameters.
-Rolling state starts fresh on every batch invocation. The table bridge reports
+Its `state_layouts=()`; rolling state starts fresh on every batch invocation.
+The table bridge reports
 `modes=("batch", "stream")`, `stateful=False`, `microbatch_invariant=True`,
 `checkpoint_support="stateless"`, `supports_static_inputs=True`,
-`partition_contract="row_axis_independent"` and `finality="per_row_final"`.
-It admits one table input with row-preserving native work and an optional
-latched static matrix RHS. Its stream mode does not enable standalone array
-stream outputs. Both factories report `deterministic=True` and
+`partition_contract="row_axis_independent"`, `state_layouts=()` and
+`finality="per_row_final"`. It admits one table input with row-preserving native
+work and an optional
+latched static matrix RHS. Its stream mode does not add high-level ArrayExpr
+streaming. All three native factories report `deterministic=True` and
 `replay_safe=True` for identical inputs on the same implementation and numerical
 profile; these claims do not promise cross-platform bitwise equality or delivery
-guarantees.
+guarantees. The sequence factory instead reports `modes=("stream",)`,
+`stateful=True`, `microbatch_invariant=True`, `requires_watermark=False`,
+`checkpoint_support="checkpointed_stateful"`, `state_version=1`,
+`state_layouts=(1,)`, `supports_static_inputs=False`,
+`partition_contract="single_ordered_sequence"` and `finality="per_row_final"`.
+It uses explicit required array `input`/`output` ports and its own closed options
+schema. Its checkpoint and managed restart contract belongs to that native
+factory, not to a Python stateless-provider marker.
 
-Use the factories through native ArrayExpr declarations, the advanced
-`PipelineBuilder.external` or project surface. Registration retains no Python
-callback or provider root. It prepares both frozen capabilities before atomic
-native insertion, publishes two registration records and invalidates symbolic
+Use the array/table factories through native ArrayExpr declarations, advanced
+`PipelineBuilder.external` or project surfaces. The sequence factory uses
+advanced stream bindings. Registration retains no Python callback or provider
+root. It prepares all three frozen capabilities before atomic
+native insertion, publishes three registration records and invalidates symbolic
 caches once. A collision in any native lifecycle, invalid descriptor, or cleared
 runtime leaves records, capability revision and caches unchanged. Querying the
 Rust descriptors alone does not register a provider.
@@ -859,8 +882,9 @@ tuple as `ConnectorCapability` entries. Each entry pairs its
 `transaction`, and the `snapshot`/`polling`/`cdc`/`lookup` flags), the
 declared formats, and an options schema.
 
-The session ID is stable for one runtime. A successful registry entry advances
-the revision exactly once; rejected duplicates do not. NumPy/JAX helpers add
+The session ID is stable for one runtime. Revision equals the number of
+successful registration records. The native bundle advances it by three across
+four lifecycle entries; a rejected bundle leaves it unchanged. NumPy/JAX helpers add
 `expression@1`, mapped `table_matmul@1`, and mapped `symbolic_matrix@1` as
 separate entries, so one helper normally advances by three and can expose a
 real partial success if a later entry already exists. Previously returned
@@ -925,8 +949,11 @@ unlisted keys below). Key order inside a record is not guaranteed.
 - A `kafka_decoder` record has no `provider` key and exists only on wheels
   built with `connector-kafka`.
 - A `native_provider` record comes from `calc_flow.array.register_native`;
-  its two records describe one array/table factory bundle. Replay that bundle
+  its three records describe one array/sequence/table factory bundle. Replay
+  that bundle
   by calling the helper once on the target runtime, rather than once per record.
+  Missing identities or a contradictory sequence lifecycle fail validation;
+  native snapshots never silently downgrade to a two-identity bundle.
 - The listed keys of a record are the arguments of the one successful call
   that produced it: `register_provider`, `register_mapping_provider`,
   `register_scalar_udf`, `register_kafka_decoder`, or
@@ -1020,6 +1047,7 @@ records onto a second runtime through the public registration methods:
 ```python
 from calc_flow import Runtime
 from calc_flow.array import register_native
+from calc_flow.capabilities import runtime_capabilities
 
 
 def scale(inputs, options):
@@ -1039,6 +1067,12 @@ register_native(parent)
 
 capabilities, records = parent.capability_registration_snapshot()
 assert capabilities.providers[0].name == records[0]["name"] == "scale"
+runtime_capabilities(
+    session_id=capabilities.scope.session_id,
+    revision=capabilities.scope.revision,
+    package_version=capabilities.package_version,
+    registrations=records,
+)  # Validate complete native bundle evidence before replaying any records.
 
 worker = Runtime()
 native_bundle_replayed = False
@@ -1335,6 +1369,32 @@ Run [`examples/native_arrays.py`](../examples/native_arrays.py) for an Arrow-onl
 moving-mean, conditional-selection and reduction example.
 
 
+### Native sequence provider
+
+The advanced stream identity `native:array_sequence@1` consumes one real native
+float32 or float64 vector ingress and emits one aligned float64 vector Batch per
+input, including empty chunks. Its descriptor pins the input dtype; scalars,
+matrices, Boolean values, static inputs and second dynamic ingresses are rejected.
+Vector positions advance state in arrival order. Batch metadata sequence numbers
+do not reset, reorder or deduplicate the sequence. Table entities and event-time
+reordering continue to use table operators.
+
+The strict options object requires `ir_version=1`, `input_dtype` and `kernel`.
+The kernel is either `{"function":"rolling_mean","window":20}` with optional
+`min_periods` and `numerical_profile`, or `{"function":"ewma","span":20}` with
+optional `min_periods`. `execution` holds output/allocation limits and `state`
+holds `max_state_bytes`; both are optional and reject unknown keys. These options
+use the sequence factory's schema, independently of array_expr IR1/IR2.
+Compile it through `PipelineBuilder.external` with an explicitly registered
+Runtime and run it through explicit native source/sink bindings. Checkpoint layout
+1 and state version 1 identify its real native codec/recovery contract; they are
+separate from capability schema 5 and project/manifest version 3.
+
+The Python API adds no owned state class, `ArrayExpr.stream`, implicit input zip,
+or mixed array/table stream result convenience method. Independent sequence
+nodes own independent state; one sequence cannot be split into parallel
+partitions. Existing NumPy/JAX lifecycle and numerical contracts remain unchanged.
+
 ### Native ArrayExpr declarations and collection
 
 `array_input(name, dtype=..., shape=..., backend="native")` declares a dynamic
@@ -1375,8 +1435,9 @@ cached declaration template; payloads are never cached. `array_options` limits
 each lowered native IR execution, rather than total memory for an arbitrary
 graph, and its normalized limits participate in the template cache key.
 The blocking method rejects a running event loop. Async array collection,
-mixed table/array Program outputs and standalone native array streams are not
-available. `compute`, TableExpr collection and Program collection return tables.
+mixed table/array Program outputs and `ArrayExpr.stream` are not available.
+Advanced stateful vector streams use the separate
+[native sequence provider](#native-sequence-provider). `compute`, TableExpr collection and Program collection return tables.
 
 `linalg.from_columns(table, columns=..., backend="native")` establishes a
 semantic row origin. Use the same TableExpr node in `from_columns` and

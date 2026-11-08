@@ -814,7 +814,28 @@ async fn reset_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Res
     match &inputs.operator {
         CompiledStreamOperator::StreamJoin(_) => reset_join_metadata(inputs, task_id).await,
         CompiledStreamOperator::StreamAsofJoin(_) => reset_managed_asof(inputs, task_id).await,
+        CompiledStreamOperator::External(_) => reset_external_operator(inputs, task_id).await,
         _ => reset_legacy_operator(inputs, task_id),
+    }
+}
+
+async fn reset_external_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<()> {
+    inputs.context.bind_task_id(task_id);
+    let restore = inputs.restore.as_ref().expect("restore presence checked");
+    let context = StreamOperatorContext::new(inputs.context.job(), &inputs.node_id, None);
+    let operation = async {
+        inputs.operator.reset()?;
+        inputs
+            .operator
+            .restore_async(&restore.snapshot, &context)
+            .await
+    };
+    match AssertUnwindSafe(operation).catch_unwind().await {
+        Ok(result) => result,
+        Err(payload) => Err(CalcFlowError::TaskPanicked {
+            task_id: task_id.as_u64(),
+            message: panic_message(payload.as_ref()),
+        }),
     }
 }
 
