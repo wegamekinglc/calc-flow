@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
-import subprocess
+import subprocess  # nosec B404  # fixed Linux shell and loopback fixtures
 import sys
 import tarfile
 import tempfile
@@ -13,6 +13,7 @@ from collections import Counter
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 ARCHIVE = "coveralls-linux-x86_64.tar.gz"
@@ -78,16 +79,18 @@ def _serve(responses: dict[str, tuple[tuple[int, bytes], ...]]):
 class CoverallsDownloadTests(unittest.TestCase):
     def _install(self, responses, directory: Path):
         with _serve(responses) as (url, requests):
-            result = subprocess.run(
-                ["bash", "-c", INSTALL],
+            result = subprocess.run(  # nosec B603  # constant installer, local fixtures
+                ["/bin/bash", "--noprofile", "--norc", "-c", INSTALL],
                 cwd=directory,
                 env={
-                    **os.environ,
+                    "PATH": "/usr/bin:/bin",
                     "CURL_HOME": str(ROOT / ".github/coveralls"),
                     "NO_PROXY": "127.0.0.1",
                     "no_proxy": "127.0.0.1",
                     "COVERALLS_TEST_URL": url,
                 },
+                shell=False,
+                check=False,
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -107,6 +110,34 @@ class CoverallsDownloadTests(unittest.TestCase):
             self.assertTrue((Path(directory) / "reported").exists())
             self.assertEqual(requests[f"/{ARCHIVE}"], 2)
             self.assertEqual(requests["/coveralls-checksums.txt"], 2)
+
+    def test_installer_ignores_ambient_path_and_shell_hooks(self) -> None:
+        archive = _reporter_archive()
+        checksum = f"{hashlib.sha256(archive).hexdigest()}  {ARCHIVE}\n".encode()
+        responses = {
+            f"/{ARCHIVE}": ((200, archive),),
+            "/coveralls-checksums.txt": ((200, checksum),),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            untrusted = directory / "bin"
+            untrusted.mkdir()
+            fake_bash = untrusted / "bash"
+            fake_bash.write_text("#!/bin/sh\nexit 86\n", encoding="utf-8")
+            fake_bash.chmod(0o755)
+            shell_hook = directory / "shell-hook.sh"
+            shell_hook.write_text("exit 86\n", encoding="utf-8")
+            for ambient in (
+                {"PATH": f"{untrusted}:{os.defpath}"},
+                {"BASH_ENV": str(shell_hook)},
+            ):
+                with (
+                    self.subTest(ambient=ambient),
+                    mock.patch.dict(os.environ, ambient),
+                ):
+                    result, _ = self._install(responses, directory)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertTrue((directory / "reported").exists())
 
     def test_persistent_http_errors_fail_without_executing_reporter(self) -> None:
         for failed_asset in (ARCHIVE, "coveralls-checksums.txt"):
