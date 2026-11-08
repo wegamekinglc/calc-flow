@@ -462,16 +462,34 @@ fn branch_dtype(if_true: ArrayView<'_>, if_false: ArrayView<'_>) -> Result<Array
     }
 }
 
-fn select<T>(
+fn select<'a, T>(
     condition: Option<bool>,
-    if_true: impl FnOnce() -> Option<T>,
-    if_false: impl FnOnce() -> Option<T>,
+    if_true: ArrayView<'a>,
+    if_false: ArrayView<'a>,
+    index: usize,
+    value: impl FnOnce(&ArrayView<'a>, usize) -> Option<T>,
 ) -> Option<T> {
     match condition {
-        Some(true) => if_true(),
-        Some(false) => if_false(),
+        Some(true) => value(&if_true, index),
+        Some(false) => value(&if_false, index),
         None => None,
     }
+}
+
+fn selection_layout(
+    condition: ArrayView<'_>,
+    if_true: ArrayView<'_>,
+    if_false: ArrayView<'_>,
+) -> Result<(ArrayDType, Shape, bool)> {
+    boolean_dtype(condition, "condition.dtype")?;
+    let dtype = branch_dtype(if_true, if_false)?;
+    let shape = resolve_shape(&[
+        (condition, "condition.shape"),
+        (if_true, "if_true.shape"),
+        (if_false, "if_false.shape"),
+    ])?;
+    let nullable = condition.has_nulls() || if_true.has_nulls() || if_false.has_nulls();
+    Ok((dtype, shape, nullable))
 }
 
 /// Selects values using a Boolean condition and explicit scalar broadcasting.
@@ -505,34 +523,33 @@ pub fn where_(
     if_false: ArrayView<'_>,
     execution: &ArrayExecutionOptions,
 ) -> Result<NativeArray> {
-    boolean_dtype(condition, "condition.dtype")?;
-    let dtype = branch_dtype(if_true, if_false)?;
-    let shape = resolve_shape(&[
-        (condition, "condition.shape"),
-        (if_true, "if_true.shape"),
-        (if_false, "if_false.shape"),
-    ])?;
-    let nullable = condition.has_nulls() || if_true.has_nulls() || if_false.has_nulls();
+    let (dtype, shape, nullable) = selection_layout(condition, if_true, if_false)?;
     match dtype {
         ArrayDType::Float32 => float_output(shape, nullable, execution, |index| {
             select(
                 condition.boolean(index),
-                || if_true.number32(index),
-                || if_false.number32(index),
+                if_true,
+                if_false,
+                index,
+                ArrayView::number32,
             )
         }),
         ArrayDType::Float64 => float_output(shape, nullable, execution, |index| {
             select(
                 condition.boolean(index),
-                || if_true.number64(index),
-                || if_false.number64(index),
+                if_true,
+                if_false,
+                index,
+                ArrayView::number64,
             )
         }),
         ArrayDType::Boolean => boolean_output(shape, nullable, execution, |index| {
             select(
                 condition.boolean(index),
-                || if_true.boolean(index),
-                || if_false.boolean(index),
+                if_true,
+                if_false,
+                index,
+                ArrayView::boolean,
             )
         }),
     }

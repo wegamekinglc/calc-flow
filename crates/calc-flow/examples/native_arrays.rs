@@ -21,19 +21,7 @@ fn main() -> Result<()> {
         vec![4],
     )?;
     let execution = ArrayExecutionOptions::default();
-    let average = array::rolling_mean(
-        values.float_view()?,
-        RollingMeanOptions::new(2)?,
-        &execution,
-    )?;
-    let condition =
-        array::greater_equal(average.view(), ArrayView::scalar_f64(Some(4.0)), &execution)?;
-    let result = array::where_(
-        condition.view(),
-        average.view(),
-        ArrayView::scalar_f64(Some(0.0)),
-        &execution,
-    )?;
+    let result = filtered_average(&values, &execution)?;
     let total = array::sum(
         result.float_view()?,
         ReductionOptions::default(),
@@ -61,4 +49,20 @@ fn main() -> Result<()> {
     println!("Native values: {:?}", actual.values());
     println!("Native sum: {total}");
     Ok(())
+}
+
+fn filtered_average(
+    values: &NativeArray,
+    execution: &ArrayExecutionOptions,
+) -> Result<NativeArray> {
+    let average =
+        array::rolling_mean(values.float_view()?, RollingMeanOptions::new(2)?, execution)?;
+    let condition =
+        array::greater_equal(average.view(), ArrayView::scalar_f64(Some(4.0)), execution)?;
+    array::where_(
+        condition.view(),
+        average.view(),
+        ArrayView::scalar_f64(Some(0.0)),
+        execution,
+    )
 }
