@@ -96,11 +96,10 @@ def _execution(execution: ArrayExecutionOptions | None) -> ArrayExecutionOptions
 def _reduce(
     array: NativeArray,
     operation: str,
-    skip_nulls: bool,
+    options: tuple[bool, int | None, bool],
     execution: ArrayExecutionOptions | None,
-    axis: int | None,
-    keepdims: bool,
 ) -> NativeArray:
+    skip_nulls, axis, keepdims = options
     if type(keepdims) is not bool:
         raise TypeError("keepdims must be a bool")
     if axis is not None:
@@ -126,7 +125,7 @@ def sum(
     execution: ArrayExecutionOptions | None = None,
 ) -> NativeArray:
     """Return a float64 sum along the selected axis; nulls propagate."""
-    return _reduce(array, "sum", skip_nulls, execution, axis, keepdims)
+    return _reduce(array, "sum", (skip_nulls, axis, keepdims), execution)
 
 
 def mean(
@@ -138,7 +137,7 @@ def mean(
     execution: ArrayExecutionOptions | None = None,
 ) -> NativeArray:
     """Return a float64 mean along the selected axis; nulls propagate."""
-    return _reduce(array, "mean", skip_nulls, execution, axis, keepdims)
+    return _reduce(array, "mean", (skip_nulls, axis, keepdims), execution)
 
 
 def min(
@@ -150,7 +149,7 @@ def min(
     execution: ArrayExecutionOptions | None = None,
 ) -> NativeArray:
     """Return the native minimum along the selected axis, preserving the input dtype."""
-    return _reduce(array, "min", skip_nulls, execution, axis, keepdims)
+    return _reduce(array, "min", (skip_nulls, axis, keepdims), execution)
 
 
 def max(
@@ -162,7 +161,7 @@ def max(
     execution: ArrayExecutionOptions | None = None,
 ) -> NativeArray:
     """Return the native maximum along the selected axis, preserving the input dtype."""
-    return _reduce(array, "max", skip_nulls, execution, axis, keepdims)
+    return _reduce(array, "max", (skip_nulls, axis, keepdims), execution)
 
 
 def ewma(
