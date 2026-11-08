@@ -19,6 +19,12 @@ measurements. Use the current guides for supported behavior.
   arithmetic with table kernels while preserving checkpoint fields and shared
   history; preflight output and fixed-capacity history allocations.
 
+- 2026-11-08: Expose immutable native arrays to Python with owned NumPy
+  snapshots, shared Arrow buffers, mask-preserving export and native `Batch`
+  payloads, including packed Boolean values. Add synchronous Rust-backed
+  reductions, elementwise arithmetic, comparisons, Kleene logic, conditional
+  selection, rolling mean and EWMA with frozen allocation limits and GIL release.
+
 - 2026-11-08: Expose native Rust EWMA with first-valid-sample initialization,
   nullable aligned Float64 output, explicit span/warm-up options and bounded
   output/state allocation. Share the numeric transition with typed table EWMA

@@ -46,6 +46,67 @@ class ProviderError(ExecutionError): ...
 class CheckpointError(CalcFlowError): ...
 class CancelledError(ExecutionError): ...
 
+@final
+class NativeArray:
+    @property
+    def dtype(self) -> str: ...
+    @property
+    def shape(self) -> tuple[int, ...]: ...
+    @property
+    def estimated_bytes(self) -> int: ...
+    @property
+    def retained_buffer_bytes(self) -> int: ...
+    def __len__(self) -> int: ...
+    def to_arrow(self) -> pa.Array: ...
+    def to_numpy(self, *, fill_value: float | bool | None = None) -> object: ...
+
+def _native_array_from_bytes(
+    values: bytes, dtype: str, shape: list[int]
+) -> NativeArray: ...
+def _native_array_from_arrow(values: pa.Array, shape: list[int]) -> NativeArray: ...
+def _native_array_reduce(
+    array: NativeArray,
+    operation: str,
+    skip_nulls: bool,
+    max_elements: int,
+    max_allocation_bytes: int,
+) -> NativeArray: ...
+def _native_array_ewma(
+    array: NativeArray,
+    span: int,
+    min_periods: int,
+    max_elements: int,
+    max_allocation_bytes: int,
+) -> NativeArray: ...
+def _native_array_rolling_mean(
+    array: NativeArray,
+    window: int,
+    min_periods: int,
+    numerical_profile: str,
+    max_elements: int,
+    max_allocation_bytes: int,
+) -> NativeArray: ...
+def _native_array_unary(
+    array: NativeArray,
+    operation: str,
+    max_elements: int,
+    max_allocation_bytes: int,
+) -> NativeArray: ...
+def _native_array_binary(
+    left: NativeArray,
+    right: NativeArray,
+    operation: str,
+    max_elements: int,
+    max_allocation_bytes: int,
+) -> NativeArray: ...
+def _native_array_where(
+    condition: NativeArray,
+    if_true: NativeArray,
+    if_false: NativeArray,
+    max_elements: int,
+    max_allocation_bytes: int,
+) -> NativeArray: ...
+
 class StreamingRuntimeError(CalcFlowError):
     @property
     def category(self) -> str: ...

@@ -1,5 +1,6 @@
 //! Python bindings for Calc Flow's Rust-native v3 engine.
 
+mod array;
 mod arrow_source;
 mod batch;
 mod config;
@@ -27,12 +28,21 @@ fn version() -> &'static str {
 #[pyo3(name = "_native")]
 fn calc_flow_python(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(version, module)?)?;
+    register_types(module)?;
+    register_runtime(module)
+}
+
+fn register_types(module: &Bound<'_, PyModule>) -> PyResult<()> {
     error::register(module)?;
+    array::register(module)?;
     batch::register(module)?;
     module.add_class::<arrow_source::PyArrowSource>()?;
     execution_options::register(module)?;
     config::register(module)?;
-    connector::register(module)?;
+    connector::register(module)
+}
+
+fn register_runtime(module: &Bound<'_, PyModule>) -> PyResult<()> {
     continuous::register(module)?;
     pipeline::register(module)?;
     store::register(module)?;

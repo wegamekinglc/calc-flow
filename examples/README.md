@@ -1,6 +1,6 @@
 # Calc Flow examples
 
-All 36 runnable Python examples have a [Rust counterpart](../crates/calc-flow/examples/README.md),
+The 36 numbered runnable Python examples have a [Rust counterpart](../crates/calc-flow/examples/README.md),
 including connector sources/sinks, recovery, and financial streams. Each pair
 uses the same unique number and filename stem, from `01_datafusion_pipeline`
 to `36_symbolic_event_window`.
@@ -18,6 +18,11 @@ async batch execution, 09 for financial features, and 14 for project export.
 These programs use the internal Rust runtime and check observable results;
 explicit graph, provider, and native-extension examples cover advanced integrations. Each Python program
 is standalone; the [learning paths](../docs/examples.md) group them by task.
+
+[`native_arrays.py`](native_arrays.py) demonstrates Arrow imports, native row-window
+means, explicit scalar broadcasting, Boolean selection and scalar reduction.
+It requires no NumPy/JAX provider or optional array backend. Run it with
+`uv run --no-sync python examples/native_arrays.py` after installing the package.
 
 ## Prepare and run
 

@@ -372,6 +372,9 @@ impl PyBatch {
         metadata: Option<&Bound<'_, PyAny>>,
         active_entities: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
+        if backend == "native" {
+            return native_array_batch(py, array, metadata, active_entities);
+        }
         let prepared = py
             .import(intern!(py, "calc_flow.array"))?
             .getattr(intern!(py, "_prepare_array"))?
@@ -434,6 +437,14 @@ impl PyBatch {
         let payload = inner
             .external_payload()
             .map_err(|_| PyTypeError::new_err("table batches do not contain an array"))?;
+        if let Some(native) = payload
+            .as_any()
+            .downcast_ref::<calc_flow::array::NativeArray>()
+        {
+            return Ok(
+                Py::new(py, crate::array::PyNativeArray::from_inner(native.clone()))?.into_any(),
+            );
+        }
         let payload = payload
             .as_any()
             .downcast_ref::<PythonPayload>()
@@ -449,6 +460,9 @@ impl PyBatch {
         let payload = inner
             .external_payload()
             .map_err(|_| PyTypeError::new_err("table batches do not have an array backend"))?;
+        if payload.as_any().is::<calc_flow::array::NativeArray>() {
+            return Ok("native".into());
+        }
         let payload = payload
             .as_any()
             .downcast_ref::<PythonPayload>()
@@ -499,6 +513,19 @@ impl PyBatch {
         let inner = self.inner.write().take();
         drop(inner);
     }
+}
+
+fn native_array_batch(
+    py: Python<'_>,
+    array: &Bound<'_, PyAny>,
+    metadata: Option<&Bound<'_, PyAny>>,
+    active_entities: Option<&Bound<'_, PyAny>>,
+) -> PyResult<PyBatch> {
+    let native: PyRef<'_, crate::array::PyNativeArray> = array.extract()?;
+    let metadata = metadata_from_python_with_active_entities(py, metadata, active_entities)?;
+    let inner = calc_flow::Batch::external(Arc::new(native.inner.clone()), metadata)
+        .map_err(crate::error::to_py_err)?;
+    Ok(PyBatch::from_inner(inner))
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
