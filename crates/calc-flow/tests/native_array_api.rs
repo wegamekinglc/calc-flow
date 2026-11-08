@@ -1,4 +1,4 @@
-use std::{mem::size_of, sync::Arc};
+use std::{collections::BTreeMap, mem::size_of, sync::Arc};
 
 use calc_flow::{
     Batch, BatchKind, BatchMetadata, CalcFlowError, ExternalPayload,
@@ -22,7 +22,7 @@ fn test_float_view_borrows_exact_float_storage() {
     };
     assert!(std::ptr::eq(borrowed.as_ptr(), values.as_ptr()));
     assert!(borrowed[1].is_nan());
-    assert_eq!(borrowed[2], f64::INFINITY);
+    assert_eq!(borrowed[2].to_bits(), f64::INFINITY.to_bits());
     assert!(FloatView::from_f32(&[]).is_empty());
 }
 
@@ -49,7 +49,7 @@ fn test_native_array_takes_owned_values_and_preserves_ieee_bits() {
     assert!(std::ptr::eq(values.as_ptr(), pointer));
     assert_eq!(values[0].to_bits(), (-0.0_f64).to_bits());
     assert_eq!(values[1].to_bits(), nan_bits);
-    assert_eq!(values[2], f64::INFINITY);
+    assert_eq!(values[2].to_bits(), f64::INFINITY.to_bits());
 
     let scalar = NativeArray::from_f32(vec![-0.0], vec![], None).unwrap();
     assert_eq!(scalar.dtype(), ArrayDType::Float32);
@@ -144,7 +144,7 @@ fn test_native_array_enters_batch_without_static_snapshot_and_hides_values() {
     assert!(!debug.contains("123456"));
     let expected_bytes = array.estimated_bytes();
     let expected_retained = array.retained_buffer_bytes();
-    let metadata = BatchMetadata::new("native-array-test", 4, Default::default()).unwrap();
+    let metadata = BatchMetadata::new("native-array-test", 4, BTreeMap::new()).unwrap();
     let batch = Batch::external(Arc::new(array), metadata.clone()).unwrap();
     assert_eq!(batch.kind(), BatchKind::Array);
     assert_eq!(batch.num_rows(), 1);
