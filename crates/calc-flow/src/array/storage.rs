@@ -1,17 +1,17 @@
 use std::{any::Any, fmt, sync::Arc};
 
 use datafusion::arrow::{
-    array::{Array, ArrayRef, Float32Array, Float64Array},
-    buffer::{NullBuffer, ScalarBuffer},
+    array::{Array, ArrayRef, BooleanArray, Float32Array, Float64Array},
+    buffer::{BooleanBuffer, NullBuffer, ScalarBuffer},
 };
 
 use super::{
-    ArrayDType, FloatValues, FloatView, byte_width, bytes_overflow, invalid, validate_validity,
-    visible_bytes,
+    ArrayDType, ArrayView, FloatValues, FloatView, boolean_visible_bytes, byte_width,
+    bytes_overflow, invalid, validate_validity, visible_bytes,
 };
 use crate::{ExternalPayload, Result};
 
-/// Immutable native floating-point storage with a scalar or vector shape.
+/// Immutable native floating-point or Boolean scalar and vector storage.
 ///
 /// Values and validity use Arrow's shared read-only buffers. Clones retain
 /// the same storage; accessors never expose mutable caller-owned data.
@@ -25,7 +25,7 @@ pub struct NativeArray {
 }
 
 impl NativeArray {
-    /// Takes ownership of a float32/float64 Arrow array without copying values.
+    /// Takes ownership of a float32/float64/Boolean Arrow array without copying.
     ///
     /// Preserves values, validity, and their slice offsets. Shape `[]` denotes
     /// one scalar; `[n]` denotes a vector with exactly `n` values.
@@ -35,6 +35,23 @@ impl NativeArray {
     /// Returns [`crate::CalcFlowError::InvalidArgument`] for an unsupported
     /// concrete Arrow type, invalid shape or validity, or byte-count overflow.
     pub fn from_arrow(values: ArrayRef, shape: Vec<usize>) -> Result<Self> {
+        if let Some(array) = values.as_any().downcast_ref::<BooleanArray>() {
+            validate_shape(array.len(), &shape)?;
+            validate_validity(array.len(), array.nulls())?;
+            let visible_bytes = boolean_visible_bytes(array.values(), array.nulls(), shape.len())?;
+            let retained_bytes = retained_bytes(
+                array.values().inner().capacity(),
+                array.nulls(),
+                shape.len(),
+            )?;
+            return Ok(Self {
+                values,
+                dtype: ArrayDType::Boolean,
+                shape: shape.into_boxed_slice(),
+                visible_bytes,
+                retained_bytes,
+            });
+        }
         let (view, capacity) = arrow_view(&values)?;
         let (visible_bytes, retained_bytes) =
             validate_parts(view.len(), view.dtype(), &shape, view.validity(), capacity)?;
@@ -45,6 +62,24 @@ impl NativeArray {
             visible_bytes,
             retained_bytes,
         })
+    }
+
+    /// Takes ownership of packed Boolean values and optional validity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::CalcFlowError::InvalidArgument`] for an invalid shape,
+    /// mismatched validity length, or byte-count overflow before construction.
+    pub fn from_boolean(
+        values: BooleanBuffer,
+        shape: Vec<usize>,
+        validity: Option<NullBuffer>,
+    ) -> Result<Self> {
+        validate_shape(values.len(), &shape)?;
+        validate_validity(values.len(), validity.as_ref())?;
+        boolean_visible_bytes(&values, validity.as_ref(), shape.len())?;
+        retained_bytes(values.inner().capacity(), validity.as_ref(), shape.len())?;
+        Self::from_arrow(Arc::new(BooleanArray::new(values, validity)), shape)
     }
 
     /// Takes ownership of single-precision values and optional validity.
@@ -124,12 +159,30 @@ impl NativeArray {
         &self.values
     }
 
+    /// Borrows values without copying and preserves the stored scalar shape.
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "Private storage is validated by every constructor before it can be borrowed."
+    )]
+    pub fn view(&self) -> ArrayView<'_> {
+        let view = if let Some(array) = self.values.as_any().downcast_ref::<BooleanArray>() {
+            ArrayView::from_boolean(array.values(), array.nulls())
+                .expect("native Boolean storage was validated at construction")
+        } else {
+            ArrayView::from_float(
+                self.float_view()
+                    .expect("native floating storage was validated at construction"),
+            )
+        };
+        view.with_scalar(self.shape.is_empty())
+    }
+
     /// Borrows the stored primitive values and validity for synchronous work.
     ///
     /// # Errors
     ///
     /// Returns [`crate::CalcFlowError::InvalidArgument`] if the storage is not
-    /// floating-point. Every currently supported constructor is floating-point.
+    /// floating-point, including Boolean storage.
     pub fn float_view(&self) -> Result<FloatView<'_>> {
         arrow_view(&self.values).map(|(view, _)| view)
     }
@@ -212,16 +265,25 @@ fn validate_parts(
     validate_shape(len, shape)?;
     validate_validity(len, validity)?;
     let visible = visible_bytes(len, dtype, validity, shape.len())?;
+    Ok((
+        visible,
+        retained_bytes(capacity_bytes, validity, shape.len())?,
+    ))
+}
+
+fn retained_bytes(
+    capacity_bytes: usize,
+    validity: Option<&NullBuffer>,
+    rank: usize,
+) -> Result<usize> {
     let bitmap = validity.map_or(0, |validity| validity.buffer().capacity());
-    let shape_bytes = shape
-        .len()
+    let shape_bytes = rank
         .checked_mul(size_of::<usize>())
         .ok_or_else(bytes_overflow)?;
-    let retained = capacity_bytes
+    capacity_bytes
         .checked_add(bitmap)
         .and_then(|bytes| bytes.checked_add(shape_bytes))
-        .ok_or_else(bytes_overflow)?;
-    Ok((visible, retained))
+        .ok_or_else(bytes_overflow)
 }
 
 fn validate_vec(

@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-08: Add Rust native elementwise floating arithmetic, comparisons,
+  packed Boolean storage and Kleene logic, and nullable conditional selection.
+  Borrowed vectors and inline scalars use explicit broadcasting, dtype promotion,
+  immutable inputs and checked output allocation limits.
+
 - 2026-11-08: Add a direct Rust native row-window mean with explicit minimum
   periods and numerical profile. Share floating add/remove, repair and readout
   arithmetic with table kernels while preserving checkpoint fields and shared
