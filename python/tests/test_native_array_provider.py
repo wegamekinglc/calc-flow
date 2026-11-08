@@ -147,6 +147,7 @@ def _descriptor() -> dict[str, object]:
         "input_ports": [],
         "output_ports": [],
         "modes": ["batch"],
+        "supports_static_inputs": True,
         "port_binding": "options",
         "options_json_schema": (
             '{"additionalProperties":false,"properties":{},"type":"object"}'
@@ -157,6 +158,19 @@ def _descriptor() -> dict[str, object]:
             "shape_rules": [{"name": "native_scalar_vector_broadcast", "version": "1"}],
         },
     }
+
+
+def _descriptors(first: dict[str, object] | None = None) -> list[dict[str, object]]:
+    table = {
+        **_descriptor(),
+        "name": "table_array",
+        "modes": ["batch", "stream"],
+        "checkpoint_support": "stateless",
+        "finality": "per_row_final",
+        "microbatch_invariant": True,
+        "partition_contract": "row_axis_independent",
+    }
+    return [_descriptor() if first is None else first, table]
 
 
 class _NativeRegistration:
@@ -170,12 +184,15 @@ class _NativeRegistration:
         self.calls += 1
 
 
-def test_native_registration_commits_one_frozen_rust_capability(
+def test_native_registration_commits_one_frozen_capability_bundle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     descriptor = _descriptor()
     monkeypatch.setattr(
-        _native, "_native_array_capability", lambda: descriptor, raising=False
+        _native,
+        "_native_array_capabilities",
+        lambda: _descriptors(descriptor),
+        raising=False,
     )
     inner = _NativeRegistration()
     runtime = Runtime(_inner=inner)  # type: ignore[arg-type]
@@ -186,7 +203,9 @@ def test_native_registration_commits_one_frozen_rust_capability(
 
     snapshot, records = runtime.capability_registration_snapshot()
     capability = snapshot.providers[0]
-    assert snapshot.scope.revision == inner.calls == 1
+    assert snapshot.scope.revision == 2
+    assert len(records) == 2
+    assert inner.calls == 1
     assert runtime._symbolic_cache_generation == 1
     assert runtime._symbolic_compile_cache == runtime._symbolic_schema_cache == {}
     assert records[0]["capability"] is capability
@@ -230,7 +249,10 @@ def test_invalid_descriptor_is_rejected_before_native_insertion(
 ) -> None:
     descriptor = {**_descriptor(), **change}
     monkeypatch.setattr(
-        _native, "_native_array_capability", lambda: descriptor, raising=False
+        _native,
+        "_native_array_capabilities",
+        lambda: _descriptors(descriptor),
+        raising=False,
     )
     inner = _NativeRegistration()
     runtime = Runtime(_inner=inner)  # type: ignore[arg-type]
@@ -248,7 +270,9 @@ def test_invalid_descriptor_is_rejected_before_native_insertion(
 def test_native_registration_error_keeps_snapshots_and_both_caches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_native, "_native_array_capability", _descriptor, raising=False)
+    monkeypatch.setattr(
+        _native, "_native_array_capabilities", _descriptors, raising=False
+    )
     inner = _NativeRegistration()
     runtime = Runtime(_inner=inner)  # type: ignore[arg-type]
     array_module.register_native(runtime)
@@ -317,7 +341,9 @@ def test_unavailable_native_symbolic_backend_never_imports_jax(
 def test_registration_during_cache_factory_keeps_the_new_generation_uncached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_native, "_native_array_capability", _descriptor, raising=False)
+    monkeypatch.setattr(
+        _native, "_native_array_capabilities", _descriptors, raising=False
+    )
     runtime = Runtime(_inner=_NativeRegistration())  # type: ignore[arg-type]
 
     def compile_after_registration() -> object:
@@ -333,7 +359,9 @@ def test_registration_during_cache_factory_keeps_the_new_generation_uncached(
 def test_cleared_native_registration_leaves_the_empty_runtime_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_native, "_native_array_capability", _descriptor, raising=False)
+    monkeypatch.setattr(
+        _native, "_native_array_capabilities", _descriptors, raising=False
+    )
     inner = _NativeRegistration()
     inner.error = RuntimeError("Runtime has been cleared by garbage collection")
     runtime = Runtime(_inner=inner)  # type: ignore[arg-type]

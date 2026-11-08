@@ -2046,7 +2046,7 @@ async fn run_job_driver(
         progress: prepared_progress,
         delivery_mode: _,
         delivery_proofs: _,
-        static_inputs: _,
+        static_inputs,
     } = validated;
     if let Err(error) = core.sql_recovery.configure(
         plan.nodes
@@ -2101,6 +2101,16 @@ async fn run_job_driver(
             }
         },
         None => None,
+    };
+    let recovered = checkpoint
+        .as_ref()
+        .and_then(|checkpoint| checkpoint.selected.as_ref())
+        .map(|selected| selected.manifest.static_inputs());
+    let context = match crate::static_input::finalize_native(context, static_inputs, recovered) {
+        Ok(context) => context,
+        Err(error) => {
+            return core.prepare_driver_report(checkpoint_start_failure(launch_id, error));
+        }
     };
     if let Some(checkpoint) = checkpoint.as_ref() {
         core.runtime_status.lock().checkpoint = Some(checkpoint.status.clone());

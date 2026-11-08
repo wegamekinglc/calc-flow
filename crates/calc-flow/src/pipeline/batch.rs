@@ -128,6 +128,41 @@ fn required_datafusion<'a>(
     })
 }
 
+impl BatchExecutionPlan {
+    pub(crate) fn with_static_input_specs(
+        mut self,
+        specs: Vec<crate::StaticInputSpec>,
+    ) -> Result<Self> {
+        let mut declarations = BTreeMap::new();
+        for spec in specs {
+            let name = spec.name().to_owned();
+            if !self.external_inputs.contains_key(&name)
+                || declarations.insert(name.clone(), spec).is_some()
+            {
+                return Err(CalcFlowError::Compile {
+                    message: format!("invalid or duplicate static input binding {name:?}"),
+                });
+            }
+        }
+        self.native_statics
+            .configure(&self.external_inputs, &declarations)?;
+        if !declarations.is_empty() {
+            self.fingerprint = static_fingerprint(&self.fingerprint, &declarations)?;
+        }
+        Ok(self)
+    }
+}
+fn static_fingerprint(
+    fingerprint: &str,
+    declarations: &BTreeMap<String, crate::StaticInputSpec>,
+) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let value = serde_json::json!({"graph_fingerprint":fingerprint,"static_inputs":declarations});
+    Ok(hex::encode(Sha256::digest(
+        crate::canonical_json(&value)?.as_bytes(),
+    )))
+}
+
 impl std::fmt::Debug for BatchExecutionPlan {
     /// Diagnostics show the pipeline identity only; operator state never
     /// appears (invariant I4).
@@ -150,6 +185,7 @@ pub struct BatchExecutionPlan {
     /// Graph, configuration and selected UDF snapshot are fixed for this owner.
     /// Templates match query, alias and exact schema and never contain input rows.
     query_templates: Arc<QueryTemplates>,
+    native_statics: crate::array::NativeStaticPlan,
     /// Built-in batch operators hold no run state; only external ones can.
     has_operator_state: bool,
     row_parallel_sql: bool,
@@ -229,6 +265,11 @@ impl PipelineBuilder {
             && self.nodes.values().all(|node| {
                 matches!(&node.operator, NodeOperator::Sql(sql) if sql.is_simple_projection())
             });
+        let mut native_statics = crate::array::NativeStaticPlan::default();
+        native_statics.set_endpoints(&graph.external_inputs);
+        for node in self.nodes.values() {
+            native_statics.push(&node.node_id, node.operator.metadata());
+        }
         let nodes = build_nodes(self, graph.order, |definition| {
             CompiledBatchOperator::try_convert(definition)
                 .expect("batch-only nodes were validated before conversion")
@@ -241,6 +282,7 @@ impl PipelineBuilder {
             fingerprint: graph.fingerprint,
             table: graph.table,
             query_templates: Arc::default(),
+            native_statics,
             has_operator_state,
             row_parallel_sql,
             row_local_projection,
@@ -465,6 +507,11 @@ impl BatchExecutionPlan {
         options: ExecutionOptions,
     ) -> Result<RunResult> {
         let context = RunContext::new(options.settings, options.deadline, options.cancellation)?;
+        let inputs = Arc::new(inputs);
+        let context = self
+            .native_statics
+            .prepare_batch(Arc::clone(&inputs), context)
+            .await?;
         let mut runtime = self
             .table
             .as_ref()

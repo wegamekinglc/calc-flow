@@ -22,11 +22,55 @@ pub struct StreamJobContext {
     cancellation: CancellationToken,
     checkpointing: bool,
     static_inputs: Arc<BTreeMap<String, Batch>>,
+    native_statics: Option<Arc<crate::array::NativeScope>>,
     gather: super::gather_work::JobGatherOwner,
     #[cfg(feature = "benchmark-internals")]
     dispatch_trace: crate::benchmark_internals::DispatchTraceOwner,
     #[cfg(feature = "benchmark-internals")]
     join_cpu_trace: crate::benchmark_internals::JoinCpuTraceOwner,
+}
+
+pub(crate) struct StreamJobControl {
+    job_id: u64,
+    deadline: Option<DateTime<Utc>>,
+    cancellation: CancellationToken,
+    #[cfg(test)]
+    deadline_clock: Option<watch::Receiver<DateTime<Utc>>>,
+}
+impl StreamJobControl {
+    pub(crate) const fn job_id(&self) -> u64 {
+        self.job_id
+    }
+    pub(crate) fn check_cancelled(&self) -> Result<()> {
+        check_job(
+            self.job_id,
+            &self.cancellation,
+            self.deadline.as_ref(),
+            #[cfg(test)]
+            self.deadline_clock.as_ref(),
+        )
+    }
+}
+fn check_job(
+    job_id: u64,
+    cancellation: &CancellationToken,
+    deadline: Option<&DateTime<Utc>>,
+    #[cfg(test)] clock: Option<&watch::Receiver<DateTime<Utc>>>,
+) -> Result<()> {
+    if cancellation.is_cancelled()
+        || deadline.is_some_and(|deadline| {
+            #[cfg(test)]
+            if let Some(clock) = clock {
+                return *clock.borrow() >= *deadline;
+            }
+            Utc::now() >= *deadline
+        })
+    {
+        return Err(CalcFlowError::Cancelled {
+            run_id: job_id.to_string(),
+        });
+    }
+    Ok(())
 }
 
 impl fmt::Debug for StreamJobContext {
@@ -62,6 +106,7 @@ impl StreamJobContext {
             cancellation,
             checkpointing: true,
             static_inputs: Arc::new(BTreeMap::new()),
+            native_statics: None,
             gather: super::gather_work::JobGatherOwner::new(job_id.to_string().into()),
             #[cfg(feature = "benchmark-internals")]
             dispatch_trace: crate::benchmark_internals::DispatchTraceOwner::default(),
@@ -77,6 +122,39 @@ impl StreamJobContext {
         self
     }
 
+    pub(crate) fn with_settings(mut self, settings: JsonMap) -> Self {
+        self.settings = settings;
+        self
+    }
+    pub(crate) fn native_control(&self) -> StreamJobControl {
+        StreamJobControl {
+            job_id: self.job_id,
+            deadline: self.deadline,
+            cancellation: self.cancellation.clone(),
+            #[cfg(test)]
+            deadline_clock: self.deadline_clock.clone(),
+        }
+    }
+    pub(crate) fn with_native_static_scope(
+        mut self,
+        scope: Arc<crate::array::NativeScope>,
+    ) -> Self {
+        self.native_statics = Some(scope);
+        self
+    }
+    pub(crate) fn native_static_inputs(
+        &self,
+        node: &str,
+        inputs: &BTreeMap<String, Batch>,
+    ) -> Result<(BTreeMap<String, Batch>, usize)> {
+        match &self.native_statics {
+            Some(scope) => scope.resolve(node, inputs),
+            None => Ok((inputs.clone(), 0)),
+        }
+    }
+    pub(crate) fn native_static_input(&self, node: &str, port: &str) -> Option<&Batch> {
+        self.native_statics.as_ref()?.input(node, port)
+    }
     pub(crate) fn gather_owner(&self) -> &super::gather_work::JobGatherOwner {
         &self.gather
     }
@@ -184,20 +262,13 @@ impl StreamJobContext {
     /// Returns [`CalcFlowError::Cancelled`] when cancellation was requested or
     /// the deadline has passed.
     pub fn check_cancelled(&self) -> Result<()> {
-        if self.cancellation.is_cancelled()
-            || self.deadline.is_some_and(|deadline| {
-                #[cfg(test)]
-                if let Some(clock) = &self.deadline_clock {
-                    return *clock.borrow() >= deadline;
-                }
-                Utc::now() >= deadline
-            })
-        {
-            return Err(CalcFlowError::Cancelled {
-                run_id: self.job_id.to_string(),
-            });
-        }
-        Ok(())
+        check_job(
+            self.job_id,
+            &self.cancellation,
+            self.deadline.as_ref(),
+            #[cfg(test)]
+            self.deadline_clock.as_ref(),
+        )
     }
 }
 

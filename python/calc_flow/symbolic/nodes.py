@@ -333,6 +333,14 @@ _NO_ATTRS: dict[str, PrimitiveSpec] = {
 }
 
 _PRIMITIVES: dict[str, PrimitiveSpec] = {
+    "array_reshape": PrimitiveSpec(frozenset({"shape"}), CMap(())),
+    "array_transpose": PrimitiveSpec(frozenset(), CMap(())),
+    "array_reduce": PrimitiveSpec(
+        frozenset({"function", "axis", "keepdims", "skip_nulls"}), CMap(())
+    ),
+    "array_input": PrimitiveSpec(
+        frozenset({"name", "backend", "dtype", "shape"}), CMap(())
+    ),
     "sql": PrimitiveSpec(frozenset({"query", "aliases"}), CMap(())),
     "snapshot_sql": PrimitiveSpec(frozenset({"query", "aliases"}), CMap(())),
     "late_output": PrimitiveSpec(

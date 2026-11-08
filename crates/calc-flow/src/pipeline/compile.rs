@@ -419,7 +419,7 @@ pub(crate) fn external_ports(
 /// Port names cannot contain `.`, so qualification is unambiguous and cannot
 /// collide with a bare name. Sorted endpoints make the assignment independent
 /// of graph insertion order.
-fn external_names(endpoints: BTreeSet<PortEndpoint>) -> BTreeMap<String, PortEndpoint> {
+pub(crate) fn external_names(endpoints: BTreeSet<PortEndpoint>) -> BTreeMap<String, PortEndpoint> {
     let counts = endpoints
         .iter()
         .fold(BTreeMap::new(), |mut counts, endpoint| {

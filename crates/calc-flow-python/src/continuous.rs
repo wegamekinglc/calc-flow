@@ -1181,7 +1181,7 @@ fn latch_static_array(name: &str, batch: &calc_flow::Batch) -> PyResult<calc_flo
 }
 
 /// Converts the adapter-supplied static input mapping into engine-owned
-/// batches. Table batches pass through unchanged; array batches are
+/// batches. Tables and native arrays retain their owners; Python arrays are
 /// snapshotted out of Python memory at this seam.
 fn build_static_inputs(
     static_inputs: &Bound<'_, PyDict>,
@@ -1195,7 +1195,11 @@ fn build_static_inputs(
                 PyTypeError::new_err("static_inputs must be a mapping of calc_flow.Batch values")
             })?
             .clone_inner()?;
-        let batch = if batch.kind() == calc_flow::BatchKind::Array {
+        let native_array = batch.external_payload().is_ok_and(|payload| {
+            std::any::Any::type_id(payload.as_ref())
+                == std::any::TypeId::of::<calc_flow::array::NativeArray>()
+        });
+        let batch = if batch.kind() == calc_flow::BatchKind::Array && !native_array {
             latch_static_array(&name, &batch)?
         } else {
             batch
@@ -3004,6 +3008,112 @@ mod tests {
             checked_static_array_shape("weights", &[2, 3]).unwrap(),
             vec![2_u64, 3_u64]
         );
+    }
+
+    #[test]
+    fn native_static_bindings_preserve_shared_payload_and_metadata() {
+        Python::initialize();
+        Python::attach(|py| {
+            let array =
+                calc_flow::array::NativeArray::from_f64(vec![2.0, 1.0], vec![2, 1], None).unwrap();
+            let metadata = calc_flow::BatchMetadata::new(
+                "native-static",
+                7,
+                BTreeMap::from([("tag".into(), serde_json::json!("kept"))]),
+            )
+            .unwrap();
+            let batch = Batch::external(Arc::new(array), metadata.clone()).unwrap();
+            let object = Py::new(py, PyBatch::from_inner(batch.clone())).unwrap();
+            let inputs = PyDict::new(py);
+            inputs.set_item("first.rhs", object.bind(py)).unwrap();
+            inputs.set_item("second.rhs", object.bind(py)).unwrap();
+
+            let converted = super::build_static_inputs(&inputs).unwrap();
+            for alias in ["first.rhs", "second.rhs"] {
+                assert!(Arc::ptr_eq(
+                    converted[alias].external_payload().unwrap(),
+                    batch.external_payload().unwrap()
+                ));
+                assert_eq!(converted[alias].metadata(), &metadata);
+            }
+        });
+    }
+
+    #[derive(Debug)]
+    struct ForgedNativePayload {
+        array: calc_flow::array::NativeArray,
+        delegate: bool,
+    }
+
+    impl calc_flow::ExternalPayload for ForgedNativePayload {
+        fn backend(&self) -> &'static str {
+            "native"
+        }
+
+        fn len(&self) -> usize {
+            self.array.len()
+        }
+
+        fn estimated_bytes(&self) -> usize {
+            self.array.estimated_bytes()
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            if self.delegate { &self.array } else { self }
+        }
+    }
+
+    #[test]
+    fn native_static_bindings_reject_forged_and_delegated_native_payloads() {
+        Python::initialize();
+        Python::attach(|py| {
+            for delegate in [false, true] {
+                let payload = ForgedNativePayload {
+                    array: calc_flow::array::NativeArray::from_f64(vec![2.0], vec![1], None)
+                        .unwrap(),
+                    delegate,
+                };
+                let batch = Batch::external(Arc::new(payload), calc_flow::BatchMetadata::default())
+                    .unwrap();
+                let inputs = PyDict::new(py);
+                inputs
+                    .set_item("rhs", Py::new(py, PyBatch::from_inner(batch)).unwrap())
+                    .unwrap();
+
+                let error = super::build_static_inputs(&inputs).unwrap_err();
+                assert!(error.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+                assert!(error.to_string().contains("static_inputs.rhs.backend"));
+            }
+        });
+    }
+
+    #[test]
+    fn native_static_bindings_keep_numpy_snapshot_isolation() {
+        Python::initialize();
+        Python::attach(|py| {
+            let array = py
+                .import("numpy")
+                .unwrap()
+                .call_method1("array", (vec![2.0_f64, 1.0],))
+                .unwrap();
+            let object = py
+                .get_type::<PyBatch>()
+                .call_method1("_from_external", (&array, "numpy", 2, PyDict::new(py)))
+                .unwrap();
+            let inputs = PyDict::new(py);
+            inputs.set_item("weights", object).unwrap();
+            let converted = super::build_static_inputs(&inputs).unwrap();
+            array.call_method1("fill", (99.0,)).unwrap();
+
+            let snapshot = converted["weights"].static_array_snapshot().unwrap();
+            assert_eq!(snapshot.backend(), "numpy");
+            assert_eq!(snapshot.dtype(), "float64");
+            assert_eq!(snapshot.shape(), &[2]);
+            assert!(matches!(
+                snapshot.values(),
+                calc_flow::StaticArrayValues::Float(values) if values == &[2.0, 1.0]
+            ));
+        });
     }
 
     struct FailingOpenSource;

@@ -13,8 +13,11 @@ mod document;
 mod execute;
 mod infer;
 mod ir;
+pub(super) mod preparation;
 mod schema;
 mod shape;
+mod table;
+pub use table::NativeTableArrayFactory;
 mod validate;
 mod worker;
 
@@ -74,19 +77,20 @@ impl NativeArrayFactory {
     }
 }
 
-/// Registers the native array batch factory under its exact versioned identity.
+/// Atomically registers native array batch and table batch/stream factories.
 ///
 /// # Errors
 ///
 /// Returns [`crate::CalcFlowError::InvalidArgument`] on duplicate registration;
-/// the existing registry entry remains unchanged.
+/// all existing registry entries remain unchanged.
 pub fn register_native(registry: &ProviderRegistry) -> Result<()> {
-    registry.register_batch(
-        "native",
-        "array_expr",
-        "1",
-        Arc::new(NativeArrayFactory::default()),
-    )
+    let workers = Arc::new(worker::Workers::default());
+    let array = Arc::new(NativeArrayFactory {
+        workers: Arc::clone(&workers),
+    });
+    let table = Arc::new(NativeTableArrayFactory::with_workers(workers));
+    let table_batch = Arc::clone(&table);
+    registry.register_native_array_bundle(array, table_batch, table)
 }
 
 impl BatchOperatorFactory for NativeArrayFactory {
@@ -151,6 +155,18 @@ impl OperatorMetadata for NativeOperator {
     }
 }
 
+fn scoped_inputs(
+    plan: &infer::Plan,
+    inputs: &BTreeMap<String, Batch>,
+    run: &crate::RunContext,
+) -> Result<(BTreeMap<String, Batch>, usize)> {
+    if plan.program.ir_version == 2 {
+        run.native_static_inputs(inputs)
+    } else {
+        Ok((inputs.clone(), 0))
+    }
+}
+
 #[async_trait]
 impl BatchOperator for NativeOperator {
     async fn process(
@@ -159,13 +175,15 @@ impl BatchOperator for NativeOperator {
         context: &BatchOperatorContext<'_>,
     ) -> Result<BTreeMap<String, Batch>> {
         context.run.check_cancelled()?;
-        let prepared = execute::prepare(&self.program, inputs)?;
-        let plan = Arc::clone(&self.program);
-        let inputs = inputs.clone();
+        let (inputs, reserved) = scoped_inputs(&self.program, inputs, context.run)?;
+        let plan = execute::reserve(&self.program, reserved)?;
+        let prepared = execute::prepare(&plan, &inputs)
+            .map_err(|error| execute::reserved_error(error, reserved))?;
         let outputs = self
             .workers
             .run(context.run.clone(), move |check| {
                 execute::run(&plan, &inputs, &prepared, check)
+                    .map_err(|error| execute::reserved_error(error, reserved))
             })
             .await?;
         context.run.check_cancelled()?;

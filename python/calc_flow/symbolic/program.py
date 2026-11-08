@@ -26,7 +26,7 @@ from calc_flow.symbolic.types import CompileMode
 if TYPE_CHECKING:
     import pyarrow as pa
 
-    from calc_flow._native import ExecutionOptions
+    from calc_flow._native import ExecutionOptions, NativeArray
     from calc_flow.compute import TableData
     from calc_flow.config import ProjectDocument
     from calc_flow.pipeline import BatchExecutionPlan, Runtime, StreamExecutionPlan
@@ -147,7 +147,7 @@ def _node_name(node: Node, /) -> str:
 
 
 def _collect_program_nodes(
-    inputs: tuple[TableExpr | Parameter[object], ...],
+    inputs: tuple[TableExpr | ArrayExpr | Parameter[object], ...],
     outputs: tuple[tuple[str, TableExpr | ArrayExpr], ...],
     /,
 ) -> dict[str, tuple[bytes, Node]]:
@@ -177,7 +177,7 @@ def _collect_program_nodes(
 
 def _program_fingerprint(
     name: str,
-    inputs: tuple[TableExpr | Parameter[object], ...],
+    inputs: tuple[TableExpr | ArrayExpr | Parameter[object], ...],
     outputs: tuple[tuple[str, TableExpr | ArrayExpr], ...],
     /,
 ) -> str:
@@ -228,7 +228,7 @@ def _program_edges(
 
 
 def _input_records(
-    inputs: tuple[TableExpr | Parameter[object], ...],
+    inputs: tuple[TableExpr | ArrayExpr | Parameter[object], ...],
     /,
 ) -> list[bytes]:
     return [
@@ -237,23 +237,38 @@ def _input_records(
     ]
 
 
+def _input_declaration(
+    value: object, index: int
+) -> TableExpr | ArrayExpr | Parameter[object]:
+    if not isinstance(value, (TableExpr, ArrayExpr, Parameter)):
+        raise TypeError(
+            f"Program.inputs[{index}]: expected TableExpr | ArrayExpr | "
+            f"Parameter[object]; got {type_name(value)}"
+        )
+    if isinstance(value, ArrayExpr) and value._node.op.name != "array_input":
+        from calc_flow.symbolic.native_arrays import is_native_array
+
+        error = ValueError if is_native_array(value._node) else TypeError
+        raise error(
+            f"Program.inputs[{index}]: ArrayExpr inputs must be "
+            "declared array_input values"
+        )
+    if value._node.op.name not in ("table_input", "array_input", "parameter"):
+        raise ValueError(
+            f"Program.inputs[{index}]: invalid_literal: program inputs"
+            " must be declared table_input, array_input or parameter values; got"
+            f" {value._node.op.name}"
+        )
+    return value
+
+
 def _validated_inputs(
-    inputs: Sequence[TableExpr | Parameter[object]], /
-) -> tuple[TableExpr | Parameter[object], ...]:
+    inputs: Sequence[TableExpr | ArrayExpr | Parameter[object]], /
+) -> tuple[TableExpr | ArrayExpr | Parameter[object], ...]:
     declared: dict[str, str] = {}
-    copied: list[TableExpr | Parameter[object]] = []
-    for index, value in enumerate(inputs):
-        if not isinstance(value, (TableExpr, Parameter)):
-            raise TypeError(
-                f"Program.inputs[{index}]: expected TableExpr |"
-                f" Parameter[object]; got {type_name(value)}"
-            )
-        if value._node.op.name not in ("table_input", "parameter"):
-            raise ValueError(
-                f"Program.inputs[{index}]: invalid_literal: program inputs"
-                " must be declared table_input or parameter values; got"
-                f" {value._node.op.name}"
-            )
+    copied: list[TableExpr | ArrayExpr | Parameter[object]] = []
+    for index, candidate in enumerate(inputs):
+        value = _input_declaration(candidate, index)
         input_name = _node_name(value._node)
         root = "static_inputs" if isinstance(value, Parameter) else "inputs"
         if input_name in declared:
@@ -268,9 +283,9 @@ def _validated_inputs(
 
 def _discovered_inputs(
     outputs: tuple[tuple[str, TableExpr | ArrayExpr], ...], /
-) -> tuple[TableExpr | Parameter[object], ...]:
+) -> tuple[TableExpr | ArrayExpr | Parameter[object], ...]:
     visited: set[bytes] = set()
-    roots: list[TableExpr | Parameter[object]] = []
+    roots: list[TableExpr | ArrayExpr | Parameter[object]] = []
 
     def visit(node: Node) -> None:
         if node.node_bytes in visited:
@@ -278,6 +293,8 @@ def _discovered_inputs(
         visited.add(node.node_bytes)
         if node.op.name == "table_input":
             roots.append(TableExpr(node))
+        elif node.op.name == "array_input":
+            roots.append(ArrayExpr(node))
         elif node.op.name == "parameter":
             roots.append(Parameter(node))
         for child in node.args:
@@ -338,7 +355,7 @@ class Program:
     """An immutable program with its engine chosen before compilation."""
 
     _name: str
-    _inputs: tuple[TableExpr | Parameter[object], ...]
+    _inputs: tuple[TableExpr | ArrayExpr | Parameter[object], ...]
     _outputs: tuple[tuple[str, TableExpr | ArrayExpr], ...]
     _fingerprint: str
     _engine: Literal["sql", "streaming"]
@@ -350,7 +367,7 @@ class Program:
         /,
         *,
         engine: Literal["sql", "streaming"],
-        inputs: Sequence[TableExpr | Parameter[object]] | None = None,
+        inputs: Sequence[TableExpr | ArrayExpr | Parameter[object]] | None = None,
         outputs: Mapping[str, TableExpr | ArrayExpr]
         | Sequence[tuple[str, TableExpr | ArrayExpr]] = (),
     ) -> None:
@@ -389,7 +406,7 @@ class Program:
         return self._name
 
     @property
-    def inputs(self) -> tuple[TableExpr | Parameter[object], ...]:
+    def inputs(self) -> tuple[TableExpr | ArrayExpr | Parameter[object], ...]:
         """The declared inputs in declaration order."""
 
         return self._inputs
@@ -412,7 +429,9 @@ class Program:
 
         return self._engine
 
-    def with_input(self, value: TableExpr | Parameter[object], /) -> Program:
+    def with_input(
+        self, value: TableExpr | ArrayExpr | Parameter[object], /
+    ) -> Program:
         """Return a new program with one declared input appended."""
 
         return Program(
@@ -430,7 +449,7 @@ class Program:
 
     def execute(
         self,
-        inputs: Mapping[str, StreamInput | TableData],
+        inputs: Mapping[str, StreamInput | TableData | NativeArray],
         /,
         *,
         runtime: Runtime | None = None,
@@ -452,7 +471,7 @@ class Program:
                     "execute.watermarks is available for the streaming engine"
                 )
             return self.collect(
-                cast("Mapping[str, TableData]", inputs),
+                cast("Mapping[str, TableData | NativeArray]", inputs),
                 runtime=runtime,
                 options=options,
             )
@@ -466,7 +485,7 @@ class Program:
 
     def stream(
         self,
-        inputs: Mapping[str, StreamInput | TableData],
+        inputs: Mapping[str, StreamInput | TableData | NativeArray],
         /,
         *,
         runtime: Runtime | None = None,
@@ -568,7 +587,7 @@ class Program:
 
     def collect(
         self,
-        inputs: Mapping[str, TableData],
+        inputs: Mapping[str, TableData | NativeArray],
         /,
         *,
         runtime: Runtime | None = None,
@@ -582,7 +601,7 @@ class Program:
 
     def collect_async(
         self,
-        inputs: Mapping[str, TableData],
+        inputs: Mapping[str, TableData | NativeArray],
         /,
         *,
         runtime: Runtime | None = None,

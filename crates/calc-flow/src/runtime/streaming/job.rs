@@ -922,11 +922,29 @@ fn validate_runtime_topology(plan: &StreamRuntimePlanParts) -> Result<()> {
     Ok(())
 }
 
+fn static_ingress(
+    plan: &StreamRuntimePlanParts,
+    node: &RuntimeStreamNode,
+    port: &str,
+) -> Result<bool> {
+    let Some(name) = plan
+        .static_input_ports
+        .get(&node.node_id)
+        .and_then(|ports| ports.get(port))
+    else {
+        return Ok(false);
+    };
+    if !plan.static_input_ids.contains(name) {
+        return Err(CalcFlowError::Internal {
+            message: "static ingress projection lacks its physical declaration".into(),
+        });
+    }
+    Ok(true)
+}
+
 fn validate_node_ingresses(plan: &StreamRuntimePlanParts, node: &RuntimeStreamNode) -> Result<()> {
     for ingress in node.input_ports.keys() {
-        if plan.static_input_ids.contains(ingress) {
-            // Static input ports carry no runtime edge: the latched value is
-            // installed through the prepared static inputs (SCE-11).
+        if static_ingress(plan, node, ingress)? {
             continue;
         }
         let edge_id = node

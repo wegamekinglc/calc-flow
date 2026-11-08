@@ -1,5 +1,6 @@
 mod asof;
 mod late_output;
+mod native_static;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -417,14 +418,17 @@ pub fn validate_project(
     let mut issues = Vec::new();
     let mut fingerprint = None;
     match build_project(project, providers, udfs) {
-        Ok(plan) => {
-            validate_source_coverage(
-                project,
-                plan.external_inputs().keys().map(String::as_str),
-                CompileMode::Batch,
-                &mut issues,
-            );
-            fingerprint = issues.is_empty().then(|| plan.fingerprint().into());
+        Ok((plan, native_issues)) => {
+            issues.extend(native_issues);
+            if let Some(plan) = plan {
+                validate_source_coverage(
+                    project,
+                    plan.external_inputs().keys().map(String::as_str),
+                    CompileMode::Batch,
+                    &mut issues,
+                );
+                fingerprint = issues.is_empty().then(|| plan.fingerprint().into());
+            }
         }
         Err(error) => issues.push(issue(
             graph_error_path(project, &error),
@@ -454,8 +458,9 @@ pub fn compile_project(
     if let Some(first) = issues.first() {
         return Err(validation_error(first));
     }
-    let plan =
-        build_project_builder(project, providers, CompileMode::Batch)?.compile_batch(udfs)?;
+    let plan = validated_project_builder(project, providers, CompileMode::Batch)?
+        .compile_batch(udfs)?
+        .with_static_input_specs(project.static_inputs.clone())?;
     let mut coverage = Vec::new();
     validate_source_coverage(
         project,
@@ -487,7 +492,7 @@ pub fn compile_stream_project(
         return Err(validation_error(first));
     }
     let requirements = project_stream_requirements(project, requirements)?;
-    let plan = build_project_builder(project, providers, CompileMode::Stream)?
+    let plan = validated_project_builder(project, providers, CompileMode::Stream)?
         .compile_stream(udfs, &requirements)?
         .with_static_input_specs(project.static_inputs.clone())?;
     let mut coverage = Vec::new();
@@ -581,7 +586,7 @@ pub fn compile_stream_project_graph(
             message: "host-provided stream compilation rejects connector bindings".into(),
         });
     }
-    build_project_builder(project, providers, CompileMode::Stream)?
+    validated_project_builder(project, providers, CompileMode::Stream)?
         .compile_stream(udfs, requirements)?
         .with_static_input_specs(project.static_inputs.clone())
 }
@@ -1262,8 +1267,31 @@ fn build_project(
     project: &ProjectSpec,
     providers: &ProviderRegistry,
     udfs: &UdfRegistrySnapshot,
-) -> Result<BatchExecutionPlan> {
-    build_project_builder(project, providers, CompileMode::Batch)?.compile_batch(udfs)
+) -> Result<(Option<BatchExecutionPlan>, Vec<ValidationIssue>)> {
+    let builder = build_project_builder(project, providers, CompileMode::Batch)?;
+    let issues = native_static::binding_issues(project, &builder);
+    if !issues.is_empty() {
+        return Ok((None, issues));
+    }
+    let plan = builder.compile_batch(udfs)?;
+    let plan = if project.static_inputs.iter().any(native_static::is_native) {
+        plan.with_static_input_specs(project.static_inputs.clone())?
+    } else {
+        plan
+    };
+    Ok((Some(plan), issues))
+}
+
+fn validated_project_builder(
+    project: &ProjectSpec,
+    providers: &ProviderRegistry,
+    mode: CompileMode,
+) -> Result<PipelineBuilder> {
+    let builder = build_project_builder(project, providers, mode)?;
+    if let Some(first) = native_static::binding_issues(project, &builder).first() {
+        return Err(validation_error(first));
+    }
+    Ok(builder)
 }
 
 fn build_project_builder(
@@ -2004,11 +2032,12 @@ fn validate_static_inputs(project: &ProjectSpec, issues: &mut Vec<ValidationIssu
             &source_bindings,
             &mut names,
             issues,
+            native_static::is_native(spec),
         );
         validate_static_input_kind(
             name,
             declared_kind,
-            external_inputs.get(name.as_str()).copied(),
+            native_static::legacy_kind(spec, &external_inputs),
             &base,
             issues,
         );
@@ -2047,8 +2076,9 @@ fn validate_static_input_name(
     source_bindings: &BTreeSet<&str>,
     names: &mut BTreeSet<String>,
     issues: &mut Vec<ValidationIssue>,
+    native: bool,
 ) {
-    if !is_port_identifier(name) {
+    if !native && !is_port_identifier(name) {
         issues.push(issue(
             format!("{base}.name"),
             "invalid_field",
@@ -2062,7 +2092,7 @@ fn validate_static_input_name(
             format!("duplicate static input name {name:?}"),
         ));
     }
-    if !external_inputs.contains_key(name) {
+    if !native && !external_inputs.contains_key(name) {
         issues.push(issue(
             format!("{base}.name"),
             "unknown_binding",
@@ -2872,7 +2902,16 @@ fn validate_source_coverage<'a>(
     mode: CompileMode,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    let expected = expected.into_iter().collect::<BTreeSet<_>>();
+    let mut expected = expected.into_iter().collect::<BTreeSet<_>>();
+    if mode == CompileMode::Batch {
+        let native = project
+            .static_inputs
+            .iter()
+            .filter(|spec| native_static::is_native(spec))
+            .map(StaticInputSpec::name)
+            .collect::<BTreeSet<_>>();
+        expected.retain(|name| !native.contains(name));
+    }
     let (configured, configured_len, path) = match mode {
         CompileMode::Batch => (
             project

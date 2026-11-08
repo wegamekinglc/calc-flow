@@ -499,10 +499,38 @@ pub(crate) fn digest_for_name(name: &str, batch: &Batch) -> Result<StaticInputDi
 /// source opens; `digests` is the bounded evidence recorded into checkpoint
 /// manifests and prepared-job identity. The value drops with the job driver,
 /// which releases the handles exactly once on every exit path.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct PreparedStaticInputs {
     pub(crate) latched: BTreeMap<String, Batch>,
     pub(crate) digests: BTreeMap<String, StaticInputDigest>,
+    pub(crate) native_scope: Option<std::sync::Arc<crate::array::NativeScope>>,
+}
+
+impl std::fmt::Debug for PreparedStaticInputs {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedStaticInputs")
+            .field("latched_count", &self.latched.len())
+            .field("digest_count", &self.digests.len())
+            .field("native_prepared", &self.native_scope.is_some())
+            .finish()
+    }
+}
+pub(crate) fn finalize_native(
+    context: crate::StreamJobContext,
+    prepared: PreparedStaticInputs,
+    recovered: Option<&BTreeMap<String, StaticInputDigest>>,
+) -> Result<crate::StreamJobContext> {
+    context.check_cancelled()?;
+    if let Some(scope) = prepared.native_scope {
+        if let Some(recovered) = recovered {
+            scope.verify_recovered(recovered)?;
+        }
+        context.check_cancelled()?;
+        Ok(context.with_native_static_scope(scope))
+    } else {
+        Ok(context)
+    }
 }
 
 fn static_error(path: String, message: String) -> CalcFlowError {
@@ -675,7 +703,7 @@ fn validate_table_against_schema(
     Ok(())
 }
 
-fn validate_static_input_names(
+pub(crate) fn validate_static_input_names(
     declared: &BTreeMap<String, StaticInputSpec>,
     supplied: &BTreeMap<String, Batch>,
 ) -> Result<()> {

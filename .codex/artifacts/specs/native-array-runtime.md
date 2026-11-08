@@ -112,6 +112,20 @@ token 可能已经被上游舍入为 f64；factory 无法恢复其原始写法�
 
 外部 payload 的逻辑可见字节、实际 retained allocation、scratch reservation 分开记录。共享 Batch 继续按每消费者进行边计费；不能用 `copy_bytes` 冒充峰值 RSS。bitmap、shape、输出、候选状态、checkpoint capture 和首次静态放置均进入各自预算，拒绝发生在不可逆提交之前。
 
+M2 native 静态准备的 B_j/R_j 只约束指定的 native-owned payload、descriptor、
+buffer 与 preparation work，精确边界见
+[M2 预算澄清](../api-notes/native-array-runtime.md#m2-native-preparation-budget-boundary-clarification)。
+D 包含独立持有的 live selected/current manifest 字段及 native JSON-map 字符串；
+通用 whole-manifest canonical String/Vec、global I/O envelope、backend retention
+history Vec，以及原有 allocator/map-node/外层 settings frame 明确排除，不能
+按字段编码长度虚构其 allocation 占比，也不承诺 RSS/all-runtime memory 上限。
+该排除仅限 generic envelope，不豁免 native array 或 encoded-state 副本；
+这些副本须消除或按适用 F/P/W/K 计费，A6 state/capture 合同保持不变。
+阶段取 max 必须证明真实 non-overlap 与并发界线，否则计入实际重叠；未来 D
+预留不能掩盖实际 F/P 超额，各消费者仍分别满足 R_j+W<=B_j 与 numeric B_j-R_j。
+不改变旧 NumPy/JAX、无 static native 执行或公共配置；实际 copy inventory、容量
+和生命周期证明仍由最终源码审查/针对性行为测试完成。
+
 错误至少定位到 `inputs.<name>.dtype/shape/validity`、`options.window`、`outputs.<name>.bytes` 或具体节点。Rust public fallible API 使用 `calc_flow::Result<T>`；PyO3 继续映射到现有 Config/Compile/Execution/Checkpoint 错误类别，并保留 source error。
 
 观测区分编译、输入转换、kernel、输出转换、静态放置和状态/capture 成本。复用已有 metrics/counters；只有无法观察的实际成本才新增字段，不制造空占位指标。native array operator 不伪造 DataFusion metrics。

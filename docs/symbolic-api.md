@@ -10,6 +10,7 @@ On this page:
 - [Event-time window aggregation](#symbolic-event-time-window-aggregation)
 - [Bounded stream joins](#symbolic-bounded-stream-joins)
 - [Bounded backward ASOF Join](#symbolic-bounded-backward-asof-join)
+- [Native array compilation](#native-array-compilation)
 - [Matrix compilation](#symbolic-matrix-compilation)
 
 ## Symbolic declarations and static analysis
@@ -35,17 +36,19 @@ The declaration catalog is intentionally wider than the implemented project
 lowerers. Use this availability matrix when constructing user-facing formula
 editors or validating stored declarations:
 
-| Domain                   | Construct/analyze | Batch/stream compile   | Current lowering boundary                                             |
-|--------------------------|-------------------|------------------------|-----------------------------------------------------------------------|
-| row-local columns        | yes               | yes                    | portable scalar types and the documented SQL allowlist                |
-| SQL table stages         | yes               | yes; one stream alias  | native SELECT/CTE schema; row-local expressions after SQL             |
-| rolling `ts`             | yes               | yes                    | source/alias/row-local operands and earlier rolling results           |
-| cross-section `cs`       | yes               | yes                    | staged values; event time and partitions resolve to inputs or aliases |
-| relational stream joins  | yes               | stream only            | independent/nested native joins with proved post-join ordering        |
-| backward ASOF joins      | yes               | stream only            | strict final left preservation; typed identity and bounded state      |
-| symbolic matrix          | yes               | exact supported shape  | one static `weights` parameter and one allowlisted matmul             |
-| event `window`           | yes               | stream with aggregates | fixed UTC tumbling/hopping; stateless table work on either side       |
-| standalone array outputs | yes               | no                     | arrays compile only through the supported table attachment            |
+| Domain                    | Construct/analyze | Batch/stream compile   | Current lowering boundary                                             |
+|---------------------------|-------------------|------------------------|-----------------------------------------------------------------------|
+| row-local columns         | yes               | yes                    | portable scalar types and the documented SQL allowlist                |
+| SQL table stages          | yes               | yes; one stream alias  | native SELECT/CTE schema; row-local expressions after SQL             |
+| rolling `ts`              | yes               | yes                    | source/alias/row-local operands and earlier rolling results           |
+| cross-section `cs`        | yes               | yes                    | staged values; event time and partitions resolve to inputs or aliases |
+| relational stream joins   | yes               | stream only            | independent/nested native joins with proved post-join ordering        |
+| backward ASOF joins       | yes               | stream only            | strict final left preservation; typed identity and bounded state      |
+| NumPy/JAX matrix          | yes               | exact supported shape  | one static `weights` parameter and one allowlisted matmul             |
+| event `window`            | yes               | stream with aggregates | fixed UTC tumbling/hopping; stateless table work on either side       |
+| native table-array bridge | yes               | batch and stream       | row-preserving work; at most one static-RHS matmul per table stage    |
+| native array outputs      | yes               | batch only             | single ArrayExpr.collect_array; array/table roots; no mixed outputs   |
+| NumPy/JAX array outputs   | yes               | no                     | use the existing supported table attachment                           |
 
 `Program.analyze` reports `unsupported_type` for stateful operands outside
 the current materialization boundary, so a clean analysis does not advertise
@@ -90,8 +93,8 @@ The `row`, `ts`, `cs`, `table`, `linalg`, and `window` namespaces expose
 row-local functions, rolling frames (`rows`/`duration`), cross-section groups
 (`exact_time`/`event_time_bucket`), table bridges, and matrix work.
 
-A `Program` declares uniquely named inputs (`table_input` or `parameter`
-values) and outputs (tables or arrays) in declaration order. Its required
+A `Program` declares uniquely named inputs (`table_input`, native `array_input`
+or `parameter` values) and outputs (tables or arrays) in declaration order. Its required
 keyword-only `engine` is `"sql"` or `"streaming"` and remains fixed on copies
 returned by `with_input` and `output`. Outputs accept a
 mapping or tuple-pair sequence. Omitting `inputs` discovers reachable roots;
@@ -118,6 +121,7 @@ the analysis proves:
   operand types, the safe float32/float64 Array API promotion, the frozen
   rolling/cross-section output-type table, and exact field resolution;
   unsupported row-local cross-type arithmetic needs an explicit `row.cast`;
+  native array dtype and shape come from Rust's descriptor-only IR query;
 - domains and row lineages, rejecting cross-input lineage mixing;
 - symbolic dimensions through `linalg.from_columns` and `linalg.matmul`,
   retaining the row axis of a table-derived array;
@@ -126,8 +130,10 @@ the analysis proves:
   `state cross_section, duration(60000000)`-style facts; and
 - stream safety: temporal and cross-section inputs need an event-time column
   with entity and sequence keys; event windows require an exact supported
-  timestamp field without that ordering metadata. A stream-mode array output
-  with row-axis lineage is reported as unbounded state.
+  timestamp field without that ordering metadata. Native ArrayExpr outputs
+  require batch `collect_array`; standalone native array streams are unsupported.
+  Existing NumPy/JAX stream-mode array outputs carrying row-axis lineage are
+  reported as unbounded state.
 
 `analyze` returns an immutable `AnalysisResult` carrying `mode`,
 `program_fingerprint`, `capability_session_id`, `capability_revision`, and an
@@ -176,9 +182,11 @@ SQL has a distinct row lineage and clears entity, event-time, and sequence
 ordering facts. Row-local projections, filters, and arithmetic after SQL are
 supported. Rolling calculations can feed SQL; temporal expressions directly
 after SQL fail the missing-ordering check. An `ORDER BY` inside SQL does not
-establish symbolic temporal ordering. SQL-to-event-window composition and
-standalone array Program outputs are not supported. Matrix calculations must
-use the documented table-attachment shape and explicit provider registration.
+establish symbolic temporal ordering. SQL-to-event-window composition remains
+unsupported. A native table-rooted ArrayExpr may collect its array result after
+SQL with `collect_array`, using explicit native provider registration.
+`Program.collect` still returns tables; mixed table/array Program results and
+NumPy/JAX standalone outputs remain unsupported.
 
 Batch SQL can join multiple aliases. Append stream compilation rejects more
 than one alias before any source opens, even if aliases share a root. Stream SQL with an
@@ -256,8 +264,9 @@ share one cross-section grouping/sort stage. A different prefilter, grouping,
 bucket width, or upstream state stage is a hard materialization boundary, so
 the optimizer does not move a filter across temporal, cross-section, or
 event-window finality. Table/array and backend transitions remain explicit
-boundaries, and the allowlisted array expression is fused into one provider
-call per accepted micro-batch.
+boundaries. NumPy/JAX fuse their allowlisted array expression into one provider
+call per accepted micro-batch. Native ArrayExpr lowers into Rust IR segments
+through the same table/SQL graph; at most one matmul occurs in each native IR.
 
 Explicit compilation on a supplied `Runtime` uses its bounded expression
 compile cache. Convenience `compute`/`collect` execution creates a fresh plan
@@ -278,6 +287,11 @@ Stream compilation caches
 the immutable project JSON after successful native compilation and returns a
 fresh owning native plan on every call: a `StreamingRunner` consumes its plan.
 Compile again and create fresh bindings and a runner for each job or restart.
+Native `collect_array` also captures fresh bindings and compiles a fresh finite
+plan; its cached template contains no payloads. Its key includes normalized
+`array_options`, whose limits bound each native IR execution, not total memory
+for the whole graph. Descriptor-only Rust query results share the existing
+runtime registration generation and bounded compile cache.
 Any successful provider, stream-lifecycle, or UDF registration invalidates
 that runtime's entries. Cache facts do not promise a measured compile speedup.
 
@@ -546,9 +560,49 @@ lateness settings apply to rolling/cross-section stages; ASOF uses its own
 spec's late policy and has no allowed-lateness parameter. Batch analysis,
 compilation, and collection reject ASOF. There is no Python matching engine.
 
+## Native array compilation
+
+Explicit `calc_flow.array.register_native(runtime)` installs the native array
+batch factory and the row-preserving table bridge atomically. Native
+`array_input` and static array parameters contain descriptors only. A single
+ArrayExpr result may depend on native arrays, table/SQL roots and static
+parameters together; `collect_array` returns one NativeArray. Table collection
+and `compute` retain their Arrow table result contract. See
+[native declarations and collection](python-api.md#native-arrayexpr-declarations-and-collection)
+for input types, operations and limits.
+
+The table selected by `from_columns` must be the same TableExpr node passed to
+`attach_columns`; matching row facts, schemas or lengths do not establish this
+identity. Reuse a filtered/projected table for both operations.
+
+The native table bridge accepts homogeneous native columns, nullable until an
+operation such as matmul rejects nulls. It permits row-preserving elementwise
+work, a single matmul with an arbitrarily named direct static RHS, and rank-two
+axis-one reductions. A vector attaches as one column. Rank-two transpose,
+full/axis-zero reduction and unproved reshape erase the row origin; restoring
+the shape or matching row counts cannot restore it. An independent dynamic
+array declaration cannot attach by length alone. Non-row-preserving batch work
+can execute after a table bridge boundary when collecting an array.
+
+One attachment expression containing two matmuls is unsupported. A caller can
+explicitly attach the first result, use `from_columns` on that new TableExpr,
+perform the next matmul and attachment, then project final columns. Each table
+stage has at most one matmul; no hidden columns are generated automatically.
+Independent array collection may lower a matmul chain into separate batch IRs.
+
+Static native parameters accept NativeArray or actual native array Batch values.
+Capture one immutable Batch per logical parameter and share it across physical
+aliases. The runtime shares validated canonical-body preparation and placement
+within one run or job; each physical alias retains its own descriptor checks,
+name-dependent digest-v1 hashing and recovery comparison before sources open.
+This does not remove per-alias hashing work or introduce a serialized cache key.
+NativeArray entries in TableExpr/Program stream mappings bind static parameters;
+standalone dynamic native array streams remain unsupported. Existing ASOF and
+event-window admission restrictions remain in force.
+
 ## Symbolic matrix compilation
 
-A single table output shaped as `table.attach_columns(table_value, array,
+For NumPy/JAX, a single table output shaped as `table.attach_columns(table_value, array,
 names=...)` lowers the explicit table/array bridge to the selected
 `numpy:symbolic_matrix@1` or `jax:symbolic_matrix@1` provider. The array may
 contain `linalg.from_columns`, allowlisted elementwise arithmetic and boolean

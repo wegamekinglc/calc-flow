@@ -17,7 +17,7 @@ pub use stream::{
 };
 
 pub(crate) use compile::{
-    CompiledNode, NodeDefinition, TablePlanResources, build_nodes, compile_graph,
+    CompiledNode, NodeDefinition, TablePlanResources, build_nodes, compile_graph, external_names,
 };
 pub(crate) use stream::{
     CompiledStreamOperator, OUTPUT_FRONTIER_METADATA_KEY_V1, OperatorCheckpointCapability,

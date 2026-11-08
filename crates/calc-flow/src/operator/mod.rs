@@ -575,6 +575,31 @@ impl ProviderRegistry {
         }
     }
 
+    pub(crate) fn register_native_array_bundle(
+        &self,
+        array: Arc<dyn BatchOperatorFactory>,
+        table_batch: Arc<dyn BatchOperatorFactory>,
+        table_stream: Arc<dyn StreamOperatorFactory>,
+    ) -> Result<()> {
+        let array_key = ("native".into(), "array_expr".into(), "1".into());
+        let table_key = ("native".into(), "table_array".into(), "1".into());
+        let mut batch = self.batch_factories.write();
+        let mut stream = self.stream_factories.write();
+        if batch.contains_key(&array_key)
+            || batch.contains_key(&table_key)
+            || stream.contains_key(&table_key)
+        {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "provider".into(),
+                message: "duplicate provider/name/version".into(),
+            });
+        }
+        batch.insert(array_key, array);
+        batch.insert(table_key.clone(), table_batch);
+        stream.insert(table_key, table_stream);
+        Ok(())
+    }
+
     /// Resolves an exact external batch factory.
     ///
     /// # Errors

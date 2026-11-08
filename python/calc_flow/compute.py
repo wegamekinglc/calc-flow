@@ -1,4 +1,4 @@
-"""Arrow convenience execution through expression lowering and the native runtime."""
+"""Table and native-array collection through the single native runtime."""
 
 from __future__ import annotations
 
@@ -10,11 +10,14 @@ from typing import TypeVar, Union, cast
 import pyarrow as pa
 
 from calc_flow._compat import TypeAliasType, dataclass
-from calc_flow._native import Batch, ExecutionOptions, RunResult
+from calc_flow._native import Batch, ExecutionOptions, NativeArray, RunResult
+from calc_flow._native_array import ArrayExecutionOptions
 from calc_flow.pipeline import BatchExecutionPlan, Runtime, _canonical
 from calc_flow.symbolic import errors
-from calc_flow.symbolic.expr import Parameter, TableExpr, table_input
+from calc_flow.symbolic.expr import ArrayExpr, Parameter, TableExpr, table_input
 from calc_flow.symbolic.lower.bindings import _BatchBindings
+from calc_flow.symbolic.native_arrays import is_native_array
+from calc_flow.symbolic.nodes import CDType, CInt, CSeq, CStr
 from calc_flow.symbolic.program import Program, _node_name, _selected_runtime
 
 TableData = TypeAliasType("TableData", Union[pa.Table, pa.RecordBatch, Batch])
@@ -26,9 +29,10 @@ def _require_blocking(entry: str) -> None:
         asyncio.get_running_loop()
     except RuntimeError:
         return
-    raise RuntimeError(
-        f"{entry}() cannot run inside an event loop; use {entry}_async()"
-    )
+    message = f"{entry}() cannot run inside an event loop"
+    if entry != "collect_array":
+        message += f"; use {entry}_async()"
+    raise RuntimeError(message)
 
 
 def _arrow_table(data: TableData, path: str) -> pa.Table | pa.RecordBatch:
@@ -66,15 +70,17 @@ def _table_batch(data: TableData, path: str) -> Batch:
     return data if isinstance(data, Batch) else Batch.from_pyarrow(table)
 
 
-def _input_kind(value: TableExpr | Parameter[object]) -> str:
-    return "static parameter" if isinstance(value, Parameter) else "table input"
+def _input_kind(value: TableExpr | ArrayExpr | Parameter[object]) -> str:
+    if isinstance(value, Parameter):
+        return "static parameter"
+    return "array input" if isinstance(value, ArrayExpr) else "table input"
 
 
 def _check_input_names(
     provided: Mapping[str, object],
-    expected: Mapping[str, TableExpr | Parameter[object]],
+    expected: Mapping[str, T],
     root: str,
-    describe: Callable[[TableExpr | Parameter[object]], str],
+    describe: Callable[[T], str],
 ) -> None:
     for name, value in expected.items():
         if name not in provided:
@@ -85,9 +91,9 @@ def _check_input_names(
 
 
 def _validated_inputs(
-    inputs: Mapping[str, TableData],
-    expected: Mapping[str, TableExpr | Parameter[object]],
-) -> dict[str, TableData]:
+    inputs: Mapping[str, TableData | NativeArray],
+    expected: Mapping[str, TableExpr | ArrayExpr | Parameter[object]],
+) -> dict[str, TableData | NativeArray]:
     if not isinstance(inputs, Mapping):
         raise TypeError("collect.inputs: expected a mapping by declared input name")
     copied = dict(inputs)
@@ -96,8 +102,12 @@ def _validated_inputs(
 
 
 def _input_batch(
-    data: TableData, value: TableExpr | Parameter[object], path: str
+    data: TableData | NativeArray,
+    value: TableExpr | ArrayExpr | Parameter[object],
+    path: str,
 ) -> Batch:
+    if _is_native_declaration(value):
+        return _native_input_batch(data, value, path)
     if isinstance(value, Parameter) and value.kind == "array":
         if not isinstance(data, Batch) or data.kind != "array":
             raise TypeError(
@@ -105,11 +115,61 @@ def _input_batch(
                 "and register its provider"
             )
         return data
-    return _table_batch(data, path)
+    return _table_batch(cast(TableData, data), path)
+
+
+def _is_native_declaration(value: TableExpr | ArrayExpr | Parameter[object]) -> bool:
+    if isinstance(value, ArrayExpr):
+        return True
+    backend = value._node.attr("backend")
+    return (
+        isinstance(value, Parameter)
+        and value.kind == "array"
+        and isinstance(backend, CStr)
+        and backend.value == "native"
+    )
+
+
+def _native_input_batch(
+    data: TableData | NativeArray,
+    declaration: TableExpr | ArrayExpr | Parameter[object],
+    path: str,
+) -> Batch:
+    if isinstance(data, NativeArray):
+        batch = Batch.from_array(data, backend="native")
+    elif isinstance(data, Batch):
+        batch = data
+    else:
+        raise TypeError(f"{path}.backend: expected NativeArray or native array Batch")
+    if batch.kind != "array" or batch.backend != "native":
+        raise TypeError(f"{path}.backend: expected a native array payload")
+    array = batch.array
+    if not isinstance(array, NativeArray):
+        raise TypeError(f"{path}.backend: expected an actual native array payload")
+    _validate_native_descriptor(array, declaration, path)
+    return batch
+
+
+def _validate_native_descriptor(
+    array: NativeArray,
+    declaration: TableExpr | ArrayExpr | Parameter[object],
+    path: str,
+) -> None:
+    dtype = declaration._node.attr("dtype")
+    if not isinstance(dtype, CDType) or array.dtype != dtype.name:
+        raise ValueError(f"{path}.dtype: native dtype differs from its declaration")
+    shape = declaration._node.attr("shape")
+    if not isinstance(shape, CSeq) or len(shape.items) != len(array.shape):
+        raise ValueError(f"{path}.shape: native rank differs from its declaration")
+    for index, dimension in enumerate(shape.items):
+        if isinstance(dimension, CInt) and dimension.value != array.shape[index]:
+            raise ValueError(
+                f"{path}.shape: native extent differs from its declaration"
+            )
 
 
 def _collect_batches(
-    program: Program, inputs: Mapping[str, TableData]
+    program: Program, inputs: Mapping[str, TableData | NativeArray]
 ) -> dict[str, Batch]:
     expected = {_node_name(value._node): value for value in program.inputs}
     copied = _validated_inputs(inputs, expected)
@@ -120,7 +180,9 @@ def _collect_batches(
 
 
 def _prepare_collect(
-    program: Program, inputs: Mapping[str, TableData], runtime: Runtime | None
+    program: Program,
+    inputs: Mapping[str, TableData | NativeArray],
+    runtime: Runtime | None,
 ) -> tuple[BatchExecutionPlan, dict[str, Batch], dict[str, str]]:
     batches = _collect_batches(program, inputs)
     return _prepare_collect_batches(program, batches, _selected_runtime(runtime))
@@ -135,11 +197,17 @@ class _LoweredCollect:
     output_names: tuple[tuple[str, str], ...]
 
 
-def _lower_collect(program: Program, selected: Runtime) -> _LoweredCollect:
+def _lower_collect(
+    program: Program,
+    selected: Runtime,
+    array_options: ArrayExecutionOptions | None = None,
+) -> _LoweredCollect:
     from calc_flow.symbolic.lower.program import lower_program_document
 
     bindings = _BatchBindings()
-    document = lower_program_document(program, selected, "batch", _bindings=bindings)
+    document = lower_program_document(
+        program, selected, "batch", _bindings=bindings, _array_options=array_options
+    )
     input_names, output_names = bindings.names()
     return _LoweredCollect(
         _canonical(document),
@@ -164,10 +232,13 @@ def _lowered_collect(program: Program, selected: Runtime) -> _LoweredCollect:
 
 
 def _prepare_collect_batches(
-    program: Program, batches: Mapping[str, Batch], selected: Runtime
+    program: Program,
+    batches: Mapping[str, Batch],
+    selected: Runtime,
+    _lowered: _LoweredCollect | None = None,
 ) -> tuple[BatchExecutionPlan, dict[str, Batch], dict[str, str]]:
     with selected._registration_lock:
-        lowered = _lowered_collect(program, selected)
+        lowered = _lowered_collect(program, selected) if _lowered is None else _lowered
         input_names = dict(lowered.input_names)
         output_names = dict(lowered.output_names)
         for name in batches:
@@ -193,13 +264,65 @@ def _tables(result: RunResult, outputs: dict[str, str]) -> dict[str, pa.Table]:
     return {name: batches[port].to_pyarrow() for name, port in outputs.items()}
 
 
+def _collect_array(
+    expression: ArrayExpr,
+    inputs: Mapping[str, TableData | NativeArray],
+    runtime: Runtime,
+    options: ExecutionOptions | None,
+    array_options: ArrayExecutionOptions | None,
+) -> NativeArray:
+    _require_blocking("collect_array")
+    if not is_native_array(expression._node):
+        raise TypeError("collect_array requires a native ArrayExpr")
+    _validate_options(options)
+    if not isinstance(runtime, Runtime):
+        raise TypeError("collect_array requires an explicit calc_flow Runtime")
+    if array_options is not None and not isinstance(
+        array_options, ArrayExecutionOptions
+    ):
+        raise TypeError("array_options must be ArrayExecutionOptions or None")
+    limits = ArrayExecutionOptions() if array_options is None else array_options
+    program = Program("collect_array", engine="sql", outputs={"output": expression})
+    batches = _collect_batches(program, inputs)
+    key = (
+        "collect_array",
+        program.fingerprint,
+        tuple(value._node.node_bytes for value in program.inputs),
+        limits.max_elements,
+        limits.max_allocation_bytes,
+    )
+    with runtime._registration_lock:
+        lowered = cast(
+            _LoweredCollect,
+            runtime._cached_symbolic_compile(
+                key, lambda: _lower_collect(program, runtime, limits)
+            ),
+        )
+        plan, bound, outputs = _prepare_collect_batches(
+            program, batches, runtime, lowered
+        )
+    return _native_output(
+        plan.execute(bound, options=options).outputs[outputs["output"]]
+    )
+
+
+def _native_output(output: Batch) -> NativeArray:
+    if output.kind != "array" or output.backend != "native":
+        raise TypeError("collect_array.output: expected a native array Batch")
+    array = output.array
+    if not isinstance(array, NativeArray):
+        raise TypeError("collect_array.output: expected an actual native array payload")
+    return array
+
+
 def _collect(
     program: Program,
-    inputs: Mapping[str, TableData],
+    inputs: Mapping[str, TableData | NativeArray],
     runtime: Runtime | None,
     options: ExecutionOptions | None,
 ) -> dict[str, pa.Table]:
     _require_blocking("collect")
+    _require_table_outputs(program)
     plan, bound, outputs = _prepare_collect(program, inputs, runtime)
     _validate_options(options)
     return _tables(plan.execute(bound, options=options), outputs)
@@ -216,8 +339,8 @@ def _as_input_mapping(
 
 
 def _table_inputs(
-    program: Program, inputs: TableData | Mapping[str, TableData]
-) -> Mapping[str, TableData]:
+    program: Program, inputs: TableData | Mapping[str, TableData | NativeArray]
+) -> Mapping[str, TableData | NativeArray]:
     return _as_input_mapping(
         program,
         inputs,
@@ -264,10 +387,11 @@ def _build_program(
 
 def _collect_async(
     program: Program,
-    inputs: Mapping[str, TableData],
+    inputs: Mapping[str, TableData | NativeArray],
     runtime: Runtime | None,
     options: ExecutionOptions | None,
 ) -> Awaitable[dict[str, pa.Table]]:
+    _require_table_outputs(program)
     batches = _collect_batches(program, inputs)
     selected = _selected_runtime(runtime)
     _validate_options(options)
@@ -279,6 +403,13 @@ def _collect_async(
         return await _execute_collect(plan, bound, outputs, options)
 
     return execute()
+
+
+def _require_table_outputs(program: Program) -> None:
+    if any(isinstance(value, ArrayExpr) for _, value in program.outputs):
+        raise TypeError(
+            "collect returns tables; use ArrayExpr.collect_array for one array result"
+        )
 
 
 async def _run_blocking_compile(compile_plan: Callable[..., T], *args: object) -> T:
@@ -311,7 +442,7 @@ async def _execute_collect(
 
 def _collect_table_async(
     program: Program,
-    inputs: Mapping[str, TableData],
+    inputs: Mapping[str, TableData | NativeArray],
     runtime: Runtime | None,
     options: ExecutionOptions | None,
 ) -> Awaitable[pa.Table]:

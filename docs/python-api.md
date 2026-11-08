@@ -164,7 +164,8 @@ parsed as formulas.
 
 `cf.Program(name, /, *, engine, inputs=None, outputs=())` accepts outputs as a mapping
 in insertion order or a sequence of `(name, TableExpr | ArrayExpr)` pairs. Omitting
-`inputs` discovers reachable table inputs and parameters in deterministic order,
+`inputs` discovers reachable table inputs, native array inputs and parameters in
+deterministic order,
 including when outputs are added later with `program.output(...)`.
 Explicit input sequences are respected, including `inputs=()`; missing referenced
 inputs become analysis errors. Conflicting roots with the same name fail.
@@ -179,20 +180,21 @@ other engine. Calls for the other engine raise `RuntimeError`.
 diagnostics; it does not change the program engine or permit opposite-mode
 compilation, export, or execution.
 
-| Method                                                                                                   | Result and input contract                                                        |
-| -------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| `table_expr.collect(inputs, /, *, runtime=None, options=None)`                                           | One Arrow table; one table root accepts data directly, otherwise use a mapping   |
-| `program.collect(inputs, /, *, runtime=None, options=None)`                                              | `dict[str, pyarrow.Table]` in logical output order; always supply a mapping      |
-| `cf.Program(name, engine=...)`                                                                           | Require `"sql"` or `"streaming"` at construction                                 |
-| `program.execute(inputs, /, *, runtime=None, options=None, config=None, watermarks=None)`                | SQL: named Arrow tables; streaming: owned `StreamOutput` events                  |
-| `table_expr.collect_async(...)` / `program.collect_async(...)`                                           | Awaitable forms of the same contracts                                            |
-| `table_expr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                            | Owned async iterator of Arrow tables                                             |
-| `program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                               | Owned async iterator of named `StreamOutput` events; input mapping required      |
-| `program.analyze(runtime=None, /, *, mode=None)`                                                         | Immutable analysis result; defaults to the selected engine                       |
-| `program.explain(runtime=None, /, *, mode=None)`                                                         | Deterministic explanation text                                                   |
-| `program.compile_batch(runtime=None, /)`                                                                 | Explicit batch execution plan                                                    |
-| `program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0, late_policy="error")`             | Explicit stream plan for a runner                                                |
-| `program.to_project(runtime=None, /, *, mode=None, allowed_lateness_micros=0, late_policy="error")`      | Validated, data-only project-v3 document for the selected engine                 |
+| Method                                                                                              | Result and input contract                                                      |
+|-----------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|
+| `table_expr.collect(inputs, /, *, runtime=None, options=None)`                                      | One Arrow table; one table root accepts data directly, otherwise use a mapping |
+| `array_expr.collect_array(inputs, /, *, runtime, options=None, array_options=None)`                 | One NativeArray from native array/table roots; explicit registered Runtime     |
+| `program.collect(inputs, /, *, runtime=None, options=None)`                                         | `dict[str, pyarrow.Table]` in logical output order; always supply a mapping    |
+| `cf.Program(name, engine=...)`                                                                      | Require `"sql"` or `"streaming"` at construction                               |
+| `program.execute(inputs, /, *, runtime=None, options=None, config=None, watermarks=None)`           | SQL: named Arrow tables; streaming: owned `StreamOutput` events                |
+| `table_expr.collect_async(...)` / `program.collect_async(...)`                                      | Awaitable forms of the same contracts                                          |
+| `table_expr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                       | Owned async iterator of Arrow tables                                           |
+| `program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                          | Owned async iterator of named `StreamOutput` events; input mapping required    |
+| `program.analyze(runtime=None, /, *, mode=None)`                                                    | Immutable analysis result; defaults to the selected engine                     |
+| `program.explain(runtime=None, /, *, mode=None)`                                                    | Deterministic explanation text                                                 |
+| `program.compile_batch(runtime=None, /)`                                                            | Explicit batch execution plan                                                  |
+| `program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0, late_policy="error")`        | Explicit stream plan for a runner                                              |
+| `program.to_project(runtime=None, /, *, mode=None, allowed_lateness_micros=0, late_policy="error")` | Validated, data-only project-v3 document for the selected engine               |
 
 `execute` uses finite table inputs with the SQL engine and stream inputs with
 the streaming engine. `options` is SQL-only; `config` and `watermarks` are
@@ -202,13 +204,16 @@ same SQL declaration.
 
 Collection mappings use declared input names, and the returned mapping uses
 logical output names. Missing, extra, or wrong-kind inputs fail with named paths.
-Supported static array parameters require `Batch.from_array` and explicit provider
-registration on the selected runtime. Collection returns table outputs;
-standalone array-output declarations are not executable. See the
+Static array parameters require explicit provider registration on the selected
+runtime. Native parameters accept a NativeArray or a native array Batch;
+NumPy/JAX parameters use `Batch.from_array`. Table collection returns tables;
+collect one native ArrayExpr with `collect_array`. Mixed table/array Program
+results remain unsupported. See the
 [capability matrix](symbolic-api.md#symbolic-declarations-and-static-analysis).
 
-Omitting `runtime` selects a fresh default `Runtime`; pass one explicitly for
-registered providers/UDFs. Every convenience `compute` or `collect` call creates
+Omitting `runtime` for table collection selects a fresh default `Runtime`; pass
+one explicitly for registered providers/UDFs. Native `collect_array` requires
+an explicit runtime. Every convenience `compute` or `collect` call creates
 a fresh batch plan, including repeated/concurrent calls using the same runtime.
 Rolling state does not carry between those calls, and explicitly compiled cached
 plans are neither reused nor reset. Use explicit plans for snapshot/restore/reset,
@@ -813,28 +818,39 @@ The public `Runtime.register_provider` and
 so an arbitrary Python callback remains batch-only rather than acquiring this
 proof from caller-supplied metadata.
 
-`calc_flow.array.register_native(runtime)` registers the Rust
-`native:array_expr@1` batch factory. Its descriptor comes from Rust, including
-the complete IR JSON Schema and option-defined ports. It supports native
-Boolean/float32/float64 scalars and vectors; numeric promotion preserves
-float32 unless an operand is float64. Boolean values support logical and
-comparison operations. True scalars broadcast, while `[1]` remains a vector
-and vector lengths must match. The factory reports `modes=("batch",)`,
-`stateful=False`, `microbatch_invariant=False`, `requires_watermark=False`,
-`checkpoint_support="unproven"`, `state_version=None`,
-`supports_static_inputs=False`, `partition_contract="none"` and
-`finality="unproven"`. Its `deterministic=True` and `replay_safe=True` claims
-apply to identical inputs on the same implementation and numerical profile;
-they do not promise cross-platform bitwise equality or delivery guarantees.
-Rolling state starts fresh on every batch invocation.
+`calc_flow.array.register_native(runtime)` atomically registers the Rust
+`native:array_expr@1` batch factory and `native:table_array@1` batch/stream
+bridge. Their frozen capabilities, complete IR JSON Schemas and option-defined
+ports come from Rust. The array factory supports native Boolean/float32/float64
+scalars, vectors and packed matrices. Only true scalars broadcast; `[1]` remains
+a vector, and non-scalar operands require matching shapes. Numeric promotion
+preserves float32 unless an operand is float64. IR version 1 retains its original
+scalar/vector contract; IR version 2 adds rank-two storage, matmul, reshape,
+transpose and axis reductions.
 
-Use this factory through the advanced `PipelineBuilder.external` or project
-surface with the declared native IR. Native symbolic/matrix lowering is not
-available yet. Registration retains no Python callback or provider root. It
-prepares a frozen capability before insertion, then records one successful
-entry and invalidates symbolic caches once. A duplicate, invalid descriptor,
-or cleared native runtime leaves the records, capability revision and caches
-unchanged. Querying the Rust descriptor alone does not register a provider.
+The array factory reports `modes=("batch",)`, `stateful=False`,
+`microbatch_invariant=False`, `requires_watermark=False`,
+`checkpoint_support="unproven"`, `state_version=None`,
+`supports_static_inputs=True`, `partition_contract="none"` and
+`finality="unproven"`. Static inputs here cover finite batch parameters.
+Rolling state starts fresh on every batch invocation. The table bridge reports
+`modes=("batch", "stream")`, `stateful=False`, `microbatch_invariant=True`,
+`checkpoint_support="stateless"`, `supports_static_inputs=True`,
+`partition_contract="row_axis_independent"` and `finality="per_row_final"`.
+It admits one table input with row-preserving native work and an optional
+latched static matrix RHS. Its stream mode does not enable standalone array
+stream outputs. Both factories report `deterministic=True` and
+`replay_safe=True` for identical inputs on the same implementation and numerical
+profile; these claims do not promise cross-platform bitwise equality or delivery
+guarantees.
+
+Use the factories through native ArrayExpr declarations, the advanced
+`PipelineBuilder.external` or project surface. Registration retains no Python
+callback or provider root. It prepares both frozen capabilities before atomic
+native insertion, publishes two registration records and invalidates symbolic
+caches once. A collision in any native lifecycle, invalid descriptor, or cleared
+runtime leaves records, capability revision and caches unchanged. Querying the
+Rust descriptors alone does not register a provider.
 
 Compiled-in connector registrations surface on the snapshot's `connectors`
 tuple as `ConnectorCapability` entries. Each entry pairs its
@@ -909,7 +925,8 @@ unlisted keys below). Key order inside a record is not guaranteed.
 - A `kafka_decoder` record has no `provider` key and exists only on wheels
   built with `connector-kafka`.
 - A `native_provider` record comes from `calc_flow.array.register_native`;
-  replay it by calling that helper on the target runtime.
+  its two records describe one array/table factory bundle. Replay that bundle
+  by calling the helper once on the target runtime, rather than once per record.
 - The listed keys of a record are the arguments of the one successful call
   that produced it: `register_provider`, `register_mapping_provider`,
   `register_scalar_udf`, `register_kafka_decoder`, or
@@ -1018,14 +1035,18 @@ parent.register_mapping_provider(
     input_ports=(("table", "table"), ("weights", "array")),
     output_ports=(("output", "array"),),
 )
+register_native(parent)
 
 capabilities, records = parent.capability_registration_snapshot()
 assert capabilities.providers[0].name == records[0]["name"] == "scale"
 
 worker = Runtime()
+native_bundle_replayed = False
 for record in records:
     if record["kind"] == "native_provider":
-        register_native(worker)
+        if not native_bundle_replayed:
+            register_native(worker)
+            native_bundle_replayed = True
         continue
     if record["kind"] != "provider":  # read kind before any other key
         raise ValueError(f"cannot replay a {record['kind']} registration")
@@ -1312,6 +1333,76 @@ graph execution remains a separate registered capability.
 
 Run [`examples/native_arrays.py`](../examples/native_arrays.py) for an Arrow-only
 moving-mean, conditional-selection and reduction example.
+
+
+### Native ArrayExpr declarations and collection
+
+`array_input(name, dtype=..., shape=..., backend="native")` declares a dynamic
+native array. Shapes have zero, one or two dimensions; `None` denotes an unknown
+extent. `parameter(kind="array", backend="native", dtype=..., shape=...)`
+declares a static array with concrete dimensions. Neither declaration captures
+values. `Program.with_input` accepts an ArrayExpr only when it is an
+`array_input` declaration.
+
+Native ArrayExpr supports arithmetic, comparisons and Boolean operators, plus
+`reshape(shape)`, `transpose()` and `sum/mean/min/max(axis=None, keepdims=False,
+skip_nulls=False)`. Rust infers dtype and shape from descriptors; analysis never
+allocates sample arrays or imports NumPy/JAX. Python integer scalar operands must
+have magnitude at most `2**53` before encoding; finite Python float literals
+retain the full float64 range. Boolean literals remain Boolean.
+
+```python
+import pyarrow as pa
+import calc_flow as cf
+import calc_flow.array as cfa
+
+runtime = cf.Runtime()
+cfa.register_native(runtime)
+values = cf.array_input("values", dtype="float32", shape=(None, 2))
+data = cfa.from_arrow(pa.array([1.0, 3.0, 2.0, 4.0], type=pa.float32()), shape=(2, 2))
+result = values.mean(axis=1).collect_array({"values": data}, runtime=runtime)
+assert result.dtype == "float64"
+assert result.shape == (2,)
+assert result.to_arrow().to_pylist() == [2.0, 3.0]
+```
+
+`collect_array` returns one NativeArray and requires an explicitly registered
+Runtime. Its mapping uses logical declaration names: table inputs accept the
+usual Arrow tables/batches; native array inputs and static parameters accept a
+NativeArray or a Batch containing an actual native payload. Input mappings are
+copied and payloads remain read-only. Every call compiles a fresh plan from a
+cached declaration template; payloads are never cached. `array_options` limits
+each lowered native IR execution, rather than total memory for an arbitrary
+graph, and its normalized limits participate in the template cache key.
+The blocking method rejects a running event loop. Async array collection,
+mixed table/array Program outputs and standalone native array streams are not
+available. `compute`, TableExpr collection and Program collection return tables.
+
+`linalg.from_columns(table, columns=..., backend="native")` establishes a
+semantic row origin. Use the same TableExpr node in `from_columns` and
+`attach_columns`; reuse a filtered or projected table for both operations.
+`linalg.matmul` accepts arbitrary static parameter names;
+row-preserving arithmetic and rank-two `mean(axis=1)` can precede
+`table.attach_columns`. A native vector attaches as one column. A bridge segment
+admits at most one matmul with a direct static RHS. A direct attachment of a
+two-matmul chain is unsupported. To use successive table matmuls, explicitly
+attach the first result, call `from_columns` on that new TableExpr, multiply and
+attach again, then project the desired final columns. The runtime does not
+create hidden intermediate columns. Independent array collection may split
+multiple matmuls into separate batch segments. SQL may precede or follow the
+bridge, and attachment may be followed directly by projection or filtering.
+Independent table outputs may share one static declaration; bindings reuse the
+same captured Batch across physical ports and the runtime owns static placement.
+
+A table-rooted ArrayExpr can also use `collect_array`. The existing table/SQL
+segments feed a native array output, followed by standalone batch segments for
+full or axis-zero reductions, transpose and other operations that lose row
+correspondence. Rank-two transpose, full/axis-zero reduction and an unproved
+reshape erase the row origin permanently; matching row counts or restoring the
+old shape cannot make them attachable. An independent `array_input` has no table
+origin. NativeArray values in TableExpr/Program stream input mappings bind
+static array parameters; they do not enable dynamic array stream inputs.
+NumPy/JAX declarations retain their existing admission contracts.
 
 ## NumPy and JAX
 

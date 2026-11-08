@@ -49,3 +49,51 @@ terminal-complete manifest 的每个 native sequence 节点，也必须在返回
 
 A6a 不发布 sequence/checkpoint capability。A6b 的工厂、codec、真实恢复、
 能力版本迁移及对应测试须一起验收；所有阶段继续禁止 TA-Lib 代码依赖。
+
+## M2 native metadata budget boundary review
+
+最终结论：**Pass for the explicit boundary clarification**。这是对
+[M2 native preparation budget 边界](../api-notes/native-array-runtime.md#m2-native-preparation-budget-boundary-clarification)
+的定点设计审查，不是当前源码、copy multipliers、整个 M2 功能、实际测试/CI 或
+合并就绪批准。既有 API/A6 审查历史保留。
+
+来源为设计输入 `m2-chain-attachment-api.md` §3，完整文件 SHA-256：
+
+```text
+675302e98bdf69f32ca12f0eefa0ae3b42449d52b9497673924fb348fed927d0
+```
+
+最终审查输入 `m2-manifest-budget-critic.md` 的 SHA-256：
+
+```text
+28e852b3fb1d3f47f0d1af70e0a5160e9b25c04a8d0294aef1e46e8650268a0e
+```
+
+接受的边界：D 继续包含独立 native alias/version/SHA/descriptor、Run/Job
+settings、checkpoint identity、live selected/current manifest 和 native JSON-map
+字符串。真实共享 Arc allocation 只计一次，同值独立 clone 分别计费。通用整个
+canonical String/Vec、global I/O envelope、历史 retention 维护 Vec 是明确排除项，
+不虚构 native 字段占其容量的比例；不能把 manifest 内独立 native 字段也排除。
+现有 allocator/map-node/外层 settings frame 排除保持，保证范围是指定 native
+storage/metadata，不是 RSS、all checkpoint memory 或 all runtime live bytes。
+
+phase max 只在实际所有权证明 non-overlap 时成立，包括 worker/cancel/staging、
+SQL 临时对象释放与并发 epochs；否则覆盖实际重叠或经证明的保守组合。resident
+context inventory 和完整 copy-site 数量仍需最终源码审核，此 Pass 不认证 evolving
+公式/常量。fresh job 的一个 possible selected slot 可显式保守预留。
+
+F/P 的实际容量必须独立核实；未来 D 不是掩盖 frozen/source/placement 超额的
+可借用 credit。拒绝超额或连同完整仍需要的 D 与 W 对每个 consumer 重新准入。
+R_j+W<=B_j 和后续 numeric B_j-R_j 边界保持，宽预算不补贴窄预算，不加公共 knob、
+协议版本、digest 变化或旧 NumPy/JAX 预算重解释。
+
+源边界包括 `state/manifest.rs::canonical_bytes/recompute_state_checksum` 的 native
+JSON 字符串与 whole-document buffer 分离，以及
+`state/transaction.rs::retain_locked/load_retention_manifests` 的历史维护 Vec。
+最终实现审查须证明实际 clone sites、容量与重叠，不以重复生产常量的算术测试
+代替证据；应覆盖 fresh/recovered、selected+current+JSON copies、取消/late drop、
+紧消费者预算和未来 D 尚未使用时的 F/P 超额。保留无 publication/source-open、
+per-alias digest golden、非 native 行为与 bounded worker settlement 验收。
+
+本归档不修改产品，不运行构建/产品测试/benchmark，不操作 remote；没有未决
+边界设计问题，但上述源码和行为证明责任仍属于对应 M2 实现阶段。

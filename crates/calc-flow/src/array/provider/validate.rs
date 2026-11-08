@@ -97,7 +97,7 @@ fn names<'a>(values: impl Iterator<Item = &'a str>, field: &str, maximum: usize)
     Ok(())
 }
 
-fn validate(program: &Program) -> Result<()> {
+pub(super) fn validate(program: &Program) -> Result<()> {
     names(
         program.inputs.iter().map(|input| input.name.as_str()),
         "options.inputs",

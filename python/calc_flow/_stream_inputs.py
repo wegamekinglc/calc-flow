@@ -10,7 +10,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from calc_flow._compat import TypeAliasType, dataclass
-from calc_flow._native import Batch
+from calc_flow._native import Batch, NativeArray
 from calc_flow.compute import TableData, _arrow_table, _table_batch
 from calc_flow.runtime import (
     BoundedOutOfOrderness,
@@ -49,8 +49,8 @@ _POLICIES = (SourceProvidedWatermarks, BoundedOutOfOrderness, DisabledWatermarks
 
 
 def _capture_stream_inputs(
-    inputs: Mapping[str, StreamInput | TableData],
-) -> dict[str, StreamInput | TableData]:
+    inputs: Mapping[str, StreamInput | TableData | NativeArray],
+) -> dict[str, StreamInput | TableData | NativeArray]:
     return {
         name: tuple(value)
         if isinstance(value, Sequence) and not isinstance(value, _MATERIALIZED_ITEMS)
@@ -81,7 +81,7 @@ def _policy_mapping(
 
 
 def _selected_policies(
-    inputs: Mapping[str, StreamInput | TableData],
+    inputs: Mapping[str, StreamInput | TableData | NativeArray],
     expected: Mapping[str, TableExpr | Parameter],
     watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None,
 ) -> Mapping[str, WatermarkPolicy]:

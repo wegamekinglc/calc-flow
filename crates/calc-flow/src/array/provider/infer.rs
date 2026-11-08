@@ -94,7 +94,7 @@ pub(super) fn query_outputs(plan: &Plan) -> Result<crate::JsonMap> {
         serde_json::Value::Array(outputs),
     )]))
 }
-fn abstract_inputs(plan: &Plan) -> BTreeMap<String, Descriptor> {
+pub(super) fn abstract_inputs(plan: &Plan) -> BTreeMap<String, Descriptor> {
     plan.program
         .inputs
         .iter()

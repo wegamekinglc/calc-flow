@@ -287,7 +287,7 @@ class ArrayFacts:
 
     backend: str | None
     dtype: str | None
-    shape: tuple[int | str, ...]
+    shape: tuple[int | str | None, ...]
     lineage: _RowOrigin | None
     state: frozenset[str]
 
@@ -552,6 +552,13 @@ class _Analyzer:
                 )
 
     def check_unbounded_output(self, output_name: str, facts: ArrayFacts, /) -> None:
+        if self._mode == "stream" and facts.backend == "native":
+            self.issue(
+                f"outputs.{output_name}",
+                "unsupported_mode",
+                "native ArrayExpr outputs require batch collect_array",
+            )
+            return
         if self._mode == "stream" and facts.lineage is not None:
             self.issue(
                 f"outputs.{output_name}",
@@ -886,6 +893,7 @@ class _Analyzer:
         array = self.array(node.args[1], f"{path}.attach_columns.array")
         names = _cstr_seq(node.attr("names"))
         self._attach_lineage_check(array, child, path)
+        self._attach_native_source_check(node, path)
         self._attach_width_check(array, names, path)
         fields = self._attached_fields(child, array, names, path)
         return TableFacts(
@@ -896,6 +904,22 @@ class _Analyzer:
             child.entity_by,
             child.sequence_by,
         )
+
+    def _attach_native_source_check(self, node: Node, path: str, /) -> None:
+        from calc_flow.symbolic.native_arrays import (
+            NATIVE_ATTACHMENT_SOURCE_MESSAGE,
+            is_native_array,
+            native_attachment_source_matches,
+        )
+
+        if is_native_array(node.args[1]) and not native_attachment_source_matches(
+            node.args[1], node.args[0]
+        ):
+            self.issue(
+                f"{path}.attach_columns.array.source",
+                "schema_mismatch",
+                NATIVE_ATTACHMENT_SOURCE_MESSAGE,
+            )
 
     def _stream_asof_join_table(self, node: Node, path: str, /) -> TableFacts:
         from calc_flow.symbolic.asof import analyze_asof
@@ -1257,8 +1281,12 @@ class _Analyzer:
         if not array.shape:
             return
         width_path = f"{path}.attach_columns.array.shape[{len(array.shape) - 1}]"
-        width = array.shape[-1]
-        if isinstance(width, str):
+        width = (
+            1
+            if array.backend == "native" and len(array.shape) == 1
+            else array.shape[-1]
+        )
+        if width is None or isinstance(width, str):
             self.issue(
                 width_path,
                 "unresolved_type",
@@ -2171,6 +2199,13 @@ class _Analyzer:
         return facts
 
     def _analyze_array(self, node: Node, path: str, /) -> ArrayFacts:
+        from calc_flow.symbolic.native_arrays import (
+            analyze_native_array,
+            is_native_array,
+        )
+
+        if is_native_array(node):
+            return analyze_native_array(node, self, path)
         handler = _ARRAY_HANDLERS.get(node.op.name)
         if handler is None:
             self.issue(

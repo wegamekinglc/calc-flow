@@ -17,6 +17,10 @@ use serde_json::Value;
 
 use crate::{CalcFlowError, JsonMap, Result};
 
+pub(crate) mod native_cell;
+mod native_static;
+pub(crate) use native_static::{NativeStaticOwned, NativeStaticValues};
+
 #[cfg(test)]
 #[path = "batch/arrow_run_end_validation_tests.rs"]
 mod arrow_run_end_validation_tests;
@@ -510,23 +514,9 @@ impl LatchedArrayPayload {
             }
             LatchedArrayValues::Float(values) => values.get(value_index).map(|value| {
                 if self.dtype == "float32" {
-                    // f64 to f32 narrowing is the documented lossless carrier
-                    // rule for latched float32 values (digest v1).
-                    #[allow(clippy::cast_possible_truncation)]
-                    let narrowed = *value as f32;
-                    let bits = if value.is_nan() {
-                        0x7fc0_0000u32
-                    } else {
-                        narrowed.to_bits()
-                    };
-                    bits.to_be_bytes().to_vec()
+                    native_cell::float32(*value).to_vec()
                 } else {
-                    let bits = if value.is_nan() {
-                        0x7ff8_0000_0000_0000u64
-                    } else {
-                        value.to_bits()
-                    };
-                    bits.to_be_bytes().to_vec()
+                    native_cell::float64(*value).to_vec()
                 }
             }),
         }

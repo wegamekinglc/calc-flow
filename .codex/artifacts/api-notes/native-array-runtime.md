@@ -679,3 +679,233 @@ one-shot 与 splits/empty/Arrow offset/f32 widening/null/NaN/Inf/zero/warm-up/�
 每行为先 focused RED，再实现与必要 lint/rustdoc/example 检查；完整矩阵/coverage
 留给 CI，本设计无性能测量或提速承诺。A7 保持原计划另行设计，本归档不新增指标、
 OHLC zipper、MACD 多输出 owner 或通用框架。
+
+## M2 native preparation budget boundary clarification
+
+Status: **Pass for the explicit accounting-boundary clarification**. This
+appendix is the authoritative clarification of section 5.3's F/P/D/W and
+per-consumer reservation contract. It preserves the earlier API/A6 archive as
+history and does not change any public signature, digest-v1 byte, manifest-v3
+protocol, NumPy/JAX budget interpretation or ordinary native execution without
+static reservations. It is not an implementation, full-feature/source-review,
+executed-test, performance or merge-readiness approval.
+
+The reviewed source is section 3 of the design input titled
+`m2-chain-attachment-api.md`, whole-document SHA-256
+`675302e98bdf69f32ca12f0eefa0ae3b42449d52b9497673924fb348fed927d0`.
+The focused review titled `m2-manifest-budget-critic.md`, SHA-256
+`28e852b3fb1d3f47f0d1af70e0a5160e9b25c04a8d0294aef1e46e8650268a0e`,
+passed these explicit boundaries; its
+[canonical disposition](../critiques/native-array-runtime.md#m2-native-metadata-budget-boundary-review)
+preserves the source-review obligations. This archive supplies the clarification
+referenced by the [resource specification](../specs/native-array-runtime.md).
+
+### Trusted scope and consumer limits
+
+Existing `prepare_static_inputs(declared, supplied)` has neither a budget nor
+cancellation argument; do not treat it as an existing controlled preparation
+mechanism. The new native-only path receives trusted compiled records of node
+identity, local-port-to-physical-static projection, StaticInputSpec and each
+consumer's validated `ArrayExecutionOptions.max_allocation_bytes`, called B_j.
+Caller metadata and ordinary dynamic input cannot fabricate these records.
+Non-native providers may keep the legacy helper; native preparation cannot
+silently fall back to it.
+
+Finite compilation retains the required static declarations. Each execute owns
+one fresh private preparation scope shared through that run's RunContext
+clones; each managed job/recovery job owns one fresh scope in its job context.
+A trusted owner is retained for the scope's lifetime. Sharing requires that
+owner and successful validated backend/dtype/shape/canonical preparation
+identity; equal contents or allocator addresses alone do not establish sharing.
+Physical aliases still have separate declarations, salted digest-v1 prefixes
+and independently checked recovery digests. Freeze/canonical encoding/native
+placement may be shared once per trusted owner, but SHA work remains per alias.
+No global pool or cross-run placement cache is introduced.
+
+### Included F/P/D/W ownership
+
+Use checked sizes and actual retained capacities where a buffer has capacity:
+
+- **F_g:** frozen carrier and widened scalar storage, null flags, shape and
+  backend/dtype descriptors retained for the execution. A supplied already
+  latched carrier is still charged. Include distinct source buffers kept alive
+  by retaining the trusted owner; they cannot become an uncharged extra copy.
+  Do not substitute a saturating estimated_bytes value for checked capacity.
+- **P_g:** packed native dtype-width values, validity and shape. An owner may
+  share a buffer between representations only when allocation identity proves
+  it. Widened frozen f32 and packed f32 are distinct allocations and both count.
+- **D_g:** independently owned native alias names, digest-version/SHA text and
+  newly owned descriptors for **every physical alias**, including the concrete
+  metadata copies described below. Equal text in two allocations counts twice;
+  an actually shared Arc allocation counts once.
+- **W_g:** the peak simultaneously live preparation scratch: the fixed 4 KiB
+  canonical encoding chunk, actual live SHA states, conversion/snapshot
+  temporaries and necessary controlled worker scratch. Private read-only
+  access should avoid full-copy public snapshots; if a full temporary is
+  required, admit its complete charge before creating it.
+
+Managed D includes native strings/descriptors independently owned by the scope,
+prepared latched/digest maps, installed static map, Run/Job settings JSON,
+required persistent checkpoint identity, the live recovered selected manifest,
+the newly constructed current-epoch manifest, and temporary native JSON-map
+strings used during checksum/serialization. The live selected manifest is not
+backend history. A native field does not become excluded merely because its
+owner is a manifest or JSON value. This includes newly materialized native-only
+maps/strings even when a later whole-document serializer is excluded.
+
+### Explicit exclusions and the actual guarantee
+
+The guarantee is a per-native-consumer limit on **specified native-owned
+payload, descriptor and buffer storage and preparation work**. It excludes:
+
+- existing allocator/map-node overhead and the pre-existing outer
+  `static_inputs` settings key/frame that exists with zero native aliases;
+- the whole generic manifest canonical String/Vec allocation and global I/O
+  envelope, as indivisible generic checkpoint machinery;
+- backend historical manifest retention maintenance, including its separately
+  loaded transient history Vec.
+
+This exclusion is limited to the generic whole-manifest/I/O envelope; copying
+native array storage or encoded native operator state does not become exempt
+because it occurs in a backend or I/O path. Such copies must be eliminated or
+charged under the applicable F/P/W/K contract; A6 state/capture accounting is
+unchanged.
+
+Do not assign an invented fraction of a generic serializer buffer's physical
+capacity to native fields. Their encoded byte contribution is not that
+allocation's capacity. Conversely, the separately owned native field/string
+copies inside selected/current manifests or JSON maps remain in D. Mixed
+legacy operator, sink and schema contents do not acquire a new generic
+serialization budget through this feature. Borrowed dynamic input remains
+excluded as before.
+
+These are named exclusions, not consequences silently inferred from the old
+allocator-overhead exclusion. Do not describe this limit as all live bytes,
+all checkpoint memory, an exact runtime-memory bound, total process memory or
+RSS. No existing NumPy/JAX behavior or public budget knob changes, and no new
+implicit limit overrides an explicitly configured native consumer limit.
+
+### Lifecycle overlap and descriptor reservations
+
+Determine D from the maximum **actual simultaneous ownership** across the
+bounded lifecycle, including each independently owned copy within a phase.
+Preinstall, installed, capture/checksum and publication are useful names for
+organizing a proof; phase names themselves do not establish non-overlap.
+
+Before installation, local preparation maps, root settings, persistent identity
+and selected-manifest validation may overlap. Treat consumed preparation maps
+as released before task scopes only if the actual transfer/drop ordering proves
+that release. Later selected/current manifests and native JSON-map temporaries
+must be included wherever they coexist. A fresh managed run may reserve one
+possible selected-manifest slot as an explicit conservative bound because
+selection is not yet known; it is not spare credit for another component.
+
+The engine-owned settings-copy inventory must be derived from actual clone
+sites and dispatch: root job context, logical operator tasks, dynamic source
+bindings, named output sink tasks (not each sink inside one task), and the
+optional benchmark context. Verify the managed SQL capture/restore dispatch's
+thin SqlRecoveryContext rather than counting a direct adapter's full-context
+clone as another managed task. Arbitrary user-created context clones inside
+external callbacks are outside this bounded engine-owned inventory. This
+appendix does not certify an evolving resident-context formula or multiplier.
+
+Taking a maximum across phases is valid only after final source review proves
+non-overlap for the relevant allocations, including cancellation/worker
+settlement, asynchronous staging, SQL temporary release before publication,
+and any epochs that can coexist. Otherwise charge their overlap or a proven
+conservative bounded combination. No fixed copy count may be invented from
+phase labels or certified by a test that repeats the implementation's own
+unverified constants. Verify observed descriptor capacities before publishing
+or installing the scope, and retain the full admitted later-phase D bound
+while that lifecycle remains possible.
+
+### Per-consumer reservation and independent capacity checks
+
+For each consumer j, let G_j contain its distinct trusted native static owners:
+
+```text
+R_j = sum(F_g + P_g + D_g for g in G_j)
+For every consumer j of the owner g being prepared: R_j + W_g <= B_j
+After preparation: numeric packing/output/scratch <= B_j - R_j
+```
+
+Predict all owners' final retained charges before any freeze/allocation,
+including owners placed later. Prepare owner groups serially. Repeated aliases
+of one owner do not duplicate F/P in a consumer's sum, but D still covers every
+alias and required independent metadata copy. Sum distinct owners; charge the
+complete shared W_g against every consumer needing g. A looser consumer cannot
+subsidize a tighter one, and unrelated consumers do not create a global minimum
+for unrelated owner groups. A cached placement retains R_j; cache hits do not
+restore the full numeric B_j.
+
+Verify F and P independently against their admitted predicted charges and
+verify instantiated alias-descriptor capacities. **Future D is reserved
+capacity, not spare credit:** an oversized actual frozen/source or packed
+allocation cannot pass merely because the intermediate aggregate still fits a
+larger full reservation that includes not-yet-created metadata. Reject such an
+over-allocation, or explicitly re-admit the actual F/P together with the
+complete still-required D bound and W before publication for every affected
+consumer. Never consume future D to conceal the discrepancy. All checked
+predictions precede allocation and actual retained capacities are validated
+before anything becomes reusable.
+
+### Cancellation, digest preparation and publication
+
+Keep digest-v1 exact. Initialize each physical alias's SHA state with its
+unchanged version/kind/length-prefixed-name bytes. Encode the shared descriptor/
+cell stream once into the fixed 4 KiB chunk and feed each chunk, including the
+final partial chunk, in order to every alias state. W includes the chunk and
+all live hash states; finalized digest strings enter D. Do not create a
+body-sized Vec or introduce a replacement digest/private body hash.
+
+The private fallible cancellation callback uses the actual RunContext's
+cancellation/deadline in finite execution and actual job/admission cancellation
+and deadline in managed preparation. Check before admission, at most every
+4,096 scanned slots including null slots, every encoded chunk, at most every
+64 alias-hash updates, and after final placement before publication. Do not
+synthesize a per-batch context that loses the job's clock/deadline. Heavy
+preparation runs in the existing bounded owned worker mechanism; waiter loss
+or teardown keeps inputs, candidate storage and permits owned until settlement.
+
+Validate every alias's StaticInputSpec before placement and compare all
+physical recovery digests before opening sources or exposing a reusable
+placement. Keep all candidate maps local until every owner, capacity check,
+per-consumer reservation, alias digest and final cancellation check succeeds.
+Publish into the fresh scope once. Failure/cancellation leaves it unchanged,
+with no partially prepared reusable cache. Ownership of unsuccessful workers
+must settle before their reservations are released.
+
+Choose the first offending physical alias/consumer in deterministic name order.
+The preparation error path is `static_inputs.<alias>.bytes`, naming consumer,
+required bytes and limit. Numeric execution retains its existing output/scratch
+error paths while explaining the reserved static bytes R_j.
+
+### Final source-review and acceptance obligations
+
+This boundary Pass leaves the following proof obligations with implementation:
+
+- Account for the actual copy sites/capacities in fresh and recovered jobs,
+  selected plus current manifests, native JSON-map clones, settings/task
+  contexts, SQL dispatch and staging. Show genuine Arc sharing where claimed.
+  Prove the bounded overlap of phases/epochs, including cancellation and late
+  drops; do not certify guessed multipliers.
+- Test tighter/looser consumers, several owners whose sum exceeds one limit,
+  frozen-f32/packed-f32/source overlap, live hash-state/chunk scratch and a cached
+  numeric output that fails only after its static reservation is included.
+- Exercise actual F/P capacity above its own prediction while unused future D
+  exists: aggregate fit alone must not accept it. If re-admission is used,
+  include the full still-required D bound for every consumer.
+- Test null scanning and many-alias hashing cancellation, independently owned
+  metadata in current/selected/JSON representations, and asynchronous lifetime
+  boundaries. Assert failure publishes no reusable placement and managed
+  startup/recovery opens no sources. Keep per-alias digest golden bytes and
+  non-native preparation behavior unchanged.
+
+These are required source/behavior proofs, not reported results. The relevant
+source boundaries include
+[`CheckpointManifest::canonical_bytes` and `recompute_state_checksum`](../../../crates/calc-flow/src/state/manifest.rs),
+which separate native JSON strings from whole-document serialization, and
+[`retain_locked`/`load_retention_manifests`](../../../crates/calc-flow/src/state/transaction.rs),
+which own backend retention-history maintenance. Existing examples, selected
+checks and final implementation review must verify the complete feature under
+normal repository policy; this clarification supplies no performance claim.
