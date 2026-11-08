@@ -18,6 +18,7 @@ from calc_flow.capabilities import (
     ProviderArrayRules,
     ProviderOptionsSchema,
     RuntimeCapabilities,
+    _native_array_provider_capability,
     _StatelessProviderLifecycle,
     runtime_capabilities,
 )
@@ -289,6 +290,23 @@ class Runtime:
             self._registrations.append(registration)
             self._invalidate_symbolic_compile_cache()
 
+    def _register_native_array(self) -> None:
+        with self._registration_lock:
+            capability = _native_array_provider_capability(
+                _native._native_array_capability()
+            )
+            registration = {
+                "kind": "native_provider",
+                "provider": capability.provider,
+                "name": capability.name,
+                "version": capability.version,
+                "capability": capability,
+            }
+            registrations = [*self._registrations, registration]
+            self._inner._register_native_array()
+            object.__setattr__(self, "_registrations", registrations)
+            self._invalidate_symbolic_compile_cache()
+
     def register_mapping_provider(
         self,
         provider: str,
@@ -550,8 +568,9 @@ class Runtime:
         """Return this runtime's successful trusted registrations, oldest first.
 
         Each record is a new ``dict`` holding the arguments of one registration,
-        including its live callable. Records are process-local trusted values,
-        not data: never place them in a project, checkpoint, or API payload.
+        including a Python registration's live callable or a native provider's
+        frozen capability. Records are process-local trusted values, not a
+        project, checkpoint, or API payload format.
         """
         with self._registration_lock:
             return self._copied_registrations()
@@ -570,8 +589,8 @@ class Runtime:
         consistent pair.
 
         The records are the registrations that ``capabilities`` describes: each
-        ``provider`` and ``scalar_udf`` record has one capability entry with the
-        same identity.
+        ``provider``, ``native_provider`` and ``scalar_udf`` record has one
+        capability entry with the same identity.
         """
         with self._registration_lock:
             registrations = self._copied_registrations()

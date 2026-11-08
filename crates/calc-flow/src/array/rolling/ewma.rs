@@ -1,5 +1,6 @@
 use datafusion::arrow::buffer::{BooleanBuffer, Buffer, NullBuffer};
 
+use super::super::control;
 use crate::{
     Result,
     array::{ArrayExecutionOptions, FloatValues, FloatView, NativeArray},
@@ -94,16 +95,22 @@ pub fn ewma(
     options: EwmaOptions,
     execution: &ArrayExecutionOptions,
 ) -> Result<NativeArray> {
+    ewma_checked(input, options, execution, &mut || Ok(()))
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "alpha uses the existing table Float64 span conversion"
+)]
+pub(in crate::array) fn ewma_checked(
+    input: FloatView<'_>,
+    options: EwmaOptions,
+    execution: &ArrayExecutionOptions,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<NativeArray> {
+    check()?;
     let len = input.len();
-    let bitmap_bytes = len.div_ceil(8);
-    let output_bytes = len
-        .checked_mul(size_of::<f64>())
-        .and_then(|bytes| bytes.checked_add(bitmap_bytes))
-        .and_then(|bytes| bytes.checked_add(size_of::<usize>()))
-        .ok_or_else(|| {
-            super::super::invalid("outputs.output.bytes", "byte count overflowed usize")
-        })?;
-    let scratch_bytes = size_of::<(u64, f64)>();
+    let (output_bytes, scratch_bytes) = required_bytes(len)?;
     execution.validate_allocation(len, output_bytes, scratch_bytes)?;
     let alpha = 2.0 / (options.span as f64 + 1.0);
     match input.values() {
@@ -114,6 +121,7 @@ pub fn ewma(
             alpha,
             options.min_periods,
             execution,
+            check,
         ),
         FloatValues::Float64(values) => calculate(
             values.iter().copied(),
@@ -122,8 +130,20 @@ pub fn ewma(
             alpha,
             options.min_periods,
             execution,
+            check,
         ),
     }
+}
+
+pub(in crate::array) fn required_bytes(len: usize) -> Result<(usize, usize)> {
+    let output = len
+        .checked_mul(size_of::<f64>())
+        .and_then(|bytes| bytes.checked_add(len.div_ceil(8)))
+        .and_then(|bytes| bytes.checked_add(size_of::<usize>()))
+        .ok_or_else(|| {
+            super::super::invalid("outputs.output.bytes", "byte count overflowed usize")
+        })?;
+    Ok((output, size_of::<(u64, f64)>()))
 }
 
 fn calculate(
@@ -133,11 +153,13 @@ fn calculate(
     alpha: f64,
     min_periods: u64,
     execution: &ArrayExecutionOptions,
+    check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<NativeArray> {
     let (mut values, mut bitmap) = allocate_output(len, execution)?;
     let mut valid_count = 0;
     let mut previous = 0.0;
     for (index, sample) in input.enumerate() {
+        control::checkpoint(index, check)?;
         let sample = if validity.is_none_or(|mask| mask.is_valid(index)) && !sample.is_nan() {
             Some(sample)
         } else {
@@ -151,7 +173,10 @@ fn calculate(
         }
     }
     let validity = NullBuffer::new(BooleanBuffer::new(Buffer::from(bitmap), 0, len));
-    NativeArray::from_f64(values, vec![len], Some(validity))
+    control::finish(
+        NativeArray::from_f64(values, vec![len], Some(validity)),
+        check,
+    )
 }
 
 fn allocate_output(len: usize, execution: &ArrayExecutionOptions) -> Result<(Vec<f64>, Vec<u8>)> {

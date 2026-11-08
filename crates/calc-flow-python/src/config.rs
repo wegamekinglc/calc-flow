@@ -327,6 +327,14 @@ impl PyRuntime {
         Ok(Self::from_tokio(Arc::new(tokio)))
     }
 
+    fn _register_native_array(&self) -> PyResult<()> {
+        let guard = self.state.read();
+        let state = guard
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err(CLEARED_RUNTIME_MESSAGE))?;
+        calc_flow::array::register_native(&state.providers).map_err(crate::error::to_py_err)
+    }
+
     #[pyo3(name = "register_provider")]
     #[pyo3(
         signature = (provider, name, version, callback, *, accepts_context = ExactBool(false)),
@@ -811,10 +819,19 @@ pub(crate) fn json_to_python<'py>(py: Python<'py>, encoded: &str) -> PyResult<Bo
         .call1((encoded,))
 }
 
+#[pyfunction]
+fn _native_array_capability(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    let descriptor = calc_flow::array::NativeArrayFactory::capability_descriptor();
+    let value = serde_json::Value::Object(descriptor.into_iter().collect());
+    let encoded = calc_flow::canonical_json(&value).map_err(crate::error::to_py_err)?;
+    json_to_python(py, &encoded)
+}
+
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyRuntime>()?;
     module.add_function(wrap_pyfunction!(project_json_schema, module)?)?;
     module.add_function(wrap_pyfunction!(validate_project_json, module)?)?;
+    module.add_function(wrap_pyfunction!(_native_array_capability, module)?)?;
     Ok(())
 }
 
@@ -1019,6 +1036,49 @@ mod tests {
                 assert_eq!(error.value(py).to_string(), CLEARED_RUNTIME_MESSAGE);
             }
             runtime.borrow(py).__clear__();
+        });
+    }
+
+    #[test]
+    fn native_array_registration_preserves_roots_and_rejects_cleared_state() {
+        Python::initialize();
+        Python::attach(|py| {
+            let runtime = PyRuntime::new().unwrap();
+            let providers = Arc::clone(&runtime.state.read().as_ref().unwrap().providers);
+            runtime._register_native_array().unwrap();
+            let factory = providers
+                .resolve_batch("native", "array_expr", "1")
+                .unwrap();
+            let error = runtime._register_native_array().unwrap_err();
+            assert!(
+                error
+                    .value(py)
+                    .to_string()
+                    .contains("duplicate provider/name/version")
+            );
+            assert!(Arc::ptr_eq(
+                &factory,
+                &providers
+                    .resolve_batch("native", "array_expr", "1")
+                    .unwrap()
+            ));
+            assert!(
+                providers
+                    .resolve_stream("native", "array_expr", "1")
+                    .is_err()
+            );
+            assert!(runtime.state.read().as_ref().unwrap().roots.is_empty());
+
+            let cleared = PyRuntime::new().unwrap();
+            let providers = Arc::clone(&cleared.state.read().as_ref().unwrap().providers);
+            cleared.__clear__();
+            let error = cleared._register_native_array().unwrap_err();
+            assert_eq!(error.value(py).to_string(), CLEARED_RUNTIME_MESSAGE);
+            assert!(
+                providers
+                    .resolve_batch("native", "array_expr", "1")
+                    .is_err()
+            );
         });
     }
 

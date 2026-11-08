@@ -97,6 +97,13 @@ M1 接受一维数值输入，输出可为向量或标量；比较/where 所需�
 
 普通归约与 ts rolling 是不同 API，不用一个全局 `ignore_missing` 开关覆盖它们。采用原生 Array API 运算子集的明确规范，并给 nullable 扩展单独说明；不宣称完整 Array API 标准实现。
 
+上述 Python 整数字面量上限由声明前端在 JSON 编码前检查。A3 原生 factory
+接收已解析的 `JsonMap`，只能检查 `serde_json::Number` 保留的表示：i64/u64
+整数表示限于 ±2^53，有限 f64 表示保留完整范围。超出 i64/u64 的原始整数
+token 可能已经被上游舍入为 f64；factory 无法恢复其原始写法或精度，也不声称
+仍能验证原 token 上限。此处明确修订原先过强的 token 承诺，具体边界见
+[A3 接口修订](../api-notes/native-array-runtime.md#a3-已解析数值字面量边界)。
+
 ### 3.3 预算、错误与可观察性
 
 `ArrayExecutionOptions` 统一传递输出/临时内存限额。直接调用默认保留现有 1,000 万输出元素上限，并增加默认 256 MiB 的本次执行分配预算；它覆盖 owned 输出和临时缓冲，不包括借用输入与进程其他内存。允许显式调整，checked size/overflow 检查始终有效。有状态 handle 另有 `max_state_bytes`，默认 256 MiB；managed stream 使用 operator/job 的预算而非新增一套互不相干的内存池。

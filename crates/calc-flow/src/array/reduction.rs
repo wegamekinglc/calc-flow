@@ -1,5 +1,6 @@
 use datafusion::arrow::buffer::{BooleanBuffer, Buffer, NullBuffer};
 
+use super::control;
 use super::{ArrayExecutionOptions, FloatValues, FloatView, NativeArray, byte_width, invalid};
 use crate::Result;
 
@@ -61,7 +62,16 @@ pub fn sum(
     options: ReductionOptions,
     execution: &ArrayExecutionOptions,
 ) -> Result<NativeArray> {
-    exact_reduction(input, options, execution, false)
+    sum_checked(input, options, execution, &mut || Ok(()))
+}
+
+pub(super) fn sum_checked(
+    input: FloatView<'_>,
+    options: ReductionOptions,
+    execution: &ArrayExecutionOptions,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<NativeArray> {
+    exact_reduction(input, options, execution, false, check)
 }
 
 /// Computes an exactly accumulated mean before float64 ties-to-even rounding.
@@ -79,7 +89,16 @@ pub fn mean(
     options: ReductionOptions,
     execution: &ArrayExecutionOptions,
 ) -> Result<NativeArray> {
-    exact_reduction(input, options, execution, true)
+    mean_checked(input, options, execution, &mut || Ok(()))
+}
+
+pub(super) fn mean_checked(
+    input: FloatView<'_>,
+    options: ReductionOptions,
+    execution: &ArrayExecutionOptions,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<NativeArray> {
+    exact_reduction(input, options, execution, true, check)
 }
 
 /// Returns a scalar minimum, preserving the input dtype.
@@ -96,7 +115,16 @@ pub fn min(
     options: ReductionOptions,
     execution: &ArrayExecutionOptions,
 ) -> Result<NativeArray> {
-    extremum(input, options, execution, false)
+    min_checked(input, options, execution, &mut || Ok(()))
+}
+
+pub(super) fn min_checked(
+    input: FloatView<'_>,
+    options: ReductionOptions,
+    execution: &ArrayExecutionOptions,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<NativeArray> {
+    extremum(input, options, execution, false, check)
 }
 
 /// Returns a scalar maximum, preserving the input dtype.
@@ -113,7 +141,20 @@ pub fn max(
     options: ReductionOptions,
     execution: &ArrayExecutionOptions,
 ) -> Result<NativeArray> {
-    extremum(input, options, execution, true)
+    max_checked(input, options, execution, &mut || Ok(()))
+}
+
+pub(super) fn max_checked(
+    input: FloatView<'_>,
+    options: ReductionOptions,
+    execution: &ArrayExecutionOptions,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<NativeArray> {
+    extremum(input, options, execution, true, check)
+}
+
+pub(super) const fn exact_scratch_bytes() -> usize {
+    ExactSum::scratch_bytes()
 }
 
 fn exact_reduction(
@@ -121,19 +162,24 @@ fn exact_reduction(
     options: ReductionOptions,
     execution: &ArrayExecutionOptions,
     average: bool,
+    check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<NativeArray> {
+    check()?;
     if null_result(input, options) {
         execution.validate_allocation(1, size_of::<f64>() + 1, 0)?;
-        return scalar_f64(None);
+        return control::finish(scalar_f64(None), check);
     }
     execution.validate_allocation(1, size_of::<f64>(), ExactSum::scratch_bytes())?;
     let mut total = ExactSum::new();
-    visit_valid(input, |_, value| {
+    visit_valid(input, check, |_, value| {
         total
             .push(value)
             .map_err(|_| invalid("input.elements", "valid element count overflowed usize"))
     })?;
-    scalar_f64(if average { total.mean() } else { total.sum() })
+    control::finish(
+        scalar_f64(if average { total.mean() } else { total.sum() }),
+        check,
+    )
 }
 
 fn extremum(
@@ -141,20 +187,25 @@ fn extremum(
     options: ReductionOptions,
     execution: &ArrayExecutionOptions,
     maximum: bool,
+    check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<NativeArray> {
+    check()?;
     let is_null = null_result(input, options);
     execution.validate_allocation(1, byte_width(input.dtype()) + usize::from(is_null), 0)?;
     if is_null {
-        return scalar_from_position(input, None);
+        return control::finish(scalar_from_position(input, None), check);
     }
     let mut selected = None;
-    visit_valid(input, |index, value| {
+    visit_valid(input, check, |index, value| {
         if selected.is_none_or(|(_, current)| better_extremum(value, current, maximum)) {
             selected = Some((index, value));
         }
         Ok(())
     })?;
-    scalar_from_position(input, selected.map(|(index, _)| index))
+    control::finish(
+        scalar_from_position(input, selected.map(|(index, _)| index)),
+        check,
+    )
 }
 
 fn better_extremum(next: f64, current: f64, maximum: bool) -> bool {
@@ -179,26 +230,28 @@ fn null_result(input: FloatView<'_>, options: ReductionOptions) -> bool {
 
 fn visit_valid(
     input: FloatView<'_>,
+    check: &mut dyn FnMut() -> Result<()>,
+    visit: impl FnMut(usize, f64) -> Result<()>,
+) -> Result<()> {
+    match input.values() {
+        FloatValues::Float32(values) => visit_values(input, values, check, visit),
+        FloatValues::Float64(values) => visit_values(input, values, check, visit),
+    }
+}
+
+fn visit_values<T: Copy + Into<f64>>(
+    input: FloatView<'_>,
+    values: &[T],
+    check: &mut dyn FnMut() -> Result<()>,
     mut visit: impl FnMut(usize, f64) -> Result<()>,
 ) -> Result<()> {
-    let valid = |index| input.validity().is_none_or(|mask| mask.is_valid(index));
-    match input.values() {
-        FloatValues::Float32(values) => {
-            for (index, value) in values.iter().enumerate() {
-                if valid(index) {
-                    visit(index, f64::from(*value))?;
-                }
-            }
-        }
-        FloatValues::Float64(values) => {
-            for (index, value) in values.iter().enumerate() {
-                if valid(index) {
-                    visit(index, *value)?;
-                }
-            }
+    for (index, value) in values.iter().enumerate() {
+        control::checkpoint(index, check)?;
+        if input.validity().is_none_or(|mask| mask.is_valid(index)) {
+            visit(index, (*value).into())?;
         }
     }
-    Ok(())
+    check()
 }
 
 fn scalar_from_position(input: FloatView<'_>, selected: Option<usize>) -> Result<NativeArray> {

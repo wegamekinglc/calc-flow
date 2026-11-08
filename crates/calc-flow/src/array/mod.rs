@@ -17,8 +17,10 @@ use datafusion::arrow::buffer::{BooleanBuffer, NullBuffer};
 
 use crate::{CalcFlowError, Result};
 
+mod control;
 mod elementwise;
 mod execution;
+mod provider;
 mod reduction;
 pub(crate) mod rolling;
 mod rolling_mean;
@@ -31,6 +33,7 @@ pub use elementwise::{
     subtract, where_,
 };
 pub use execution::ArrayExecutionOptions;
+pub use provider::{NativeArrayFactory, register_native};
 pub use reduction::{ReductionOptions, max, mean, min, sum};
 pub use rolling::{EwmaOptions, ewma};
 pub use rolling_mean::{RollingMeanOptions, rolling_mean};

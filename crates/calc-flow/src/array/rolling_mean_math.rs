@@ -238,10 +238,25 @@ impl StableFold {
 pub(crate) fn stable_fold(
     values: impl Iterator<Item = f64>,
 ) -> Result<FloatSummary, ArithmeticError> {
+    stable_fold_controlled(values.map(Some), &mut || Ok(()), std::convert::identity)
+}
+
+pub(crate) fn stable_fold_controlled<E>(
+    values: impl Iterator<Item = Option<f64>>,
+    check: &mut dyn FnMut() -> Result<(), E>,
+    arithmetic: impl Fn(ArithmeticError) -> E,
+) -> Result<FloatSummary, E> {
+    check()?;
     let mut fold = StableFold::new();
-    for sample in values {
-        fold.push(sample)?;
+    for (index, sample) in values.enumerate() {
+        if index.is_multiple_of(4096) {
+            check()?;
+        }
+        if let Some(sample) = sample {
+            fold.push(sample).map_err(&arithmetic)?;
+        }
     }
+    check()?;
     Ok(fold.finish())
 }
 

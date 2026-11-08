@@ -991,6 +991,8 @@ def _symbolic_result_dtype(
 ) -> str:
     """Return the selected provider's v1 dtype for one symbolic primitive."""
 
+    if backend not in {"numpy", "jax"}:
+        raise TypeError(f"unsupported symbolic array backend {backend!r}")
     import numpy as np
 
     matrix = operation == "matmul"
@@ -1022,6 +1024,8 @@ def _symbolic_dtype_namespace(backend: str) -> object:
         import numpy as np
 
         return np
+    if backend != "jax":
+        raise TypeError(f"unsupported symbolic array backend {backend!r}")
     import jax.numpy as jnp
 
     return jnp
@@ -1331,6 +1335,11 @@ class _SymbolicMatrixProvider:
             }
         )
         return {"output": _native.Batch.from_pyarrow(attached, metadata)}
+
+
+def register_native(runtime: Runtime) -> None:
+    """Register the native batch-only array expression factory with a runtime."""
+    runtime._register_native_array()
 
 
 def register_numpy(runtime: Runtime) -> None:

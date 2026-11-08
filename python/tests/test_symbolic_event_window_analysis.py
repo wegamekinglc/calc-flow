@@ -60,7 +60,7 @@ def test_native_window_capability_is_precise_and_sorted() -> None:
     capabilities = Runtime().capabilities()
     window = next(item for item in capabilities.operators if item.kind == "window")
 
-    assert capabilities.schema_version == 3
+    assert capabilities.schema_version == 4
     assert window.version == "1"
     assert window.modes == ("stream",)
     assert window.input_ports == (ProviderPort("input", "table", required=True),)
