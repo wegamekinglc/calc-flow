@@ -138,7 +138,7 @@ async fn test_cte_refusal_refunds_and_retry_is_once() {
             .runtime()
             .unwrap()
             .incremental_memory_pool();
-        let basis = pool.reserved();
+        let basis = settled_reserved(&job, &pool).await;
         let next = post_input(&dtype, &[vec![Some(TWO); 3]], 1);
         let weak = weak_arrays(&next);
         assert!(matches!(
@@ -146,11 +146,11 @@ async fn test_cte_refusal_refunds_and_retry_is_once() {
             Err(CalcFlowError::Operator { node_id, .. }) if node_id == "reject-extrema"
         ));
         assert!(weak.iter().all(|array| array.upgrade().is_none()));
-        assert_eq!(pool.reserved(), basis);
+        assert_eq!(settled_reserved(&job, &pool).await, basis);
         same_snapshot(&accepted, &state.checkpoint(Epoch::INITIAL).unwrap());
         let pressure = MemoryConsumer::new("cte-pressure").register(&pool);
         pressure.try_grow((1 << 30) - basis - 1).unwrap();
-        let held = pool.reserved();
+        let held = settled_reserved(&job, &pool).await;
         let next = post_input(&dtype, &[vec![Some(TWO); 3]], 1);
         let weak = weak_arrays(&next);
         let mut collector = EdgeCollector::new(state.output_ports().to_vec());
@@ -162,7 +162,7 @@ async fn test_cte_refusal_refunds_and_retry_is_once() {
         );
         assert!(collector.drain("output").is_empty());
         assert!(weak.iter().all(|array| array.upgrade().is_none()));
-        assert_eq!(pool.reserved(), held);
+        assert_eq!(settled_reserved(&job, &pool).await, held);
         drop(pressure);
         same_snapshot(&accepted, &state.checkpoint(Epoch::INITIAL).unwrap());
         let actual = process(

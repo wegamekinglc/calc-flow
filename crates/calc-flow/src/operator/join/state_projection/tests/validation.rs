@@ -119,6 +119,7 @@ async fn reject_snapshot(
     let epoch = target.state.last_checkpoint_epoch;
     let writer = target.v2_writer.observation_for_test();
     let pool = target.runtime.runtime().unwrap().incremental_memory_pool();
+    job.gather_owner().retire_idle_generation_for_test().await;
     let baseline = pool.reserved();
     assert!(
         target.restore(&snapshot).is_err(),
@@ -144,6 +145,7 @@ async fn reject_snapshot(
         writer,
         "writer changed: {label}"
     );
+    job.gather_owner().retire_idle_generation_for_test().await;
     assert_eq!(pool.reserved(), baseline, "managed credit changed: {label}");
 }
 

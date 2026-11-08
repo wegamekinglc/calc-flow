@@ -745,3 +745,51 @@ acquisition, Python matrix, remote CI result or measured speedup is added by
 this source handoff. A local source commit prepares a draft PR for real
 CI/Codacy; the final baseline and candidate builds still require then-current
 main and any final merged P2 changes as specified by the protocol.
+
+## Integration onto main 7ac64990
+
+P3 is rebased onto exact main
+`7ac64990739a5d7dd8d6acecbc5e6ce2b65e5d75`, which includes the merged P2
+implementation. The runtime conflicts only combine P2's existing decay pool
+with P3's shared-row plan initialization and test constructors. Both caches
+retain their admission and owner accounting. P3 still admits only exclusive
+Float64 Rows mean/difference plans; a stage containing decay keeps P2's
+original typed cache/reference path. No numeric recurrence, M2 transition,
+codec, fingerprint input, quota or logical-budget rule changed in this merge.
+The original shared-row allocator, entity-parallel implementation and old
+8d fixtures/generator remain byte-identical to the previously reviewed P3.
+
+Two Python integration defects had focused RED/GREEN evidence. The existing
+P2 small-stream test first failed with `KeyError: rolling_decay`: the new plan
+preflight had bypassed P2's `_warm_program`. Plan preparation now uses that
+unchanged declaration helper and checks the exact existing decay or mixed
+decay/mean outputs as well as the mean shapes. Both P2 indicators pass the
+same small-stream test, including their independent value oracles. A second
+controller test showed that requiring bitwise equality for certified decay
+would reject results allowed by P2's existing D13 tolerance. All output
+digests remain recorded; paired exact equality applies to the original
+mean/dual-mean indicators, including every frozen P3 case. P2 decay indicators
+retain their original value-oracle acceptance. Expanded configuration and
+project/program/plan identity checks remain required for both families.
+
+The integrated core library test build took 3m20s. Its eight shared-history
+tests pass, including both-profile old-writer recovery, positive-credit
+restore/serial rejection and actual SQL sorted AVG. Seventeen further exact
+test selections pass in 0.90s: P2 typed/mixed/buffered recovery, refused and
+cancelled work, budgets and twelve work counters; P3 MeanRows/generic parity,
+all summary bits, sorted continuation/alias/refusal and parallel paths.
+Scoped core `--lib --tests --features benchmark-internals` Clippy with
+`-D warnings` passes in 2m27s. The directly affected Python/controller checks
+pass 62 tests plus two subtests; twenty P2 helper controls and the existing
+small-stream test also pass. Formatter, Ruff, C901 at most eight, the actual
+complexity ratchet, whitespace and project-schema no-drift checks pass.
+
+Receipts are archived under `target/ta-arroyo-p3-debug-cargo` with the
+`p3-main7ac-` prefix; `p3-main7ac-preservation.json` records twenty-five
+byte-preservation checks. Earlier manifests remain historical evidence;
+the integrated source receives a separate freeze. No release build or
+performance acquisition ran here. The three workloads, sample counts and
+inclusive budget above are unchanged. The dedicated deadline/quiet/RSS/seal
+adapter, compatible sealed release identities, delta review and final-head
+CI/Codacy remain required. An existing cc6 release artifact is not relabeled
+as main 7ac by this integration.

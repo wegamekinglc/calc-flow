@@ -92,6 +92,8 @@ pub struct RollingCallbackMetrics {
     pub output_rows_prepared: u64,
     /// Output chunks prepared before emission.
     pub output_chunks_prepared: u64,
+    #[serde(rename = "_decay_work", skip_serializing_if = "DecayWork::is_empty")]
+    decay_work: DecayWork,
 }
 
 #[derive(Clone, Copy)]
@@ -137,6 +139,81 @@ pub(crate) enum RollingWork {
     ScalarValueConversions,
     OutputRowsPrepared,
     OutputChunksPrepared,
+    DecayTransitions,
+    DecayShortcutRows,
+    DecayCertifiedRows,
+    DecayGuardFallbackRows,
+    DecayQuotaReferenceRows,
+    DecayScheduledReseedRows,
+    DecayInitialSeedSamples,
+    DecayScheduledReseedSamples,
+    DecayGuardReseedSamples,
+    DecayReferenceScanSamples,
+    DecayCacheCopiedSamples,
+    DecayReferenceHistorySamples,
+}
+
+const DECAY_WORK_NAMES: [&str; 12] = [
+    "transitions",
+    "shortcut_rows",
+    "certified_rows",
+    "guard_fallback_rows",
+    "quota_reference_rows",
+    "scheduled_reseed_rows",
+    "initial_seed_samples",
+    "scheduled_reseed_samples",
+    "guard_reseed_samples",
+    "reference_scan_samples",
+    "cache_copied_samples",
+    "reference_history_samples",
+];
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct DecayWork {
+    counts: [u64; 12],
+    overflowed: bool,
+}
+
+impl Serialize for DecayWork {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(DECAY_WORK_NAMES.len()))?;
+        for (name, amount) in DECAY_WORK_NAMES.into_iter().zip(self.counts) {
+            map.serialize_entry(name, &amount)?;
+        }
+        map.end()
+    }
+}
+
+impl DecayWork {
+    fn is_empty(&self) -> bool {
+        self.counts.iter().all(|amount| *amount == 0)
+    }
+
+    pub(crate) fn add(&mut self, work: RollingWork, amount: usize) {
+        let slot = &mut self.counts[work as usize - RollingWork::DecayTransitions as usize];
+        let next = u64::try_from(amount)
+            .ok()
+            .and_then(|amount| slot.checked_add(amount));
+        self.overflowed |= next.is_none();
+        if let Some(next) = next {
+            *slot = next;
+        }
+    }
+
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.overflowed |= other.overflowed;
+        for (target, amount) in self.counts.iter_mut().zip(other.counts) {
+            if let Some(next) = target.checked_add(amount) {
+                *target = next;
+            } else {
+                self.overflowed = true;
+            }
+        }
+    }
 }
 
 pub(crate) trait RollingMetricsClock: Send + Sync {
@@ -200,7 +277,7 @@ impl RollingMetricsStore {
                     switched: now,
                     stage: RollingStage::Other,
                     durations: [Duration::ZERO; 10],
-                    work: [0; 10],
+                    work: [0; 22],
                     overflowed: false,
                     finalized: false,
                     outcome: None,
@@ -219,7 +296,7 @@ struct Observation {
     switched: Duration,
     stage: RollingStage,
     durations: [Duration; 10],
-    work: [u64; 10],
+    work: [u64; 22],
     overflowed: bool,
     finalized: bool,
     outcome: Option<CallbackOutcome>,
@@ -280,6 +357,22 @@ impl RollingMetricsRecorder {
             observation.work[work as usize] = next;
         } else {
             observation.overflowed = true;
+        }
+    }
+
+    pub(crate) fn add_decay(&self, work: &DecayWork) {
+        let mut observation = self.0.observation.lock();
+        if observation.outcome.is_some() || observation.overflowed {
+            return;
+        }
+        observation.overflowed |= work.overflowed;
+        for (index, amount) in work.counts.iter().enumerate() {
+            let slot = index + RollingWork::DecayTransitions as usize;
+            if let Some(next) = observation.work[slot].checked_add(*amount) {
+                observation.work[slot] = next;
+            } else {
+                observation.overflowed = true;
+            }
         }
     }
 
@@ -459,6 +552,10 @@ fn accumulate(
         scalar_value_conversions => ScalarValueConversions,
         output_rows_prepared => OutputRowsPrepared,
         output_chunks_prepared => OutputChunksPrepared,
+    }
+    let decay = &observation.work[RollingWork::DecayTransitions as usize..];
+    for (current, amount) in next.decay_work.counts.iter_mut().zip(decay) {
+        *current = current.checked_add(*amount)?;
     }
     Some(next)
 }

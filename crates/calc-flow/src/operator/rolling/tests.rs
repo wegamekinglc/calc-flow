@@ -1,3 +1,4 @@
+mod decay_tests;
 mod late;
 mod shared_rows;
 

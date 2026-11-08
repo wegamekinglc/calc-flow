@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import hashlib
+import json
 import statistics
+import struct
 import time
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -37,6 +41,7 @@ from calc_flow import (
     StreamRuntimeConfig,
     Watermark,
 )
+from calc_flow.symbolic import Program, rows, ts
 
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
 BASE_MICROS = np.int64(int(BASE.timestamp() * 1_000_000))
@@ -50,6 +55,129 @@ SCHEMA = pa.schema(
 )
 RTOL = 1e-10
 ATOL = 1e-10
+DECAY_INDICATORS = ("rolling_decay", "decay_mean")
+
+
+def expected_decay(prices: np.ndarray, *, entities: int, window: int) -> np.ndarray:
+    """Independently fold finite fixture frames in the reference weight order."""
+    expected = np.empty(len(prices), dtype=np.float64)
+    for entity in range(entities):
+        history = deque(maxlen=window)
+        for position in range(entity, len(prices), entities):
+            history.append(float(prices[position]))
+            numerator = denominator = 0.0
+            for weight, value in enumerate(history, window - len(history) + 1):
+                numerator += float(weight) * value
+                denominator += float(weight)
+            expected[position] = numerator / denominator
+    return expected
+
+
+FLOAT64_DIGEST_FORMAT = "calc-flow-warm-float64-v1"
+
+
+def _metadata_pairs(metadata: dict[bytes, bytes] | None) -> list[list[str]]:
+    return [[key.hex(), value.hex()] for key, value in sorted((metadata or {}).items())]
+
+
+def _canonical_schema(schema: pa.Schema) -> bytes:
+    fields = [
+        {
+            "name": field.name,
+            "type": str(field.type),
+            "nullable": field.nullable,
+            "metadata": _metadata_pairs(field.metadata),
+        }
+        for field in schema
+    ]
+    value = {"fields": fields, "metadata": _metadata_pairs(schema.metadata)}
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _digest_field(digest: Any, value: bytes) -> None:
+    digest.update(struct.pack("<Q", len(value)))
+    digest.update(value)
+
+
+class _Float64Digest:
+    """Hash logical validity and valid raw bits independently of Arrow chunks."""
+
+    def __init__(self) -> None:
+        self._schema: bytes | None = None
+        self._columns: tuple[int, ...] = ()
+        self._column_count = 0
+        self._rows = 0
+        self._validity: list[Any] = []
+        self._values: list[Any] = []
+        self._valid_counts: list[int] = []
+
+    def _initialize(self, schema: pa.Schema) -> None:
+        self._columns = tuple(
+            index
+            for index, field in enumerate(schema)
+            if pa.types.is_float64(field.type)
+        )
+        if not self._columns:
+            raise ValueError("output digest requires a Float64 column")
+        self._schema = _canonical_schema(schema)
+        self._column_count = len(schema)
+        self._validity = [hashlib.sha256() for _ in self._columns]
+        self._values = [hashlib.sha256() for _ in self._columns]
+        self._valid_counts = [0 for _ in self._columns]
+
+    def update(self, table: pa.Table) -> None:
+        if self._schema is None:
+            self._initialize(table.schema)
+        if _canonical_schema(table.schema) != self._schema:
+            raise ValueError("output digest schema changed")
+        for position, column in enumerate(self._columns):
+            for chunk in table.column(column).chunks:
+                self._update_chunk(position, chunk)
+        self._rows += table.num_rows
+
+    def _update_chunk(self, position: int, chunk: pa.Array) -> None:
+        valid = chunk.is_valid().to_numpy(zero_copy_only=False)
+        self._validity[position].update(valid.astype(np.uint8).tobytes())
+        count = int(np.count_nonzero(valid))
+        if count:
+            buffer = chunk.buffers()[1]
+            if buffer is None:
+                raise ValueError("valid Float64 output has no value buffer")
+            bits = np.frombuffer(
+                buffer, dtype=np.uint64, count=len(chunk), offset=chunk.offset * 8
+            )
+            self._values[position].update(
+                np.asarray(bits[valid], dtype="<u8").tobytes()
+            )
+        self._valid_counts[position] += count
+
+    def hexdigest(self) -> str:
+        if self._schema is None:
+            raise ValueError("output digest has no schema")
+        digest = hashlib.sha256(FLOAT64_DIGEST_FORMAT.encode() + b"\0")
+        for value in (
+            self._schema,
+            struct.pack("<Q", self._column_count),
+            struct.pack("<Q", len(self._columns)),
+            struct.pack("<Q", self._rows),
+        ):
+            _digest_field(digest, value)
+        for position, column in enumerate(self._columns):
+            for value in (
+                struct.pack("<Q", column),
+                struct.pack("<Q", self._rows),
+                struct.pack("<Q", self._valid_counts[position]),
+                self._validity[position].digest(),
+                self._values[position].digest(),
+            ):
+                _digest_field(digest, value)
+        return digest.hexdigest()
+
+
+def _float64_output_digest(table: pa.Table) -> str:
+    digest = _Float64Digest()
+    digest.update(table)
+    return digest.hexdigest()
 
 
 def _prices(sequence: np.ndarray, entities: int) -> np.ndarray:
@@ -61,11 +189,16 @@ def _prices(sequence: np.ndarray, entities: int) -> np.ndarray:
     )
 
 
+def _symbols(entities: int) -> np.ndarray:
+    width = max(3, len(str(entities - 1)))
+    return np.asarray([f"S{index:0{width}d}" for index in range(entities)])
+
+
 def _segment(start: int, rows: int, entities: int) -> pa.Table:
     sequence = np.arange(start, start + rows, dtype=np.uint64)
     entity_index = sequence % np.uint64(entities)
     positions = sequence // np.uint64(entities)
-    symbols = np.asarray([f"S{index:03d}" for index in range(entities)])
+    symbols = _symbols(entities)
     return pa.table(
         {
             "event_time": pa.array(
@@ -154,7 +287,7 @@ def _input_table(config: ScenarioConfig, start: int, rows: int) -> pa.Table:
         (sequence.astype(np.int64) - config.history_rows) % config.append_entities,
         sequence % config.entities,
     ).astype(np.int64)
-    symbols = np.asarray([f"S{index:03d}" for index in range(config.entities)])
+    symbols = _symbols(config.entities)
     table = table.set_column(
         0,
         SCHEMA.field(0),
@@ -178,20 +311,6 @@ def _prepared_events(
     return data, watermark
 
 
-async def _push_and_receive(
-    source: _InteractiveSource,
-    sink: _QueueSink,
-    data: Data,
-    watermark: Watermark,
-) -> tuple[pa.Table, float]:
-    started = time.perf_counter_ns()
-    await source.push(data)
-    await source.push(watermark)
-    table = await sink.receive()
-    elapsed = (time.perf_counter_ns() - started) / 1_000_000_000
-    return table, elapsed
-
-
 def _expected(
     config: ScenarioConfig,
     *,
@@ -204,7 +323,9 @@ def _expected(
     context_start = start - context_rows
     sequence = np.arange(context_start, start + rows, dtype=np.uint64)
     prices = _prices(sequence, config.entities)
-    if config.indicator == "dual_sma_spread":
+    if config.indicator in DECAY_INDICATORS:
+        values = expected_decay(prices, entities=config.entities, window=config.window)
+    elif config.indicator == "dual_sma_spread":
         values = expected_dual_sma_spread(
             prices,
             entities=config.entities,
@@ -266,7 +387,11 @@ def _validate_output(
     if table.num_rows != rows:
         raise RuntimeError(f"expected {rows} output rows, observed {table.num_rows}")
     output_column = (
-        "dual_sma_spread" if config.indicator == "dual_sma_spread" else "moving_average"
+        "decay"
+        if config.indicator in DECAY_INDICATORS
+        else "dual_sma_spread"
+        if config.indicator == "dual_sma_spread"
+        else "moving_average"
     )
     sequence = table["sequence"].combine_chunks().to_numpy(zero_copy_only=False)
     order = np.arange(rows)
@@ -277,15 +402,23 @@ def _validate_output(
         raise RuntimeError("stream output identity columns changed")
     actual = table[output_column].combine_chunks().to_numpy(zero_copy_only=False)[order]
     expected = _expected(config, start=start, rows=rows)
-    close = np.isclose(actual, expected, rtol=RTOL, atol=ATOL, equal_nan=True)
+    tolerance = (1e-12, 1e-12) if config.indicator in DECAY_INDICATORS else (RTOL, ATOL)
+    close = np.isclose(
+        actual, expected, rtol=tolerance[0], atol=tolerance[1], equal_nan=True
+    )
     absolute = np.abs(actual - expected)
     result = {
         "passed": bool(np.all(close)),
         "mismatched_values": int(np.count_nonzero(~close)),
         "max_absolute_error": float(absolute.max(initial=0.0)),
+        "float64_digest": _float64_output_digest(table),
     }
     if not result["passed"]:
         raise RuntimeError(f"strict incremental correctness failed: {result}")
+    if config.indicator == "decay_mean":
+        _validate_output(
+            table, replace(config, indicator="rolling_mean"), start=start, rows=rows
+        )
     return result
 
 
@@ -323,6 +456,123 @@ def _validate_positive_sizes(sizes: tuple[int, ...]) -> None:
         raise ValueError("scenario sizes must be positive integers")
 
 
+def _expected_mean(size: int) -> dict[str, Any]:
+    return {
+        "kind": "mean",
+        "primitive_version": 1,
+        "input": "price",
+        "frame": {"kind": "rows", "size": size},
+        "min_periods": 1,
+    }
+
+
+def _expected_rolling_output(config: ScenarioConfig) -> dict[str, Any]:
+    slow = _expected_mean(config.window)
+    if config.indicator == "rolling_mean":
+        return slow
+    return {
+        "kind": "difference",
+        "primitive_version": 1,
+        "left": _expected_mean(config.fast_window),
+        "right": slow,
+    }
+
+
+def _expected_rolling_outputs(config: ScenarioConfig) -> list[dict[str, Any]]:
+    if config.indicator not in DECAY_INDICATORS:
+        return [_expected_rolling_output(config)]
+    decay = {**_expected_mean(config.window), "kind": "decay"}
+    if config.indicator == "decay_mean":
+        return [decay, _expected_mean(config.window)]
+    return [decay]
+
+
+def _rolling_preflight(spec: dict[str, Any], config: ScenarioConfig) -> None:
+    expected = {
+        "configuration_version": 1,
+        "state_layout_version": 1,
+        "numerical_profile": "stable_v1",
+        "partition_by": ["symbol"],
+        "event_time": "event_time",
+        "sequence_by": ["sequence"],
+        "allowed_lateness_micros": 0,
+        "late_policy": {"kind": "error", "scope": "envelope"},
+        "value_policy": "stateful_numeric_v1",
+    }
+    actual = {key: spec.get(key) for key in expected}
+    actual["numerical_profile"] = spec.get("numerical_profile", "stable_v1")
+    if actual != expected:
+        raise ValueError("warm plan preflight rolling semantics changed")
+    outputs = [
+        {key: value for key, value in output.items() if key != "output"}
+        for output in spec["outputs"]
+    ]
+    if outputs != _expected_rolling_outputs(config):
+        raise ValueError("warm plan preflight output frames or min_periods changed")
+
+
+def _plan_preflight(project: dict[str, Any], config: ScenarioConfig) -> dict[str, Any]:
+    if project["runtime"]["mode"] != "stream":
+        raise ValueError("warm plan preflight requires streaming mode")
+    graph = project["graph"]
+    expected = {
+        "batch_size": 8192,
+        "target_partitions": 1,
+        "parallelism_mode": "fixed",
+        "enable_rolling_rewrite": True,
+    }
+    datafusion = {key: graph["datafusion"].get(key) for key in expected}
+    if datafusion != expected:
+        raise ValueError("warm plan preflight DataFusion policy changed")
+    rolling = [
+        node["operator"]["spec"]
+        for node in graph["nodes"]
+        if node["operator"]["kind"] == "rolling"
+    ]
+    if len(rolling) != 1:
+        raise ValueError("warm plan preflight requires one rolling stage")
+    _rolling_preflight(rolling[0], config)
+    windows = (
+        [config.fast_window, config.window]
+        if config.indicator == "dual_sma_spread"
+        else [config.window] * len(_expected_rolling_outputs(config))
+    )
+    return {
+        "engine": "streaming",
+        "numerical_profile": "stable_v1",
+        "windows": windows,
+        "min_periods": 1,
+        "datafusion": datafusion,
+    }
+
+
+def _validate_no_late_rows(status: dict[str, Any]) -> None:
+    operators = status.get("operators")
+    if not isinstance(operators, dict) or not operators:
+        raise RuntimeError("warm stream requires measured zero late rows")
+    if any(
+        not isinstance(node, dict) or node.get("late_rows") != 0
+        for node in operators.values()
+    ):
+        raise RuntimeError("warm stream requires measured zero late rows")
+
+
+def _prepared_plan(config: ScenarioConfig) -> tuple[Any, dict[str, Any]]:
+    runtime = Runtime()
+    program = _warm_program(config)
+    project = program.to_project(runtime).model_dump(mode="json")
+    preflight = _plan_preflight(project, config)
+    encoded = json.dumps(project, sort_keys=True, separators=(",", ":")).encode()
+    plan = program.compile_stream(runtime)
+    identity = {
+        "program_fingerprint": program.fingerprint,
+        "plan_fingerprint": plan.fingerprint,
+        "project_sha256": hashlib.sha256(encoded).hexdigest(),
+        "preflight": preflight,
+    }
+    return plan, identity
+
+
 @dataclass(frozen=True, slots=True)
 class ScenarioConfig:
     history_rows: int = 1_024_000
@@ -345,17 +595,50 @@ class ScenarioConfig:
         )
         _validate_positive_sizes(sizes)
         _validate_append_entities(self.append_entities, self.entities)
-        ticks = (self.history_rows, self.history_segment_rows)
+        ticks = (self.history_rows,)
         if self.append_entities is None:
             ticks += (self.append_rows,)
         if any(value % self.entities for value in ticks):
             raise ValueError(
                 "history and increments must contain complete entity ticks"
             )
+        segment = self.history_segment_rows
+        if segment % self.entities and self.entities % segment:
+            raise ValueError(
+                "history segments must contain or divide complete entity ticks"
+            )
         if self.fast_window > self.window:
             raise ValueError("fast_window must not exceed window")
-        if self.indicator not in ("rolling_mean", "dual_sma_spread"):
+        if self.indicator not in ("rolling_mean", "dual_sma_spread", *DECAY_INDICATORS):
             raise ValueError("unsupported warm indicator")
+        if self.indicator in DECAY_INDICATORS and self.append_entities is not None:
+            raise ValueError("decay profiling requires full entity ticks")
+
+
+def _warm_program(config: ScenarioConfig) -> Program:
+    indicator = (
+        "rolling_mean" if config.indicator in DECAY_INDICATORS else config.indicator
+    )
+    program = _native_program(
+        config.window,
+        indicator=indicator,
+        fast_window=config.fast_window,
+        engine="streaming",
+    )
+    if config.indicator not in DECAY_INDICATORS:
+        return program
+    quotes = program.inputs[0]
+    features = {"decay": ts.decay(quotes["price"], window=rows(config.window))}
+    if config.indicator == "decay_mean":
+        features["moving_average"] = ts.mean(
+            quotes["price"], window=rows(config.window)
+        )
+    return Program(
+        f"warm-{config.indicator}",
+        engine="streaming",
+        inputs=program.inputs,
+        outputs=(("indicators", quotes.with_columns(features)),),
+    )
 
 
 class WarmScenario:
@@ -375,15 +658,16 @@ class WarmScenario:
         self.position = 0
         self.warm_seconds = 0.0
         self.before_status: dict[str, Any] = {}
+        self._warm_digest = _Float64Digest()
+        self.plan_identity: dict[str, Any] = {}
+
+    @property
+    def warm_output_digest(self) -> str:
+        return self._warm_digest.hexdigest()
 
     @classmethod
     async def start(cls, config: ScenarioConfig, state_root: Path) -> WarmScenario:
-        plan = _native_program(
-            config.window,
-            indicator=config.indicator,
-            fast_window=config.fast_window,
-            engine="streaming",
-        ).compile_stream(Runtime())
+        plan, identity = _prepared_plan(config)
         maximum = max(config.history_segment_rows, config.append_rows)
         source = _InteractiveSource(max_batch_rows=maximum)
         sink = _QueueSink()
@@ -402,25 +686,46 @@ class WarmScenario:
             ),
         ).start_async()
         scenario = cls(config, source, sink, job)
+        scenario.plan_identity = identity
         try:
             await asyncio.wait_for(source.opened.wait(), timeout=30)
             started = time.perf_counter()
-            while scenario.position < config.history_rows:
-                count = min(
-                    config.history_segment_rows, config.history_rows - scenario.position
-                )
-                data, watermark = _prepared_events(config, scenario.position, count)
-                table, _elapsed = await _push_and_receive(source, sink, data, watermark)
-                scenario.validate(table, count)
-                scenario.position += count
+            await scenario._warm_history()
             scenario.warm_seconds = time.perf_counter() - started
             # A loop turn outside timing lets prior completion callbacks retire.
             await asyncio.sleep(0)
             scenario.before_status = job.status()
+            _validate_no_late_rows(scenario.before_status)
             return scenario
         except BaseException:
             await job.cancel_async()
             raise
+
+    async def _warm_history(self) -> None:
+        group_rows = max(self.config.history_segment_rows, self.config.entities)
+        while self.position < self.config.history_rows:
+            await self._warm_group(
+                min(group_rows, self.config.history_rows - self.position)
+            )
+
+    async def _warm_group(self, rows: int) -> None:
+        start = self.position
+        end = start + rows
+        watermark = None
+        for offset in range(0, rows, self.config.history_segment_rows):
+            count = min(self.config.history_segment_rows, rows - offset)
+            data, watermark = _prepared_events(self.config, start + offset, count)
+            await self.source.push(data)
+        await self.source.push(watermark)
+        while self.position < end:
+            table = await self.sink.receive()
+            if not 0 < table.num_rows <= end - self.position:
+                raise RuntimeError(
+                    "warm output must contain only the pending tick rows"
+                )
+            self.validate(table, table.num_rows)
+            self._warm_digest.update(table)
+            self.position += table.num_rows
 
     def validate(self, table: pa.Table, rows: int) -> dict[str, Any]:
         return _validate_output(
@@ -469,9 +774,11 @@ class WarmScenario:
             raise RuntimeError(
                 f"warm runner ended in {outcome.state}: {outcome.errors}"
             )
+        status = self.job.status()
+        _validate_no_late_rows(status)
         return {
             "state": outcome.state,
             "warm_seconds": self.warm_seconds,
             "before_status": self.before_status,
-            "after_status": self.job.status(),
+            "after_status": status,
         }

@@ -368,6 +368,7 @@ mod tests {
             estimated_state_bytes_per_entity: 0,
             fingerprint: "test-kernel".to_owned(),
             checkpoint_fingerprint: None,
+            decay_pool: None,
         };
         plan.shared_rows = plan.shared_rows_shape();
         plan

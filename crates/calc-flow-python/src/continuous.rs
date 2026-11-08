@@ -2083,7 +2083,25 @@ fn rolling_callback_to_py<'py>(
         "output_rows_prepared" => status.output_rows_prepared,
         "output_chunks_prepared" => status.output_chunks_prepared,
     });
+    let serialized = serde_json::to_value(status).map_err(|error| {
+        PyRuntimeError::new_err(format!("rolling metrics serialization failed: {error}"))
+    })?;
+    copy_decay_work_to_py(py, &value, &serialized)?;
     Ok(value)
+}
+
+fn copy_decay_work_to_py(
+    py: Python<'_>,
+    target: &Bound<'_, PyDict>,
+    serialized: &serde_json::Value,
+) -> PyResult<()> {
+    if let Some(work) = serialized.get("_decay_work") {
+        target.set_item(
+            "_decay_work",
+            crate::config::json_to_python(py, &work.to_string())?,
+        )?;
+    }
+    Ok(())
 }
 
 fn stream_join_status_value_to_py<'py>(
@@ -2677,6 +2695,37 @@ mod tests {
                     assert!(error.is_instance_of::<pyo3::exceptions::PyRuntimeError>(py));
                     assert!(error.to_string().contains("StreamingJob has been cleared"));
                 }
+            }
+        });
+    }
+
+    #[test]
+    fn rolling_decay_private_work_mapping_preserves_ordinary_status_keys() {
+        Python::initialize();
+        Python::attach(|py| {
+            let status = calc_flow::RollingCallbackMetrics::default();
+            let ordinary = super::rolling_callback_to_py(py, &status).unwrap();
+            assert!(!ordinary.contains("_decay_work").unwrap());
+            let keys = ordinary.keys().to_string();
+            let key_count = ordinary.len();
+            super::copy_decay_work_to_py(py, &ordinary, &serde_json::json!({})).unwrap();
+            assert_eq!(ordinary.keys().to_string(), keys);
+            let work = serde_json::json!({"_decay_work": {
+                "transitions": 3, "cache_copied_samples": 2,
+                "reference_scan_samples": 6
+            }});
+            super::copy_decay_work_to_py(py, &ordinary, &work).unwrap();
+            assert_eq!(ordinary.len(), key_count + 1);
+            let mapped = ordinary.get_item("_decay_work").unwrap().unwrap();
+            for (name, expected) in [
+                ("transitions", 3_u64),
+                ("cache_copied_samples", 2),
+                ("reference_scan_samples", 6),
+            ] {
+                assert_eq!(
+                    mapped.get_item(name).unwrap().extract::<u64>().unwrap(),
+                    expected
+                );
             }
         });
     }

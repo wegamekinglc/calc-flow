@@ -778,10 +778,10 @@ membership, delivery count/status, and integer/boolean/string values are
 always exact.
 
 | Primitive family                                      | `rtol`  | `atol`  |
-| ----------------------------------------------------- | ------- | ------- |
+|-------------------------------------------------------|---------|---------|
 | row-local, lag/delta, min/max, rank/percentile        | exact   | exact   |
 | cross-section top/bottom selection                    | exact   | exact   |
-| rolling sum/mean (`float64` result)                   | `1e-12` | `1e-12` |
+| rolling sum/mean/weighted decay (`float64` result)    | `1e-12` | `1e-12` |
 | variance/stddev/covariance/correlation                | `1e-10` | `1e-12` |
 | cross-section demean/z-score/winsorize/mean-fill      | `1e-10` | `1e-12` |
 | matrix/provider `float64` within one provider/version | `1e-12` | `1e-12` |

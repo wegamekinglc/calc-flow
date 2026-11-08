@@ -1,0 +1,128 @@
+diff --git a/crates/calc-flow/src/operator/rolling/tests.rs b/crates/calc-flow/src/operator/rolling/tests.rs
+index 27787793..39bd6a6d 100644
+--- a/crates/calc-flow/src/operator/rolling/tests.rs
++++ b/crates/calc-flow/src/operator/rolling/tests.rs
+@@ -0,0 +1 @@
++mod decay_tests;
+diff --git a/crates/calc-flow/src/operator/rolling/tests/decay_tests.rs b/crates/calc-flow/src/operator/rolling/tests/decay_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/calc-flow/src/operator/rolling/tests/decay_tests.rs
+@@ -0,0 +1,117 @@
++use super::*;
++
++fn decay_output(window: u64) -> Value {
++    json!({
++        "kind": "decay", "primitive_version": 1, "input": "price",
++        "output": "decayed", "frame": {"kind": "rows", "size": window},
++        "min_periods": 1
++    })
++}
++
++fn decay_spec(window: u64, with_mean: bool) -> RollingSpec {
++    let mut outputs = vec![decay_output(window)];
++    if with_mean {
++        outputs.push(aggregate_output("mean", "price", "mean", window));
++    }
++    kernel_spec(json!(outputs))
++}
++
++#[test]
++fn p2_decay_and_mean_use_the_typed_kernel() {
++    for with_mean in [false, true] {
++        let spec = decay_spec(3, with_mean);
++        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
++        assert_eq!(
++            compiled.kernel_plan.selection(),
++            KernelSelection::OrderedPrimitive
++        );
++        let input = float64_fast_record(&[
++            (1, "a", 1, Some(1.0)),
++            (2, "a", 2, None),
++            (3, "a", 3, Some(4.0)),
++            (4, "a", 4, Some(f64::NAN)),
++            (5, "a", 5, Some(7.0)),
++        ]);
++        assert_typed_matches_general(&spec, &kernel_schema(), &input);
++    }
++}
++
++#[tokio::test]
++async fn p2_capture_old_source_checkpoints_before_typed_admission() {
++    let Ok(destination) = std::env::var("CALC_FLOW_CAPTURE_DECAY_FIXTURES") else {
++        return;
++    };
++    let mut cases = Vec::new();
++    let mut single = decay_spec(3, false);
++    cases.push(("single_stable_v1", single.clone()));
++    single.numerical_profile = RollingNumericalProfile::StableV2Preview;
++    cases.push(("single_stable_v2", single));
++    let mut mixed = decay_spec(3, true);
++    mixed.numerical_profile = RollingNumericalProfile::StableV2Preview;
++    cases.push(("mixed_mean_stable_v2", mixed));
++    let mut cumulative = kernel_spec(json!([
++        decay_output(3),
++        {"kind":"cumulative_sum", "primitive_version":1, "input":"price", "output":"total", "min_periods":1}
++    ]));
++    cumulative.state_layout_version = 4;
++    cases.push(("mixed_cumulative", cumulative));
++    let earlier = kernel_spec(json!([
++        aggregate_output("min", "label", "minimum_label", 3),
++        decay_output(3)
++    ]));
++    cases.push(("earlier_unsupported_group", earlier));
++    let mut fixtures = Vec::new();
++    for (name, spec) in cases {
++        let mut operator =
++            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
++        assert_eq!(
++            operator.compiled.kernel_plan.selection(),
++            KernelSelection::General
++        );
++        let job = crate::StreamJobContext::new(
++            7,
++            TEST_FINGERPRINT,
++            JsonMap::new(),
++            None,
++            crate::CancellationToken::new(),
++        );
++        let context = StreamOperatorContext::new(&job, "rolling", None);
++        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
++        operator
++            .process_data(
++                "input",
++                Batch::table(
++                    vec![float64_fast_record(&[
++                        (1, "a", 1, Some(1e20)),
++                        (2, "a", 2, None),
++                        (3, "a", 3, Some(1.0)),
++                    ])],
++                    BatchMetadata::default(),
++                )
++                .unwrap(),
++                &context,
++                &mut output,
++            )
++            .await
++            .unwrap();
++        operator
++            .on_watermark(EventTime::from_micros(3), &context, &mut output)
++            .await
++            .unwrap();
++        let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
++        let segments: BTreeMap<_, _> = snapshot
++            .segments
++            .iter()
++            .map(|(id, segment)| (id.clone(), hex::encode(segment.bytes())))
++            .collect();
++        fixtures.push(json!({"case":name, "spec":spec, "metadata":snapshot.inline_metadata, "segments":segments}));
++    }
++    let payload = json!({
++        "runtime_baseline":"8d8be7d907a095dbc0dc2b73dafcfdd842979cdf",
++        "generator_patch_sha256":std::env::var("CALC_FLOW_GENERATOR_PATCH_SHA256").unwrap(),
++        "fixtures":fixtures
++    });
++    tokio::fs::write(destination, serde_json::to_vec_pretty(&payload).unwrap())
++        .await
++        .unwrap();
++}

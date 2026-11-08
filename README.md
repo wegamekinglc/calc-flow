@@ -83,6 +83,11 @@ The [Rust runtime reference](docs/rust-api.md) and
 [native examples](crates/calc-flow/examples/README.md) cover implementation and
 extension work. The `calc-flow` crate's exports remain available to those users.
 
+For native applications, see the [Rust installation and quickstart](crates/calc-flow/README.md).
+The first crates.io publication is being prepared; the
+[Rust release guide](docs/rust-release.md) covers packaging, external consumers,
+and the registry dependency audit.
+
 ## Architecture
 
 ```text
@@ -219,6 +224,8 @@ the maintained repository commands and constraints.
 - **[Verification](docs/verification.md)** — documentation, examples, and implementation checks
 - **[Python release guide](docs/python-release.md)** — packaging, verification,
   Trusted Publishers, and the PyPI procedure
+- **[Rust release guide](docs/rust-release.md)** — crate packaging, external
+  consumers, dependency audit, and the crates.io procedure
 - **[Benchmark suite](docs/benchmark-suite.md)** — scheduled tables, scale matrices,
   external-engine comparisons and historical regression evidence
 - **[Changelog](CHANGELOG.md)** — the single history of changes

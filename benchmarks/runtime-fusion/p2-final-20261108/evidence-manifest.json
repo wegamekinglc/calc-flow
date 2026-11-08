@@ -1,0 +1,44 @@
+{
+  "schema": "calc-flow.p2-final-decay-evidence.v1",
+  "candidate": "cc6e33e00acd6a8f1feba7a7776f208c29e71638",
+  "baseline_actual": "7a2463a89a2f4340a64cbdec90c97d7db05097ba",
+  "baseline_product_equivalent_main": "8d8be7d907a095dbc0dc2b73dafcfdd842979cdf",
+  "status": "complete, valid; final-source performance acceptance passed; CI/review remain independent",
+  "normalization": {
+    "samples.csv": "Generated LF-only readable view of raw JSON; no source CSV existed. All 240 time/start/error/phase numeric fields round-trip exactly. Raw JSON remains in report.json and complete evidence."
+  },
+  "files": {
+    "audit.json": {
+      "bytes": 1263,
+      "sha256": "66b00ff4d467407d3336a7ee37d13afe5a20319a51854ed4f4c232a25762ac49"
+    },
+    "complete-evidence.json.gz": {
+      "bytes": 564443,
+      "sha256": "1bd46cee5fd4c91811b556196a2514e7bfd150134cc11f70da2e6f4317743c33"
+    },
+    "outer-receipt.json": {
+      "bytes": 491,
+      "sha256": "1f2ee91eeb3b2ad1a4f4ee870ddbce9d6ebf25cac17a617c62fcd95ad8dc550c"
+    },
+    "postseals.json": {
+      "bytes": 32266,
+      "sha256": "c4a568615dae2cee9f40a4a60de5f6f02d3ce6aa33c8f3db84044752fe5360a9"
+    },
+    "protocol.json": {
+      "bytes": 16230,
+      "sha256": "f17a1eb6e58398e6ae36d9f4a82829c36d3d337b60aa2e907f2f9da73d7a846d"
+    },
+    "report.json": {
+      "bytes": 309508,
+      "sha256": "9f352f403f1e5edd0cfd50fc29bab2522b88a08e87052fee966f95f1ed57a067"
+    },
+    "samples.csv": {
+      "bytes": 26207,
+      "sha256": "6cb9ca8a811050c86569bee947f4f1f3d21b381b1ac5606973266d10ed982809"
+    },
+    "statistics.json": {
+      "bytes": 13010,
+      "sha256": "69e136eed09a2b4710074005e972f3d5bba7aa4382b942ad21d8455508e8fd0d"
+    }
+  }
+}

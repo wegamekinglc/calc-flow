@@ -205,7 +205,14 @@ impl RollingKernelPlan {
             self.nan_as_value,
             node_id,
         )?;
-        append_typed_outputs(&self.outputs, builders, current, node_id)
+        append_typed_outputs(
+            &self.outputs,
+            builders,
+            current,
+            &inputs.groups,
+            row_index,
+            node_id,
+        )
     }
 
     fn sorted_partition_key(

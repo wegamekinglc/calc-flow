@@ -73,6 +73,7 @@ fn lane_plan(dual: bool) -> RollingKernelPlan {
         estimated_state_bytes_per_entity: 0,
         fingerprint: "two-lane-fixture".into(),
         checkpoint_fingerprint: None,
+        decay_pool: None,
     };
     plan.shared_rows = plan.shared_rows_shape();
     plan

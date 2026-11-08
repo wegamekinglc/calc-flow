@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-08: Prepare the `calc-flow` Rust crate for crates.io with package
+  metadata, a native quickstart, distribution and external consumer checks,
+  and a separate release workflow. Audit the packaged registry lockfile before
+  upload; the standard Arrow 59 dependency chain uses compatible zstd security
+  backports without changing Python source builds or checkpoint contracts.
 - 2026-11-08: Share input history across eligible different-width Float64
   Rows means and mean differences, including sorted SQL AVG windows. Keep
   independent accumulators and checkpoint bytes, credit each optional cache

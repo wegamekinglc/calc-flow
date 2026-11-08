@@ -37,7 +37,7 @@ impl TypedCumulativeState {
             TypedGroupInput::Unsigned(values) => values
                 .is_valid(row)
                 .then(|| NumericValue::Unsigned(values.value(row))),
-            TypedGroupInput::Pair(..) => {
+            TypedGroupInput::Pair(..) | TypedGroupInput::DecayReference(_) => {
                 return Err(internal_error("cumulative input is not primitive"));
             }
         };
