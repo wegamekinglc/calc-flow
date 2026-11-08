@@ -134,24 +134,13 @@ fn evaluate(
     capacity: usize,
     check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<NativeArray> {
-    let mut history = RowsHistory::new(capacity);
-    let mut summary = FloatSummary::default();
+    let mut kernel = MeanKernel::new(capacity);
     let mut output = Vec::with_capacity(input.len());
     let mut bitmap = vec![0_u8; input.len().div_ceil(8)];
     for index in 0..input.len() {
         control::checkpoint(index, check)?;
-        advance(&mut summary, &mut history, sample_at(input, index), window)?;
-        let count = u64::try_from(index + 1)
-            .map_err(|_| invalid("input.shape", "sequence position exceeds u64"))?;
-        repair(
-            &mut summary,
-            &history,
-            options.numerical_profile,
-            count,
-            check,
-        )?;
-        if summary.valid_count >= options.min_periods {
-            output.push(summary.read_mean());
+        if let Some(value) = kernel.push(sample_at(input, index), options, window, check)? {
+            output.push(value);
             bitmap[index / 8] |= 1 << (index % 8);
         } else {
             output.push(0.0);
@@ -159,6 +148,107 @@ fn evaluate(
     }
     let validity = NullBuffer::new(BooleanBuffer::new(Buffer::from(bitmap), 0, input.len()));
     NativeArray::from_f64(output, vec![input.len()], Some(validity))
+}
+
+pub(super) struct MeanKernel {
+    history: RowsHistory,
+    summary: FloatSummary,
+    positions: u64,
+}
+
+impl MeanKernel {
+    #[cfg(test)]
+    pub(super) fn set_test_positions(&mut self, positions: u64) {
+        self.positions = positions;
+    }
+
+    pub(super) fn new(capacity: usize) -> Self {
+        Self {
+            history: RowsHistory::new(capacity),
+            summary: FloatSummary::default(),
+            positions: 0,
+        }
+    }
+
+    pub(super) fn capacity(&self) -> usize {
+        self.history.values.capacity()
+    }
+
+    pub(super) fn try_candidate(capacity: usize) -> Result<Self> {
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(capacity)
+            .map_err(|error| invalid("state.peak_bytes", error.to_string()))?;
+        Ok(Self {
+            history: RowsHistory {
+                values,
+                start: 0,
+                len: 0,
+            },
+            summary: FloatSummary::default(),
+            positions: 0,
+        })
+    }
+
+    pub(super) fn copy_from(
+        &mut self,
+        source: &Self,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        for index in 0..self.capacity() {
+            control::checkpoint(index, check)?;
+            self.history.values.push(None);
+        }
+        for (index, value) in source.history.iter().enumerate() {
+            control::checkpoint(index, check)?;
+            self.history.push(value);
+        }
+        self.summary = source.summary;
+        self.positions = source.positions;
+        check()
+    }
+
+    pub(super) fn validate_positions(&self, len: usize) -> Result<()> {
+        let len = u64::try_from(len)
+            .map_err(|_| invalid("input.rows", "sequence position exceeds u64"))?;
+        self.positions
+            .checked_add(len)
+            .ok_or_else(|| invalid("input.rows", "sequence position exceeds u64"))?;
+        Ok(())
+    }
+
+    pub(super) fn next_capacity(&self, len: usize, window: u64) -> usize {
+        let limit = usize::try_from(window)
+            .unwrap_or(usize::MAX)
+            .saturating_add(1);
+        self.history
+            .len
+            .saturating_add(len)
+            .min(limit)
+            .max(self.capacity())
+    }
+
+    pub(super) fn push(
+        &mut self,
+        sample: Option<f64>,
+        options: RollingMeanOptions,
+        window: usize,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Option<f64>> {
+        self.positions = self
+            .positions
+            .checked_add(1)
+            .ok_or_else(|| invalid("input.rows", "sequence position exceeds u64"))?;
+        advance(&mut self.summary, &mut self.history, sample, window)?;
+        repair(
+            &mut self.summary,
+            &self.history,
+            options.numerical_profile,
+            self.positions,
+            check,
+        )?;
+        Ok((self.summary.valid_count >= options.min_periods).then(|| self.summary.read_mean()))
+    }
 }
 
 fn advance(
@@ -277,7 +367,7 @@ fn arithmetic_error(error: ArithmeticError) -> crate::CalcFlowError {
 }
 
 struct RowsHistory {
-    values: Box<[Option<f64>]>,
+    values: Vec<Option<f64>>,
     start: usize,
     len: usize,
 }
@@ -285,7 +375,7 @@ struct RowsHistory {
 impl RowsHistory {
     fn new(capacity: usize) -> Self {
         Self {
-            values: vec![None; capacity].into_boxed_slice(),
+            values: vec![None; capacity],
             start: 0,
             len: 0,
         }

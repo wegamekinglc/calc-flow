@@ -26,6 +26,7 @@ mod reduction;
 pub(crate) mod rolling;
 mod rolling_mean;
 pub(crate) mod rolling_mean_math;
+mod sequence;
 mod storage;
 
 fn shape_elements(shape: &[usize]) -> Result<usize> {
@@ -50,6 +51,7 @@ pub use provider::{NativeArrayFactory, register_native};
 pub use reduction::{Reduction, ReductionOptions, max, mean, min, reduce, sum};
 pub use rolling::{EwmaOptions, ewma};
 pub use rolling_mean::{RollingMeanOptions, rolling_mean};
+pub use sequence::{ArrayStateOptions, EwmaState, RollingMeanState};
 pub use storage::NativeArray;
 
 /// Supported native element types.

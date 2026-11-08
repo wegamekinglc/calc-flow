@@ -24,3 +24,28 @@ stream 证明；描述查询不构成注册。失败注册不推进记录、revi
 
 本修订不需更改数值算法、启用全局任意精度解析或增加依赖；Python 声明前端
 仍在编码前限制 Python 整数。保留原生数组数据、f32 有限转换及 pow 界限。
+
+## M2 与 A6 合同复核摘要
+
+最终设计结论：**Pass**。本节归档已批准的
+[API 合同](../api-notes/native-array-runtime.md)；设计通过不替代实现审查、
+实际执行和 required CI。A6a 与 A6b 保持独立交付，不能提前声称状态恢复能力。
+
+M2 的直接多 matmul attachment 不自动扩围；每次表桥接仍限一次 matmul，
+多次运算通过显式 Table 阶段，独立数组收集保留每段一次的分段合同。
+静态 digest-v1 含物理绑定名：共享 owner 可只冻结、规范编码和放置一次，
+每个别名仍独立校验声明、计算并核对原协议摘要。每个消费者的真实准备预算、
+有界编码 scratch、实际取消和完整候选发布必须落实，不能假设旧准备入口已
+提供这些机制；不得改变旧 NumPy/JAX 的计费或恢复解释。
+
+A6a 的直接 owned mean/EWMA 接口、数值合同和状态/峰值预算通过。
+A6b 的真实 stateful lifecycle、capability schema 5、版本化 raw-IEEE codec
+及 managed restart 合同，在补齐以下两项后通过：丢失 awaiter 后，未结束的
+工作必须继续持有预算，由同 operator 的 pending-work gate 阻止或完整计费
+后续候选、capture 和 restore；同步 reset/restore 不能取消未结束工作的计费。
+terminal-complete manifest 的每个 native sequence 节点，也必须在返回成功
+或打开 sink 前完成同样的有界 preload、checksum、codec、identity 和限额校验。
+仅增加普通 restore_async 路径不能覆盖 terminal fast path。
+
+A6a 不发布 sequence/checkpoint capability。A6b 的工厂、codec、真实恢复、
+能力版本迁移及对应测试须一起验收；所有阶段继续禁止 TA-Lib 代码依赖。
