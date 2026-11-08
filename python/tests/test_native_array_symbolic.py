@@ -4,6 +4,7 @@ import asyncio
 import builtins
 import json
 import math
+import runpy
 from pathlib import Path
 
 import pyarrow as pa
@@ -660,6 +661,18 @@ def test_native_chained_matmul_document_has_one_matmul_per_segment() -> None:
     assert len(document["static_inputs"]) == 2
 
 
+def _assert_native_static_array_ports(nodes: list[dict[str, object]]) -> None:
+    static_ports = [
+        declaration
+        for node in nodes
+        for declaration in node["operator"]["options"]["inputs"]
+        if declaration["kind"] == "array"
+    ]
+    assert len(static_ports) == 2
+    assert all(declaration["binding"] == "static" for declaration in static_ports)
+    assert all("mutability" not in declaration for declaration in static_ports)
+
+
 def test_native_parameter_document_shares_logical_binding_across_physical_aliases() -> (
     None
 ):
@@ -692,25 +705,15 @@ def test_native_parameter_document_shares_logical_binding_across_physical_aliase
     physical, _ = bindings.names()
     aliases = physical["arbitrary_beta"]
     assert len(aliases) == 2
-    static_ports = [
-        declaration
+    table_nodes = [
+        node
         for node in document["graph"]["nodes"]
         if node["operator"].get("name") == "table_array"
-        for declaration in node["operator"]["options"]["inputs"]
-        if declaration["kind"] == "array"
     ]
-    assert len(static_ports) == 2
-    assert all(declaration["binding"] == "static" for declaration in static_ports)
-    assert all("mutability" not in declaration for declaration in static_ports)
+    assert len(table_nodes) == 2
+    _assert_native_static_array_ports(table_nodes)
     assert {entry["name"] for entry in document["static_inputs"]} == set(aliases)
     assert all(entry["input"] not in aliases for entry in document["data_sources"])
-    assert (
-        sum(
-            node["operator"].get("name") == "table_array"
-            for node in document["graph"]["nodes"]
-        )
-        == 2
-    )
 
 
 def test_collect_array_rejects_external_backends_before_binding_or_planning() -> None:
@@ -963,11 +966,13 @@ def test_real_native_planning_binding_limits_utf8_bytes_before_json_parsing() ->
         _native._infer_native_array_program("é" * 32_769)
 
 
-def test_real_documented_native_array_collection_example() -> None:
+def test_real_documented_native_array_collection_example(tmp_path: Path) -> None:
     document = (Path(__file__).resolve().parents[2] / "docs/python-api.md").read_text()
     section = document.split("### Native ArrayExpr declarations and collection", 1)[1]
     snippet = section.split("```python\n", 1)[1].split("```", 1)[0]
-    exec(compile(snippet, "docs/python-api.md", "exec"), {})
+    script = tmp_path / "native_array_collection.py"
+    script.write_text(snippet, encoding="utf-8")
+    runpy.run_path(str(script))
 
 
 def test_real_collect_array_combines_table_and_dynamic_array_roots() -> None:

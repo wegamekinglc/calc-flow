@@ -95,6 +95,7 @@ def test_public_surface_is_the_frozen_export_list() -> None:
         "TableExpr",
         "WindowAggregate",
         "cs",
+        "array_input",
         "duration",
         "event_time_bucket",
         "exact_time",

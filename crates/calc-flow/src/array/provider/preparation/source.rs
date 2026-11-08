@@ -119,15 +119,18 @@ fn frozen_bytes(
     valid: usize,
     nullable: bool,
 ) -> Result<usize> {
-    let width = if dtype == ArrayDType::Boolean { 1 } else { 8 };
-    let values = valid
-        .checked_mul(width)
-        .ok_or_else(|| invalid("bytes", "frozen carrier byte count overflowed"))?;
+    let values = frozen_value_bytes(dtype, valid)?;
     let shape = rank
         .checked_mul(size_of::<u64>())
         .ok_or_else(|| invalid("bytes", "frozen shape byte count overflowed"))?;
     let flags = if nullable { elements } else { 0 };
     add(add(values, shape)?, add(flags, 6 + name(dtype).len())?)
+}
+fn frozen_value_bytes(dtype: ArrayDType, valid: usize) -> Result<usize> {
+    let width = if dtype == ArrayDType::Boolean { 1 } else { 8 };
+    valid
+        .checked_mul(width)
+        .ok_or_else(|| invalid("bytes", "frozen carrier byte count overflowed"))
 }
 pub(super) const fn name(dtype: ArrayDType) -> &'static str {
     match dtype {

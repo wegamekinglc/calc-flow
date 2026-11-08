@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import runpy
 from pathlib import Path
 
 import pytest
@@ -110,6 +111,7 @@ def test_m2_native_rules_are_explicit_new_versioned_identities(name: str) -> Non
 
 def test_documented_registration_replay_installs_the_native_bundle_once(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     class Probe:
         def __init__(self) -> None:
@@ -136,7 +138,9 @@ def test_documented_registration_replay_installs_the_native_bundle_once(
     document = (Path(__file__).resolve().parents[2] / "docs/python-api.md").read_text()
     section = document.split("The example registers a mapping provider", 1)[1]
     snippet = section.split("```python\n", 1)[1].split("```", 1)[0]
-    exec(compile(snippet, "docs/python-api.md", "exec"), {})
+    script = tmp_path / "registration_replay.py"
+    script.write_text(snippet, encoding="utf-8")
+    runpy.run_path(str(script))
     assert [probe.calls for probe in probes] == [1, 1]
 
 

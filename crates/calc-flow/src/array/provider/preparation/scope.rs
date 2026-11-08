@@ -162,4 +162,49 @@ mod tests {
             matches!(result,Err(CalcFlowError::InvalidArgument{field,..}) if field=="static_inputs.beta.bytes")
         );
     }
+    #[test]
+    fn test_finalizing_without_native_scope_leaves_past_deadline_to_legacy_runtime() {
+        let deadline = chrono::Utc::now() - chrono::Duration::hours(1);
+        let context = crate::StreamJobContext::new(
+            71,
+            "legacy-finalize",
+            BTreeMap::new(),
+            Some(deadline),
+            crate::CancellationToken::new(),
+        );
+        assert!(context.check_cancelled().is_err());
+        let context = crate::static_input::finalize_native(
+            context,
+            crate::static_input::PreparedStaticInputs::default(),
+            None,
+        )
+        .expect("legacy lifecycle must handle its own deadline");
+        assert_eq!(context.job_id(), 71);
+        assert_eq!(context.deadline(), Some(&deadline));
+        assert!(context.check_cancelled().is_err());
+    }
+
+    #[test]
+    fn test_finalizing_native_scope_still_rejects_cancelled_job() {
+        let cancellation = crate::CancellationToken::new();
+        let context = crate::StreamJobContext::new(
+            72,
+            "native-finalize",
+            BTreeMap::new(),
+            None,
+            cancellation.clone(),
+        );
+        cancellation.cancel();
+        let scope = NativeScope {
+            aliases: BTreeMap::new(),
+            consumers: Arc::new(Vec::new()),
+            reservations: Vec::new(),
+        };
+        let prepared = crate::static_input::PreparedStaticInputs {
+            native_scope: Some(Arc::new(scope)),
+            ..crate::static_input::PreparedStaticInputs::default()
+        };
+        let result = crate::static_input::finalize_native(context, prepared, None);
+        assert!(matches!(result,Err(CalcFlowError::Cancelled{run_id}) if run_id=="72"));
+    }
 }

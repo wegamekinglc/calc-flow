@@ -134,7 +134,7 @@ mod tests {
             Batch::external(Arc::new(array.clone()), BatchMetadata::default()).unwrap();
         let first = Batch::external(Arc::new(array), BatchMetadata::default()).unwrap();
         let second =
-            first.with_metadata(BatchMetadata::new("alias", 1, Default::default()).unwrap());
+            first.with_metadata(BatchMetadata::new("alias", 1, BTreeMap::default()).unwrap());
         let supplied = BTreeMap::from([
             ("a.beta".into(), first),
             ("b.beta".into(), second),
@@ -202,7 +202,7 @@ mod tests {
             inner: Arc<dyn ExternalPayload>,
         }
         impl ExternalPayload for Forwarder {
-            fn backend(&self) -> &str {
+            fn backend(&self) -> &'static str {
                 "native"
             }
             fn len(&self) -> usize {

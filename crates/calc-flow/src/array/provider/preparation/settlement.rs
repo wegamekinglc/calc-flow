@@ -113,7 +113,7 @@ mod tests {
             let packet = worker.await.unwrap();
             let _ = result.send(packet);
         });
-        let waiter = tokio::spawn(async move { receive.await });
+        let waiter = tokio::spawn(receive);
         ready.await.unwrap();
         waiter.abort();
         let _ = waiter.await;

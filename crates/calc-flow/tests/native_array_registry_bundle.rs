@@ -35,25 +35,12 @@ fn test_native_registration_collision_never_publishes_other_lifecycles_or_replac
         let stream: Option<Arc<dyn StreamOperatorFactory>> = (collision == 2).then(|| {
             Arc::new(NativeTableArrayFactory::default()) as Arc<dyn StreamOperatorFactory>
         });
-        if let Some(factory) = &batch {
-            registry
-                .register_batch(
-                    "native",
-                    if collision == 0 {
-                        "array_expr"
-                    } else {
-                        "table_array"
-                    },
-                    "1",
-                    Arc::clone(factory),
-                )
-                .unwrap();
-        }
-        if let Some(factory) = &stream {
-            registry
-                .register_stream("native", "table_array", "1", Arc::clone(factory))
-                .unwrap();
-        }
+        let batch_name = if collision == 0 {
+            "array_expr"
+        } else {
+            "table_array"
+        };
+        install_collision(&registry, batch_name, batch.as_ref(), stream.as_ref());
         assert!(
             array::register_native(&registry).is_err(),
             "a collision must reject the whole bundle"
@@ -72,27 +59,43 @@ fn test_native_registration_collision_never_publishes_other_lifecycles_or_replac
                 .is_ok(),
             collision == 2
         );
-        if let Some(factory) = batch {
-            let actual = registry
-                .resolve_batch(
-                    "native",
-                    if collision == 0 {
-                        "array_expr"
-                    } else {
-                        "table_array"
-                    },
-                    "1",
-                )
-                .unwrap();
-            assert!(Arc::ptr_eq(&factory, &actual));
-        }
-        if let Some(factory) = stream {
-            assert!(Arc::ptr_eq(
-                &factory,
-                &registry
-                    .resolve_stream("native", "table_array", "1")
-                    .unwrap()
-            ));
-        }
+        assert_retained_owners(&registry, batch_name, batch, stream);
+    }
+}
+
+fn install_collision(
+    registry: &ProviderRegistry,
+    batch_name: &str,
+    batch: Option<&Arc<dyn BatchOperatorFactory>>,
+    stream: Option<&Arc<dyn StreamOperatorFactory>>,
+) {
+    if let Some(factory) = batch {
+        registry
+            .register_batch("native", batch_name, "1", Arc::clone(factory))
+            .unwrap();
+    }
+    if let Some(factory) = stream {
+        registry
+            .register_stream("native", "table_array", "1", Arc::clone(factory))
+            .unwrap();
+    }
+}
+fn assert_retained_owners(
+    registry: &ProviderRegistry,
+    batch_name: &str,
+    batch: Option<Arc<dyn BatchOperatorFactory>>,
+    stream: Option<Arc<dyn StreamOperatorFactory>>,
+) {
+    if let Some(factory) = batch {
+        let actual = registry.resolve_batch("native", batch_name, "1").unwrap();
+        assert!(Arc::ptr_eq(&factory, &actual));
+    }
+    if let Some(factory) = stream {
+        assert!(Arc::ptr_eq(
+            &factory,
+            &registry
+                .resolve_stream("native", "table_array", "1")
+                .unwrap()
+        ));
     }
 }

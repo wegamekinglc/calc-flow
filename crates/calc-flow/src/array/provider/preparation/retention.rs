@@ -65,7 +65,7 @@ mod tests {
     use super::*;
     use crate::{STATIC_INPUT_DIGEST_VERSION, StaticInputDigest};
     use serde_json::Value;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn digest_bytes(value: &StaticInputDigest) -> usize {
         value.digest_version.capacity() + value.sha256.capacity()
@@ -88,21 +88,24 @@ mod tests {
             sha256: "0".repeat(64),
         };
         let scope_name: std::sync::Arc<str> = name.into();
-        let latched = BTreeMap::from([(name.to_owned(), ())]);
+        let latched_keys = BTreeSet::from([name.to_owned()]);
         let prepared = BTreeMap::from([(name.to_owned(), digest.clone())]);
-        let context_latched = latched.clone();
+        let context_latched_keys = latched_keys.clone();
         let settings = serde_json::json!({name: {"digest_version":digest.digest_version,"sha256":digest.sha256}});
         let identity = prepared.clone();
         let selected = identity.clone();
         let native_json = serde_json::to_value(&selected).unwrap();
         let observed = scope_name.len()
             + digest_bytes(&digest)
-            + latched.keys().map(String::capacity).sum::<usize>()
+            + latched_keys.iter().map(String::capacity).sum::<usize>()
             + prepared
                 .iter()
                 .map(|(key, value)| key.capacity() + digest_bytes(value))
                 .sum::<usize>()
-            + context_latched.keys().map(String::capacity).sum::<usize>()
+            + context_latched_keys
+                .iter()
+                .map(String::capacity)
+                .sum::<usize>()
             + json_bytes(&settings)
             + identity
                 .iter()
@@ -155,9 +158,9 @@ mod tests {
             sha256: "0".repeat(64),
         };
         let one = serde_json::json!({name:{"digest_version":digest.digest_version,"sha256":digest.sha256}});
-        let latched = BTreeMap::from([(name.to_owned(), ())]);
+        let latched_keys = BTreeSet::from([name.to_owned()]);
         let prepared = BTreeMap::from([(name.to_owned(), digest.clone())]);
-        let context_static = latched.clone();
+        let context_static_keys = latched_keys.clone();
         let identity = prepared.clone();
         let selected = identity.clone();
         let native_json = serde_json::to_value(&selected).unwrap();
@@ -166,13 +169,16 @@ mod tests {
             .map(|(key, value)| key.capacity() + digest_bytes(value))
             .sum::<usize>();
         let scope = name.len() + digest_bytes(&digest);
-        let context_static_bytes = context_static.keys().map(String::capacity).sum::<usize>();
+        let context_static_bytes = context_static_keys
+            .iter()
+            .map(String::capacity)
+            .sum::<usize>();
         let identity_bytes = identity
             .iter()
             .map(|(name, digest)| name.capacity() + digest_bytes(digest))
             .sum::<usize>();
         let before_install = scope
-            + latched.keys().map(String::capacity).sum::<usize>()
+            + latched_keys.iter().map(String::capacity).sum::<usize>()
             + prepared
                 .iter()
                 .map(|(name, digest)| name.capacity() + digest_bytes(digest))
@@ -182,7 +188,7 @@ mod tests {
             + selected_bytes
             + json_bytes(&native_json)
             + json_bytes(&one);
-        drop(latched);
+        drop(latched_keys);
         drop(prepared);
         let current = identity.clone();
         let current_bytes = current
@@ -219,7 +225,7 @@ mod tests {
             sha256: "0".repeat(64),
         };
         let scope = name.len() + digest_bytes(&digest);
-        let latched = BTreeMap::from([(name.to_owned(), ())]);
+        let latched_keys = BTreeSet::from([name.to_owned()]);
         let identity = BTreeMap::from([(name.to_owned(), digest)]);
         let selected = identity.clone();
         let current = identity.clone();
@@ -231,7 +237,7 @@ mod tests {
                 .sum::<usize>()
         };
         let actual = scope
-            + latched.keys().map(String::capacity).sum::<usize>()
+            + latched_keys.iter().map(String::capacity).sum::<usize>()
             + owned_map(&identity)
             + owned_map(&selected)
             + owned_map(&current)

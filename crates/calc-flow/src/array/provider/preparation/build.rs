@@ -418,7 +418,7 @@ mod tests {
         #[derive(Debug)]
         struct Forged;
         impl crate::ExternalPayload for Forged {
-            fn backend(&self) -> &str {
+            fn backend(&self) -> &'static str {
                 "native"
             }
             fn len(&self) -> usize {

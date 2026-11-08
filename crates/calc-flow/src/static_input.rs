@@ -521,8 +521,8 @@ pub(crate) fn finalize_native(
     prepared: PreparedStaticInputs,
     recovered: Option<&BTreeMap<String, StaticInputDigest>>,
 ) -> Result<crate::StreamJobContext> {
-    context.check_cancelled()?;
     if let Some(scope) = prepared.native_scope {
+        context.check_cancelled()?;
         if let Some(recovered) = recovered {
             scope.verify_recovered(recovered)?;
         }
