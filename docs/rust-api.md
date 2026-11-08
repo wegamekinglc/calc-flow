@@ -12,6 +12,7 @@ On this page:
 
 - [Build and document](#build-and-document)
 - [Native array storage](#native-array-storage)
+- [Native array reductions](#native-array-reductions)
 - [Expression pipeline](#expression-pipeline)
 - [SQL operators](#sql-operators)
 - [Snapshot SQL](#snapshot-sql)
@@ -70,6 +71,47 @@ shape entries, which can be larger for slices. Neither value measures process
 RSS. The native payload uses the existing `BatchKind::Array` and reports its
 logical row count through the batch. Static parameter snapshots retain their
 separate freezing and digest contract.
+
+## Native array reductions
+
+`array::sum`, `mean`, `min`, and `max` synchronously reduce a `FloatView`
+without modifying its values or validity. They return an owned scalar
+`NativeArray` with shape `[]`; sum and mean produce float64, while min and max
+preserve the input dtype.
+
+```rust
+use calc_flow::{Result, array::{self, ArrayExecutionOptions, FloatView, ReductionOptions}};
+
+fn total() -> Result<array::NativeArray> {
+    array::sum(
+        FloatView::from_f64(&[1e308, 1.0, -1e308]),
+        ReductionOptions::default(),
+        &ArrayExecutionOptions::default(),
+    )
+}
+```
+
+Sum and mean accumulate finite values exactly and apply one final float64
+round-to-nearest ties-to-even conversion. Mean divides the exact total before
+conversion, preserving a finite average such as `mean([1e308, 1e308])`.
+This numerical contract is separate from existing table rolling contracts.
+
+By default any null input yields a null scalar. Use
+`ReductionOptions::default().with_skip_nulls(true)` to skip null positions;
+empty input and input without accepted values still yield null. Null result
+storage contains positive zero and an explicit invalid bitmap. Valid NaNs
+propagate as canonical NaNs. Sum/mean return NaN for mixed-sign infinities and
+preserve a single infinity sign. Min/max preserve a lone zero sign; when both
+zero signs occur, min returns negative zero and max returns positive zero.
+
+`ArrayExecutionOptions` defaults to 10,000,000 output elements and 256 MiB of
+combined output-buffer and kernel-scratch accounting. The limits can be
+changed with `with_max_elements` and `with_max_allocation_bytes`; zero is
+allowed to forbid a nonempty result or allocated output. A scalar reduction
+requires one output element regardless of input length. Borrowed inputs,
+allocator/object overhead, and process RSS are outside this execution charge.
+Limits are checked before output allocation or scanning input values. Exact
+sum/mean also reserve their bounded accumulator/finalization scratch.
 
 ## Expression pipeline
 
