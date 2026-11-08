@@ -24,6 +24,10 @@ use std::{
 const ROWS: usize = 100_000;
 const QUERY: &str = "SELECT key, SUM(value) AS total, COUNT(value) AS count, MIN(value) AS minimum, MAX(value) AS maximum FROM events GROUP BY key";
 
+#[cfg(feature = "benchmark-internals")]
+#[path = "support/sql_snapshot_cache.rs"]
+mod snapshot_cache;
+
 #[derive(Clone, Copy)]
 struct Case {
     name: &'static str,
@@ -682,6 +686,10 @@ fn state_census(
 
 fn main() {
     let args = std::env::args_os().collect::<Vec<_>>(); // nosemgrep: args-os
+    if args.iter().any(|arg| arg == "--snapshot-cache-case") {
+        selected_snapshot_cache(&args);
+        return;
+    }
     let value_type = value_type(&args);
     let check = args.iter().any(|arg| arg == "--check" || arg == "--test");
     let samples = args
@@ -710,7 +718,21 @@ fn main() {
     if value_type.bits != 0 {
         report["value_type"] = value_type.descriptor();
     }
-    let bytes = serde_json::to_vec_pretty(&report).unwrap();
+    write_report(&args, &report);
+}
+
+#[cfg(feature = "benchmark-internals")]
+fn selected_snapshot_cache(args: &[std::ffi::OsString]) {
+    write_report(args, &snapshot_cache::run(args));
+}
+
+#[cfg(not(feature = "benchmark-internals"))]
+fn selected_snapshot_cache(_args: &[std::ffi::OsString]) {
+    panic!("--snapshot-cache-case requires benchmark-internals");
+}
+
+fn write_report(args: &[std::ffi::OsString], report: &Value) {
+    let bytes = serde_json::to_vec_pretty(report).unwrap();
     if let Some(index) = args.iter().position(|arg| arg == "--output") {
         let path = std::path::Path::new(args.get(index + 1).expect("--output needs a path"));
         if let Some(parent) = path.parent() {
