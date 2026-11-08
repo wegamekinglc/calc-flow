@@ -17,8 +17,12 @@ use datafusion::arrow::buffer::NullBuffer;
 
 use crate::{CalcFlowError, Result};
 
+mod execution;
+mod reduction;
 mod storage;
 
+pub use execution::ArrayExecutionOptions;
+pub use reduction::{ReductionOptions, max, mean, min, sum};
 pub use storage::NativeArray;
 
 /// Supported native floating-point element types.
