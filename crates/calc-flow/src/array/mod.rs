@@ -20,6 +20,7 @@ use crate::{CalcFlowError, Result};
 mod control;
 mod elementwise;
 mod execution;
+mod matrix;
 mod provider;
 mod reduction;
 pub(crate) mod rolling;
@@ -27,14 +28,26 @@ mod rolling_mean;
 pub(crate) mod rolling_mean_math;
 mod storage;
 
+fn shape_elements(shape: &[usize]) -> Result<usize> {
+    if shape.len() > 2 {
+        return Err(invalid("input.shape", "expected rank zero, one or two"));
+    }
+    shape.iter().try_fold(1_usize, |count, dimension| {
+        count
+            .checked_mul(*dimension)
+            .ok_or_else(|| invalid("input.shape", "element count overflowed usize"))
+    })
+}
+
 pub use elementwise::{
     ArrayView, abs, add, divide, equal, exp, greater, greater_equal, less, less_equal, log,
     logical_and, logical_not, logical_or, logical_xor, multiply, neg, not_equal, pow, sqrt,
     subtract, where_,
 };
 pub use execution::ArrayExecutionOptions;
+pub use matrix::{matmul, reshape, transpose};
 pub use provider::{NativeArrayFactory, register_native};
-pub use reduction::{ReductionOptions, max, mean, min, sum};
+pub use reduction::{Reduction, ReductionOptions, max, mean, min, reduce, sum};
 pub use rolling::{EwmaOptions, ewma};
 pub use rolling_mean::{RollingMeanOptions, rolling_mean};
 pub use storage::NativeArray;
@@ -222,3 +235,6 @@ impl fmt::Debug for FloatView<'_> {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+mod matrix_tests;

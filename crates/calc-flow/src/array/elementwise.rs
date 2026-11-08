@@ -10,38 +10,36 @@ pub use view::ArrayView;
 #[derive(Clone, Copy)]
 struct Shape {
     len: usize,
-    scalar: bool,
+    dimensions: [usize; 2],
+    rank: usize,
 }
 
 impl Shape {
     fn owned(self) -> Vec<usize> {
-        if self.scalar { vec![] } else { vec![self.len] }
+        self.dimensions[..self.rank].to_vec()
     }
 }
 
 fn resolve_shape(inputs: &[(ArrayView<'_>, &str)]) -> Result<Shape> {
-    let mut vector_len = None;
+    let mut selected: Option<ArrayView<'_>> = None;
     for (input, field) in inputs {
         if input.is_scalar() {
             continue;
         }
-        if let Some(expected) = vector_len {
-            if input.len() != expected {
-                return Err(invalid(
-                    field,
-                    format!(
-                        "expected vector length {expected}, received {}",
-                        input.len()
-                    ),
-                ));
-            }
-        } else {
-            vector_len = Some(input.len());
+        if let Some(previous) = selected
+            && input.shape() != previous.shape()
+        {
+            return Err(invalid(field, "expected identical shapes or a scalar"));
         }
+        selected = Some(*input);
     }
+    let mut dimensions = [0; 2];
+    let shape = selected.as_ref().map_or(&[][..], ArrayView::shape);
+    dimensions[..shape.len()].copy_from_slice(shape);
     Ok(Shape {
-        len: vector_len.unwrap_or(1),
-        scalar: vector_len.is_none(),
+        len: selected.map_or(1, |input| input.len()),
+        dimensions,
+        rank: shape.len(),
     })
 }
 
@@ -70,7 +68,7 @@ fn validate_output(
     nullable: bool,
     execution: &ArrayExecutionOptions,
 ) -> Result<()> {
-    let bytes = required_bytes(dtype, shape.len, shape.scalar, nullable)?;
+    let bytes = required_shape_bytes(dtype, shape.len, shape.rank, nullable)?;
     execution.validate_allocation(shape.len, bytes, 0)
 }
 
@@ -80,6 +78,18 @@ pub(super) fn required_bytes(
     scalar: bool,
     nullable: bool,
 ) -> Result<usize> {
+    required_shape_bytes(dtype, len, usize::from(!scalar), nullable)
+}
+
+pub(super) fn required_shape_bytes(
+    dtype: ArrayDType,
+    len: usize,
+    rank: usize,
+    nullable: bool,
+) -> Result<usize> {
+    let shape_bytes = rank
+        .checked_mul(size_of::<usize>())
+        .ok_or_else(|| invalid("outputs.output.bytes", "shape byte count overflowed usize"))?;
     let values = match dtype {
         ArrayDType::Float32 => len.checked_mul(size_of::<f32>()),
         ArrayDType::Float64 => len.checked_mul(size_of::<f64>()),
@@ -87,7 +97,7 @@ pub(super) fn required_bytes(
     };
     values
         .and_then(|bytes| bytes.checked_add(if nullable { len.div_ceil(8) } else { 0 }))
-        .and_then(|bytes| bytes.checked_add(if scalar { 0 } else { size_of::<usize>() }))
+        .and_then(|bytes| bytes.checked_add(shape_bytes))
         .ok_or_else(|| invalid("outputs.output.bytes", "output byte count overflowed usize"))
 }
 

@@ -49,6 +49,8 @@ class CancelledError(ExecutionError): ...
 @final
 class NativeArray:
     @property
+    def element_count(self) -> int: ...
+    @property
     def dtype(self) -> str: ...
     @property
     def shape(self) -> tuple[int, ...]: ...
@@ -67,7 +69,7 @@ def _native_array_from_arrow(values: pa.Array, shape: list[int]) -> NativeArray:
 def _native_array_reduce(
     array: NativeArray,
     operation: str,
-    skip_nulls: bool,
+    options: tuple[bool, int | None, bool],
     max_elements: int,
     max_allocation_bytes: int,
 ) -> NativeArray: ...
@@ -105,6 +107,15 @@ def _native_array_where(
     if_false: NativeArray,
     max_elements: int,
     max_allocation_bytes: int,
+) -> NativeArray: ...
+def _native_array_matmul(
+    left: NativeArray, right: NativeArray, max_elements: int, max_allocation_bytes: int
+) -> NativeArray: ...
+def _native_array_reshape(
+    array: NativeArray, shape: list[int], max_elements: int, max_allocation_bytes: int
+) -> NativeArray: ...
+def _native_array_transpose(
+    array: NativeArray, max_elements: int, max_allocation_bytes: int
 ) -> NativeArray: ...
 
 class StreamingRuntimeError(CalcFlowError):

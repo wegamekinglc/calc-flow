@@ -107,7 +107,7 @@ def test_native_conversions_reject_wrong_dtype_rank_and_shape() -> None:
     with pytest.raises(ConfigError, match="input.dtype"):
         cfa.from_numpy(np.array([1], dtype="int64"))
     with pytest.raises(ConfigError, match="input.shape"):
-        cfa.from_numpy(np.ones((1, 1)))
+        cfa.from_numpy(np.ones((1, 1, 1)))
     with pytest.raises(ConfigError, match="input.dtype"):
         cfa.from_arrow(pa.array([1]))
     with pytest.raises(ConfigError, match="input.shape"):

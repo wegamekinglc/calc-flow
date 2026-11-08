@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{ExternalPayload, Result};
 
-/// Immutable native floating-point or Boolean scalar and vector storage.
+/// Immutable native floating-point or Boolean packed rank-0/1/2 storage.
 ///
 /// Values and validity use Arrow's shared read-only buffers. Clones retain
 /// the same storage; accessors never expose mutable caller-owned data.
@@ -28,7 +28,7 @@ impl NativeArray {
     /// Takes ownership of a float32/float64/Boolean Arrow array without copying.
     ///
     /// Preserves values, validity, and their slice offsets. Shape `[]` denotes
-    /// one scalar; `[n]` denotes a vector with exactly `n` values.
+    /// one scalar; `[n]` denotes a vector, and `[rows, columns]` a packed matrix.
     ///
     /// # Errors
     ///
@@ -139,7 +139,7 @@ impl NativeArray {
         self.dtype
     }
 
-    /// Returns the scalar `[]` or vector `[n]` shape.
+    /// Returns the scalar, vector or packed row-major matrix shape.
     pub fn shape(&self) -> &[usize] {
         &self.shape
     }
@@ -149,7 +149,12 @@ impl NativeArray {
         self.shape.first().copied().unwrap_or(1)
     }
 
-    /// Returns whether this is a zero-length vector.
+    /// Returns the number of physical positions, including null values.
+    pub fn element_count(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Returns whether the logical row count is zero.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -170,11 +175,13 @@ impl NativeArray {
                 .expect("native Boolean storage was validated at construction")
         } else {
             ArrayView::from_float(
-                self.float_view()
+                arrow_view(&self.values)
+                    .map(|(view, _)| view)
                     .expect("native floating storage was validated at construction"),
             )
         };
-        view.with_scalar(self.shape.is_empty())
+        view.reshape(&self.shape)
+            .expect("native shape was validated at construction")
     }
 
     /// Borrows the stored primitive values and validity for synchronous work.
@@ -182,8 +189,14 @@ impl NativeArray {
     /// # Errors
     ///
     /// Returns [`crate::CalcFlowError::InvalidArgument`] if the storage is not
-    /// floating-point, including Boolean storage.
+    /// floating-point, including Boolean storage, or has matrix shape.
     pub fn float_view(&self) -> Result<FloatView<'_>> {
+        if self.shape.len() == 2 {
+            return Err(invalid(
+                "input.shape",
+                "matrix sequence requires an explicit vector reshape",
+            ));
+        }
         arrow_view(&self.values).map(|(view, _)| view)
     }
 
@@ -303,13 +316,7 @@ fn validate_vec(
 }
 
 fn validate_shape(len: usize, shape: &[usize]) -> Result<()> {
-    if shape.len() > 1 {
-        return Err(invalid(
-            "input.shape",
-            format!("expected scalar or vector, received rank {}", shape.len()),
-        ));
-    }
-    let expected = shape.first().copied().unwrap_or(1);
+    let expected = super::shape_elements(shape)?;
     if expected != len {
         return Err(invalid(
             "input.shape",

@@ -1199,7 +1199,8 @@ The full version is [`examples/05_async_execution.py`](../examples/05_async_exec
 ## Native arrays
 
 `calc_flow.array` exposes owned CPU arrays and synchronous Rust calculations.
-The native owner accepts float32/float64 and Boolean scalars and vectors. Arrow imports
+The native owner accepts float32/float64 and Boolean scalars, vectors and
+packed row-major matrices. Arrow imports
 share read-only buffers and preserve offsets and null masks. NumPy imports
 copy the caller's values before computation; NumPy is optional and imported
 only for NumPy conversion.
@@ -1219,13 +1220,16 @@ batch = Batch.from_array(values, backend="native", metadata={"source": "prices"}
 assert batch.array.to_arrow().to_pylist() == [2.0, None, 4.0]
 ```
 
-`NativeArray` has read-only `dtype`, `shape`, `estimated_bytes` and
+`NativeArray` has read-only `dtype`, `shape`, `element_count`, `estimated_bytes` and
 `retained_buffer_bytes` properties. `len(array)` counts logical rows, including
-one row for a scalar. Byte estimates charge visible values, validity and shape;
+one row for a scalar. Matrices count their first dimension as rows;
+`element_count` counts flat positions, so shape `(3, 0)` has three rows and no
+positions. Arrow export is flat; NumPy export restores the stored shape. Byte estimates charge visible values, validity and shape;
 retained bytes count backing-buffer capacities, rather than process RSS.
 `from_arrow(array, shape=())` declares a scalar and requires one element;
 the default shape is `(len(array),)`. `from_numpy(ndarray)` accepts exact native-endian
-float32/float64 ndarrays with zero or one dimension, including empty vectors.
+bool/float32/float64 ndarrays with zero, one or two dimensions, including
+empty vectors and zero-sized matrix axes.
 
 `to_arrow()` preserves validity. `to_numpy()` rejects arrays containing nulls
 unless a numeric `fill_value` is supplied, for example
@@ -1235,7 +1239,7 @@ valid NaN values remain valid NaNs. NumPy exports use immutable bytes storage:
 neither the returned array nor its base arrays can regain write access.
 Conversions never mutate the caller's array.
 
-`sum`, `mean`, `min` and `max` return scalar native arrays. Nulls propagate
+`sum`, `mean`, `min` and `max` return scalar native arrays by default. Nulls propagate
 unless `skip_nulls=True`; empty or all-null inputs produce null scalars.
 Sum and mean return float64; min and max retain the input dtype. Valid NaNs
 follow the native numerical rules and are distinct from nulls.
@@ -1268,6 +1272,33 @@ Mixed float32/float64 arithmetic promotes to float64; Boolean operands do not
 implicitly convert to floating values. `pow` requires a finite, non-null
 scalar exponent with magnitude at most 64. IEEE NaN/Inf arithmetic and
 null propagation follow the Rust kernels, without Python operator evaluation.
+
+`matmul(left, right)` requires non-null floating matrices with shapes `(m,k)`
+and `(k,n)`, where `n > 0`. Zero rows and zero inner width are supported;
+zero inner width produces positive zeros. Mixed floating dtypes promote to
+float64; two float32 operands retain float32 multiplication and accumulation.
+Each dot uses increasing inner indices, a separate multiply and addition, and
+positive-zero initialization. This deterministic baseline does not promise
+NumPy/BLAS parity or a particular speedup.
+
+`reshape(array, shape)` owns a new descriptor and shares values/masks; rank must
+be at most two and the checked product must preserve `element_count`. It has no
+inferred `-1` dimension or order argument. `transpose(array)` swaps matrix axes
+into packed row-major order. Scalars/vectors and empty/size-one matrix axes
+remain aliases; other transposes copy values and masks. Budgets charge new
+buffers and descriptors, while aliases do not charge existing input buffers.
+
+`sum`, `mean`, `min` and `max` also accept `axis=None` and `keepdims=False`.
+No axis means all positions; otherwise choose a nonnegative axis below rank.
+Keepdims retains reduced dimensions at extent one; scalar full reductions stay
+scalar. Each lane uses the original null/NaN/signed-zero and exact sum/mean
+contracts. Empty/all-null accepted lanes return null, including sum. Matrices
+must be explicitly reshaped to vectors before EWMA or rolling sequence work.
+Elementwise operands broadcast only scalars or identical shapes: `(n,)` and
+`(n,1)` remain distinct.
+
+Run [`examples/native_matrices.py`](../examples/native_matrices.py) for an Arrow-only
+matrix product, axis mean and shape-transform example.
 
 Each calculation accepts `execution=cfa.ArrayExecutionOptions(...)` with
 `max_elements=10_000_000` and `max_allocation_bytes=256 * 1024 * 1024` defaults.

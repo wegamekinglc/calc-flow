@@ -16,6 +16,7 @@ On this page:
 - [Native exponential averages](#native-exponential-averages)
 - [Native rolling mean](#native-rolling-mean)
 - [Native elementwise arrays](#native-elementwise-arrays)
+- [Packed matrices and axes](#packed-matrices-and-axes)
 - [Native array batch provider](#native-array-batch-provider)
 - [Expression pipeline](#expression-pipeline)
 - [SQL operators](#sql-operators)
@@ -51,7 +52,12 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p calc-flow --no-deps
 `calc_flow::array` exposes immutable native float32/float64 and packed Boolean storage for Rust
 extensions. `FloatView` borrows contiguous values and an optional Arrow
 `NullBuffer` for synchronous work. `NativeArray` owns Arrow buffers and supports
-scalar shape `[]` or vector shape `[length]`; a scalar has exactly one value.
+scalar shape `[]`, vector shape `[length]`, or packed row-major matrix shape
+`[rows, columns]`; a scalar has exactly one value. `len()` counts logical rows;
+`element_count()` and `ArrayView::len()` count flat positions. `[3,0]` has three
+rows and no positions. Arrow export is flat and retains shape separately.
+`float_view()` rejects matrices; explicitly reshape a matrix to a vector before
+sequence/rolling work.
 
 ```rust
 use std::sync::Arc;
@@ -69,8 +75,9 @@ Float32/Float64/Boolean Arrow storage and preserves slice and validity
 offsets. `as_arrow` exports a read-only Arrow reference, while `float_view`
 borrows the typed values. Clones share Arrow buffers, and debug output contains
 descriptors without element values. These objects need no Python process.
-For Boolean storage, `float_view` returns an `input.dtype` error; `view`
-borrows either dtype and preserves the stored scalar or vector shape.
+For non-matrix Boolean storage, `float_view` returns an `input.dtype` error;
+all matrix `float_view` calls return `input.shape`. `view` borrows either dtype
+and preserves the stored scalar, vector or matrix shape.
 
 `estimated_bytes` charges visible typed slots, the bitmap byte span and shape
 entries. `retained_buffer_bytes` reports exposed backing-buffer capacities plus
@@ -82,7 +89,7 @@ separate freezing and digest contract.
 ## Native array reductions
 
 `array::sum`, `mean`, `min`, and `max` synchronously reduce a `FloatView`
-without modifying its values or validity. They return an owned scalar
+without modifying its values or validity. Default options return an owned scalar
 `NativeArray` with shape `[]`; sum and mean produce float64, while min and max
 preserve the input dtype.
 
@@ -198,10 +205,11 @@ buffer capacities participate in native payload accounting.
 
 Every operation takes borrowed `ArrayView` operands and
 `&ArrayExecutionOptions`, returning `Result<NativeArray>` with fresh owned
-storage. All-scalar inputs produce shape `[]`. Otherwise every vector must
-have the same length, and scalars broadcast to that length, including zero.
+storage. All-scalar inputs produce shape `[]`. Otherwise every operand must
+have exactly the same shape, and scalars broadcast to that shape, including zero
+extents. Vectors and matrices with the same flat count remain distinct.
 A vector of length one remains a vector and cannot broadcast to another
-vector length. These synchronous APIs support rank zero and one.
+vector length. These synchronous APIs support rank zero, one and two.
 
 | Functions                                                 | Accepted operands and results                                      |
 |-----------------------------------------------------------|--------------------------------------------------------------------|
@@ -239,6 +247,40 @@ do not include element payloads.
 
 These APIs do not alter Python expression lowering, Table execution,
 NumPy/JAX providers, or graph registration.
+
+## Packed matrices and axes
+
+`matmul(left.view(), right.view(), &execution)` requires floating rank-2 shapes
+`[m,k] @ [k,n]` with `n > 0` and no actual null values. All-valid validity buffers
+remain legal. Zero rows and zero inner width are supported; zero inner width
+produces positive zeros. Mixed float32/float64 promotes to float64, while two
+float32 inputs retain float32 accumulation. Each dot visits increasing inner
+indices with a separate multiply and addition, beginning at positive zero.
+There is no BLAS/FMA/reassociation or NumPy parity claim.
+
+`reshape(&input, shape, &execution)` owns a new rank-0/1/2 descriptor while sharing
+read-only Arrow storage. It requires an unchanged checked element count and no
+inferred dimensions. Its budget charges descriptor bytes and final elements.
+`ArrayView::reshape(shape)` changes only the borrowed stack descriptor.
+`transpose(&input, &execution)` swaps two matrix axes; scalars/vectors and
+empty/size-one axes alias storage. Other matrices copy packed values and validity,
+including sliced Boolean buffers and raw floating bits.
+
+`reduce(view, Reduction::{Sum,Mean,Min,Max}, options, &execution)` accepts
+`ReductionOptions::with_axis(None)` or `with_axis(Some(axis))`, plus
+`with_keepdims(bool)`.
+Axis must be less than rank. Each lane uses the existing exact sum/mean and
+min/max null, NaN and signed-zero rules. Empty/all-null accepted lanes are null:
+`[0,3]` reduced on axis 0 gives three nulls, and `[2,0]` on axis 1 gives two.
+Keepdims retains reduced dimensions at extent one; scalar full reductions remain
+scalar. The original FloatView functions remain available and interpret their
+input as a vector. Their default results and budget contracts are unchanged.
+
+Execution limits count flat output elements, new descriptors/buffers and peak
+scratch. Controlled paths check cancellation before allocation, at least every
+4096 positions (including dot-product inner loops), and before returning.
+The executable [native matrix example](../crates/calc-flow/examples/native_matrices.rs)
+combines matrix multiplication, axis means and owned shape transforms.
 
 ## Native array batch provider
 

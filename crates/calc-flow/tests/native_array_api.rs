@@ -114,7 +114,7 @@ fn test_native_array_rejects_invalid_descriptors() {
         "input.dtype",
     );
     assert_invalid_field(
-        NativeArray::from_f64(vec![1.0], vec![1, 1], None).unwrap_err(),
+        NativeArray::from_f64(vec![1.0], vec![1, 1, 1], None).unwrap_err(),
         "input.shape",
     );
     assert_invalid_field(
