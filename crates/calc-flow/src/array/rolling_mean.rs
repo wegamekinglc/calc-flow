@@ -174,23 +174,26 @@ fn allocation_plan(
         .and_then(|bytes| bytes.checked_add(len.div_ceil(8)))
         .and_then(|bytes| bytes.checked_add(size_of::<usize>()))
         .ok_or_else(|| invalid("outputs.output.bytes", "output byte count overflowed usize"))?;
-    let scratch = if len == 0 {
-        0
-    } else {
-        let state = size_of::<FloatSummary>();
-        let fold = if options.numerical_profile == RollingNumericalProfile::StableV2Preview {
-            rolling_mean_math::stable_scratch_bytes()
-        } else {
-            0
-        };
-        capacity
-            .checked_mul(size_of::<Option<f64>>())
-            .and_then(|bytes| bytes.checked_add(state))
-            .and_then(|bytes| bytes.checked_add(fold))
-            .ok_or_else(|| invalid("scratch.bytes", "history byte count overflowed usize"))?
-    };
+    let scratch = scratch_bytes(len, capacity, options.numerical_profile)?;
     execution.validate_allocation(len, output, scratch)?;
     Ok((window, capacity))
+}
+
+fn scratch_bytes(len: usize, capacity: usize, profile: RollingNumericalProfile) -> Result<usize> {
+    if len == 0 {
+        return Ok(0);
+    }
+    let state = size_of::<FloatSummary>();
+    let fold = if profile == RollingNumericalProfile::StableV2Preview {
+        rolling_mean_math::stable_scratch_bytes()
+    } else {
+        0
+    };
+    capacity
+        .checked_mul(size_of::<Option<f64>>())
+        .and_then(|bytes| bytes.checked_add(state))
+        .and_then(|bytes| bytes.checked_add(fold))
+        .ok_or_else(|| invalid("scratch.bytes", "history byte count overflowed usize"))
 }
 
 fn sample_at(input: FloatView<'_>, index: usize) -> Option<f64> {
