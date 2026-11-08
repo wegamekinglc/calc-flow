@@ -333,6 +333,7 @@ jobs:
       - name: Report Python coverage to Coveralls
         uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
         with:
+          coverage-reporter-version: v0.6.22
           github-token: ${{ secrets.GITHUB_TOKEN }}
           flag-name: python
           compare-sha: ${{ needs.coverage-baseline.outputs.compare_sha }}
@@ -814,6 +815,7 @@ jobs:
       - name: Report Rust coverage to Coveralls
         uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
         with:
+          coverage-reporter-version: v0.6.22
           github-token: ${{ secrets.GITHUB_TOKEN }}
           flag-name: rust
           compare-sha: ${{ needs.coverage-baseline.outputs.compare_sha }}
@@ -853,6 +855,7 @@ jobs:
       - name: Close the parallel Coveralls build
         uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
         with:
+          coverage-reporter-version: v0.6.22
           github-token: ${{ secrets.GITHUB_TOKEN }}
           parallel-finished: true
   linux-gate:
