@@ -177,6 +177,6 @@ impl fmt::Debug for FloatView<'_> {
             .field("dtype", &self.dtype())
             .field("len", &self.len())
             .field("nullable", &self.validity.is_some())
-            .finish()
+            .finish_non_exhaustive()
     }
 }

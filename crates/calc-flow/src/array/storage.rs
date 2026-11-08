@@ -158,7 +158,7 @@ impl fmt::Debug for NativeArray {
             .field("dtype", &self.dtype)
             .field("shape", &self.shape)
             .field("null_count", &self.values.null_count())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
