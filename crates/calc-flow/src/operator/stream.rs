@@ -418,6 +418,17 @@ impl<'a> StreamOperatorContext<'a> {
         self.job.static_input(name)
     }
 
+    /// Returns one prepared native static value for this node's local port.
+    pub(crate) fn native_static_input(&self, port: &str) -> Option<&Batch> {
+        self.job.native_static_input(self.operator_id, port)
+    }
+    pub(crate) fn native_static_inputs(
+        &self,
+        inputs: &BTreeMap<String, Batch>,
+    ) -> Result<(BTreeMap<String, Batch>, usize)> {
+        self.job.native_static_inputs(self.operator_id, inputs)
+    }
+
     /// Returns the operator's node identity.
     pub const fn operator_id(&self) -> &str {
         self.operator_id

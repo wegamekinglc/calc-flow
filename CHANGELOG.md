@@ -9,6 +9,22 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-09: Validate native static array names against actual exposed graph
+  bindings and omit them from finite data-source coverage, preserving legacy
+  Table/NumPy/JAX static validation and source requirements.
+
+- 2026-11-08: Add native ArrayExpr dynamic declarations, Rust-backed shape/type
+  queries, axis reductions and synchronous single-array collection from native
+  array and table/SQL roots. Lower native table attachment through row-preserving
+  bridge segments with arbitrary static parameter names and shared physical
+  bindings. Register both native identities atomically and replay their frozen
+  capability records as one bundle, retaining capability schema 4 and project-v3.
+
+- 2026-11-08: Add native table/array bridges with proven row lineage, stateless
+  streams and shared per-run/job static preparation. Preserve per-alias digest-v1
+  recovery checks, account payload/descriptor lifetimes, settle cancelled startup
+  work before cleanup, and register the three array/table factories atomically.
+
 - 2026-11-08: Add owned Rust rolling-mean and EWMA states with transactional
   chunk processing, checked cumulative positions, bounded retained history and
   total-live allocation admission. Preserve eager numerical semantics and

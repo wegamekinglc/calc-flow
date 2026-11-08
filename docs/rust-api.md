@@ -19,6 +19,7 @@ On this page:
 - [Native elementwise arrays](#native-elementwise-arrays)
 - [Packed matrices and axes](#packed-matrices-and-axes)
 - [Native array batch provider](#native-array-batch-provider)
+- [Native table/array bridge](#native-tablearray-bridge)
 - [Expression pipeline](#expression-pipeline)
 - [SQL operators](#sql-operators)
 - [Snapshot SQL](#snapshot-sql)
@@ -335,11 +336,12 @@ combines matrix multiplication, axis means and owned shape transforms.
 
 ## Native array batch provider
 
-`array::register_native(&ProviderRegistry)` registers the batch factory
-`native:array_expr@1`. `NativeArrayFactory::default()` also implements
-`BatchOperatorFactory` for direct Rust integration. Both paths validate the
-exact provider/name/version; duplicate registration preserves the existing
-entry. There is no native stream factory or static placement callback.
+`array::register_native(&ProviderRegistry)` atomically registers
+`native:array_expr@1` for batch processing and `native:table_array@1` for batch
+and admitted stateless stream processing. Any collision leaves all existing
+entries unchanged. The bundle shares two worker slots across both factories.
+`NativeArrayFactory::default()` also implements `BatchOperatorFactory` for
+direct Rust integration; every factory validates its exact identity.
 
 The factory's `capability_descriptor()` returns data describing its actual
 batch behavior and a canonical `options_json_schema` string. Querying this
@@ -440,7 +442,7 @@ an ambiguous program can be refused even when a particular eager result fits.
 Allocator/object overhead, borrowed inputs and process RSS remain outside the
 buffer budget. No partial output map is published on failure.
 
-Each factory shares two private worker slots across its operators. Computation
+A directly constructed factory shares two private worker slots across its operators. Computation
 runs on Tokio's blocking pool; queued admission uses a 10 ms polling interval to observe cancellation and
 deadlines while the runtime can schedule it. Kernels check
 before allocation, every 4096 visited positions, inside rolling history refolds,
@@ -453,6 +455,93 @@ cancellation and Tokio's ordinary `Runtime::drop` drains its blocking pool.
 does not prove that a worker has ended, and closure-owned buffers and permits
 remain retained until it does. The factory introduces no checkpoint or
 cross-platform bitwise reproducibility promise.
+
+## Native table/array bridge
+
+`NativeTableArrayFactory` reuses IR2 kernels for one exact-schema table input,
+zero or one static matrix RHS, and one array or attached-table output. Its
+`capability_descriptor()` exposes a strict canonical wrapper schema, batch and
+stream modes, stateless checkpoint support and row-axis-independent finality.
+The array factory remains batch-only with unproven checkpoint support. Both
+factories support declared finite native static inputs.
+
+```json
+{
+  "ir_version": 2,
+  "inputs": [
+    {"name": "observations", "kind": "table", "columns": ["a", "b"]},
+    {"name": "coefficients", "kind": "array", "binding": "static", "dtype": "float64", "shape": [2, 1]}
+  ],
+  "nodes": [
+    {"id": "x", "op": "input", "name": "observations"},
+    {"id": "w", "op": "input", "name": "coefficients"},
+    {"id": "y", "op": "matmul", "left": "x", "right": "w"}
+  ],
+  "outputs": [{"name": "result", "kind": "table", "node": "y", "attach_to": "observations", "names": ["score"]}]
+}
+```
+
+Selected columns are nonempty, unique and homogeneous bool/float32/float64.
+Chunks and slices retain logical row order. Packing is charged and does not
+require `combine_chunks`; invalid slots are never read. Table output preserves
+original columns, Arrow metadata and Batch metadata, and appends conservatively
+nullable inferred fields. Its declared schema, including schema metadata, must
+match exactly. Array output instead declares `kind`, `name`, `node`, `dtype`
+and `shape`, without `attach_to` or `names`; it retains rows and Batch metadata.
+
+Admission proves the original table row lineage. Elementwise work, static-RHS
+matmul, rank-two axis-1 reductions and a rank-one transpose preserve it. Full or
+axis-0 reductions, rank-two transpose, rolling/EWMA and mismatched origins cannot
+be attached merely because lengths match. Batch reshape requires unchanged row
+mapping; stream rejects every concrete reshape because it can fix a microbatch
+length. A matrix is permitted only as the direct RHS of the single matmul.
+Every stream RHS must have an actual compiled static binding; direct Rust
+builders receive the same startup check before any source opens.
+
+Provide declared values with the existing finite input mapping or
+`StreamingRunner::with_static_inputs`. Native static names exactly match exposed
+graph bindings: bare when the local port is unique, `node.port` when repeated.
+Finite `data_sources` omits native static arrays and rejects dummy dynamic
+sources for them; legacy Table/NumPy/JAX static declarations retain their source
+coverage rules. Native project validation applies the same static declarations
+and trusted-consumer checks as compilation and returns its matching fingerprint.
+Only genuine native or engine-latched
+native owners enter this preparation path. A wrapper delegating `as_any` does
+not acquire trusted owner identity. One run/job freezes, canonically encodes and
+places each shared owner once across nodes, including array/table consumers.
+Separate owners sharing values or backing buffers remain separate. SHA-256 is
+still computed per physical alias with unchanged name-sensitive digest-v1;
+encoding once does not eliminate per-alias hashing. Public global
+`static_input(name)` lookup keeps its existing meaning; private execution uses
+exact node-port-to-physical projections.
+
+Each consumer reserves retained source/frozen storage, packed placement and
+identifiable native descriptor copies. Preparation adds a fixed 4 KiB encoding
+chunk and one SHA state per alias. Every consumer must admit its own retained
+reservation plus shared preparation workspace before allocation; numerical
+packing/outputs/scratch receive the remaining byte allowance. Actual data and
+instantiated descriptor capacities are checked separately, so future descriptor
+reservation cannot subsidize a larger observed array allocation.
+
+Managed descriptor admission takes the larger of the pre-installation phase
+and active checkpoint phase. It counts native strings in preparation maps,
+installed static keys, resident settings copies, checkpoint identity, the live
+selected/current manifest and temporary native JSON maps. Preparation maps are
+consumed before task contexts are created. Resident settings copies comprise one
+root, each logical operator, each dynamic source binding, each named output
+sink task and the optional benchmark context. Built-in SQL capture/restore uses
+thin controls. A fresh job conservatively reserves a possible selected manifest
+slot before recovery is known; loaded selected native capacities are rechecked.
+Existing global frames/map overhead, whole-manifest serialization/I/O buffers,
+historical retention maintenance and user-created external context clones are
+outside this identifiable-storage budget, which is not an RSS cap.
+
+Preparation checks actual run/job cancellation and deadlines in bounded workers.
+A dropped startup waiter requests cancellation; owned cleanup waits for actual
+work, permits and inputs to settle, including queued admission. All physical
+recovery digests and observed native descriptor capacities pass before scope
+installation and source open. Failure/cancellation publishes no reusable scope.
+The existing NumPy/JAX preparation and checkpoint protocols retain their behavior.
 
 ## Expression pipeline
 

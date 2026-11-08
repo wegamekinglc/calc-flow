@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import field
 from threading import RLock
 from types import MappingProxyType
-from typing import Any, Literal, Union
+from typing import Any, Literal, Union, cast
 from uuid import uuid4
 
 from typing_extensions import TypeAlias
@@ -18,7 +18,7 @@ from calc_flow.capabilities import (
     ProviderArrayRules,
     ProviderOptionsSchema,
     RuntimeCapabilities,
-    _native_array_provider_capability,
+    _native_array_provider_capabilities,
     _StatelessProviderLifecycle,
     runtime_capabilities,
 )
@@ -190,6 +190,15 @@ class Runtime:
         self._symbolic_compile_cache.clear()
         self._symbolic_schema_cache.clear()
 
+    def _infer_native_array_program(self, program_json: str) -> str:
+        return cast(
+            str,
+            self._cached_symbolic_compile(
+                ("native_array_inference", program_json),
+                lambda: _native._infer_native_array_program(program_json),
+            ),
+        )
+
     def _infer_symbolic_expression_schema(
         self, select: Sequence[str], filter_sql: str | None, schema: Any, /
     ) -> Any:
@@ -292,17 +301,20 @@ class Runtime:
 
     def _register_native_array(self) -> None:
         with self._registration_lock:
-            capability = _native_array_provider_capability(
-                _native._native_array_capability()
+            capabilities = _native_array_provider_capabilities(
+                _native._native_array_capabilities()
             )
-            registration = {
-                "kind": "native_provider",
-                "provider": capability.provider,
-                "name": capability.name,
-                "version": capability.version,
-                "capability": capability,
-            }
-            registrations = [*self._registrations, registration]
+            records = [
+                {
+                    "kind": "native_provider",
+                    "provider": capability.provider,
+                    "name": capability.name,
+                    "version": capability.version,
+                    "capability": capability,
+                }
+                for capability in capabilities
+            ]
+            registrations = [*self._registrations, *records]
             self._inner._register_native_array()
             object.__setattr__(self, "_registrations", registrations)
             self._invalidate_symbolic_compile_cache()

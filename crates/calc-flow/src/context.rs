@@ -33,13 +33,28 @@ impl CancellationToken {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RunContext {
     run_id: Arc<str>,
     node_id: Option<Arc<str>>,
     settings: Arc<JsonMap>,
     deadline: Option<DateTime<Utc>>,
     cancellation: CancellationToken,
+    native_statics: Option<Arc<crate::array::NativeScope>>,
+}
+
+impl std::fmt::Debug for RunContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RunContext")
+            .field("run_id", &self.run_id)
+            .field("node_id", &self.node_id)
+            .field("settings", &self.settings)
+            .field("deadline", &self.deadline)
+            .field("cancellation", &self.cancellation)
+            .field("native_static_scope", &self.native_statics)
+            .finish()
+    }
 }
 
 impl RunContext {
@@ -66,6 +81,7 @@ impl RunContext {
             settings: Arc::new(settings),
             deadline,
             cancellation,
+            native_statics: None,
         })
     }
 
@@ -85,6 +101,26 @@ impl RunContext {
         let mut context = self.clone();
         context.node_id = Some(node_id.into());
         Ok(context)
+    }
+
+    pub(crate) fn with_native_static_scope(
+        mut self,
+        scope: Arc<crate::array::NativeScope>,
+    ) -> Self {
+        self.native_statics = Some(scope);
+        self
+    }
+    pub(crate) fn native_static_inputs(
+        &self,
+        inputs: &BTreeMap<String, crate::Batch>,
+    ) -> Result<(BTreeMap<String, crate::Batch>, usize)> {
+        match (&self.native_statics, self.node_id()) {
+            (Some(scope), Some(node)) => scope.resolve(node, inputs),
+            _ => Ok((inputs.clone(), 0)),
+        }
+    }
+    pub(crate) fn native_static_input(&self, port: &str) -> Option<&crate::Batch> {
+        self.native_statics.as_ref()?.input(self.node_id()?, port)
     }
 
     /// Verifies that the run remains active.

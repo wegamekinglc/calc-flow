@@ -15,6 +15,7 @@ import pyarrow as pa
 from calc_flow._compat import dataclass
 from calc_flow._native import (
     Batch,
+    NativeArray,
     StreamingRuntimeError,
     _ArrowResultQueue,
     _ArrowResultSink,
@@ -67,7 +68,7 @@ class StreamOutput:
 @dataclass(frozen=True, slots=True)
 class _StreamRequest:
     program: Program
-    inputs: dict[str, StreamInput | TableData]
+    inputs: dict[str, StreamInput | TableData | NativeArray]
     runtime: Runtime | None
     config: StreamRuntimeConfig | None
     watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None
@@ -298,7 +299,8 @@ class StreamResults(Generic[T]):
         for name, value in expected.items():
             data = self._request.inputs[name]
             if isinstance(value, Parameter):
-                static[name] = _input_batch(data, value, f"stream.inputs.{name}")
+                batch = _input_batch(data, value, f"stream.inputs.{name}")
+                static.update((physical, batch) for physical in names[name])
             else:
                 binding, adapter = _source_binding(
                     data,
@@ -476,7 +478,7 @@ class StreamResults(Generic[T]):
 
 def _stream_program(
     program: Program,
-    inputs: Mapping[str, StreamInput | TableData],
+    inputs: Mapping[str, StreamInput | TableData | NativeArray],
     runtime: Runtime | None,
     config: StreamRuntimeConfig | None,
     watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None,
@@ -497,7 +499,7 @@ def _stream_program(
 
 def _stream_table(
     table: TableExpr,
-    inputs: StreamInput | Mapping[str, StreamInput | TableData],
+    inputs: StreamInput | Mapping[str, StreamInput | TableData | NativeArray],
     runtime: Runtime | None,
     config: StreamRuntimeConfig | None,
     watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None,

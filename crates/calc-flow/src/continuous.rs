@@ -1100,12 +1100,25 @@ impl StreamingRunner {
     ) {
         let runner = OneShotContinuousRunner::new();
         let cleanup = runner.cleanup_observer();
-        (self.start_on(runner), async move {
+        let (pending, receipt) = if self.plan.native_static_plan().needs_preparation() {
+            let (lease, receipt) = crate::array::preparation_channel();
+            (crate::array::Preparation::new(self, lease), Some(receipt))
+        } else {
+            (crate::array::Preparation::from_parts(self, None), None)
+        };
+        (Self::start_on(pending, runner), async move {
+            if let Some(receipt) = receipt {
+                receipt.await;
+            }
             cleanup.await.map_err(safe_error)
         })
     }
 
-    async fn start_on(self, runner: OneShotContinuousRunner) -> Result<StreamingJob> {
+    async fn start_on(
+        pending: crate::array::Preparation<Self>,
+        runner: OneShotContinuousRunner,
+    ) -> Result<StreamingJob> {
+        let (runner_inputs, lease) = pending.into_parts();
         let Self {
             plan,
             sources,
@@ -1113,21 +1126,30 @@ impl StreamingRunner {
             checkpoints,
             config,
             static_inputs,
-        } = self;
+        } = runner_inputs;
         let job_id = allocate_job_id()?;
-        let prepared_static_inputs =
-            crate::static_input::prepare_static_inputs(plan.static_inputs(), &static_inputs)
-                .map_err(static_preflight_error)?;
-        let fingerprint = plan.fingerprint().to_owned();
         let context = StreamJobContext::new(
             job_id,
-            fingerprint,
-            static_input_settings(&prepared_static_inputs),
+            plan.fingerprint().to_owned(),
+            JsonMap::new(),
             None,
             CancellationToken::new(),
         )
-        .with_checkpointing(config.checkpointing)
-        .with_static_inputs(prepared_static_inputs.latched.clone());
+        .with_checkpointing(config.checkpointing);
+        let pending_inputs = crate::array::Preparation::from_parts(Arc::new(static_inputs), lease);
+        let copies = plan.native_context_copies()?;
+        let mut prepared_static_inputs = prepare_startup_statics(
+            plan.native_static_plan(),
+            plan.static_inputs(),
+            pending_inputs,
+            &context,
+            copies,
+        )
+        .await
+        .map_err(static_preflight_error)?;
+        let context = context
+            .with_settings(static_input_settings(prepared_static_inputs.value()))
+            .with_static_inputs(prepared_static_inputs.value().latched.clone());
         let sources = sources
             .into_iter()
             .map(|(binding_id, binding)| NamedSourceBinding {
@@ -1154,34 +1176,13 @@ impl StreamingRunner {
             sinks,
             edge_budget: config.edge_budget,
             delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
-            static_inputs: prepared_static_inputs,
+            static_inputs: prepared_static_inputs.take_value(),
         };
         #[cfg(test)]
-        let (start, fault_probe) = match checkpoints {
-            Some(checkpoints) if checkpoints.fault.is_some() => {
-                let (point, mode) = checkpoints.fault.expect("fault presence checked");
-                let (start, probe) = runner.start_checkpointed_with_config_and_fault_probe(
-                    spec,
-                    checkpoints.inner,
-                    config,
-                    point,
-                    mode,
-                );
-                (start, Some(probe))
-            }
-            Some(checkpoints) => (
-                runner.start_checkpointed_with_config(spec, checkpoints.inner, config),
-                None,
-            ),
-            None => (runner.start_with_config(spec, config), None),
-        };
+        let (start, fault_probe) = start_registered(runner, spec, checkpoints, config);
         #[cfg(not(test))]
-        let start = match checkpoints {
-            Some(checkpoints) => {
-                runner.start_checkpointed_with_config(spec, checkpoints.inner, config)
-            }
-            None => runner.start_with_config(spec, config),
-        };
+        let start = start_registered(runner, spec, checkpoints, config);
+        drop(prepared_static_inputs);
         start
             .await
             .map(|inner| StreamingJob {
@@ -1193,6 +1194,87 @@ impl StreamingRunner {
             })
             .map_err(|failure| start_error(job_id, &failure))
     }
+}
+
+#[cfg(test)]
+fn start_registered(
+    runner: OneShotContinuousRunner,
+    spec: ContinuousJobSpec,
+    checkpoints: Option<ManagedCheckpointRuntime>,
+    config: StreamRuntimeConfig,
+) -> (
+    crate::runtime::streaming::runner::OneShotStartObserver,
+    Option<crate::runtime::streaming::runner::CheckpointFaultInjector>,
+) {
+    match checkpoints {
+        Some(checkpoints) if checkpoints.fault.is_some() => {
+            let (point, mode) = checkpoints.fault.expect("fault presence checked");
+            let (start, probe) = runner.start_checkpointed_with_config_and_fault_probe(
+                spec,
+                checkpoints.inner,
+                config,
+                point,
+                mode,
+            );
+            (start, Some(probe))
+        }
+        Some(checkpoints) => (
+            runner.start_checkpointed_with_config(spec, checkpoints.inner, config),
+            None,
+        ),
+        None => (runner.start_with_config(spec, config), None),
+    }
+}
+#[cfg(not(test))]
+fn start_registered(
+    runner: OneShotContinuousRunner,
+    spec: ContinuousJobSpec,
+    checkpoints: Option<ManagedCheckpointRuntime>,
+    config: StreamRuntimeConfig,
+) -> crate::runtime::streaming::runner::OneShotStartObserver {
+    match checkpoints {
+        Some(checkpoints) => runner.start_checkpointed_with_config(spec, checkpoints.inner, config),
+        None => runner.start_with_config(spec, config),
+    }
+}
+
+async fn prepare_startup_statics(
+    native: &crate::array::NativeStaticPlan,
+    declared: &BTreeMap<String, crate::StaticInputSpec>,
+    pending: crate::array::Preparation<Arc<BTreeMap<String, Batch>>>,
+    context: &StreamJobContext,
+    copies: usize,
+) -> Result<crate::array::Preparation<crate::static_input::PreparedStaticInputs>> {
+    native.validate_bindings()?;
+    crate::static_input::validate_static_input_names(declared, pending.value())?;
+    if !native.needs_preparation() {
+        return pending
+            .map(|supplied| crate::static_input::prepare_static_inputs(declared, &supplied))
+            .transpose();
+    }
+    let legacy = prepare_legacy_statics(declared, pending.value())?;
+    let scope = native.prepare_stream(pending, context, copies).await?;
+    Ok(scope.map(move |scope| merge_native_statics(legacy, scope)))
+}
+fn prepare_legacy_statics(
+    declared: &BTreeMap<String, crate::StaticInputSpec>,
+    supplied: &BTreeMap<String, Batch>,
+) -> Result<crate::static_input::PreparedStaticInputs> {
+    let legacy=declared.iter().filter(|(_,spec)|!matches!(spec,crate::StaticInputSpec::Array{backend,..} if backend=="native")).map(|(name,spec)|(name.clone(),spec.clone())).collect::<BTreeMap<_,_>>();
+    let values = legacy
+        .keys()
+        .map(|name| (name.clone(), supplied[name].clone()))
+        .collect();
+    crate::static_input::prepare_static_inputs(&legacy, &values)
+}
+fn merge_native_statics(
+    mut legacy: crate::static_input::PreparedStaticInputs,
+    scope: crate::array::NativeScope,
+) -> crate::static_input::PreparedStaticInputs {
+    legacy.latched.extend(scope.latched());
+    legacy.digests.extend(scope.digests());
+    legacy.native_scope = Some(Arc::new(scope));
+    legacy
 }
 
 /// Sole owning handle for one running continuous job.
@@ -1503,6 +1585,8 @@ fn start_error(job_id: u64, failure: &StartFailure) -> CalcFlowError {
 
 #[cfg(test)]
 mod checkpointing_tests;
+#[cfg(test)]
+mod native_static_tests;
 
 #[cfg(test)]
 mod tests {

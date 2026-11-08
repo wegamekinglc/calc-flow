@@ -75,6 +75,7 @@ mod test_seams;
 
 pub use channel::{ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, edge_channel};
 pub use context::StreamJobContext;
+pub(crate) use context::StreamJobControl;
 pub use message::{StreamMessage, StreamMessageKind};
 #[cfg(feature = "benchmark-internals")]
 pub(crate) use operator_task::benchmark_replay;

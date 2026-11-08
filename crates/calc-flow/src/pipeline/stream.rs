@@ -367,6 +367,7 @@ pub(crate) struct StreamRuntimePlanParts {
     pub(crate) source_routes: BTreeMap<String, RuntimeSourceRoute>,
     pub(crate) sink_routes: BTreeMap<String, RuntimeSinkRoute>,
     pub(crate) static_input_ids: BTreeSet<String>,
+    pub(crate) static_input_ports: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl CompiledStreamOperator {
@@ -712,6 +713,8 @@ pub struct StreamExecutionPlan {
     project_sources: Option<BTreeMap<String, SourceBinding>>,
     project_sinks: Option<BTreeMap<String, Vec<SinkBinding>>>,
     static_inputs: BTreeMap<String, crate::StaticInputSpec>,
+    static_input_ports: BTreeMap<String, BTreeMap<String, String>>,
+    native_statics: crate::array::NativeStaticPlan,
 }
 
 impl PipelineBuilder {
@@ -762,6 +765,11 @@ impl PipelineBuilder {
             .collect::<BTreeMap<_, _>>();
         let name = self.name.clone();
         let table = graph.table;
+        let mut native_statics = crate::array::NativeStaticPlan::default();
+        native_statics.set_endpoints(&graph.external_inputs);
+        for node in self.nodes.values() {
+            native_statics.push(&node.node_id, node.operator.metadata());
+        }
         let nodes = build_runtime_nodes(self, &graph.order, table.as_ref(), &graph.late_outputs);
         Ok(StreamExecutionPlan {
             name,
@@ -775,6 +783,8 @@ impl PipelineBuilder {
             project_sources: None,
             project_sinks: None,
             static_inputs: BTreeMap::new(),
+            static_input_ports: BTreeMap::new(),
+            native_statics,
         })
     }
 }
@@ -1064,6 +1074,9 @@ impl StreamExecutionPlan {
             }
             self.static_inputs.insert(name, spec);
         }
+        self.native_statics
+            .configure(&self.external_inputs, &self.static_inputs)?;
+        self.static_input_ports = static_projection(&self.static_inputs, &self.external_inputs);
         if !self.static_inputs.is_empty() {
             let value = json!({
                 "graph_fingerprint": self.fingerprint.as_str(),
@@ -1076,6 +1089,32 @@ impl StreamExecutionPlan {
         Ok(self)
     }
 
+    pub(crate) fn native_static_plan(&self) -> &crate::array::NativeStaticPlan {
+        &self.native_statics
+    }
+    pub(crate) fn native_context_copies(&self) -> Result<usize> {
+        let sources = self
+            .external_inputs
+            .keys()
+            .filter(|name| !self.static_inputs.contains_key(*name))
+            .count();
+        [
+            1,
+            self.nodes.len(),
+            sources,
+            self.external_outputs.len(),
+            usize::from(cfg!(feature = "benchmark-internals")),
+        ]
+        .into_iter()
+        .try_fold(0_usize, |total, count| {
+            total
+                .checked_add(count)
+                .ok_or_else(|| CalcFlowError::InvalidArgument {
+                    field: "static_inputs.bytes".into(),
+                    message: "native context descriptor count overflowed".into(),
+                })
+        })
+    }
     pub(crate) fn take_project_bindings(&mut self) -> Option<ProjectRuntimeBindings> {
         match (self.project_sources.take(), self.project_sinks.take()) {
             (Some(sources), Some(sinks)) => Some((sources, sinks)),
@@ -1349,6 +1388,8 @@ impl StreamExecutionPlan {
             project_sources: _,
             project_sinks: _,
             static_inputs,
+            static_input_ports,
+            native_statics: _,
         } = self;
         let static_input_ids = static_inputs.into_keys().collect::<BTreeSet<_>>();
         let external_inputs = external_inputs
@@ -1385,8 +1426,25 @@ impl StreamExecutionPlan {
             source_routes,
             sink_routes,
             static_input_ids,
+            static_input_ports,
         })
     }
+}
+
+fn static_projection(
+    specs: &BTreeMap<String, crate::StaticInputSpec>,
+    external: &BTreeMap<String, PortEndpoint>,
+) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut projection: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for name in specs.keys() {
+        if let Some(endpoint) = external.get(name) {
+            projection
+                .entry(endpoint.node_id.clone())
+                .or_default()
+                .insert(endpoint.port.clone(), name.clone());
+        }
+    }
+    projection
 }
 
 fn project_internal_edges(

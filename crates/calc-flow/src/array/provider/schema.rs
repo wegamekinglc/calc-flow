@@ -253,11 +253,96 @@ pub(super) fn descriptor() -> JsonMap {
         "options_schema":null, "options_json_schema":schema,
         "modes":["batch"], "stateful":false, "microbatch_invariant":false,
         "requires_watermark":false, "checkpoint_support":"unproven", "state_version":null,
-        "supports_static_inputs":false, "partition_contract":"none", "finality":"unproven",
+        "supports_static_inputs":true, "partition_contract":"none", "finality":"unproven",
         "deterministic":true, "replay_safe":true,
         "array_rules":{"supported_dtypes":["bool","float32","float64"],
             "safe_dtype_rule":{"name":"native_float_bool_dtype","version":"1"},
             "shape_rules":[{"name":"native_scalar_vector_broadcast","version":"1"},{"name":"native_packed_rank2","version":"1"},{"name":"native_matmul","version":"1"},{"name":"native_axis_reduction","version":"1"}]}
     }))
     .expect("fixed capability descriptor is an object")
+}
+
+fn names(minimum: usize) -> Value {
+    json!({"type":"array","minItems":minimum,"uniqueItems":true,"items":{"type":"string"}})
+}
+fn table_inputs() -> Value {
+    let table = object(
+        vec![
+            ("name", identifier()),
+            ("kind", json!({"const":"table"})),
+            ("columns", names(1)),
+        ],
+        &["name", "kind", "columns"],
+    );
+    let array = object(
+        vec![
+            ("name", identifier()),
+            ("kind", json!({"const":"array"})),
+            ("binding", json!({"const":"static"})),
+            ("dtype", dtype()),
+            ("shape", shape(2)),
+        ],
+        &["name", "kind", "binding", "dtype", "shape"],
+    );
+    json!({"type":"array","minItems":1,"maxItems":2,"items":{"oneOf":[table,array]}})
+}
+fn table_outputs() -> Value {
+    let table = object(
+        vec![
+            ("name", identifier()),
+            ("kind", json!({"const":"table"})),
+            ("node", identifier()),
+            ("attach_to", identifier()),
+            ("names", names(1)),
+        ],
+        &["name", "kind", "node", "attach_to", "names"],
+    );
+    let mut array = output(2);
+    array["properties"]["kind"] = json!({"const":"array"});
+    array["required"]
+        .as_array_mut()
+        .expect("fixed required array")
+        .push(json!("kind"));
+    json!({"type":"array","minItems":1,"maxItems":1,"items":{"oneOf":[table,array]}})
+}
+fn table_schema() -> Value {
+    let mut schema = program(2);
+    schema["properties"]["inputs"] = table_inputs();
+    schema["properties"]["outputs"] = table_outputs();
+    schema["$schema"] = json!("https://json-schema.org/draft/2020-12/schema");
+    schema["x-calc-flow-max-compact-json-bytes"] = json!(65536);
+    schema["x-calc-flow-max-node-depth"] = json!(24);
+    schema["description"] = json!(concat!(
+        "native:table_array@1 IR2 requires exactly one exact-schema table input with homogeneous selected bool/float32/float64 columns, ",
+        "at most one static matrix used only as a direct matmul RHS, and one row-proven array or attached-table output. ",
+        "Attachment requires the original table lineage and known positive width; full/axis0 reduction and rank2 transpose erase row lineage. ",
+        "Stream additionally rejects rolling/EWMA, axis0 reductions, concrete reshape, and rank2 transpose. ",
+        "Output ports and schemas must exactly match. Null static RHS values are rejected before source open. ",
+        "Static aliases retain per-name digest-v1; native preparation and numerical work share checked per-consumer allocation limits."
+    ));
+    schema
+}
+
+pub(super) fn table_descriptor() -> JsonMap {
+    let mut descriptor = descriptor();
+    let schema =
+        canonical_json(&table_schema()).expect("bounded fixed table schema is canonical JSON");
+    for (key, value) in [
+        ("name", json!("table_array")),
+        ("options_json_schema", json!(schema)),
+        ("modes", json!(["batch", "stream"])),
+        ("microbatch_invariant", json!(true)),
+        ("checkpoint_support", json!("stateless")),
+        ("partition_contract", json!("row_axis_independent")),
+        ("finality", json!("per_row_final")),
+    ] {
+        descriptor.insert(key.into(), value);
+    }
+    descriptor
+        .get_mut("array_rules")
+        .expect("fixed array rules")["shape_rules"]
+        .as_array_mut()
+        .expect("fixed shape rules")
+        .push(json!({"name":"native_table_static_rhs","version":"1"}));
+    descriptor
 }

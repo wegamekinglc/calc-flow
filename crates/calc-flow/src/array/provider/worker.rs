@@ -5,7 +5,10 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::{CalcFlowError, CancellationToken, Result, RunContext};
+use crate::runtime::streaming::StreamJobControl;
+use crate::{CalcFlowError, CancellationToken, Result, RunContext, StreamJobContext};
+
+use super::preparation::settlement::Preparation;
 
 const WORKERS: usize = 2;
 const ADMISSION_CHECK: Duration = Duration::from_millis(10);
@@ -31,6 +34,7 @@ impl Drop for CancelOnDrop {
 struct OwnedWorker<T: Send + 'static> {
     handle: Option<JoinHandle<Result<T>>>,
     stop: CancellationToken,
+    name: &'static str,
 }
 impl<T: Send + 'static> OwnedWorker<T> {
     async fn settle(mut self) -> Result<T> {
@@ -40,7 +44,7 @@ impl<T: Send + 'static> OwnedWorker<T> {
             .expect("worker handle remains owned")
             .await;
         self.handle.take();
-        result.map_err(|_| worker_error())?
+        result.map_err(|_| worker_error(self.name))?
     }
 }
 impl<T: Send + 'static> Drop for OwnedWorker<T> {
@@ -51,32 +55,105 @@ impl<T: Send + 'static> Drop for OwnedWorker<T> {
     }
 }
 
-fn worker_error() -> CalcFlowError {
+fn worker_error(name: &str) -> CalcFlowError {
     CalcFlowError::ExternalProvider {
         provider: "native".into(),
-        name: "array_expr".into(),
+        name: name.into(),
         version: "1".into(),
         message: "native computation worker terminated".into(),
     }
 }
-fn check(context: &RunContext, stop: &CancellationToken) -> Result<()> {
+pub(super) enum Scope {
+    Batch(RunContext),
+    Stream(StreamJobControl),
+}
+impl Scope {
+    pub(super) fn stream(job: &StreamJobContext) -> Self {
+        Self::Stream(job.native_control())
+    }
+    fn check_cancelled(&self) -> Result<()> {
+        match self {
+            Self::Batch(context) => context.check_cancelled(),
+            Self::Stream(context) => context.check_cancelled(),
+        }
+    }
+    fn cancelled(&self) -> CalcFlowError {
+        let run_id = match self {
+            Self::Batch(context) => context.run_id().to_owned(),
+            Self::Stream(context) => context.job_id().to_string(),
+        };
+        CalcFlowError::Cancelled { run_id }
+    }
+}
+fn check(context: &Scope, stop: &CancellationToken) -> Result<()> {
     context.check_cancelled()?;
     if stop.is_cancelled() {
-        return Err(CalcFlowError::Cancelled {
-            run_id: context.run_id().to_owned(),
-        });
+        return Err(context.cancelled());
     }
     Ok(())
 }
 
 impl Workers {
+    #[cfg(test)]
+    pub(super) fn test_permits(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.permits)
+    }
     pub(super) async fn run<T: Send + 'static>(
         &self,
         context: RunContext,
         job: impl FnOnce(&mut dyn FnMut() -> Result<()>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        let permit = self.admit(&context).await?;
+        self.run_scoped(Scope::Batch(context), "array_expr", job)
+            .await
+    }
+    pub(super) async fn run_table<T: Send + 'static>(
+        &self,
+        context: RunContext,
+        job: impl FnOnce(&mut dyn FnMut() -> Result<()>) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.run_scoped(Scope::Batch(context), "table_array", job)
+            .await
+    }
+    pub(super) async fn run_stream<T: Send + 'static>(
+        &self,
+        context: &StreamJobContext,
+        job: impl FnOnce(&mut dyn FnMut() -> Result<()>) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.run_scoped(Scope::stream(context), "table_array", job)
+            .await
+    }
+    pub(super) async fn run_scoped<T: Send + 'static>(
+        &self,
+        context: Scope,
+        name: &'static str,
+        job: impl FnOnce(&mut dyn FnMut() -> Result<()>) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let mut result = self
+            .run_work(context, name, Preparation::from_parts(job, None))
+            .await?;
+        Ok(result.take_value())
+    }
+    pub(super) async fn run_preparation<T: Send + 'static>(
+        &self,
+        context: Scope,
+        name: &'static str,
+        pending: Preparation<
+            impl FnOnce(&mut dyn FnMut() -> Result<()>) -> Result<T> + Send + 'static,
+        >,
+    ) -> Result<Preparation<T>> {
+        self.run_work(context, name, pending).await
+    }
+    async fn run_work<T: Send + 'static>(
+        &self,
+        context: Scope,
+        name: &'static str,
+        pending: Preparation<
+            impl FnOnce(&mut dyn FnMut() -> Result<()>) -> Result<T> + Send + 'static,
+        >,
+    ) -> Result<Preparation<T>> {
+        let permit = self.admit(&context, name).await?;
         context.check_cancelled()?;
+        let (job, lease) = pending.into_parts();
         let stop = CancellationToken::new();
         let _cancel = CancelOnDrop(stop.clone());
         let worker_stop = stop.clone();
@@ -91,21 +168,27 @@ impl Workers {
         let owned = OwnedWorker {
             handle: Some(worker),
             stop,
+            name,
         };
         let (sender, receiver) = oneshot::channel();
         drop(tokio::spawn(async move {
-            let _ = sender.send(owned.settle().await);
+            let packet = Preparation::from_parts(owned.settle().await, lease);
+            let _ = sender.send(packet);
         }));
-        receiver.await.map_err(|_| worker_error())?
+        receiver.await.map_err(|_| worker_error(name))?.transpose()
     }
 
-    async fn admit(&self, context: &RunContext) -> Result<tokio::sync::OwnedSemaphorePermit> {
+    async fn admit(
+        &self,
+        context: &Scope,
+        name: &str,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit> {
         let permit = Arc::clone(&self.permits).acquire_owned();
         tokio::pin!(permit);
         loop {
             context.check_cancelled()?;
             tokio::select! {
-                permit=&mut permit=>return permit.map_err(|_|worker_error()),
+                permit=&mut permit=>return permit.map_err(|_|worker_error(name)),
                 ()=tokio::time::sleep(ADMISSION_CHECK)=>{},
             }
         }

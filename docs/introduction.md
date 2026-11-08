@@ -92,7 +92,11 @@ Temporal calculations declare entity, event-time, and sequence keys on
 `table_input`; see [temporal ordering](python-api.md#temporal-ordering).
 `TableExpr.collect` returns one Arrow table; `Program.collect` returns tables by
 logical output name. Async forms use the same calculation and cancellation
-contract. See [batch calculations](batch-guide.md).
+contract. A native `ArrayExpr.collect_array` separately returns one NativeArray
+from array or table/SQL roots, using an explicitly registered runtime. It is a
+blocking batch method; Table stream mappings accept NativeArray values only for
+static parameters. See [batch calculations](batch-guide.md) and
+[native arrays](python-api.md#native-arrayexpr-declarations-and-collection).
 
 Use `TableExpr.stream(inputs)` or `Program.stream(inputs)` when data arrives
 over time. A Program requires `engine="streaming"` for streams and selects

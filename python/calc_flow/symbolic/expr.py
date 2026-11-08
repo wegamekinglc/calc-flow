@@ -52,7 +52,8 @@ from calc_flow.symbolic.types import (
 if TYPE_CHECKING:
     from datetime import timedelta
 
-    from calc_flow._native import ExecutionOptions
+    from calc_flow._native import Batch, ExecutionOptions, NativeArray
+    from calc_flow._native_array import ArrayExecutionOptions
     from calc_flow.asof_join_spec import AsofStateLimits
     from calc_flow.compute import TableData
     from calc_flow.pipeline import Runtime
@@ -166,9 +167,19 @@ def _column_binary(
     )
 
 
+def _require_native_integer_literal(left: ArrayExpr, operand: object) -> None:
+    if type(operand) is not int or abs(operand) <= 2**53:
+        return
+    from calc_flow.symbolic.native_arrays import is_native_array
+
+    if is_native_array(left._node):
+        raise ValueError("native array literal must satisfy abs(value) <= 2^53")
+
+
 def _array_binary(
     left: ArrayExpr, right: object, primitive: str, operator: str, /
 ) -> ArrayExpr:
+    _require_native_integer_literal(left, right)
     return ArrayExpr(
         build(
             primitive,
@@ -262,7 +273,79 @@ def _reflected_column(
 
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
 class ArrayExpr(Expr[object]):
-    """An Array API-backed expression with backend, dtype, and lineage."""
+    """An immutable array declaration with explicit backend, dtype and lineage."""
+
+    def collect_array(
+        self,
+        inputs: Mapping[str, NativeArray | Batch | TableData],
+        /,
+        *,
+        runtime: Runtime,
+        options: ExecutionOptions | None = None,
+        array_options: ArrayExecutionOptions | None = None,
+    ) -> NativeArray:
+        """Collect one native batch result from declared array and table inputs."""
+        from calc_flow.compute import _collect_array
+
+        return _collect_array(self, inputs, runtime, options, array_options)
+
+    def reshape(self, shape: Sequence[int], /) -> ArrayExpr:
+        """Declare a packed scalar/vector/matrix reshape with concrete extents."""
+        if isinstance(shape, (str, bytes)) or not isinstance(shape, Sequence):
+            raise TypeError("ArrayExpr.reshape.shape: expected a sequence")
+        if len(shape) > 2:
+            raise ValueError("ArrayExpr.reshape.shape: expected rank at most two")
+        dimensions = tuple(
+            CInt(require_non_negative_int(value, f"ArrayExpr.reshape.shape[{index}]"))
+            for index, value in enumerate(shape)
+        )
+        return ArrayExpr(
+            build("array_reshape", (self._node,), {"shape": CSeq(dimensions)})
+        )
+
+    def transpose(self) -> ArrayExpr:
+        """Declare a native transpose; rank zero and one remain unchanged."""
+        return ArrayExpr(build("array_transpose", (self._node,), {}))
+
+    def sum(
+        self,
+        *,
+        axis: int | None = None,
+        keepdims: bool = False,
+        skip_nulls: bool = False,
+    ) -> ArrayExpr:
+        """Declare an exact native sum over all positions or one axis."""
+        return _array_reduce(self, "sum", axis, keepdims, skip_nulls)
+
+    def mean(
+        self,
+        *,
+        axis: int | None = None,
+        keepdims: bool = False,
+        skip_nulls: bool = False,
+    ) -> ArrayExpr:
+        """Declare an exact native mean over all positions or one axis."""
+        return _array_reduce(self, "mean", axis, keepdims, skip_nulls)
+
+    def min(
+        self,
+        *,
+        axis: int | None = None,
+        keepdims: bool = False,
+        skip_nulls: bool = False,
+    ) -> ArrayExpr:
+        """Declare a native minimum over all positions or one axis."""
+        return _array_reduce(self, "min", axis, keepdims, skip_nulls)
+
+    def max(
+        self,
+        *,
+        axis: int | None = None,
+        keepdims: bool = False,
+        skip_nulls: bool = False,
+    ) -> ArrayExpr:
+        """Declare a native maximum over all positions or one axis."""
+        return _array_reduce(self, "max", axis, keepdims, skip_nulls)
 
     def __eq__(self, other: ArrayOperand, /) -> ArrayExpr:
         return _array_binary(self, other, "eq", "==")
@@ -325,11 +408,38 @@ class ArrayExpr(Expr[object]):
         return ArrayExpr(build("not", (self._node,), {}))
 
 
+def _array_reduce(
+    value: ArrayExpr,
+    function: str,
+    axis: int | None,
+    keepdims: bool,
+    skip_nulls: bool,
+) -> ArrayExpr:
+    if axis is not None:
+        require_non_negative_int(axis, f"ArrayExpr.{function}.axis")
+    for name, flag in (("keepdims", keepdims), ("skip_nulls", skip_nulls)):
+        if type(flag) is not bool:
+            raise TypeError(f"ArrayExpr.{function}.{name}: expected a bool")
+    return ArrayExpr(
+        build(
+            "array_reduce",
+            (value._node,),
+            {
+                "function": CStr(function),
+                "axis": CNull() if axis is None else CInt(axis),
+                "keepdims": CBool(keepdims),
+                "skip_nulls": CBool(skip_nulls),
+            },
+        )
+    )
+
+
 def _reflected_array(
     left: ArrayExpr, right: object, primitive: str, operator: str, /
 ) -> ArrayExpr:
     """Build the reflected non-commutative operators ``right <op> left``."""
 
+    _require_native_integer_literal(left, right)
     return ArrayExpr(
         build(
             primitive,
@@ -493,7 +603,7 @@ class TableExpr(Expr[object]):
 
     def stream(
         self,
-        inputs: StreamInput | Mapping[str, StreamInput | TableData],
+        inputs: StreamInput | Mapping[str, StreamInput | TableData | NativeArray],
         /,
         *,
         runtime: Runtime | None = None,
@@ -513,7 +623,7 @@ class TableExpr(Expr[object]):
 
     def collect(
         self,
-        inputs: TableData | Mapping[str, TableData],
+        inputs: TableData | Mapping[str, TableData | NativeArray],
         /,
         *,
         runtime: Runtime | None = None,
@@ -531,7 +641,7 @@ class TableExpr(Expr[object]):
 
     def collect_async(
         self,
-        inputs: TableData | Mapping[str, TableData],
+        inputs: TableData | Mapping[str, TableData | NativeArray],
         /,
         *,
         runtime: Runtime | None = None,
@@ -644,6 +754,51 @@ def _cv_schema(fields: Sequence[Field], /) -> CSeq:
                 }
             )
             for field in fields
+        )
+    )
+
+
+def _require_native_descriptor(dtype: str, shape: Sequence[object], path: str) -> None:
+    if dtype not in {"bool", "float32", "float64"}:
+        raise ValueError(f"{path}.dtype: expected bool, float32 or float64")
+    if len(shape) > 2:
+        raise ValueError(f"{path}.shape: expected rank at most two")
+
+
+def array_input(
+    name: str,
+    /,
+    *,
+    dtype: str,
+    shape: Sequence[int | None],
+    backend: Literal["native"] = "native",
+) -> ArrayExpr:
+    """Declare one dynamic native array without capturing its input values."""
+    path = "array_input"
+    name = require_non_empty_str(name, f"{path}.name")
+    backend = require_non_empty_str(backend, f"{path}.backend")
+    dtype = require_non_empty_str(dtype, f"{path}.dtype")
+    if backend != "native":
+        raise ValueError(f"{path}.backend: expected native")
+    if isinstance(shape, (str, bytes)) or not isinstance(shape, Sequence):
+        raise TypeError(f"{path}.shape: expected a sequence of dimensions")
+    _require_native_descriptor(dtype, shape, path)
+    dimensions = tuple(
+        CNull()
+        if value is None
+        else CInt(require_non_negative_int(value, f"{path}.shape[{index}]"))
+        for index, value in enumerate(shape)
+    )
+    return ArrayExpr(
+        build(
+            "array_input",
+            (),
+            {
+                "name": CStr(name),
+                "backend": CStr(backend),
+                "dtype": CDType(dtype),
+                "shape": CSeq(dimensions),
+            },
         )
     )
 
@@ -808,6 +963,8 @@ def _array_parameter(
         require_non_negative_int(value, f"{base}.shape[{index}]")
         for index, value in enumerate(shape)
     )
+    if backend_value == "native":
+        _require_native_descriptor(dtype_value, dims, base)
     node = build(
         "parameter",
         (),

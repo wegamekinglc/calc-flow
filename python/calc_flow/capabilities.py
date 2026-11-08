@@ -43,6 +43,7 @@ _CAPABILITY_RULES = frozenset(
         ("native_packed_rank2", "1"),
         ("native_matmul", "1"),
         ("native_axis_reduction", "1"),
+        ("native_table_static_rhs", "1"),
     )
 )
 
@@ -602,13 +603,28 @@ def _native_array_provider_capability(value: object) -> ProviderCapability:
             "array_rules": _descriptor_array_rules(raw["array_rules"]),
         }
     )
-    if (capability.provider, capability.name, capability.version) != (
+    if (capability.provider, capability.version) != (
         "native",
-        "array_expr",
         "1",
-    ):
-        raise ValueError("native array capability must describe native:array_expr@1")
+    ) or capability.name not in {"array_expr", "table_array"}:
+        raise ValueError("native array capability must describe a native array factory")
     return capability
+
+
+def _native_array_provider_capabilities(
+    value: object,
+) -> tuple[ProviderCapability, ...]:
+    capabilities = tuple(
+        _native_array_provider_capability(raw) for raw in _descriptor_list(value)
+    )
+    if sorted(capability.name for capability in capabilities) != [
+        "array_expr",
+        "table_array",
+    ]:
+        raise ValueError(
+            "native capability bundle requires array_expr and table_array exactly once"
+        )
+    return tuple(sorted(capabilities, key=lambda capability: capability.name))
 
 
 def runtime_capabilities(

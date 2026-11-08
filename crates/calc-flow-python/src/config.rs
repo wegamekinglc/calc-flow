@@ -828,11 +828,51 @@ fn _native_array_capability(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
     json_to_python(py, &encoded)
 }
 
+#[pyfunction]
+fn _infer_native_array_program(program_json: &str) -> PyResult<String> {
+    if program_json.len() > 65_536 {
+        return Err(crate::error::to_py_err(
+            calc_flow::CalcFlowError::InvalidArgument {
+                field: "program_json".into(),
+                message: "native array program exceeds 64 KiB".into(),
+            },
+        ));
+    }
+    let program: calc_flow::JsonMap = serde_json::from_str(program_json).map_err(|error| {
+        crate::error::to_py_err(calc_flow::CalcFlowError::InvalidArgument {
+            field: "program_json".into(),
+            message: error.to_string(),
+        })
+    })?;
+    let inferred = calc_flow::array::NativeArrayFactory::infer_program(&program)
+        .map_err(crate::error::to_py_err)?;
+    let value = serde_json::Value::Object(inferred.into_iter().collect());
+    calc_flow::canonical_json(&value).map_err(crate::error::to_py_err)
+}
+
+#[pyfunction]
+fn _native_array_capabilities(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    let descriptors = [
+        calc_flow::array::NativeArrayFactory::capability_descriptor(),
+        calc_flow::array::NativeTableArrayFactory::capability_descriptor(),
+    ];
+    let value = serde_json::Value::Array(
+        descriptors
+            .into_iter()
+            .map(|descriptor| serde_json::Value::Object(descriptor.into_iter().collect()))
+            .collect(),
+    );
+    let encoded = calc_flow::canonical_json(&value).map_err(crate::error::to_py_err)?;
+    json_to_python(py, &encoded)
+}
+
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyRuntime>()?;
     module.add_function(wrap_pyfunction!(project_json_schema, module)?)?;
     module.add_function(wrap_pyfunction!(validate_project_json, module)?)?;
     module.add_function(wrap_pyfunction!(_native_array_capability, module)?)?;
+    module.add_function(wrap_pyfunction!(_infer_native_array_program, module)?)?;
+    module.add_function(wrap_pyfunction!(_native_array_capabilities, module)?)?;
     Ok(())
 }
 

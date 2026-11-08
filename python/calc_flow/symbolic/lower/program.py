@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import sys
 
+from calc_flow._native_array import ArrayExecutionOptions
 from calc_flow.capabilities import RuntimeCapabilities
 from calc_flow.pipeline import (
     BatchExecutionPlan,
@@ -654,6 +655,7 @@ def lower_program_document(
     allowed_lateness_micros: int = 0,
     late_policy: str = "error",
     _bindings: _BatchBindings | None = None,
+    _array_options: ArrayExecutionOptions | None = None,
 ) -> dict[str, object]:
     """Analyze and lower one program to its strict project-v3 document.
 
@@ -672,6 +674,7 @@ def lower_program_document(
             allowed_lateness_micros=allowed_lateness_micros,
             late_policy=late_policy,
             _bindings=_bindings,
+            _array_options=_array_options,
         )
 
 
@@ -684,6 +687,7 @@ def _lower_program_document(
     allowed_lateness_micros: int = 0,
     late_policy: str = "error",
     _bindings: _BatchBindings | None = None,
+    _array_options: ArrayExecutionOptions | None = None,
 ) -> dict[str, object]:
     """Lower validated declarations while their registration revision is locked."""
     analyzer, capabilities = _check_expression_capability(program, selected, mode_value)
@@ -691,6 +695,17 @@ def _lower_program_document(
     _check_stateful_lowering(
         program, capabilities, mode_value, allowed_lateness_micros, late_policy
     )
+    from calc_flow.symbolic.lower.native_arrays import lower_native_program
+
+    native = lower_native_program(
+        program,
+        analyzer,
+        mode_value,
+        (allowed_lateness_micros, late_policy),
+        _array_options,
+    )
+    if native is not None:
+        return native
     from calc_flow.symbolic.lower.sql import _walk_nodes, lower_sql_program
 
     if any(

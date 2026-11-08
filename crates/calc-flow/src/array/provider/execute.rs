@@ -19,12 +19,57 @@ pub(super) struct Prepared {
     costs: Vec<budget::Cost>,
 }
 
+pub(super) fn reserve(plan: &Arc<Plan>, reserved: usize) -> Result<Arc<Plan>> {
+    if reserved == 0 {
+        return Ok(Arc::clone(plan));
+    }
+    let mut program = plan.program.clone();
+    program.execution.max_allocation_bytes = program
+        .execution
+        .max_allocation_bytes
+        .checked_sub(reserved)
+        .ok_or_else(|| {
+            invalid(
+                "outputs.bytes",
+                "reserved allocations exceed program allocation limit",
+            )
+        })?;
+    Ok(Arc::new(Plan {
+        program,
+        order: plan.order.clone(),
+        indices: plan.indices.clone(),
+    }))
+}
+pub(super) fn reserved_error(error: crate::CalcFlowError, reserved: usize) -> crate::CalcFlowError {
+    match error {
+        crate::CalcFlowError::InvalidArgument { field, message }
+            if reserved != 0
+                && (field.starts_with("outputs.") || field.starts_with("scratch.")) =>
+        {
+            invalid(
+                &field,
+                format!("{message}; {reserved} bytes reserved for native static inputs"),
+            )
+        }
+        error => error,
+    }
+}
+
 pub(super) fn prepare(plan: &Plan, inputs: &BTreeMap<String, Batch>) -> Result<Prepared> {
     let descriptors = inputs_descriptors(plan, inputs)?;
-    let concrete = infer::infer(plan, &descriptors)?;
-    final_elements(plan, &concrete)?;
+    prepare_descriptors(plan, &descriptors)
+}
+pub(super) fn prepare_descriptors(
+    plan: &Plan,
+    descriptors: &BTreeMap<String, Descriptor>,
+) -> Result<Prepared> {
+    let concrete = infer::infer(plan, descriptors)?;
+    prepare_inferred(plan, &concrete)
+}
+pub(super) fn prepare_inferred(plan: &Plan, concrete: &[Descriptor]) -> Result<Prepared> {
+    final_elements(plan, concrete)?;
     Ok(Prepared {
-        costs: budget::preflight(plan, &concrete)?,
+        costs: budget::preflight(plan, concrete)?,
     })
 }
 fn final_elements(plan: &Plan, descriptors: &[Descriptor]) -> Result<()> {
@@ -162,7 +207,7 @@ fn inputs_descriptors(
     }
     Ok(descriptors)
 }
-fn input_descriptor(input: &Input, batch: &Batch, version: u8) -> Result<Descriptor> {
+pub(super) fn input_descriptor(input: &Input, batch: &Batch, version: u8) -> Result<Descriptor> {
     let field = format!("inputs.{}", input.name);
     let value = native(batch, &format!("{field}.backend"))?;
     if value.dtype() != input.dtype.native() {
@@ -490,4 +535,60 @@ fn matmul<'a>(
     check: Check<'_>,
 ) -> Result<NativeArray> {
     array::matrix::matmul_checked(get(left)?.view(), get(right)?.view(), options, check)
+}
+
+#[cfg(test)]
+mod reservation_tests {
+    use super::super::ir::{DType, Execution, Input, Output, Program};
+    use super::*;
+    #[test]
+    fn test_numeric_preflight_keeps_static_retention_reserved_and_reports_the_reason() {
+        let plan = Arc::new(
+            infer::plan(Program {
+                ir_version: 2,
+                inputs: vec![Input {
+                    name: "x".into(),
+                    dtype: DType::Float64,
+                    shape: vec![Some(2)],
+                }],
+                nodes: vec![
+                    Node::Input {
+                        id: "x".into(),
+                        name: "x".into(),
+                    },
+                    Node::Unary {
+                        id: "y".into(),
+                        function: Unary::Neg,
+                        input: "x".into(),
+                    },
+                ],
+                outputs: vec![Output {
+                    name: "output".into(),
+                    node: "y".into(),
+                    assertion: None,
+                }],
+                execution: Execution {
+                    max_elements: 2,
+                    max_allocation_bytes: 64,
+                },
+            })
+            .unwrap(),
+        );
+        let value = NativeArray::from_f64(vec![1.0, 2.0], vec![2], None).unwrap();
+        let inputs = BTreeMap::from([(
+            "x".into(),
+            Batch::external(Arc::new(value), BatchMetadata::default()).unwrap(),
+        )]);
+        let admitted = reserve(&plan, 40).unwrap();
+        assert!(prepare(&admitted, &inputs).is_ok());
+        let tight = reserve(&plan, 41).unwrap();
+        let error = prepare(&tight, &inputs)
+            .err()
+            .expect("reserved bytes must remain live");
+        let error = reserved_error(error, 41);
+        assert!(
+            matches!(error, crate::CalcFlowError::InvalidArgument{field,message} if field=="outputs.bytes" && message.contains("41 bytes reserved for native static inputs"))
+        );
+        assert_eq!(plan.program.execution.max_allocation_bytes, 64);
+    }
 }
