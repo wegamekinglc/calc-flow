@@ -42,7 +42,7 @@ fn lane_plan(dual: bool) -> RollingKernelPlan {
         min_periods: if dual && group == 0 { 5 } else { 20 },
         ddof: 0,
     };
-    RollingKernelPlan {
+    let mut plan = RollingKernelPlan {
         version: ROLLING_KERNEL_PLAN_VERSION,
         state_layout_version: 3,
         numerical_profile: RollingNumericalProfile::StableV1,
@@ -53,6 +53,7 @@ fn lane_plan(dual: bool) -> RollingKernelPlan {
         partition_columns: vec![2],
         sequence_columns: vec![1],
         nan_as_value: false,
+        shared_rows: None,
         groups,
         outputs: vec![TypedOutputPlan {
             group: 0,
@@ -73,7 +74,9 @@ fn lane_plan(dual: bool) -> RollingKernelPlan {
         fingerprint: "two-lane-fixture".into(),
         checkpoint_fingerprint: None,
         decay_pool: None,
-    }
+    };
+    plan.shared_rows = plan.shared_rows_shape();
+    plan
 }
 
 fn two_output_plan() -> RollingKernelPlan {
@@ -1400,6 +1403,11 @@ fn entity_parallel_merge_compatibility_selects_lane_failures_before_malformed_ou
 
 #[test]
 fn entity_parallel_merge_compatibility_drops_owned_allocations_on_error_and_unwind() {
+    // Process-wide cache infrastructure is outside each merge's ownership probe.
+    let plan = lane_plan(true);
+    let mut initialization = TypedEntityState::new(&plan.groups, 0);
+    initialization.prepare_shared_rows(plan.shared_rows);
+    drop(initialization);
     for null_case in [0, 4] {
         for failure in [2, 8, 9, 11] {
             let mut correct_failure = false;
@@ -1843,6 +1851,7 @@ fn readout_shape_plan(group_count: usize, difference: bool) -> RollingKernelPlan
         TypedOutputKind::Statistic(Statistic::Mean)
     };
     plan.outputs[0].min_periods = if difference { u64::MAX } else { 2 };
+    plan.shared_rows = plan.shared_rows_shape();
     plan
 }
 

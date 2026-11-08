@@ -1,0 +1,189 @@
+diff --git a/crates/calc-flow/src/operator/rolling/tests.rs b/crates/calc-flow/src/operator/rolling/tests.rs
+index 27787793..1ae55dc4 100644
+--- a/crates/calc-flow/src/operator/rolling/tests.rs
++++ b/crates/calc-flow/src/operator/rolling/tests.rs
+@@ -1,0 +2 @@ mod late;
++mod shared_rows;
+diff --git a/crates/calc-flow/src/operator/rolling/tests/shared_rows.rs b/crates/calc-flow/src/operator/rolling/tests/shared_rows.rs
+new file mode 100644
+index 00000000..c7c46cb7
+--- /dev/null
++++ b/crates/calc-flow/src/operator/rolling/tests/shared_rows.rs
+@@ -0,0 +1,177 @@
++use super::*;
++use crate::{OperatorStateSnapshot, StateSegment, StreamMessage};
++
++fn shared_rows_fixture_spec(profile: RollingNumericalProfile) -> RollingSpec {
++    let mut spec = kernel_spec(json!([
++        aggregate_output("mean", "price", "fast", 5),
++        aggregate_output("mean", "price", "slow", 80)
++    ]));
++    spec.numerical_profile = profile;
++    spec
++}
++
++fn shared_rows_fixture_record(start: u32, count: u32) -> RecordBatch {
++    let rows = (start..start + count)
++        .map(|row| {
++            let value = match row % 23 {
++                0 => None,
++                1 => Some(-0.0),
++                _ => Some(1e12 + f64::from(row) * 0.3),
++            };
++            (
++                i64::from(row),
++                if row % 2 == 0 { "a" } else { "b" },
++                u64::from(row),
++                value,
++            )
++        })
++        .collect::<Vec<_>>();
++    float64_fast_record(&rows)
++}
++
++fn shared_rows_snapshot_json(snapshot: &OperatorStateSnapshot) -> Value {
++    json!({
++        "inline_metadata": snapshot.inline_metadata,
++        "segments": snapshot.segments.iter().map(|(id, segment)| {
++            (id.clone(), json!({"bytes": hex::encode(segment.bytes()), "sha256": segment.sha256()}))
++        }).collect::<BTreeMap<_, _>>()
++    })
++}
++
++fn shared_rows_snapshot_from_json(value: &Value) -> OperatorStateSnapshot {
++    let segments = value["segments"]
++        .as_object()
++        .unwrap()
++        .iter()
++        .map(|(id, segment)| {
++            let bytes = hex::decode(segment["bytes"].as_str().unwrap()).unwrap();
++            let segment_value = StateSegment::new(bytes);
++            assert_eq!(segment_value.sha256(), segment["sha256"].as_str().unwrap());
++            (id.clone(), segment_value)
++        })
++        .collect();
++    OperatorStateSnapshot {
++        inline_metadata: serde_json::from_value(value["inline_metadata"].clone()).unwrap(),
++        segments,
++    }
++}
++
++fn shared_rows_output_bits(output: Vec<StreamMessage>) -> Vec<Vec<Option<u64>>> {
++    let mut columns = vec![Vec::new(), Vec::new()];
++    for message in output {
++        let batch = message.as_data().unwrap();
++        for record in batch.table_payload().unwrap().batches() {
++            for (column, values) in columns.iter_mut().zip(record.columns().iter().skip(6)) {
++                let values = values.as_any().downcast_ref::<Float64Array>().unwrap();
++                column.extend(values.iter().map(|value| value.map(f64::to_bits)));
++            }
++        }
++    }
++    columns
++}
++
++async fn shared_rows_fixture_continue(
++    operator: &mut RollingOperator,
++    job: &crate::StreamJobContext,
++) -> Vec<Vec<Option<u64>>> {
++    let context = StreamOperatorContext::new(job, "rolling", Some(EventTime::from_micros(160)));
++    let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
++    let batch = Batch::table(
++        vec![shared_rows_fixture_record(165, 68)],
++        BatchMetadata::default(),
++    )
++    .unwrap();
++    operator
++        .process_data("input", batch, &context, &mut output)
++        .await
++        .unwrap();
++    operator
++        .on_watermark(EventTime::from_micros(232), &context, &mut output)
++        .await
++        .unwrap();
++    shared_rows_output_bits(output.drain("output"))
++}
++
++async fn shared_rows_fixture_case(profile: RollingNumericalProfile) -> Value {
++    let spec = shared_rows_fixture_spec(profile);
++    let mut source =
++        RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
++    let job = crate::StreamJobContext::new(
++        7,
++        TEST_FINGERPRINT,
++        JsonMap::new(),
++        None,
++        crate::CancellationToken::new(),
++    );
++    let context = StreamOperatorContext::new(&job, "rolling", None);
++    let mut output = crate::EdgeCollector::new(source.output_ports().to_vec());
++    let prefix = Batch::table(
++        vec![
++            shared_rows_fixture_record(1, 64),
++            shared_rows_fixture_record(65, 100),
++        ],
++        BatchMetadata::default(),
++    )
++    .unwrap();
++    source
++        .process_data("input", prefix, &context, &mut output)
++        .await
++        .unwrap();
++    source
++        .on_watermark(EventTime::from_micros(160), &context, &mut output)
++        .await
++        .unwrap();
++    output.drain("output");
++    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
++    let snapshot_json = shared_rows_snapshot_json(&snapshot);
++    let charge = json!({"rows": source.state.charge.rows, "bytes": source.state.charge.bytes});
++    let mut restored = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
++    StreamOperator::restore(
++        &mut restored,
++        &shared_rows_snapshot_from_json(&snapshot_json),
++    )
++    .unwrap();
++    let uninterrupted = shared_rows_fixture_continue(&mut source, &job).await;
++    let resumed = shared_rows_fixture_continue(&mut restored, &job).await;
++    assert_eq!(uninterrupted[0].len(), 72);
++    assert_eq!(resumed[0].len(), 72);
++    json!({"snapshot": snapshot_json, "charge": charge, "uninterrupted": uninterrupted, "resumed": resumed})
++}
++
++#[tokio::test]
++async fn shared_rows_legacy_checkpoint_and_writer_preserve_each_execution_route() {
++    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
++        .join("src/operator/rolling/tests/fixtures/shared-rows-8d8be7d9.json");
++    let fixture: Value =
++        serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
++    assert_eq!(
++        fixture["runtime_source_commit"],
++        "8d8be7d907a095dbc0dc2b73dafcfdd842979cdf"
++    );
++    for (name, profile) in [
++        ("stable_v1", RollingNumericalProfile::StableV1),
++        ("stable_v2", RollingNumericalProfile::StableV2Preview),
++    ] {
++        let actual = shared_rows_fixture_case(profile).await;
++        assert_eq!(
++            actual, fixture["cases"][name],
++            "legacy writer/continuation mismatch for {name}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn capture_pinned_baseline_shared_rows_fixture() {
++    let mut cases = BTreeMap::new();
++    for (name, profile) in [
++        ("stable_v1", RollingNumericalProfile::StableV1),
++        ("stable_v2", RollingNumericalProfile::StableV2Preview),
++    ] {
++        cases.insert(name, shared_rows_fixture_case(profile).await);
++    }
++    let fixture = json!({"runtime_source_commit": "8d8be7d907a095dbc0dc2b73dafcfdd842979cdf", "cases": cases});
++    let path = std::env::var("CALC_FLOW_P3_LEGACY_FIXTURE_OUTPUT").unwrap();
++    tokio::fs::write(path, serde_json::to_vec_pretty(&fixture).unwrap())
++        .await
++        .unwrap();
++}

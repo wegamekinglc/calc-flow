@@ -355,7 +355,12 @@ impl RollingKernelPlan {
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<PreparedOrderedKernel<'a>> {
         let stream = self.prepare_ordered_stream_state(state, input, node_id, observer)?;
-        let fill = self.prepare_typed_fill(input, stream, node_id, observer)?;
+        let mut fill = self.prepare_typed_fill(input, stream, node_id, observer)?;
+        if self.shared_rows.is_some() {
+            for entity in &mut fill.stream.state.states {
+                Arc::make_mut(entity).prepare_shared_rows(self.shared_rows);
+            }
+        }
         Ok(PreparedOrderedKernel {
             plan: self,
             node_id,
@@ -544,6 +549,7 @@ fn balanced_lane_loads(loads: &[usize], row_count: usize) -> bool {
 
 fn parallel_entity_state(entity: &TypedEntityState, groups: &[TypedGroupPlan]) -> bool {
     entity.groups.len() == groups.len()
+        && entity.shared_rows_match_groups(groups)
         && entity
             .groups
             .iter()
@@ -923,10 +929,13 @@ impl<'a, const GROUPS: usize> NumericLaneContext<'a, GROUPS> {
         row: LaneRow,
         progress: &mut LaneProgress,
     ) -> std::result::Result<(), NumericLaneStop> {
-        for ordinal in 0..self.group_count {
-            let Some(state) = entity.groups.get_mut(ordinal) else {
-                break;
+        if entity.shared_rows.is_some() {
+            let TypedGroupInput::Single(values) = self.column(0) else {
+                unreachable!("shared lane rows have Single inputs");
             };
+            entity.push_shared_row(valid_float64(values, row.original_row as usize, false));
+        }
+        for ordinal in 0..self.group_count.min(entity.groups.len()) {
             let column = self.column(ordinal);
             check_cancelled(self.cancellation, progress)?;
             let site = NumericSite {
@@ -937,22 +946,37 @@ impl<'a, const GROUPS: usize> NumericLaneContext<'a, GROUPS> {
             progress.active_site = Some(site);
             #[cfg(test)]
             self.observe(NumericTestPoint::BeforeGroup(site));
-            self.update_group_state(state, column, site, entity.transition_count)
+            self.update_group_state(entity, column, site)
                 .map_err(|error| NumericLaneStop::Ordinary(TaggedNumericError { site, error }))?;
             #[cfg(test)]
             self.observe(NumericTestPoint::AfterGroup(site));
             check_cancelled(self.cancellation, progress)?;
+        }
+        if entity.shared_rows.is_some() {
+            entity.trim_shared_rows();
         }
         Ok(())
     }
 
     fn update_group_state(
         &self,
-        state: &mut TypedWindowState,
+        entity: &mut TypedEntityState,
         column: &TypedGroupInput,
         site: NumericSite,
-        transition_count: u64,
     ) -> Result<()> {
+        if entity.shared_rows.is_some() {
+            let TypedGroupInput::Single(values) = self.column(0) else {
+                unreachable!("shared lane rows have Single inputs");
+            };
+            return entity.update_shared_group(
+                site.ordinal,
+                valid_float64(values, site.row as usize, false),
+                RollingNumericalProfile::StableV1,
+                &self.input.node_id,
+            );
+        }
+        let transition_count = entity.transition_count;
+        let state = &mut entity.groups[site.ordinal];
         // Eligibility proved the Rows5/20 queue bound. Expiration precedes repair.
         let event_time = self.input.event_times.value(site.row as usize);
         match state {
@@ -1030,7 +1054,11 @@ fn run_prepared_numeric_lane<const GROUPS: usize>(
     let mut entities = request
         .entities
         .iter_mut()
-        .map(|entity| Arc::make_mut(&mut entity.state))
+        .map(|entity| {
+            let state = Arc::make_mut(&mut entity.state);
+            state.prepare_lane_shared_rows(&request.input.columns);
+            state
+        })
         .collect::<Vec<_>>();
     for (ordinal, row) in request.rows.iter().copied().enumerate() {
         #[cfg(test)]

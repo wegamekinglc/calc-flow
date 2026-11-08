@@ -5,6 +5,7 @@
 
 use std::{sync::Arc, time::Instant};
 
+use super::numeric_rows::SharedRowsShape;
 use super::{
     ArrayRef, Float64Array, Float64Builder, OutputStorage, RollingKernelPlan,
     RollingMetricsRecorder, RollingStage, RollingWork, Statistic, TypedEntityState,
@@ -32,6 +33,7 @@ enum MeanReadout {
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct MeanKernel {
     readouts: Vec<MeanReadout>,
+    shared_rows: Option<SharedRowsShape>,
 }
 
 impl MeanKernel {
@@ -55,7 +57,10 @@ impl MeanKernel {
             .iter()
             .map(|output| mean_readout(output, groups))
             .collect::<Option<Vec<_>>>()?;
-        Some(Self { readouts })
+        Some(Self {
+            readouts,
+            shared_rows: plan.shared_rows,
+        })
     }
 }
 
@@ -97,7 +102,8 @@ pub(super) fn fill_mean_rows(
     let mut rows = MeanRows {
         plan,
         inputs,
-        entities: touched_entities(states, inputs.entity_ids, observer),
+        entities: touched_entities(states, inputs.entity_ids, kernel.shared_rows, observer),
+        sharing: kernel.shared_rows.is_some(),
         node_id,
         processed: 0,
     };
@@ -128,9 +134,10 @@ fn group_mismatch() -> crate::CalcFlowError {
 
 /// Takes unique ownership of each touched entity once per batch; untouched
 /// shared states stay shared.
-fn touched_entities<'a>(
+pub(super) fn touched_entities<'a>(
     states: &'a mut [Arc<TypedEntityState>],
     entity_ids: &[usize],
+    sharing: Option<SharedRowsShape>,
     observer: Option<&RollingMetricsRecorder>,
 ) -> Vec<Option<&'a mut TypedEntityState>> {
     let mut touched = vec![false; states.len()];
@@ -146,7 +153,9 @@ fn touched_entities<'a>(
         .map(|(state, touched)| {
             touched.then(|| {
                 copied += usize::from(Arc::strong_count(state) > 1);
-                Arc::make_mut(state)
+                let entity = Arc::make_mut(state);
+                entity.prepare_shared_rows(sharing);
+                entity
             })
         })
         .collect();
@@ -162,6 +171,7 @@ struct MeanRows<'a> {
     entities: Vec<Option<&'a mut TypedEntityState>>,
     node_id: &'a str,
     processed: usize,
+    sharing: bool,
 }
 
 impl MeanRows<'_> {
@@ -186,8 +196,19 @@ impl MeanRows<'_> {
         values: [&Float64Array; GROUPS],
         readouts: [MeanReadout; OUTPUTS],
     ) -> Result<[Float64Builder; OUTPUTS]> {
+        if self.sharing {
+            self.fill_rows::<GROUPS, OUTPUTS, true>(values, readouts)
+        } else {
+            self.fill_rows::<GROUPS, OUTPUTS, false>(values, readouts)
+        }
+    }
+
+    fn fill_rows<const GROUPS: usize, const OUTPUTS: usize, const SHARED: bool>(
+        &mut self,
+        values: [&Float64Array; GROUPS],
+        readouts: [MeanReadout; OUTPUTS],
+    ) -> Result<[Float64Builder; OUTPUTS]> {
         let (plan, inputs, node_id) = (self.plan, self.inputs, self.node_id);
-        let (nan_as_value, profile) = (plan.nan_as_value, plan.numerical_profile);
         let entities = &mut self.entities;
         let processed = &mut self.processed;
         let rows = inputs.entity_ids.len();
@@ -205,19 +226,58 @@ impl MeanRows<'_> {
             entity.transition_count = transitions;
             *processed += 1;
             let event_time = inputs.event_times.value(row);
-            for (group, values) in entity.groups.iter_mut().zip(values) {
-                let TypedWindowState::Numeric(state) = group else {
-                    return Err(group_mismatch());
-                };
-                let sample = valid_float64(values, row, nan_as_value);
-                state.update(event_time, sample, profile, transitions, node_id)?;
-            }
+            update_mean_groups::<GROUPS, SHARED>(entity, values, row, event_time, plan, node_id)?;
             for (builder, readout) in builders.iter_mut().zip(readouts) {
                 builder.append_option(read_readout(&entity.groups, readout)?);
             }
         }
         Ok(builders)
     }
+}
+
+fn update_mean_groups<const GROUPS: usize, const SHARED: bool>(
+    entity: &mut TypedEntityState,
+    values: [&Float64Array; GROUPS],
+    row: usize,
+    event_time: i64,
+    plan: &RollingKernelPlan,
+    node_id: &str,
+) -> Result<()> {
+    if SHARED && entity.shared_rows.is_some() {
+        let sample = valid_float64(values[0], row, plan.nan_as_value);
+        entity.push_shared_row(sample);
+        for ordinal in 0..GROUPS {
+            entity.update_shared_group(ordinal, sample, plan.numerical_profile, node_id)?;
+        }
+        entity.trim_shared_rows();
+        Ok(())
+    } else {
+        update_owned_groups(entity, values, row, event_time, plan, node_id)
+    }
+}
+
+fn update_owned_groups<const GROUPS: usize>(
+    entity: &mut TypedEntityState,
+    values: [&Float64Array; GROUPS],
+    row: usize,
+    event_time: i64,
+    plan: &RollingKernelPlan,
+    node_id: &str,
+) -> Result<()> {
+    for (group, values) in entity.groups.iter_mut().zip(values) {
+        let TypedWindowState::Numeric(state) = group else {
+            return Err(group_mismatch());
+        };
+        let sample = valid_float64(values, row, plan.nan_as_value);
+        state.update(
+            event_time,
+            sample,
+            plan.numerical_profile,
+            entity.transition_count,
+            node_id,
+        )?;
+    }
+    Ok(())
 }
 
 fn read_readout(groups: &[TypedWindowState], readout: MeanReadout) -> Result<Option<f64>> {
@@ -249,7 +309,7 @@ mod tests {
         ROLLING_KERNEL_PLAN_VERSION, RollingKernelPlan, RollingNumericalProfile, Statistic,
         TimestampMicrosecondArray, TypedEntityState, TypedFloatReadout, TypedFloatReadoutKind,
         TypedFrame, TypedGroupInput, TypedGroupPlan, TypedOutputKind, TypedOutputPlan,
-        TypedRowInputs, fill_typed_rows,
+        TypedRowInputs, TypedWindowState, fill_typed_rows,
     };
     use super::{MeanKernel, fill_mean_rows};
 
@@ -290,7 +350,7 @@ mod tests {
     }
 
     fn plan(groups: Vec<TypedGroupPlan>, outputs: Vec<TypedOutputPlan>) -> RollingKernelPlan {
-        RollingKernelPlan {
+        let mut plan = RollingKernelPlan {
             version: ROLLING_KERNEL_PLAN_VERSION,
             state_layout_version: 3,
             numerical_profile: RollingNumericalProfile::StableV1,
@@ -301,6 +361,7 @@ mod tests {
             partition_columns: Vec::new(),
             sequence_columns: Vec::new(),
             nan_as_value: false,
+            shared_rows: None,
             groups,
             outputs,
             fallback_reason: None,
@@ -308,7 +369,9 @@ mod tests {
             fingerprint: "test-kernel".to_owned(),
             checkpoint_fingerprint: None,
             decay_pool: None,
-        }
+        };
+        plan.shared_rows = plan.shared_rows_shape();
+        plan
     }
 
     #[test]
@@ -362,6 +425,49 @@ mod tests {
         ];
         for plan in rejected {
             assert!(MeanKernel::compile(&plan).is_none(), "{:?}", plan.outputs);
+        }
+    }
+
+    #[test]
+    fn dual_mean_rows_do_not_retain_duplicate_input_queues() {
+        let plan = plan(
+            vec![rows(1, 2), rows(1, 4)],
+            vec![mean_output(0, 1), mean_output(1, 1)],
+        );
+        let values = Float64Array::from_iter_values((1..=8).map(f64::from));
+        let columns = vec![
+            TypedGroupInput::Single(values.clone()),
+            TypedGroupInput::Single(values),
+        ];
+        let times = TimestampMicrosecondArray::from_iter_values(1..=8);
+        let ids = vec![0; 8];
+        let inputs = TypedRowInputs {
+            columns: &columns,
+            event_times: &times,
+            entity_ids: &ids,
+        };
+        let mut states = vec![Arc::new(TypedEntityState::new(&plan.groups, 8))];
+        let (output, _) = fill_mean_rows(
+            &plan,
+            &MeanKernel::compile(&plan).unwrap(),
+            inputs,
+            &mut states,
+            "r",
+            None,
+        )
+        .unwrap();
+        let retained: usize = states[0]
+            .groups
+            .iter()
+            .map(|group| match group {
+                TypedWindowState::Numeric(state) => state.samples.len(),
+                _ => unreachable!(),
+            })
+            .sum();
+        assert!(retained <= 4, "duplicate standalone samples: {retained}");
+        for (column, expected) in output.iter().zip([7.5_f64, 6.5]) {
+            let column = column.as_any().downcast_ref::<Float64Array>().unwrap();
+            assert_eq!(column.value(7).to_bits(), expected.to_bits());
         }
     }
 

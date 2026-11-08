@@ -47,6 +47,8 @@ use crate::operator::{
 };
 
 mod argmax;
+#[cfg(test)]
+mod shared_rows_tests;
 mod sql_aggregate;
 use sql_aggregate::{SqlRollingKernel, SqlRollingState};
 
@@ -327,14 +329,14 @@ impl RollingExecutionKernel {
         }
     }
 
-    fn update_and_fill(
+    fn update_and_fill_owned(
         &self,
-        state: &RollingExecutionState,
+        state: RollingExecutionState,
         input: &RecordBatch,
     ) -> crate::Result<RollingExecutionBatch> {
         match (self, state) {
             (Self::Shared(kernel), RollingExecutionState::Shared(state)) => {
-                let result = kernel.update_and_fill(state, input)?;
+                let result = kernel.update_and_fill_owned(state, input)?;
                 Ok(RollingExecutionBatch {
                     columns: result.columns,
                     state: RollingExecutionState::Shared(result.state),
@@ -342,7 +344,7 @@ impl RollingExecutionKernel {
                 })
             }
             (Self::Sql(kernel), RollingExecutionState::Sql(state)) => {
-                kernel.update_and_fill(state, input)
+                kernel.update_and_fill(&state, input)
             }
             _ => Err(crate::CalcFlowError::Internal {
                 message: "SQL rolling state does not match the physical kernel".to_owned(),
@@ -687,7 +689,7 @@ impl ExecutionPlan for CalcFlowRollingExec {
             let timer = stream.metrics.baseline.elapsed_compute().timer();
             let transition = stream
                 .kernel
-                .update_and_fill(&stream.state, &batch)
+                .update_and_fill_owned(stream.state, &batch)
                 .map_err(|error| calc_flow_execution_error(&error))?;
             stream
                 .reservation

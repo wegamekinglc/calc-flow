@@ -1,0 +1,92 @@
+[
+  {
+    "arm": "baseline",
+    "case_id": "P3-C1",
+    "close_result": "normal",
+    "exit_code": 0,
+    "pid": 39623,
+    "reaped": true,
+    "resources": {
+      "created": 1794099397.08,
+      "last_sampled_process_cpu_seconds": 0.47000000000000003,
+      "pid": 39623,
+      "sample_count": 20,
+      "sampled_process_tree_peak_rss": 135626752
+    }
+  },
+  {
+    "arm": "candidate",
+    "case_id": "P3-C1",
+    "close_result": "normal",
+    "exit_code": 0,
+    "pid": 39639,
+    "reaped": true,
+    "resources": {
+      "created": 1794099397.34,
+      "last_sampled_process_cpu_seconds": 0.39,
+      "pid": 39639,
+      "sample_count": 17,
+      "sampled_process_tree_peak_rss": 134533120
+    }
+  },
+  {
+    "arm": "baseline",
+    "case_id": "P3-T1",
+    "close_result": "normal",
+    "exit_code": 0,
+    "pid": 39676,
+    "reaped": true,
+    "resources": {
+      "created": 1794099398.53,
+      "last_sampled_process_cpu_seconds": 0.38,
+      "pid": 39676,
+      "sample_count": 13,
+      "sampled_process_tree_peak_rss": 135393280
+    }
+  },
+  {
+    "arm": "candidate",
+    "case_id": "P3-T1",
+    "close_result": "normal",
+    "exit_code": 0,
+    "pid": 39690,
+    "reaped": true,
+    "resources": {
+      "created": 1794099398.54,
+      "last_sampled_process_cpu_seconds": 0.39,
+      "pid": 39690,
+      "sample_count": 12,
+      "sampled_process_tree_peak_rss": 131006464
+    }
+  },
+  {
+    "arm": "baseline",
+    "case_id": "P3-T2",
+    "close_result": "normal",
+    "exit_code": 0,
+    "pid": 39768,
+    "reaped": true,
+    "resources": {
+      "created": 1794099400.53,
+      "last_sampled_process_cpu_seconds": 60.85,
+      "pid": 39768,
+      "sample_count": 1639,
+      "sampled_process_tree_peak_rss": 1349668864
+    }
+  },
+  {
+    "arm": "candidate",
+    "case_id": "P3-T2",
+    "close_result": "normal",
+    "exit_code": 0,
+    "pid": 39782,
+    "reaped": true,
+    "resources": {
+      "created": 1794099400.55,
+      "last_sampled_process_cpu_seconds": 56.89,
+      "pid": 39782,
+      "sample_count": 1639,
+      "sampled_process_tree_peak_rss": 1334128640
+    }
+  }
+]

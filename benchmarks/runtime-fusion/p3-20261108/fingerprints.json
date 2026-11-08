@@ -1,0 +1,158 @@
+{
+  "dependency_fingerprint": "7819c2a730bd99a23f2d83d10e7d548d5cddd62573ff872656360a79d1685a7e",
+  "dependency_identity": {
+    "build_profile": "release",
+    "cargo_lock_sha256": "c84da76d6ef02aec794afdb6b4f12d266d7a1bc76e7e36f8a7585332443eac1f",
+    "native_features": [
+      "pyo3/abi3-py313"
+    ],
+    "numpy": "2.5.1",
+    "pyarrow": "24.0.0",
+    "python": "3.13.9",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8",
+    "tokio_worker_threads": "4"
+  },
+  "machine_fingerprint": "a7f90a35db46db52ac6c7c64aab07fdaf64d99628624514df60da2b76c178751",
+  "machine_identity": {
+    "cpu_affinity": [
+      0,
+      2
+    ],
+    "logical_cpus": 32,
+    "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43"
+  },
+  "scope": "Derived only from recorded warm-contract environment/config/plan metadata; native binary identity differs intentionally and is retained separately. No standalone minima/noise-floor verdict is used.",
+  "workloads": [
+    {
+      "fingerprint": "14114ac55c6f97f7bde64e99da1b1ababf7a5784cc44f3486fdbcbfcadb3df0f",
+      "identity": {
+        "collect_gc": false,
+        "config": {
+          "append_entities": 1,
+          "append_rows": 1024,
+          "entities": 1,
+          "fast_window": 20,
+          "history_rows": 1000,
+          "history_segment_rows": 1000,
+          "indicator": "rolling_mean",
+          "window": 60
+        },
+        "digest_format": "calc-flow-warm-float64-v1",
+        "harness_sha256": {
+          "benchmarks/rolling_indicator_comparison.py": "446f44cccf0205460f663a9096859e69e98b407999bf898df8fd6b1c12c46f12",
+          "benchmarks/warm_stream.py": "9c23f97cebb62f6bf475c4b8d59b03dd0423ef4688f12fcf8d4345dbfb45a000",
+          "scripts/profile_warm_stream.py": "075a74a28de7a1372d06c283047a1fe434687757b934799eb937ad56eb4dc6c0",
+          "scripts/toolkit.py": "ef8ad17c43ea4a974e5e01a3fcaf1aec7a70e19b88286db8b82c4dcde2945d56"
+        },
+        "plan_identity": {
+          "plan_fingerprint": "655631e6ecd27b019d4b1b7ed5dbfd05f2351e1d61e056e15322c511d1b244a3",
+          "preflight": {
+            "datafusion": {
+              "batch_size": 8192,
+              "enable_rolling_rewrite": true,
+              "parallelism_mode": "fixed",
+              "target_partitions": 1
+            },
+            "engine": "streaming",
+            "min_periods": 1,
+            "numerical_profile": "stable_v1",
+            "windows": [
+              60
+            ]
+          },
+          "program_fingerprint": "689d4b904aad0f2c8a8b1aa83f39dfae86c04fd9d09089b674b802376978ab64",
+          "project_sha256": "f65a501a22a8668ca279ad0289eef9b582fde32728817ae0ba6ee4098dc00ddf"
+        },
+        "sample_pairs": 30
+      }
+    },
+    {
+      "fingerprint": "4cba8bea5750df928897f348fb884247bee2efa60db8e05746f7ac85c2f552ca",
+      "identity": {
+        "collect_gc": false,
+        "config": {
+          "append_entities": 1,
+          "append_rows": 1024,
+          "entities": 1,
+          "fast_window": 20,
+          "history_rows": 1000,
+          "history_segment_rows": 1000,
+          "indicator": "dual_sma_spread",
+          "window": 60
+        },
+        "digest_format": "calc-flow-warm-float64-v1",
+        "harness_sha256": {
+          "benchmarks/rolling_indicator_comparison.py": "446f44cccf0205460f663a9096859e69e98b407999bf898df8fd6b1c12c46f12",
+          "benchmarks/warm_stream.py": "9c23f97cebb62f6bf475c4b8d59b03dd0423ef4688f12fcf8d4345dbfb45a000",
+          "scripts/profile_warm_stream.py": "075a74a28de7a1372d06c283047a1fe434687757b934799eb937ad56eb4dc6c0",
+          "scripts/toolkit.py": "ef8ad17c43ea4a974e5e01a3fcaf1aec7a70e19b88286db8b82c4dcde2945d56"
+        },
+        "plan_identity": {
+          "plan_fingerprint": "9f9d88a79dbde71e93a000fc8a8b28c6d627573e987147fccc82291178036d4c",
+          "preflight": {
+            "datafusion": {
+              "batch_size": 8192,
+              "enable_rolling_rewrite": true,
+              "parallelism_mode": "fixed",
+              "target_partitions": 1
+            },
+            "engine": "streaming",
+            "min_periods": 1,
+            "numerical_profile": "stable_v1",
+            "windows": [
+              20,
+              60
+            ]
+          },
+          "program_fingerprint": "09341524c81cedc198f3ba073485e34f3a0e2caa6d8af5acb0ca6a4e6d1989e3",
+          "project_sha256": "44f18344aba13b8111402b26b8c4c3acf72bcc7f3e9b35b2f2a46e57da27afa5"
+        },
+        "sample_pairs": 30
+      }
+    },
+    {
+      "fingerprint": "ec63d58870b042137b96eb9b6e7fc591ca2b0dc561ee5c3839900a25f78cce0b",
+      "identity": {
+        "collect_gc": false,
+        "config": {
+          "append_entities": 1000,
+          "append_rows": 1000,
+          "entities": 10000,
+          "fast_window": 20,
+          "history_rows": 600000,
+          "history_segment_rows": 1000,
+          "indicator": "dual_sma_spread",
+          "window": 60
+        },
+        "digest_format": "calc-flow-warm-float64-v1",
+        "harness_sha256": {
+          "benchmarks/rolling_indicator_comparison.py": "446f44cccf0205460f663a9096859e69e98b407999bf898df8fd6b1c12c46f12",
+          "benchmarks/warm_stream.py": "9c23f97cebb62f6bf475c4b8d59b03dd0423ef4688f12fcf8d4345dbfb45a000",
+          "scripts/profile_warm_stream.py": "075a74a28de7a1372d06c283047a1fe434687757b934799eb937ad56eb4dc6c0",
+          "scripts/toolkit.py": "ef8ad17c43ea4a974e5e01a3fcaf1aec7a70e19b88286db8b82c4dcde2945d56"
+        },
+        "plan_identity": {
+          "plan_fingerprint": "9f9d88a79dbde71e93a000fc8a8b28c6d627573e987147fccc82291178036d4c",
+          "preflight": {
+            "datafusion": {
+              "batch_size": 8192,
+              "enable_rolling_rewrite": true,
+              "parallelism_mode": "fixed",
+              "target_partitions": 1
+            },
+            "engine": "streaming",
+            "min_periods": 1,
+            "numerical_profile": "stable_v1",
+            "windows": [
+              20,
+              60
+            ]
+          },
+          "program_fingerprint": "09341524c81cedc198f3ba073485e34f3a0e2caa6d8af5acb0ca6a4e6d1989e3",
+          "project_sha256": "44f18344aba13b8111402b26b8c4c3acf72bcc7f3e9b35b2f2a46e57da27afa5"
+        },
+        "sample_pairs": 30
+      }
+    }
+  ]
+}

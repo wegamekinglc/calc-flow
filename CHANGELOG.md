@@ -14,6 +14,12 @@ measurements. Use the current guides for supported behavior.
   and a separate release workflow. Audit the packaged registry lockfile before
   upload; the standard Arrow 59 dependency chain uses compatible zstd security
   backports without changing Python source builds or checkpoint contracts.
+- 2026-11-08: Share input history across eligible different-width Float64
+  Rows means and mean differences, including sorted SQL AVG windows. Keep
+  independent accumulators and checkpoint bytes, credit each optional cache
+  owner separately, and retain owned queues when the cache quota refuses an
+  allocation. Cover held aliases, restore and serial output rejection or
+  cancellation. End-to-end performance acceptance remains pending.
 
 - 2026-11-07: Withdraw the delegated delta-aggregation prototype after
   measurement. Large compact-SUM batches ran their delta aggregation as a

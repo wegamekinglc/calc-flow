@@ -1,5 +1,6 @@
 mod decay_tests;
 mod late;
+mod shared_rows;
 
 #[tokio::test]
 async fn test_side_output_direct_execution_completes_both_ports() {

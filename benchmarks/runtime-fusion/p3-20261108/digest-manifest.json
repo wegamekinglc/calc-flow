@@ -1,0 +1,66 @@
+{
+  "arm_samples": 180,
+  "baseline_actual_source": "cc6e33e00acd6a8f1feba7a7776f208c29e71638",
+  "baseline_not_relabelled": true,
+  "byte_policy": "Raw archive copies original bytes. samples.csv is a new LF view; no original CSV normalization. No data pooled from other tasks.",
+  "candidate_source": "8b5c13109b3d2cfc10802e91a5bacc3fd9aa3624",
+  "candidate_tree": "4e56b71ff6d9d13ddcf6b838174132acc4ae8dbd",
+  "case_count": 3,
+  "files": {
+    "p3-20261108.md": {
+      "bytes": 15278,
+      "sha256": "a23e57e20508007e2e62b99d0c944e14d0657ee13194370bd543702c849c0ac2"
+    },
+    "p3-20261108/archive-digest.json": {
+      "bytes": 415,
+      "sha256": "cedd0f74da789f6786c9fcad1d5a2d1d5cfa9666b9bb0ea5c89ca1b815c223ca"
+    },
+    "p3-20261108/fingerprints.json": {
+      "bytes": 6419,
+      "sha256": "a937eb422f5aabb913cf0457463f04ecfafac4f008bf4c7c28bf3e7736f17e0e"
+    },
+    "p3-20261108/identity.json": {
+      "bytes": 23492,
+      "sha256": "0824743b0223ecf63c6fcf01f361a6c9e2f9a73cc16fac44d500977dea9a3538"
+    },
+    "p3-20261108/native-counters.json": {
+      "bytes": 20817,
+      "sha256": "77d50ff99d237c34529d25217d40c20993e57d82d9ac2f01989abf7e435d98ec"
+    },
+    "p3-20261108/os-receipts.json": {
+      "bytes": 2093,
+      "sha256": "211708924bb69b5bfd1e20e89dddec34fded475a58c20cc3c1615e5bc387bf45"
+    },
+    "p3-20261108/raw-manifest.json": {
+      "bytes": 34576,
+      "sha256": "ae681d58f82adc49f8609e8fdcd1710ff3879408923414fdc05645dc296dac3c"
+    },
+    "p3-20261108/raw.tar.gz": {
+      "bytes": 1310592,
+      "sha256": "68973aab4031548a9452be4c701b1adf75ce2d25798056eaa5976d2c69b9d121"
+    },
+    "p3-20261108/samples.csv": {
+      "bytes": 33519,
+      "sha256": "5782f669cb43bb7627d9087c5efadbfafc028038d9fc1efb7fa0aab703d1f8d5"
+    },
+    "p3-20261108/source-ci-snapshot.json": {
+      "bytes": 506,
+      "sha256": "6643a6796a8c4cf59e18e42c3bf46411cfc530510a31a18c41a57b8eeb5690ed"
+    },
+    "p3-20261108/source-head.json": {
+      "bytes": 224,
+      "sha256": "1f8e6677b16db68fd315a4dd1f5b5965bf0e5553e0c0c5f6481bb5f0a7dfe8e7"
+    },
+    "p3-20261108/statistics.json": {
+      "bytes": 7501,
+      "sha256": "2884b46bd8a90cb213e21a7bb302fe7365472d4b6e6d1ff4f7f692a0f76c2fcd"
+    },
+    "p3-20261108/verification.json": {
+      "bytes": 1033,
+      "sha256": "5a08e20528de2a254400a9b43a111c813ef71e1121e813911dac23fad8028bb9"
+    }
+  },
+  "no_native_retry_or_probe": true,
+  "phase_seconds": 125.40064238407649,
+  "schema": "calc-flow.p3-published-artifacts.v1"
+}

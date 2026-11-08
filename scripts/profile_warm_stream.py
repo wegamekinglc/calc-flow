@@ -49,6 +49,7 @@ except ImportError:  # direct execution puts only scripts/ on sys.path
 REPOSITORY = Path(__file__).resolve().parents[1]
 HISTORY_ROWS = (10_240, 102_400, 1_024_000, 10_240_000)
 APPEND_ROWS = (64, 640, 6_400, 64_000)
+FLOAT64_DIGEST_FORMAT = "calc-flow-warm-float64-v1"
 PHASE_NAMES = (
     "enqueue_to_source_data",
     "source_data_to_source_watermark",
@@ -87,6 +88,27 @@ def matrix_points(
     )
 
 
+def _scalar_dimensions(args: argparse.Namespace) -> dict[str, int]:
+    names = ("entities", "window", "fast_window", "history_segment_rows")
+    return {
+        name: value
+        for name in names
+        if (value := getattr(args, name, None)) is not None
+    }
+
+
+def _positive_scalar(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("scenario dimensions must be positive")
+    return parsed
+
+
+def _add_scalar_dimensions(parser: argparse.ArgumentParser) -> None:
+    for name in ("entities", "window", "fast-window", "history-segment-rows"):
+        parser.add_argument(f"--{name}", type=_positive_scalar)
+
+
 def matrix_cases(args: argparse.Namespace) -> list[tuple[dict[str, Any], str]]:
     points = (
         product(args.history_rows, args.append_rows)
@@ -101,6 +123,7 @@ def matrix_cases(args: argparse.Namespace) -> list[tuple[dict[str, Any], str]]:
             "history_rows": history,
             "append_rows": append,
             "indicator": indicator,
+            **_scalar_dimensions(args),
         }
         if active is not None:
             config["append_entities"] = active
@@ -497,7 +520,13 @@ class WorkerSession:
         self.scenario = await WarmScenario.start(
             config, self.root / f"state-{self.count}"
         )
-        return {"config": asdict(config), "warm_seconds": self.scenario.warm_seconds}
+        return {
+            "config": asdict(config),
+            "warm_seconds": self.scenario.warm_seconds,
+            "float64_digest_format": FLOAT64_DIGEST_FORMAT,
+            "warm_output_digest": self.scenario.warm_output_digest,
+            "plan_identity": self.scenario.plan_identity,
+        }
 
     def active_scenario(self):
         if self.scenario is None:
@@ -559,6 +588,63 @@ async def worker_main(root: Path) -> None:
 def _validate_sample(sample: dict[str, Any], expected_start: int) -> None:
     if sample["start_row"] != expected_start or not sample["correctness"]["passed"]:
         raise ValueError("paired workers did not advance equivalent correct states")
+    _validate_digest(sample["correctness"].get("float64_digest"))
+
+
+def _validate_digest(value: Any) -> None:
+    if not isinstance(value, str) or re.fullmatch("[0-9a-f]{64}", value) is None:
+        raise ValueError("paired worker requires a valid Float64 digest")
+
+
+def _validate_plan_identity(identity: Any) -> None:
+    if not isinstance(identity, dict) or not isinstance(
+        identity.get("preflight"), dict
+    ):
+        raise ValueError("paired workers require plan preflight identity")
+    for key in ("program_fingerprint", "plan_fingerprint", "project_sha256"):
+        _validate_digest(identity.get(key))
+
+
+def _validate_start(response: dict[str, Any], config: dict[str, Any]) -> None:
+    fields = {
+        "history_rows",
+        "append_rows",
+        "append_entities",
+        "entities",
+        "window",
+        "fast_window",
+        "history_segment_rows",
+        "indicator",
+    }
+    expanded = response.get("config")
+    if not isinstance(expanded, dict) or set(expanded) != fields:
+        raise ValueError("paired worker configuration is incomplete")
+    if any(expanded.get(key) != value for key, value in config.items()):
+        raise ValueError("paired worker configuration differs from requested case")
+    if response.get("float64_digest_format") != FLOAT64_DIGEST_FORMAT:
+        raise ValueError("paired worker Float64 digest format differs")
+    _validate_digest(response.get("warm_output_digest"))
+    _validate_plan_identity(response.get("plan_identity"))
+
+
+def _validate_pair_digest(
+    left: str, right: str, config: dict[str, Any], phase: str
+) -> None:
+    # Decay retains the independent value oracle's D13 tolerance.
+    if config["indicator"] in ("rolling_mean", "dual_sma_spread") and left != right:
+        raise ValueError(f"paired {phase} Float64 digests differ")
+
+
+def _validate_starts(starts: list[dict[str, Any]], config: dict[str, Any]) -> None:
+    for response in starts:
+        _validate_start(response, config)
+    if starts[0]["config"] != starts[1]["config"]:
+        raise ValueError("paired worker configurations differ")
+    _validate_pair_digest(
+        starts[0]["warm_output_digest"], starts[1]["warm_output_digest"], config, "warm"
+    )
+    if starts[0]["plan_identity"] != starts[1]["plan_identity"]:
+        raise ValueError("paired plan preflight identities differ")
 
 
 def _phase_values(sample: dict[str, Any]) -> np.ndarray:
@@ -608,8 +694,10 @@ def _case_summary(measured: list[list[dict[str, Any]]], rows: int) -> dict[str, 
 async def _measure_case(
     workers: list[Worker], config: dict[str, Any], samples: int, collect_gc: bool
 ) -> dict[str, Any]:
-    for worker in workers:
-        await worker.request(operation="start", config=config)
+    starts = [
+        await worker.request(operation="start", config=config) for worker in workers
+    ]
+    _validate_starts(starts, config)
     measured: list[list[dict[str, Any]]] = [[], []]
     for index in range(samples):
         order = (0, 1) if index % 2 == 0 else (1, 0)
@@ -620,10 +708,17 @@ async def _measure_case(
             expected = config["history_rows"] + index * config["append_rows"]
             _validate_sample(sample, expected)
             measured[side].append(sample)
+        _validate_pair_digest(
+            measured[0][-1]["correctness"]["float64_digest"],
+            measured[1][-1]["correctness"]["float64_digest"],
+            config,
+            "sample",
+        )
     terminal = [await worker.request(operation="finish") for worker in workers]
     return {
         "config": config,
         "collect_gc": collect_gc,
+        "start": starts,
         "samples": measured,
         "terminal": terminal,
         **_case_summary(measured, config["append_rows"]),
@@ -921,6 +1016,7 @@ async def diagnose(args: argparse.Namespace) -> None:
         "append_rows": args.append_rows,
         "append_entities": args.append_entities,
         "indicator": args.indicator,
+        **_scalar_dimensions(args),
     }
     with tempfile.TemporaryDirectory(
         prefix="warm-diagnostic-", dir=output.parent
@@ -977,6 +1073,7 @@ def main() -> None:
     paired.add_argument("--append-rows", type=int, nargs="*", default=APPEND_ROWS)
     paired.add_argument("--append-entities", type=int, nargs="+")
     paired.add_argument("--seed", type=int, default=20260905)
+    _add_scalar_dimensions(paired)
     paired.add_argument(
         "--worker-threads", type=int, nargs=2, metavar=("BASELINE", "CANDIDATE")
     )
@@ -1007,6 +1104,7 @@ def main() -> None:
     )
     diagnostic.add_argument("--samples", type=int, default=30)
     diagnostic.add_argument("--forced-gc", action="store_true")
+    _add_scalar_dimensions(diagnostic)
     args = parser.parse_args()
     if args.command == "build":
         asyncio.run(build(args))

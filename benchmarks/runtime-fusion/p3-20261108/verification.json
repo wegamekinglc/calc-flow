@@ -1,0 +1,22 @@
+{
+  "P3_preregistered_performance_rule_pass": true,
+  "all_180_independent_oracles_pass": true,
+  "all_3_warm_digests_and_90_pair_digests_equal": true,
+  "all_6_OS_zero_normal_reaped_and_RSS_sampled": true,
+  "all_metrics_no_overflow_late_error": true,
+  "all_native_jobs_completed_natural_end": true,
+  "all_start_plan_identities_equal": true,
+  "all_terminal_tasks_edges_empty": true,
+  "arm_samples": 180,
+  "baseline_sha": "cc6e33e00acd6a8f1feba7a7776f208c29e71638",
+  "no_native_probe_or_retry": true,
+  "paired_observations": 90,
+  "phase_elapsed_seconds": 125.40064238407649,
+  "posthoc_artifact_rehash_matches_postseals": true,
+  "pre_post_source_build_native_helpers_equal_within_absolute_deadline": true,
+  "recorded_thread_environment_matches_frozen_limits": true,
+  "required_final_core_parity_CI_and_review": "pending at acquisition handoff; performance does not authorize merge",
+  "source_sha": "8b5c13109b3d2cfc10802e91a5bacc3fd9aa3624",
+  "status": "passed",
+  "validated_rows_warm_plus_append_both_arms": 1386880
+}
