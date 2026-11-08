@@ -971,7 +971,7 @@ async fn test_native_table_static_project_prepares_real_native_owner_before_exec
     let project: ProjectSpec = serde_json::from_value(json!({
         "format_version":3,"id":"native-static","name":"native-static","runtime":{"mode":"batch","options":{}},
         "static_inputs":[{"name":"coefficients","kind":"array","mutability":"static","backend":"native","dtype":"float64","shape":[2,1]}],
-        "data_sources":[{"id":"rows","input":"observations","format":"arrow_ipc","data":null},{"id":"beta","input":"coefficients","format":"arrow_ipc","data":null}],
+        "data_sources":[{"id":"rows","input":"observations","format":"arrow_ipc","data":null}],
         "graph":{"name":"native-static","nodes":[{"id":"calc",
             "operator":{"kind":"external","provider":"native","name":"table_array","version":"1","options":static_options()},
             "input_ports":[{"name":"observations","kind":"table","schema":fields},{"name":"coefficients","kind":"array"}],

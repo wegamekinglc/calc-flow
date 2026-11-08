@@ -159,7 +159,7 @@ fn verify(opens: &AtomicUsize, results: &Mutex<Vec<f64>>) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let directory = tempfile::tempdir().map_err(|source| CalcFlowError::Io {
-        path: std::env::temp_dir().to_string_lossy().into_owned(),
+        path: "temporary checkpoint directory".into(),
         source,
     })?;
     let opens = Arc::new(AtomicUsize::new(0));
