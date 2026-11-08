@@ -811,6 +811,7 @@ fn result(plan: &IncrementalSql) -> RecordBatch {
         0,
         plan.groups.len(),
         &CandidateMap::with_hasher(RandomState::new()),
+        (None, &plan.scratch.new_empty()),
         "codec",
     )
     .unwrap()

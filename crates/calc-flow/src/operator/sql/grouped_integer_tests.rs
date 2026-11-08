@@ -374,7 +374,7 @@ async fn test_utf8_key_output_avoids_per_group_string_allocations() {
     let mut output = None;
     let allocations = allocation_counter::measure(|| {
         output = Some(
-            plan.aggregate_output_chunk(0, 256, &candidates, "utf8-output")
+            plan.aggregate_output_chunk(0, 256, &candidates, (None, &reservation), "utf8-output")
                 .unwrap(),
         );
     });
@@ -580,7 +580,7 @@ async fn assert_utf8_output_fits_charge(input: Batch) {
     let mut output = None;
     let allocations = allocation_counter::measure(|| {
         output = Some(
-            plan.aggregate_output_chunk(0, count, &candidates, "utf8-charge")
+            plan.aggregate_output_chunk(0, count, &candidates, (None, &reservation), "utf8-charge")
                 .unwrap(),
         );
     });

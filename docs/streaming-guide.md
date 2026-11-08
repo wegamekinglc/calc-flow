@@ -765,7 +765,7 @@ unchanged ones. Eligible aggregate queries use native incremental accumulators
 and update them with only the new input rows, without retaining historical
 input batches. For example, the plain grouped Int64 `SUM(delta)` in
 [stock account positions](#stock-account-positions) follows this path.
-Full snapshots still materialize all current groups. Queries outside the
+Full snapshots still deliver all current groups. Queries outside the
 supported native shapes retain input and rerun over it; their memory,
 checkpoint size, and query cost can grow with stream length. State is
 checkpointed when checkpointing is enabled. There is no fixed SQL state cap
@@ -792,7 +792,8 @@ to limit each aggregate SQL node to 100,000 live groups and 64 MiB of conservati
 owned-state charges. `StateBudget.max_rows` means live groups here, including
 null-only groups, rather than cumulative input rows. Charges include plans,
 encoded keys, owned key/value/ordering scalars, container capacity, cached
-results, dirty tracking, checkpoint metadata and cached checkpoint/log segments.
+scalar results and key columns, dirty tracking, checkpoint metadata and cached
+checkpoint/log segments.
 The installed state and transaction or restore candidate pay simultaneously;
 held captures remain charged until released. A candidate or checkpoint can
 therefore exceed the budget even when the installed winners alone fit. Failed
@@ -803,6 +804,14 @@ validation buffers and serialization scratch use separate engine reservations.
 An IPC buffer's ownership lease pays its engine reservation once. The compact
 budget limits owned state, not serialization peak memory or process RSS.
 There is no fixed RSS guarantee even for a fixed key set.
+
+With an unbounded engine pool, native cumulative snapshots may share unchanged
+raw aggregate arrays through a private cache capped at 8 MiB, including metadata.
+The cache uses engine reservations; an update can hold the installed cache and
+its replacement together until successful emission commits it. Finite or unknown
+engine pools and refused cache allocations use the ordinary column builder.
+Full snapshot contents and frequency are unchanged; projection, HAVING, ordering,
+and LIMIT still run for each snapshot. Restore and reset start with an empty cache.
 
 An explicit compact budget requires supported compact execution at every
 aggregate SQL node; row-local SQL is unaffected. Registered UDFs and unsupported

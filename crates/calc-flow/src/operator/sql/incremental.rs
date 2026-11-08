@@ -82,6 +82,10 @@ mod grouped_inline_tests;
 #[path = "snapshot_key_cache_tests.rs"]
 mod snapshot_key_cache_tests;
 
+#[cfg(test)]
+#[path = "c1_entry_tests.rs"]
+mod c1_entry_tests;
+
 #[path = "group_aggregates.rs"]
 mod group_aggregates;
 use group_aggregates::{GroupAggregates, InlineSum, StateView};
@@ -92,6 +96,13 @@ mod output_order;
 #[path = "snapshot_keys.rs"]
 mod snapshot_keys;
 
+#[path = "snapshot_aggregates.rs"]
+mod snapshot_aggregates;
+use snapshot_aggregates::SnapshotAggregates;
+
+type PreparedOutput = (Vec<RecordBatch>, Option<SnapshotAggregates>);
+type OutputCache<'a> = (Option<&'a mut SnapshotAggregates>, &'a MemoryReservation);
+
 pub(super) struct IncrementalSql {
     inline_sum: Option<InlineSum>,
     schema: SchemaRef,
@@ -100,6 +111,7 @@ pub(super) struct IncrementalSql {
     scratch: MemoryReservation,
     /// Key columns shared by repeated full snapshots.
     snapshot_keys: snapshot_keys::SnapshotKeys,
+    snapshot_aggregates: SnapshotAggregates,
     aggregate_schema: SchemaRef,
     output_schema: SchemaRef,
     aggregates: Vec<Arc<AggregateFunctionExpr>>,
@@ -675,6 +687,7 @@ type PreparedTransaction = (
     Vec<(usize, Group)>,
     Vec<Option<Group>>,
     Option<GroupContainer>,
+    Option<SnapshotAggregates>,
 );
 
 struct GroupContainer {
@@ -684,6 +697,7 @@ struct GroupContainer {
 }
 
 pub(super) struct Transaction {
+    snapshot_aggregates: Option<SnapshotAggregates>,
     container: Option<GroupContainer>,
     dirty: Option<dirty::DirtyGroups>,
     pub records: Vec<RecordBatch>,
@@ -795,10 +809,7 @@ impl IncrementalSql {
         let Some(aggregate_bytes) = aggregate_bytes(&aggregates, name)? else {
             return Ok(None);
         };
-        let Some(NativeStrategy {
-            global_records,
-            sequential,
-        }) = native_strategy(
+        let Some(strategy) = native_strategy(
             runtime,
             &runtime.incremental_reservation(name),
             raw,
@@ -811,15 +822,18 @@ impl IncrementalSql {
             return Ok(None);
         };
         let (converter, finalizer_bytes) = grouped_layout(&keys, &aggregates, name)?;
+        let aggregate_schema = Arc::new(aggregate.schema.as_arrow().clone());
+        let (scratch, cache) = SnapshotAggregates::with_scratch(runtime, &aggregate_schema, name);
         Ok(Some(Self {
             inline_sum: group_aggregates::bind_inline_sum(&keys, &aggregates),
             ordered_last: aggregates.iter().any(|expr| ordered_last::selected(expr)),
             variable_extrema: variable_extrema_slots(&aggregates),
             compact_budget: None,
-            scratch: runtime.incremental_reservation(name),
+            scratch,
             snapshot_keys: snapshot_keys::SnapshotKeys::new(reservation.new_empty()),
+            snapshot_aggregates: cache,
             schema,
-            aggregate_schema: Arc::new(aggregate.schema.as_arrow().clone()),
+            aggregate_schema,
             output_schema: Arc::new(analyzed.schema().as_arrow().clone()),
             aggregates,
             aggregate_filters,
@@ -839,8 +853,8 @@ impl IncrementalSql {
             converter,
             groups: Vec::new(),
             dirty: dirty::DirtyGroups::empty(reservation.new_empty()),
-            sequential,
-            global_records,
+            sequential: strategy.sequential,
+            global_records: strategy.global_records,
             container_fee: None,
             index: HashMap::with_hasher(RandomState::new()),
             reservation,
@@ -1180,7 +1194,7 @@ impl IncrementalSql {
         self.finish_candidates(&mut candidates, context, name)
             .await?;
         let proof = candidates.proof.take();
-        let (records, groups, new_groups, container) = self
+        let (records, groups, new_groups, container, snapshot_aggregates) = self
             .prepare_transaction(candidates, &reservation, context, name)
             .await?;
         let checkpointing = context.job().checkpointing();
@@ -1191,6 +1205,7 @@ impl IncrementalSql {
             None
         };
         Ok(Transaction {
+            snapshot_aggregates,
             records,
             track_updates: input.0,
             checkpointing,
@@ -1254,7 +1269,7 @@ impl IncrementalSql {
     ) -> Result<PreparedTransaction> {
         self.snapshot_keys.begin();
         let count = self.output_count(&candidates, name)?;
-        let records = self
+        let (records, snapshot_aggregates) = self
             .output_records(count, &candidates.groups, reservation, context, name)
             .await?;
         let new_count = count - self.groups.len();
@@ -1266,7 +1281,7 @@ impl IncrementalSql {
         let (groups, new_groups) = self
             .prepare_groups(candidates.groups, new_count, context)
             .await?;
-        Ok((records, groups, new_groups, container))
+        Ok((records, groups, new_groups, container, snapshot_aggregates))
     }
 
     fn validate_input_schema(&self, rows: usize, schema: &SchemaRef) -> Result<()> {
@@ -1958,20 +1973,41 @@ impl IncrementalSql {
         reservation: &MemoryReservation,
         context: &StreamOperatorContext<'_>,
         name: &str,
-    ) -> Result<Vec<RecordBatch>> {
+    ) -> Result<PreparedOutput> {
         let output_charge = self.output_charge(count, candidates, context, name).await?;
+        let mut cache = self.snapshot_aggregates.prepare(
+            (&self.aggregate_schema, count, self.aggregates.len()),
+            candidates.keys().copied(),
+            |slot| Arc::clone(&self.output_group(slot, candidates).key),
+        );
+        let shared = cache.as_ref().map_or(0, SnapshotAggregates::shared_bytes);
+        let output_charge = output_charge.saturating_sub(shared);
         reservation
             .try_grow(output_charge)
             .map_err(|error| df_error(name, error))?;
-        let records = self.output_chunks(count, candidates, context, name).await?;
-        self.apply_output_order(records, reservation, context, name)
-            .await
+        if let Some(cache) = &mut cache {
+            cache.set_output_credit(output_charge);
+        }
+        let records = self
+            .output_chunks(
+                count,
+                candidates,
+                (cache.as_mut(), reservation),
+                context,
+                name,
+            )
+            .await?;
+        let records = self
+            .apply_output_order(records, reservation, context, name)
+            .await?;
+        Ok((records, cache))
     }
 
     async fn output_chunks(
         &self,
         count: usize,
         candidates: &CandidateMap,
+        mut cache: OutputCache<'_>,
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<Vec<RecordBatch>> {
@@ -1979,7 +2015,13 @@ impl IncrementalSql {
         for start in (0..count).step_by(CHUNK_ROWS) {
             context.check_cancelled()?;
             let end = count.min(start.saturating_add(CHUNK_ROWS));
-            records.push(self.output_chunk(start, end, candidates, name)?);
+            records.push(self.output_chunk(
+                start,
+                end,
+                candidates,
+                (cache.0.as_deref_mut(), cache.1),
+                name,
+            )?);
             tokio::task::yield_now().await;
         }
         if records.is_empty() {
@@ -2053,9 +2095,10 @@ impl IncrementalSql {
         start: usize,
         end: usize,
         candidates: &CandidateMap,
+        cache: OutputCache<'_>,
         name: &str,
     ) -> Result<RecordBatch> {
-        let aggregate = self.aggregate_output_chunk(start, end, candidates, name)?;
+        let aggregate = self.aggregate_output_chunk(start, end, candidates, cache, name)?;
         let aggregate = self.apply_having(aggregate, name)?;
         if self
             .post_order
@@ -2072,22 +2115,45 @@ impl IncrementalSql {
         start: usize,
         end: usize,
         candidates: &CandidateMap,
+        cache: OutputCache<'_>,
         name: &str,
     ) -> Result<RecordBatch> {
         let groups = (start..end)
             .map(|slot| self.output_group(slot, candidates))
             .collect::<Vec<_>>();
         let key_columns = self.snapshot_key_columns(start, &groups, name)?;
-        let aggregate_columns = (self.keys.len()..self.keys.len() + self.aggregates.len())
-            .map(|column| self.scalar_output_column(groups.iter().copied(), column, name));
-        let columns = key_columns
-            .iter()
-            .cloned()
-            .map(Ok)
-            .chain(aggregate_columns)
-            .collect::<Result<Vec<ArrayRef>>>()?;
+        let columns = self.snapshot_output_columns(start, &groups, &key_columns, cache, name)?;
         RecordBatch::try_new(self.aggregate_schema.clone(), columns)
             .map_err(|error| df_error(name, error))
+    }
+
+    fn snapshot_output_columns(
+        &self,
+        start: usize,
+        groups: &[&Group],
+        key_columns: &[ArrayRef],
+        cache: OutputCache<'_>,
+        name: &str,
+    ) -> Result<Vec<ArrayRef>> {
+        let chunk = start / CHUNK_ROWS;
+        if let Some(columns) = cache.0.as_ref().and_then(|cache| cache.get(chunk)) {
+            return Ok(key_columns.iter().chain(columns).cloned().collect());
+        }
+        let mut columns = Vec::with_capacity(key_columns.len() + self.aggregates.len());
+        columns.extend(key_columns.iter().cloned());
+        for column in self.keys.len()..self.keys.len() + self.aggregates.len() {
+            columns.push(self.scalar_output_column(groups.iter().copied(), column, name)?);
+        }
+        if let Some(prepared) = cache.0
+            && let Some(first) = groups.first()
+        {
+            prepared.stage(
+                (chunk, groups.len(), &first.key),
+                &columns[key_columns.len()..],
+                cache.1,
+            );
+        }
+        Ok(columns)
     }
 
     /// Key columns of one output chunk, shared across snapshots while the
@@ -2357,21 +2423,34 @@ impl IncrementalSql {
         if let Some(proof) = transaction.proof {
             self.sequential = Some(proof);
         }
-        for (slot, group) in transaction.groups {
-            if transaction.checkpointing && transaction.track_updates {
+        self.commit_groups(
+            (transaction.groups, transaction.new_groups),
+            transaction.checkpointing,
+            transaction.track_updates,
+        );
+        self.snapshot_keys.install_staged();
+        if let Some(cache) = transaction.snapshot_aggregates {
+            self.snapshot_aggregates = cache;
+        } else {
+            self.snapshot_aggregates.clear();
+        }
+    }
+
+    fn commit_groups(&mut self, groups: PreparedGroups, checkpointing: bool, track_updates: bool) {
+        for (slot, group) in groups.0 {
+            if checkpointing && track_updates {
                 self.dirty.mark(slot);
             }
             self.groups[slot] = group;
         }
-        for group in transaction.new_groups.into_iter().flatten() {
+        for group in groups.1.into_iter().flatten() {
             let slot = self.groups.len();
-            if transaction.checkpointing {
+            if checkpointing {
                 self.dirty.mark(slot);
             }
             self.index.insert(group.key.clone(), slot);
             self.groups.push(group);
         }
-        self.snapshot_keys.install_staged();
     }
 
     pub(super) fn clear_checkpoint_changes(&mut self) {

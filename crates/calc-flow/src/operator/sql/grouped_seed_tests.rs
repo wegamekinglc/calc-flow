@@ -193,7 +193,7 @@ async fn case(dtype: &DataType) {
         .await
         .unwrap();
     let count = plan.output_count(&candidates, "seed").unwrap();
-    let actual = plan
+    let (actual, cache) = plan
         .output_records(count, &candidates.groups, &reservation, &context, "seed")
         .await
         .unwrap();
@@ -232,7 +232,15 @@ async fn case(dtype: &DataType) {
         );
         assert!(calls.iter().all(|rows| *rows > 1));
     }
-    drop((candidates, reservation, plan, initial, actual, expected));
+    drop((
+        candidates,
+        reservation,
+        plan,
+        initial,
+        actual,
+        expected,
+        cache,
+    ));
     assert!(job.gather_owner().close_and_drain().await.is_empty());
     drop(context);
     drop(job);
