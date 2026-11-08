@@ -15,6 +15,7 @@ On this page:
 - [Native array reductions](#native-array-reductions)
 - [Native exponential averages](#native-exponential-averages)
 - [Native rolling mean](#native-rolling-mean)
+- [Owned native sequence state](#owned-native-sequence-state)
 - [Native elementwise arrays](#native-elementwise-arrays)
 - [Packed matrices and axes](#packed-matrices-and-axes)
 - [Native array batch provider](#native-array-batch-provider)
@@ -192,6 +193,56 @@ scratch/history. History has fixed storage for at most
 `min(input_length, window + 1)` positions, evaluated without integer overflow;
 `u64::MAX` windows remain usable with small inputs. Inputs are read-only, and
 oversized results or scratch are rejected before allocating their buffers.
+
+## Owned native sequence state
+
+`RollingMeanState` and `EwmaState` preserve an ordered sequence across synchronous
+`process` calls. Construct them with the existing kernel options and
+`ArrayStateOptions`, then pass rank-one `ArrayView` chunks and per-call
+`ArrayExecutionOptions`. Float32 and Float64 chunks may alternate; both use the
+same Float64 recurrence. Scalars, matrices and Boolean vectors are rejected,
+including empty inputs with those descriptors.
+
+```rust
+use calc_flow::{Result, array::{ArrayExecutionOptions, ArrayStateOptions,
+    ArrayView, FloatView, RollingMeanOptions, RollingMeanState}};
+
+fn across_chunks() -> Result<calc_flow::array::NativeArray> {
+    let mut state = RollingMeanState::new(
+        RollingMeanOptions::new(2)?, ArrayStateOptions::default(),
+    )?;
+    let execution = ArrayExecutionOptions::default();
+    state.process(ArrayView::from_float(FloatView::from_f64(&[1.0, 3.0])), &execution)?;
+    state.process(ArrayView::from_float(FloatView::from_f32(&[5.0])), &execution)
+}
+```
+
+Each result owns a Float64 vector with one output position per input position.
+The existing eager mean and EWMA numerical contracts apply, including missing
+positions, warm-up, infinities, operation order and mean/M2 repair. StableV2's
+rebase cadence counts all sequence positions across chunks. An empty vector
+does not advance or repair state. Input buffers remain read-only; output buffers
+outlive the input borrow, reset and state drop.
+
+The default retained-state limit is 256 MiB. `state_bytes()` charges 64 bytes
+plus 16 per allocated mean history slot, including spare capacity, or 24 bytes
+for EWMA. Construction allocates no window-sized history, even for `u64::MAX`.
+`reset()` releases mean history, resets counters and retains options and limits.
+These logical charges exclude allocator and object overhead and do not measure
+RSS. Debug reports descriptors and charges without sample values.
+
+For these state handles, `max_allocation_bytes` limits the total participating
+old state, isolated candidate, owned output/mask/shape and numerical scratch.
+Candidate capacity is also subject to `max_state_bytes`; `max_elements` counts
+output positions. Empty calls still check output descriptors and limits.
+Validation, allocation, count or numerical errors leave history, capacity and
+recurrence bits intact so a rejected chunk can be retried. Retained and peak
+violations use `state.max_state_bytes` and `state.peak_bytes`; output errors
+retain their `outputs.output.*` fields. Existing eager functions keep their
+output-and-scratch budget semantics and independent ephemeral states.
+
+These types have no public cloning, serialization or checkpoint API. See the
+standalone [owned-state example](../crates/calc-flow/examples/native_array_state.rs).
 
 ## Native elementwise arrays
 

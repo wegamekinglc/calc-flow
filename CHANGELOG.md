@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-08: Add owned Rust rolling-mean and EWMA states with transactional
+  chunk processing, checked cumulative positions, bounded retained history and
+  total-live allocation admission. Preserve eager numerical semantics and
+  cross-chunk repair cadence; reset releases state without invalidating outputs.
+
 - 2026-11-08: Add strict native array IR2 programs and descriptor-only Rust
   inference queries. Reuse matrix/layout/axis kernels, retain IR1 field and
   rank restrictions, and account shared alias buffers, shape descriptors and

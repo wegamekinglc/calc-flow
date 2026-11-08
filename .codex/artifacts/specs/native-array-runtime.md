@@ -160,7 +160,7 @@ M2 扩展现有 `ArrayExpr` 和 `linalg`，不新增一套并行 DSL。为动态
 - table 结果继续走 `collect`；混合 table/array Program 结果不在本轮开放。
 - `linalg.from_columns(..., backend="native") → matmul → attach_columns` 接入同一原生执行层。
 - SQL 前后组合、直接 attachment 后的 projection/filter、独立多输出应使用同一 segment 机制；保留每段的类型和行对应关系。
-- M2 原生矩阵保留一次 matmul 的首批准入；去掉 native 路径对参数必须叫 `weights` 的要求，并允许不同片段共享同一静态参数。多 matmul 链和任意动态 stream RHS 留待后续准入扩展，不顺带放宽 NumPy/JAX 原合同。
+- M2 每个原生程序/表桥接片段最多一次 matmul；去掉 native 路径对参数必须叫 `weights` 的要求，并允许不同片段共享同一静态参数。独立数组收集允许每段一次的显式分段；Table 中多次 matmul 须经显式 Table 阶段边界。单个 attachment 的自动多 matmul 链与任意动态 stream RHS 留待后续准入扩展，不放宽 NumPy/JAX 原合同。
 - Rust/Python 原生类型推导由同一 Rust 规则驱动，Python 可通过私有 planning binding 查询；不再对未知 backend 回落导入 JAX。
 
 ## 5. 分阶段实施与验收
@@ -223,11 +223,11 @@ Rust 是 IR 验证的最终边界：单节点 options 编码上限 64 KiB，最�
 
 ### A4 二维矩阵与 table 桥接（M2）
 
-增加二维 contiguous descriptor，明确行主序/列主序的内部读写接口；不开放任意 strides。矩阵只接受 f32/f64、非 null，内维一致、输出宽度为正；允许零行输出。混合精度按 native promotion 执行。
+增加二维 contiguous descriptor，明确行主序/列主序的内部读写接口；不开放任意 strides。通用二维存储保留 bool 与 null；matmul 操作数只接受 f32/f64、非 null，内维一致、输出宽度为正，允许零行输出。混合精度按 native promotion 执行。
 
 原生 `table_array@1` 直接读 Arrow 列，优先按输出列写 Arrow buffer。只有所选矩阵 kernel 要求时才打包 dense storage；每份 packing、静态放置和输出分配都受预算控制。首期实现确定顺序的正确 CPU 基础 kernel，不默认引入新的 BLAS 依赖，不宣称胜过 NumPy。
 
-静态矩阵每 job 冻结/放置一次，多个节点共享不可变放置值；跨 job 不共享未验证缓存。缓存键包含 backend、dtype、shape、canonical digest 和必要执行身份；取消/失败放置不得发布缓存。
+静态矩阵在每个有限 run 或 managed job 内按可信 owner 冻结、规范编码和原生放置一次；多个节点共享不可变放置值，跨执行不复用。共享键包含执行身份、保活的可信 owner、已验证 backend/dtype/shape 与成功的规范准备身份。恢复 digest-v1 包含物理绑定名，因此每个别名仍独立校验声明、计算原协议 SHA 并核对恢复值；物理摘要不能用作共享 placement 键。按消费者预算流式编码有界 chunk，不保无界 body；准备、放置和 scratch 重叠受真实预算/取消约束，完整校验前不发布候选缓存。
 
 复用 segment 边界接通 SQL→matrix→SQL、attachment→filter/project、独立多输出和不同参数名。保持行对应关系检查：跨表、过滤前后行集不同、输出宽度与字段冲突均编译失败。ASOF/event-window 限制继续按现有合同，不借此自动放宽。
 
@@ -303,8 +303,8 @@ stateful native capability 必须来自 Rust 真实注册记录：stateful、支
 | 05 | A3         | PyO3、native batch factory、capabilities、Python eager、stubs/examples    | 03、04                       |
 | 06 | A4         | 2D/storage adapter、static placement、matrix provider、table segmentation | 05                           |
 | 07 | A5         | `array_input`、analyzer、ArrayExpr 收集、axis/shape lowering              | 05、06                       |
-| 08 | A6 前半    | 直接 owned state、真实 stateful capability、array stream operator         | 04、05                       |
-| 09 | A6 后半    | codec、managed restart、控制/失败/预算验收                                | 08；与 06 静态输入对齐       |
+| 08 | A6a        | 直接 owned state、共享候选转移、状态与峰值预算                            | 04、05                       |
+| 09 | A6b        | 真实 stateful factory、codec、managed restart、能力迁移与控制/预算验收    | 08；与 06 静态输入对齐       |
 | 10 | A7 RSI/ATR | recurrence、Rust/Python/table 表面与恢复                                  | 09                           |
 | 11 | A7 MACD    | 共享多输出与原语组合、跨表面契约                                          | 09                           |
 

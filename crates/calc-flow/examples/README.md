@@ -43,8 +43,12 @@ conditional selection and an exact sum. It needs no provider registration.
 [`native_matrices.rs`](native_matrices.rs) demonstrates packed rank-2 multiplication,
 axis means and owned reshape/transpose with allocation limits.
 
+[`native_array_state.rs`](native_array_state.rs) advances owned rolling-mean and
+EWMA states across chunks, verifies continuity and retains output after reset.
+
 ```bash
 cargo run -p calc-flow --example native_arrays
+cargo run -p calc-flow --example native_array_state
 ```
 
 ## Python-to-Rust inventory

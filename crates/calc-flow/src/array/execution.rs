@@ -6,6 +6,9 @@ use crate::Result;
 /// Borrowed input storage is excluded. Allocation accounting includes owned
 /// output buffers and conservatively bounded kernel scratch, not process RSS
 /// or fixed object/allocator overhead.
+/// Owned sequence states additionally include committed and candidate storage
+/// in their total-live budget; see [`crate::array::RollingMeanState::process`]
+/// and [`crate::array::EwmaState::process`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[must_use]
 pub struct ArrayExecutionOptions {
@@ -36,6 +39,8 @@ impl ArrayExecutionOptions {
     /// Returns limits with a new maximum output-and-scratch byte charge.
     ///
     /// Zero rejects every execution requiring an allocated output buffer.
+    /// Owned sequence states apply this limit to total live participating state,
+    /// candidate, output and scratch storage instead of incremental allocations.
     pub const fn with_max_allocation_bytes(self, max_allocation_bytes: usize) -> Self {
         Self {
             max_allocation_bytes,
@@ -48,7 +53,7 @@ impl ArrayExecutionOptions {
         self.max_elements
     }
 
-    /// Returns the combined output-and-scratch byte limit.
+    /// Returns the allocation byte limit for the selected native operation.
     pub const fn max_allocation_bytes(&self) -> usize {
         self.max_allocation_bytes
     }

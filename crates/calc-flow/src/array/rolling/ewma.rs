@@ -156,19 +156,12 @@ fn calculate(
     check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<NativeArray> {
     let (mut values, mut bitmap) = allocate_output(len, execution)?;
-    let mut valid_count = 0;
-    let mut previous = 0.0;
+    let mut kernel = EwmaKernel::default();
     for (index, sample) in input.enumerate() {
         control::checkpoint(index, check)?;
-        let sample = if validity.is_none_or(|mask| mask.is_valid(index)) && !sample.is_nan() {
-            Some(sample)
-        } else {
-            None
-        };
-        (valid_count, previous) = next_ewma(valid_count, previous, sample, alpha, false)
-            .ok_or_else(|| super::super::invalid("input.rows", "EWMA sample count overflowed"))?;
-        if valid_count >= min_periods {
-            values[index] = previous;
+        let sample = present_sample(sample, validity, index);
+        if let Some(value) = kernel.push(sample, alpha, min_periods)? {
+            values[index] = value;
             bitmap[index / 8] |= 1 << (index % 8);
         }
     }
@@ -177,6 +170,14 @@ fn calculate(
         NativeArray::from_f64(values, vec![len], Some(validity)),
         check,
     )
+}
+
+fn present_sample(sample: f64, validity: Option<&NullBuffer>, index: usize) -> Option<f64> {
+    if validity.is_none_or(|mask| mask.is_valid(index)) && !sample.is_nan() {
+        Some(sample)
+    } else {
+        None
+    }
 }
 
 fn allocate_output(len: usize, execution: &ArrayExecutionOptions) -> Result<(Vec<f64>, Vec<u8>)> {
@@ -200,6 +201,32 @@ fn allocate_output(len: usize, execution: &ArrayExecutionOptions) -> Result<(Vec
         })?;
     execution.validate_allocation(len, allocated, size_of::<(u64, f64)>())?;
     Ok((values, bitmap))
+}
+
+#[derive(Clone, Copy, Default)]
+pub(in crate::array) struct EwmaKernel {
+    valid_count: u64,
+    previous: f64,
+}
+
+impl EwmaKernel {
+    #[cfg(test)]
+    pub(in crate::array) fn set_test_valid_count(&mut self, valid_count: u64) {
+        self.valid_count = valid_count;
+    }
+
+    pub(in crate::array) fn push(
+        &mut self,
+        sample: Option<f64>,
+        alpha: f64,
+        min_periods: u64,
+    ) -> Result<Option<f64>> {
+        (self.valid_count, self.previous) =
+            next_ewma(self.valid_count, self.previous, sample, alpha, false).ok_or_else(|| {
+                super::super::invalid("input.rows", "EWMA sample count overflowed")
+            })?;
+        Ok((self.valid_count >= min_periods).then_some(self.previous))
+    }
 }
 
 #[inline]

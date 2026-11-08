@@ -182,3 +182,500 @@ IR/capability 版本。
 
 回归覆盖真实 serde_json 解析、原生 literal 校验及执行结果 bits：正负 2^64
 和它们相邻的原始大整数拼写会形成相同 f64；保留的整数表示仍按边界拒绝。
+
+## 5. M2（A4/A5）已批准设计合同
+
+以下归档已经 API 与 critic 审查通过的精确合同及澄清；这是分阶段实施的
+设计依据，不是功能、测试或 CI 完成声明。原 A1/A2/A3 及已解析 literal 边界
+保留；本节仅按阶段扩展对应表面。Table bridge、完整 symbolic 收集和 A6b
+不能因本归档而被标记为已实现。参见[主计划](../specs/native-array-runtime.md)
+及[专项审核](../critiques/native-array-runtime.md)。配置保持 data-only，Batch
+仍是图数据 envelope，DataFusion 仍是唯一 table 引擎；不引入 TA-Lib 代码。
+
+### 5.1 Packed matrix 与精确公开表面
+
+NativeArray 扩展为 packed row-major rank 0/1/2，允许 nullable bool/f32/f64。
+`len/is_empty` 按逻辑行计数：`[]` 为 1，`[n]` 为 n，`[r,c]` 为 r；
+`element_count` 和 ArrayView 的 len/is_empty 按全部槽位计数，故 `[3,0]`
+有 3 行而 view 为空。Arrow 导出保留扁平存储，shape 单独携带；NumPy 导出
+保留 shape，输入先按原 immutable snapshot 合同捕获。rank-2 float_view
+在 `input.shape` 拒绝，不隐式 flatten。保留 Arrow value/validity offsets。
+
+```rust
+impl NativeArray {
+    pub fn element_count(&self) -> usize;
+    // Existing view() -> ArrayView<'_>, constructors and Arrow accessors remain.
+}
+impl<'a> ArrayView<'a> {
+    pub fn reshape(self, shape: &[usize]) -> Result<Self>;
+}
+pub fn matmul(left: ArrayView<'_>, right: ArrayView<'_>, execution: &ArrayExecutionOptions)
+    -> Result<NativeArray>;
+pub fn reshape(input: &NativeArray, shape: &[usize], execution: &ArrayExecutionOptions)
+    -> Result<NativeArray>;
+pub fn transpose(input: &NativeArray, execution: &ArrayExecutionOptions)
+    -> Result<NativeArray>;
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Reduction { Sum, Mean, Min, Max }
+impl ReductionOptions {
+    pub const fn with_axis(self, axis: Option<usize>) -> Self;
+    pub const fn with_keepdims(self, keepdims: bool) -> Self;
+    pub const fn axis(&self) -> Option<usize>;
+    pub const fn keepdims(&self) -> bool;
+}
+pub fn reduce(input: ArrayView<'_>, operation: Reduction, options: ReductionOptions,
+              execution: &ArrayExecutionOptions) -> Result<NativeArray>;
+```
+
+旧 sum/mean/min/max(FloatView, ...) 保留，并将无 shape 的 view 作为 vector。
+axis 默认 None、keepdims 默认 false；Python eager 对应归约增加同名 keyword。
+新增 Python eager matmul/reshape/transpose，沿用 execution options 约定。
+
+- 逐元素广播只接受 scalar 或完全相同的 shape；不把 `[n]` 当 `[n,1]`，
+  不沿 singleton matrix 维广播。promotion/null/Kleene/where/pow 保持原合同。
+- Matmul 仅 `[m,k] @ [k,n]`、n>0、f32/f64 且实际 null count 为零；即使输出
+  为空也验证两侧。nullable schema 本身不是拒绝理由。m=0 返回 `[0,n]`；
+  k=0 返回 positive-zero `[m,n]`；f32/f32 保持 f32，混合升 f64。每输出按
+  递增 k 在提升后的 dtype 中先乘再从 +0 左折叠相加；无 FMA、重排、隐藏
+  宽累加或 exact-reduction 替换，不承诺 NumPy/BLAS 位级一致。
+- Reshape 要求 rank<=2、checked product 与槽位数相等；无负数、-1 推断、
+  stride/order 参数。owned reshape 共享数据，仅新 descriptor；view 保留借用。
+  Transpose 的 rank 0/1 为 identity；一般 matrix 复制 value/validity 为 packed
+  存储，零元素或 size-one-axis 可共享。所有 owned 输出拥有独立生命周期。
+- Reduce 只接纳浮点；axis=None 归约全部，否则 axis<rank，拒绝负 axis。
+  keepdims 将被归约轴设为 1，axis=None 则每原轴为 1，scalar 仍为 scalar。
+  每 lane 使用 A2 exact sum/mean 及既有 min/max/null/NaN/signed-zero 规则；
+  空或全 null lane 为 invalid，sum 也不例外。例：`[0,3]` axis=0 得三个
+  invalid，`[2,0]` axis=1 得两个 invalid。
+
+按元素而非行检查 max_elements。新输出、bitmap、descriptor、packing 和峰值
+scratch 分配前计费；reshape/trivial transpose 的共享数据只计一次，新 shape
+仍计费，多个 named outputs 仍逐个计输出元素。借用输入不变成新 owned 分配。
+取消检查必须进入长 dot product、单 lane 和 transpose 内层，且不改变累加顺序。
+
+### 5.2 IR2、ArrayExpr 与 table 边界
+
+保留 `native:array_expr@1` identity，新增 ir_version=2；IR1 的字段、rank<=1、
+结果和拒绝条件不变。IR2 保留 64 KiB、128 nodes、depth 24、32 inputs、16 outputs
+上限，描述符允许 rank<=2 的非负整数或 null extent。新增 matmul(left,right)、
+reshape(input,shape)、transpose(input)，reduce 增加 axis=null|0|1 与 keepdims。
+每 IR program 最多一次 matmul；rolling/EWMA 仍为 vector。抽象输出 assertions
+必须与推导完全一致，实际执行先复核 concrete shape、尺寸溢出、dtype 和预算。
+
+`NativeArrayFactory::infer_program(&JsonMap) -> Result<JsonMap>` 与私有绑定
+`_native._infer_native_array_program(program_json: str) -> str` 共用 Rust
+parser/inference。query outputs 只有 name/node，返回 name/node/dtype/shape；
+执行 IR 仍要求 assertions。仅用 descriptor/literal，不读行、不创建探测数组，
+不通过 NumPy/JAX 推导；查询缓存依赖 runtime registration revision。
+
+```python
+def array_input(
+    name: str, /, *, dtype: str, shape: Sequence[int | None],
+    backend: Literal["native"] = "native",
+) -> ArrayExpr: ...
+
+class ArrayExpr:
+    def reshape(self, shape: Sequence[int], /) -> ArrayExpr: ...
+    def transpose(self) -> ArrayExpr: ...
+    # sum/min/max use the same keyword shape as mean.
+    def mean(self, *, axis: int | None = None, keepdims: bool = False,
+             skip_nulls: bool = False) -> ArrayExpr: ...
+    def collect_array(
+        self, inputs: Mapping[str, NativeArray | Batch | TableData], /, *,
+        runtime: Runtime, options: ExecutionOptions | None = None,
+        array_options: ArrayExecutionOptions | None = None,
+    ) -> NativeArray: ...
+```
+
+array_input 是 dynamic 声明；parameter(kind="array", mutability="static", ...)
+仍是 static。collect_array 只返回一个 native 结果，允许 table、dynamic array
+及 static 参数共同作为根；要求已注册 Runtime、精确 named bindings、真实 native
+payload、匹配的 dtype/shape，复制输入 mapping，不修改调用者。每次拥有 fresh
+batch plan，复用既有 segment、logical/physical bindings 和 immutable template；
+cache key 包含 normalized array_options，payload 不入声明缓存。该选项只限每个
+native IR 执行，非全图 RSS。阻塞入口拒绝运行中的 event loop。compute/collect/
+Program 继续返回 tables；不增加 async array stream 或 mixed Program results。
+Program.with_input 接受 ArrayExpr 时只允许 array_input 根，不能接受计算结果。
+
+新增 `NativeTableArrayFactory`，identity `native:table_array@1`：真正的 batch
+与受限 stateless stream factory。wrapper options 为 ir_version=2、inputs、nodes、
+outputs、execution；恰有一个 required exact-schema table 和一个 output，至多一个
+`kind="array", binding="static"` 的矩阵输入，名字任意，仅作唯一 matmul 的直接
+RHS，无 dynamic RHS。table input 的 columns 非空、唯一、同 native dtype；null
+可入存储，matmul 再按实际 null 拒绝。outputs 有两种闭合形状：
+
+```text
+table: {name, kind:"table", node, attach_to:<table input>, names:[...]}
+array: {name, kind:"array", node, dtype, shape}
+```
+
+数值结果必须保留原 table row origin，rank 1 或 2；table attachment 的 vector
+需一个名字，matrix 需已知正宽度及同数目的名字，不能与原字段冲突。仅接纳同
+origin 的逐元素、static-RHS matmul、matrix axis=1 reduce 和已证明保留行映射的
+shape 操作；拒绝 rolling/EWMA、axis=0/full reduce、rank-2 transpose 或未证明的
+reshape。stream 还必须对任意批行数保持准入及行映射；锁定 batch length 的
+concrete reshape 不合格。编译及 source-open 前验证 RHS 是真实 latched static，
+不能只信 `binding` 字符串。保留全部 Arrow chunks/slices 的逻辑行序、原 columns/
+Arrow metadata/Batch metadata、精确空输出 schema；packing 必须计费。
+
+table-rooted collect_array 复用 table/SQL segments，table_array 可先返回 array；
+full reduction/transpose/dynamic RHS 等 batch-only 工作在后续 array_expr segment。
+attach 后直接 filter/project、SQL 前后组合、独立多输出及共享不同名参数均需真实
+执行。origin 是语义，不由长度恢复：transpose/axis=0/full reduce/未证明 reshape
+丢失后，即便 shape 再次相等也不能回贴；独立 array_input 没有 table origin。
+保留既有 ASOF/event-window 及 NumPy/JAX 准入边界。
+
+独立 array collection 可以每段一次 matmul 地分解链；**单次 attachment 表达式
+的两个 chained matmul 不在 M2 准入内**，报 CompileError，例如
+"native attachment supports at most one matmul between table stages; found 2"。
+显式路径为 attach 第一结果 → from_columns(新 TableExpr) → 第二 matmul → attach
+到该新 TableExpr → project 最终列。无需自动隐藏列，也不能凭同长度恢复 origin。
+
+### 5.3 Native static scope、digest-v1 与具体预算
+
+冻结/规范编码/native placement 对一次执行中的每个 trusted owner 各做一次；
+**SHA-256 仍按 physical alias 分别执行**。digest-v1 包含 version、kind tag、
+length-prefixed physical name，再接 descriptor/cells；每 alias 必须与既有
+`static_input.rs::digest_for_name(alias, batch)` 逐位相同，不改 digest/manifest。
+初始化各 alias 的原前缀 SHA state，一遍规范编码按固定 4 KiB chunk 喂给全部
+hashers，无 body-sized Vec；hash 工作仍随 alias 数×payload bytes 增长。
+每 alias 独立验证自己的 StaticInputSpec 和恢复 digest，在 source open 前完成。
+同 owner 某 alias 的 dtype/shape 错误，必须该 physical path 失败且不发布 placement。
+
+共享 key 为 `(execution scope, retained trusted owner, validated backend/dtype/shape,
+engine-minted canonical-preparation identity)`。retain owner 防地址复用；不同 owner
+同值不合并，不凭相同底层 buffer 或 caller metadata 共享，不用不同 salted alias
+hash 作共享 key，不引入可持久化的替代 digest。每 finite run/job/recovery job 都有
+fresh scope，失败/取消不发布可复用 entry。
+
+既有 prepare_static_inputs 没有 budget/cancellation 参数，不能假定已有该机制。
+实施需 native-only 私有受控路径：compiled native consumers 提供真实 node/port→
+physical static projection 和 `B_j = max_allocation_bytes`；finite plan 保留相关
+StaticInputSpec，RunContext clones 共用本次 fresh scope，managed job 同理。
+公开 static_input 的既有 global lookup 语义不改，不向 native 回落到无预算 helper。
+
+对 owner g 以 checked arithmetic 计算：F_g 为 frozen carrier、宽化值、null flags、
+shape/descriptor 及 owner 额外保活的不同 source buffers；P_g 为 packed native
+values/validity/shape；D_g 为每 physical alias 的 digest text/新增 descriptor；
+W_g 为 4 KiB chunk、全部 live SHA states、真实 conversion/snapshot peak scratch。
+已有 frozen carrier 仍计保留成本；f32 的宽化 frozen 与 packed f32 是两份分配。
+仅在 owner identity 证明同一 allocation 时去重，检查 actual capacities；此逻辑
+存储计费不含 allocator/map-node overhead，不是 RSS。
+
+```text
+G_j = consumer j 的所有不同 native static owners
+R_j = sum(F_g + P_g + D_g for g in G_j)
+对 owner g 的每个 consumer j: R_j + W_g <= B_j
+consumer j 的后续 numeric packing/output/scratch 预算 = B_j - R_j
+```
+
+owner groups 串行 prepare，分配前预测全部最终 R_j；同 consumer 的重复 alias
+只计 owner 一次，但所有 owner 必须求和。每 group 的完整 shared workspace 对
+其每个 consumer 校验；较宽预算不能补贴较窄预算，不将无关 consumer 的最小值
+变成全局上限。缓存命中不取消 R_j。仅新 native static path 扩展 consumer 预算，
+不改无 static 的 native 或 NumPy/JAX 行为；不另加覆盖显式配置的默认上限。
+
+重型 prepare 使用 bounded owned worker，并传入实际 RunContext 或 job/admission
+的取消/deadline 检查，不伪造 per-batch context。检查 admission 前、最多每 4,096
+槽（包括 null）、每编码 chunk、最多每 64 alias-hash updates 和最终 publication 前。
+所有 group、每 alias descriptor/recovery digest、预算/实际容量及最终取消检查通过后，
+才一次发布局部候选 map；错误保持 scope 不变。错误定位 `static_inputs.<alias>.bytes`
+并写明 consumer、required/limit；numeric 错误保留 output/scratch 路径并说明 R_j。
+
+### 5.4 M2 capability 与验收边界
+
+M2 保持 capability schema 4。旧 native_scalar_vector_broadcast@1 不改，新增真实
+native_packed_rank2@1、native_matmul@1、native_axis_reduction@1、
+native_table_static_rhs@1。完整 M2 中 array_expr 仍 batch-only/checkpoint unproven，
+实际 finite static 接入后才声明 supports_static_inputs；table_array 声明 batch+stream、
+per_row_final、stateful=false、microbatch_invariant/deterministic/replay_safe=true、
+checkpoint_support=stateless、state_version=None、supports_static_inputs=true、
+partition_contract=row_axis_independent。不得用 Python stateless marker 代替 Rust 实现。
+
+register_native 公共签名不改，原子插入 array_expr batch + table_array batch/stream
+三项，固定 batch→stream lock 顺序，先验证所有 key/descriptor/records，首次插入后
+无 fallible 验证。成功为两个 native_provider records、revision len+2、两种 symbolic
+cache 只 invalidate 一次；任何 collision/failure 保持 maps/records/revision/caches/
+generation。保留 singular descriptor query，plural 返回 array_expr/table_array。
+
+M2 验收必须执行 tiny 独立数学 oracle、空/null/offset/alias-budget/cancellation、
+真实 SQL/table/array segments、显式两段 attachment 与错误 lineage，以及一次 scope
+共享、fresh scope/不同 owner 隔离、每 alias digest golden、不同 consumer 限额、
+多 owner 求和/f32 overlap/hash workspace/cached-output 预算和失败零 publication/
+source-open。不以 schema、counter 或 document-only 测试代替端到端行为；不宣称提速。
+
+## 6. A6a 已批准合同：Rust owned sequence state
+
+A6a 可独立交付，尚不发布 sequence factory/checkpoint capability。只新增 Rust
+生命周期 owner，Python eager API 保持；不增加 Python state classes、高层 async
+ArrayExpr stream、mixed Program 输出、公开 serde/Clone/文件 snapshot 表面。
+
+```rust
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use]
+pub struct ArrayStateOptions { /* private fields; Default max_state_bytes = 256 MiB */ }
+impl ArrayStateOptions {
+    pub const fn with_max_state_bytes(self, max_state_bytes: usize) -> Self;
+    pub const fn max_state_bytes(&self) -> usize;
+}
+pub struct RollingMeanState { /* private owned state */ }
+impl RollingMeanState {
+    pub fn new(options: RollingMeanOptions, state: ArrayStateOptions) -> Result<Self>;
+    pub fn process(&mut self, input: ArrayView<'_>, execution: &ArrayExecutionOptions)
+        -> Result<NativeArray>;
+    pub fn reset(&mut self);
+    pub fn state_bytes(&self) -> usize;
+}
+pub struct EwmaState { /* private owned state */ }
+impl EwmaState {
+    pub fn new(options: EwmaOptions, state: ArrayStateOptions) -> Result<Self>;
+    pub fn process(&mut self, input: ArrayView<'_>, execution: &ArrayExecutionOptions)
+        -> Result<NativeArray>;
+    pub fn reset(&mut self);
+    pub fn state_bytes(&self) -> usize;
+}
+```
+
+new 验证空状态 charge，不按 window 预分配；reset infallible、释放历史并清零
+recurrence/counters，保留配置。Debug 只显示选项/count/charge，不打印输入。
+process 只接 rank-1 f32/f64（含 `[0]`），拒绝 scalar/matrix/bool，不隐式 flatten。
+直接 handle 可在不同 call 混用 f32/f64，合法 f32 精确宽化，均输出同位置 f64。
+所有 fallible 工作在 candidate 完成后才替换 owned state；失败保持原 counters、
+history、capacity、bits，允许安全重试；输入及已返回输出始终只读。纯 CPU API 同步。
+
+mean 复用 M1 add-before-expire、FloatSummary 的 sum/mean/**m2**/非有限计数及
+readout；null/NaN 占窗口位置、不计有效样本，Inf 有效。StableV1 default/nonfinite
+refold/extreme 行为不改，非 exact 普通 mean 或 SQL AVG 的 NaN-value 路径。
+StableV2Preview 对应 `stable_v2`，累积 row counter 保留既有周期 repair cadence，
+跨 chunk/process 调用及恢复保持累计位置；仅显式 reset 清零。EWMA 保留 first-valid seed、
+`alpha=2.0/(span as f64+1.0)`、`previous+alpha*(sample-previous)`、span-one 分支；
+null/NaN 不推进 valid count，warm-up 后 carry previous，Inf/生成的 NaN 仍有效。
+mean: window>0、1<=min_periods<=window；EWMA: span/min_periods>0，可 min_periods>span。
+参数为 u64；checked processed-position counter 跨 call 保留，EWMA 另存 valid count。
+空 chunk 不推进/repair，返回既有 eager 空表示；u64::MAX 后新行失败，空 chunk 不溢出。
+
+共享私有 transition/candidate，但 eager 旧签名、数值、空 validity 和原 execution
+预算不被新增 handle state cap 收紧；table codec/layout/fingerprint 及数学合同不改。
+
+```text
+state_bytes(mean) = 64 + 16 * allocated_history_slots
+state_bytes(ewma) = 24
+S = old committed state; C = isolated candidate; O = output/validity/shape
+T = copy/numeric/encoding/decoding scratch; K = distinct live captured segments
+P = S + C + O + T + K <= execution.max_allocation_bytes
+C <= state.max_state_bytes; output positions <= execution.max_elements
+```
+
+以上是逻辑 storage charge，非 ABI/RSS；不含 options/handle/allocator/container
+overhead。slots 按 actual capacity 含 insertion spare，不只算 live rows；window
+巨大时最多为已观察所需的 window+1 transient slot，checked bound，禁止预留整个
+window。new 的 state cap 至少 64/24；reset 回到该 charge。新 stateful API 的
+max_allocation_bytes 明确涵盖全部参与的 live ownership，非仅增量分配；相同 Arc
+allocation 可去重，复制 candidate 必须另计。分配前预测，实际更大容量发布前复核。
+
+checkpoint prepare 取 C=O=0，加实际 encoding/capture；restore 同时计 encoded
+segments、old state、candidate、scratch。segment lease 跟随实际 StateSegment 的
+最后 owner，包括后台 staging；缓存引用或 reset 不能提前解除 K。已知长度必须
+在 managed preload 分配前做 native reservation，不能无界 load 后才拒绝。
+仍按每 edge 计 Batch，非全图内存池，不改既有 eager/table/NumPy/JAX 预算。
+
+## 7. A6b 已批准合同：真实 ordered stream 与 managed recovery
+
+A6b 把 factory、Rust lifecycle、codec、managed restart、capability migration 一并
+交付；不得先发布未实现的 checkpointed capability。本节是该后续阶段的合同。
+
+### 7.1 Identity、options 与输出接受点
+
+新增 `calc_flow::array::NativeArraySequenceFactory: Default + StreamOperatorFactory`，
+并有 `pub fn capability_descriptor() -> JsonMap`。identity 为
+`native:array_sequence@1`，stream-only，无 batch factory；固定 required array
+ports input/output，无 Arrow schema，factory 自行验证 identity/ports，即使绕过 registry。
+独立于 array_expr IR 的闭合 options 为：
+
+```json
+{
+  "ir_version": 1,
+  "input_dtype": "float64",
+  "kernel": {"function":"rolling_mean","window":20,"min_periods":1,"numerical_profile":"stable_v1"},
+  "execution": {"max_elements":10000000,"max_allocation_bytes":268435456},
+  "state": {"max_state_bytes":268435456}
+}
+```
+
+ir_version/input_dtype/kernel required；dtype 仅 f32/f64。rolling_mean 要求 window，
+min_periods=1、profile=stable_v1 默认，可显式 stable_v2；ewma 要求 span、
+min_periods=1 默认，拒绝 window/profile/alpha/adjust。execution/state 可省略，
+各取上述默认。严格整数/count/profile/未知字段校验，64 KiB 和现有 JSON depth
+边界；raw duplicate keys 由上游 strict parser 拒绝，JsonMap 不恢复丢失拼写。
+保持前述 A3 parsed-value 边界，不新增 callbacks/source/import paths。
+
+每 Batch 必须是真实 NativeArray、匹配 declared dtype 的 `[n]`，空批也检查；
+一批输出一个同行数 f64 Batch 并保留 metadata。按唯一 dynamic edge arrival
+位置推进；metadata.sequence 不负责排序/去重/reset。拒绝 static/第二输入/隐式 zip/
+latest-value/实体推断/矩阵 flatten，source open 前验证真实 dynamic ingress。
+多实体/event-time/late 仍走 table；独立节点/分支有独立 state owner。
+
+process_data 完整 validate/preflight → bounded worker 生成隔离 candidate/output →
+完成所有 fallible 包装/预算/取消检查 → await `emit("output", batch)` → 成功后
+立即 nonfallible/non-awaiting commit 并返回。emit 成功与 commit 间不得再检查取消/
+deadline、分配、编码或 fallible metrics；失败保留旧 state。partial fanout 沿既有
+失败 job/恢复规则，不能承诺撤回已接受输出或新增 exactly-once 保证。
+
+每 operator 除 factory-wide worker limit 外，必须有 pending-work owner/gate：
+awaiter 丢失时旧 state/candidate/output/scratch/permit/credit 保留至 settlement。
+后续 process/capture/restore 先 settle，或在同一 P 中计入全部仍 live 工作；
+sync reset 不能抹 credit，sync restore 必须拒绝 busy 或先完整计费。worker 只返回
+candidate，无共享 mutable state/stale commit。活跃 runtime 下 supervisor/reaper
+拥有 join；正常 Tokio Runtime drop 等待 blocking work；调用方主动选择
+shutdown_timeout/shutdown_background 不保证返回前 settlement，不新增清理线程。
+Watermark/Idle/Barrier/EOF 仍由 runtime FIFO 转发；数值 watermark/progress handler
+无额外输出，EOF 无额外行，barrier 只捕获此前成功 emit 已 commit 的状态。
+
+### 7.2 Lifecycle、异步 restore 与 terminal 路径
+
+扩展既有 non-exhaustive enum，保留原 variants；native sequence 返回 version=1
+及三个 true，compiler 映射为同正版本 CheckpointedStateful，零/不一致版本拒绝。
+microbatch_invariant 指保序重分批后拼接的数值位置一致，非 Batch metadata 相同。
+stateful external 的 delivery 检查同样验证 determinism/replay safety；Python dict
+不能伪造 Rust proof，不借用 `_StatelessProviderLifecycle`。
+
+```rust
+// Additional StreamOperatorLifecycle variant:
+CheckpointedStateful {
+    state_version: u32,
+    microbatch_invariant: bool,
+    deterministic: bool,
+    replay_safe: bool,
+}
+// Defaulted additional method on the existing async_trait StreamOperator:
+async fn restore_async(
+    &mut self, snapshot: &OperatorStateSnapshot, context: &StreamOperatorContext<'_>,
+) -> Result<()> {
+    context.check_cancelled()?;
+    self.restore(snapshot)
+}
+```
+
+prepare_checkpoint_async 在 bounded worker 受控编码/copy/SHA，prepared segment 绑定
+committed revision；checkpoint(epoch) 只 clone segment/小 metadata，revision 变更
+后未 prepare 则 checkpoint error，无同步重编码 fallback。unchanged revision 可共享
+segment。native restore_async 同样有界 decode/validate 后才换 state；sync restore
+复用 decoder 并遵守 pending-credit 约束。正常 managed entry 在 operator ack 和
+任何 Source::open 前 await 它；已知 segment size 在 preload 前 admission，加载/
+hash/编码也须有取消接点，不能最后用 monolithic SHA 绕过控制。
+
+terminal-complete fast path 会绕过普通 external restore，因此**每个 terminal manifest
+中的 native sequence node**也必须在报告 completed 或打开任何 sink 前通过同样的
+bounded preload、checksum、codec、identity、limits 检查；即使永不打开 source。
+只增加最小 native validation dispatch，不改变 legacy external 或 table/SQL/join
+恢复合同。reset 可丢本地 capture 引用，但 runtime 仍持有的 segment lease 不解除。
+
+### 7.3 闭合 state layout 1
+
+通过既有 StateBackend/session/StateHandle/OperatorStateSnapshot 持久化；manifest
+仍为 3，sequence semantic state/numeric semantics/layout 各为 1。每 checkpoint
+即使空数值状态也恰有 `state` segment，缺失即损坏；fresh job 用 reset。strict inline
+metadata 记录 identity/layout/numeric semantics/state fingerprint；runtime 保留其
+reserved version wrapper、progress/cursors/frontier/长度/checksum 职责。
+
+state fingerprint 为 canonical data-only identity/input_dtype/kernel/normalized math
+parameters/profile/numeric semantics/layout 的 SHA-256；全 pipeline fingerprint 仍校验
+配置/bindings，不能因预算不改变数学就绕过它。以下整数固定 little-endian，顺序固定：
+
+```text
+76-byte header:
+  magic[8]="CFASEQ\0\0", layout:u32=1, numeric_semantics:u32=1,
+  kernel:u8 (1 mean,2 ewma), input_dtype:u8 (1 f32,2 f64),
+  profile:u8 (mean 1 stable_v1 / 2 stable_v2; ewma 0), reserved:u8=0,
+  state_fingerprint[32], window_or_span:u64, min_periods:u64, processed_positions:u64
+mean payload (all listed counters/bits u64):
+  valid_count, sum_bits, mean_bits, m2_bits, nan_count, positive_infinity_count,
+  negative_infinity_count, history_length;
+  oldest-to-newest history slots: tag:u8 (0 missing,1 present), value_bits:u64
+ewma payload: valid_count:u64, previous_bits:u64
+exact bytes: mean=140+9*history_length; ewma=92; no trailing bytes
+```
+
+所有必要浮点保存 raw IEEE bits（含 signed zero/Inf/summary NaN payload）；missing
+tag 的 bits 必须 0，present history NaN 拒绝，因为 M1 已将输入 null/NaN 归为
+missing，不能读取其无用 payload。不写非有限 JSON float，不套用 static digest 的
+NaN canonicalization。恢复 ring 的逻辑顺序即可，不持久化 allocator capacity、
+不按 window 预分配、不重算 summary/repair position 或从 history tail 重启 EWMA。
+
+分配/decode 前检查 magic/versions/tags/length/fingerprint/params/profile/dtype、
+checked size、预算及 inventory；history_length=min(processed_positions,window)，
+valid_count 等于 present 数，Inf counts 与历史相符、nan_count=0；EWMA valid_count
+不大于 processed_positions，零 valid 时 previous_bits 必须 +0。拒绝 unknown/
+duplicate inline fields、错误计数、overflow、extra/missing segment/bytes。保留 summary
+bits，正常下一行才按既有规则 repair。StateSegment/StateHandle 提供 checksum，非
+认证；错误不改变旧 state，并在 source open 前或 terminal 完成前失败。
+
+### 7.4 计划中的 A6b capability 4→5 与原子注册
+
+**M2 保持 schema 4，A6b 才迁移到 5**：closed ProviderCapability 增加
+`state_layouts: tuple[int, ...] = ()`。checkpointed_stateful 必须非空、严格递增、
+positive exact integers；其他 checkpoint kinds 必须空。PartitionContract 新增
+`single_ordered_sequence`，表示 arrival 顺序单 owner，无 partition independence/
+multi-input alignment；无需额外 order flag。sequence descriptor 为：
+
+```text
+native:array_sequence@1; port_binding=fixed; required array input/output
+modes=[stream]; stateful=true; microbatch_invariant=true; requires_watermark=false
+finality=per_row_final; checkpoint_support=checkpointed_stateful
+state_version=1; state_layouts=[1]; deterministic=true; replay_safe=true
+supports_static_inputs=false; partition_contract=single_ordered_sequence
+supported_dtypes=[float32,float64]; safe_dtype_rule=native_float_dtype@1
+shape_rules=[native_sequence_vector@1]
+```
+
+fixed ports 可提供 strict options_json_schema，但 options_schema 必须 None，二者
+互斥；原 fixed/no-JSON-schema 仍合法，ports 不从 schema prose 推断。旧 providers
+layouts 默认为空，array_expr batch-only/unproven 与 table_array stateless/
+row_axis_independent 语义不变；NumPy/JAX/plain providers 原默认不变。无兼容 shim，
+消费者按 schema_version 迁移，不能将 v5 当 v4；project/manifest 仍 3、digest-v1 不改。
+
+register_native 保持签名，一事务插入 array_expr batch、table_array batch/stream、
+array_sequence stream 四项；Python 三个 native_provider records，plural descriptor
+顺序 array_expr/array_sequence/table_array，singular 仍 array_expr。成功 revision
+len+3、两种 cache invalidate 一次；所有 key/descriptor/records 先准备，失败保持
+两 maps/records/revision/cache contents/generation。snapshot/worker replay 按 bundle
+注册一次，不能逐 record 重放；不完整或矛盾 native evidence 拒绝，不能降级 lifecycle。
+
+同批更新 Rust descriptors/lifecycle/admission，Python version literals/strict keys/
+lists/integers/rules/partition/layout validators/defaults/canonical snapshots，PyO3
+helpers 与 `_native.pyi`/公共 typing/schema，registration snapshot/replay/count/cache
+消费者，以及 docs/examples/fixtures 中 version/字段/layout/两条旧 record 假设。
+project-v3 schema 必须无漂移；能力迁移不提前混入 A6a 或当前 M2。
+
+### 7.5 错误、实施拆分与验收
+
+direct input/state/peak/count 错误沿 InvalidArgument，字段分别为 input.shape/
+input.dtype、state.max_state_bytes、state.peak_bytes、input.rows；输出沿
+outputs.output.*。stream wrong dtype/counterfeit 定位 inputs.input.dtype/backend，
+kernel 参数定位 options.kernel.*，消息说明 expected/received 或 required/limit，
+不打印数值。managed codec/identity/limits 错误使用带 operator/field 的
+CheckpointMismatch→既有 Python CheckpointError；底层 I/O source 与实际取消身份保留。
+
+A6a 交付 direct state/shared transitions/limits/rustdoc/20–50 行 Rust 示例；对比
+one-shot 与 splits/empty/Arrow offset/f32 widening/null/NaN/Inf/zero/warm-up/巨大 window/
+两 profile repair 边界，验证 failed call 后重试、输出生命周期、old/candidate peak
+及 table/M1 oracle 不变。A6b 完整交付后才声明真实 stream/checkpoint capability，
+验收包括：
+
+- 真实 runner 单 ingress 结果/隔离、错误 static/多输入、emit 拒绝及成功后立即
+  cancel 的 commit 边界、slow sink、control FIFO/barrier/EOF、partial fanout。
+- aborted waiter 后 tight-budget reuse/reset/restore/capture 不能遗漏 pending
+  allocations；worker/permit settlement、旧 capture 在新处理/reset 后继续计费。
+- raw bits/计数 round trip、错误 checksum/长度/tag/version/dtype/params/巨大 state；
+  新 managed job/runner + replayable source + stable backend 真正恢复 committed prefix，
+  与不中断输出相符，检查 seek/open，不能只做 encode/decode 测试。
+- 普通及 terminal recovery 均测试 corrupt/oversized/valid state；terminal 还需
+  valid managed checksum 但内部 codec/layout 错误，证明 semantic validation，失败
+  不开 source/sink、不报告完成；其他分支 static identity 改变仍 fail closed。
+- 四 registry collision、descriptor failure、cleared Runtime、bundle/replay 的
+  三 records/四 entries/一次 invalidate，以及旧 providers/table checkpoint 回归。
+
+每行为先 focused RED，再实现与必要 lint/rustdoc/example 检查；完整矩阵/coverage
+留给 CI，本设计无性能测量或提速承诺。A7 保持原计划另行设计，本归档不新增指标、
+OHLC zipper、MACD 多输出 owner 或通用框架。
