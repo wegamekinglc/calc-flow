@@ -512,3 +512,232 @@ performance is still zero; compatible baseline/candidate release provenance,
 the inclusive deadline/quiet/RSS/ownership/full-seal outer adapter, measured
 improvement, green required final-head checks and final specialist review
 remain outstanding. This clearance authorizes no timing claim or merge.
+
+
+### TARGET Three-case Controller Review
+
+**Request Changes — one quiet-guard source gap remains before acquisition.**
+This follow-up reviews only the target wrapper and pure-mock evidence; prior
+runtime/helper/main-integration clearance remains applicable. No native test,
+build, timing acquisition, protocol change, remote action or D1 edit occurred.
+
+The measured clone is clean at
+`8b5c13109b3d2cfc10802e91a5bacc3fd9aa3624`, tree
+`4e56b71ff6d9d13ddcf6b838174132acc4ae8dbd`. The frozen wrapper
+`target/ta-arroyo-p3-performance/collect-p3.py` is 20,449 bytes/609 lines,
+SHA-256 `e8b311c82c769fb04d8f5ad0e5507691afd772eb5ea912939810ebf3d9986806`.
+Its 150-line mock module has SHA-256
+`0b15e6322148a8b99440dec1bc94b0054affedcd431215aae9b3711d7fdded9f`.
+`controller-review.json` has SHA-256
+`beee07520f09f16b9f0ed63e50a030632aae1dcfa91ec70ff4bcb5e2291367d2`;
+both embedded source texts and declared hashes exactly match the actual files.
+Both source files were read in full, with directly used shared helper context.
+
+#### Blocking Source Finding
+
+- **`collect-p3.py` — `quiet_guard`: supported direct-script invocations can
+  evade the guard.** The recognized argv values are exact module names such as
+  `scripts.profile_warm_stream`; the roots sent to `generic.competing_process`
+  are only the two Cargo output trees. A competing supported command such as
+  `python /<source>/scripts/profile_warm_stream.py compare ...`, or the relative
+  `scripts/profile_warm_stream.py` form, matches neither rule. This runtime
+  explicitly supports direct script execution, and its Python executable/site
+  lies outside Cargo roots. Add a target-local recognizer covering module and
+  direct-script/worker forms associated with the actual candidate/baseline
+  source or worker/site identities, while retaining own-PID/owned-descendant
+  exclusion. Use those real identities rather than relabeling receipt Cargo
+  paths or rejecting every unrelated Python process. Add the smallest mock
+  proving a direct warm competitor is rejected and owned workers are excluded.
+  No shared framework, new case or native probe is requested.
+
+#### Verified Matrix, Oracle and Ownership Boundaries
+
+The full preregistered performance section was cross-checked. The two commands
+select only the three exact configurations: T1 dual20/60 and C1 Mean60 at
+history1000/segment1000/entities1/active1/append1024, then T2 dual20/60 at
+history600000/segment1000/entities10000/active1000/append1000. Normal GC,
+30 advancing AB/BA pairs, seed20260905, CPUs0/2, default Tokio4 and DF1/8192
+remain fixed. There is no scheduler override or extra implicit matrix point.
+`validate_complete` rejects missing/duplicate/substituted configurations;
+source commands cannot add a fourth workload. Previously cleared T2 tick,
+watermark, timestamp, label and digest implementation is unchanged.
+
+Each actual start must acknowledge the exact expanded configuration, versioned
+warm digest and logical project/Program/plan identities. The actual preflight
+requires stable_v1, correct windows/minimum period and DF settings. Warm outputs
+and every matching 30-pair sample retain exact Float64 digests, valid start-row
+advancement and independent oracle acceptance. All three P3 indicators remain
+in the strict Mean/dual branch; no D13 exception or new relaxation flag is used.
+The two-sided sample/terminal shapes, normal completed native state and
+maintained paired statistics are checked again from the written reports.
+
+Exactly six distinct worker PIDs must have normal OS-exit-zero/reaped receipts
+and a positive observed worker RSS sample count/peak. Missing sampling is fatal,
+not zero. The thin 20 ms descendant sampler identifies the actual module
+`_worker` argv, records create-time identity and sampled worker-tree peaks;
+whole-command-tree peak is separately recorded. Last sampled process CPU is
+correctly labelled incomplete rather than a complete lifetime total. Root's
+whole-tree owner retains remaining-owner detection and termination after
+collector failure; the existing Worker finally/close receipts remain unchanged.
+A primary command error is preserved when cleanup also fails. No retry or
+partial three-case acceptance is present.
+
+#### Verified Deadline and Seals
+
+`BOOT_STARTED` precedes path/identity setup and helper/psutil loading; parent
+protocol and owner monitor use it across both commands. The child consumes the
+parent's absolute acquire/total deadlines. Normal process return is checked
+against that same acquisition clock, closing the generic final-poll race.
+Cancellation gives existing Worker cleanup its reserved interval, then retained
+generic settlement and the outer absolute owner enforce the hard bound.
+
+Source/provenance/helper preparation, installation, fixture/history/oracle
+work, both compare commands, reporting/bootstrap, terminal cleanup and final
+seals are inside one 600-second phase, with acquisition at 530 and 70 seconds
+reserved for cleanup. Successful postseals and empty owned tree are required;
+final receipt writing is followed by a deadline check that invalidates late
+success. The wrapper does not rely only on a self-reported success boolean.
+No source/helper import, fixture or second command receives a fresh budget.
+
+Seals reuse the maintained build/wheel/native/source revalidators and include
+both source inventories with vendor/configuration files, locks/build manifests,
+full common-helper union, four reported helpers, controller, ownership helper,
+actual thread environment, taskset and static baseline-equivalence evidence.
+The baseline proof SHA-256 is
+`3968f4ad8b7ba09b8e0c6059e83b52bd17a69887159101fed8e239e55f1358e1`;
+its final P2 approval reference matches SHA-256
+`9b6ea9fe57287a2f5f869c26c56635d61a4938e41fbb34af9c7a68edb301e990`.
+It honestly retains baseline cc6/build/native identity and invokes the reviewed
+release-equivalent metadata/cfg(test)-only integration to main7ac; it claims
+neither full directory equality nor an artifact newly built from main7ac.
+No P2 runtime or final approval was re-reviewed in this target task.
+
+The candidate build receipt does not yet exist at this handoff. No final core,
+binding, wheel/native hash or completed candidate build is inferred. Actual
+compatible release receipts, compiler/artifact freshness and root's quiet
+machine confirmation remain pre-acquisition conditions after the source fix.
+Planned acquisition and acquisition-outer paths are absent; formal samples and
+native probes remain zero.
+
+#### Evidence and Disposition
+
+The saved metadata RED has two real failures (duplicate fixed case and changed
+sparse physical segment); its GREEN control passes three tests. The final
+pure-mock selection records 11 passing tests in 0.149s and was not rerun.
+The provided `controller-ruff.log` ends with the original 52 lint findings and
+predates the final formatted source. It must remain historical; retain a
+successful lint/format result for the final frozen helper rather than citing
+that old log as green. This is an evidence correction, not a native test/build
+request or a finding that all old lint errors remain in the current source.
+
+Only the quiet-guard source correction, its narrow mock and final helper
+lint/format evidence are needed. Then freeze the updated controller/mock/review
+identities and perform the actual release/quiet/resource admission. No new
+case, framework, sample count or timing retry is requested. This review edits
+only its artifact and passes whitespace; source-stage clearance does not
+establish speedup, final required CI/coverage success or permission to merge.
+
+
+### Real Candidate Release Build and TARGET Guard Closure
+
+**Comment Only — release evidence and corrected controller are cleared for
+one preregistered acquisition, subject to actual quiet/resource admission.**
+The e8b quiet-guard Request Changes above is closed by the target-only delta
+below. Prior source/helper/main review remains unchanged. This is not a claim
+of performance improvement, final CI/coverage success or merge approval.
+
+#### Independently Verified Terminal Build
+
+The actual owner session 7225/owner PID23604 terminates with exit 0; builder
+PID23734 reports success. Owner wall is 887.4934346489608 seconds, maintained
+builder wall 886.7632291639457 seconds, and Cargo wall 883.2192111240001
+seconds. The separate cache copy took 3.211518742 seconds before that owner
+build interval. These are build/preparation costs outside acquisition, not
+part of an already-consumed or reset 600-second measurement phase.
+
+The candidate receipt has SHA-256
+`7642c75d2cdb991e3e6314ab777822e3f72710df841e13d6d59d6b546c222a6c`.
+Its source is the clean immutable 8b5c1310 clone/tree 4e56 already identified
+above. The original source aggregate was independently recomputed from
+1,106 entries and equals
+`0657b633a58f6707019c0e53b39a6f12cd170dcffda4b98948a3771bec3ae8af`;
+Cargo.lock also matches its receipt. No generated source `_native*.so` exists.
+
+The actual Cargo stdout at `build-audit/cargo-audit/23828.stdout` has SHA-256
+`4b42fa0b200d7980527e2ab29cdce6f9be3da9b6f218ce8eefa76e1361b0413d`.
+It contains exactly one core `calc_flow` and one binding `calc_flow_python`
+compiler artifact, both `fresh=false`, followed by one successful
+`build-finished`. Each package/manifest/src path names the actual immutable
+candidate checkout. Both are optimization level 3, test=false, no debug
+assertions or debug info. Core features are empty; binding features are
+`connector-file`/`default`. No diagnostic test feature or reused stale core/
+binding artifact is substituted for actual release compilation.
+
+The original Cargo journal has SHA-256
+`3fb7e3eae8df808f6e8f45c096edf96e00f8d5a29d1b0a11bcecfd7155851614`.
+Its command uses the real Cargo binary with release/locked/abi3-py313 flags,
+the exact binding manifest and Maturin's strip-symbols flag. The inspected
+launcher forwards original stdout bytes and argv without replacing Cargo or
+inventing compiler events. Captured environment has CARGO_TARGET_DIR isolated,
+CARGO_BUILD_JOBS2/incremental0 and no Rust/profile/toolchain override. Maturin
+finds the managed CPython3.13 interpreter; the maintained builder supplies that
+interpreter to PyO3. Build command/profile, rustc, Python/interpreter and lock
+match the retained baseline after ignoring only the output directory.
+
+The 38,642,361-byte wheel independently hashes to
+`24b8bee2141a8159fc8eac7422d80fb1bf822c91b557673b02b48df9b1bd0ec3`.
+Its only native member, `calc_flow/_native.abi3.so`, is 108,396,664 bytes and
+hashes to
+`6b599135f830eb3b88f7bb7c4ac9162f2ca2d8e2902d6eeec05cad987c835bfc`.
+Those native bytes exactly equal the actual compiled binding library. The
+outer-build copied compiler records exactly match the original Cargo events;
+the final audit SHA-256 is
+`90cedb63302bb5c6d705377f3b39b66c2077574f742b768282512521dca7291c`.
+This closes the formerly pending candidate receipt/freshness/hash evidence.
+The baseline remains its actual reviewed cc6 wheel/native, under the existing
+release-equivalence proof; no artifact is renamed main7ac or candidate8b.
+
+#### Focused Quiet-guard Correction
+
+The corrected wrapper SHA-256 is
+`cda80106c96e2020ccca50c02d0f27a4138d5c4f73045c5bf77017912d6bfc74`;
+mock SHA-256 is
+`dfe062d559fb7db7d3a58248da918648d9306c5c831e2f9f61fa4df027b47464`;
+review JSON SHA-256 is
+`e315095a334a2e0fa34faf7a139ba6e1ef05e19d42f76b295a36ca57b02b20fc`.
+Both embedded full source texts/hash declarations match. The archived e8b
+wrapper matches its original seal, and the diff is limited to quiet-guard
+identity/root recognition and removing historical resource-PID exclusions.
+Matrix, sample/oracle/digest gates, budgets, cancellation and receipt handling
+are unchanged.
+
+`measurement_roots` obtains the actual baseline source/wheel directory,
+immutable candidate source, actual target/site and baseline Cargo roots, and
+managed venv context. Known module and direct absolute/relative script forms
+are recognized. A private `_worker` using the relevant source, temporary site,
+PYTHONPATH/cwd/interpreter or VIRTUAL_ENV context is also recognized. Genuine
+own current compare root/descendants remain excluded. Historical sampled PID
+keys are no longer broadly exempted, so an old resource entry cannot hide an
+unrelated current process.
+
+The saved quiet RED has three real assertion failures for absolute direct
+worker, relative script compare and worker site/PYTHONPATH forms; its owned
+control remains passing. The focused quiet GREEN passes five tests. The final
+combined pure-mock selection passes sixteen tests in 0.094s, including three
+source/venv context subtests. No native workload or timing probe was launched.
+`controller-ruff-final.log` now explicitly records `All checks passed!` and
+`2 files already formatted`; the old 52-error log is correctly labelled
+historical. No passed tests/lint were rerun by this reviewer.
+
+No target-source, release-provenance or supplied-evidence must-fix remains.
+Planned acquisition/outer paths remain absent. Root may now confirm the actual
+quiet/resources and execute the original two commands exactly once: three
+fixed workloads, thirty advancing paired appends each, six distinct fresh
+workers, normal GC, exact P3 bitwise results and the one 600-second phase with
+530-second acquisition/70-second cleanup reserve. Preserve partial evidence
+and stop on failure/noise/drift; there is no extra probe, case, retry or budget
+reset. All hashes/source/worker identities and owned cleanup must still be
+observed again by the acquisition's real before/after checks. Performance and
+final required CI/final specialist review remain merge gates. Only this review
+artifact changed; whitespace passes. No source/controller edit, build, native
+execution, acquisition or remote action was performed here.

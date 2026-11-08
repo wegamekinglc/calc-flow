@@ -1,0 +1,10 @@
+{
+  "bytes": 1310592,
+  "every_archive_member_revalidated": true,
+  "git_blob_sha1": "eba2280678b3f4b4402a4de72b9011c8ffd04fd1",
+  "manifest_file_count": 198,
+  "manifest_sha256": "ae681d58f82adc49f8609e8fdcd1710ff3879408923414fdc05645dc296dac3c",
+  "original_target_name": "p3-20261108-raw.tar.gz",
+  "published_name": "raw.tar.gz",
+  "sha256": "68973aab4031548a9452be4c701b1adf75ce2d25798056eaa5976d2c69b9d121"
+}

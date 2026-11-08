@@ -1,0 +1,16 @@
+{
+  "basis": "root authoritative GitHub check snapshot reported 01:07 UTC; this performance specialist made no additional network CI query",
+  "completed": 33,
+  "expected_tag_only_publish_skip": 1,
+  "failed": 0,
+  "final_archive_head_ci": "pending until root publishes documentation/evidence update",
+  "includes": [
+    "Codacy",
+    "core parity",
+    "coverage",
+    "cross-platform checks"
+  ],
+  "merge_approval": false,
+  "source_sha": "8b5c13109b3d2cfc10802e91a5bacc3fd9aa3624",
+  "success": 32
+}

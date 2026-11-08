@@ -1,0 +1,245 @@
+{
+  "P3_preregistered_rule_pass": true,
+  "cases": [
+    {
+      "baseline": {
+        "cv": 0.14431958490847324,
+        "p50_seconds": 0.0004504645,
+        "p95_seconds": 0.0006106713499999999,
+        "rows_per_second": 2273209.0986082144
+      },
+      "bootstrap_resamples": 20000,
+      "candidate": {
+        "cv": 0.7912177138625304,
+        "p50_seconds": 0.00043780800000000003,
+        "p95_seconds": 0.0013022247499999964,
+        "rows_per_second": 2338924.8254942806
+      },
+      "case_id": "P3-C1",
+      "config": {
+        "append_entities": 1,
+        "append_rows": 1024,
+        "entities": 1,
+        "fast_window": 20,
+        "history_rows": 1000,
+        "history_segment_rows": 1000,
+        "indicator": "rolling_mean",
+        "window": 60
+      },
+      "confirmed_regression": false,
+      "paired_speedup_ci95": [
+        0.9346112088222938,
+        1.0990332982003603
+      ],
+      "paired_speedup_median": 1.0097763385452236,
+      "phase_intervals": {
+        "baseline": {
+          "enqueue_to_source_data": {
+            "p50_seconds": 2.14955e-05,
+            "p95_seconds": 2.8380549999999994e-05
+          },
+          "sink_to_receive": {
+            "p50_seconds": 5.4811499999999995e-05,
+            "p95_seconds": 8.729029999999997e-05
+          },
+          "source_data_to_source_watermark": {
+            "p50_seconds": 0.00018279899999999998,
+            "p95_seconds": 0.00022548219999999995
+          },
+          "source_watermark_to_sink": {
+            "p50_seconds": 0.00018768350000000002,
+            "p95_seconds": 0.00025367045
+          },
+          "to_pyarrow": {
+            "p50_seconds": 2.3284e-05,
+            "p95_seconds": 3.48288e-05
+          }
+        },
+        "candidate": {
+          "enqueue_to_source_data": {
+            "p50_seconds": 2.0863e-05,
+            "p95_seconds": 2.581955e-05
+          },
+          "sink_to_receive": {
+            "p50_seconds": 5.3679e-05,
+            "p95_seconds": 8.423139999999997e-05
+          },
+          "source_data_to_source_watermark": {
+            "p50_seconds": 0.0001799115,
+            "p95_seconds": 0.00020921575
+          },
+          "source_watermark_to_sink": {
+            "p50_seconds": 0.0001787725,
+            "p95_seconds": 0.00027924739999999986
+          },
+          "to_pyarrow": {
+            "p50_seconds": 2.3616e-05,
+            "p95_seconds": 4.5754849999999974e-05
+          }
+        }
+      },
+      "target_qualifies": false
+    },
+    {
+      "baseline": {
+        "cv": 0.17400719036829135,
+        "p50_seconds": 0.00048421049999999995,
+        "p95_seconds": 0.00062480215,
+        "rows_per_second": 2114782.723629496
+      },
+      "bootstrap_resamples": 20000,
+      "candidate": {
+        "cv": 0.7101032983851773,
+        "p50_seconds": 0.0004795255,
+        "p95_seconds": 0.0007340124999999998,
+        "rows_per_second": 2135444.3090096354
+      },
+      "case_id": "P3-T1",
+      "config": {
+        "append_entities": 1,
+        "append_rows": 1024,
+        "entities": 1,
+        "fast_window": 20,
+        "history_rows": 1000,
+        "history_segment_rows": 1000,
+        "indicator": "dual_sma_spread",
+        "window": 60
+      },
+      "confirmed_regression": false,
+      "paired_speedup_ci95": [
+        0.9298465388641957,
+        1.1012261176825784
+      ],
+      "paired_speedup_median": 0.9966154950146431,
+      "phase_intervals": {
+        "baseline": {
+          "enqueue_to_source_data": {
+            "p50_seconds": 2.0895e-05,
+            "p95_seconds": 3.3074949999999994e-05
+          },
+          "sink_to_receive": {
+            "p50_seconds": 5.6379e-05,
+            "p95_seconds": 7.479804999999999e-05
+          },
+          "source_data_to_source_watermark": {
+            "p50_seconds": 0.000180207,
+            "p95_seconds": 0.0002509029
+          },
+          "source_watermark_to_sink": {
+            "p50_seconds": 0.0002161655,
+            "p95_seconds": 0.0003141138
+          },
+          "to_pyarrow": {
+            "p50_seconds": 2.35255e-05,
+            "p95_seconds": 3.853774999999999e-05
+          }
+        },
+        "candidate": {
+          "enqueue_to_source_data": {
+            "p50_seconds": 2.13885e-05,
+            "p95_seconds": 3.127364999999999e-05
+          },
+          "sink_to_receive": {
+            "p50_seconds": 5.4214999999999995e-05,
+            "p95_seconds": 7.228990000000001e-05
+          },
+          "source_data_to_source_watermark": {
+            "p50_seconds": 0.000178426,
+            "p95_seconds": 0.0002816556999999999
+          },
+          "source_watermark_to_sink": {
+            "p50_seconds": 0.0001997735,
+            "p95_seconds": 0.00031741409999999995
+          },
+          "to_pyarrow": {
+            "p50_seconds": 2.33855e-05,
+            "p95_seconds": 3.096074999999999e-05
+          }
+        }
+      },
+      "target_qualifies": false
+    },
+    {
+      "baseline": {
+        "cv": 0.08474941236857643,
+        "p50_seconds": 0.029434961,
+        "p95_seconds": 0.03532268919999999,
+        "rows_per_second": 33973.20621556115
+      },
+      "bootstrap_resamples": 20000,
+      "candidate": {
+        "cv": 0.06326672792564568,
+        "p50_seconds": 0.027973405,
+        "p95_seconds": 0.03087450985,
+        "rows_per_second": 35748.24015882228
+      },
+      "case_id": "P3-T2",
+      "config": {
+        "append_entities": 1000,
+        "append_rows": 1000,
+        "entities": 10000,
+        "fast_window": 20,
+        "history_rows": 600000,
+        "history_segment_rows": 1000,
+        "indicator": "dual_sma_spread",
+        "window": 60
+      },
+      "confirmed_regression": false,
+      "paired_speedup_ci95": [
+        1.012244263291032,
+        1.075538708189021
+      ],
+      "paired_speedup_median": 1.0557103103394505,
+      "phase_intervals": {
+        "baseline": {
+          "enqueue_to_source_data": {
+            "p50_seconds": 3.9750000000000004e-05,
+            "p95_seconds": 5.0017899999999994e-05
+          },
+          "sink_to_receive": {
+            "p50_seconds": 0.00012287449999999998,
+            "p95_seconds": 0.0001609946
+          },
+          "source_data_to_source_watermark": {
+            "p50_seconds": 0.000288082,
+            "p95_seconds": 0.0003663965
+          },
+          "source_watermark_to_sink": {
+            "p50_seconds": 0.028926244,
+            "p95_seconds": 0.03484469884999999
+          },
+          "to_pyarrow": {
+            "p50_seconds": 6.431899999999999e-05,
+            "p95_seconds": 8.474905e-05
+          }
+        },
+        "candidate": {
+          "enqueue_to_source_data": {
+            "p50_seconds": 3.6808000000000004e-05,
+            "p95_seconds": 5.099584999999998e-05
+          },
+          "sink_to_receive": {
+            "p50_seconds": 0.00012669500000000002,
+            "p95_seconds": 0.0001562186
+          },
+          "source_data_to_source_watermark": {
+            "p50_seconds": 0.0003294185,
+            "p95_seconds": 0.0004145749999999999
+          },
+          "source_watermark_to_sink": {
+            "p50_seconds": 0.027431687,
+            "p95_seconds": 0.0303177814
+          },
+          "to_pyarrow": {
+            "p50_seconds": 6.3916e-05,
+            "p95_seconds": 8.681194999999998e-05
+          }
+        }
+      },
+      "target_qualifies": true
+    }
+  ],
+  "contract": "paired-warm-stream-v1",
+  "merge_approval": false,
+  "samples": "30 advancing AB/BA pairs per case within one persistent pair; fresh pair per case"
+}
