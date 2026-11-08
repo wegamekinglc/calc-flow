@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import math
 import operator
 from collections.abc import Callable, Mapping
@@ -11,6 +12,99 @@ from typing_extensions import Never
 
 from calc_flow import _native
 from calc_flow._compat import dataclass
+from calc_flow._native_array import (
+    ArrayExecutionOptions as ArrayExecutionOptions,
+)
+from calc_flow._native_array import (
+    NativeArray as NativeArray,
+)
+from calc_flow._native_array import (
+    abs as abs,
+)
+from calc_flow._native_array import (
+    add as add,
+)
+from calc_flow._native_array import (
+    divide as divide,
+)
+from calc_flow._native_array import (
+    equal as equal,
+)
+from calc_flow._native_array import (
+    ewma as ewma,
+)
+from calc_flow._native_array import (
+    exp as exp,
+)
+from calc_flow._native_array import (
+    from_arrow as from_arrow,
+)
+from calc_flow._native_array import (
+    from_numpy as from_numpy,
+)
+from calc_flow._native_array import (
+    greater as greater,
+)
+from calc_flow._native_array import (
+    greater_equal as greater_equal,
+)
+from calc_flow._native_array import (
+    less as less,
+)
+from calc_flow._native_array import (
+    less_equal as less_equal,
+)
+from calc_flow._native_array import (
+    log as log,
+)
+from calc_flow._native_array import (
+    logical_and as logical_and,
+)
+from calc_flow._native_array import (
+    logical_not as logical_not,
+)
+from calc_flow._native_array import (
+    logical_or as logical_or,
+)
+from calc_flow._native_array import (
+    logical_xor as logical_xor,
+)
+from calc_flow._native_array import (
+    max as max,
+)
+from calc_flow._native_array import (
+    mean as mean,
+)
+from calc_flow._native_array import (
+    min as min,
+)
+from calc_flow._native_array import (
+    multiply as multiply,
+)
+from calc_flow._native_array import (
+    neg as neg,
+)
+from calc_flow._native_array import (
+    not_equal as not_equal,
+)
+from calc_flow._native_array import (
+    pow as pow,
+)
+from calc_flow._native_array import (
+    rolling_mean as rolling_mean,
+)
+from calc_flow._native_array import (
+    sqrt as sqrt,
+)
+from calc_flow._native_array import (
+    subtract as subtract,
+)
+from calc_flow._native_array import (
+    sum as sum,
+)
+from calc_flow._native_array import (
+    where_ as where_,
+)
 from calc_flow.capabilities import (
     CapabilityRule,
     ProviderArrayRules,
@@ -136,7 +230,7 @@ def _ast_depth(node: ast.AST) -> int:
     children = list(ast.iter_child_nodes(node))
     if not children:
         return 1
-    return 1 + max(_ast_depth(child) for child in children)
+    return 1 + builtins.max(_ast_depth(child) for child in children)
 
 
 def _validate_node(node: ast.AST) -> None:
@@ -147,7 +241,10 @@ def _validate_node(node: ast.AST) -> None:
     if isinstance(node, ast.Constant):
         if type(node.value) not in (int, float):
             raise _array_error("constants must be finite numbers")
-        if type(node.value) is int and abs(node.value) > _MAX_INTEGER_MAGNITUDE:
+        if (
+            type(node.value) is int
+            and builtins.abs(node.value) > _MAX_INTEGER_MAGNITUDE
+        ):
             raise _array_error(
                 f"integer constant magnitude limit is {_MAX_INTEGER_MAGNITUDE}"
             )
@@ -160,7 +257,7 @@ def _validate_node(node: ast.AST) -> None:
             exponent = _numeric_literal(node.right)
             if exponent is None:
                 raise _array_error("power exponent must be a finite numeric literal")
-            if abs(exponent) > _MAX_POWER_EXPONENT_MAGNITUDE:
+            if builtins.abs(exponent) > _MAX_POWER_EXPONENT_MAGNITUDE:
                 raise _array_error(
                     f"power exponent magnitude limit is {_MAX_POWER_EXPONENT_MAGNITUDE}"
                 )
@@ -572,7 +669,7 @@ def _validate_numpy_dtype(dtype: object) -> None:
 
 def _validate_python_operation_scalar(value: object) -> bool:
     if type(value) is int:
-        if abs(value) > _MAX_INTEGER_MAGNITUDE:
+        if builtins.abs(value) > _MAX_INTEGER_MAGNITUDE:
             raise _array_error(
                 f"integer constant magnitude limit is {_MAX_INTEGER_MAGNITUDE}"
             )
@@ -599,7 +696,7 @@ def _broadcast_shape(
     left: tuple[int, ...], right: tuple[int, ...]
 ) -> tuple[int, ...] | None:
     dimensions: list[int] = []
-    for offset in range(1, max(len(left), len(right)) + 1):
+    for offset in range(1, builtins.max(len(left), len(right)) + 1):
         left_dim = left[-offset] if offset <= len(left) else 1
         right_dim = right[-offset] if offset <= len(right) else 1
         if left_dim == 1:

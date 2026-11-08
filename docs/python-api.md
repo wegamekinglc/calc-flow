@@ -28,6 +28,7 @@ On this page:
 - [Runtime capabilities](#runtime-capabilities)
 - [Execution options and provider context](#execution-options-and-provider-context)
 - [Async execution](#async-execution)
+- [Native arrays](#native-arrays)
 - [NumPy and JAX](#numpy-and-jax)
 - [Symbolic declarations and static analysis](#symbolic-declarations-and-static-analysis)
 - [Projects and persistence](#projects-and-persistence)
@@ -1147,6 +1148,89 @@ failures that occur before the first deadline check retain their existing
 precedence.
 
 The full version is [`examples/05_async_execution.py`](../examples/05_async_execution.py).
+
+## Native arrays
+
+`calc_flow.array` exposes owned CPU arrays and synchronous Rust calculations.
+The native owner accepts float32/float64 and Boolean scalars and vectors. Arrow imports
+share read-only buffers and preserve offsets and null masks. NumPy imports
+copy the caller's values before computation; NumPy is optional and imported
+only for NumPy conversion.
+
+```python
+import pyarrow as pa
+import calc_flow.array as cfa
+from calc_flow import Batch
+
+values = cfa.from_arrow(pa.array([2.0, None, 4.0]))
+assert values.dtype == "float64"
+assert values.shape == (3,)
+assert cfa.sum(values).to_arrow().to_pylist() == [None]
+assert cfa.mean(values, skip_nulls=True).to_arrow().to_pylist() == [3.0]
+assert cfa.ewma(values, span=3).to_arrow().to_pylist() == [2.0, 2.0, 3.0]
+batch = Batch.from_array(values, backend="native", metadata={"source": "prices"})
+assert batch.array.to_arrow().to_pylist() == [2.0, None, 4.0]
+```
+
+`NativeArray` has read-only `dtype`, `shape`, `estimated_bytes` and
+`retained_buffer_bytes` properties. `len(array)` counts logical rows, including
+one row for a scalar. Byte estimates charge visible values, validity and shape;
+retained bytes count backing-buffer capacities, rather than process RSS.
+`from_arrow(array, shape=())` declares a scalar and requires one element;
+the default shape is `(len(array),)`. `from_numpy(ndarray)` accepts exact native-endian
+float32/float64 ndarrays with zero or one dimension, including empty vectors.
+
+`to_arrow()` preserves validity. `to_numpy()` rejects arrays containing nulls
+unless a numeric `fill_value` is supplied, for example
+`values.to_numpy(fill_value=float("nan"))`. Boolean arrays also accept Boolean
+fill values. Only null positions are filled;
+valid NaN values remain valid NaNs. NumPy exports use immutable bytes storage:
+neither the returned array nor its base arrays can regain write access.
+Conversions never mutate the caller's array.
+
+`sum`, `mean`, `min` and `max` return scalar native arrays. Nulls propagate
+unless `skip_nulls=True`; empty or all-null inputs produce null scalars.
+Sum and mean return float64; min and max retain the input dtype. Valid NaNs
+follow the native numerical rules and are distinct from nulls.
+`ewma(values, span=..., min_periods=1)` returns an aligned float64 vector,
+seeds from the first valid value, and shares the table EWMA transition.
+Null and NaN observations are skipped; their readout carries prior state once
+the valid-observation warmup is met. `min_periods` may exceed `span`.
+
+`rolling_mean(values, window=..., min_periods=1, numerical_profile="stable_v1")`
+uses a row window: nulls and NaNs occupy positions without counting as valid
+samples. `min_periods` must be between one and the window size. The default
+retains the table `stable_v1` transition; `stable_v2` selects the existing
+preview profile explicitly. Both return aligned float64 vectors.
+
+The native eager elementwise functions accept explicit `NativeArray` operands:
+
+- Floating arithmetic: `neg`, `abs`, `sqrt`, `log`, `exp`, `add`, `subtract`,
+  `multiply`, `divide` and `pow`.
+- Comparisons: `equal`, `not_equal`, `less`, `less_equal`, `greater` and
+  `greater_equal`. Results use packed Boolean storage with independent validity.
+- Boolean operations: `logical_not`, `logical_and`, `logical_or` and
+  `logical_xor`. AND/OR use Kleene rules; XOR propagates nulls.
+- Conditional selection: `where_(condition, if_true, if_false)` uses a Boolean
+  condition; a null condition yields null.
+
+Use a rank-0 native array for broadcasting, for example
+`cfa.add(values, cfa.from_arrow(pa.array([2.0]), shape=()))`. A one-element
+vector remains a vector and cannot broadcast to another vector length.
+Mixed float32/float64 arithmetic promotes to float64; Boolean operands do not
+implicitly convert to floating values. `pow` requires a finite, non-null
+scalar exponent with magnitude at most 64. IEEE NaN/Inf arithmetic and
+null propagation follow the Rust kernels, without Python operator evaluation.
+
+Each calculation accepts `execution=cfa.ArrayExecutionOptions(...)` with
+`max_elements=10_000_000` and `max_allocation_bytes=256 * 1024 * 1024` defaults.
+These frozen per-call limits cover result elements and native output/scratch
+buffers, excluding borrowed inputs and conversion snapshots. Native calculations
+release the GIL. This eager API does not require provider registration;
+graph execution remains a separate registered capability.
+
+Run [`examples/native_arrays.py`](../examples/native_arrays.py) for an Arrow-only
+moving-mean, conditional-selection and reduction example.
 
 ## NumPy and JAX
 
