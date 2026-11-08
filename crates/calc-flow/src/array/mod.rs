@@ -19,10 +19,15 @@ use crate::{CalcFlowError, Result};
 
 mod execution;
 mod reduction;
+pub(crate) mod rolling;
+mod rolling_mean;
+pub(crate) mod rolling_mean_math;
 mod storage;
 
 pub use execution::ArrayExecutionOptions;
 pub use reduction::{ReductionOptions, max, mean, min, sum};
+pub use rolling::{EwmaOptions, ewma};
+pub use rolling_mean::{RollingMeanOptions, rolling_mean};
 pub use storage::NativeArray;
 
 /// Supported native floating-point element types.

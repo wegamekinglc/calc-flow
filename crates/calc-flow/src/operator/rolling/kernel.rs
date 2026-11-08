@@ -35,6 +35,9 @@ use super::{
     },
     internal_error, operator_error,
 };
+use crate::array::rolling_mean_math::{
+    self, ArithmeticError, CompensatedSum, FloatSummary, SummaryMut,
+};
 use crate::{
     Result,
     operator::rolling_metrics::{RollingMetricsRecorder, RollingStage, RollingWork},
@@ -3156,38 +3159,17 @@ impl TypedEwmaState {
         }
     }
 
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "cumulative mean uses the released Float64 sample count conversion"
-    )]
     fn update(&mut self, sample: Option<f64>, node_id: &str) -> Result<()> {
-        let Some(sample) = sample else {
-            return Ok(());
-        };
-        let next_count = self
-            .valid_count
-            .checked_add(1)
-            .ok_or_else(|| operator_error(node_id, "rolling EWMA sample count overflowed"))?;
-        self.value = if self.valid_count == 0 || self.alpha.to_bits() == 1.0_f64.to_bits() {
-            sample
-        } else if self.cumulative {
-            if self.value.is_infinite() && sample.is_finite() {
-                self.value
-            } else if sample.is_infinite() {
-                sample + self.value
-            } else {
-                let difference = sample - self.value;
-                if difference.is_finite() {
-                    self.value + difference / next_count as f64
-                } else {
-                    let weight = 1.0 / next_count as f64;
-                    self.value * (1.0 - weight) + sample * weight
-                }
-            }
-        } else {
-            self.value + self.alpha * (sample - self.value)
-        };
-        self.valid_count = next_count;
+        let (valid_count, value) = crate::array::rolling::next_ewma(
+            self.valid_count,
+            self.value,
+            sample,
+            self.alpha,
+            self.cumulative,
+        )
+        .ok_or_else(|| operator_error(node_id, "rolling EWMA sample count overflowed"))?;
+        self.value = value;
+        self.valid_count = valid_count;
         Ok(())
     }
 
@@ -3196,78 +3178,51 @@ impl TypedEwmaState {
     }
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "the frozen mean and variance output type is Float64"
-)]
 #[inline]
-fn add_float64(accumulator: &mut WindowAccumulator, sample: f64, node_id: &str) -> Result<()> {
-    accumulator.valid_count = accumulator
-        .valid_count
-        .checked_add(1)
-        .ok_or_else(|| operator_error(node_id, "rolling valid sample count overflowed"))?;
-    if sample.is_nan() {
-        accumulator.nan_count = accumulator.nan_count.saturating_add(1);
-        return Ok(());
+fn float_summary_mut(accumulator: &mut WindowAccumulator) -> SummaryMut<'_> {
+    SummaryMut {
+        valid_count: &mut accumulator.valid_count,
+        sum: match &mut accumulator.sum {
+            Some(SumState::Float(total)) => Some(total),
+            _ => None,
+        },
+        mean: &mut accumulator.mean,
+        m2: &mut accumulator.m2,
+        nan_count: &mut accumulator.nan_count,
+        pos_inf: &mut accumulator.pos_inf,
+        neg_inf: &mut accumulator.neg_inf,
     }
-    let Some(SumState::Float(total)) = &mut accumulator.sum else {
-        return Err(internal_error(
-            "typed Float64 rolling group has a non-floating sum state",
-        ));
-    };
-    *total += sample;
-    if sample.is_infinite() {
-        if sample > 0.0 {
-            accumulator.pos_inf = accumulator.pos_inf.saturating_add(1);
-        } else {
-            accumulator.neg_inf = accumulator.neg_inf.saturating_add(1);
-        }
-    }
-    let count = accumulator.valid_count as f64;
-    let delta = sample - accumulator.mean;
-    accumulator.mean += delta / count;
-    accumulator.m2 += delta * (sample - accumulator.mean);
-    Ok(())
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "the frozen mean and variance output type is Float64"
-)]
-#[inline]
-fn remove_float64(accumulator: &mut WindowAccumulator, sample: f64) -> Result<()> {
-    accumulator.valid_count = accumulator
-        .valid_count
-        .checked_sub(1)
-        .ok_or_else(|| internal_error("rolling removal without a matching add"))?;
-    if sample.is_nan() {
-        // Deliberately sticky for DataFusion 54 AVG compatibility. The normal
-        // rolling API filters NaNs before they can reach this transition.
-        return Ok(());
-    }
-    let Some(SumState::Float(total)) = &mut accumulator.sum else {
-        return Err(internal_error(
-            "typed Float64 rolling group has a non-floating sum state",
-        ));
-    };
-    *total -= sample;
-    if sample.is_infinite() {
-        if sample > 0.0 {
-            accumulator.pos_inf = accumulator.pos_inf.saturating_sub(1);
-        } else {
-            accumulator.neg_inf = accumulator.neg_inf.saturating_sub(1);
+fn float_arithmetic_error(error: ArithmeticError, node_id: &str) -> crate::CalcFlowError {
+    match error {
+        ArithmeticError::CountOverflow => {
+            operator_error(node_id, "rolling valid sample count overflowed")
+        }
+        ArithmeticError::FiniteCountOverflow => {
+            operator_error(node_id, "rolling finite sample count overflowed")
+        }
+        ArithmeticError::RemovalWithoutAdd => {
+            internal_error("rolling removal without a matching add")
+        }
+        ArithmeticError::NonFloatingSum => {
+            internal_error("typed Float64 rolling group has a non-floating sum state")
         }
     }
-    if accumulator.valid_count == 0 {
-        accumulator.mean = 0.0;
-        accumulator.m2 = 0.0;
-    } else {
-        let count = accumulator.valid_count as f64;
-        let delta = sample - accumulator.mean;
-        accumulator.mean -= delta / count;
-        accumulator.m2 -= delta * (sample - accumulator.mean);
-    }
-    Ok(())
+}
+
+#[inline]
+fn add_float64(accumulator: &mut WindowAccumulator, sample: f64, node_id: &str) -> Result<()> {
+    float_summary_mut(accumulator)
+        .add(sample)
+        .map_err(|error| float_arithmetic_error(error, node_id))
+}
+
+#[inline]
+fn remove_float64(accumulator: &mut WindowAccumulator, sample: f64) -> Result<()> {
+    float_summary_mut(accumulator)
+        .remove(sample)
+        .map_err(|error| float_arithmetic_error(error, ""))
 }
 
 fn refold_float64(
@@ -3488,117 +3443,29 @@ pub(super) fn stable_v2_rebase_due(
     retained_samples: usize,
     numerical_risk: bool,
 ) -> bool {
-    if numerical_risk {
-        return true;
-    }
-    if retained_samples < 2 {
-        return false;
-    }
-    let cadence = u64::try_from(retained_samples.max(64)).unwrap_or(u64::MAX);
-    transition_count.is_multiple_of(cadence)
+    rolling_mean_math::rebase_due(transition_count, retained_samples, numerical_risk)
 }
 
-#[derive(Default)]
-struct CompensatedSum {
-    value: f64,
-    correction: f64,
-}
-
-impl CompensatedSum {
-    fn add(&mut self, sample: f64) {
-        let adjusted = sample - self.correction;
-        let next = self.value + adjusted;
-        self.correction = (next - self.value) - adjusted;
-        self.value = next;
+fn float_summary_accumulator(summary: FloatSummary) -> WindowAccumulator {
+    WindowAccumulator {
+        valid_count: summary.valid_count,
+        sum: Some(SumState::Float(summary.sum)),
+        mean: summary.mean,
+        m2: summary.m2,
+        nan_count: summary.nan_count,
+        pos_inf: summary.pos_inf,
+        neg_inf: summary.neg_inf,
+        expired_through: i128::MIN,
     }
 }
 
-struct StableFloat64Fold {
-    accumulator: WindowAccumulator,
-    origin: Option<f64>,
-    finite_count: u64,
-    offsets: CompensatedSum,
-    offset_squares: CompensatedSum,
-}
-
-impl StableFloat64Fold {
-    fn new() -> Self {
-        Self {
-            accumulator: WindowAccumulator::new(SumClass::Float),
-            origin: None,
-            finite_count: 0,
-            offsets: CompensatedSum::default(),
-            offset_squares: CompensatedSum::default(),
-        }
-    }
-
-    fn push(&mut self, sample: f64, node_id: &str) -> Result<()> {
-        self.accumulator.valid_count = self
-            .accumulator
-            .valid_count
-            .checked_add(1)
-            .ok_or_else(|| operator_error(node_id, "rolling valid sample count overflowed"))?;
-        if sample.is_nan() {
-            self.accumulator.nan_count = self.accumulator.nan_count.saturating_add(1);
-            return Ok(());
-        }
-        if sample.is_infinite() {
-            update_infinity_count(
-                &mut self.accumulator.pos_inf,
-                &mut self.accumulator.neg_inf,
-                sample,
-                true,
-            );
-            return Ok(());
-        }
-        let origin = *self.origin.get_or_insert(sample);
-        let offset = sample - origin;
-        self.offsets.add(offset);
-        self.offset_squares.add(offset * offset);
-        self.finite_count = self
-            .finite_count
-            .checked_add(1)
-            .ok_or_else(|| operator_error(node_id, "rolling finite sample count overflowed"))?;
-        Ok(())
-    }
-
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "the stable_v2 preview retains the frozen Float64 output type"
-    )]
-    fn finish(mut self) -> WindowAccumulator {
-        let origin = self.origin.unwrap_or(0.0);
-        let finite_total = origin * self.finite_count as f64 + self.offsets.value;
-        let total = match (self.accumulator.pos_inf > 0, self.accumulator.neg_inf > 0) {
-            (true, true) => f64::NAN,
-            (true, false) => f64::INFINITY,
-            (false, true) => f64::NEG_INFINITY,
-            (false, false) => finite_total,
-        };
-        self.accumulator.sum = Some(SumState::Float(total));
-        if self.finite_count > 0 {
-            let count = self.finite_count as f64;
-            self.accumulator.mean = origin + self.offsets.value / count;
-            self.accumulator.m2 =
-                self.offset_squares.value - self.offsets.value * self.offsets.value / count;
-        }
-        self.accumulator
-    }
-}
-
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "the stable_v2 preview retains the frozen Float64 output type"
-)]
 pub(super) fn stable_v2_float64_accumulator(
     values: impl Iterator<Item = f64>,
     node_id: &str,
 ) -> Result<WindowAccumulator> {
-    let mut fold = StableFloat64Fold::new();
-    for sample in values {
-        fold.push(sample, node_id)?;
-    }
-    Ok(fold.finish())
+    rolling_mean_math::stable_fold(values)
+        .map(float_summary_accumulator)
+        .map_err(|error| float_arithmetic_error(error, node_id))
 }
 
 #[derive(Default)]
@@ -4147,15 +4014,12 @@ fn append_sum(builder: &mut Float64Builder, accumulator: &WindowAccumulator) -> 
 
 #[inline]
 fn float_mean(accumulator: &WindowAccumulator) -> f64 {
-    if accumulator.nan_count > 0 {
-        return f64::NAN;
-    }
-    match (accumulator.pos_inf > 0, accumulator.neg_inf > 0) {
-        (true, true) => f64::NAN,
-        (true, false) => f64::INFINITY,
-        (false, true) => f64::NEG_INFINITY,
-        (false, false) => accumulator.mean,
-    }
+    rolling_mean_math::read_mean(
+        accumulator.nan_count,
+        accumulator.pos_inf,
+        accumulator.neg_inf,
+        accumulator.mean,
+    )
 }
 
 #[allow(

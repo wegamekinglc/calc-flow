@@ -13,6 +13,8 @@ On this page:
 - [Build and document](#build-and-document)
 - [Native array storage](#native-array-storage)
 - [Native array reductions](#native-array-reductions)
+- [Native exponential averages](#native-exponential-averages)
+- [Native rolling mean](#native-rolling-mean)
 - [Expression pipeline](#expression-pipeline)
 - [SQL operators](#sql-operators)
 - [Snapshot SQL](#snapshot-sql)
@@ -112,6 +114,72 @@ requires one output element regardless of input length. Borrowed inputs,
 allocator/object overhead, and process RSS are outside this execution charge.
 Limits are checked before output allocation or scanning input values. Exact
 sum/mean also reserve their bounded accumulator/finalization scratch.
+
+## Native exponential averages
+
+`array::ewma` computes a Float64 result from a borrowed float32 or float64
+view. `EwmaOptions::new(span)` requires a positive span and defaults to
+`min_periods=1`; `with_min_periods` accepts any positive warm-up count, including
+one larger than the span. The smoothing factor is `2 / (span + 1)`.
+
+The first valid sample seeds the state. Null and NaN inputs leave it unchanged;
+once warm-up completes, those rows carry the last value. Infinity remains a
+valid sample, so subsequent IEEE arithmetic may produce a valid NaN result.
+Finite-input overflow follows the same recurrence as the table operator.
+Output rows align with input positions, including leading nulls before warm-up.
+This is the existing table EWMA contract, shared through one numeric transition.
+
+```rust
+use calc_flow::{Result, array::{ArrayExecutionOptions, EwmaOptions, FloatView, ewma}};
+
+fn smooth(values: &[f64]) -> Result<calc_flow::array::NativeArray> {
+    ewma(
+        FloatView::from_f64(values),
+        EwmaOptions::new(20)?.with_min_periods(3)?,
+        &ArrayExecutionOptions::default(),
+    )
+}
+```
+
+Execution limits include the Float64 output, compact validity bitmap, shape,
+and fixed recurrence state. Inputs stay read-only. This finite call starts a
+fresh recurrence; managed streaming state continues to belong to its operator.
+
+## Native rolling mean
+
+`array::rolling_mean` computes one ordered sequence directly, without a graph,
+DataFusion session or Python process. `RollingMeanOptions::new(window)` selects
+one minimum valid sample and the existing `RollingNumericalProfile::StableV1`.
+Use `with_min_periods` for a count between one and the window, or explicitly
+select `StableV2Preview` with `with_numerical_profile`.
+
+```rust
+use calc_flow::{Result, array::{ArrayExecutionOptions, FloatView, RollingMeanOptions, rolling_mean}};
+
+fn rolling_prices(values: &[f64]) -> Result<calc_flow::array::NativeArray> {
+    rolling_mean(
+        FloatView::from_f64(values),
+        RollingMeanOptions::new(20)?.with_min_periods(5)?,
+        &ArrayExecutionOptions::default(),
+    )
+}
+```
+
+The Float64 output has one position per input, including for Float32 input.
+Nulls and NaNs consume window positions but do not count as valid samples;
+infinities remain valid. A missing current input still reads the surviving
+window, and insufficient valid samples produce null. The default matches the
+native `StatefulNumericV1` table path, including its released extreme-value
+limits. It does not adopt ordinary array mean's exact summation or the SQL AVG
+rewrite's sticky NaN-value policy. Array and table execution share add/remove,
+mean/M2 repair, preview rebase and readout arithmetic; checkpoint fields and
+the table's shared-history owner remain unchanged.
+
+Execution limits cover output buffers, validity, shape, and bounded numeric
+scratch/history. History has fixed storage for at most
+`min(input_length, window + 1)` positions, evaluated without integer overflow;
+`u64::MAX` windows remain usable with small inputs. Inputs are read-only, and
+oversized results or scratch are rejected before allocating their buffers.
 
 ## Expression pipeline
 
