@@ -30,6 +30,8 @@
 // Production targets keep the lint.
 #![cfg_attr(test, allow(clippy::large_stack_arrays))]
 
+pub mod array;
+
 mod batch;
 mod config;
 mod connector;
