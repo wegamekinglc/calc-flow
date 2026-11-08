@@ -1,12 +1,20 @@
-use datafusion::arrow::buffer::{BooleanBuffer, Buffer, NullBuffer};
-
-use super::control;
-use super::{ArrayExecutionOptions, FloatValues, FloatView, NativeArray, byte_width, invalid};
+use super::{ArrayDType, ArrayExecutionOptions, ArrayView, FloatView, NativeArray};
 use crate::Result;
 
+mod axis;
 mod exact;
 
-use exact::ExactSum;
+pub(super) use axis::reduce_checked;
+
+pub(super) fn reduction_requirements(
+    dtype: ArrayDType,
+    shape: &[usize],
+    nullable: bool,
+    operation: Reduction,
+    options: ReductionOptions,
+) -> Result<(usize, usize, usize)> {
+    axis::descriptor_requirements(dtype, shape, nullable, operation, options)
+}
 
 /// Missing-value handling for native whole-array reductions.
 ///
@@ -16,23 +24,88 @@ use exact::ExactSum;
 #[must_use]
 pub struct ReductionOptions {
     skip_nulls: bool,
+    axis: Option<usize>,
+    keepdims: bool,
 }
 
 impl ReductionOptions {
     /// Returns options selecting whether null input positions are skipped.
     pub const fn with_skip_nulls(self, skip_nulls: bool) -> Self {
-        Self { skip_nulls }
+        Self { skip_nulls, ..self }
     }
 
     /// Returns whether null input positions are skipped.
     pub const fn skip_nulls(&self) -> bool {
         self.skip_nulls
     }
+
+    /// Selects a single nonnegative axis, or all positions with `None`.
+    pub const fn with_axis(self, axis: Option<usize>) -> Self {
+        Self { axis, ..self }
+    }
+
+    /// Selects whether reduced dimensions remain with extent one.
+    pub const fn with_keepdims(self, keepdims: bool) -> Self {
+        Self { keepdims, ..self }
+    }
+
+    /// Returns the selected axis, or `None` for all positions.
+    pub const fn axis(&self) -> Option<usize> {
+        self.axis
+    }
+
+    /// Returns whether reduced dimensions remain in the result.
+    pub const fn keepdims(&self) -> bool {
+        self.keepdims
+    }
+}
+
+/// A shape-aware floating-point reduction.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Reduction {
+    /// Exact finite accumulation and one float64 rounding.
+    Sum,
+    /// Exact finite accumulation and division before float64 rounding.
+    Mean,
+    /// Minimum, retaining input dtype and signed-zero rules.
+    Min,
+    /// Maximum, retaining input dtype and signed-zero rules.
+    Max,
+}
+
+/// Reduces all positions or one axis of a scalar, vector or packed matrix.
+///
+/// Each lane preserves the exact sum/mean, canonical NaN, null and signed-zero
+/// contracts of the original whole-vector functions. Empty lanes are null.
+///
+/// ```
+/// use calc_flow::{Result, array::{self, ArrayExecutionOptions, NativeArray, Reduction, ReductionOptions}};
+/// # fn main() -> Result<()> {
+/// let input = NativeArray::from_f64(vec![1.0, 3.0, 5.0, 7.0], vec![2, 2], None)?;
+/// let means = array::reduce(input.view(), Reduction::Mean,
+///     ReductionOptions::default().with_axis(Some(1)), &ArrayExecutionOptions::default())?;
+/// assert_eq!(means.shape(), &[2]);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Errors
+///
+/// Returns `InvalidArgument` for Boolean inputs, an axis outside the rank,
+/// overflow or exceeded result/scratch limits.
+pub fn reduce(
+    input: ArrayView<'_>,
+    operation: Reduction,
+    options: ReductionOptions,
+    execution: &ArrayExecutionOptions,
+) -> Result<NativeArray> {
+    reduce_checked(input, operation, options, execution, &mut || Ok(()))
 }
 
 /// Sums valid values exactly before one float64 ties-to-even rounding.
 ///
-/// Returns a scalar float64 array. Empty input and input with no accepted
+/// Default options return a scalar float64 array. Empty input and input with no accepted
 /// values return a null scalar. Exact zero is positive zero; valid NaNs and
 /// mixed-sign infinities produce a canonical NaN.
 ///
@@ -71,7 +144,13 @@ pub(super) fn sum_checked(
     execution: &ArrayExecutionOptions,
     check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<NativeArray> {
-    exact_reduction(input, options, execution, false, check)
+    reduce_checked(
+        ArrayView::from_float(input),
+        Reduction::Sum,
+        options,
+        execution,
+        check,
+    )
 }
 
 /// Computes an exactly accumulated mean before float64 ties-to-even rounding.
@@ -98,10 +177,16 @@ pub(super) fn mean_checked(
     execution: &ArrayExecutionOptions,
     check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<NativeArray> {
-    exact_reduction(input, options, execution, true, check)
+    reduce_checked(
+        ArrayView::from_float(input),
+        Reduction::Mean,
+        options,
+        execution,
+        check,
+    )
 }
 
-/// Returns a scalar minimum, preserving the input dtype.
+/// Returns a minimum, preserving the input dtype; defaults produce a scalar.
 ///
 /// Valid NaNs propagate as a canonical NaN. Mixed signed zeros select negative
 /// zero; a single zero sign is preserved. Empty or unaccepted input is null.
@@ -124,10 +209,16 @@ pub(super) fn min_checked(
     execution: &ArrayExecutionOptions,
     check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<NativeArray> {
-    extremum(input, options, execution, false, check)
+    reduce_checked(
+        ArrayView::from_float(input),
+        Reduction::Min,
+        options,
+        execution,
+        check,
+    )
 }
 
-/// Returns a scalar maximum, preserving the input dtype.
+/// Returns a maximum, preserving the input dtype; defaults produce a scalar.
 ///
 /// Valid NaNs propagate as a canonical NaN. Mixed signed zeros select positive
 /// zero; a single zero sign is preserved. Empty or unaccepted input is null.
@@ -150,62 +241,17 @@ pub(super) fn max_checked(
     execution: &ArrayExecutionOptions,
     check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<NativeArray> {
-    extremum(input, options, execution, true, check)
+    reduce_checked(
+        ArrayView::from_float(input),
+        Reduction::Max,
+        options,
+        execution,
+        check,
+    )
 }
 
 pub(super) const fn exact_scratch_bytes() -> usize {
-    ExactSum::scratch_bytes()
-}
-
-fn exact_reduction(
-    input: FloatView<'_>,
-    options: ReductionOptions,
-    execution: &ArrayExecutionOptions,
-    average: bool,
-    check: &mut dyn FnMut() -> Result<()>,
-) -> Result<NativeArray> {
-    check()?;
-    if null_result(input, options) {
-        execution.validate_allocation(1, size_of::<f64>() + 1, 0)?;
-        return control::finish(scalar_f64(None), check);
-    }
-    execution.validate_allocation(1, size_of::<f64>(), ExactSum::scratch_bytes())?;
-    let mut total = ExactSum::new();
-    visit_valid(input, check, |_, value| {
-        total
-            .push(value)
-            .map_err(|_| invalid("input.elements", "valid element count overflowed usize"))
-    })?;
-    control::finish(
-        scalar_f64(if average { total.mean() } else { total.sum() }),
-        check,
-    )
-}
-
-fn extremum(
-    input: FloatView<'_>,
-    options: ReductionOptions,
-    execution: &ArrayExecutionOptions,
-    maximum: bool,
-    check: &mut dyn FnMut() -> Result<()>,
-) -> Result<NativeArray> {
-    check()?;
-    let is_null = null_result(input, options);
-    execution.validate_allocation(1, byte_width(input.dtype()) + usize::from(is_null), 0)?;
-    if is_null {
-        return control::finish(scalar_from_position(input, None), check);
-    }
-    let mut selected = None;
-    visit_valid(input, check, |index, value| {
-        if selected.is_none_or(|(_, current)| better_extremum(value, current, maximum)) {
-            selected = Some((index, value));
-        }
-        Ok(())
-    })?;
-    control::finish(
-        scalar_from_position(input, selected.map(|(index, _)| index)),
-        check,
-    )
+    exact::ExactSum::scratch_bytes()
 }
 
 fn better_extremum(next: f64, current: f64, maximum: bool) -> bool {
@@ -218,78 +264,4 @@ fn better_extremum(next: f64, current: f64, maximum: bool) -> bool {
     } else {
         next.total_cmp(&current).is_lt()
     }
-}
-
-fn null_result(input: FloatView<'_>, options: ReductionOptions) -> bool {
-    input.is_empty()
-        || input.validity().is_some_and(|validity| {
-            validity.null_count() == input.len()
-                || (!options.skip_nulls && validity.null_count() != 0)
-        })
-}
-
-fn visit_valid(
-    input: FloatView<'_>,
-    check: &mut dyn FnMut() -> Result<()>,
-    visit: impl FnMut(usize, f64) -> Result<()>,
-) -> Result<()> {
-    match input.values() {
-        FloatValues::Float32(values) => visit_values(input, values, check, visit),
-        FloatValues::Float64(values) => visit_values(input, values, check, visit),
-    }
-}
-
-fn visit_values<T: Copy + Into<f64>>(
-    input: FloatView<'_>,
-    values: &[T],
-    check: &mut dyn FnMut() -> Result<()>,
-    mut visit: impl FnMut(usize, f64) -> Result<()>,
-) -> Result<()> {
-    for (index, value) in values.iter().enumerate() {
-        control::checkpoint(index, check)?;
-        if input.validity().is_none_or(|mask| mask.is_valid(index)) {
-            visit(index, (*value).into())?;
-        }
-    }
-    check()
-}
-
-fn scalar_from_position(input: FloatView<'_>, selected: Option<usize>) -> Result<NativeArray> {
-    match input.values() {
-        FloatValues::Float32(values) => {
-            let value = selected.map(|index| {
-                let value = values[index];
-                if value.is_nan() {
-                    f32::from_bits(0x7fc0_0000)
-                } else {
-                    value
-                }
-            });
-            NativeArray::from_f32(
-                vec![value.unwrap_or(0.0)],
-                vec![],
-                value.is_none().then(null_scalar_bitmap),
-            )
-        }
-        FloatValues::Float64(values) => scalar_f64(selected.map(|index| {
-            let value = values[index];
-            if value.is_nan() {
-                f64::from_bits(0x7ff8_0000_0000_0000)
-            } else {
-                value
-            }
-        })),
-    }
-}
-
-fn scalar_f64(value: Option<f64>) -> Result<NativeArray> {
-    NativeArray::from_f64(
-        vec![value.unwrap_or(0.0)],
-        vec![],
-        value.is_none().then(null_scalar_bitmap),
-    )
-}
-
-fn null_scalar_bitmap() -> NullBuffer {
-    NullBuffer::new(BooleanBuffer::new(Buffer::from_vec(vec![0_u8]), 0, 1))
 }

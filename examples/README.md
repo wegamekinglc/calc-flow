@@ -19,6 +19,9 @@ These programs use the internal Rust runtime and check observable results;
 explicit graph, provider, and native-extension examples cover advanced integrations. Each Python program
 is standalone; the [learning paths](../docs/examples.md) group them by task.
 
+[`native_matrices.py`](native_matrices.py) demonstrates packed rank-2 multiplication,
+axis means, reshape and transpose using only Arrow and the native core.
+
 [`native_arrays.py`](native_arrays.py) demonstrates Arrow imports, native row-window
 means, explicit scalar broadcasting, Boolean selection and scalar reduction.
 It requires no NumPy/JAX provider or optional array backend. Run it with

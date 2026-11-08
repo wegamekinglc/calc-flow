@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use calc_flow::array::{
-    ArrayDType, ArrayExecutionOptions, ArrayView, EwmaOptions, NativeArray, ReductionOptions,
-    RollingMeanOptions,
+    ArrayDType, ArrayExecutionOptions, ArrayView, EwmaOptions, NativeArray, Reduction,
+    ReductionOptions, RollingMeanOptions,
 };
+use datafusion::arrow::buffer::BooleanBuffer;
 use pyo3::{
     prelude::*,
     types::{PyBytes, PyCapsule, PyTuple},
@@ -37,6 +38,11 @@ impl PyNativeArray {
     #[getter]
     fn shape<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         PyTuple::new(py, self.inner.shape().iter().copied())
+    }
+
+    #[getter]
+    fn element_count(&self) -> usize {
+        self.inner.element_count()
     }
 
     #[getter]
@@ -93,18 +99,18 @@ fn _native_array_from_bytes(
     shape: Vec<usize>,
 ) -> PyResult<PyNativeArray> {
     let values = values.as_bytes();
-    let width = float_width(dtype)?;
+    let width = value_width(dtype)?;
     if !values.len().is_multiple_of(width) {
         return Err(invalid("input.bytes", "incomplete typed value"));
     }
     let len = values.len() / width;
-    if shape.len() > 1 || shape.first().copied().unwrap_or(1) != len {
-        return Err(invalid(
-            "input.shape",
-            "expected scalar or matching vector shape",
-        ));
-    }
+    validate_snapshot_shape(len, &shape)?;
     let array = match dtype {
+        "bool" => NativeArray::from_boolean(
+            BooleanBuffer::collect_bool(values.len(), |index| values[index] != 0),
+            shape,
+            None,
+        ),
         "float32" => NativeArray::from_f32(
             values
                 .chunks_exact(4)
@@ -131,12 +137,28 @@ fn _native_array_from_bytes(
     Ok(PyNativeArray::from_inner(array))
 }
 
-fn float_width(dtype: &str) -> PyResult<usize> {
+fn value_width(dtype: &str) -> PyResult<usize> {
     match dtype {
+        "bool" => Ok(1),
         "float32" => Ok(4),
         "float64" => Ok(8),
-        _ => Err(invalid("input.dtype", "expected float32 or float64")),
+        _ => Err(invalid("input.dtype", "expected bool, float32 or float64")),
     }
+}
+
+fn validate_snapshot_shape(len: usize, shape: &[usize]) -> PyResult<()> {
+    if shape.len() > 2 {
+        return Err(invalid("input.shape", "expected rank at most two"));
+    }
+    let count = shape.iter().try_fold(1_usize, |count, dimension| {
+        count
+            .checked_mul(*dimension)
+            .ok_or_else(|| invalid("input.shape", "element count overflowed usize"))
+    })?;
+    if count != len {
+        return Err(invalid("input.shape", "shape must match flat values"));
+    }
+    Ok(())
 }
 
 #[pyfunction]
@@ -161,25 +183,29 @@ fn _native_array_reduce(
     py: Python<'_>,
     array: &PyNativeArray,
     operation: &str,
-    skip_nulls: bool,
+    options: (bool, Option<usize>, bool),
     max_elements: usize,
     max_allocation_bytes: usize,
 ) -> PyResult<PyNativeArray> {
     let function = match operation {
-        "sum" => calc_flow::array::sum,
-        "mean" => calc_flow::array::mean,
-        "min" => calc_flow::array::min,
-        "max" => calc_flow::array::max,
+        "sum" => Reduction::Sum,
+        "mean" => Reduction::Mean,
+        "min" => Reduction::Min,
+        "max" => Reduction::Max,
         _ => return Err(invalid("operation", "unsupported native reduction")),
     };
-    let input = array.inner.clone();
+    let input = &array.inner;
     let execution = ArrayExecutionOptions::default()
         .with_max_elements(max_elements)
         .with_max_allocation_bytes(max_allocation_bytes);
     py.detach(move || {
-        function(
-            input.float_view()?,
-            ReductionOptions::default().with_skip_nulls(skip_nulls),
+        calc_flow::array::reduce(
+            input.view(),
+            function,
+            ReductionOptions::default()
+                .with_skip_nulls(options.0)
+                .with_axis(options.1)
+                .with_keepdims(options.2),
             &execution,
         )
     })
@@ -202,7 +228,7 @@ fn _native_array_ewma(
     let execution = ArrayExecutionOptions::default()
         .with_max_elements(max_elements)
         .with_max_allocation_bytes(max_allocation_bytes);
-    let input = array.inner.clone();
+    let input = &array.inner;
     py.detach(move || calc_flow::array::ewma(input.float_view()?, options, &execution))
         .map(PyNativeArray::from_inner)
         .map_err(crate::error::to_py_err)
@@ -232,7 +258,7 @@ fn _native_array_rolling_mean(
         .and_then(|options| options.with_min_periods(min_periods))
         .map_err(crate::error::to_py_err)?
         .with_numerical_profile(profile);
-    let input = array.inner.clone();
+    let input = &array.inner;
     let execution = execution_limits(max_elements, max_allocation_bytes);
     py.detach(move || calc_flow::array::rolling_mean(input.float_view()?, options, &execution))
         .map(PyNativeArray::from_inner)
@@ -306,7 +332,7 @@ fn _native_array_unary(
     max_allocation_bytes: usize,
 ) -> PyResult<PyNativeArray> {
     let function = unary_function(operation)?;
-    let input = array.inner.clone();
+    let input = &array.inner;
     let execution = execution_limits(max_elements, max_allocation_bytes);
     py.detach(move || function(input.view(), &execution))
         .map(PyNativeArray::from_inner)
@@ -323,8 +349,8 @@ fn _native_array_binary(
     max_allocation_bytes: usize,
 ) -> PyResult<PyNativeArray> {
     let function = binary_function(operation)?;
-    let left = left.inner.clone();
-    let right = right.inner.clone();
+    let left = &left.inner;
+    let right = &right.inner;
     let execution = execution_limits(max_elements, max_allocation_bytes);
     py.detach(move || function(left.view(), right.view(), &execution))
         .map(PyNativeArray::from_inner)
@@ -340,9 +366,9 @@ fn _native_array_where(
     max_elements: usize,
     max_allocation_bytes: usize,
 ) -> PyResult<PyNativeArray> {
-    let condition = condition.inner.clone();
-    let if_true = if_true.inner.clone();
-    let if_false = if_false.inner.clone();
+    let condition = &condition.inner;
+    let if_true = &if_true.inner;
+    let if_false = &if_false.inner;
     let execution = execution_limits(max_elements, max_allocation_bytes);
     py.detach(move || {
         calc_flow::array::where_(
@@ -354,6 +380,51 @@ fn _native_array_where(
     })
     .map(PyNativeArray::from_inner)
     .map_err(crate::error::to_py_err)
+}
+
+#[pyfunction]
+fn _native_array_matmul(
+    py: Python<'_>,
+    left: &PyNativeArray,
+    right: &PyNativeArray,
+    max_elements: usize,
+    max_allocation_bytes: usize,
+) -> PyResult<PyNativeArray> {
+    let left = &left.inner;
+    let right = &right.inner;
+    let execution = execution_limits(max_elements, max_allocation_bytes);
+    py.detach(move || calc_flow::array::matmul(left.view(), right.view(), &execution))
+        .map(PyNativeArray::from_inner)
+        .map_err(crate::error::to_py_err)
+}
+
+#[pyfunction]
+fn _native_array_reshape(
+    py: Python<'_>,
+    array: &PyNativeArray,
+    shape: Vec<usize>,
+    max_elements: usize,
+    max_allocation_bytes: usize,
+) -> PyResult<PyNativeArray> {
+    let input = &array.inner;
+    let execution = execution_limits(max_elements, max_allocation_bytes);
+    py.detach(move || calc_flow::array::reshape(input, &shape, &execution))
+        .map(PyNativeArray::from_inner)
+        .map_err(crate::error::to_py_err)
+}
+
+#[pyfunction]
+fn _native_array_transpose(
+    py: Python<'_>,
+    array: &PyNativeArray,
+    max_elements: usize,
+    max_allocation_bytes: usize,
+) -> PyResult<PyNativeArray> {
+    let input = &array.inner;
+    let execution = execution_limits(max_elements, max_allocation_bytes);
+    py.detach(move || calc_flow::array::transpose(input, &execution))
+        .map(PyNativeArray::from_inner)
+        .map_err(crate::error::to_py_err)
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -373,5 +444,12 @@ fn register_calculations(module: &Bound<'_, PyModule>) -> PyResult<()> {
 fn register_elementwise(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_native_array_unary, module)?)?;
     module.add_function(wrap_pyfunction!(_native_array_binary, module)?)?;
-    module.add_function(wrap_pyfunction!(_native_array_where, module)?)
+    module.add_function(wrap_pyfunction!(_native_array_where, module)?)?;
+    register_matrix(module)
+}
+
+fn register_matrix(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(_native_array_matmul, module)?)?;
+    module.add_function(wrap_pyfunction!(_native_array_reshape, module)?)?;
+    module.add_function(wrap_pyfunction!(_native_array_transpose, module)?)
 }

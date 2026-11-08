@@ -13,3 +13,10 @@ pub(super) fn finish<T>(result: Result<T>, check: &mut dyn FnMut() -> Result<()>
     check()?;
     Ok(value)
 }
+
+// Keep the checkpoint cadence across short lanes as well as long inner loops.
+pub(super) fn step(index: &mut usize, check: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+    checkpoint(*index, check)?;
+    *index = index.wrapping_add(1);
+    Ok(())
+}

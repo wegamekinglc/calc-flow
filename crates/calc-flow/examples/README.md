@@ -1,7 +1,8 @@
 # Calc Flow Rust examples
 
-Every runnable Python example in [`examples/`](../../../examples/README.md)
-has a Rust counterpart with the same number and filename stem below (01–36).
+The 36 numbered Python examples in [`examples/`](../../../examples/README.md)
+have Rust counterparts with the same number and filename stem below. The native
+array and matrix examples use matching descriptive filenames.
 Core examples live here; examples using native
 connectors live in [`calc-flow-connectors/examples/`](../../calc-flow-connectors/examples/).
 Run commands from the repository root. No Python interpreter or native Python
@@ -38,6 +39,9 @@ expressions and SQL continue to execute in DataFusion.
 [`native_arrays.rs`](native_arrays.rs) uses the built-in synchronous Rust array
 functions directly: nullable Arrow input, rolling mean, scalar broadcasting,
 conditional selection and an exact sum. It needs no provider registration.
+
+[`native_matrices.rs`](native_matrices.rs) demonstrates packed rank-2 multiplication,
+axis means and owned reshape/transpose with allocation limits.
 
 ```bash
 cargo run -p calc-flow --example native_arrays

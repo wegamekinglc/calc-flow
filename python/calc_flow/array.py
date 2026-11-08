@@ -69,6 +69,7 @@ from calc_flow._native_array import (
 from calc_flow._native_array import (
     logical_xor as logical_xor,
 )
+from calc_flow._native_array import matmul as matmul
 from calc_flow._native_array import (
     max as max,
 )
@@ -90,6 +91,7 @@ from calc_flow._native_array import (
 from calc_flow._native_array import (
     pow as pow,
 )
+from calc_flow._native_array import reshape as reshape
 from calc_flow._native_array import (
     rolling_mean as rolling_mean,
 )
@@ -102,6 +104,7 @@ from calc_flow._native_array import (
 from calc_flow._native_array import (
     sum as sum,
 )
+from calc_flow._native_array import transpose as transpose
 from calc_flow._native_array import (
     where_ as where_,
 )

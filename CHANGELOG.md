@@ -9,6 +9,16 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-08: Expose packed rank-2 native arrays in Python, including Boolean
+  NumPy snapshots, shaped immutable exports, matmul, reshape, transpose and
+  axis/keepdims reductions. Keep Arrow exports flat and count logical rows
+  separately from the read-only `element_count` property.
+
+- 2026-11-08: Extend native storage and elementwise work to packed rank-2
+  arrays with separate row/element counts. Add deterministic floating matmul,
+  owned reshape/transpose and exact per-axis reductions with keepdims, null
+  masks, checked allocation accounting and interruptible kernel loops.
+
 - 2026-11-08: Add the bounded Rust `native:array_expr@1` batch factory with
   strict typed IR, shape/dtype inference, native eager kernel execution, one
   shared buffer budget, owned worker cancellation and Rust capability/schema

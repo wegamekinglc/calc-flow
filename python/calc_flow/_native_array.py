@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from calc_flow import _native
@@ -33,17 +34,17 @@ class ArrayExecutionOptions:
 
 
 def from_numpy(values: np.ndarray) -> NativeArray:
-    """Copy a rank-0/1 float32/float64 ndarray into immutable native storage."""
+    """Copy a rank-0/1/2 bool/float32/float64 ndarray into immutable storage."""
     import numpy as np
 
     if type(values) is not np.ndarray:
         raise TypeError("values must be an exact NumPy ndarray")
-    if values.dtype not in (np.dtype("float32"), np.dtype("float64")):
+    if values.dtype not in (np.dtype("bool"), np.dtype("float32"), np.dtype("float64")):
         raise _native.ConfigError(
-            "input.dtype: expected native-endian float32 or float64"
+            "input.dtype: expected native-endian bool, float32 or float64"
         )
-    if values.ndim > 1:
-        raise _native.ConfigError("input.shape: expected a scalar or vector")
+    if values.ndim > 2:
+        raise _native.ConfigError("input.shape: expected rank at most two")
     return _native._native_array_from_bytes(
         values.tobytes(order="C"), str(values.dtype), list(values.shape)
     )
@@ -97,12 +98,22 @@ def _reduce(
     operation: str,
     skip_nulls: bool,
     execution: ArrayExecutionOptions | None,
+    axis: int | None,
+    keepdims: bool,
 ) -> NativeArray:
+    if type(keepdims) is not bool:
+        raise TypeError("keepdims must be a bool")
+    if axis is not None:
+        _integer(axis, "options.axis")
     if type(skip_nulls) is not bool:
         raise TypeError("skip_nulls must be a bool")
     limits = _execution(execution)
     return _native._native_array_reduce(
-        array, operation, skip_nulls, limits.max_elements, limits.max_allocation_bytes
+        array,
+        operation,
+        (skip_nulls, axis, keepdims),
+        limits.max_elements,
+        limits.max_allocation_bytes,
     )
 
 
@@ -110,40 +121,48 @@ def sum(
     array: NativeArray,
     *,
     skip_nulls: bool = False,
+    axis: int | None = None,
+    keepdims: bool = False,
     execution: ArrayExecutionOptions | None = None,
 ) -> NativeArray:
-    """Return the native float64 scalar sum; nulls propagate by default."""
-    return _reduce(array, "sum", skip_nulls, execution)
+    """Return a float64 sum along the selected axis; nulls propagate."""
+    return _reduce(array, "sum", skip_nulls, execution, axis, keepdims)
 
 
 def mean(
     array: NativeArray,
     *,
     skip_nulls: bool = False,
+    axis: int | None = None,
+    keepdims: bool = False,
     execution: ArrayExecutionOptions | None = None,
 ) -> NativeArray:
-    """Return the native float64 scalar mean; nulls propagate by default."""
-    return _reduce(array, "mean", skip_nulls, execution)
+    """Return a float64 mean along the selected axis; nulls propagate."""
+    return _reduce(array, "mean", skip_nulls, execution, axis, keepdims)
 
 
 def min(
     array: NativeArray,
     *,
     skip_nulls: bool = False,
+    axis: int | None = None,
+    keepdims: bool = False,
     execution: ArrayExecutionOptions | None = None,
 ) -> NativeArray:
-    """Return the native scalar minimum, preserving the input dtype."""
-    return _reduce(array, "min", skip_nulls, execution)
+    """Return the native minimum along the selected axis, preserving the input dtype."""
+    return _reduce(array, "min", skip_nulls, execution, axis, keepdims)
 
 
 def max(
     array: NativeArray,
     *,
     skip_nulls: bool = False,
+    axis: int | None = None,
+    keepdims: bool = False,
     execution: ArrayExecutionOptions | None = None,
 ) -> NativeArray:
-    """Return the native scalar maximum, preserving the input dtype."""
-    return _reduce(array, "max", skip_nulls, execution)
+    """Return the native maximum along the selected axis, preserving the input dtype."""
+    return _reduce(array, "max", skip_nulls, execution, axis, keepdims)
 
 
 def ewma(
@@ -398,4 +417,43 @@ def where_(
     limits = _execution(execution)
     return _native._native_array_where(
         condition, if_true, if_false, limits.max_elements, limits.max_allocation_bytes
+    )
+
+
+def matmul(
+    left: NativeArray,
+    right: NativeArray,
+    *,
+    execution: ArrayExecutionOptions | None = None,
+) -> NativeArray:
+    """Multiply rank-2 non-null floating arrays in deterministic inner order."""
+    limits = _execution(execution)
+    return _native._native_array_matmul(
+        left, right, limits.max_elements, limits.max_allocation_bytes
+    )
+
+
+def reshape(
+    array: NativeArray,
+    shape: Sequence[int],
+    *,
+    execution: ArrayExecutionOptions | None = None,
+) -> NativeArray:
+    """Return an owned packed shape alias, charging only the new descriptor."""
+    dimensions = tuple(shape)
+    for dimension in dimensions:
+        _integer(dimension, "input.shape")
+    limits = _execution(execution)
+    return _native._native_array_reshape(
+        array, list(dimensions), limits.max_elements, limits.max_allocation_bytes
+    )
+
+
+def transpose(
+    array: NativeArray, *, execution: ArrayExecutionOptions | None = None
+) -> NativeArray:
+    """Swap matrix axes into packed row order; scalars and vectors are aliases."""
+    limits = _execution(execution)
+    return _native._native_array_transpose(
+        array, limits.max_elements, limits.max_allocation_bytes
     )
