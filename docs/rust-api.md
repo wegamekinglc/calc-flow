@@ -15,6 +15,7 @@ On this page:
 - [Native array reductions](#native-array-reductions)
 - [Native exponential averages](#native-exponential-averages)
 - [Native rolling mean](#native-rolling-mean)
+- [Native elementwise arrays](#native-elementwise-arrays)
 - [Expression pipeline](#expression-pipeline)
 - [SQL operators](#sql-operators)
 - [Snapshot SQL](#snapshot-sql)
@@ -46,7 +47,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p calc-flow --no-deps
 
 ## Native array storage
 
-`calc_flow::array` exposes immutable native float32/float64 storage for Rust
+`calc_flow::array` exposes immutable native float32/float64 and packed Boolean storage for Rust
 extensions. `FloatView` borrows contiguous values and an optional Arrow
 `NullBuffer` for synchronous work. `NativeArray` owns Arrow buffers and supports
 scalar shape `[]` or vector shape `[length]`; a scalar has exactly one value.
@@ -61,11 +62,14 @@ fn native_input() -> Result<Batch> {
 }
 ```
 
-`from_f32` and `from_f64` take ownership of their vectors; `from_arrow`
-shares existing primitive Arrow storage and preserves slice and validity
+`from_f32` and `from_f64` take ownership of their vectors; `from_boolean`
+takes ownership of a `BooleanBuffer`. `from_arrow` shares existing concrete
+Float32/Float64/Boolean Arrow storage and preserves slice and validity
 offsets. `as_arrow` exports a read-only Arrow reference, while `float_view`
 borrows the typed values. Clones share Arrow buffers, and debug output contains
 descriptors without element values. These objects need no Python process.
+For Boolean storage, `float_view` returns an `input.dtype` error; `view`
+borrows either dtype and preserves the stored scalar or vector shape.
 
 `estimated_bytes` charges visible typed slots, the bitmap byte span and shape
 entries. `retained_buffer_bytes` reports exposed backing-buffer capacities plus
@@ -180,6 +184,60 @@ scratch/history. History has fixed storage for at most
 `min(input_length, window + 1)` positions, evaluated without integer overflow;
 `u64::MAX` windows remain usable with small inputs. Inputs are read-only, and
 oversized results or scratch are rejected before allocating their buffers.
+
+## Native elementwise arrays
+
+`ArrayView` is a read-only, copyable operand descriptor. `from_float(FloatView)`
+and `from_boolean(&BooleanBuffer, Option<&NullBuffer>)` borrow vectors;
+`scalar_f32(Option<f32>)`, `scalar_f64(Option<f64>)`, and
+`scalar_boolean(Option<bool>)` create nullable inline scalars without allocating.
+`NativeArray::view()` borrows existing storage without copying. Boolean values
+and validity can have independent bit offsets; both visible spans and retained
+buffer capacities participate in native payload accounting.
+
+Every operation takes borrowed `ArrayView` operands and
+`&ArrayExecutionOptions`, returning `Result<NativeArray>` with fresh owned
+storage. All-scalar inputs produce shape `[]`. Otherwise every vector must
+have the same length, and scalars broadcast to that length, including zero.
+A vector of length one remains a vector and cannot broadcast to another
+vector length. These synchronous APIs support rank zero and one.
+
+| Functions                                                 | Accepted operands and results                                      |
+|-----------------------------------------------------------|--------------------------------------------------------------------|
+| `neg`, `abs`, `sqrt`, `log`, `exp`                        | Floating input; same floating dtype                                |
+| `add`, `subtract`, `multiply`, `divide`, `pow`            | Floating operands; float32 together, otherwise float64             |
+| `equal`, `not_equal`                                      | Floating pairs or Boolean pairs; packed Boolean output             |
+| `less`, `less_equal`, `greater`, `greater_equal`          | Floating operands; packed Boolean output                           |
+| `logical_not`, `logical_and`, `logical_or`, `logical_xor` | Boolean operands; packed Boolean output                            |
+| `where_(condition, if_true, if_false, execution)`         | Boolean condition; floating branches promoted, or Boolean branches |
+
+`pow` requires a non-null finite scalar exponent whose absolute value is at
+most 64; a one-element exponent vector is rejected. Boolean values never
+implicitly convert to numbers. `where_` checks all three shapes and both branch
+dtypes, including an unselected branch. It reads only the selected branch's
+valid value; a null condition produces null.
+
+Arithmetic and comparisons propagate nulls without reading null payload slots.
+NaNs remain valid values: IEEE equality with NaN is false, inequality is true,
+and ordered comparisons are false. Division by zero and floating domain errors
+produce valid IEEE infinities or NaNs. Signed zeros follow the individual
+floating operation; transcendental functions have no cross-platform bitwise
+guarantee. Boolean logic uses Kleene semantics: false AND null is false, true OR
+null is true, XOR propagates either null, and NOT null is null. Null output slots
+contain zero or false.
+
+Output elements and the peak values/validity/shape allocation are checked before
+output allocation. Packed Boolean outputs use exactly `ceil(length / 8)` value
+bytes; a candidate validity bitmap is charged when any operand contains nulls,
+even if selection or Kleene logic ultimately produces an all-valid result and
+discards that bitmap. Limits exclude borrowed inputs, fixed scalar locals,
+allocator/object overhead, and process RSS. Errors are `InvalidArgument` with
+operand dtype/shape paths, `right.value` for an invalid scalar exponent, or
+`outputs.output.elements`/`outputs.output.bytes` for exceeded limits. Messages
+do not include element payloads.
+
+These APIs do not alter Python expression lowering, Table execution,
+NumPy/JAX providers, or graph registration.
 
 ## Expression pipeline
 

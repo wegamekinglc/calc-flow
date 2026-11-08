@@ -1,4 +1,4 @@
-//! Read-only native floating-point array storage.
+//! Read-only native floating-point and Boolean array storage and computation.
 //!
 //! ```
 //! use calc_flow::{Result, array::NativeArray};
@@ -13,10 +13,11 @@
 
 use std::fmt;
 
-use datafusion::arrow::buffer::NullBuffer;
+use datafusion::arrow::buffer::{BooleanBuffer, NullBuffer};
 
 use crate::{CalcFlowError, Result};
 
+mod elementwise;
 mod execution;
 mod reduction;
 pub(crate) mod rolling;
@@ -24,13 +25,18 @@ mod rolling_mean;
 pub(crate) mod rolling_mean_math;
 mod storage;
 
+pub use elementwise::{
+    ArrayView, abs, add, divide, equal, exp, greater, greater_equal, less, less_equal, log,
+    logical_and, logical_not, logical_or, logical_xor, multiply, neg, not_equal, pow, sqrt,
+    subtract, where_,
+};
 pub use execution::ArrayExecutionOptions;
 pub use reduction::{ReductionOptions, max, mean, min, sum};
 pub use rolling::{EwmaOptions, ewma};
 pub use rolling_mean::{RollingMeanOptions, rolling_mean};
 pub use storage::NativeArray;
 
-/// Supported native floating-point element types.
+/// Supported native element types.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ArrayDType {
@@ -38,6 +44,8 @@ pub enum ArrayDType {
     Float32,
     /// IEEE 754 double-precision values.
     Float64,
+    /// Packed Boolean values.
+    Boolean,
 }
 
 /// A borrowed, read-only sequence of typed floating-point values.
@@ -137,6 +145,8 @@ const fn byte_width(dtype: ArrayDType) -> usize {
     match dtype {
         ArrayDType::Float32 => size_of::<f32>(),
         ArrayDType::Float64 => size_of::<f64>(),
+        // Packed storage uses boolean_visible_bytes instead.
+        ArrayDType::Boolean => size_of::<bool>(),
     }
 }
 
@@ -161,15 +171,35 @@ fn visible_bytes(
     let values = len
         .checked_mul(byte_width(dtype))
         .ok_or_else(bytes_overflow)?;
-    let bitmap = match validity {
-        Some(validity) if len != 0 => {
-            let bits = (validity.offset() % 8)
-                .checked_add(len)
-                .ok_or_else(bytes_overflow)?;
-            bits.div_ceil(8)
-        }
-        _ => 0,
-    };
+    visible_bytes_with_values(values, len, validity, rank)
+}
+
+fn boolean_visible_bytes(
+    values: &BooleanBuffer,
+    validity: Option<&NullBuffer>,
+    rank: usize,
+) -> Result<usize> {
+    let bytes = bit_span_bytes(values.len(), values.offset())?;
+    visible_bytes_with_values(bytes, values.len(), validity, rank)
+}
+
+fn bit_span_bytes(len: usize, offset: usize) -> Result<usize> {
+    if len == 0 {
+        return Ok(0);
+    }
+    (offset % 8)
+        .checked_add(len)
+        .map(|bits| bits.div_ceil(8))
+        .ok_or_else(bytes_overflow)
+}
+
+fn visible_bytes_with_values(
+    values: usize,
+    len: usize,
+    validity: Option<&NullBuffer>,
+    rank: usize,
+) -> Result<usize> {
+    let bitmap = validity.map_or(Ok(0), |mask| bit_span_bytes(len, mask.offset()))?;
     let shape = rank
         .checked_mul(size_of::<usize>())
         .ok_or_else(bytes_overflow)?;

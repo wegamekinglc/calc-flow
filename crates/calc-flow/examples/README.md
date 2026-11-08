@@ -35,6 +35,14 @@ They preserve the calculations, immutable inputs, matrix shapes, provider gate,
 and one-time static-weight placement. They do not call NumPy or JAX. Table
 expressions and SQL continue to execute in DataFusion.
 
+[`native_arrays.rs`](native_arrays.rs) uses the built-in synchronous Rust array
+functions directly: nullable Arrow input, rolling mean, scalar broadcasting,
+conditional selection and an exact sum. It needs no provider registration.
+
+```bash
+cargo run -p calc-flow --example native_arrays
+```
+
 ## Python-to-Rust inventory
 
 | Python example                                                                                   | Rust example                                                                                   | Connector features |
