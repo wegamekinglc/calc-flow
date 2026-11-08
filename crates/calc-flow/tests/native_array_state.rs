@@ -212,12 +212,8 @@ fn test_state_debug_reports_descriptors_without_sample_values() {
     }
 }
 
-#[test]
-fn test_sliced_nullable_chunks_keep_global_mean_cadence_and_eager_bits() {
-    use calc_flow::{RollingNumericalProfile, array::rolling_mean};
-    use datafusion::arrow::array::{Array, Float64Array};
-    use std::sync::Arc;
-    let prices = Float64Array::from(
+fn cadence_prices() -> datafusion::arrow::array::Float64Array {
+    datafusion::arrow::array::Float64Array::from(
         (0..135)
             .map(|index| match index {
                 0 | 134 => Some(9e99),
@@ -229,7 +225,15 @@ fn test_sliced_nullable_chunks_keep_global_mean_cadence_and_eager_bits() {
                 _ => Some(1e12 + f64::from(index % 7) * 0.125),
             })
             .collect::<Vec<_>>(),
-    );
+    )
+}
+
+#[test]
+fn test_sliced_nullable_chunks_keep_global_mean_cadence_and_eager_bits() {
+    use calc_flow::{RollingNumericalProfile, array::rolling_mean};
+    use datafusion::arrow::array::Array;
+    use std::sync::Arc;
+    let prices = cadence_prices();
     let sliced = prices.slice(1, 133);
     let input = NativeArray::from_arrow(Arc::new(sliced), vec![133]).unwrap();
     let execution = ArrayExecutionOptions::default();
