@@ -330,8 +330,22 @@ jobs:
           path: coverage.xml
           if-no-files-found: error
           retention-days: 14
+      - name: Configure bounded coverage downloads
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/calc-flow-coverage-curl"
+          cat > "$RUNNER_TEMP/calc-flow-coverage-curl/.curlrc" <<'EOF'
+          fail
+          retry = 2
+          retry-all-errors
+          connect-timeout = 10
+          max-time = 30
+          retry-max-time = 100
+          EOF
       - name: Report Python coverage to Coveralls
         uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
+        env:
+          CURL_HOME: ${{ runner.temp }}/calc-flow-coverage-curl
         with:
           coverage-reporter-version: v0.6.22
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -812,8 +826,22 @@ jobs:
           path: rust-lcov.info
           if-no-files-found: error
           retention-days: 14
+      - name: Configure bounded coverage downloads
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/calc-flow-coverage-curl"
+          cat > "$RUNNER_TEMP/calc-flow-coverage-curl/.curlrc" <<'EOF'
+          fail
+          retry = 2
+          retry-all-errors
+          connect-timeout = 10
+          max-time = 30
+          retry-max-time = 100
+          EOF
       - name: Report Rust coverage to Coveralls
         uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
+        env:
+          CURL_HOME: ${{ runner.temp }}/calc-flow-coverage-curl
         with:
           coverage-reporter-version: v0.6.22
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -852,8 +880,22 @@ jobs:
     if: always() && needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
+      - name: Configure bounded coverage downloads
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/calc-flow-coverage-curl"
+          cat > "$RUNNER_TEMP/calc-flow-coverage-curl/.curlrc" <<'EOF'
+          fail
+          retry = 2
+          retry-all-errors
+          connect-timeout = 10
+          max-time = 30
+          retry-max-time = 100
+          EOF
       - name: Close the parallel Coveralls build
         uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
+        env:
+          CURL_HOME: ${{ runner.temp }}/calc-flow-coverage-curl
         with:
           coverage-reporter-version: v0.6.22
           github-token: ${{ secrets.GITHUB_TOKEN }}
