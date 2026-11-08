@@ -2805,11 +2805,11 @@ impl WindowAccumulator {
     /// matches the checkpoint rebuild for non-finite classifications.
     #[inline]
     fn is_non_finite(&self) -> bool {
-        let sum_non_finite = match &self.sum {
-            Some(SumState::Float(total)) => !total.is_finite(),
-            _ => false,
+        let sum = match &self.sum {
+            Some(SumState::Float(total)) => Some(*total),
+            _ => None,
         };
-        sum_non_finite || !self.mean.is_finite() || !self.m2.is_finite()
+        crate::array::rolling_mean_math::numerical_risk(sum, self.mean, self.m2)
     }
 
     const fn has_float_sum(&self) -> bool {

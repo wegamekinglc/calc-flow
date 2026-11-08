@@ -9,6 +9,16 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-08: Add a direct Rust native row-window mean with explicit minimum
+  periods and numerical profile. Share floating add/remove, repair and readout
+  arithmetic with table kernels while preserving checkpoint fields and shared
+  history; preflight output and fixed-capacity history allocations.
+
+- 2026-11-08: Expose native Rust EWMA with first-valid-sample initialization,
+  nullable aligned Float64 output, explicit span/warm-up options and bounded
+  output/state allocation. Share the numeric transition with typed table EWMA
+  while preserving existing cumulative behavior, errors and checkpoint fields.
+
 - 2026-11-08: Add synchronous Rust native sum, mean, min and max reductions
   with explicit null handling and output/scratch limits. Sum and mean use
   exact finite accumulation and final ties-to-even rounding; scalar outputs
