@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-08: Add synchronous Rust native sum, mean, min and max reductions
+  with explicit null handling and output/scratch limits. Sum and mean use
+  exact finite accumulation and final ties-to-even rounding; scalar outputs
+  retain validity, dtype and signed-zero contracts without a Python host.
+
 - 2026-11-08: Add immutable Rust native float32/float64 scalar and vector
   storage, read-only borrowed views, Arrow buffer sharing and native array
   `Batch` payload accounting. Preserve validity offsets and distinguish visible
