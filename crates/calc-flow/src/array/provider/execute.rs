@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use super::{
     budget,
     infer::{self, Descriptor, Plan, Shape},
-    ir::{Binary, Node, Reduce, Unary},
+    ir::{Binary, Input, Node, Reduce, Unary},
 };
 use crate::{
     Batch, BatchMetadata, Result,
@@ -131,30 +131,32 @@ fn inputs_descriptors(
     }
     let mut descriptors = BTreeMap::new();
     for input in &plan.program.inputs {
-        let field = format!("inputs.{}", input.name);
         let batch = inputs
             .get(&input.name)
             .ok_or_else(|| invalid("inputs", "input names differ from declarations"))?;
-        let value = native(batch, &format!("{field}.backend"))?;
-        if value.dtype() != input.dtype.native() {
-            return Err(invalid(
-                &format!("{field}.dtype"),
-                "dtype differs from declaration",
-            ));
-        }
-        let shape = native_shape(value.shape(), &field)?;
-        validate_input_shape(&input.shape, shape, &field)?;
-        descriptors.insert(
-            input.name.clone(),
-            Descriptor {
-                dtype: input.dtype,
-                shape,
-                nullable: value.as_arrow().null_count() != 0,
-            },
-        );
+        descriptors.insert(input.name.clone(), input_descriptor(input, batch)?);
     }
     Ok(descriptors)
 }
+
+fn input_descriptor(input: &Input, batch: &Batch) -> Result<Descriptor> {
+    let field = format!("inputs.{}", input.name);
+    let value = native(batch, &format!("{field}.backend"))?;
+    if value.dtype() != input.dtype.native() {
+        return Err(invalid(
+            &format!("{field}.dtype"),
+            "dtype differs from declaration",
+        ));
+    }
+    let shape = native_shape(value.shape(), &field)?;
+    validate_input_shape(&input.shape, shape, &field)?;
+    Ok(Descriptor {
+        dtype: input.dtype,
+        shape,
+        nullable: value.as_arrow().null_count() != 0,
+    })
+}
+
 pub(super) fn native_shape(shape: &[usize], field: &str) -> Result<Shape> {
     match shape {
         [] => Ok(Shape::Scalar),

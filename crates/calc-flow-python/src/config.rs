@@ -327,7 +327,8 @@ impl PyRuntime {
         Ok(Self::from_tokio(Arc::new(tokio)))
     }
 
-    fn _register_native_array(&self) -> PyResult<()> {
+    #[pyo3(name = "_register_native_array")]
+    fn register_native_array(&self) -> PyResult<()> {
         let guard = self.state.read();
         let state = guard
             .as_ref()
@@ -1045,11 +1046,11 @@ mod tests {
         Python::attach(|py| {
             let runtime = PyRuntime::new().unwrap();
             let providers = Arc::clone(&runtime.state.read().as_ref().unwrap().providers);
-            runtime._register_native_array().unwrap();
+            runtime.register_native_array().unwrap();
             let factory = providers
                 .resolve_batch("native", "array_expr", "1")
                 .unwrap();
-            let error = runtime._register_native_array().unwrap_err();
+            let error = runtime.register_native_array().unwrap_err();
             assert!(
                 error
                     .value(py)
@@ -1072,7 +1073,7 @@ mod tests {
             let cleared = PyRuntime::new().unwrap();
             let providers = Arc::clone(&cleared.state.read().as_ref().unwrap().providers);
             cleared.__clear__();
-            let error = cleared._register_native_array().unwrap_err();
+            let error = cleared.register_native_array().unwrap_err();
             assert_eq!(error.value(py).to_string(), CLEARED_RUNTIME_MESSAGE);
             assert!(
                 providers
