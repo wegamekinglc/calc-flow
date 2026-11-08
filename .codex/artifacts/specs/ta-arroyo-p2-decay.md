@@ -35,10 +35,10 @@ implementation; their presence must not be misreported as newly optimized.
 
 Every decay output currently collects valid frame samples and folds weighted
 products for every row:
-[rolling.rs:4166](../../../crates/calc-flow/src/operator/rolling.rs:4166).
+[rolling.rs](../../../crates/calc-flow/src/operator/rolling.rs).
 This creates per-output-window work and allocation proportional to the retained
 frame. Typed admission rejects decay:
-[kernel.rs:1609](../../../crates/calc-flow/src/operator/rolling/kernel.rs:1609).
+[kernel.rs](../../../crates/calc-flow/src/operator/rolling/kernel.rs).
 Consequently decay also prevents a shared stage from using the typed path for
 its otherwise admitted numeric outputs.
 
