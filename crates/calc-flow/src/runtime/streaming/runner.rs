@@ -1,6 +1,7 @@
 mod asof;
 mod checkpoint_task;
 mod join_terminal;
+mod native_sequences;
 pub(super) mod operator_fusion;
 mod source_history;
 mod sql_recovery;
@@ -2074,32 +2075,26 @@ async fn run_job_driver(
         })
         .collect();
     let cancellation = context.cancellation().clone();
+    let native_sequences = crate::array::NativeSequenceInventory::for_plan(&plan, &context);
     let checkpoint = match checkpoint {
-        Some(checkpoint) => match open_checkpoint_runtime(checkpoint, &cancellation).await {
-            Ok(checkpoint) => {
-                if let Err(error) = core
-                    .metrics
-                    .record_checkpoint_orphan_cleanup(checkpoint.startup_orphans_removed)
-                {
-                    return core.prepare_driver_report(checkpoint_start_failure(launch_id, error));
+        Some(checkpoint) => {
+            match open_checkpoint_runtime(checkpoint, &cancellation, native_sequences).await {
+                Ok(checkpoint) => {
+                    if let Err(error) = core
+                        .metrics
+                        .record_checkpoint_orphan_cleanup(checkpoint.startup_orphans_removed)
+                    {
+                        return core
+                            .prepare_driver_report(checkpoint_start_failure(launch_id, error));
+                    }
+                    Some(checkpoint)
                 }
-                Some(checkpoint)
+                Err(error) => {
+                    return core
+                        .prepare_driver_report(native_sequences::failure(launch_id, error, false));
+                }
             }
-            Err(error) => {
-                return core.prepare_driver_report(DriverReport {
-                    launch_id,
-                    completion: DriverCompletion::StartFailed(StartFailure {
-                        primary: Arc::new(RuntimeFailure {
-                            origin: FailureOrigin::Preflight,
-                            error,
-                        }),
-                        diagnostic_id: None,
-                        cleanup_failures: Vec::new(),
-                    }),
-                    cleanup_failures: Vec::new(),
-                });
-            }
-        },
+        }
         None => None,
     };
     let recovered = checkpoint
@@ -2125,6 +2120,13 @@ async fn run_job_driver(
     {
         return core.prepare_driver_report(checkpoint_start_failure(launch_id, error));
     }
+    let native_snapshots = match native_sequences::load(&plan, checkpoint.as_ref(), &context).await
+    {
+        Ok(snapshots) => snapshots,
+        Err(error) => {
+            return core.prepare_driver_report(native_sequences::native_failure(launch_id, error));
+        }
+    };
     if let Some(checkpoint) = checkpoint.as_ref()
         && let Some(selected) = checkpoint.selected.as_ref()
     {
@@ -2133,6 +2135,17 @@ async fn run_job_driver(
         }
         match manifest_is_terminal(&selected.manifest, &plan) {
             Ok(true) => {
+                if let Err(error) = native_sequences::restore_terminal(
+                    &mut plan,
+                    checkpoint,
+                    native_snapshots,
+                    &context,
+                )
+                .await
+                {
+                    return core
+                        .prepare_driver_report(native_sequences::native_failure(launch_id, error));
+                }
                 let mut sql_frames = sql_recovery::TerminalSqlFrames::default();
                 match sql_recovery::restore_terminal(
                     &mut plan,
@@ -2224,6 +2237,7 @@ async fn run_job_driver(
                 &mut sources,
                 &core.asof_loads,
                 &cancellation,
+                native_snapshots,
             )
             .await
             {
@@ -2606,6 +2620,7 @@ async fn prepare_checkpoint_recovery(
     sources: &mut BTreeMap<String, SourceBinding>,
     loads: &asof::LoadOwner,
     cancellation: &CancellationToken,
+    mut native_snapshots: BTreeMap<String, crate::OperatorStateSnapshot>,
 ) -> crate::Result<(
     BTreeMap<String, OperatorRestoreState>,
     Option<DurableProgressRestore>,
@@ -2659,16 +2674,21 @@ async fn prepare_checkpoint_recovery(
                     "checkpoint operator {operator_id:?} is absent from the prepared plan"
                 ),
             })?;
-        let snapshot = asof::load_snapshot_with_join(
-            &checkpoint.transaction,
-            loads,
-            operator,
-            operator_id,
-            entry,
-            cancellation,
-            checkpoint.join_preload_reader.as_ref(),
-        )
-        .await?;
+        let snapshot = match native_snapshots.remove(operator_id) {
+            Some(snapshot) => snapshot,
+            None => {
+                asof::load_snapshot_with_join(
+                    &checkpoint.transaction,
+                    loads,
+                    operator,
+                    operator_id,
+                    entry,
+                    cancellation,
+                    checkpoint.join_preload_reader.as_ref(),
+                )
+                .await?
+            }
+        };
         let mut snapshot = checkpoint_capability.decode_snapshot(operator_id, snapshot)?;
         let restored_output_frontier = snapshot
             .inline_metadata
@@ -2779,7 +2799,8 @@ async fn recover_opened_sinks(
 async fn open_checkpoint_runtime(
     checkpoint: ValidatedCheckpointRuntime,
     cancellation: &CancellationToken,
-) -> crate::Result<OpenedCheckpointRuntime> {
+    native_sequences: Option<Arc<crate::array::NativeSequenceInventory>>,
+) -> Result<OpenedCheckpointRuntime, crate::state::NativeRecoveryError> {
     let ValidatedCheckpointRuntime { spec, identity } = checkpoint;
     let (state_backend, manifest_root, managed_storage, managed, local_backend) = match spec.storage
     {
@@ -2828,18 +2849,23 @@ async fn open_checkpoint_runtime(
     .map_err(|error| sanitize_managed_preflight_error(error, managed, false))?;
     #[cfg(all(test, unix))]
     let transaction = configure_test_manifest_transaction(transaction, &spec.faults);
+    let transaction = native_sequences::attach(
+        transaction,
+        native_sequences.clone(),
+        join_preload_reader.as_ref(),
+    )?;
     let selected = transaction
-        .select_latest_cancellable(&identity, cancellation)
+        .select_latest_native_cancellable(&identity, cancellation)
         .await
-        .map_err(|error| sanitize_managed_preflight_error(error, managed, true))?;
+        .map_err(|error| native_sequences::sanitize_preflight(error, managed))?;
     let startup_orphans_removed = transaction
-        .retain_cancellable(
+        .retain_native_cancellable(
             &identity,
             selected.as_ref().map(|selected| &selected.manifest),
             cancellation,
         )
         .await
-        .map_err(|error| sanitize_managed_preflight_error(error, managed, true))?
+        .map_err(|error| native_sequences::sanitize_preflight(error, managed))?
         .removed_orphan_segments;
     #[cfg(test)]
     let transaction =
@@ -2851,6 +2877,7 @@ async fn open_checkpoint_runtime(
     let status = CheckpointStatusHandle::new(&identity, selected.as_ref());
     Ok(OpenedCheckpointRuntime {
         transaction,
+        native_sequences,
         join_preload_reader,
         _managed_storage: managed_storage,
         identity,
@@ -2996,7 +3023,7 @@ fn sanitize_managed_recovery_failure(
     failure: Arc<RuntimeFailure>,
     managed: bool,
 ) -> Arc<RuntimeFailure> {
-    if !managed {
+    if !managed || matches!(failure.origin, FailureOrigin::NativeSequenceRecovery { .. }) {
         return failure;
     }
     let error = safe_managed_recovery_error(&failure.error);
@@ -3348,6 +3375,7 @@ async fn run_operator_entry(
         mut local_owners,
     } = create_runtime_edges(&plan, &layout, &core.metrics).map_err(preflight_entry_failure)?;
     let node_count = plan.nodes.len();
+    let native_entries = native_sequences::entry_nodes(&plan, &restores, context);
     let registration = &mut OperatorRegistration {
         next_node_order: 0,
         context,
@@ -3380,7 +3408,14 @@ async fn run_operator_entry(
     }
     drop(ack_tx);
     let _ = entry_tx.send(true);
-    await_operator_entry(node_count, core, &mut ack_rx, &mut supervisor).await?;
+    await_operator_entry(
+        node_count,
+        core,
+        &mut ack_rx,
+        &mut supervisor,
+        &native_entries,
+    )
+    .await?;
     let endpoints = take_boundary_endpoints(
         plan.source_routes,
         plan.sink_routes,
@@ -3563,6 +3598,7 @@ async fn await_operator_entry(
     core: &Arc<JobCore>,
     ack_rx: &mut mpsc::UnboundedReceiver<super::operator_task::OperatorEntryAck>,
     supervisor: &mut TaskSupervisor,
+    native_entries: &BTreeSet<String>,
 ) -> Result<(), EntryFailure> {
     let mut acks = Vec::with_capacity(node_count);
     for _ in 0..node_count {
@@ -3588,8 +3624,14 @@ async fn await_operator_entry(
         acks.into_iter().find_map(|ack| {
             ack.result.err().map(|error| {
                 Arc::new(RuntimeFailure {
-                    origin: FailureOrigin::OperatorEntry {
-                        node_id: ack.node_id,
+                    origin: if native_entries.contains(&ack.node_id) {
+                        FailureOrigin::NativeSequenceRecovery {
+                            node_id: ack.node_id,
+                        }
+                    } else {
+                        FailureOrigin::OperatorEntry {
+                            node_id: ack.node_id,
+                        }
                     },
                     error,
                 })

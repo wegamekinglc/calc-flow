@@ -13,6 +13,13 @@ measurements. Use the current guides for supported behavior.
   bindings and omit them from finite data-source coverage, preserving legacy
   Table/NumPy/JAX static validation and source requirements.
 
+- 2026-11-08: Migrate capability snapshots to schema 5 with provider state-layout
+  inventories, a single-ordered-sequence partition contract and strict fixed-port
+  JSON Schema metadata. Extend the native bundle to three frozen identity records
+  for four lifecycle registrations, including the checkpointed native sequence
+  provider; validate complete snapshot evidence before replaying the bundle once.
+  Project/manifest version 3 and existing NumPy/JAX contracts remain unchanged.
+
 - 2026-11-08: Add native ArrayExpr dynamic declarations, Rust-backed shape/type
   queries, axis reductions and synchronous single-array collection from native
   array and table/SQL roots. Lower native table attachment through row-preserving
@@ -24,6 +31,11 @@ measurements. Use the current guides for supported behavior.
   streams and shared per-run/job static preparation. Preserve per-alias digest-v1
   recovery checks, account payload/descriptor lifetimes, settle cancelled startup
   work before cleanup, and register the three array/table factories atomically.
+
+- 2026-11-09: Add the Rust native ordered array-sequence stream factory with
+  transactional output, bounded binary state captures and managed local
+  recovery. Validate ordinary and terminal native state before opening
+  connectors, and retain I/O locks and state credit through worker settlement.
 
 - 2026-11-08: Add owned Rust rolling-mean and EWMA states with transactional
   chunk processing, checked cumulative positions, bounded retained history and

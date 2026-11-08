@@ -22,6 +22,8 @@ use crate::runtime::streaming::entity_work::ScopedEntityWorkClient;
 /// state. Determinism and replay safety remain separate because best-effort
 /// and at-least-once plans may use a stateless nondeterministic provider while
 /// exactly-once plans must reject it.
+/// Checkpointed stateful providers additionally prove a positive state version
+/// and preserve that proof throughout compilation and managed recovery.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum StreamOperatorLifecycle {
@@ -35,6 +37,17 @@ pub enum StreamOperatorLifecycle {
         /// Repeating one callback with the same inputs produces the same output.
         deterministic: bool,
         /// Replaying an input prefix is safe for downstream delivery.
+        replay_safe: bool,
+    },
+    /// The operator retains recoverable state across ordered callback invocations.
+    CheckpointedStateful {
+        /// Positive semantic state version used by managed checkpoint wrappers.
+        state_version: u32,
+        /// Preserving row order across chunk splits preserves output positions.
+        microbatch_invariant: bool,
+        /// Repeating a restored input suffix produces the same output.
+        deterministic: bool,
+        /// Replaying a prefix is safe under the plan's delivery contract.
         replay_safe: bool,
     },
 }
@@ -51,14 +64,26 @@ impl StreamOperatorLifecycle {
     }
 
     pub(crate) const fn is_exactly_once_safe(self) -> bool {
-        matches!(
-            self,
+        match self {
             Self::Stateless {
                 microbatch_invariant: true,
                 deterministic: true,
                 replay_safe: true,
-            }
-        )
+            } => true,
+            Self::CheckpointedStateful {
+                state_version,
+                microbatch_invariant: true,
+                deterministic: true,
+                replay_safe: true,
+            } => state_version > 0,
+            _ => false,
+        }
+    }
+
+    pub(crate) const fn proves_checkpointed_state(self, expected: u32) -> bool {
+        matches!(self, Self::CheckpointedStateful {
+            state_version, microbatch_invariant: true, ..
+        } if state_version > 0 && state_version == expected)
     }
 }
 
@@ -72,7 +97,7 @@ impl StreamOperatorLifecycle {
 #[derive(Clone)]
 pub struct StateSegment {
     bytes: Arc<Vec<u8>>,
-    sha256: String,
+    sha256: Arc<String>,
     owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
@@ -83,9 +108,53 @@ impl StateSegment {
         let sha256 = hex::encode(Sha256::digest(&bytes));
         Self {
             bytes: Arc::new(bytes),
-            sha256,
+            sha256: Arc::new(sha256),
             owner: None,
         }
+    }
+
+    pub(crate) fn new_controlled(
+        bytes: Vec<u8>,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Self> {
+        check()?;
+        let mut hash = Sha256::new();
+        for chunk in bytes.chunks(4096) {
+            check()?;
+            hash.update(chunk);
+        }
+        check()?;
+        let digest: [u8; 32] = hash.finalize().into();
+        let checksum = Self::encode_digest(&digest)?;
+        check()?;
+        Ok(Self::from_validated(bytes, checksum))
+    }
+
+    fn encode_digest(digest: &[u8; 32]) -> Result<String> {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let mut checksum = String::new();
+        checksum
+            .try_reserve_exact(64)
+            .map_err(|error| CalcFlowError::CheckpointMismatch {
+                message: format!("state segment checksum allocation failed: {error}"),
+            })?;
+        for &byte in digest {
+            checksum.push(char::from(DIGITS[usize::from(byte >> 4)]));
+            checksum.push(char::from(DIGITS[usize::from(byte & 15)]));
+        }
+        Ok(checksum)
+    }
+
+    pub(crate) fn shared_allocations(&self) -> (Arc<Vec<u8>>, Arc<String>) {
+        (Arc::clone(&self.bytes), Arc::clone(&self.sha256))
+    }
+
+    pub(crate) fn retained_buffer_bytes(&self) -> Option<usize> {
+        self.bytes.capacity().checked_add(self.sha256.capacity())
+    }
+
+    pub(crate) const fn controlled_scratch_bytes() -> usize {
+        size_of::<Sha256>() + size_of::<[u8; 32]>()
     }
 
     /// Wraps bytes whose digest was already validated against a committed
@@ -93,7 +162,7 @@ impl StateSegment {
     pub(crate) fn from_validated(bytes: Vec<u8>, sha256: String) -> Self {
         Self {
             bytes: Arc::new(bytes),
-            sha256,
+            sha256: Arc::new(sha256),
             owner: None,
         }
     }
@@ -166,6 +235,9 @@ impl PartialEq for StateSegment {
 }
 
 impl Eq for StateSegment {}
+
+#[cfg(test)]
+mod segment_tests;
 
 /// Operator-private state captured at one epoch (API note A2.3).
 ///
@@ -735,6 +807,24 @@ pub trait StreamOperator: OperatorMetadata {
                 message: "stateless operator state must be empty".into(),
             })
         }
+    }
+
+    /// Restores state before managed operator entry and source release.
+    ///
+    /// The default preserves the existing synchronous restore implementation.
+    /// Native providers can override it to admit bounded asynchronous workers.
+    ///
+    /// # Errors
+    ///
+    /// Returns cancellation/deadline errors before invoking synchronous restore,
+    /// or the unchanged error from that implementation.
+    async fn restore_async(
+        &mut self,
+        snapshot: &OperatorStateSnapshot,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        context.check_cancelled()?;
+        self.restore(snapshot)
     }
 
     /// Resets the operator to its freshly constructed state (API note A3).

@@ -580,14 +580,17 @@ impl ProviderRegistry {
         array: Arc<dyn BatchOperatorFactory>,
         table_batch: Arc<dyn BatchOperatorFactory>,
         table_stream: Arc<dyn StreamOperatorFactory>,
+        sequence_stream: Arc<dyn StreamOperatorFactory>,
     ) -> Result<()> {
         let array_key = ("native".into(), "array_expr".into(), "1".into());
         let table_key = ("native".into(), "table_array".into(), "1".into());
+        let sequence_key = ("native".into(), "array_sequence".into(), "1".into());
         let mut batch = self.batch_factories.write();
         let mut stream = self.stream_factories.write();
         if batch.contains_key(&array_key)
             || batch.contains_key(&table_key)
             || stream.contains_key(&table_key)
+            || stream.contains_key(&sequence_key)
         {
             return Err(CalcFlowError::InvalidArgument {
                 field: "provider".into(),
@@ -597,6 +600,7 @@ impl ProviderRegistry {
         batch.insert(array_key, array);
         batch.insert(table_key.clone(), table_batch);
         stream.insert(table_key, table_stream);
+        stream.insert(sequence_key, sequence_stream);
         Ok(())
     }
 

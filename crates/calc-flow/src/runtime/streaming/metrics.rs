@@ -679,7 +679,8 @@ impl MetricsRecorder {
                 &mut first_overflow,
             );
             match &failure.origin {
-                FailureOrigin::OperatorEntry { node_id } => {
+                FailureOrigin::OperatorEntry { node_id }
+                | FailureOrigin::NativeSequenceRecovery { node_id } => {
                     attempt_node_error(&mut snapshot.nodes, node_id, &mut first_overflow);
                 }
                 FailureOrigin::SourceOpen { binding_id }

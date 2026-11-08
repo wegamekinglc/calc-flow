@@ -37,6 +37,7 @@ On this page:
 - [Checkpoints and recovery](#checkpoints-and-recovery)
 - [Job lifecycle](#job-lifecycle)
 - [Runtime tuning and backpressure](#runtime-tuning-and-backpressure)
+- [Native array sequence recovery](#native-array-sequence-recovery)
 - [Status and diagnostics](#status-and-diagnostics)
 - [Production checklist](#production-checklist)
 
@@ -1741,6 +1742,31 @@ Backpressure is expected. A slow sink eventually awaits upstream sends. Do not
 hide that signal behind an unbounded queue inside a connector. If the external
 transport cannot pause, declare the loss explicitly and use a best-effort
 route.
+
+## Native array sequence recovery
+
+The Rust `NativeArraySequenceFactory` provides a single ordered Array ingress
+with one rolling-mean or EWMA kernel. It uses the runner's normal bounded
+edges, barriers and EOF checkpoints. Equal dynamic batches remain valid;
+static declarations, implicit entity grouping and multi-input sequence joins
+are unsupported. See the [Rust sequence contract](rust-api.md#checkpointed-native-array-sequences)
+and [executable example](../crates/calc-flow/examples/native_sequence_stream.rs).
+
+Managed local recovery checks native encoded lengths and numerical-state
+limits before allocating the input buffer, then validates SHA and the binary
+codec in controlled workers. A terminal manifest receives the same validation
+before returning success or opening a sink. Invalid native state fails closed
+with its operator identity and original `state.*` field. Cancellation remains
+cancellation; other providers retain their existing diagnostic redaction.
+Python managed startup reports these failures as a frozen `StreamingRuntimeError`
+with `category="checkpoint_mismatch"`, `component_kind="operator"`, the actual
+`component_id` and the safe `state.*` field in `message`. Direct core errors
+mapped through the generic Python boundary use `CheckpointError`; the managed
+runner keeps its existing structured exception type.
+Native state reads and checkpoint writes retain their transaction/publication
+locks and payload owners until actual I/O settles after an abandoned waiter.
+The public managed API uses local storage; a lower-level route without the
+certified bounded reader cannot restore native sequence state.
 
 ## Status and diagnostics
 

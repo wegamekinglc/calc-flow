@@ -197,12 +197,8 @@ impl PipelineBuilder {
             NodeOperator::StreamAsofJoin(_) => {
                 OperatorCheckpointCapability::CheckpointedStateful { state_version: 3 }
             }
-            NodeOperator::Stream(operator) if operator.lifecycle().is_proven_stateless() => {
-                OperatorCheckpointCapability::Stateless
-            }
-            NodeOperator::Batch(_) | NodeOperator::Stream(_) => {
-                OperatorCheckpointCapability::Unproven
-            }
+            NodeOperator::Stream(operator) => external_checkpoint_capability(operator.lifecycle()),
+            NodeOperator::Batch(_) => OperatorCheckpointCapability::Unproven,
         };
         self.add_node_with_capability(node_id, operator, checkpoint_capability)
     }
@@ -225,11 +221,17 @@ impl PipelineBuilder {
     where
         O: Into<NodeOperator>,
     {
-        self.add_node_with_capability(
+        let mut builder = self.add_node_with_capability(
             node_id,
             operator.into(),
             OperatorCheckpointCapability::CheckpointedStateful { state_version },
-        )
+        )?;
+        builder
+            .nodes
+            .get_mut(node_id)
+            .expect("test node was just added")
+            .checkpoint_test_override = true;
+        Ok(builder)
     }
 
     fn add_node_with_capability(
@@ -254,6 +256,8 @@ impl PipelineBuilder {
                 node_id: node_id.into(),
                 operator,
                 checkpoint_capability,
+                #[cfg(test)]
+                checkpoint_test_override: false,
             },
         );
         Ok(self)
@@ -278,6 +282,21 @@ impl PipelineBuilder {
         }
         self.edges.push(edge);
         Ok(self)
+    }
+}
+
+fn external_checkpoint_capability(
+    lifecycle: crate::StreamOperatorLifecycle,
+) -> OperatorCheckpointCapability {
+    match lifecycle {
+        crate::StreamOperatorLifecycle::Stateless {
+            microbatch_invariant: true,
+            ..
+        } => OperatorCheckpointCapability::Stateless,
+        crate::StreamOperatorLifecycle::CheckpointedStateful { state_version, .. } => {
+            OperatorCheckpointCapability::CheckpointedStateful { state_version }
+        }
+        _ => OperatorCheckpointCapability::Unproven,
     }
 }
 

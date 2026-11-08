@@ -602,7 +602,8 @@ class Runtime:
 
         The records are the registrations that ``capabilities`` describes: each
         ``provider``, ``native_provider`` and ``scalar_udf`` record has one
-        capability entry with the same identity.
+        capability entry with the same identity. The native helper publishes
+        three records together; replay its complete bundle once.
         """
         with self._registration_lock:
             registrations = self._copied_registrations()

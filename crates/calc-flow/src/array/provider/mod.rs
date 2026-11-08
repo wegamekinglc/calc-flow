@@ -15,11 +15,21 @@ mod infer;
 mod ir;
 pub(super) mod preparation;
 mod schema;
+mod sequence_pending;
+mod stream;
+pub use stream::NativeArraySequenceFactory;
+pub(crate) use stream::inventory::{
+    NativeIoCompletion, NativeSequenceFailure, NativeSequenceInventory, NativeSequenceRecord,
+    is_native_sequence_operator,
+};
 mod shape;
 mod table;
 pub use table::NativeTableArrayFactory;
 mod validate;
 mod worker;
+
+#[cfg(test)]
+mod sequence_pending_tests;
 
 /// Factory for the bounded, batch-only `native:array_expr@1` provider.
 ///
@@ -77,7 +87,8 @@ impl NativeArrayFactory {
     }
 }
 
-/// Atomically registers native array batch and table batch/stream factories.
+/// Atomically registers native array batch, table batch/stream and sequence
+/// stream factories.
 ///
 /// # Errors
 ///
@@ -88,9 +99,10 @@ pub fn register_native(registry: &ProviderRegistry) -> Result<()> {
     let array = Arc::new(NativeArrayFactory {
         workers: Arc::clone(&workers),
     });
-    let table = Arc::new(NativeTableArrayFactory::with_workers(workers));
+    let table = Arc::new(NativeTableArrayFactory::with_workers(Arc::clone(&workers)));
+    let sequence = Arc::new(NativeArraySequenceFactory::with_workers(workers));
     let table_batch = Arc::clone(&table);
-    registry.register_native_array_bundle(array, table_batch, table)
+    registry.register_native_array_bundle(array, table_batch, table, sequence)
 }
 
 impl BatchOperatorFactory for NativeArrayFactory {

@@ -49,7 +49,13 @@ pub use execution::ArrayExecutionOptions;
 pub use matrix::{matmul, reshape, transpose};
 pub(crate) use provider::preparation::settlement::{Preparation, channel as preparation_channel};
 pub(crate) use provider::preparation::{NativeScope, NativeStaticPlan};
-pub use provider::{NativeArrayFactory, NativeTableArrayFactory, register_native};
+pub use provider::{
+    NativeArrayFactory, NativeArraySequenceFactory, NativeTableArrayFactory, register_native,
+};
+pub(crate) use provider::{
+    NativeIoCompletion, NativeSequenceFailure, NativeSequenceInventory, NativeSequenceRecord,
+    is_native_sequence_operator,
+};
 pub use reduction::{Reduction, ReductionOptions, max, mean, min, reduce, sum};
 pub use rolling::{EwmaOptions, ewma};
 pub use rolling_mean::{RollingMeanOptions, rolling_mean};

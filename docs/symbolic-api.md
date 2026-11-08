@@ -597,7 +597,10 @@ within one run or job; each physical alias retains its own descriptor checks,
 name-dependent digest-v1 hashing and recovery comparison before sources open.
 This does not remove per-alias hashing work or introduce a serialized cache key.
 NativeArray entries in TableExpr/Program stream mappings bind static parameters;
-standalone dynamic native array streams remain unsupported. Existing ASOF and
+high-level ArrayExpr streams remain unsupported. The separate advanced native
+`array_sequence@1` provider owns one ordered vector sequence with its native
+checkpoint codec; it does not expand symbolic attachment or mixed-result APIs.
+Existing ASOF and
 event-window admission restrictions remain in force.
 
 ## Symbolic matrix compilation

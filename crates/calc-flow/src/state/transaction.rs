@@ -21,9 +21,11 @@ use std::fs::File;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sha2::{Digest as _, Sha256};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
+mod native;
 mod working;
+pub(crate) use native::NativeRecoveryError;
 pub(crate) use working::WorkingStatePins;
 
 use super::{
@@ -159,7 +161,8 @@ pub(crate) struct ManifestTransaction {
     lineage_hash: String,
     manifest_root: PathBuf,
     retained_epochs: usize,
-    operation: Mutex<()>,
+    operation: Arc<Mutex<()>>,
+    native: Option<Arc<native::NativePolicy>>,
     session_segments: Arc<parking_lot::Mutex<SessionSegments>>,
     #[cfg(test)]
     fault_hook: Option<ManifestTransactionFaultHook>,
@@ -277,7 +280,8 @@ impl ManifestTransaction {
             ),
             manifest_root,
             retained_epochs,
-            operation: Mutex::new(()),
+            operation: Arc::new(Mutex::new(())),
+            native: None,
             session_segments: Arc::new(parking_lot::Mutex::new(SessionSegments::default())),
             #[cfg(test)]
             fault_hook: None,
@@ -346,37 +350,40 @@ impl ManifestTransaction {
         prepared: PreparedEpochManifest,
         cancellation: &CancellationToken,
     ) -> Result<ManifestPublication> {
-        let _guard = owner_settled(cancellation, "manifest-publish-lock", async {
-            Ok(self.operation.lock().await)
-        })
-        .await?;
+        let guard = self
+            .operation(cancellation, "manifest-publish-lock")
+            .await?;
         #[cfg(test)]
         self.settle_operation_hook(ManifestOperationPoint::Publish, cancellation)
             .await?;
-        self.publish_locked(prepared, cancellation).await
+        self.publish_locked(prepared, cancellation, &guard).await
     }
 
     async fn publish_locked(
         &self,
         prepared: PreparedEpochManifest,
         cancellation: &CancellationToken,
+        guard: &native::Operation<'_>,
     ) -> Result<ManifestPublication> {
+        self.reject_native_raw_prepared(&prepared.staged_segments)?;
         self.stage_prepared_segments(&prepared.staged_segments, cancellation)
             .await?;
         self.validate_prepared_segments(&prepared.staged_segments, cancellation)
             .await?;
         self.publish_prepared_segments(&prepared.staged_segments, cancellation)
             .await?;
-        owner_settled(
+        let read = native::CandidateRead {
+            name: "manifest-publish-segment-read",
+            session: Some(&self.session_segments),
             cancellation,
-            "manifest-publish-segment-read",
-            validate_manifest_segments(
-                self.lineage.as_ref(),
-                &prepared.manifest,
-                Some(&self.session_segments),
-            ),
-        )
-        .await?;
+            operation: guard,
+            validation: native::Validation::Maintenance,
+        };
+        self.native_admission(&prepared.manifest, read.validation)
+            .map_err(NativeRecoveryError::into_error)?;
+        self.validate_candidate_segments(&prepared.manifest, &read)
+            .await
+            .map_err(NativeRecoveryError::into_error)?;
         let epoch = prepared.manifest.epoch();
         let manifest = prepared.manifest;
         let bytes = owner_settled(
@@ -481,13 +488,17 @@ impl ManifestTransaction {
         snapshot: OperatorStateSnapshot,
         cancellation: &CancellationToken,
     ) -> Result<StagedOperatorState> {
-        let _guard = owner_settled(cancellation, "state-stage-lock", async {
-            Ok(self.operation.lock().await)
-        })
-        .await?;
+        let guard = self.operation(cancellation, "state-stage-lock").await?;
         #[cfg(test)]
         self.settle_operation_hook(ManifestOperationPoint::Stage, cancellation)
             .await?;
+        if let Some(policy) = &self.native
+            && policy.inventory.contains(operator_id)
+        {
+            return self
+                .stage_native_state(policy, operator_id, epoch, snapshot, cancellation, &guard)
+                .await;
+        }
         self.stage_operator_state_locked(operator_id, epoch, snapshot, cancellation)
             .await
     }
@@ -744,6 +755,21 @@ impl ManifestTransaction {
         self.lineage.load_segment(handle).await
     }
 
+    pub(crate) async fn native_load_guard(
+        &self,
+        mut check: impl FnMut() -> Result<()> + Send,
+    ) -> Result<OwnedMutexGuard<()>> {
+        let acquired = self.operation.clone().lock_owned();
+        tokio::pin!(acquired);
+        loop {
+            check()?;
+            tokio::select! {
+                guard = &mut acquired => return Ok(guard),
+                () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {},
+            }
+        }
+    }
+
     pub(crate) async fn load_operator_state_cancellable(
         &self,
         operator_id: &str,
@@ -877,10 +903,20 @@ impl ManifestTransaction {
         identity: &PreparedManifestIdentity,
         cancellation: &CancellationToken,
     ) -> Result<Option<SelectedManifest>> {
-        let _guard = owner_settled(cancellation, "manifest-select-lock", async {
-            Ok(self.operation.lock().await)
-        })
-        .await?;
+        self.select_latest_native_cancellable(identity, cancellation)
+            .await
+            .map_err(NativeRecoveryError::into_error)
+    }
+
+    pub(crate) async fn select_latest_native_cancellable(
+        &self,
+        identity: &PreparedManifestIdentity,
+        cancellation: &CancellationToken,
+    ) -> std::result::Result<Option<SelectedManifest>, NativeRecoveryError> {
+        let guard = self
+            .operation(cancellation, "manifest-select-lock")
+            .await
+            .map_err(|error| self.operation_failure(error))?;
         #[cfg(test)]
         self.settle_operation_hook(ManifestOperationPoint::Select, cancellation)
             .await?;
@@ -888,20 +924,22 @@ impl ManifestTransaction {
         let candidates = manifest_candidates(root, "manifest-select-list", cancellation).await?;
         let mut latest = None;
         for candidate in candidates {
-            // Recovery always revalidates every referenced segment byte: the
-            // `None` session skips nothing on this path.
+            // Native payload bytes are admitted by the certified recovery path.
             let manifest = self
                 .load_candidate_manifest(
                     &candidate,
                     identity,
-                    "manifest-select",
-                    None,
-                    cancellation,
+                    &native::CandidateRead {
+                        name: "manifest-select",
+                        session: None,
+                        cancellation,
+                        operation: &guard,
+                        validation: native::Validation::Recovery,
+                    },
                 )
                 .await?;
             let expectation = identity.expectation(candidate.epoch);
-            let mut handles = BTreeSet::new();
-            collect_manifest_handles(&manifest, &mut handles);
+            let handles = self.verified_manifest_handles(&manifest);
             self.session_segments.lock().verified.extend(handles);
             latest = Some(SelectedManifest {
                 validation: ManifestValidation {
@@ -929,14 +967,26 @@ impl ManifestTransaction {
         in_flight: Option<&CheckpointManifest>,
         cancellation: &CancellationToken,
     ) -> Result<RetentionReport> {
-        let _guard = owner_settled(cancellation, "manifest-retain-lock", async {
-            Ok(self.operation.lock().await)
-        })
-        .await?;
+        self.retain_native_cancellable(identity, in_flight, cancellation)
+            .await
+            .map_err(NativeRecoveryError::into_error)
+    }
+
+    pub(crate) async fn retain_native_cancellable(
+        &self,
+        identity: &PreparedManifestIdentity,
+        in_flight: Option<&CheckpointManifest>,
+        cancellation: &CancellationToken,
+    ) -> std::result::Result<RetentionReport, NativeRecoveryError> {
+        let guard = self
+            .operation(cancellation, "manifest-retain-lock")
+            .await
+            .map_err(|error| self.operation_failure(error))?;
         #[cfg(test)]
         self.settle_operation_hook(ManifestOperationPoint::Retain, cancellation)
             .await?;
-        self.retain_locked(identity, in_flight, cancellation).await
+        self.retain_locked(identity, in_flight, cancellation, &guard)
+            .await
     }
 
     async fn retain_locked(
@@ -944,11 +994,12 @@ impl ManifestTransaction {
         identity: &PreparedManifestIdentity,
         in_flight: Option<&CheckpointManifest>,
         cancellation: &CancellationToken,
-    ) -> Result<RetentionReport> {
+        guard: &native::Operation<'_>,
+    ) -> std::result::Result<RetentionReport, NativeRecoveryError> {
         let root = self.manifest_root.clone();
         let candidates = manifest_candidates(root, "manifest-retain-list", cancellation).await?;
         let manifests = self
-            .load_retention_manifests(candidates, identity, cancellation)
+            .load_retention_manifests(candidates, identity, cancellation, guard)
             .await?;
         let RetentionPlan {
             retained_manifests,
@@ -995,16 +1046,22 @@ impl ManifestTransaction {
         candidates: Vec<ManifestCandidate>,
         identity: &PreparedManifestIdentity,
         cancellation: &CancellationToken,
-    ) -> Result<Vec<(ManifestCandidate, CheckpointManifest)>> {
+        guard: &native::Operation<'_>,
+    ) -> std::result::Result<Vec<(ManifestCandidate, CheckpointManifest)>, NativeRecoveryError>
+    {
         let mut manifests = Vec::with_capacity(candidates.len());
         for candidate in candidates {
             let manifest = self
                 .load_candidate_manifest(
                     &candidate,
                     identity,
-                    "manifest-retain",
-                    Some(&self.session_segments),
-                    cancellation,
+                    &native::CandidateRead {
+                        name: "manifest-retain",
+                        session: Some(&self.session_segments),
+                        cancellation,
+                        operation: guard,
+                        validation: native::Validation::Maintenance,
+                    },
                 )
                 .await?;
             manifests.push((candidate, manifest));
@@ -1016,10 +1073,10 @@ impl ManifestTransaction {
         &self,
         candidate: &ManifestCandidate,
         identity: &PreparedManifestIdentity,
-        operation: &str,
-        session_segments: Option<&parking_lot::Mutex<SessionSegments>>,
-        cancellation: &CancellationToken,
-    ) -> Result<CheckpointManifest> {
+        read: &native::CandidateRead<'_, '_>,
+    ) -> std::result::Result<CheckpointManifest, NativeRecoveryError> {
+        let cancellation = read.cancellation;
+        let operation = read.name;
         let bytes = owner_settled(cancellation, &format!("{operation}-read"), async {
             tokio::fs::read(&candidate.path)
                 .await
@@ -1034,12 +1091,8 @@ impl ManifestTransaction {
         .await?;
         validate_candidate_epoch(candidate, &manifest)?;
         manifest.validate(&identity.expectation(candidate.epoch))?;
-        owner_settled(
-            cancellation,
-            &format!("{operation}-segments"),
-            validate_manifest_segments(self.lineage.as_ref(), &manifest, session_segments),
-        )
-        .await?;
+        self.native_admission(&manifest, read.validation)?;
+        self.validate_candidate_segments(&manifest, read).await?;
         Ok(manifest)
     }
 
@@ -1163,33 +1216,70 @@ struct ManifestCandidate {
 async fn validate_manifest_segments(
     lineage: &dyn StateLineageBackend,
     manifest: &CheckpointManifest,
-    session_segments: Option<&parking_lot::Mutex<SessionSegments>>,
+    session: Option<&parking_lot::Mutex<SessionSegments>>,
 ) -> Result<()> {
-    // Handles this session committed or fully verified skip the redundant
-    // re-read; recovery-time selection passes `None` and therefore revalidates
-    // every referenced segment byte (AC-08). Membership is checked per handle
-    // under a short lock — never across an `.await` — so the check stays O(1)
-    // per segment instead of cloning the session set every epoch.
-    let session_verified = |handle: &StateHandle| {
-        session_segments.is_some_and(|session| session.lock().verified.contains(handle))
-    };
+    validate_manifest_segments_scoped(lineage, manifest, session, None).await
+}
+async fn validate_manifest_segments_scoped(
+    lineage: &dyn StateLineageBackend,
+    manifest: &CheckpointManifest,
+    session: Option<&parking_lot::Mutex<SessionSegments>>,
+    native: Option<&crate::array::NativeSequenceInventory>,
+) -> Result<()> {
+    validate_source_segments(lineage, manifest, session).await?;
+    validate_operator_segments(lineage, manifest, session, native).await?;
+    validate_sink_segments(lineage, manifest, session).await
+}
+fn session_verified(
+    session: Option<&parking_lot::Mutex<SessionSegments>>,
+    handle: &StateHandle,
+) -> bool {
+    session.is_some_and(|state| state.lock().verified.contains(handle))
+}
+async fn validate_source_segments(
+    lineage: &dyn StateLineageBackend,
+    manifest: &CheckpointManifest,
+    session: Option<&parking_lot::Mutex<SessionSegments>>,
+) -> Result<()> {
     for source in manifest.sources().values() {
         if let Some(history) = &source.history {
             for handle in &history.segments {
-                if !session_verified(handle) {
+                if !session_verified(session, handle) {
                     lineage.verify_committed_segment(handle).await?;
                 }
             }
         }
     }
-    for handle in manifest
-        .operators()
-        .values()
-        .flat_map(|entry| &entry.segments)
-        .chain(manifest.sinks().values().flat_map(|entry| &entry.segments))
-    {
-        if !session_verified(handle) {
-            lineage.load_segment(handle).await?;
+    Ok(())
+}
+async fn validate_operator_segments(
+    lineage: &dyn StateLineageBackend,
+    manifest: &CheckpointManifest,
+    session: Option<&parking_lot::Mutex<SessionSegments>>,
+    native: Option<&crate::array::NativeSequenceInventory>,
+) -> Result<()> {
+    for (node, entry) in manifest.operators() {
+        if native.is_some_and(|inventory| inventory.contains(node)) {
+            continue;
+        }
+        for handle in &entry.segments {
+            if !session_verified(session, handle) {
+                lineage.load_segment(handle).await?;
+            }
+        }
+    }
+    Ok(())
+}
+async fn validate_sink_segments(
+    lineage: &dyn StateLineageBackend,
+    manifest: &CheckpointManifest,
+    session: Option<&parking_lot::Mutex<SessionSegments>>,
+) -> Result<()> {
+    for sink in manifest.sinks().values() {
+        for handle in &sink.segments {
+            if !session_verified(session, handle) {
+                lineage.load_segment(handle).await?;
+            }
         }
     }
     Ok(())

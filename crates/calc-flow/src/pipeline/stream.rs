@@ -27,6 +27,9 @@ use super::{NodeDefinition, TablePlanResources, compile_graph};
 
 mod projection;
 
+#[cfg(test)]
+mod proof_tests;
+
 /// Per graph-output delivery requests recorded into the compiled stream plan
 /// (API note A1.2).
 #[derive(Clone, Debug, Default)]
@@ -575,6 +578,17 @@ impl CompiledStreamOperator {
         }
     }
 
+    pub(crate) async fn restore_async(
+        &mut self,
+        snapshot: &crate::OperatorStateSnapshot,
+        context: &crate::StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        match self {
+            Self::External(operator) => operator.restore_async(snapshot, context).await,
+            _ => self.restore(snapshot),
+        }
+    }
+
     pub(crate) fn restore_with_progress(
         &mut self,
         snapshot: &crate::OperatorStateSnapshot,
@@ -715,6 +729,7 @@ pub struct StreamExecutionPlan {
     static_inputs: BTreeMap<String, crate::StaticInputSpec>,
     static_input_ports: BTreeMap<String, BTreeMap<String, String>>,
     native_statics: crate::array::NativeStaticPlan,
+    native_sequence_nodes: BTreeSet<String>,
 }
 
 impl PipelineBuilder {
@@ -764,6 +779,12 @@ impl PipelineBuilder {
             .map(|edge| (edge.stable_id(), edge.clone()))
             .collect::<BTreeMap<_, _>>();
         let name = self.name.clone();
+        let native_sequence_nodes = self
+            .nodes
+            .iter()
+            .filter(|(_, node)| crate::array::is_native_sequence_operator(&node.operator))
+            .map(|(id, _)| id.clone())
+            .collect();
         let table = graph.table;
         let mut native_statics = crate::array::NativeStaticPlan::default();
         native_statics.set_endpoints(&graph.external_inputs);
@@ -785,6 +806,7 @@ impl PipelineBuilder {
             static_inputs: BTreeMap::new(),
             static_input_ports: BTreeMap::new(),
             native_statics,
+            native_sequence_nodes,
         })
     }
 }
@@ -993,30 +1015,76 @@ fn validate_external_provider_lifecycles(
         let NodeOperator::Stream(operator) = &node.operator else {
             continue;
         };
-        match node.checkpoint_capability {
-            OperatorCheckpointCapability::Stateless => {
-                let lifecycle = operator.lifecycle();
-                if !lifecycle.is_proven_stateless() {
-                    return Err(CalcFlowError::Compile {
-                        message: format!(
-                            "stream provider node {node_id:?} does not prove a stateless micro-batch-invariant lifecycle"
-                        ),
-                    });
-                }
-                if exactly_once && !lifecycle.is_exactly_once_safe() {
-                    return Err(CalcFlowError::Compile {
-                        message: format!(
-                            "stream provider node {node_id:?} is not deterministic and replay safe; exactly-once delivery is unavailable"
-                        ),
-                    });
-                }
-            }
-            // Stateful operators prove eligibility through their checkpoint
-            // capability. Unproven operators preserve the existing two-stage
-            // contract: job admission rejects them before connectors open.
-            OperatorCheckpointCapability::CheckpointedStateful { .. }
-            | OperatorCheckpointCapability::Unproven => {}
+        #[cfg(test)]
+        if node.checkpoint_test_override {
+            continue;
         }
+        validate_external_lifecycle(
+            node_id,
+            node.checkpoint_capability,
+            operator.lifecycle(),
+            exactly_once,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_external_lifecycle(
+    node_id: &str,
+    capability: OperatorCheckpointCapability,
+    lifecycle: crate::StreamOperatorLifecycle,
+    exactly_once: bool,
+) -> Result<()> {
+    match capability {
+        OperatorCheckpointCapability::Stateless => validate_stateless_proof(node_id, lifecycle)?,
+        OperatorCheckpointCapability::CheckpointedStateful { state_version } => {
+            validate_stateful_proof(node_id, lifecycle, state_version)?;
+        }
+        OperatorCheckpointCapability::Unproven => return Ok(()),
+    }
+    validate_external_delivery(node_id, lifecycle, exactly_once)
+}
+
+fn validate_stateless_proof(
+    node_id: &str,
+    lifecycle: crate::StreamOperatorLifecycle,
+) -> Result<()> {
+    if !lifecycle.is_proven_stateless() {
+        return Err(CalcFlowError::Compile {
+            message: format!(
+                "stream provider node {node_id:?} does not prove a stateless micro-batch-invariant lifecycle"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_stateful_proof(
+    node_id: &str,
+    lifecycle: crate::StreamOperatorLifecycle,
+    expected: u32,
+) -> Result<()> {
+    if !lifecycle.proves_checkpointed_state(expected) {
+        return Err(CalcFlowError::Compile {
+            message: format!(
+                "stream provider node {node_id:?} does not prove checkpointed state version {expected} with micro-batch invariance"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_external_delivery(
+    node_id: &str,
+    lifecycle: crate::StreamOperatorLifecycle,
+    exactly_once: bool,
+) -> Result<()> {
+    if exactly_once && !lifecycle.is_exactly_once_safe() {
+        return Err(CalcFlowError::Compile {
+            message: format!(
+                "stream provider node {node_id:?} is not deterministic and replay safe; exactly-once delivery is unavailable"
+            ),
+        });
     }
     Ok(())
 }
@@ -1053,7 +1121,8 @@ impl StreamExecutionPlan {
     /// # Errors
     ///
     /// Returns [`CalcFlowError::Compile`] when a declaration duplicates a
-    /// name or does not name a graph external input binding.
+    /// name or does not name a graph external input binding. Native sequence
+    /// static ingress returns [`CalcFlowError::InvalidArgument`] at its binding.
     pub(crate) fn with_static_input_specs(
         mut self,
         specs: Vec<crate::StaticInputSpec>,
@@ -1072,6 +1141,7 @@ impl StreamExecutionPlan {
                     message: format!("static input name {name:?} is declared twice"),
                 });
             }
+            self.validate_sequence_static_role(&name)?;
             self.static_inputs.insert(name, spec);
         }
         self.native_statics
@@ -1115,6 +1185,20 @@ impl StreamExecutionPlan {
                 })
         })
     }
+    fn validate_sequence_static_role(&self, name: &str) -> Result<()> {
+        let endpoint = &self.external_inputs[name];
+        if self.native_sequence_nodes.contains(&endpoint.node_id) {
+            return Err(CalcFlowError::InvalidArgument {
+                field: format!("static_inputs.{name}"),
+                message: format!(
+                    "native:array_sequence@1 operator {:?} requires dynamic input",
+                    endpoint.node_id
+                ),
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn take_project_bindings(&mut self) -> Option<ProjectRuntimeBindings> {
         match (self.project_sources.take(), self.project_sinks.take()) {
             (Some(sources), Some(sinks)) => Some((sources, sinks)),
@@ -1390,6 +1474,7 @@ impl StreamExecutionPlan {
             static_inputs,
             static_input_ports,
             native_statics: _,
+            native_sequence_nodes: _,
         } = self;
         let static_input_ids = static_inputs.into_keys().collect::<BTreeSet<_>>();
         let external_inputs = external_inputs

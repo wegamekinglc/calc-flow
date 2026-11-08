@@ -1341,7 +1341,7 @@ class _SymbolicMatrixProvider:
 
 
 def register_native(runtime: Runtime) -> None:
-    """Register the native batch-only array expression factory with a runtime."""
+    """Register the native array, table and stateful sequence provider bundle."""
     runtime._register_native_array()
 
 

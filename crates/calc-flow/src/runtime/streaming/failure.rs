@@ -19,6 +19,9 @@ pub(crate) enum FailureOrigin {
     OperatorEntry {
         node_id: String,
     },
+    NativeSequenceRecovery {
+        node_id: String,
+    },
     SourceOpen {
         binding_id: String,
     },

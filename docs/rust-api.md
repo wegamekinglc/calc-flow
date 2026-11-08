@@ -16,6 +16,7 @@ On this page:
 - [Native exponential averages](#native-exponential-averages)
 - [Native rolling mean](#native-rolling-mean)
 - [Owned native sequence state](#owned-native-sequence-state)
+- [Checkpointed native array sequences](#checkpointed-native-array-sequences)
 - [Native elementwise arrays](#native-elementwise-arrays)
 - [Packed matrices and axes](#packed-matrices-and-axes)
 - [Native array batch provider](#native-array-batch-provider)
@@ -245,6 +246,49 @@ output-and-scratch budget semantics and independent ephemeral states.
 These types have no public cloning, serialization or checkpoint API. See the
 standalone [owned-state example](../crates/calc-flow/examples/native_array_state.rs).
 
+## Checkpointed native array sequences
+
+`NativeArraySequenceFactory` creates stream-only `native:array_sequence@1`
+operators. Its closed data-only options select one `rolling_mean` or `ewma`
+kernel and lock `input_dtype` to `float32` or `float64`. Both kernels return
+Float64 vectors. Declare exactly one required Array port `input` and one
+required Array port `output`, without Arrow schemas. A scalar, matrix, Boolean
+vector, foreign payload or changed dtype is rejected even when empty.
+
+Each operator processes one sequence in accepted arrival order. Batch metadata
+is preserved but does not reorder samples. It does not infer entities, event
+time or multiple-input alignment. Its ingress must be dynamic; every static
+input declaration is rejected regardless of the declared backend. A dynamic
+source may emit equal or repeated immutable batches normally.
+
+Accepted output commits an isolated numerical candidate. A rejected emission,
+cancelled computation, count overflow or budget error leaves the committed
+recurrence unchanged. Workers own pending candidates through cancellation and
+abandoned waiters; a later operation must settle that work before reuse. Reset
+cannot release credit still held by a running candidate.
+
+The owned-state charges above also apply here. The allocation limit includes
+old state, candidate, output, numerical scratch and retained encoded captures.
+Distinct immutable capture allocations are charged once until their final
+owner drops. Encoding uses version-one binary state with raw IEEE values;
+restoration validates kernel parameters, dtype, numerical profile, counts,
+layout and fingerprint without recomputing saved summaries.
+
+Use `ManagedCheckpointRuntime` with stable graph/binding identities and an
+exactly replayable source for durable restart. The current public managed
+runtime uses local storage. Native recovery requires that certified bounded
+reader; unsupported internal/custom reader routes fail closed for native
+sequence nodes. Byte lengths and allocation limits are checked before reading
+state into owned buffers. Ordinary and terminal-complete recovery perform the
+same controlled SHA, codec and identity validation before any source or sink
+opens. Invalid latest state fails closed; there is no numerical-state fallback.
+Legacy external providers keep their existing recovery contract.
+
+The executable [native sequence example](../crates/calc-flow/examples/native_sequence_stream.rs)
+processes chunks through a managed EWMA operator, then starts a fresh job from
+its terminal checkpoint without reopening the source. This Rust factory does
+not add a Python expression-stream declaration API.
+
 ## Native elementwise arrays
 
 `ArrayView` is a read-only, copyable operand descriptor. `from_float(FloatView)`
@@ -337,9 +381,10 @@ combines matrix multiplication, axis means and owned shape transforms.
 ## Native array batch provider
 
 `array::register_native(&ProviderRegistry)` atomically registers
-`native:array_expr@1` for batch processing and `native:table_array@1` for batch
-and admitted stateless stream processing. Any collision leaves all existing
-entries unchanged. The bundle shares two worker slots across both factories.
+`native:array_expr@1` for batch processing, `native:table_array@1` for batch
+and admitted stateless stream processing, and `native:array_sequence@1` for
+checkpointed sequence streams. Any of the four lifecycle-key collisions leaves
+all existing entries unchanged. The three factories share two worker slots.
 `NativeArrayFactory::default()` also implements `BatchOperatorFactory` for
 direct Rust integration; every factory validates its exact identity.
 

@@ -1,4 +1,4 @@
-use super::{ArrayStateOptions, Budget, Output, history_charge, sample, validate_input};
+use super::{ArrayStateOptions, Budget, Output, Prepared, history_charge, sample, validate_input};
 use crate::{
     Result, RollingNumericalProfile,
     array::{
@@ -24,10 +24,10 @@ use crate::{
 /// # }
 /// ```
 pub struct RollingMeanState {
-    options: RollingMeanOptions,
-    limits: ArrayStateOptions,
-    kernel: MeanKernel,
-    bytes: usize,
+    pub(super) options: RollingMeanOptions,
+    pub(super) limits: ArrayStateOptions,
+    pub(super) kernel: MeanKernel,
+    pub(super) bytes: usize,
 }
 
 impl RollingMeanState {
@@ -68,25 +68,58 @@ impl RollingMeanState {
         execution: &ArrayExecutionOptions,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<NativeArray> {
-        self.validate(input, check)?;
-        let mut budget = self.budget(input.len(), execution)?;
-        if input.is_empty() {
-            return control::finish(Output::allocate(&budget, check)?.finish(false), check);
-        }
-        let (next, result) = self.prepare(input, &mut budget, check)?;
-        check()?;
-        self.kernel = next;
-        self.bytes = budget.candidate;
-        Ok(result)
+        let prepared = self.prepare_checked(input, execution, 0, check)?;
+        Ok(prepared.commit(self))
     }
 
-    fn budget<'a>(&self, len: usize, execution: &'a ArrayExecutionOptions) -> Result<Budget<'a>> {
+    pub(in crate::array) fn prepare_checked(
+        &self,
+        input: ArrayView<'_>,
+        execution: &ArrayExecutionOptions,
+        captures: usize,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Prepared<Self>> {
+        self.validate(input, check)?;
+        let mut budget = self.budget(input.len(), execution, captures)?;
+        if input.is_empty() {
+            let output = Output::allocate(&budget, check)?.finish(false)?;
+            return control::finish(
+                Ok(Prepared {
+                    candidate: None,
+                    output,
+                }),
+                check,
+            );
+        }
+        let (kernel, output) = self.prepare(input, &mut budget, check)?;
+        let candidate = Self {
+            options: self.options,
+            limits: self.limits,
+            kernel,
+            bytes: budget.candidate,
+        };
+        control::finish(
+            Ok(Prepared {
+                candidate: Some(candidate),
+                output,
+            }),
+            check,
+        )
+    }
+
+    fn budget<'a>(
+        &self,
+        len: usize,
+        execution: &'a ArrayExecutionOptions,
+        captures: usize,
+    ) -> Result<Budget<'a>> {
         let candidate = self.candidate_charge(len)?;
         self.limits.validate(candidate)?;
         let scratch = self.scratch_bytes(len);
         let budget = Budget {
             old: self.bytes,
             candidate,
+            captures,
             scratch,
             len,
             execution,

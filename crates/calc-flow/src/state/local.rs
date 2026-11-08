@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use fs2::FileExt;
 use parking_lot::Mutex as SyncMutex;
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use super::{StateBackend, StateHandle, StateLineageBackend, StateLineageKey};
 use crate::{CalcFlowError, Epoch, Result};
@@ -76,7 +76,13 @@ impl StateBackend for LocalStateBackend {
     }
 }
 
+mod native_io;
+mod native_preload;
+pub(crate) use native_io::NativeSegmentIo;
+#[cfg(test)]
+pub(crate) use native_io::Point as NativeIoPoint;
 mod preload;
+pub(crate) use native_preload::NativeSegmentReader;
 mod publication;
 #[cfg(test)]
 pub(super) mod publication_tests;
@@ -117,13 +123,15 @@ impl LocalStateBackend {
             root: Arc::clone(&self.root),
             lineage_hash,
             lock_file,
-            publication: Mutex::new(()),
+            publication: Arc::new(Mutex::new(())),
             validated: SyncMutex::new(BTreeSet::new()),
             segment_directories: Arc::default(),
             #[cfg(test)]
             prepaid_read_hook: SyncMutex::new(None),
             #[cfg(test)]
             publication_hook: Arc::default(),
+            #[cfg(test)]
+            native_io_hook: SyncMutex::new(None),
         })
     }
 }
@@ -132,13 +140,15 @@ pub(crate) struct LocalStateLineageBackend {
     root: Arc<ManagedStateRoot>,
     lineage_hash: String,
     lock_file: File,
-    publication: Mutex<()>,
+    publication: Arc<Mutex<()>>,
     validated: SyncMutex<BTreeSet<StateHandle>>,
     segment_directories: Arc<SyncMutex<publication::SegmentDirectories>>,
     #[cfg(test)]
     prepaid_read_hook: SyncMutex<Option<preload::ReadHook>>,
     #[cfg(test)]
     publication_hook: Arc<SyncMutex<Option<publication_tests::PublicationHook>>>,
+    #[cfg(test)]
+    native_io_hook: SyncMutex<Option<native_io::Hook>>,
 }
 
 impl Drop for LocalStateLineageBackend {
@@ -217,6 +227,8 @@ impl StateLineageBackend for LocalStateLineageBackend {
     }
 
     async fn load_segment(&self, handle: &StateHandle) -> Result<Vec<u8>> {
+        #[cfg(test)]
+        self.observe_native_io(native_io::Point::OpaqueLoad)?;
         let paths = self.managed_paths(handle)?;
         let handle = handle.clone();
         let _guard = self.publication.lock().await;
