@@ -3,7 +3,7 @@
 Status: draft for critique. D = shard the per-batch incremental update of one
 `IncrementalSql` by full group key on the job-scoped native CPU service.
 This spec unseals the parallel-aggregate question that
-[sum-batch-parallel-20261104](../../benchmarks/sum-state/sum-batch-parallel-20261104.md)
+[sum-batch-parallel-20261104](../../../benchmarks/sum-state/sum-batch-parallel-20261104.md)
 closed for the row-range lane design, and follows the sharding direction its
 own review and the example-30 multicore investigation both recommended.
 
