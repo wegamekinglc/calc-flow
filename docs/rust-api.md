@@ -11,6 +11,7 @@ available for native integration. Native execution needs no Python process.
 On this page:
 
 - [Build and document](#build-and-document)
+- [Native array storage](#native-array-storage)
 - [Expression pipeline](#expression-pipeline)
 - [SQL operators](#sql-operators)
 - [Snapshot SQL](#snapshot-sql)
@@ -39,6 +40,36 @@ the full crate commands are:
 cargo test -p calc-flow --all-targets
 RUSTDOCFLAGS="-D warnings" cargo doc -p calc-flow --no-deps
 ```
+
+## Native array storage
+
+`calc_flow::array` exposes immutable native float32/float64 storage for Rust
+extensions. `FloatView` borrows contiguous values and an optional Arrow
+`NullBuffer` for synchronous work. `NativeArray` owns Arrow buffers and supports
+scalar shape `[]` or vector shape `[length]`; a scalar has exactly one value.
+
+```rust
+use std::sync::Arc;
+use calc_flow::{Batch, BatchMetadata, Result, array::NativeArray};
+
+fn native_input() -> Result<Batch> {
+    let array = NativeArray::from_f64(vec![1.0, 2.0], vec![2], None)?;
+    Batch::external(Arc::new(array), BatchMetadata::default())
+}
+```
+
+`from_f32` and `from_f64` take ownership of their vectors; `from_arrow`
+shares existing primitive Arrow storage and preserves slice and validity
+offsets. `as_arrow` exports a read-only Arrow reference, while `float_view`
+borrows the typed values. Clones share Arrow buffers, and debug output contains
+descriptors without element values. These objects need no Python process.
+
+`estimated_bytes` charges visible typed slots, the bitmap byte span and shape
+entries. `retained_buffer_bytes` reports exposed backing-buffer capacities plus
+shape entries, which can be larger for slices. Neither value measures process
+RSS. The native payload uses the existing `BatchKind::Array` and reports its
+logical row count through the batch. Static parameter snapshots retain their
+separate freezing and digest contract.
 
 ## Expression pipeline
 

@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-08: Add immutable Rust native float32/float64 scalar and vector
+  storage, read-only borrowed views, Arrow buffer sharing and native array
+  `Batch` payload accounting. Preserve validity offsets and distinguish visible
+  queue charges from retained backing-buffer capacity.
+
 - 2026-11-08: Prepare the `calc-flow` Rust crate for crates.io with package
   metadata, a native quickstart, distribution and external consumer checks,
   and a separate release workflow. Audit the packaged registry lockfile before
