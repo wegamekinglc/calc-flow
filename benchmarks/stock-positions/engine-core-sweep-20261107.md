@@ -4,9 +4,9 @@ Informational broad measurement, explicitly requested, covering both
 engines: the streaming engine (example 30, compact incremental aggregation,
 checkpoints disabled) and the SQL engine (`sql_plan_reuse_probe`, the
 compile-once state-feedback batch lifecycle with physical-plan template
-reuse from #557, fixed partitions = core count). Same workload scale as the
-[maintained seven-engine table](seven-engines-2193f8ee.md): 10,000,000
-business rows, 100x100 keys, complete cumulative snapshots.
+reuse from #557, fixed partitions = core count). The
+[recorded sweep samples](engine-core-sweep-20261107.json) use 10,000,000
+business rows, 100x100 keys, and complete cumulative snapshots.
 
 ## Results
 
@@ -29,7 +29,9 @@ Timer boundaries differ and are not compared across engines here: the
 streaming timer includes the demo source's lazy row generation while the
 SQL probe times only its execute loop against prebuilt inputs. The
 seven-engine table keeps equal boundaries for cross-engine absolutes; this
-sweep's value is each engine's own scaling shape.
+sweep's value is each engine's own scaling shape. The historical seven-engine
+table (`seven-engines-2193f8ee.md`) is not included in this checkout; its
+cross-engine figures below cannot be verified from the sweep samples.
 
 ## Findings
 

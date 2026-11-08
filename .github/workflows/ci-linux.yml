@@ -332,6 +332,9 @@ jobs:
           retention-days: 14
       - name: Report Python coverage to Coveralls
         uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
+        timeout-minutes: 10
+        env:
+          CURL_HOME: ${{ github.workspace }}/.github/coveralls
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           flag-name: python
@@ -363,6 +366,7 @@ jobs:
             scripts.test_check_spec_references \
             scripts.test_classify_ci_changes \
             scripts.test_codex_agents \
+            scripts.test_coveralls_download \
             scripts.test_generate_rolling_kernel_manifest \
             scripts.test_inspect_wheel \
             scripts.test_native_release_identity \
@@ -813,6 +817,9 @@ jobs:
           retention-days: 14
       - name: Report Rust coverage to Coveralls
         uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
+        timeout-minutes: 10
+        env:
+          CURL_HOME: ${{ github.workspace }}/.github/coveralls
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           flag-name: rust
@@ -850,8 +857,13 @@ jobs:
     if: always() && needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Close the parallel Coveralls build
         uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
+        timeout-minutes: 10
+        env:
+          CURL_HOME: ${{ github.workspace }}/.github/coveralls
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           parallel-finished: true
