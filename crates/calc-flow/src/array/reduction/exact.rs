@@ -155,12 +155,7 @@ fn round(words: &[u64; LIMBS], negative: bool, remainder: u128, divisor: u128) -
     let mut highest = index * 64 + 63 - words[index].leading_zeros() as usize;
     let shift = highest.saturating_sub(52);
     let mut significand = shifted_word(words, shift);
-    let round_up = if shift == 0 {
-        remainder * 2 > divisor || (remainder * 2 == divisor && significand & 1 != 0)
-    } else {
-        bit(words, shift - 1)
-            && (any_below(words, shift - 1) || remainder != 0 || significand & 1 != 0)
-    };
+    let round_up = should_round_up(words, shift, significand, remainder, divisor);
     significand += u64::from(round_up);
     if significand == 1 << 53 {
         significand >>= 1;
@@ -174,6 +169,21 @@ fn round(words: &[u64; LIMBS], negative: bool, remainder: u128, divisor: u128) -
         return f64::from_bits(sign | 0x7ff0_0000_0000_0000);
     }
     f64::from_bits(sign | (exponent as u64) << 52 | (significand & FRACTION_MASK))
+}
+
+fn should_round_up(
+    words: &[u64; LIMBS],
+    shift: usize,
+    significand: u64,
+    remainder: u128,
+    divisor: u128,
+) -> bool {
+    if shift == 0 {
+        remainder * 2 > divisor || (remainder * 2 == divisor && significand & 1 != 0)
+    } else {
+        bit(words, shift - 1)
+            && (any_below(words, shift - 1) || remainder != 0 || significand & 1 != 0)
+    }
 }
 
 fn shifted_word(words: &[u64; LIMBS], shift: usize) -> u64 {

@@ -163,9 +163,9 @@ fn better_extremum(next: f64, current: f64, maximum: bool) -> bool {
     } else if next.is_nan() {
         true
     } else if maximum {
-        next > current || (next == 0.0 && current == 0.0 && next.is_sign_positive())
+        next.total_cmp(&current).is_gt()
     } else {
-        next < current || (next == 0.0 && current == 0.0 && next.is_sign_negative())
+        next.total_cmp(&current).is_lt()
     }
 }
 
