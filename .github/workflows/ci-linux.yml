@@ -336,6 +336,7 @@ jobs:
         env:
           CURL_HOME: ${{ github.workspace }}/.github/coveralls
         with:
+          coverage-reporter-version: v0.6.22
           github-token: ${{ secrets.GITHUB_TOKEN }}
           flag-name: python
           compare-sha: ${{ needs.coverage-baseline.outputs.compare_sha }}
@@ -821,6 +822,7 @@ jobs:
         env:
           CURL_HOME: ${{ github.workspace }}/.github/coveralls
         with:
+          coverage-reporter-version: v0.6.22
           github-token: ${{ secrets.GITHUB_TOKEN }}
           flag-name: rust
           compare-sha: ${{ needs.coverage-baseline.outputs.compare_sha }}
@@ -865,6 +867,7 @@ jobs:
         env:
           CURL_HOME: ${{ github.workspace }}/.github/coveralls
         with:
+          coverage-reporter-version: v0.6.22
           github-token: ${{ secrets.GITHUB_TOKEN }}
           parallel-finished: true
   linux-gate:

@@ -16,6 +16,7 @@ On this page:
 - [Native exponential averages](#native-exponential-averages)
 - [Native rolling mean](#native-rolling-mean)
 - [Native elementwise arrays](#native-elementwise-arrays)
+- [Native array batch provider](#native-array-batch-provider)
 - [Expression pipeline](#expression-pipeline)
 - [SQL operators](#sql-operators)
 - [Snapshot SQL](#snapshot-sql)
@@ -238,6 +239,101 @@ do not include element payloads.
 
 These APIs do not alter Python expression lowering, Table execution,
 NumPy/JAX providers, or graph registration.
+
+## Native array batch provider
+
+`array::register_native(&ProviderRegistry)` registers the batch factory
+`native:array_expr@1`. `NativeArrayFactory::default()` also implements
+`BatchOperatorFactory` for direct Rust integration. Both paths validate the
+exact provider/name/version; duplicate registration preserves the existing
+entry. There is no native stream factory or static placement callback.
+
+The factory's `capability_descriptor()` returns data describing its actual
+batch behavior and a canonical `options_json_schema` string. Querying this
+descriptor does not register a Runtime. Named, required Array ports come from
+the options declarations; their sets must exactly match factory ports and each
+invocation's inputs. Payloads must downcast to genuine `NativeArray` owners.
+Other providers' payloads are rejected at `inputs.<name>.backend`.
+
+The versioned data-only IR has `ir_version`, `inputs`, `nodes`, `outputs`, and
+optional `execution`. Every object rejects unknown fields. Each input declares
+`name`, `dtype` (`bool`, `float32`, or `float64`), and `shape`; each output also
+declares the referenced `node`. Nodes have a unique `id` and one operation:
+
+```json
+{
+  "ir_version": 1,
+  "inputs": [{"name": "x", "dtype": "float64", "shape": [null]}],
+  "nodes": [
+    {"id": "x", "op": "input", "name": "x"},
+    {"id": "average", "op": "reduce", "function": "mean", "input": "x"},
+    {"id": "result", "op": "binary", "function": "subtract", "left": "x", "right": "average"}
+  ],
+  "outputs": [{"name": "output", "node": "result", "dtype": "float64", "shape": [null]}]
+}
+```
+
+`input`, typed `literal`, `unary`, `binary`, `where`, `reduce`, `rolling_mean`,
+and `ewma` nodes reuse the eager kernels. Full reductions accept numeric
+scalars/vectors; rolling nodes require numeric vectors, return float64, and
+start fresh for each batch. Rolling means admit explicit `stable_v1` and
+`stable_v2` profiles. Node order and port list order need not be topological or
+identical. Missing references, cycles and unreachable nodes are rejected.
+
+Shape `[]` is scalar; `[n]` is a vector, and `[null]` has an unknown vector
+extent. `[1]` remains a vector. Known and unknown extents infer the known extent;
+runtime rechecks actual equality. Output assertions must exactly match abstract
+inference, including known versus unknown extents. Concrete descriptors are
+re-inferred before numerical work. Literals contain finite numbers or bools.
+Integer `serde_json::Number` representations retained as i64/u64 must lie within
+±2^53; floating representations retain the full finite f64 range. Null literals
+and inline arrays are rejected. Explicit float32 literals round once and must
+remain finite. `pow` requires its right
+reference to be a numeric literal of magnitude at most 64, checked before f32
+conversion.
+
+The factory receives an already parsed `JsonMap`, not original JSON tokens.
+Upstream parsing can round integer tokens outside i64/u64 into f64, after which
+their original spelling cannot be recovered. For example, a retained `u64::MAX`
+integer is rejected, whereas `18446744073709551616` can become an accepted
+finite f64, indistinguishable from an explicitly floating value with the same
+bits. This boundary makes no raw-token precision guarantee. Frontends that
+retain arbitrary-precision integer literals must validate them before JSON
+conversion; native input array values are unaffected.
+
+Options are bounded to 64 KiB of compact UTF-8 JSON before a typed copy, with
+at most 128 nodes, 24 dependency levels, 32 inputs and 16 outputs. JSON nesting
+also obeys the existing 32-level document bound. Identifiers use the existing
+portable ASCII syntax with a 64-byte maximum. Duplicate names remain visible
+in declaration lists; duplicate object keys discarded by an upstream JSON
+parser cannot be reconstructed by this factory.
+
+One execution budget covers all simultaneously retained computed buffers,
+shape storage and each active kernel's scratch. Input aliases share existing
+payload owners and add no array-buffer charge. Every computed intermediate
+obeys the element ceiling, and all named output elements are summed separately,
+including repeated aliases of one input. The full graph is admitted before
+work, then each kernel receives the remaining byte allowance and actual
+retained capacities are checked. A possible validity bitmap and reduction
+accumulator are conservatively reserved during preflight even when actual
+values later suppress a bitmap or trigger an early null reduction. Consequently
+an ambiguous program can be refused even when a particular eager result fits.
+Allocator/object overhead, borrowed inputs and process RSS remain outside the
+buffer budget. No partial output map is published on failure.
+
+Each factory shares two private worker slots across its operators. Computation
+runs on Tokio's blocking pool; queued admission uses a 10 ms polling interval to observe cancellation and
+deadlines while the runtime can schedule it. Kernels check
+before allocation, every 4096 visited positions, inside rolling history refolds,
+and before returning. Explicit cancellation waits for worker settlement. Dropping
+or aborting a waiter requests local cancellation; an independent supervisor
+keeps the blocking handle and the closure retains its permit and owned inputs
+until it actually exits. During runtime teardown the guard requests local
+cancellation and Tokio's ordinary `Runtime::drop` drains its blocking pool.
+`shutdown_timeout` and `shutdown_background` explicitly stop waiting: their return
+does not prove that a worker has ended, and closure-owned buffers and permits
+remain retained until it does. The factory introduces no checkpoint or
+cross-platform bitwise reproducibility promise.
 
 ## Expression pipeline
 

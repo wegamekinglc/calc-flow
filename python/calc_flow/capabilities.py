@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import fields
 from typing import Any, Literal
 
 from calc_flow._compat import TypeAliasType, dataclass
@@ -25,7 +26,7 @@ PartitionContract = TypeAliasType(
     "PartitionContract", Literal["none", "row_axis_independent"]
 )
 
-CAPABILITY_SCHEMA_VERSION = 3
+CAPABILITY_SCHEMA_VERSION = 4
 
 _EXECUTION_MODES = frozenset(("batch", "stream"))
 _OUTPUT_FINALITIES = frozenset(("per_row_final", "group_final_append_only", "unproven"))
@@ -37,6 +38,8 @@ _CAPABILITY_RULES = frozenset(
         ("elementwise_broadcast", "1"),
         ("feature_axis_reduction", "1"),
         ("table_matmul_static_rhs", "1"),
+        ("native_float_bool_dtype", "1"),
+        ("native_scalar_vector_broadcast", "1"),
     )
 )
 
@@ -404,6 +407,70 @@ class ProviderPort:
     required: bool
 
 
+def _unique_schema_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("provider options_json_schema contains duplicate keys")
+    return result
+
+
+def _reject_schema_constant(_value: str) -> None:
+    raise ValueError("provider options_json_schema must contain finite JSON data")
+
+
+def _require_options_json_schema(schema: object) -> None:
+    _require_exact_str("provider capability", "options_json_schema", schema)
+    try:
+        decoded = json.loads(
+            schema,
+            object_pairs_hook=_unique_schema_object,
+            parse_constant=_reject_schema_constant,
+        )
+    except (ValueError, RecursionError) as error:
+        raise ValueError("provider options_json_schema must be strict JSON") from error
+    if (
+        type(decoded) is not dict
+        or decoded.get("type") != "object"
+        or decoded.get("additionalProperties") is not False
+    ):
+        raise ValueError(
+            "provider options_json_schema must describe a strict object schema"
+        )
+
+
+def _require_provider_port_binding(capability: ProviderCapability) -> None:
+    _require_exact_str("provider capability", "port_binding", capability.port_binding)
+    if capability.port_binding not in {"fixed", "options"}:
+        raise ValueError("provider port_binding must be fixed or options")
+    if capability.options_schema is not None and not isinstance(
+        capability.options_schema, ProviderOptionsSchema
+    ):
+        raise TypeError(
+            "provider options_schema must be a ProviderOptionsSchema or None"
+        )
+    if capability.port_binding == "fixed":
+        if capability.options_json_schema is not None:
+            raise ValueError(
+                "provider fixed port_binding requires options_json_schema=None"
+            )
+        return
+    _require_options_bound_ports(capability)
+
+
+def _require_options_bound_ports(capability: ProviderCapability) -> None:
+    if capability.input_ports or capability.output_ports:
+        raise ValueError(
+            "provider options port_binding requires empty input_ports/output_ports"
+        )
+    if capability.options_schema is not None:
+        raise ValueError(
+            "provider options_schema and options_json_schema are exclusive"
+        )
+    if capability.options_json_schema is None:
+        raise ValueError("provider options port_binding requires options_json_schema")
+    _require_options_json_schema(capability.options_json_schema)
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderCapability:
     provider: str
@@ -424,12 +491,16 @@ class ProviderCapability:
     supports_static_inputs: bool
     partition_contract: PartitionContract
     array_rules: ProviderArrayRules | None
+    port_binding: Literal["fixed", "options"] = "fixed"
+    options_json_schema: str | None = None
 
     def __post_init__(self) -> None:
         _require_exact_str("provider capability", "provider", self.provider)
+        _require_exact_str("provider capability", "name", self.name)
         _require_exact_str("provider capability", "version", self.version)
         _require_port_tuple("provider capability", "input_ports", self.input_ports)
         _require_port_tuple("provider capability", "output_ports", self.output_ports)
+        _require_provider_port_binding(self)
         _require_modes("provider capability", self.modes)
         _require_finality("provider capability", self.finality)
         _require_exact_bool("provider capability", "stateful", self.stateful)
@@ -471,7 +542,7 @@ class ProviderCapability:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeCapabilities:
-    schema_version: Literal[3]
+    schema_version: Literal[4]
     scope: RuntimeSessionScope
     package_version: str
     project_format_versions: tuple[int, ...]
@@ -481,6 +552,60 @@ class RuntimeCapabilities:
     udfs: tuple[UdfCapability, ...]
     providers: tuple[ProviderCapability, ...]
     connectors: tuple[ConnectorCapability, ...]
+
+
+def _descriptor_object(raw: object, expected_fields: frozenset[str]) -> dict[str, Any]:
+    if type(raw) is not dict or any(type(key) is not str for key in raw):
+        raise TypeError("native array capability must contain exact JSON objects")
+    if raw.keys() != expected_fields:
+        raise ValueError("native array capability contains missing or unknown fields")
+    return raw
+
+
+def _descriptor_list(raw: object) -> list[Any]:
+    if type(raw) is not list:
+        raise TypeError("native array capability must contain exact JSON lists")
+    return raw
+
+
+def _descriptor_rule(raw: object) -> CapabilityRule:
+    rule = _descriptor_object(raw, frozenset(("name", "version")))
+    return CapabilityRule(**rule)
+
+
+def _descriptor_array_rules(raw: object) -> ProviderArrayRules:
+    rules = _descriptor_object(
+        raw, frozenset(("supported_dtypes", "safe_dtype_rule", "shape_rules"))
+    )
+    return ProviderArrayRules(
+        supported_dtypes=tuple(_descriptor_list(rules["supported_dtypes"])),
+        safe_dtype_rule=_descriptor_rule(rules["safe_dtype_rule"]),
+        shape_rules=tuple(
+            _descriptor_rule(rule) for rule in _descriptor_list(rules["shape_rules"])
+        ),
+    )
+
+
+def _native_array_provider_capability(value: object) -> ProviderCapability:
+    raw = _descriptor_object(
+        value, frozenset(field.name for field in fields(ProviderCapability))
+    )
+    capability = ProviderCapability(
+        **{
+            **raw,
+            "input_ports": tuple(_descriptor_list(raw["input_ports"])),
+            "output_ports": tuple(_descriptor_list(raw["output_ports"])),
+            "modes": tuple(_descriptor_list(raw["modes"])),
+            "array_rules": _descriptor_array_rules(raw["array_rules"]),
+        }
+    )
+    if (capability.provider, capability.name, capability.version) != (
+        "native",
+        "array_expr",
+        "1",
+    ):
+        raise ValueError("native array capability must describe native:array_expr@1")
+    return capability
 
 
 def runtime_capabilities(
@@ -512,6 +637,8 @@ def runtime_capabilities(
     )
 
     def provider_capability(registration: Mapping[str, Any]) -> ProviderCapability:
+        if registration["kind"] == "native_provider":
+            return registration["capability"]
         lifecycle = registration.get("stream_lifecycle")
         if isinstance(lifecycle, _StatelessProviderLifecycle):
             modes: tuple[ExecutionMode, ...] = ("batch", "stream")
@@ -565,7 +692,7 @@ def runtime_capabilities(
             (
                 provider_capability(registration)
                 for registration in registrations
-                if registration["kind"] == "provider"
+                if registration["kind"] in {"provider", "native_provider"}
             ),
             key=lambda item: (item.provider, item.name, item.version),
         )

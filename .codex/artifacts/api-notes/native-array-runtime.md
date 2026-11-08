@@ -155,3 +155,30 @@ A1 没有执行 kernel，因此不创建空的 `ArrayExecutionOptions` 或预算
 针对真实接口先记录 focused RED，再实现。至少检查 f32/f64 的原始 bits、scalar/empty/vector、显式与缺省 validity、非零 array/bitmap offsets、错误路径、共享 clone/export 的生命周期、caller 数据不变、shape 的复制、visible 与 retained 字节差异、checked byte 边界及 `Batch::external` 往返。验证 `NativeArray` 为 Send+Sync，借用 view 的生命周期由 Rust 保证，不把 borrowed view 搬入 async 任务。
 
 仅运行相关 Rust unit/integration、必要 fmt/clippy/rustdoc；完整矩阵与 90% coverage 留给 CI。本文是文档变更，检查 Markdown、链接、spec references、schema 无意外漂移和 whitespace，不为计划构建 native。
+
+## A3 已解析数值字面量边界
+
+2026-11-08 接口及专项设计审查通过本修订。它明确替换先前过强的原始整数
+token 承诺，不表示该承诺曾被实现。原生 factory 的边界是已解析 `JsonMap`，
+没有原始 JSON 拼写信息。
+
+- `serde_json::Number` 保留为 i64/u64 的整数表示必须位于 ±2^53，再转 f64。
+- 已保留为 f64 的表示必须有限，可以使用完整有限范围；不能用数学上的整数性
+  或 `fract() == 0` 将它重新分类为原始整数。
+- 超出 i64/u64 的整数 token 可能在上游被舍入为有限 f64。该值与相同 bits 的
+  显式浮点表示无法区分，按相同规则处理。例如保留的 `u64::MAX` 整数会被拒绝，
+  更大的 `18446744073709551616` 却可能已被解析为可接受的 f64。此非单调边界
+  必须公开，不声称恢复原始写法或丢失的精度。
+- 显式 f32 字面量仍在上述检查后舍入且不得溢出为 Inf；pow 仍检查解析后的
+  指数绝对值不超过 64，然后才转 f32。null、数组及数值到 bool 的隐式转换仍拒绝。
+- Python 声明前端必须在还持有 Python `int` 时、JSON 编码前执行 ±2^53 检查。
+  普通 external options 和手写 project JSON 不声称经过该前端检查。
+
+JSON Schema 的 `integer` 描述数学值，不是 Rust Number 的保留表示。因此不能
+用 `type=integer` 条件模拟此规则而错拒大整值 f64。schema 描述该语义，原生
+factory 执行它；单独 schema 校验不足以证明通过全部原生语义检查。数组和
+scalar 输入的数据值合同不变。本修订不改变数值算法、解析器 feature、依赖或
+IR/capability 版本。
+
+回归覆盖真实 serde_json 解析、原生 literal 校验及执行结果 bits：正负 2^64
+和它们相邻的原始大整数拼写会形成相同 f64；保留的整数表示仍按边界拒绝。

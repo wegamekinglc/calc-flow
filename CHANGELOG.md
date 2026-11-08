@@ -9,6 +9,17 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-08: Add the bounded Rust `native:array_expr@1` batch factory with
+  strict typed IR, shape/dtype inference, native eager kernel execution, one
+  shared buffer budget, owned worker cancellation and Rust capability/schema
+  descriptors. Rolling state is fresh per batch; stream registration is absent.
+
+- 2026-11-08: Add explicit Python registration of the Rust native batch array
+  factory. Capability schema 4 adds option-defined ports and immutable JSON
+  Schema text, preserving existing providers' fixed-port defaults. Registration
+  snapshots add the `native_provider` kind with a frozen capability and no
+  callback; replay that kind with `calc_flow.array.register_native`.
+
 - 2026-11-08: Add Rust native elementwise floating arithmetic, comparisons,
   packed Boolean storage and Kleene logic, and nullable conditional selection.
   Borrowed vectors and inline scalars use explicit broadcasting, dtype promotion,

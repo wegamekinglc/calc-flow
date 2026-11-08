@@ -1,7 +1,7 @@
 use datafusion::arrow::buffer::{BooleanBuffer, Buffer, NullBuffer};
 
 use super::{
-    ArrayExecutionOptions, FloatValues, FloatView, NativeArray, invalid,
+    ArrayExecutionOptions, FloatValues, FloatView, NativeArray, control, invalid,
     rolling_mean_math::{self, ArithmeticError, FloatSummary},
 };
 use crate::{Result, RollingNumericalProfile};
@@ -110,11 +110,21 @@ pub fn rolling_mean(
     options: RollingMeanOptions,
     execution: &ArrayExecutionOptions,
 ) -> Result<NativeArray> {
+    rolling_mean_checked(input, options, execution, &mut || Ok(()))
+}
+
+pub(super) fn rolling_mean_checked(
+    input: FloatView<'_>,
+    options: RollingMeanOptions,
+    execution: &ArrayExecutionOptions,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<NativeArray> {
+    check()?;
     let (window, capacity) = allocation_plan(input.len(), options, execution)?;
     if input.is_empty() {
-        return NativeArray::from_f64(Vec::new(), vec![0], None);
+        return control::finish(NativeArray::from_f64(Vec::new(), vec![0], None), check);
     }
-    evaluate(input, options, window, capacity)
+    control::finish(evaluate(input, options, window, capacity, check), check)
 }
 
 fn evaluate(
@@ -122,16 +132,24 @@ fn evaluate(
     options: RollingMeanOptions,
     window: usize,
     capacity: usize,
+    check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<NativeArray> {
     let mut history = RowsHistory::new(capacity);
     let mut summary = FloatSummary::default();
     let mut output = Vec::with_capacity(input.len());
     let mut bitmap = vec![0_u8; input.len().div_ceil(8)];
     for index in 0..input.len() {
+        control::checkpoint(index, check)?;
         advance(&mut summary, &mut history, sample_at(input, index), window)?;
         let count = u64::try_from(index + 1)
             .map_err(|_| invalid("input.shape", "sequence position exceeds u64"))?;
-        repair(&mut summary, &history, options.numerical_profile, count)?;
+        repair(
+            &mut summary,
+            &history,
+            options.numerical_profile,
+            count,
+            check,
+        )?;
         if summary.valid_count >= options.min_periods {
             output.push(summary.read_mean());
             bitmap[index / 8] |= 1 << (index % 8);
@@ -166,6 +184,13 @@ fn allocation_plan(
     options: RollingMeanOptions,
     execution: &ArrayExecutionOptions,
 ) -> Result<(usize, usize)> {
+    let (output, scratch) = required_bytes(len, options)?;
+    execution.validate_allocation(len, output, scratch)?;
+    let window = usize::try_from(options.window).unwrap_or(usize::MAX);
+    Ok((window, len.min(window.saturating_add(1))))
+}
+
+pub(super) fn required_bytes(len: usize, options: RollingMeanOptions) -> Result<(usize, usize)> {
     u64::try_from(len).map_err(|_| invalid("input.shape", "sequence length exceeds u64"))?;
     let window = usize::try_from(options.window).unwrap_or(usize::MAX);
     let capacity = len.min(window.saturating_add(1));
@@ -174,9 +199,10 @@ fn allocation_plan(
         .and_then(|bytes| bytes.checked_add(len.div_ceil(8)))
         .and_then(|bytes| bytes.checked_add(size_of::<usize>()))
         .ok_or_else(|| invalid("outputs.output.bytes", "output byte count overflowed usize"))?;
-    let scratch = scratch_bytes(len, capacity, options.numerical_profile)?;
-    execution.validate_allocation(len, output, scratch)?;
-    Ok((window, capacity))
+    Ok((
+        output,
+        scratch_bytes(len, capacity, options.numerical_profile)?,
+    ))
 }
 
 fn scratch_bytes(len: usize, capacity: usize, profile: RollingNumericalProfile) -> Result<usize> {
@@ -215,19 +241,32 @@ fn repair(
     history: &RowsHistory,
     profile: RollingNumericalProfile,
     count: u64,
+    check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<()> {
     if profile == RollingNumericalProfile::StableV2Preview
         && rolling_mean_math::rebase_due(count, history.len, summary.is_non_finite())
     {
         *summary =
-            rolling_mean_math::stable_fold(history.iter().flatten()).map_err(arithmetic_error)?;
+            rolling_mean_math::stable_fold_controlled(history.iter(), check, arithmetic_error)?;
     } else if summary.is_non_finite() {
         *summary = FloatSummary::default();
-        for value in history.iter().flatten() {
+        refold_v1(summary, history, check)?;
+    }
+    Ok(())
+}
+
+fn refold_v1(
+    summary: &mut FloatSummary,
+    history: &RowsHistory,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
+    for (index, value) in history.iter().enumerate() {
+        control::checkpoint(index, check)?;
+        if let Some(value) = value {
             summary.as_mut().add(value).map_err(arithmetic_error)?;
         }
     }
-    Ok(())
+    check()
 }
 
 fn arithmetic_error(error: ArithmeticError) -> crate::CalcFlowError {
@@ -285,6 +324,41 @@ impl RowsHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_null_refold_checks(profile: RollingNumericalProfile) {
+        let mut history = RowsHistory::new(8193);
+        for _ in 0..8193 {
+            history.push(None);
+        }
+        let mut summary = FloatSummary {
+            sum: f64::INFINITY,
+            ..FloatSummary::default()
+        };
+        let mut checks = 0;
+        let result = repair(&mut summary, &history, profile, 1, &mut || {
+            checks += 1;
+            if checks == 3 {
+                Err(crate::CalcFlowError::Cancelled {
+                    run_id: "refold".into(),
+                })
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(
+            result,
+            Err(crate::CalcFlowError::Cancelled { .. })
+        ));
+        assert_eq!(checks, 3);
+    }
+    #[test]
+    fn test_refold_visits_null_slots_in_stable_v1() {
+        assert_null_refold_checks(RollingNumericalProfile::StableV1);
+    }
+    #[test]
+    fn test_refold_visits_null_slots_in_stable_v2() {
+        assert_null_refold_checks(RollingNumericalProfile::StableV2Preview);
+    }
 
     #[test]
     fn test_history_wrap_preserves_missing_positions_without_growth() {

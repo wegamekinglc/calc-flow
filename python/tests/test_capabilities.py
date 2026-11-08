@@ -43,7 +43,7 @@ def test_empty_runtime_capabilities_are_frozen_and_session_scoped() -> None:
     repeated = runtime.capabilities()
 
     assert isinstance(snapshot, RuntimeCapabilities)
-    assert snapshot.schema_version == 3
+    assert snapshot.schema_version == 4
     assert snapshot.scope.kind == "runtime_session"
     assert snapshot.scope.revision == 0
     assert snapshot.scope.session_id == repeated.scope.session_id

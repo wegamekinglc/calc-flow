@@ -692,7 +692,7 @@ runtime.register_provider(
 )
 snapshot = runtime.capabilities()
 
-assert snapshot.schema_version == 3
+assert snapshot.schema_version == 4
 assert snapshot.scope.kind == "runtime_session"
 assert snapshot.scope.revision == 1
 assert snapshot.providers[0].name == "normalize"
@@ -708,8 +708,9 @@ fields. `options_schema=None` means no declarative editor is available; it
 does not mean every option is valid. The provider callback remains
 authoritative during compilation.
 
-Capability schema version 3 makes every operator and provider entry
-lifecycle-aware. `OperatorCapability` and `ProviderCapability` report
+Capability schema version 4 preserves the lifecycle fields introduced by
+version 3 and adds option-defined provider ports. `OperatorCapability` and
+`ProviderCapability` report
 `modes`, `finality`, `stateful`, `microbatch_invariant`, `requires_watermark`,
 `checkpoint_support`, `state_version`, `deterministic`, and `replay_safe`;
 operators additionally report `state_layouts`, the advertised checkpoint layout
@@ -731,9 +732,18 @@ Construction validates strictly and fails closed: closed-vocabulary and
 cross-field violations raise `ValueError`, while non-strict data (a `list`
 where a tuple is declared, a non-`bool` boolean field) raises `TypeError`.
 
+`ProviderCapability.port_binding` defaults to `"fixed"`, preserving existing
+port tuples and `options_schema`; `options_json_schema` defaults to `None`.
+With `port_binding="options"`, both fixed port tuples are empty because the
+required names, kinds and flags come from `options.inputs` and
+`options.outputs`. This mode requires immutable strict JSON Schema text in
+`options_json_schema`, and `options_schema` must be `None`. The two schema
+fields cannot be combined. Empty tuples in this mode do not mean zero ports.
+
 `CapabilityRule` identities are closed and versioned. The accepted identities
 are `array_api_safe_dtype@1`, `elementwise_broadcast@1`,
-`feature_axis_reduction@1`, and `table_matmul_static_rhs@1`; any other
+`feature_axis_reduction@1`, `table_matmul_static_rhs@1`,
+`native_float_bool_dtype@1`, and `native_scalar_vector_broadcast@1`; any other
 name/version pair fails construction. `ProviderArrayRules` pairs the exact
 `supported_dtypes` tuple with a `safe_dtype_rule` and `shape_rules`, and
 stores both tuples sorted by identity.
@@ -800,6 +810,29 @@ The public `Runtime.register_provider` and
 so an arbitrary Python callback remains batch-only rather than acquiring this
 proof from caller-supplied metadata.
 
+`calc_flow.array.register_native(runtime)` registers the Rust
+`native:array_expr@1` batch factory. Its descriptor comes from Rust, including
+the complete IR JSON Schema and option-defined ports. It supports native
+Boolean/float32/float64 scalars and vectors; numeric promotion preserves
+float32 unless an operand is float64. Boolean values support logical and
+comparison operations. True scalars broadcast, while `[1]` remains a vector
+and vector lengths must match. The factory reports `modes=("batch",)`,
+`stateful=False`, `microbatch_invariant=False`, `requires_watermark=False`,
+`checkpoint_support="unproven"`, `state_version=None`,
+`supports_static_inputs=False`, `partition_contract="none"` and
+`finality="unproven"`. Its `deterministic=True` and `replay_safe=True` claims
+apply to identical inputs on the same implementation and numerical profile;
+they do not promise cross-platform bitwise equality or delivery guarantees.
+Rolling state starts fresh on every batch invocation.
+
+Use this factory through the advanced `PipelineBuilder.external` or project
+surface with the declared native IR. Native symbolic/matrix lowering is not
+available yet. Registration retains no Python callback or provider root. It
+prepares a frozen capability before insertion, then records one successful
+entry and invalidates symbolic caches once. A duplicate, invalid descriptor,
+or cleared native runtime leaves the records, capability revision and caches
+unchanged. Querying the Rust descriptor alone does not register a provider.
+
 Compiled-in connector registrations surface on the snapshot's `connectors`
 tuple as `ConnectorCapability` entries. Each entry pairs its
 `(provider, name, version)` identity and `source`/`sink`/`both` kind with a
@@ -835,31 +868,36 @@ def capability_registration_snapshot(
 `registration_snapshot()` returns this runtime's successful trusted
 registrations, oldest first. `capability_registration_snapshot()` returns
 `capabilities()` and `registration_snapshot()` as one consistent pair. Each
-record is a plain `dict` holding the arguments of one registration, including
-its live callable. Records are process-local trusted values, not data.
+record is a fresh plain `dict`. Python registrations retain their live
+callable; a `native_provider` record holds identity and a frozen Rust-derived
+`ProviderCapability`, without a callable. Records are process-local trusted
+values, not a project serialization format.
 
 Records are returned in registration order. The table describes the keys Calc
 Flow produces today: a record carries every listed key with the listed type
 and presence rule. A record may also carry keys the table does not list (see
 unlisted keys below). Key order inside a record is not guaranteed.
 
-| Kind            | Key                           | Value type                        | Present                          |
-|-----------------|-------------------------------|-----------------------------------|----------------------------------|
-| `provider`      | `kind`                        | `str`, equal to `"provider"`      | always                           |
-| `provider`      | `provider`, `name`, `version` | `str`                             | always                           |
-| `provider`      | `callback`                    | callable                          | always                           |
-| `provider`      | `options_schema`              | `ProviderOptionsSchema` or `None` | always                           |
-| `provider`      | `accepts_context`             | `bool`, equal to `True`           | only when registered with `True` |
-| `provider`      | `provider_mode`               | `str`, equal to `"mapping"`       | only for mapping providers       |
-| `provider`      | `input_ports`, `output_ports` | `tuple[tuple[str, str], ...]`     | only for mapping providers       |
-| `scalar_udf`    | `kind`                        | `str`, equal to `"scalar_udf"`    | always                           |
-| `scalar_udf`    | `provider`, `name`, `version` | `str`                             | always                           |
-| `scalar_udf`    | `input_types`                 | `tuple[str, ...]`                 | always                           |
-| `scalar_udf`    | `return_type`, `volatility`   | `str`                             | always                           |
-| `scalar_udf`    | `function`                    | callable                          | always                           |
-| `kafka_decoder` | `kind`                        | `str`, equal to `"kafka_decoder"` | always                           |
-| `kafka_decoder` | `name`, `version`             | non-empty `str`                   | always                           |
-| `kafka_decoder` | `function`                    | callable                          | always                           |
+| Kind              | Key                             | Value type                          | Present                            |
+|-------------------|---------------------------------|-------------------------------------|------------------------------------|
+| `provider`        | `kind`                          | `str`, equal to `"provider"`        | always                             |
+| `provider`        | `provider`, `name`, `version`   | `str`                               | always                             |
+| `provider`        | `callback`                      | callable                            | always                             |
+| `provider`        | `options_schema`                | `ProviderOptionsSchema` or `None`   | always                             |
+| `provider`        | `accepts_context`               | `bool`, equal to `True`             | only when registered with `True`   |
+| `provider`        | `provider_mode`                 | `str`, equal to `"mapping"`         | only for mapping providers         |
+| `provider`        | `input_ports`, `output_ports`   | `tuple[tuple[str, str], ...]`       | only for mapping providers         |
+| `native_provider` | `kind`                          | `str`, equal to `"native_provider"` | always                             |
+| `native_provider` | `provider`, `name`, `version`   | `str`                               | always                             |
+| `native_provider` | `capability`                    | frozen `ProviderCapability`         | always                             |
+| `scalar_udf`      | `kind`                          | `str`, equal to `"scalar_udf"`      | always                             |
+| `scalar_udf`      | `provider`, `name`, `version`   | `str`                               | always                             |
+| `scalar_udf`      | `input_types`                   | `tuple[str, ...]`                   | always                             |
+| `scalar_udf`      | `return_type`, `volatility`     | `str`                               | always                             |
+| `scalar_udf`      | `function`                      | callable                            | always                             |
+| `kafka_decoder`   | `kind`                          | `str`, equal to `"kafka_decoder"`   | always                             |
+| `kafka_decoder`   | `name`, `version`               | non-empty `str`                     | always                             |
+| `kafka_decoder`   | `function`                      | callable                            | always                             |
 
 - A `provider` record without `provider_mode` came from `register_provider`.
   A missing `accepts_context` means `False`.
@@ -867,9 +905,12 @@ unlisted keys below). Key order inside a record is not guaranteed.
   `batch_kind` is `"table"` or `"array"`.
 - A `kafka_decoder` record has no `provider` key and exists only on wheels
   built with `connector-kafka`.
+- A `native_provider` record comes from `calc_flow.array.register_native`;
+  replay it by calling that helper on the target runtime.
 - The listed keys of a record are the arguments of the one successful call
   that produced it: `register_provider`, `register_mapping_provider`,
-  `register_scalar_udf`, or `register_kafka_decoder`.
+  `register_scalar_udf`, `register_kafka_decoder`, or
+  `calc_flow.array.register_native`.
 
 Read records as a tolerant reader. Adding a record kind or adding a key is
 not a breaking change. Removing or retyping a listed key, changing a presence
@@ -908,7 +949,8 @@ A snapshot copies the containers and shares the values:
   registered objects themselves, with their closures and state.
   `options_schema` is the frozen instance passed at registration. Port and
   input-type values are immutable tuples built from the caller's sequences at
-  registration.
+  registration. A native record's `capability` and its nested array rules are
+  frozen values; its JSON Schema is immutable text.
 - All shared values other than the callables are immutable, so sharing is
   observable only through a callable.
 - Neither snapshot method calls, inspects, or serializes a registered
@@ -929,7 +971,8 @@ pair `capabilities, records`:
 
 - `records` are the registrations that `capabilities` describes at
   `capabilities.scope.revision`.
-- `capabilities.providers` has exactly one entry per `provider` record and
+- `capabilities.providers` has exactly one entry per `provider` or
+  `native_provider` record and
   `capabilities.udfs` one per `scalar_udf` record, with the same identities.
   Capability entries are sorted by identity while records keep registration
   order, so match them by `(provider, name, version)` rather than by
@@ -956,6 +999,7 @@ records onto a second runtime through the public registration methods:
 
 ```python
 from calc_flow import Runtime
+from calc_flow.array import register_native
 
 
 def scale(inputs, options):
@@ -977,6 +1021,9 @@ assert capabilities.providers[0].name == records[0]["name"] == "scale"
 
 worker = Runtime()
 for record in records:
+    if record["kind"] == "native_provider":
+        register_native(worker)
+        continue
     if record["kind"] != "provider":  # read kind before any other key
         raise ValueError(f"cannot replay a {record['kind']} registration")
     identity = (record["provider"], record["name"], record["version"])
