@@ -743,8 +743,11 @@ fields cannot be combined. Empty tuples in this mode do not mean zero ports.
 `CapabilityRule` identities are closed and versioned. The accepted identities
 are `array_api_safe_dtype@1`, `elementwise_broadcast@1`,
 `feature_axis_reduction@1`, `table_matmul_static_rhs@1`,
-`native_float_bool_dtype@1`, and `native_scalar_vector_broadcast@1`; any other
-name/version pair fails construction. `ProviderArrayRules` pairs the exact
+`native_float_bool_dtype@1`, `native_scalar_vector_broadcast@1`,
+`native_packed_rank2@1`, `native_matmul@1`, and `native_axis_reduction@1`; any
+other name/version pair fails construction. The last three describe IR2 packed
+matrix shapes, matrix multiplication and axis reductions; IR1 retains its
+scalar/vector shape rules. `ProviderArrayRules` pairs the exact
 `supported_dtypes` tuple with a `safe_dtype_rule` and `shape_rules`, and
 stores both tuples sorted by identity.
 

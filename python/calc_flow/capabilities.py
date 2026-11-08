@@ -40,6 +40,9 @@ _CAPABILITY_RULES = frozenset(
         ("table_matmul_static_rhs", "1"),
         ("native_float_bool_dtype", "1"),
         ("native_scalar_vector_broadcast", "1"),
+        ("native_packed_rank2", "1"),
+        ("native_matmul", "1"),
+        ("native_axis_reduction", "1"),
     )
 )
 

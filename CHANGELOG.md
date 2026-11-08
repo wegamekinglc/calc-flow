@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-08: Add strict native array IR2 programs and descriptor-only Rust
+  inference queries. Reuse matrix/layout/axis kernels, retain IR1 field and
+  rank restrictions, and account shared alias buffers, shape descriptors and
+  explicit validity masks in whole-program allocation preflight.
+
 - 2026-11-08: Expose packed rank-2 native arrays in Python, including Boolean
   NumPy snapshots, shaped immutable exports, matmul, reshape, transpose and
   axis/keepdims reductions. Keep Arrow exports flat and count logical rows

@@ -24,18 +24,26 @@ impl io::Write for Bound {
 }
 
 pub(super) fn parse(options: &JsonMap) -> Result<Program> {
-    inspect_children(options.values(), 1, &mut 0)?;
-    serde_json::to_writer(Bound(0), options)
-        .map_err(|_| invalid("options.bytes", "compact options exceed 64 KiB"))?;
-    let program: Program = serde_json::from_value(serde_json::Value::Object(
-        options.clone().into_iter().collect(),
-    ))
-    .map_err(|_| invalid("options", "invalid typed array program"))?;
-    if program.ir_version != 1 {
-        return Err(invalid("options.ir_version", "only version 1 is supported"));
-    }
+    parse_mode(options, false)
+}
+pub(super) fn parse_query(options: &JsonMap) -> Result<Program> {
+    parse_mode(options, true)
+}
+fn parse_mode(options: &JsonMap, query: bool) -> Result<Program> {
+    bounded(options)?;
+    let version = options
+        .get("ir_version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u8::try_from(version).ok())
+        .ok_or_else(|| invalid("options.ir_version", "requires a supported integer version"))?;
+    let program = super::document::decode(options, version, query)?;
     validate(&program)?;
     Ok(program)
+}
+pub(super) fn bounded(options: &JsonMap) -> Result<()> {
+    inspect_children(options.values(), 1, &mut 0)?;
+    serde_json::to_writer(Bound(0), options)
+        .map_err(|_| invalid("options.bytes", "compact options exceed 64 KiB"))
 }
 
 fn inspect_children<'a>(
@@ -101,13 +109,42 @@ fn validate(program: &Program) -> Result<()> {
         16,
     )?;
     names(program.nodes.iter().map(Node::id), "options.nodes", 128)?;
+    shapes(program)?;
+    matmuls(program)
+}
+fn shapes(program: &Program) -> Result<()> {
     for input in &program.inputs {
-        validate_shape(&input.shape, "options.inputs.shape")?;
+        validate_shape(
+            &input.shape,
+            usize::from(program.ir_version),
+            "options.inputs.shape",
+        )?;
     }
     for output in &program.outputs {
-        validate_shape(&output.shape, "options.outputs.shape")?;
+        if let Some(assertion) = &output.assertion {
+            validate_shape(
+                &assertion.shape,
+                usize::from(program.ir_version),
+                "options.outputs.shape",
+            )?;
+        }
     }
 
+    Ok(())
+}
+fn matmuls(program: &Program) -> Result<()> {
+    if program
+        .nodes
+        .iter()
+        .filter(|node| matches!(node, Node::Matmul { .. }))
+        .count()
+        > 1
+    {
+        return Err(invalid(
+            "options.nodes.matmul",
+            "at most one matmul is supported",
+        ));
+    }
     Ok(())
 }
 

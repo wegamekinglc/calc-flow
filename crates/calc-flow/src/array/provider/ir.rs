@@ -19,6 +19,13 @@ impl DType {
             Self::Float64 => ArrayDType::Float64,
         }
     }
+    pub(super) const fn spelling(self) -> &'static str {
+        match self {
+            Self::Bool => "bool",
+            Self::Float32 => "float32",
+            Self::Float64 => "float64",
+        }
+    }
     pub(super) const fn width(self) -> usize {
         match self {
             Self::Bool => 0,
@@ -36,13 +43,16 @@ pub(super) struct Input {
     pub shape: Vec<Option<usize>>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct Assertion {
+    pub dtype: DType,
+    pub shape: Vec<Option<usize>>,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Output {
     pub name: String,
     pub node: String,
-    pub dtype: DType,
-    pub shape: Vec<Option<usize>>,
+    pub assertion: Option<Assertion>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -84,6 +94,17 @@ pub(super) enum Reduce {
     Max,
 }
 
+impl Reduce {
+    pub(super) const fn native(self) -> crate::array::Reduction {
+        match self {
+            Self::Sum => crate::array::Reduction::Sum,
+            Self::Mean => crate::array::Reduction::Mean,
+            Self::Min => crate::array::Reduction::Min,
+            Self::Max => crate::array::Reduction::Max,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Profile {
@@ -101,7 +122,7 @@ impl Profile {
     }
 }
 
-const fn one() -> u64 {
+pub(super) const fn one() -> u64 {
     1
 }
 
@@ -140,6 +161,10 @@ pub(super) enum Node {
         input: String,
         #[serde(default)]
         skip_nulls: bool,
+        #[serde(default)]
+        axis: Option<usize>,
+        #[serde(default)]
+        keepdims: bool,
     },
     RollingMean {
         id: String,
@@ -157,6 +182,20 @@ pub(super) enum Node {
         #[serde(default = "one")]
         min_periods: u64,
     },
+    Matmul {
+        id: String,
+        left: String,
+        right: String,
+    },
+    Reshape {
+        id: String,
+        input: String,
+        shape: Vec<usize>,
+    },
+    Transpose {
+        id: String,
+        input: String,
+    },
 }
 
 impl Node {
@@ -169,7 +208,10 @@ impl Node {
             | Self::Where { id, .. }
             | Self::Reduce { id, .. }
             | Self::RollingMean { id, .. }
-            | Self::Ewma { id, .. } => id,
+            | Self::Ewma { id, .. }
+            | Self::Matmul { id, .. }
+            | Self::Reshape { id, .. }
+            | Self::Transpose { id, .. } => id,
         }
     }
     pub(super) fn references(&self) -> Vec<&str> {
@@ -178,8 +220,12 @@ impl Node {
             Self::Unary { input, .. }
             | Self::Reduce { input, .. }
             | Self::RollingMean { input, .. }
-            | Self::Ewma { input, .. } => vec![input],
-            Self::Binary { left, right, .. } => vec![left, right],
+            | Self::Ewma { input, .. }
+            | Self::Reshape { input, .. }
+            | Self::Transpose { input, .. } => vec![input],
+            Self::Binary { left, right, .. } | Self::Matmul { left, right, .. } => {
+                vec![left, right]
+            }
             Self::Where {
                 condition,
                 if_true,
@@ -213,24 +259,26 @@ impl Execution {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub(super) struct Program {
     pub ir_version: u8,
     pub inputs: Vec<Input>,
     pub nodes: Vec<Node>,
     pub outputs: Vec<Output>,
-    #[serde(default)]
     pub execution: Execution,
 }
 
-pub(super) fn validate_shape(shape: &[Option<usize>], field: &str) -> Result<()> {
-    if shape.len() > 1 {
-        Err(invalid(
-            field,
-            "only scalar and vector shapes are supported",
-        ))
+pub(super) fn validate_shape(shape: &[Option<usize>], maximum: usize, field: &str) -> Result<()> {
+    if shape.len() > maximum {
+        Err(invalid(field, "shape rank exceeds the declaration version"))
     } else {
+        if let Some(product) = shape.iter().copied().collect::<Option<Vec<_>>>() {
+            product.iter().try_fold(1_usize, |total, value| {
+                total
+                    .checked_mul(*value)
+                    .ok_or_else(|| invalid(field, "shape product overflowed usize"))
+            })?;
+        }
         Ok(())
     }
 }

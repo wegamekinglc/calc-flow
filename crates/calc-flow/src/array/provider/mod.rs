@@ -9,10 +9,12 @@ use crate::{
 };
 
 mod budget;
+mod document;
 mod execute;
 mod infer;
 mod ir;
 mod schema;
+mod shape;
 mod validate;
 mod worker;
 
@@ -36,6 +38,36 @@ pub struct NativeArrayFactory {
 }
 
 impl NativeArrayFactory {
+    /// Infers output descriptors for bounded descriptor-only IR1/IR2 queries.
+    ///
+    /// Query outputs contain only `name` and `node`. No input rows, numerical
+    /// buffers, or provider registration are needed.
+    ///
+    /// ```
+    /// use calc_flow::{JsonMap, array::NativeArrayFactory};
+    /// # fn main() -> calc_flow::Result<()> {
+    /// let query: JsonMap = serde_json::from_value(serde_json::json!({
+    ///     "ir_version": 2,
+    ///     "inputs": [{"name": "x", "dtype": "float32", "shape": [null, 2]}],
+    ///     "nodes": [{"id": "x", "op": "input", "name": "x"},
+    ///               {"id": "y", "op": "reduce", "function": "mean", "input": "x", "axis": 1}],
+    ///     "outputs": [{"name": "output", "node": "y"}]
+    /// })).expect("query is a JSON object");
+    /// let inferred = NativeArrayFactory::infer_program(&query)?;
+    /// assert_eq!(inferred["outputs"][0]["dtype"], "float64");
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::CalcFlowError::InvalidArgument`] for malformed programs,
+    /// incompatible descriptors, or exceeded declaration bounds.
+    pub fn infer_program(options: &JsonMap) -> Result<JsonMap> {
+        let plan = infer::plan(validate::parse_query(options)?)?;
+        infer::query_outputs(&plan)
+    }
+
     /// Returns the data-only native provider capability and strict options schema.
     pub fn capability_descriptor() -> JsonMap {
         schema::descriptor()

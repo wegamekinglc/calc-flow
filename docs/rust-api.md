@@ -315,9 +315,10 @@ declares the referenced `node`. Nodes have a unique `id` and one operation:
 }
 ```
 
-`input`, typed `literal`, `unary`, `binary`, `where`, `reduce`, `rolling_mean`,
-and `ewma` nodes reuse the eager kernels. Full reductions accept numeric
-scalars/vectors; rolling nodes require numeric vectors, return float64, and
+IR1 keeps rank zero/one and its original closed node fields. `input`, typed
+`literal`, `unary`, `binary`, `where`, `reduce`, `rolling_mean`, and `ewma`
+nodes reuse the eager kernels. Full reductions accept numeric scalars/vectors;
+rolling nodes require numeric vectors, return float64, and
 start fresh for each batch. Rolling means admit explicit `stable_v1` and
 `stable_v2` profiles. Node order and port list order need not be topological or
 identical. Missing references, cycles and unreachable nodes are rejected.
@@ -333,6 +334,28 @@ and inline arrays are rejected. Explicit float32 literals round once and must
 remain finite. `pow` requires its right
 reference to be a numeric literal of magnitude at most 64, checked before f32
 conversion.
+
+IR2 (`ir_version=2`) adds packed rank-two descriptors, `matmul` with `left`
+and `right`, `reshape` with a concrete `shape`, and `transpose`. It admits at
+most one matmul and reuses the same deterministic eager matrix kernel. All
+non-scalar operand shapes must agree exactly; corresponding known dimensions
+resolve unknown ones, with actual equality checked before allocation. A reshape
+with an unknown input extent defers its element-count equality check until
+execution. Inferred products use checked arithmetic even when combining two
+independently valid declarations. Known zero dimensions remain ordinary values.
+
+IR2 `reduce` adds optional `axis` (null, 0 or 1) and `keepdims` (false by default).
+It uses the eager axis/null/dtype rules. Rolling/EWMA continue to require vectors.
+IR1 rejects these new fields even when explicitly null or false, and rejects
+rank-two declarations and layout nodes.
+
+`NativeArrayFactory::infer_program(&JsonMap)` accepts descriptor-only IR1/IR2
+queries: each requested output contains only `name` and `node`. It returns an
+object containing `outputs` with canonical `name`, `node`, `dtype` and `shape`
+descriptors. It does not require registration or read rows. Execution limits of
+zero are valid for queries, since no numeric output or scratch is allocated.
+Executable factory options still require exact dtype/shape assertions. The
+capability's strict canonical schema exposes both versioned executable forms.
 
 The factory receives an already parsed `JsonMap`, not original JSON tokens.
 Upstream parsing can round integer tokens outside i64/u64 into f64, after which
@@ -352,7 +375,10 @@ parser cannot be reconstructed by this factory.
 
 One execution budget covers all simultaneously retained computed buffers,
 shape storage and each active kernel's scratch. Input aliases share existing
-payload owners and add no array-buffer charge. Every computed intermediate
+payload owners and add no array-buffer charge. Owned reshape and degenerate
+transpose aliases charge each new shape descriptor while sharing one data-buffer
+charge with their producer; general transpose also reserves an explicitly
+present all-valid bitmap. Every computed intermediate
 obeys the element ceiling, and all named output elements are summed separately,
 including repeated aliases of one input. The full graph is admitted before
 work, then each kernel receives the remaining byte allowance and actual

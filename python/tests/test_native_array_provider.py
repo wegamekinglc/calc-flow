@@ -125,11 +125,20 @@ def test_capability_schema_four_preserves_fixed_port_defaults() -> None:
     assert capability.options_json_schema is None
 
 
-def test_native_capability_rules_use_closed_versioned_identities() -> None:
-    for name in ("native_float_bool_dtype", "native_scalar_vector_broadcast"):
-        assert CapabilityRule(name, "1").name == name
-        with pytest.raises(ValueError, match="unknown capability rule"):
-            CapabilityRule(name, "2")
+@pytest.mark.parametrize(
+    "name",
+    (
+        "native_float_bool_dtype",
+        "native_scalar_vector_broadcast",
+        "native_packed_rank2",
+        "native_matmul",
+        "native_axis_reduction",
+    ),
+)
+def test_native_capability_rules_use_closed_versioned_identities(name: str) -> None:
+    assert CapabilityRule(name, "1").name == name
+    with pytest.raises(ValueError, match="unknown capability rule"):
+        CapabilityRule(name, "2")
 
 
 def _descriptor() -> dict[str, object]:
@@ -395,3 +404,44 @@ def test_real_native_program_runs_in_batch_and_rejects_stream_compilation() -> N
         r"provider native:array_expr@1 is unavailable",
     ):
         builder.compile_stream(runtime=runtime)
+
+
+def test_real_ir2_program_combines_matmul_and_axis_reduction() -> None:
+    runtime = Runtime()
+    array_module.register_native(runtime)
+    program = {
+        "ir_version": 2,
+        "inputs": [
+            {"name": "input", "dtype": "float32", "shape": [None, 2]},
+        ],
+        "nodes": [
+            {"id": "x", "op": "input", "name": "input"},
+            {"id": "w", "op": "transpose", "input": "x"},
+            {"id": "product", "op": "matmul", "left": "x", "right": "w"},
+            {
+                "id": "rows",
+                "op": "reduce",
+                "function": "mean",
+                "input": "product",
+                "axis": 1,
+            },
+        ],
+        "outputs": [
+            {"name": "output", "node": "rows", "dtype": "float64", "shape": [None]}
+        ],
+    }
+    plan = (
+        PipelineBuilder("native-matrix")
+        .external("calc", "native", "array_expr", "1", program)
+        .compile_batch(runtime)
+    )
+    values = array_module.from_arrow(
+        pa.array([1.0, 2.0, 3.0, 4.0], type=pa.float32()), shape=(2, 2)
+    )
+    result = plan.execute({"input": Batch.from_array(values, backend="native")})
+    output = result.outputs["output"].array
+    assert output.shape == (2,)
+    assert output.dtype == "float64"
+    assert output.to_arrow().to_pylist() == [8.0, 18.0]
+    assert values.to_arrow().to_pylist() == [1.0, 2.0, 3.0, 4.0]
+    assert result.datafusion_metrics == []
