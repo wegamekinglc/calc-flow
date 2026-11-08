@@ -1,0 +1,13 @@
+{
+  "collector_pid": 62396,
+  "exit_code": 1,
+  "collector_reaped": true,
+  "remaining_owned": [],
+  "observed_owned_pids": [
+    62396
+  ],
+  "cancel_reason": null,
+  "events": [],
+  "elapsed_seconds": 1.228403010056354,
+  "accepted_outer_completion": false
+}
