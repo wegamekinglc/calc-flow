@@ -737,6 +737,29 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("- coverage-baseline", gate)
         self.assertIn('"$COVERAGE_BASELINE_RESULT"', gate)
 
+    def test_coveralls_download_policy_is_scoped_to_all_three_reports(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
+        policy = "CURL_HOME: ${{ github.workspace }}/.github/coveralls"
+        self.assertEqual(workflow.count(policy), 3)
+        for job in ("lint-and-test", "rust-coverage", "coveralls-finish"):
+            with self.subTest(job=job):
+                section = re.split(
+                    r"\n  (?=\S)", workflow.split(f"  {job}:\n", 1)[1], maxsplit=1
+                )[0]
+                self.assertIn(policy, section)
+                self.assertIn("timeout-minutes: 10", section)
+                self.assertIn(
+                    "uses: coverallsapp/github-action@"
+                    "8d6379e14d29928660c4ba802d8e85393440b329",
+                    section,
+                )
+                self.assertNotIn("fail-on-error: false", section)
+                self.assertNotIn("continue-on-error:", section)
+                self.assertLess(
+                    section.index("uses: actions/checkout@"), section.index(policy)
+                )
+        self.assertIn("scripts.test_coveralls_download", workflow)
+
     def test_performance_workflows_cover_p1_and_p2_evidence(self) -> None:
         from scripts.benchmark_suite.catalog import shards
         from scripts.benchmark_suite.legacy import pytest_arguments
