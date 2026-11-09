@@ -55,7 +55,7 @@ def test_installed_table_indicators_execute_mixed_floats_without_mutating_input(
     None
 ):
     data = _prices()
-    before = data.to_pydict()
+    before = tuple(batch.serialize().to_pybytes() for batch in data.to_batches())
     schema = data.schema
     output = _indicators(_source(data)).collect(data)
 
@@ -64,7 +64,9 @@ def test_installed_table_indicators_execute_mixed_floats_without_mutating_input(
     assert output.schema.field("rsi") == pa.field("rsi", pa.float64())
     assert output.schema.field("atr") == pa.field("atr", pa.float64())
     assert output.schema.field("high").type == pa.float32()
-    assert data.to_pydict() == before
+    assert (
+        tuple(batch.serialize().to_pybytes() for batch in data.to_batches()) == before
+    )
     assert data.schema.equals(schema, check_metadata=True)
 
     source = _source(data)
