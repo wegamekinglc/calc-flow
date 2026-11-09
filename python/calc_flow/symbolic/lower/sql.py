@@ -411,15 +411,18 @@ class _SQLGraph:
             )
             if not ready:
                 raise RuntimeError("MACD evaluation boundaries are not acyclic")
-            rows = tuple(node for node in ready if node.op.name in _ROW_FRONTIERS)
-            if rows:
-                deferred = frozenset(node.digest for node in rows)
-                for node in rows:
-                    self._prepare_expression_inputs(node, deferred)
-                self._append_expressions(rows)
-            else:
-                for node in ready:
-                    self.table(node)
+            self._append_ready_macd_frontiers(ready)
+
+    def _append_ready_macd_frontiers(self, ready: tuple[Node, ...]) -> None:
+        rows = tuple(node for node in ready if node.op.name in _ROW_FRONTIERS)
+        if rows:
+            deferred = frozenset(node.digest for node in rows)
+            for node in rows:
+                self._prepare_expression_inputs(node, deferred)
+            self._append_expressions(rows)
+        else:
+            for node in ready:
+                self.table(node)
 
     def outputs(self) -> None:
         if self.macd_boundaries:
