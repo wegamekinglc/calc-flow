@@ -99,8 +99,12 @@ fn sequence_operator(
     kernel: serde_json::Value,
     maximum: usize,
 ) -> Box<dyn calc_flow::StreamOperator> {
+    let version = match kernel.get("function").and_then(serde_json::Value::as_str) {
+        Some("rsi" | "atr") => 2,
+        _ => 1,
+    };
     let options = JsonMap::from([
-        ("ir_version".into(), 1.into()),
+        ("ir_version".into(), version.into()),
         ("input_dtype".into(), "float64".into()),
         ("kernel".into(), kernel),
         (
@@ -344,6 +348,23 @@ fn replay_with_plan(
     events: tokio::sync::mpsc::UnboundedReceiver<()>,
     output: tokio::sync::mpsc::UnboundedSender<Batch>,
 ) -> StreamingRunner {
+    replay_with_values(
+        root,
+        plan,
+        resumed,
+        events,
+        output,
+        vec![input(vec![1.0, 3.0]), input(vec![5.0, 7.0])],
+    )
+}
+fn replay_with_values(
+    root: &Path,
+    plan: calc_flow::StreamExecutionPlan,
+    resumed: Arc<Mutex<Vec<Vec<u8>>>>,
+    events: tokio::sync::mpsc::UnboundedReceiver<()>,
+    output: tokio::sync::mpsc::UnboundedSender<Batch>,
+    inputs: Vec<Batch>,
+) -> StreamingRunner {
     let source = plan.source_binding_ids()[0].to_owned();
     let sink = plan.sink_binding_ids()[0].to_owned();
     StreamingRunner::new(
@@ -351,7 +372,7 @@ fn replay_with_plan(
         BTreeMap::from([(
             source.clone(),
             SourceBinding::new(Replay {
-                values: vec![input(vec![1.0, 3.0]), input(vec![5.0, 7.0])],
+                values: inputs,
                 position: 0,
                 events,
                 resumed,
@@ -556,4 +577,196 @@ async fn test_native_name_lookalike_retains_legacy_managed_restore_redaction() {
     );
     assert!(!error.message().contains(LEGACY_SECRET));
     assert!(!format!("{error:?}").contains(LEGACY_SECRET));
+}
+
+fn indicator_kernel(atr: bool) -> serde_json::Value {
+    if atr {
+        serde_json::json!({"function":"atr","period":1})
+    } else {
+        serde_json::json!({"function":"rsi","period":2})
+    }
+}
+fn indicator_inputs(atr: bool) -> Vec<Batch> {
+    if !atr {
+        return vec![input(vec![1.0, 3.0]), input(vec![5.0, 7.0])];
+    }
+    [
+        vec![10.0, 8.0, 9.0, 12.0, 9.0, 10.0],
+        vec![11.0, 8.0, 9.0, 14.0, 11.0, 13.0],
+    ]
+    .into_iter()
+    .map(|values| {
+        Batch::external(
+            Arc::new(NativeArray::from_f64(values, vec![2, 3], None).unwrap()),
+            BatchMetadata::default(),
+        )
+        .unwrap()
+    })
+    .collect()
+}
+fn indicator_replay(
+    root: &Path,
+    atr: bool,
+    resumed: Arc<Mutex<Vec<Vec<u8>>>>,
+    events: tokio::sync::mpsc::UnboundedReceiver<()>,
+    output: tokio::sync::mpsc::UnboundedSender<Batch>,
+) -> StreamingRunner {
+    let plan = sequence_plan(indicator_kernel(atr), 256 * 1024 * 1024);
+    replay_with_values(root, plan, resumed, events, output, indicator_inputs(atr))
+}
+fn indicator_bits(batch: &Batch) -> Vec<Option<u64>> {
+    let payload = batch.external_payload().unwrap();
+    let array = payload.as_any().downcast_ref::<NativeArray>().unwrap();
+    let view = array.float_view().unwrap();
+    let calc_flow::array::FloatValues::Float64(values) = view.values() else {
+        panic!("expected f64");
+    };
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            view.validity()
+                .unwrap()
+                .is_valid(index)
+                .then(|| value.to_bits())
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn test_indicator_sequence_new_job_replays_without_reseeding() {
+    for atr in [false, true] {
+        tokio::time::timeout(Duration::from_secs(5), indicator_restart(atr))
+            .await
+            .unwrap();
+    }
+}
+async fn indicator_restart(atr: bool) {
+    let (directory, resumed) = indicator_prefix(atr).await;
+    indicator_resume(&directory.path().join("managed"), atr, resumed).await;
+}
+async fn indicator_prefix(atr: bool) -> (tempfile::TempDir, Arc<Mutex<Vec<Vec<u8>>>>) {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("managed");
+    let resumed = Arc::new(Mutex::new(Vec::new()));
+    let (send, events) = tokio::sync::mpsc::unbounded_channel();
+    let (output, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let first = indicator_replay(&root, atr, Arc::clone(&resumed), events, output)
+        .start()
+        .await
+        .unwrap();
+    send.send(()).unwrap();
+    let expected = if atr {
+        vec![None, Some(3.0_f64.to_bits())]
+    } else {
+        vec![None, None]
+    };
+    assert_eq!(indicator_bits(&received.recv().await.unwrap()), expected);
+    first.trigger_checkpoint().await.unwrap();
+    assert_eq!(first.cancel().await.state, JobState::Cancelled);
+    drop(send);
+    (directory, resumed)
+}
+async fn indicator_resume(root: &Path, atr: bool, resumed: Arc<Mutex<Vec<Vec<u8>>>>) {
+    let (send, events) = tokio::sync::mpsc::unbounded_channel();
+    let (output, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let second = indicator_replay(root, atr, Arc::clone(&resumed), events, output)
+        .start()
+        .await
+        .unwrap();
+    assert_eq!(*resumed.lock().unwrap(), [vec![1]]);
+    send.send(()).unwrap();
+    let expected = if atr {
+        vec![3.0_f64.to_bits(), 5.0_f64.to_bits()]
+    } else {
+        vec![100.0_f64.to_bits(); 2]
+    };
+    assert_eq!(
+        indicator_bits(&received.recv().await.unwrap()),
+        expected.into_iter().map(Some).collect::<Vec<_>>()
+    );
+    drop(send);
+    assert_eq!(second.wait().await.state, JobState::Completed);
+}
+
+#[tokio::test]
+async fn test_indicator_sequence_valid_terminal_restart_keeps_sources_closed() {
+    for atr in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("managed");
+        let opens = Opens::default();
+        complete(runner_with(
+            &root,
+            opens.clone(),
+            indicator_kernel(atr),
+            256 * 1024 * 1024,
+        ))
+        .await;
+        complete(runner_with(
+            &root,
+            opens.clone(),
+            indicator_kernel(atr),
+            256 * 1024 * 1024,
+        ))
+        .await;
+        assert_eq!(opens.sources.load(Ordering::SeqCst), 1);
+        // Valid terminal replay opens sinks to settle their delivery manifest.
+        assert_eq!(opens.sinks.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[tokio::test]
+async fn test_indicator_sequence_terminal_rejects_bad_internal_state_with_valid_checksum_before_open()
+ {
+    for atr in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("managed");
+        let opens = Opens::default();
+        complete(runner_with(
+            &root,
+            opens.clone(),
+            indicator_kernel(atr),
+            256 * 1024 * 1024,
+        ))
+        .await;
+        let (path, manifest, mut bytes) = saved(&root).await;
+        assert_eq!(&bytes[..8], b"CFAIND\0\0");
+        bytes[77] = 1;
+        replace_state(&root, path, &manifest, bytes).await;
+        native_error(
+            runner_with(
+                &root,
+                opens.clone(),
+                indicator_kernel(atr),
+                256 * 1024 * 1024,
+            )
+            .start()
+            .await,
+            "state.has_previous/reserved",
+        );
+        assert_eq!(opens.sources.load(Ordering::SeqCst), 1);
+        assert_eq!(opens.sinks.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn test_indicator_sequence_normal_restore_rejects_valid_checksum_bad_state_before_source_open()
+ {
+    for atr in [false, true] {
+        let (directory, resumed) = indicator_prefix(atr).await;
+        let root = directory.path().join("managed");
+        let (path, manifest, mut bytes) = saved(&root).await;
+        bytes[77] = 1;
+        replace_state(&root, path, &manifest, bytes).await;
+        let (_send, events) = tokio::sync::mpsc::unbounded_channel();
+        let (output, mut received) = tokio::sync::mpsc::unbounded_channel();
+        native_error(
+            indicator_replay(&root, atr, Arc::clone(&resumed), events, output)
+                .start()
+                .await,
+            "state.has_previous/reserved",
+        );
+        assert!(resumed.lock().unwrap().is_empty());
+        assert!(received.try_recv().is_err());
+    }
 }

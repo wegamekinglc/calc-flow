@@ -128,7 +128,7 @@ impl Fixture {
     }
     fn spawn_read(
         &self,
-    ) -> tokio::task::JoinHandle<std::result::Result<OperatorStateSnapshot, NativeSequenceFailure>>
+    ) -> tokio::task::JoinHandle<std::result::Result<PreloadedSnapshot, NativeSequenceFailure>>
     {
         let plan = Arc::clone(&self.plan);
         let inventory = Arc::clone(&self.inventory);

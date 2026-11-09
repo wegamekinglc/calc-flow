@@ -47,10 +47,13 @@ use super::{
 };
 
 mod budget;
+mod checkpoint;
 mod compile;
 mod cumulative;
 use cumulative::CumulativeAccumulator;
 mod generated_kernel_manifest;
+mod indicators;
+pub(crate) use indicators::{IndicatorRollingRecord, RollingIoReservation};
 mod kernel;
 mod late;
 mod ordered_stream;
@@ -64,14 +67,12 @@ use compile::{
 use state_codec::{
     buffered_row_from_values, build_output_record, build_typed_batch_output,
     build_typed_stream_output, chunk_output_record, closing_coordinate, decode_state_segment,
-    deserialize_required_option, encode_state_segment, ewma_entity_from_values,
-    parse_snapshot_metadata, read_buffered_row, read_buffered_rows, rebuild_windows,
-    reconstruct_typed_state, snapshot_segments, sort_and_validate, state_schema,
-    state_schema_fingerprint, validate_decoded_state, validate_segment_schema_metadata,
-    validate_snapshot_metadata,
+    deserialize_required_option, encode_state_segment, ewma_entity_from_values, read_buffered_row,
+    read_buffered_rows, reconstruct_typed_state, snapshot_segments, sort_and_validate,
+    state_schema, state_schema_fingerprint, validate_segment_schema_metadata,
 };
 #[cfg(test)]
-use state_codec::{decode_ewma_state_row, encode_state_segment_legacy};
+use state_codec::{decode_ewma_state_row, encode_state_segment_legacy, rebuild_windows};
 
 use super::checkpoint::{checkpoint_mismatch, compile_error, internal_error, state_format};
 use budget::StateCharge;
@@ -101,6 +102,8 @@ pub const ROLLING_EWMA_STATE_LAYOUT_VERSION: u32 = 2;
 pub const ROLLING_COLUMNAR_STATE_LAYOUT_VERSION: u32 = 3;
 /// Durable columnar layout with exact cumulative summaries.
 pub const ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION: u32 = 4;
+/// Columnar rolling state with complete RSI and ATR recurrence records.
+pub const ROLLING_INDICATOR_STATE_LAYOUT_VERSION: u32 = 5;
 
 /// Versioned floating-point behavior for rolling numeric transitions.
 ///
@@ -531,6 +534,34 @@ impl RollingFloatPrimitiveSpec {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RollingOutputSpec {
+    /// Relative strength index with a complete-period Wilder seed.
+    Rsi {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Float32 or Float64 price column.
+        input: String,
+        /// Nullable Float64 output column.
+        output: String,
+        /// Positive number of seed differences and Wilder period.
+        #[schemars(range(min = 1))]
+        period: u64,
+    },
+    /// Average true range over floating high, low and close columns.
+    Atr {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Float32 or Float64 high column.
+        high: String,
+        /// Float32 or Float64 low column.
+        low: String,
+        /// Float32 or Float64 close column.
+        close: String,
+        /// Nullable Float64 output column.
+        output: String,
+        /// Positive number of seed true ranges and Wilder period.
+        #[schemars(range(min = 1))]
+        period: u64,
+    },
     /// Value of the same column `periods` earlier in the entity total order.
     Lag {
         /// Primitive version; must equal `1`.
@@ -884,7 +915,13 @@ pub enum RollingOutputSpec {
 impl RollingOutputSpec {
     fn primitive_version(&self) -> u32 {
         match self {
-            Self::Lag {
+            Self::Rsi {
+                primitive_version, ..
+            }
+            | Self::Atr {
+                primitive_version, ..
+            }
+            | Self::Lag {
                 primitive_version, ..
             }
             | Self::Delta {
@@ -962,7 +999,8 @@ impl RollingOutputSpec {
     /// Declared operand column; pair outputs report their left operand.
     fn input(&self) -> &str {
         match self {
-            Self::Lag { input, .. }
+            Self::Rsi { input, .. }
+            | Self::Lag { input, .. }
             | Self::Delta { input, .. }
             | Self::Ewma { input, .. }
             | Self::CumulativeMean { input, .. }
@@ -983,6 +1021,7 @@ impl RollingOutputSpec {
             | Self::Quantile { input, .. }
             | Self::UniqueCount { input, .. }
             | Self::Decay { input, .. } => input,
+            Self::Atr { high, .. } => high,
             Self::Covariance { left, .. } | Self::Correlation { left, .. } => left,
             Self::Difference { left, .. } => left.input(),
         }
@@ -998,7 +1037,9 @@ impl RollingOutputSpec {
 
     fn output(&self) -> &str {
         match self {
-            Self::Lag { output, .. }
+            Self::Rsi { output, .. }
+            | Self::Atr { output, .. }
+            | Self::Lag { output, .. }
             | Self::Delta { output, .. }
             | Self::Ewma { output, .. }
             | Self::CumulativeMean { output, .. }
@@ -1030,7 +1071,9 @@ impl RollingOutputSpec {
     const fn retained_rows(&self) -> u64 {
         match self {
             Self::Lag { periods, .. } | Self::Delta { periods, .. } => *periods,
-            Self::Ewma { .. }
+            Self::Rsi { .. }
+            | Self::Atr { .. }
+            | Self::Ewma { .. }
             | Self::CumulativeMean { .. }
             | Self::CumulativeSum { .. }
             | Self::CumulativeMin { .. }
@@ -1063,7 +1106,9 @@ impl RollingOutputSpec {
     /// retention.
     const fn retained_micros(&self) -> Option<u64> {
         match self {
-            Self::Lag { .. }
+            Self::Rsi { .. }
+            | Self::Atr { .. }
+            | Self::Lag { .. }
             | Self::Delta { .. }
             | Self::Ewma { .. }
             | Self::CumulativeMean { .. }
@@ -1104,7 +1149,9 @@ impl RollingOutputSpec {
 
     const fn frame(&self) -> Option<RollingFrameSpec> {
         match self {
-            Self::Lag { .. }
+            Self::Rsi { .. }
+            | Self::Atr { .. }
+            | Self::Lag { .. }
             | Self::Delta { .. }
             | Self::Ewma { .. }
             | Self::CumulativeMean { .. }
@@ -1133,7 +1180,11 @@ impl RollingOutputSpec {
 
     const fn min_periods(&self) -> Option<u64> {
         match self {
-            Self::Lag { .. } | Self::Delta { .. } | Self::Difference { .. } => None,
+            Self::Rsi { .. }
+            | Self::Atr { .. }
+            | Self::Lag { .. }
+            | Self::Delta { .. }
+            | Self::Difference { .. } => None,
             Self::Ewma { min_periods, .. }
             | Self::CumulativeMean { min_periods, .. }
             | Self::CumulativeSum { min_periods, .. }
@@ -1207,7 +1258,8 @@ pub struct RollingSpec {
     /// Durable state-layout version. Existing primitives use
     /// [`ROLLING_STATE_LAYOUT_VERSION`]; EWMA requires
     /// [`ROLLING_EWMA_STATE_LAYOUT_VERSION`]. Cumulative sum/min/max/variance
-    /// require [`ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION`].
+    /// require [`ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION`]. RSI and ATR require
+    /// [`ROLLING_INDICATOR_STATE_LAYOUT_VERSION`].
     pub state_layout_version: u32,
     /// Versioned floating-point behavior. `stable_v1` is omitted from the
     /// canonical configuration so existing project and checkpoint hashes stay
@@ -1253,9 +1305,16 @@ pub struct RollingOperator {
     spec: RollingSpec,
     input_ports: [Port; 1],
     output_ports: Vec<Port>,
-    compiled: Box<CompiledRollingSpec>,
-    state: RollingStreamState,
+    compiled: Arc<CompiledRollingSpec>,
+    state_layout_version: u32,
+    state: indicators::StateOwner,
     state_budget: StateBudget,
+    indicator_resources: Option<indicators::Resources>,
+    indicator_capture: Option<indicators::Capture>,
+    indicator_checkpoint_epoch: Option<Epoch>,
+    indicator_late_failed: bool,
+    checkpoint_workers: Option<Arc<crate::array::RollingWorkers>>,
+    checkpoint_pending: Option<Arc<crate::array::RollingPending>>,
 }
 
 impl RollingOperator {
@@ -1267,13 +1326,12 @@ impl RollingOperator {
     /// fields and [`CalcFlowError::Compile`] for missing, ambiguous, or
     /// unsupported input columns.
     pub fn new(name: &str, input_schema: SchemaRef, spec: RollingSpec) -> Result<Self> {
-        validate_operator_name(name)?;
-        validate_arguments(&spec)?;
-        let configuration = configuration(&spec)?;
-        let compiled = Box::new(compile_spec_full(&spec, &input_schema, &configuration)?);
+        let configuration = validated_operator_configuration(name, &spec)?;
+        let compiled = Arc::new(compile_spec_full(&spec, &input_schema, &configuration)?);
         let output_schema = Arc::new(output_schema(&input_schema, &compiled.outputs));
         let output_ports =
             super::late_output::output_ports(spec.late_policy, &input_schema, output_schema)?;
+        let (state, indicator_resources) = indicators::initial_state(&compiled, name)?;
         Ok(Self {
             name: name.into(),
             spec,
@@ -1284,21 +1342,41 @@ impl RollingOperator {
                 Some(input_schema),
             )?],
             output_ports,
+            checkpoint_workers: indicators::workers_for_layout(
+                compiled.state_layout_version,
+                indicator_resources.as_ref(),
+            ),
+            checkpoint_pending: indicators::pending_for_layout(compiled.state_layout_version, name),
+            state_layout_version: compiled.state_layout_version,
             compiled,
-            state: RollingStreamState::default(),
+            state,
             state_budget: StateBudget::default(),
+            indicator_resources,
+            indicator_capture: None,
+            indicator_checkpoint_epoch: None,
+            indicator_late_failed: false,
         })
     }
 
-    /// Sets the logical row and byte limit for buffered rows and retained
-    /// per-entity rolling history. The default uses the JSON counter range
-    /// without a smaller implicit row or byte limit.
-    /// Checkpoint copies and process resident memory are outside this limit.
+    /// Sets retained-row and logical-byte limits for this operator.
+    ///
+    /// For operators containing RSI or ATR, the byte limit covers the
+    /// participating peak: committed state, isolated candidates, prepared
+    /// output, scratch and live checkpoint segments. Mixed old/new outputs
+    /// share this whole-operator limit in finite and streaming evaluation.
+    /// Reset retains credits held by unfinished workers and captures.
+    ///
+    /// Old-only operators retain their retained-state byte accounting and
+    /// exclude checkpoint copies, even with explicit indicator layout 5.
+    /// The default is 9,007,199,254,740,991 rows and logical bytes. Process
+    /// resident memory, other operators and transferred results are separate.
+    /// This runtime setting is not serialized into project configuration.
     ///
     /// # Errors
     ///
-    /// Returns [`CalcFlowError::InvalidArgument`] when current state exceeds
-    /// the requested budget.
+    /// Returns [`CalcFlowError::InvalidArgument`] when retained rows or the
+    /// applicable live byte charges exceed the requested budget. A rejected
+    /// change preserves the previous limits.
     ///
     /// # Examples
     ///
@@ -1315,6 +1393,9 @@ impl RollingOperator {
                 message: "existing rolling state exceeds the requested budget".into(),
             });
         }
+        if let Some(resources) = &self.indicator_resources {
+            resources.install_budget(self.state.charge.bytes, budget, &self.name)?;
+        }
         self.state_budget = budget;
         Ok(())
     }
@@ -1326,8 +1407,26 @@ impl RollingOperator {
 
     /// Returns the durable state layout written by this operator build.
     pub const fn state_layout_version(&self) -> u32 {
-        self.compiled.state_layout_version
+        self.state_layout_version
     }
+
+    pub(crate) fn native_checkpoint_workers(&self) -> Arc<crate::array::RollingWorkers> {
+        Arc::clone(
+            self.checkpoint_workers
+                .as_ref()
+                .expect("layout5 checkpoint workers"),
+        )
+    }
+
+    fn indicator_state_packet(&self) -> Option<Arc<RollingStreamState>> {
+        self.state.packet()
+    }
+}
+
+fn validated_operator_configuration(name: &str, spec: &RollingSpec) -> Result<JsonMap> {
+    validate_operator_name(name)?;
+    validate_arguments(spec)?;
+    configuration(spec)
 }
 
 impl std::fmt::Debug for RollingOperator {
@@ -1363,6 +1462,12 @@ impl std::fmt::Debug for RollingOperator {
                 &self.compiled.kernel_plan.fallback_reason(),
             )
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for RollingOperator {
+    fn drop(&mut self) {
+        self.indicator_capture = None;
     }
 }
 
@@ -1402,6 +1507,13 @@ impl BatchOperator for RollingOperator {
         self.input_ports[0].validate(input, &format!("{}.input", self.name))?;
         context.run.check_cancelled()?;
         let table = input.table_payload()?;
+        if !self.compiled.indicator_groups.is_empty() {
+            return Ok(BTreeMap::from([(
+                "output".into(),
+                self.process_indicator_finite(input.clone(), context)
+                    .await?,
+            )]));
+        }
         let output_schema = self.output_ports[0]
             .schema()
             .expect("rolling output always has an exact schema");
@@ -1426,9 +1538,36 @@ impl BatchOperator for RollingOperator {
     }
 }
 
+fn input_row_is_late(
+    policy: LatePolicySpec,
+    allowed_lateness_micros: u64,
+    event_time: i64,
+    watermark: Option<EventTime>,
+    row_index: usize,
+    node_id: &str,
+) -> Result<bool> {
+    let Some(watermark) = watermark else {
+        return Ok(false);
+    };
+    let closing = closing_coordinate(event_time, allowed_lateness_micros, node_id)?;
+    if closing > watermark.as_micros() {
+        return Ok(false);
+    }
+    match policy {
+        LatePolicySpec::Error { .. } => Err(operator_error(
+            node_id,
+            &format!(
+                "{node_id}: late_row: envelope rejected at row_index={row_index}; event_time_micros={event_time}, closed_at_watermark_micros={}",
+                watermark.as_micros()
+            ),
+        )),
+        LatePolicySpec::Drop { .. } | LatePolicySpec::SideOutput { .. } => Ok(true),
+    }
+}
+
 /// Live stream state owned by one rolling operator task. Mutation is
 /// confined to this value; input batches stay read-only.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct RollingStreamState {
     buffer: BTreeMap<RowIdentity, BufferedRow>,
     ordered: ordered_stream::OrderedStreamBuffer,
@@ -1492,6 +1631,10 @@ impl StreamOperator for RollingOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        if !self.compiled.indicator_groups.is_empty() {
+            context.check_cancelled()?;
+        }
+        let checkpoint_guard = self.try_native_checkpoint_guard(context.operator_id())?;
         let observer = context.rolling_metrics();
         let validation = observer.map(|recorder| recorder.stage(RollingStage::InputValidation));
         if ingress != "input" {
@@ -1510,13 +1653,24 @@ impl StreamOperator for RollingOperator {
         }
         let watermark = context.input_watermark();
         drop(validation);
+        if !self.compiled.indicator_groups.is_empty() {
+            return self
+                .process_indicator_input_worker(
+                    batch,
+                    watermark,
+                    context,
+                    output,
+                    checkpoint_guard.expect("indicator pending gate"),
+                )
+                .await;
+        }
         if matches!(self.spec.late_policy, LatePolicySpec::SideOutput { .. }) {
             return self
                 .process_late_data(&batch, watermark, context, output)
                 .await;
         }
         if self.try_buffer_ordered(batch.table_payload()?, watermark, observer)? {
-            self.install_context_identity(context);
+            self.install_context_identity(context)?;
             return Ok(());
         }
         self.materialize_ordered_buffer(observer)?;
@@ -1539,16 +1693,16 @@ impl StreamOperator for RollingOperator {
         )?;
         self.check_state_budget(next_charge, context.operator_id())?;
         for (identity, row) in accepted {
-            self.state.buffer.insert(identity, row);
+            self.state.owned_mut()?.buffer.insert(identity, row);
         }
         context.record_window_metrics(
             metrics.late_rows,
             metrics.max_lateness_micros,
             metrics.null_event_time_rows,
         )?;
-        self.state.metrics = next_metrics;
-        self.state.charge = next_charge;
-        self.install_context_identity(context);
+        self.state.owned_mut()?.metrics = next_metrics;
+        self.state.owned_mut()?.charge = next_charge;
+        self.install_context_identity(context)?;
         Ok(())
     }
 
@@ -1564,6 +1718,11 @@ impl StreamOperator for RollingOperator {
         // emission leaves the buffered rows available for a retry.
         context.check_cancelled()?;
         self.observe_context(context)?;
+        if !self.compiled.indicator_groups.is_empty() {
+            return self
+                .finalize_indicator_worker(Some(watermark), context, output)
+                .await;
+        }
         if self
             .state
             .last_input_watermark
@@ -1580,7 +1739,7 @@ impl StreamOperator for RollingOperator {
                     .rolling_metrics()
                     .map(|recorder| recorder.stage(RollingStage::OrderingProof));
                 let closing = self.closing_keys(watermark.as_micros(), context.operator_id())?;
-                self.take_buffered(&closing)
+                self.take_buffered(&closing)?
             };
             self.emit_rows(rows, context, output).await?;
         } else {
@@ -1589,7 +1748,7 @@ impl StreamOperator for RollingOperator {
                 let _stage = context
                     .rolling_metrics()
                     .map(|recorder| recorder.stage(RollingStage::OrderingProof));
-                self.state.ordered.take_closed(
+                self.state.owned_mut()?.ordered.take_closed(
                     watermark,
                     &self.compiled,
                     self.spec.allowed_lateness_micros,
@@ -1599,8 +1758,8 @@ impl StreamOperator for RollingOperator {
             self.emit_ordered(records, last_identity, context, output)
                 .await?;
         }
-        self.install_context_identity(context);
-        self.state.last_input_watermark = Some(watermark);
+        self.install_context_identity(context)?;
+        self.state.owned_mut()?.last_input_watermark = Some(watermark);
         Ok(())
     }
 
@@ -1616,138 +1775,77 @@ impl StreamOperator for RollingOperator {
         if self.state.ended {
             return Ok(());
         }
+        if !self.compiled.indicator_groups.is_empty() {
+            return self.finalize_indicator_worker(None, context, output).await;
+        }
         if self.state.ordered.is_empty() {
-            let rows = self.take_all_buffered();
+            let rows = self.take_all_buffered()?;
             self.emit_rows(rows, context, output).await?;
         } else {
             let last_identity = self.state.ordered.last_identity();
-            let records = self.state.ordered.take_all();
+            let records = self.state.owned_mut()?.ordered.take_all();
             self.emit_ordered(records, last_identity, context, output)
                 .await?;
         }
-        self.install_context_identity(context);
-        self.state.ended = true;
+        self.install_context_identity(context)?;
+        self.state.owned_mut()?.ended = true;
         Ok(())
+    }
+
+    async fn prepare_checkpoint_async(
+        &mut self,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        if self.indicator_resources.is_some() {
+            return self.prepare_indicator_capture(context).await;
+        }
+        context.check_cancelled()
     }
 
     /// Captures the finality frontier, per-entity retained history, buffered
     /// unfinalized rows, and late metrics (SCE-00 D11) as one immutable base
     /// segment plus bounded inline metadata.
     fn checkpoint(&mut self, epoch: Epoch) -> Result<crate::OperatorStateSnapshot> {
-        if self
-            .state
-            .last_checkpoint_epoch
-            .is_some_and(|previous| epoch <= previous)
-        {
-            return Err(checkpoint_mismatch(
-                "rolling checkpoint epoch did not advance strictly",
-            ));
+        if self.indicator_resources.is_some() {
+            return self.capture_prepared(epoch);
         }
-        self.materialize_ordered_buffer(None)?;
-        self.state
-            .histories
-            .materialize_columnar(&self.compiled, &self.name, None)?;
-        let charge = budget::full_state_charge(
-            &self.state.buffer,
-            &self.state.ordered,
-            &self.state.histories,
-            &self.compiled,
-            &self.name,
-        )?;
-        self.check_state_budget(charge, &self.name)?;
-        self.state.charge = charge;
-        let encoded = self.encode_state(epoch)?;
-        let (descriptor, segments) = match encoded {
-            Some(prepared) => {
-                // One shared allocation and one digest serve both the snapshot
-                // and the manifest descriptor; nothing re-encodes or re-hashes.
-                let (segment_id, bytes) = prepared;
-                let segment = crate::StateSegment::new(bytes);
-                let descriptor = self.snapshot_segment_descriptor(epoch, &segment_id, &segment)?;
-                let mut segments = BTreeMap::new();
-                segments.insert(segment_id, segment);
-                (Some(descriptor), segments)
-            }
-            None => (None, BTreeMap::new()),
-        };
-        let inventory = StateInventory::new(descriptor.into_iter().collect())
-            .map_err(|error| checkpoint_mismatch(error.to_string()))?;
-        let metadata = RollingSnapshotMetadata {
-            state_layout_version: self.compiled.state_layout_version,
-            configuration_hash: self.compiled.configuration_hash.clone(),
-            state_schema_fingerprint: self.compiled.state_schema_fingerprint.clone(),
-            kernel_fingerprint: Some(self.compiled.kernel_plan.fingerprint().to_owned()),
-            numerical_profile: Some(self.compiled.kernel_plan.numerical_profile().to_owned()),
-            epoch,
-            pipeline_fingerprint: self.state.pipeline_fingerprint.clone(),
-            operator_id: self.state.operator_id.clone(),
-            last_input_watermark: self.state.last_input_watermark,
-            next_output_sequence: self.state.next_output_sequence,
-            ended: self.state.ended,
-            metrics: self.state.metrics,
-            segment_inventory: inventory.segments().to_vec(),
-            late_output: super::late_output::LateOutputSnapshot::new(
-                self.spec.late_policy,
-                self.state.next_late_output_sequence,
-            ),
-        };
-        let Value::Object(inline_metadata) =
-            serde_json::to_value(metadata).map_err(|error| format_error(&error))?
-        else {
-            return Err(internal_error(
-                "rolling snapshot metadata did not serialize as an object",
-            ));
-        };
-        self.state.last_checkpoint_epoch = Some(epoch);
-        Ok(crate::OperatorStateSnapshot {
-            inline_metadata: inline_metadata.into_iter().collect(),
-            segments,
-        })
+        self.checkpoint_legacy(epoch)
     }
 
     /// Replaces the complete live state from one validated snapshot; a failed
     /// restore leaves the current state untouched (SCE-00 D11).
     fn restore(&mut self, snapshot: &crate::OperatorStateSnapshot) -> Result<()> {
-        if snapshot.inline_metadata.is_empty() && snapshot.segments.is_empty() {
-            return StreamOperator::reset(self);
+        if self.indicator_resources.is_some() {
+            return self.restore_indicators(snapshot);
         }
-        let metadata = parse_snapshot_metadata(snapshot)?;
-        validate_snapshot_metadata(&metadata, &self.compiled, snapshot)?;
-        let next_late_output_sequence = super::late_output::LateOutputSnapshot::restore_sequence(
-            self.spec.late_policy,
-            metadata.late_output.as_ref(),
-        )?;
-        let restored = self.decode_state(&metadata, snapshot)?;
-        let charge = budget::buffered_charge(restored.buffer.values(), &self.name)?.checked_add(
-            budget::histories_charge(&restored.histories, &self.name)?,
-            &self.name,
-        )?;
-        if !self.state_budget.allows(charge.rows, charge.bytes) {
-            return Err(checkpoint_mismatch(
-                "restored rolling state exceeds the configured state budget",
-            ));
+        self.restore_legacy(snapshot)
+    }
+
+    async fn restore_async(
+        &mut self,
+        snapshot: &crate::OperatorStateSnapshot,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        if self.indicator_resources.is_some() {
+            return self.restore_indicators_async(snapshot, context).await;
         }
-        self.state = RollingStreamState {
-            buffer: restored.buffer,
-            ordered: ordered_stream::OrderedStreamBuffer::default(),
-            histories: restored.histories,
-            last_input_watermark: metadata.last_input_watermark,
-            next_output_sequence: metadata.next_output_sequence,
-            next_late_output_sequence,
-            late_output_failed: false,
-            ended: metadata.ended,
-            metrics: metadata.metrics,
-            pipeline_fingerprint: metadata.pipeline_fingerprint,
-            operator_id: metadata.operator_id,
-            last_checkpoint_epoch: Some(metadata.epoch),
-            typed_kernel_state: None,
-            charge,
-        };
-        Ok(())
+        context.check_cancelled()?;
+        StreamOperator::restore(self, snapshot)
     }
 
     fn reset(&mut self) -> Result<()> {
-        self.state = RollingStreamState::default();
+        if let Some(resources) = &self.indicator_resources {
+            let state = indicators::StateOwner::Shared(resources.empty_state());
+            resources.cancel_pending();
+            self.indicator_late_failed = false;
+            self.indicator_capture = None;
+            self.indicator_checkpoint_epoch = None;
+            self.state = state;
+            resources.reset_committed();
+            return Ok(());
+        }
+        let _guard = self.try_native_checkpoint_guard(self.checkpoint_identity())?;
+        self.state = indicators::StateOwner::new(RollingStreamState::default(), false);
         Ok(())
     }
 }
@@ -1795,18 +1893,20 @@ impl RollingOperator {
             .then(|| budget::histories_charge(&self.state.histories, node))
             .transpose()?;
         self.state
+            .owned_mut()?
             .histories
             .materialize_columnar(&self.compiled, node, observer)?;
         if let Some(old) = old {
             let new = budget::histories_charge(&self.state.histories, node)?;
-            self.state.charge = self.state.charge.checked_sub(old)?.checked_add(new, node)?;
+            self.state.owned_mut()?.charge =
+                self.state.charge.checked_sub(old)?.checked_add(new, node)?;
         }
         Ok(())
     }
 
     fn observe_context(&self, context: &StreamOperatorContext<'_>) -> Result<()> {
         super::late_output::ensure_can_continue(
-            self.state.late_output_failed,
+            self.state.late_output_failed || self.indicator_late_failed,
             context.operator_id(),
         )?;
         if self
@@ -1834,13 +1934,16 @@ impl RollingOperator {
         Ok(())
     }
 
-    fn install_context_identity(&mut self, context: &StreamOperatorContext<'_>) {
+    fn install_context_identity(&mut self, context: &StreamOperatorContext<'_>) -> Result<()> {
         self.state
+            .owned_mut()?
             .pipeline_fingerprint
             .get_or_insert_with(|| context.job().fingerprint().to_owned());
         self.state
+            .owned_mut()?
             .operator_id
             .get_or_insert_with(|| context.operator_id().to_owned());
+        Ok(())
     }
 
     /// Classifies one envelope into accepted rows and the late-metric delta
@@ -1860,6 +1963,12 @@ impl RollingOperator {
                 record_late_row(&mut metrics, watermark, row.identity.event_time, node_id)?;
                 continue;
             }
+            indicators::validate_row(
+                &self.compiled.indicator_groups,
+                &row.values,
+                node_id,
+                indicators::Coordinate::InputRow(row_index),
+            )?;
             let _ordering = observer.map(|recorder| recorder.stage(RollingStage::OrderingProof));
             if let Some(recorder) = observer {
                 recorder.add(RollingWork::OrderProofRows, 1);
@@ -1886,23 +1995,14 @@ impl RollingOperator {
         row_index: usize,
         node_id: &str,
     ) -> Result<bool> {
-        let Some(watermark) = watermark else {
-            return Ok(false);
-        };
-        let closing = closing_coordinate(event_time, self.spec.allowed_lateness_micros, node_id)?;
-        if closing > watermark.as_micros() {
-            return Ok(false);
-        }
-        match self.spec.late_policy {
-            LatePolicySpec::Error { .. } => Err(operator_error(
-                node_id,
-                &format!(
-                    "{node_id}: late_row: envelope rejected at row_index={row_index}; event_time_micros={event_time}, closed_at_watermark_micros={}",
-                    watermark.as_micros()
-                ),
-            )),
-            LatePolicySpec::Drop { .. } | LatePolicySpec::SideOutput { .. } => Ok(true),
-        }
+        input_row_is_late(
+            self.spec.late_policy,
+            self.spec.allowed_lateness_micros,
+            event_time,
+            watermark,
+            row_index,
+            node_id,
+        )
     }
 
     fn closing_keys(&self, watermark: i64, node_id: &str) -> Result<Vec<RowIdentity>> {
@@ -1920,16 +2020,18 @@ impl RollingOperator {
         Ok(keys)
     }
 
-    fn take_buffered(&mut self, keys: &[RowIdentity]) -> Vec<BufferedRow> {
-        keys.iter()
-            .filter_map(|key| self.state.buffer.remove(key))
-            .collect()
+    fn take_buffered(&mut self, keys: &[RowIdentity]) -> Result<Vec<BufferedRow>> {
+        let state = self.state.owned_mut()?;
+        Ok(keys
+            .iter()
+            .filter_map(|key| state.buffer.remove(key))
+            .collect())
     }
 
-    fn take_all_buffered(&mut self) -> Vec<BufferedRow> {
-        std::mem::take(&mut self.state.buffer)
+    fn take_all_buffered(&mut self) -> Result<Vec<BufferedRow>> {
+        Ok(std::mem::take(&mut self.state.owned_mut()?.buffer)
             .into_values()
-            .collect()
+            .collect())
     }
 
     // Final emission keeps compute, record building, chunking, sequence
@@ -1986,7 +2088,10 @@ impl RollingOperator {
                 Ok(charge) => charge,
                 Err(error) => {
                     for row in rows {
-                        self.state.buffer.insert(row.identity.clone(), row);
+                        self.state
+                            .owned_mut()?
+                            .buffer
+                            .insert(row.identity.clone(), row);
                     }
                     if let Ok(charge) = budget::full_state_charge(
                         &self.state.buffer,
@@ -1995,12 +2100,12 @@ impl RollingOperator {
                         &self.compiled,
                         context.operator_id(),
                     ) {
-                        self.state.charge = charge;
+                        self.state.owned_mut()?.charge = charge;
                     }
                     return Err(error);
                 }
             };
-        self.state.charge = current_charge;
+        self.state.owned_mut()?.charge = current_charge;
         if let Some(recorder) = observer {
             recorder.add(RollingWork::OutputRowsPrepared, record.num_rows());
         }
@@ -2021,18 +2126,18 @@ impl RollingOperator {
             recorder.add(RollingWork::OutputChunksPrepared, batches.len());
         }
         drop(budget_stage);
+        let state = self.state.owned_mut()?;
         for batch in batches {
             output.emit("output", batch).await?;
         }
-        self.state.next_output_sequence = self
-            .state
+        state.next_output_sequence = state
             .next_output_sequence
             .checked_add(chunk_count)
             .ok_or_else(|| operator_error(context.operator_id(), "output sequence overflowed"))?;
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
-        self.state.histories.apply(touched);
-        TypedStreamTransition::replace(next_kernel_state, &mut self.state.typed_kernel_state);
-        self.state.charge = next_charge;
+        state.histories.apply(touched);
+        TypedStreamTransition::replace(next_kernel_state, &mut state.typed_kernel_state);
+        state.charge = next_charge;
         Ok(())
     }
 }
@@ -2063,7 +2168,10 @@ impl RollingOperator {
                         .count()
                 })
                 .sum::<usize>();
-        if row_count == 0 {
+        if row_count == 0 && self.compiled.indicator_groups.is_empty() {
+            return Ok(None);
+        }
+        if self.state.histories.by_entity.is_empty() && self.state.buffer.is_empty() {
             return Ok(None);
         }
         let pipeline_fingerprint =
@@ -2159,6 +2267,7 @@ struct CompiledRollingSpec {
     outputs: Vec<CompiledRollingOutput>,
     window_groups: Vec<CompiledWindowGroup>,
     kernel_plan: RollingKernelPlan,
+    indicator_groups: Vec<indicators::Group>,
     max_row_retention: u64,
     max_duration_micros: Option<u64>,
     configuration_hash: String,
@@ -2182,6 +2291,7 @@ struct CompiledRollingOutput {
 
 #[derive(Clone)]
 enum CompiledEvaluation {
+    Indicator(usize),
     Lag { periods: u64 },
     Delta { periods: u64 },
     Ewma(CompiledEwma),
@@ -2552,6 +2662,7 @@ struct EntityRollingState {
     columnar: ordered_stream::ColumnarHistory,
     windows: Vec<WindowState>,
     transition_count: u64,
+    indicators: Vec<indicators::State>,
 }
 
 impl EntityRollingState {
@@ -2561,6 +2672,11 @@ impl EntityRollingState {
             columnar: ordered_stream::ColumnarHistory::default(),
             windows: fresh_windows(compiled),
             transition_count: 0,
+            indicators: compiled
+                .indicator_groups
+                .iter()
+                .map(indicators::Group::fresh)
+                .collect(),
         }
     }
 }
@@ -2868,8 +2984,22 @@ impl ExtremaAccumulator {
     /// Adds one valid sample with its canonical key, dropping dominated
     /// candidates from the back.
     fn add(&mut self, key: ExtremaKey, value: ScalarValue) {
+        match self.add_checked(key, value, &mut || Ok::<_, std::convert::Infallible>(())) {
+            Ok(()) => {}
+            Err(never) => match never {},
+        }
+    }
+
+    fn add_checked<E>(
+        &mut self,
+        key: ExtremaKey,
+        value: ScalarValue,
+        check: &mut dyn FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E> {
+        check()?;
         self.valid_count = self.valid_count.saturating_add(1);
         while let Some((_, back)) = self.queue.back() {
+            check()?;
             let dominated = if self.descending {
                 compare_samples(back, &value) != Ordering::Greater
             } else {
@@ -2881,6 +3011,7 @@ impl ExtremaAccumulator {
             self.queue.pop_back();
         }
         self.queue.push_back((key, value));
+        Ok(())
     }
 
     /// Removes one previously added valid sample from the count; dominated
@@ -2895,21 +3026,52 @@ impl ExtremaAccumulator {
     /// Row-count frame expiry: every candidate at or before the leaving
     /// row's canonical key has left the window.
     fn expire_through_key(&mut self, leaving: &ExtremaKey) {
+        match self
+            .expire_through_key_checked(leaving, &mut || Ok::<_, std::convert::Infallible>(()))
+        {
+            Ok(()) => {}
+            Err(never) => match never {},
+        }
+    }
+
+    fn expire_through_key_checked<E>(
+        &mut self,
+        leaving: &ExtremaKey,
+        check: &mut dyn FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E> {
+        check()?;
         while self.queue.front().is_some_and(|(key, _)| key <= leaving) {
+            check()?;
             self.queue.pop_front();
         }
+        Ok(())
     }
 
     /// Duration frame expiry: candidates at or before `bound` (exclusive)
     /// have left the window.
     fn expire_through_time(&mut self, bound: i128) {
+        match self.expire_through_time_checked(bound, &mut || Ok::<_, std::convert::Infallible>(()))
+        {
+            Ok(()) => {}
+            Err(never) => match never {},
+        }
+    }
+
+    fn expire_through_time_checked<E>(
+        &mut self,
+        bound: i128,
+        check: &mut dyn FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E> {
+        check()?;
         while self
             .queue
             .front()
             .is_some_and(|(key, _)| i128::from(key.event_time) <= bound)
         {
+            check()?;
             self.queue.pop_front();
         }
+        Ok(())
     }
 
     fn extremum(&self) -> Option<&ScalarValue> {
@@ -3213,96 +3375,25 @@ fn compute_output_columns_observed(
             touched: Vec::new(),
         });
     }
-    let arrow_stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
-    let mut derived: Vec<Vec<Option<ScalarValue>>> = compiled
-        .outputs
-        .iter()
-        .map(|_| vec![None; rows.len()])
-        .collect();
-    drop(arrow_stage);
-    let entities = {
-        let _stage = observer.map(|recorder| recorder.stage(RollingStage::EntityResolution));
-        let entities = group_rows_by_entity(rows);
-        if let Some(recorder) = observer {
-            recorder.add(RollingWork::ResolvedRows, rows.len());
-            recorder.add(RollingWork::TouchedEntities, entities.len());
-        }
-        entities
-    };
-    let mut touched = Vec::with_capacity(entities.len());
-    for (entity, indices) in entities {
-        let mut entity_state = {
-            let _stage = observer.map(|recorder| recorder.stage(RollingStage::StatePreparation));
-            let prior = histories.by_entity.get(entity);
-            if let Some(recorder) = observer {
-                recorder.add(RollingWork::CopiedEntities, usize::from(prior.is_some()));
-            }
-            prior
-                .cloned()
-                .unwrap_or_else(|| EntityRollingState::fresh(compiled))
-        };
-        {
-            let _stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
-            let view = EntityRowView {
-                rows,
-                indices: &indices,
-                history: &entity_state.rows,
-                event_time_index: compiled.event_time_index,
-            };
-            let mut incremental_scans = compiled
-                .outputs
-                .iter()
-                .map(|output| IncrementalScanState::from_history(output, &view))
-                .collect::<Vec<_>>();
-            for (position, &row_index) in indices.iter().enumerate() {
-                entity_state.transition_count = entity_state
-                    .transition_count
-                    .checked_add(1)
-                    .ok_or_else(|| {
-                        operator_error(node_id, "rolling entity transition count overflowed")
-                    })?;
-                if let Some(recorder) = observer {
-                    recorder.add(RollingWork::NumericRows, 1);
-                }
-                slide_windows(
-                    &view,
-                    position,
-                    row_index,
-                    entity_state.transition_count,
-                    compiled,
-                    &mut entity_state.windows,
-                    node_id,
-                )?;
-                for (ordinal, output) in compiled.outputs.iter().enumerate() {
-                    let value = if let Some(scan) = &mut incremental_scans[ordinal] {
-                        scan.advance(
-                            view.history.len() + position,
-                            view.value(view.history.len() + position, output.input_index),
-                        )
-                    } else {
-                        compute_output_value(
-                            &view,
-                            position,
-                            row_index,
-                            output,
-                            &entity_state.windows,
-                            node_id,
-                        )?
-                    };
-                    derived[ordinal][row_index] = Some(value);
-                }
-            }
-        }
-        let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
-        for &row_index in &indices {
-            entity_state.rows.push_back(rows[row_index].values.clone());
-        }
-        evict_retained_history(&mut entity_state, compiled);
-        touched.push((entity.clone(), entity_state));
-    }
+    let cells =
+        compute_output_cells_checked(rows, histories, compiled, node_id, observer, &mut || Ok(()))?;
     let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
-    let columns = encode_derived_columns(derived, compiled, node_id)?;
-    Ok(ComputedOutputs { columns, touched })
+    let columns = encode_derived_columns(cells.columns, compiled, node_id)?;
+    Ok(ComputedOutputs {
+        columns,
+        touched: cells.touched,
+    })
+}
+
+fn compute_output_cells_checked(
+    rows: &[BufferedRow],
+    histories: &RollingHistories,
+    compiled: &CompiledRollingSpec,
+    node: &str,
+    observer: Option<&RollingMetricsRecorder>,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<indicators::ComputedCells> {
+    indicators::compute_cells(rows, histories, compiled, node, observer, check)
 }
 
 /// Evicts rows that no declared output can ever observe again (SCE-08): a
@@ -3929,6 +4020,11 @@ fn compute_output_value(
     node_id: &str,
 ) -> Result<ScalarValue> {
     let periods = match &output.evaluation {
+        CompiledEvaluation::Indicator(_) => {
+            return Err(internal_error(
+                "indicator readout requires its row transition",
+            ));
+        }
         CompiledEvaluation::Lag { periods } | CompiledEvaluation::Delta { periods } => {
             usize::try_from(*periods)
                 .map_err(|_| operator_error(node_id, "rolling periods does not fit usize"))?

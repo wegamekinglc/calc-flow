@@ -19,6 +19,7 @@ On this page:
 - [Checkpointed native array sequences](#checkpointed-native-array-sequences)
 - [Native elementwise arrays](#native-elementwise-arrays)
 - [Packed matrices and axes](#packed-matrices-and-axes)
+- [Native RSI and ATR](#native-rsi-and-atr)
 - [Native array batch provider](#native-array-batch-provider)
 - [Native table/array bridge](#native-tablearray-bridge)
 - [Expression pipeline](#expression-pipeline)
@@ -249,11 +250,18 @@ standalone [owned-state example](../crates/calc-flow/examples/native_array_state
 ## Checkpointed native array sequences
 
 `NativeArraySequenceFactory` creates stream-only `native:array_sequence@1`
-operators. Its closed data-only options select one `rolling_mean` or `ewma`
-kernel and lock `input_dtype` to `float32` or `float64`. Both kernels return
-Float64 vectors. Declare exactly one required Array port `input` and one
-required Array port `output`, without Arrow schemas. A scalar, matrix, Boolean
-vector, foreign payload or changed dtype is rejected even when empty.
+operators. Its closed data-only options lock `input_dtype` to `float32` or
+`float64`. IR1 selects `rolling_mean` or `ewma` on rank-one inputs. IR2 also
+accepts `{"function":"rsi","period":...}` on rank-one prices and
+`{"function":"atr","period":...}` on packed row-major `[n,3]` inputs with
+high, low and close in that order. ATR reads those rows directly without three
+intermediate vectors; `[0,3]` is valid. Every kernel returns an aligned float64
+vector. IR2 retains the old kernels' layout and numeric identity.
+
+Declare exactly one required Array port `input` and one required Array port
+`output`, without Arrow schemas. Scalars, Boolean arrays, foreign payloads,
+changed dtypes and per-kernel unsupported shapes are rejected even when empty.
+ATR has no second ingress, implicit zip, flattening or matrix reinterpretation.
 
 Each operator processes one sequence in accepted arrival order. Batch metadata
 is preserved but does not reorder samples. It does not infer entities, event
@@ -267,12 +275,20 @@ recurrence unchanged. Workers own pending candidates through cancellation and
 abandoned waiters; a later operation must settle that work before reuse. Reset
 cannot release credit still held by a running candidate.
 
-The owned-state charges above also apply here. The allocation limit includes
+The owned-state charges for EWMA, rolling mean and RSI/ATR also apply here.
+Output-element limits count ATR rows, rather than its three input operands.
+The allocation limit includes
 old state, candidate, output, numerical scratch and retained encoded captures.
 Distinct immutable capture allocations are charged once until their final
-owner drops. Encoding uses version-one binary state with raw IEEE values;
-restoration validates kernel parameters, dtype, numerical profile, counts,
-layout and fingerprint without recomputing saved summaries.
+owner drops. EWMA/rolling mean retain byte-identical layout 1. RSI/ATR use
+layout 2 with fixed 116/108-byte state segments, raw floating bits, complete
+previous/seed/mean/counter state and an identity fingerprint including the shape
+rule and normalized parameters. Even empty or missing-reset sequences retain
+one state segment. Restoration validates reserved bytes, exact lengths,
+parameters, dtype, flags, finite/nonnegative means, inactive positive-zero bits
+and count invariants without reconstructing history. Capability schema 5 keeps
+the same identity and adds layouts `[1,2]`, with separate versioned shape rules
+`native_sequence_vector@1` and `native_sequence_indicators@2`.
 
 Use `ManagedCheckpointRuntime` with stable graph/binding identities and an
 exactly replayable source for durable restart. The current public managed
@@ -377,6 +393,41 @@ scratch. Controlled paths check cancellation before allocation, at least every
 4096 positions (including dot-product inner loops), and before returning.
 The executable [native matrix example](../crates/calc-flow/examples/native_matrices.rs)
 combines matrix multiplication, axis means and owned shape transforms.
+
+## Native RSI and ATR
+
+`rsi(view, RsiOptions::new(period)?, &execution)` and
+`atr(high, low, close, AtrOptions::new(period)?, &execution)` require rank-one
+float32/float64 inputs and a positive `u64` period. ATR operands have equal
+lengths and may use mixed floating types. Each result is aligned float64 with an
+explicit validity bitmap. Null slots contain positive zero; input buffers remain
+read-only. The first complete row establishes the previous price/close, then
+`period` differences/true ranges seed the first valid result.
+
+Null and valid NaN reset the complete segment. Valid infinity is an error. ATR
+checks every valid operand for infinity before missingness, and validates
+`high >= low` plus finite `high - low` even when close is missing. Nonfinite
+price differences, signed gaps or recurrence arithmetic are errors. Flat RSI is
+50; all-gain and all-loss RSI are 100 and positive zero, respectively.
+
+The seed uses `mean + (sample - mean) / count` in that operation order. Later
+updates use the same operations with denominator `period`; period one replaces
+the mean directly. No reassociation or fused multiply-add is used. Finite
+underflow is allowed and can affect the ratio materially: RSI with period two
+on `[0, 2^-1074, 0]` returns `[null, null, 100]`, rather than the exact-real
+ratio's 50. `u64::MAX` is accepted without period-sized storage, but cannot
+complete warm-up before the checked total-position counter is exhausted.
+
+`RsiState` and `AtrState` accept the same options plus `ArrayStateOptions`.
+Their fixed numerical charges are 48 and 40 bytes, including empty/reset
+states. Chunk errors and cancellation preserve committed values and counters;
+`reset` retains options/limits and clears recurrence and counters. These owners
+have no public cloning or snapshot format. Calls charge committed state,
+isolated candidate, output buffers/shape and any retained captures against the
+execution limit; candidates must also fit the state limit. Eager calls charge
+one fresh candidate plus output and have no independent state cap.
+The standalone [indicator example](../crates/calc-flow/examples/native_indicators.rs)
+shows chunked RSI and aligned ATR output.
 
 ## Native array batch provider
 
@@ -828,7 +879,7 @@ for application composition.
 
 ## Rolling windows
 
-`RollingOperator` evaluates native lag, delta, EWMA, and aggregate outputs over
+`RollingOperator` evaluates native lag, delta, EWMA, RSI, ATR and aggregate outputs over
 entity-partitioned, event-time-ordered rows. Its data-only `RollingSpec`
 declares ordered `partition_by` and `sequence_by` keys, a non-null UTC
 `timestamp[us]` `event_time` column, and one `RollingOutputSpec` per rolling
@@ -846,6 +897,14 @@ unadjusted `alpha = 2 / (span + 1)` recurrence and shares constant state by
 `ewma` readouts and one output name. The leaves create and share state but are
 not output columns; the operator writes their nullable `float64` difference
 directly.
+Kinds `rsi` and `atr` use `primitive_version: 1`, a positive `period`,
+and nullable float64 output. RSI names one floating input; ATR names floating
+`high`, `low` and `close` inputs. They require
+`ROLLING_INDICATOR_STATE_LAYOUT_VERSION` (5). Identical operand/period groups
+share one recurrence per entity, independently of output aliases. They reuse
+the [native indicator numerical contract](#native-rsi-and-atr), including
+complete-segment warm-up and null/NaN resets. Indicator-containing mixed nodes
+currently use the general row fallback.
 Kind `cumulative_mean` carries an input, output, and positive `min_periods`;
 it stores one count and arithmetic mean per entity. Kinds `cumulative_sum`,
 `cumulative_min`, `cumulative_max`, and `cumulative_variance` carry numeric
@@ -884,7 +943,7 @@ use their validated declaration constants. `configuration_version` is
 `ROLLING_CONFIGURATION_VERSION` (1). Declarations without cumulative summaries,
 EWMA or cumulative mean use `ROLLING_STATE_LAYOUT_VERSION` (1), while either recurrence requires
 `ROLLING_EWMA_STATE_LAYOUT_VERSION` (2). These values belong to project
-documents and configuration fingerprints. Operators without the new cumulative
+documents and configuration fingerprints. Old-only operators without cumulative
 summaries write `ROLLING_COLUMNAR_STATE_LAYOUT_VERSION` (3): one deterministic entity
 dictionary, projected retained history, a columnar reorder buffer, recurrence
 state, and kernel/numerical fingerprints. Restore continues to read the
@@ -899,12 +958,52 @@ value.
 Stream rolling state defaults to the JSON counter range,
 9,007,199,254,740,991 rows and logical bytes, without a smaller implicit budget.
 `RollingOperator::set_state_budget(StateBudget::new(...))` sets explicit row and
-byte limits before graph compilation. The charge covers accepted reorder rows,
+byte limits before graph compilation. For old-only operators, the charge covers accepted reorder rows,
 retained per-entity history, keys, and state overhead; it excludes checkpoint
 copies and process-wide resident memory. Input and watermark callbacks reject
 state growth before committing it, and restore rejects an oversized snapshot.
-Batch evaluation does not use this budget. Project-created operators use the
+Old-only batch evaluation does not use this budget. Project-created operators use the
 default, and this runtime limit does not change the project fingerprint.
+The preceding retained-only rule applies to old-only nodes, including old-only
+declarations that explicitly select layout 5.
+
+For nodes containing RSI or ATR, the same `StateBudget.max_bytes` instead
+bounds the whole operator's participating peak: committed state, isolated
+candidates, all prepared output chunks, scratch and live encoded
+checkpoint/restore segments. Mixed old rolling outputs participate too.
+Shared allocations count once by ownership, while distinct copies count
+separately. `max_rows` keeps its retained-row meaning. The rule applies to
+finite and streaming execution; it adds no serialized budget field or smaller
+implicit default. Captures and unfinished workers retain their charges across
+reset, and a lower budget must admit all live owners. These logical charges
+exclude process RSS, independent pools/operators and transferred results.
+The retained logical footprint counts observable Arrow buffer capacity/extent
+and identifiable Array/container descriptors. It excludes private immutable
+Buffer owner control blocks, whose identity cannot be inferred from the data
+pointer; construction reservations can conservatively include that overhead.
+Pure accounting owner-key/reservation indexes are not recursively charged;
+they may only reference already funded owners and numeric charges. This
+excludes no computational or payload containers and does not shorten their
+funded lifetime when ownership moves into a lease.
+
+Layout 5 preserves complete indicator groups and mixed old state with strict
+schema/configuration/kernel/numerical fingerprints. Preparation runs through
+the controlled asynchronous worker path. Capture only attaches prepared bytes
+for the exact state revision; an unprepared synchronous capture returns a
+preparation error. Unchanged payload storage can be reused across epochs;
+inventory descriptors remain epoch-specific. Managed recovery validates both
+ordinary and terminal layout-5 state before connectors open.
+
+Indicator finalization prepares the whole candidate and output before emission.
+A preparation failure preserves pending rows, recurrence state, frontiers,
+sequences and metrics. This does not retract earlier accepted input or
+downstream chunks if emission later fails. See
+[streaming indicator semantics](streaming-guide.md#native-table-indicators) and
+the executable
+[`native_table_indicators.rs`](../crates/calc-flow/examples/native_table_indicators.rs).
+
+The new `RollingOutputSpec::Rsi` and `RollingOutputSpec::Atr` variants require
+Rust callers with exhaustive matches to update those matches.
 
 `numerical_profile` is optional. Its default `stable_v1` is omitted from the
 canonical configuration, preserving existing project and checkpoint hashes.

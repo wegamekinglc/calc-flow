@@ -24,19 +24,22 @@ impl ManifestTransaction {
             .record(operator)
             .expect("native stage is selected by intrinsic inventory");
         record.admit_snapshot(&snapshot)?;
-        let segment = &snapshot.segments["state"];
-        let (handle, status) = self.native_handle(operator, epoch, segment)?;
-        if status != SegmentPublication::Carried {
-            let _complete = record
-                .stage_publish(
-                    Arc::clone(&policy.local),
-                    guard.shared(),
-                    &handle,
-                    segment,
-                    cancellation,
-                )
-                .await?;
-            self.remember_native(&handle);
+        let mut handles = Vec::with_capacity(snapshot.segments.len());
+        for (segment_id, segment) in &snapshot.segments {
+            let (handle, status) = self.native_handle(operator, epoch, segment_id, segment)?;
+            if status != SegmentPublication::Carried {
+                let _complete = record
+                    .stage_publish(
+                        Arc::clone(&policy.local),
+                        guard.shared(),
+                        &handle,
+                        segment,
+                        cancellation,
+                    )
+                    .await?;
+                self.remember_native(&handle);
+            }
+            handles.push(handle);
         }
         #[cfg(test)]
         self.inject_fault(super::super::ManifestTransactionFaultPoint::StateStage)?;
@@ -44,16 +47,17 @@ impl ManifestTransaction {
             working: WorkingStatePins::acquire(
                 self.session_segments.clone(),
                 self.lineage.clone(),
-                std::slice::from_ref(&handle),
+                &handles,
             )?,
             inline_metadata: snapshot.inline_metadata,
-            segments: vec![handle],
+            segments: handles,
         })
     }
     fn native_handle(
         &self,
         operator: &str,
         epoch: Epoch,
+        segment_id: &str,
         segment: &StateSegment,
     ) -> Result<(StateHandle, SegmentPublication)> {
         let length = u64::try_from(segment.bytes().len()).map_err(|_| {
@@ -61,7 +65,7 @@ impl ManifestTransaction {
                 message: "native:array_sequence@1 state.bytes: encoded length exceeds u64".into(),
             }
         })?;
-        let key = (operator.to_owned(), "state".to_owned());
+        let key = (operator.to_owned(), segment_id.to_owned());
         let carried = self
             .session_segments
             .lock()
@@ -77,9 +81,9 @@ impl ManifestTransaction {
             self.lineage_hash,
             digest(operator),
             epoch.as_u64(),
-            digest("state")
+            digest(segment_id)
         );
-        StateHandle::new(operator, epoch, "state", &path, length, segment.sha256())
+        StateHandle::new(operator, epoch, segment_id, &path, length, segment.sha256())
             .map(|handle| (handle, SegmentPublication::Staged))
     }
     fn remember_native(&self, handle: &StateHandle) {

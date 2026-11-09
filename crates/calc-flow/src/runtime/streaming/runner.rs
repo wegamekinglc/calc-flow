@@ -2582,17 +2582,10 @@ fn validate_manifest_operator_capabilities(
                 message: format!("checkpoint is missing operator {operator_id:?}"),
             }
         })?;
-        let segments = if entry.segments.is_empty() {
-            BTreeMap::new()
-        } else {
-            BTreeMap::from([("state".into(), crate::StateSegment::new(Vec::new()))])
-        };
-        node.checkpoint_capability.decode_snapshot(
+        node.checkpoint_capability.validate_snapshot_fields(
             operator_id,
-            crate::OperatorStateSnapshot {
-                inline_metadata: entry.inline_metadata.clone(),
-                segments,
-            },
+            &entry.inline_metadata,
+            entry.segments.is_empty(),
         )?;
     }
     Ok(())
@@ -2620,7 +2613,7 @@ async fn prepare_checkpoint_recovery(
     sources: &mut BTreeMap<String, SourceBinding>,
     loads: &asof::LoadOwner,
     cancellation: &CancellationToken,
-    mut native_snapshots: BTreeMap<String, crate::OperatorStateSnapshot>,
+    mut native_snapshots: BTreeMap<String, crate::state::PreloadedSnapshot>,
 ) -> crate::Result<(
     BTreeMap<String, OperatorRestoreState>,
     Option<DurableProgressRestore>,
@@ -2676,7 +2669,7 @@ async fn prepare_checkpoint_recovery(
             })?;
         let snapshot = match native_snapshots.remove(operator_id) {
             Some(snapshot) => snapshot,
-            None => {
+            None => crate::state::PreloadedSnapshot::uncredited(
                 asof::load_snapshot_with_join(
                     &checkpoint.transaction,
                     loads,
@@ -2686,11 +2679,13 @@ async fn prepare_checkpoint_recovery(
                     cancellation,
                     checkpoint.join_preload_reader.as_ref(),
                 )
-                .await?
-            }
+                .await?,
+            ),
         };
-        let mut snapshot = checkpoint_capability.decode_snapshot(operator_id, snapshot)?;
+        let mut snapshot = snapshot
+            .map(|snapshot| checkpoint_capability.decode_snapshot(operator_id, snapshot))?;
         let restored_output_frontier = snapshot
+            .snapshot_mut()
             .inline_metadata
             .remove(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1);
         let output_frontier = restored_output_frontier_value(
@@ -2701,7 +2696,7 @@ async fn prepare_checkpoint_recovery(
         operators.insert(
             operator_id.clone(),
             OperatorRestoreState {
-                snapshot,
+                snapshot: Arc::new(snapshot),
                 progress: entry.progress.clone(),
                 output_frontier,
                 next_epoch: checkpoint.next_epoch,
@@ -4191,11 +4186,15 @@ fn source_task_identity(task_name: &str) -> Option<(&str, &str)> {
 }
 
 fn task_runtime_failure(failure: TaskFailure) -> Arc<RuntimeFailure> {
-    Arc::new(RuntimeFailure {
-        origin: FailureOrigin::Task {
+    let origin = match failure.indicator_diagnostic {
+        Some(diagnostic) => FailureOrigin::RollingIndicator { diagnostic },
+        None => FailureOrigin::Task {
             task_id: failure.task_id,
             task_name: failure.task_name,
         },
+    };
+    Arc::new(RuntimeFailure {
+        origin,
         error: failure.error,
     })
 }

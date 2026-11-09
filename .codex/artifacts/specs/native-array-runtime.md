@@ -277,18 +277,78 @@ stateful native capability 必须来自 Rust 真实注册记录：stateful、支
 
 ### A7 RSI、ATR 与完整 MACD 分量（M3）
 
-指标由 calc-flow 自行实现，不引入 TA-Lib 代码依赖；新增算子使用共享 recurrence 基础和自己的明确合同。Rust、Python eager、table 和 stream 一起验收，避免先发布不能恢复的同名 stream 能力。
+本阶段的精确签名、数值顺序、状态/预算、IR/schema/codec 和验收要求以
+[A7 已批准 API 合同](../api-notes/native-array-runtime.md#8-a7-approved-indicator-contract)
+为准；[专项最终审查](../critiques/native-array-runtime.md#a7-indicator-contract-focused-review)
+结论为 **Pass after revision**。这是设计归档，不表示产品实现、测试执行、CI
+或合并就绪。A7 实施须等待 A6b 工厂、owned worker 与 managed recovery 基础完成。
+
+指标由 calc-flow 自行实现，不引入 TA-Lib 代码依赖；Rust eager/owned state、
+Python eager、Table 与真实 stream/codec/restart 按两个完整单元一起交付，不能
+先发布缺少恢复能力的同名 stream 指标。
 
 首版规则：
 
-- RSI：period 个有效价格差先初始化平均 gain/loss，随后 Wilder 递推；无缺失序列首个输出位于 index=period。loss 为 0 且 gain > 0 时 100；gain 为 0 且 loss > 0 时 0；两者都为 0 时 50。该 flat 值是新 native 合同，不声称 TA-Lib 精确兼容。
-- ATR：第一行仅保存 previous close；随后计算 true range；period 个 true range 的均值初始化，再 Wilder 递推；首个输出位于 index=period。要求 high >= low。
-- RSI/ATR：默认 null/NaN 断开有效段并重置 warm-up，所在行输出 null；任一 Inf 拒绝该批并不提交状态。这个新指标合同不改变已有 mean/EWMA 的 missing 处理。
-- RSI/ATR 的有限输入也必须检查差分、true range、初始化与 recurrence 的中间溢出；首版不能以规定算法有限表示时返回包含输入字段/位置的计算错误，不发布该批输出或提交候选状态。测试包含 RSI 的 `[1e308, -1e308, 1e308]` 和 ATR 的 `high=1e308, low=-1e308`，以及失败后的续算；不把溢出静默变成 RSI 极值或无限 ATR。
-- 完整 MACD：新增 `macd_components`/`MacdOutputs(line, signal, histogram)`；line 与现有 `ts.macd` 同义，signal 对 line 使用同一 native EWMA，histogram=line-signal。初值与 min_periods 明确来自 calc-flow EWMA，不冒充 TA-Lib MACD。
-- table 新入口为 `ts.rsi`、`ts.atr` 和 `ts.macd_components`；三个 MACD 输出共享一个 state owner。参数、输出 dtype、null 规则进入 schema/指纹/codec 身份。
+- RSI：period 个有效价格差初始化平均 gain/loss，随后 Wilder 递推；无缺失
+  序列首个输出位于 index=period。loss=0/gain>0 时 100，gain=0/loss>0 时 0，
+  两者为 0 时 50。seed/Wilder 和 ratio<=1 归一化均按 API 合同的明确 IEEE
+  操作顺序执行，不声称 TA-Lib 精确兼容。
+- ATR：首个完整行仅保存 previous close；period 个 true range 初始化均值，
+  随后 Wilder，首个输出位于 index=period。只读有效 payload；任一有效 Inf
+  不能被另一个缺失 operand 隐藏。high/low 都有效且有限时，即使 close 缺失
+  或是首行，也检查 high>=low 和 high-low 的有限表示。
+- RSI/ATR 的 null/NaN 断开有效段并重置完整 warm-up。Inf、有限差分/TR/seed/
+  recurrence 的不可表示中间结果返回含字段/位置的错误。直接调用和单 ingress
+  有序 array chunk 必须整批先完成计算、准入和校验；失败不发布任何该批输出，
+  不提交候选。包含 `[1e308,-1e308,1e308]` 和 `high=1e308,low=-1e308` 反例。
+- Table 的“整批原子性”明确指触发处理的 callback：输入 Inf/domain 校验发生
+  在新 Batch 接受进 buffer 前，依赖前序价格的溢出可能到之后 watermark/EOF
+  才被发现。有序及重排路径都须在该 callback 的任何 chunk 发送前，完整准备
+  全部数值、输出/边限额、候选与取消检查。准备失败零输出，保留原数值、pending
+  rows/order proof、charge、sequence 和 finality frontier。不能假定旧路径已
+  全部实现该行为。已接受的坏行仍在 buffer，重试 watermark 不能把它替换成
+  “修正批次”；job 按既有失败/恢复与 source replay 合同处理。修正输入后重试
+  只适用于接收前被拒绝的输入。发送后部分投递失败仍不承诺撤回已接受输出。
+- 有限下溢保持已批准 IEEE 结果：`RSI(period=2,[0,2^-1074,0])` 必须输出
+  `[null,null,100]`，尽管理想 Fraction seed 的 RSI 是 50。严格 operation-order
+  oracle 覆盖全部 IEEE 边界，不扩大容差或改变算法。补充 Fraction 精度断言
+  仅用于预先固定的数据域：period=1..32，每段至多 64 个 difference/TR，输入
+  为 [-4096,4096] 内 1/16 的倍数，high>=low，所有正 exact mean 在每次更新
+  均位于 [2^-20,2^13]（允许零）。该域内 ATR relative <=256*2^-52、RSI absolute
+  <=100*256*2^-52；域外按严格 IEEE oracle，不能宣称全有限域高精度误差界。
+- `macd_components` 返回 `MacdOutputs(line,signal,histogram)`：line 保持现有
+  `ts.macd`，包括 fast_span<slow_span、共同 min_periods；signal 是同一 native
+  EWMA(line)，histogram=line-signal。原 price 缺失后携带的有效 line 仍推进
+  signal。保留 EWMA 的 Inf/NaN 语义，不套用 RSI/ATR reset/finite-only 规则。
+  三个分量共用一个 owner，消费子集也保留完整 recurrence/checkpoint state。
+- Table 新入口为 `ts.rsi`、`ts.atr`、`ts.macd_components`。低级 array stream
+  ATR 采用单条 packed `[n,3]` high/low/close 输入，MACD 采用单个 packed
+  `[n,3]` line/signal/histogram 输出；不隐式 zip 多个异步 ingress。
 
-验收：独立标量公式 oracle、小型固定向量、零波动/单边上涨下跌/跳空/断段、缺失值与 Inf；批流分割、实体交错、恢复、共享输出与只消费部分 MACD 分量的状态正确性。可采用记录来源、版本和参数的外部参考数值作为补充 fixture，但测试不导入或链接 TA-Lib；只比较语义相同的范围，并记录允许误差，不能用宽容差掩盖初始化差异。
+Table 峰值预算是明确的新节点例外：仅对包含至少一个 RSI/ATR/MACD 声明且
+使用 layout 5/6 的 Rolling 节点，将现有 `StateBudget.max_bytes` 用作整个节点的
+`S+C+O+T+K` participating peak 上限；mixed legacy/new 节点整体纳入。max_rows
+仍为 retained entity/history/pending 行计数，old-only 节点保持原 retained-only
+字节语义和 checkpoint-copy 排除，即便显式选新布局也不改变旧算子语义。
+默认 rows/bytes 均仍为 9,007,199,254,740,991，不添加隐式 256 MiB 上限；现有
+Rust setter 可设限，当前 Project/Python 无对应 rolling override，不虚构配置。
+精确 finite/stream/capture/restore/reset/降限规则见 API 合同；capture 和 pending
+worker 的 lease 不能随 reset 或 awaiter 丢失提前释放。
+
+版本分开：RSI/ATR 使用 sequence IR2/layout2 与 Table layout5；MACD 使用
+IR3/layout3 与 Table layout6，旧版本含义不变，project/manifest 仍为 3。
+capability schema 保持 A6b 的 5，built-in rolling 实际 layout 清单先为
+(1,2,3,4,5)，再为 (1,2,3,4,5,6)，与 sequence 清单/注册记录数独立。精确 schema
+新增、Rust exhaustive enum match 迁移、raw bits codec 和完整 group inventory
+按 API 执行。count=0 的 buffer-only entity 不编码 indicator record；正 count
+即使全 missing/reset 也必须保存每个 group。新增 terminal Rolling layout5/6
+验证须在完成或打开 sink 前执行，与普通恢复共享有界准入和内部状态校验。
+
+验收包括独立 scalar/Fraction fixtures、flat/up/down/gap/reset/nonfinite/overflow、
+chunk/实体交错、共享/子集输出、取消/预算/重试、有效 checksum 下的内部损坏、
+缺失 group、terminal 路径和新 job/进程的真实 managed restart。先交付覆盖所有
+表面的 RSI/ATR，再交付覆盖所有表面的 MACD；每项均先 focused RED，遵循既有
+局部验证与最终 specialist review。完整签名和验收细节只在上述 API 合同维护。
 
 ## 6. 后续有条件扩展
 
@@ -351,6 +411,14 @@ PR 数量是审查单元建议，不强制以一个大 PR 装完复杂状态功�
 - 协议：旧 NumPy/JAX 项目与静态 digest fixture、现有 rolling checkpoint；新版本不支持时明确 fail closed。
 
 schema 若无计划变更必须零漂移；若有新增词汇/算子形状，审查期明确列出预期生成差异并更新 fixture，稳定后重新执行无漂移检查。每个 PR 运行 `git diff --check`。提交/推送后仅取一次非阻塞 CI 状态，不等待或轮询；pending 只允许交接，不代表可合并。
+
+后续实施会话中，用户已授权阶段 PR、修复问题并在验证完成后合并。
+该授权要求取得最终 CI 结果：合并前核对候选 head 的全部适用 check run，
+以及各个外部 commit status（包括独立的 Python、Rust Coveralls 标志）。
+它们的最新有效状态必须全部成功；失败、取消、pending 或缺失均不能作为合并就绪。
+只允许排除已确认不适用于该次变更的检查，例如未触发发布时的 publish skip。
+聚合 gate 成功或某项未列为 required，都不能覆盖单项失败。
+最终 specialist review 仍然必需；改变 head 后重新核对对应验证证据。
 
 ### 8.2 有界性能验证
 

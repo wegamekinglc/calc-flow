@@ -81,6 +81,7 @@ impl GatherHome {
         self.state
             .lock()
             .retain_diagnostic(task_id, || super::TaskFailure {
+                indicator_diagnostic: None,
                 task_id,
                 task_name: bounded_message(&name, super::DIAGNOSTIC_NAME_BYTES),
                 error: CalcFlowError::TaskPanicked {
@@ -181,6 +182,7 @@ impl GatherHome {
         let message = panic_summary(payload);
         let mut state = self.state.lock();
         state.retain_diagnostic(task_id, || super::TaskFailure {
+            indicator_diagnostic: None,
             task_id,
             task_name: bounded_message(&operator.name, super::DIAGNOSTIC_NAME_BYTES),
             error: CalcFlowError::TaskPanicked {
@@ -208,6 +210,7 @@ impl GatherHome {
         let mut state = self.state.lock();
         let task_id = operator.task.unwrap_or_else(|| super::TaskId::new(0));
         state.retain_diagnostic(task_id, || super::TaskFailure {
+            indicator_diagnostic: None,
             task_id,
             task_name: bounded_message(&operator.name, super::DIAGNOSTIC_NAME_BYTES),
             error: internal(&bounded_message(error, super::DIAGNOSTIC_MESSAGE_BYTES)),
@@ -238,6 +241,7 @@ impl super::HomeState {
                 |count| format!("native CPU diagnostics omitted={count}"),
             );
             self.failures.push(super::TaskFailure {
+                indicator_diagnostic: None,
                 task_id: self
                     .omitted_task
                     .take()

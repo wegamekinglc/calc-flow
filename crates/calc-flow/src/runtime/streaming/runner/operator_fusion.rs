@@ -1179,10 +1179,11 @@ mod tests {
             restores.insert(
                 node.node_id.clone(),
                 OperatorRestoreState {
-                    snapshot: node
-                        .checkpoint_capability
-                        .decode_snapshot(&node.node_id, snapshot)
-                        .unwrap(),
+                    snapshot: Arc::new(crate::state::PreloadedSnapshot::uncredited(
+                        node.checkpoint_capability
+                            .decode_snapshot(&node.node_id, snapshot)
+                            .unwrap(),
+                    )),
                     progress: entry.progress.clone(),
                     output_frontier: None,
                     next_epoch: Epoch::INITIAL.next().unwrap(),
@@ -1264,7 +1265,9 @@ mod tests {
                 plan.name().into(),
             ));
             let restore = OperatorRestoreState {
-                snapshot: crate::OperatorStateSnapshot::default(),
+                snapshot: Arc::new(crate::state::PreloadedSnapshot::uncredited(
+                    crate::OperatorStateSnapshot::default(),
+                )),
                 progress: BTreeMap::new(),
                 output_frontier: None,
                 next_epoch: crate::Epoch::INITIAL,

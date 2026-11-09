@@ -9,10 +9,12 @@ use super::{
     sanitize_managed_recovery_error,
 };
 use crate::{
-    CalcFlowError, OperatorStateSnapshot, StreamJobContext, StreamOperatorContext,
+    StreamJobContext, StreamOperatorContext,
     array::{NativeSequenceFailure, NativeSequenceInventory},
     pipeline::StreamRuntimePlanParts,
-    state::{LocalStateLineageBackend, ManifestTransaction, NativeRecoveryError},
+    state::{
+        LocalStateLineageBackend, ManifestTransaction, NativeRecoveryError, PreloadedSnapshot,
+    },
 };
 
 pub(super) fn attach(
@@ -24,10 +26,10 @@ pub(super) fn attach(
         return Ok(transaction);
     };
     let reader = reader.ok_or_else(|| {
-        NativeRecoveryError::Native(inventory.first_failure(CalcFlowError::CheckpointMismatch {
-            message:
-                "native:array_sequence@1 state.reader: requires a certified local reader".into(),
-        }))
+        NativeRecoveryError::Native(
+            inventory
+                .first_failure(inventory.mismatch("reader", "requires a certified local reader")),
+        )
     })?;
     transaction
         .with_native_sequences(inventory, Arc::clone(reader))
@@ -74,7 +76,7 @@ pub(super) async fn load(
     plan: &StreamRuntimePlanParts,
     checkpoint: Option<&OpenedCheckpointRuntime>,
     job: &StreamJobContext,
-) -> Result<BTreeMap<String, OperatorStateSnapshot>, NativeSequenceFailure> {
+) -> Result<BTreeMap<String, PreloadedSnapshot>, NativeSequenceFailure> {
     let mut snapshots = BTreeMap::new();
     let Some(checkpoint) = checkpoint else {
         return Ok(snapshots);
@@ -106,7 +108,7 @@ pub(super) async fn load(
 pub(super) async fn restore_terminal(
     plan: &mut StreamRuntimePlanParts,
     checkpoint: &OpenedCheckpointRuntime,
-    mut snapshots: BTreeMap<String, OperatorStateSnapshot>,
+    mut snapshots: BTreeMap<String, PreloadedSnapshot>,
     job: &StreamJobContext,
 ) -> Result<(), NativeSequenceFailure> {
     for node in &mut plan.nodes {
@@ -127,8 +129,10 @@ pub(super) async fn restore_terminal(
                     node.ingress_edges.keys(),
                     &entry.progress,
                 )?;
-                let mut snapshot = node.checkpoint_capability.decode_snapshot(id, snapshot)?;
+                let mut snapshot = snapshot
+                    .map(|snapshot| node.checkpoint_capability.decode_snapshot(id, snapshot))?;
                 let frontier = snapshot
+                    .snapshot_mut()
                     .inline_metadata
                     .remove(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1);
                 super::restored_output_frontier_value(id, false, frontier)?;

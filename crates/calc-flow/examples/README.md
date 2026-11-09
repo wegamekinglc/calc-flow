@@ -46,6 +46,11 @@ axis means and owned reshape/transpose with allocation limits.
 [`native_array_state.rs`](native_array_state.rs) advances owned rolling-mean and
 EWMA states across chunks, verifies continuity and retains output after reset.
 
+[`native_indicators.rs`](native_indicators.rs) processes chunked RSI state and
+aligned ATR vectors using the shared finite-only native indicator kernels.
+[`native_table_indicators.rs`](native_table_indicators.rs) combines native
+Table RSI, ATR and lag under an explicit whole-operator byte budget.
+
 [`native_sequence_stream.rs`](native_sequence_stream.rs) uses the checkpointed
 EWMA factory and validates a fresh managed terminal restart without reopening
 the source.
@@ -53,6 +58,8 @@ the source.
 ```bash
 cargo run -p calc-flow --example native_arrays
 cargo run -p calc-flow --example native_array_state
+cargo run -p calc-flow --example native_indicators
+cargo run -p calc-flow --example native_table_indicators
 cargo run -p calc-flow --example native_sequence_stream
 ```
 

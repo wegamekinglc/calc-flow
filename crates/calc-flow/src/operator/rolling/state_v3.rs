@@ -26,8 +26,8 @@ use super::{
     BufferedRow, CompiledEvaluation, CompiledRollingSpec, CompiledWindowGroup, DecodedRollingState,
     EntityRollingState, KeyValue, RollingHistories, RollingNumericalProfile,
     RollingSnapshotMetadata, WindowState, buffered_row_from_values, ewma_entity_from_values,
-    ewma_entity_values, internal_error, rebuild_windows, state_format, state_schema, typed_null,
-    validate_decoded_state, validate_segment_schema_metadata,
+    ewma_entity_values, internal_error, state_format, state_schema, typed_null,
+    validate_segment_schema_metadata,
 };
 use crate::Result;
 
@@ -36,11 +36,15 @@ const KIND_HISTORY: u8 = 1;
 const KIND_BUFFER: u8 = 2;
 const KIND_EWMA: u8 = 3;
 const KIND_CUMULATIVE: u8 = 4;
+const KIND_INDICATOR: u8 = 5;
 
 pub(super) fn state_fields_for_layout(input_schema: &Schema, layout: u32) -> Vec<Field> {
     let mut fields = state_fields(input_schema);
-    if layout == super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION {
+    if layout >= super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION {
         fields.push(Field::new("_cumulative_summary", DataType::Binary, true));
+    }
+    if layout == super::ROLLING_INDICATOR_STATE_LAYOUT_VERSION {
+        fields.push(Field::new("_indicator_state", DataType::Binary, true));
     }
     fields
 }
@@ -91,7 +95,7 @@ pub(super) fn encode(
 
     for (entity, &entity_id) in &entity_ids {
         let transition_count = (compiled.state_layout_version
-            == super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+            >= super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
             || compiled.kernel_plan.numerical_profile_kind()
                 == RollingNumericalProfile::StableV2Preview)
             .then(|| {
@@ -154,8 +158,9 @@ pub(super) fn encode(
     }
 
     encoded.push_cumulative(histories, &entity_ids, input_schema)?;
+    encoded.push_indicators(histories, &entity_ids, input_schema, compiled)?;
     let schema = state_schema(input_schema, compiled, pipeline_fingerprint, operator_id);
-    let record = encoded.finish(Arc::new(schema.clone()))?;
+    let record = encoded.finish(Arc::new(schema.clone()), compiled.state_layout_version)?;
     let mut bytes = Vec::new();
     {
         let mut writer = FileWriter::try_new(&mut bytes, &schema)
@@ -203,13 +208,57 @@ pub(super) fn decode(
             "rolling columnar state segment column count does not match layout v3".to_owned(),
         ));
     }
+    if compiled.state_layout_version == super::ROLLING_INDICATOR_STATE_LAYOUT_VERSION {
+        return decode_record_checked(&record, input_schema, compiled, "rolling", &mut || Ok(()));
+    }
     let arrays = StateArrays::new(&record, width)?;
     let projection = history_projection(compiled);
     let mut decoder = StateDecoder::new(input_schema, compiled, projection);
     for row_index in 0..record.num_rows() {
-        decoder.decode_row(&record, &arrays, row_index)?;
+        decoder.decode_row(&record, &arrays, row_index, &mut || Ok(()))?;
     }
     decoder.finish()
+}
+
+pub(super) fn decode_record_checked(
+    record: &RecordBatch,
+    input_schema: &Schema,
+    compiled: &CompiledRollingSpec,
+    node: &str,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<DecodedRollingState> {
+    check()?;
+    validate_controlled_record(record, input_schema, compiled)?;
+    let state = read_controlled_state(record, input_schema, compiled, node, check)?;
+    check()?;
+    Ok(state)
+}
+fn read_controlled_state(
+    record: &RecordBatch,
+    input_schema: &Schema,
+    compiled: &CompiledRollingSpec,
+    node: &str,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<DecodedRollingState> {
+    let arrays = StateArrays::new(record, input_schema.fields().len())?;
+    let projection = history_projection_checked(compiled, check)?;
+    let mut decoder = StateDecoder::new(input_schema, compiled, projection);
+    decoder.read_record(record, &arrays, node, check)?;
+    decoder.finish_checked(node, check)
+}
+
+fn validate_controlled_record(
+    record: &RecordBatch,
+    input: &Schema,
+    compiled: &CompiledRollingSpec,
+) -> Result<()> {
+    let columns = input.fields().len().checked_add(8);
+    if compiled.state_layout_version != super::ROLLING_INDICATOR_STATE_LAYOUT_VERSION
+        || columns != Some(record.num_columns())
+    {
+        return Err(state_format("invalid controlled layout5 record shape"));
+    }
+    Ok(())
 }
 
 fn entity_dictionary(
@@ -225,36 +274,49 @@ fn entity_dictionary(
 }
 
 fn history_projection(compiled: &CompiledRollingSpec) -> BTreeSet<usize> {
-    let mut projection = BTreeSet::from([compiled.event_time_index]);
-    projection.extend(compiled.sequence_columns.iter().map(|column| column.index));
-    for output in &compiled.outputs {
-        if matches!(
-            output.evaluation,
-            CompiledEvaluation::Lag { .. }
-                | CompiledEvaluation::Delta { .. }
-                | CompiledEvaluation::Scan(_)
-        ) {
-            projection.insert(output.input_index);
-        }
+    match super::state_codec::project_restore_columns(projection_columns(compiled), &mut || {
+        Ok::<_, std::convert::Infallible>(())
+    }) {
+        Ok(projection) => projection,
+        Err(never) => match never {},
     }
-    for group in &compiled.window_groups {
-        match group {
-            CompiledWindowGroup::Numeric { input_index, .. }
-            | CompiledWindowGroup::Extrema { input_index, .. } => {
-                projection.insert(*input_index);
-            }
-            CompiledWindowGroup::Pair {
-                left_index,
-                right_index,
-                ..
-            } => {
-                projection.insert(*left_index);
-                projection.insert(*right_index);
-            }
-            CompiledWindowGroup::Ewma { .. } | CompiledWindowGroup::Cumulative { .. } => {}
-        }
+}
+fn history_projection_checked(
+    compiled: &CompiledRollingSpec,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<BTreeSet<usize>> {
+    super::state_codec::project_restore_columns(projection_columns(compiled), check)
+}
+fn projection_columns(compiled: &CompiledRollingSpec) -> impl Iterator<Item = Option<usize>> + '_ {
+    std::iter::once(Some(compiled.event_time_index))
+        .chain(
+            compiled
+                .sequence_columns
+                .iter()
+                .map(|column| Some(column.index)),
+        )
+        .chain(compiled.outputs.iter().map(|output| {
+            matches!(
+                output.evaluation,
+                CompiledEvaluation::Lag { .. }
+                    | CompiledEvaluation::Delta { .. }
+                    | CompiledEvaluation::Scan(_)
+            )
+            .then_some(output.input_index)
+        }))
+        .chain(compiled.window_groups.iter().flat_map(group_projection))
+}
+fn group_projection(group: &CompiledWindowGroup) -> [Option<usize>; 2] {
+    match group {
+        CompiledWindowGroup::Numeric { input_index, .. }
+        | CompiledWindowGroup::Extrema { input_index, .. } => [Some(*input_index), None],
+        CompiledWindowGroup::Pair {
+            left_index,
+            right_index,
+            ..
+        } => [Some(*left_index), Some(*right_index)],
+        CompiledWindowGroup::Ewma { .. } | CompiledWindowGroup::Cumulative { .. } => [None, None],
     }
-    projection
 }
 
 fn projected_history(
@@ -322,6 +384,7 @@ struct EncodedColumns {
     counts: Vec<Option<u64>>,
     values: Vec<Option<f64>>,
     summaries: Vec<Option<Vec<u8>>>,
+    indicators: Vec<Option<Vec<u8>>>,
 }
 
 impl EncodedColumns {
@@ -335,6 +398,7 @@ impl EncodedColumns {
             counts: Vec::new(),
             values: Vec::new(),
             summaries: Vec::new(),
+            indicators: Vec::new(),
         }
     }
 
@@ -356,6 +420,7 @@ impl EncodedColumns {
         self.counts.push(ewma.map(|value| value.1));
         self.values.push(ewma.map(|value| value.2));
         self.summaries.push(None);
+        self.indicators.push(None);
     }
 
     fn push_cumulative(
@@ -386,7 +451,31 @@ impl EncodedColumns {
         Ok(())
     }
 
-    fn finish(self, schema: Arc<Schema>) -> Result<RecordBatch> {
+    fn push_indicators(
+        &mut self,
+        histories: &RollingHistories,
+        entities: &BTreeMap<Vec<Option<KeyValue>>, u64>,
+        schema: &Schema,
+        compiled: &CompiledRollingSpec,
+    ) -> Result<()> {
+        for (entity, state) in &histories.by_entity {
+            for (index, group) in compiled.indicator_groups.iter().enumerate() {
+                self.push(
+                    KIND_INDICATOR,
+                    entities[entity],
+                    None,
+                    null_values(schema),
+                    None,
+                );
+                *self.groups.last_mut().expect("just pushed") = Some(index as u64);
+                *self.indicators.last_mut().expect("just pushed") =
+                    Some(group.encode(&state.indicators[index])?);
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(self, schema: Arc<Schema>, layout: u32) -> Result<RecordBatch> {
         let mut arrays: Vec<ArrayRef> = vec![
             Arc::new(UInt8Array::from(self.kinds)),
             Arc::new(UInt64Array::from(self.entity_ids)),
@@ -404,9 +493,17 @@ impl EncodedColumns {
             Arc::new(UInt64Array::from(self.counts)) as ArrayRef,
             Arc::new(Float64Array::from(self.values)) as ArrayRef,
         ]);
-        if schema.fields().len() == arrays.len() + 1 {
+        if layout >= super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION {
             arrays.push(Arc::new(
                 self.summaries
+                    .iter()
+                    .map(|value| value.as_deref())
+                    .collect::<BinaryArray>(),
+            ));
+        }
+        if layout == super::ROLLING_INDICATOR_STATE_LAYOUT_VERSION {
+            arrays.push(Arc::new(
+                self.indicators
                     .iter()
                     .map(|value| value.as_deref())
                     .collect::<BinaryArray>(),
@@ -415,6 +512,14 @@ impl EncodedColumns {
         RecordBatch::try_new(schema, arrays)
             .map_err(|error| state_format(format!("rolling state batch is invalid: {error}")))
     }
+}
+
+fn binary_payload(record: &RecordBatch, index: Option<usize>, row: usize) -> Result<Option<&[u8]>> {
+    let Some(index) = index else {
+        return Ok(None);
+    };
+    let values: &BinaryArray = required_array(record, index, "binary payload")?;
+    Ok((!values.is_null(row)).then(|| values.value(row)))
 }
 
 struct StateArrays<'a> {
@@ -436,6 +541,18 @@ impl<'a> StateArrays<'a> {
             counts: required_array(record, width + 4, "valid count")?,
             values: required_array(record, width + 5, "value")?,
         })
+    }
+
+    fn recurrence(&self, kind: u8, row: usize) -> Result<Option<(u64, u64, f64)>> {
+        if kind != KIND_INDICATOR {
+            return self.ewma(row);
+        }
+        if !self.counts.is_null(row) || !self.values.is_null(row) {
+            return Err(state_format(
+                "indicator row carries unrelated recurrence fields",
+            ));
+        }
+        Ok(None)
     }
 
     fn ewma(&self, row_index: usize) -> Result<Option<(u64, u64, f64)>> {
@@ -465,6 +582,23 @@ fn required_array<'a, T: 'static>(
         .ok_or_else(|| state_format(format!("rolling state {name} column has the wrong type")))
 }
 
+type RowPayloads<'a> = (Option<&'a [u8]>, Option<&'a [u8]>);
+#[derive(Clone, Copy)]
+struct RowHeader {
+    kind: u8,
+    entity: u64,
+    position: Option<u64>,
+    ewma: Option<(u64, u64, f64)>,
+}
+fn reject_indicator(indicator: Option<&[u8]>) -> Result<()> {
+    if indicator.is_some() {
+        return Err(state_format(
+            "non-indicator row carries an indicator payload",
+        ));
+    }
+    Ok(())
+}
+
 struct StateDecoder<'a> {
     input_schema: &'a Schema,
     compiled: &'a CompiledRollingSpec,
@@ -472,12 +606,14 @@ struct StateDecoder<'a> {
     entities: Vec<(Vec<Option<KeyValue>>, Vec<ScalarValue>)>,
     transition_counts: Vec<u64>,
     used_entities: Vec<bool>,
+    pending_entities: Vec<bool>,
     decoded: DecodedRollingState,
     last_kind: Option<u8>,
     last_history_entity: Option<u64>,
     last_buffer: Option<super::RowIdentity>,
     last_ewma: Option<(u64, u64)>,
     cumulative_groups: BTreeSet<(u64, u64)>,
+    indicator_groups: BTreeSet<(u64, u64)>,
 }
 
 impl<'a> StateDecoder<'a> {
@@ -493,75 +629,166 @@ impl<'a> StateDecoder<'a> {
             entities: Vec::new(),
             transition_counts: Vec::new(),
             used_entities: Vec::new(),
+            pending_entities: Vec::new(),
             decoded: DecodedRollingState::default(),
             last_kind: None,
             last_history_entity: None,
             last_buffer: None,
             last_ewma: None,
             cumulative_groups: BTreeSet::new(),
+            indicator_groups: BTreeSet::new(),
         }
     }
 
+    fn read_record(
+        &mut self,
+        record: &RecordBatch,
+        arrays: &StateArrays<'_>,
+        node: &str,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        for row in 0..record.num_rows() {
+            check()?;
+            self.decode_row(record, arrays, row, check)
+                .map_err(|error| super::state_codec::layout_five_restore_error(error, node))?;
+        }
+        check()
+    }
     fn decode_row(
         &mut self,
         record: &RecordBatch,
         arrays: &StateArrays<'_>,
-        row_index: usize,
+        row: usize,
+        check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
-        if arrays.kinds.is_null(row_index) || arrays.entity_ids.is_null(row_index) {
+        let header = self.header(arrays, row)?;
+        let values = self.read_values(record, row, check)?;
+        let (summary, indicator) = self.payloads(record, row)?;
+        match header.kind {
+            KIND_INDICATOR => self.indicator_row(header, arrays, row, &values, summary, indicator),
+            KIND_CUMULATIVE => self.cumulative_row(header, &values, summary, indicator),
+            _ => self.ordinary_row(header, values, summary, indicator),
+        }
+    }
+    fn header(&mut self, arrays: &StateArrays<'_>, row: usize) -> Result<RowHeader> {
+        if arrays.kinds.is_null(row) || arrays.entity_ids.is_null(row) {
             return Err(state_format(
-                "rolling state kind and entity ID must be non-null".to_owned(),
+                "rolling state kind and entity ID must be non-null",
             ));
         }
-        let kind = arrays.kinds.value(row_index);
+        let kind = arrays.kinds.value(row);
         if self.last_kind.is_some_and(|previous| kind < previous) {
             return Err(state_format(
-                "rolling columnar state rows are not ordered by kind".to_owned(),
+                "rolling columnar state rows are not ordered by kind",
             ));
         }
         self.last_kind = Some(kind);
-        let entity_id = arrays.entity_ids.value(row_index);
-        let position =
-            (!arrays.positions.is_null(row_index)).then(|| arrays.positions.value(row_index));
-        let ewma = arrays.ewma(row_index)?;
-        let values = (0..self.input_schema.fields().len())
-            .map(|index| {
-                ScalarValue::try_from_array(record.column(index + 3), row_index).map_err(|error| {
-                    state_format(format!("rolling state row could not be read: {error}"))
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let payload = if self.compiled.state_layout_version
-            == super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+        Ok(RowHeader {
+            kind,
+            entity: arrays.entity_ids.value(row),
+            position: (!arrays.positions.is_null(row)).then(|| arrays.positions.value(row)),
+            ewma: arrays.recurrence(kind, row)?,
+        })
+    }
+    fn payloads<'b>(&self, record: &'b RecordBatch, row: usize) -> Result<RowPayloads<'b>> {
+        let tail = self.input_schema.fields().len() + 6;
+        let layout = self.compiled.state_layout_version;
+        let summary = (layout >= super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION).then_some(tail);
+        let indicator =
+            (layout == super::ROLLING_INDICATOR_STATE_LAYOUT_VERSION).then_some(tail + 1);
+        Ok((
+            binary_payload(record, summary, row)?,
+            binary_payload(record, indicator, row)?,
+        ))
+    }
+    fn indicator_row(
+        &mut self,
+        header: RowHeader,
+        arrays: &StateArrays<'_>,
+        row: usize,
+        values: &[ScalarValue],
+        summary: Option<&[u8]>,
+        indicator: Option<&[u8]>,
+    ) -> Result<()> {
+        if header.position.is_some()
+            || summary.is_some()
+            || values.iter().any(|value| !value.is_null())
         {
-            let summaries: &BinaryArray =
-                required_array(record, record.num_columns() - 1, "cumulative summary")?;
-            (!summaries.is_null(row_index)).then(|| summaries.value(row_index))
-        } else {
-            None
-        };
-        if kind == KIND_CUMULATIVE {
-            if ewma.is_some() || values.iter().any(|value| !value.is_null()) {
-                return Err(state_format(
-                    "cumulative row contains unrelated values".to_owned(),
-                ));
-            }
-            return self.decode_cumulative(entity_id, position, payload);
-        }
-        if payload.is_some() {
             return Err(state_format(
-                "non-cumulative row contains a summary".to_owned(),
+                "indicator row carries unrelated input/summary fields",
             ));
         }
+        let group = (!arrays.groups.is_null(row)).then(|| arrays.groups.value(row));
+        self.decode_indicator(header.entity, group, indicator)
+    }
+    fn cumulative_row(
+        &mut self,
+        header: RowHeader,
+        values: &[ScalarValue],
+        summary: Option<&[u8]>,
+        indicator: Option<&[u8]>,
+    ) -> Result<()> {
+        reject_indicator(indicator)?;
+        if header.ewma.is_some() || values.iter().any(|value| !value.is_null()) {
+            return Err(state_format("cumulative row contains unrelated values"));
+        }
+        self.decode_cumulative(header.entity, header.position, summary)
+    }
+    fn ordinary_row(
+        &mut self,
+        header: RowHeader,
+        values: Vec<ScalarValue>,
+        summary: Option<&[u8]>,
+        indicator: Option<&[u8]>,
+    ) -> Result<()> {
+        reject_indicator(indicator)?;
+        if summary.is_some() {
+            return Err(state_format("non-cumulative row contains a summary"));
+        }
+        let RowHeader {
+            kind,
+            entity,
+            position,
+            ewma,
+        } = header;
         match kind {
-            KIND_ENTITY => self.decode_entity(entity_id, position, ewma, values),
-            KIND_HISTORY => self.decode_history(entity_id, position, ewma, values),
-            KIND_BUFFER => self.decode_buffer(entity_id, position, ewma, values),
-            KIND_EWMA => self.decode_ewma(entity_id, position, ewma, &values),
+            KIND_ENTITY => self.decode_entity(entity, position, ewma, values),
+            KIND_HISTORY => self.decode_history(entity, position, ewma, values),
+            KIND_BUFFER => self.decode_buffer(entity, position, ewma, values),
+            KIND_EWMA => self.decode_ewma(entity, position, ewma, &values),
             other => Err(state_format(format!(
                 "rolling state segment contains unknown row kind {other}"
             ))),
         }
+    }
+
+    fn read_values(
+        &self,
+        record: &RecordBatch,
+        row: usize,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Vec<ScalarValue>> {
+        self.input_schema
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                check()?;
+                if self.compiled.indicator_groups.is_empty() {
+                    ScalarValue::try_from_array(record.column(index + 3), row).map_err(|error| {
+                        state_format(format!("rolling state row could not be read: {error}"))
+                    })
+                } else {
+                    super::indicators::materialize::read_scalar_as(
+                        record.column(index + 3).as_ref(),
+                        row,
+                        field.data_type(),
+                        "rolling checkpoint",
+                        check,
+                    )
+                }
+            })
+            .collect()
     }
 
     fn decode_entity(
@@ -582,11 +809,12 @@ impl<'a> StateDecoder<'a> {
         self.entities.push((entity, values));
         self.transition_counts.push(transition_count);
         self.used_entities.push(false);
+        self.pending_entities.push(false);
         Ok(())
     }
 
     fn entity_transition_count(&self, position: Option<u64>) -> Result<u64> {
-        if self.compiled.state_layout_version == super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION {
+        if self.compiled.state_layout_version >= super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION {
             return position.ok_or_else(|| {
                 state_format(
                     "layout_v4 rolling entity row is missing its transition count".to_owned(),
@@ -670,38 +898,46 @@ impl<'a> StateDecoder<'a> {
         Ok(())
     }
 
-    // Buffer identity and canonical ordering are validated before insertion.
-    // #lizard forgives
     fn decode_buffer(
         &mut self,
         entity_id: u64,
         position: Option<u64>,
         ewma: Option<(u64, u64, f64)>,
-        mut values: Vec<ScalarValue>,
+        values: Vec<ScalarValue>,
     ) -> Result<()> {
         if position.is_some() || ewma.is_some() {
             return Err(state_format(
-                "rolling buffer row carries history or EWMA state".to_owned(),
+                "rolling buffer row carries history or EWMA state",
             ));
         }
+        let row = self.buffer_row(entity_id, values)?;
+        self.stage_buffer_row(entity_id, row)
+    }
+
+    fn buffer_row(&self, entity_id: u64, mut values: Vec<ScalarValue>) -> Result<BufferedRow> {
         self.validate_partition_nulls(&values)?;
-        let (entity, dictionary_values) = self.entity(entity_id)?.clone();
-        install_partition_values(&mut values, &dictionary_values, self.compiled);
+        let (entity, dictionary_values) = self.entity(entity_id)?;
+        install_partition_values(&mut values, dictionary_values, self.compiled);
         let row = buffered_row_from_values(values, self.compiled)?;
-        if row.identity.entity != entity {
+        if row.identity.entity != *entity {
             return Err(state_format(
-                "rolling buffer entity does not match its dictionary ID".to_owned(),
+                "rolling buffer entity does not match its dictionary ID",
             ));
         }
+        Ok(row)
+    }
+
+    fn stage_buffer_row(&mut self, entity_id: u64, row: BufferedRow) -> Result<()> {
         if self
             .last_buffer
             .as_ref()
             .is_some_and(|previous| previous >= &row.identity)
         {
             return Err(state_format(
-                "rolling buffer rows are not in canonical identity order".to_owned(),
+                "rolling buffer rows are not in canonical identity order",
             ));
         }
+        self.validate_pending_row(&row.values)?;
         self.last_buffer = Some(row.identity.clone());
         if self
             .decoded
@@ -710,11 +946,20 @@ impl<'a> StateDecoder<'a> {
             .is_some()
         {
             return Err(state_format(
-                "rolling state segment contains a duplicate buffered identity".to_owned(),
+                "rolling state segment contains a duplicate buffered identity",
             ));
         }
-        self.mark_used(entity_id)?;
-        Ok(())
+        self.mark_pending(entity_id)
+    }
+
+    fn mark_pending(&mut self, entity_id: u64) -> Result<()> {
+        let index =
+            usize::try_from(entity_id).map_err(|_| state_format("invalid pending entity ID"))?;
+        *self
+            .pending_entities
+            .get_mut(index)
+            .ok_or_else(|| state_format("unknown pending entity ID"))? = true;
+        self.mark_used(entity_id)
     }
 
     // EWMA payload, ordering, group type, and uniqueness are one invariant.
@@ -810,7 +1055,7 @@ impl<'a> StateDecoder<'a> {
         group: Option<u64>,
         payload: Option<&'b [u8]>,
     ) -> Result<(u64, &'b [u8])> {
-        if self.compiled.state_layout_version != super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION {
+        if self.compiled.state_layout_version < super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION {
             return Err(state_format("cumulative row requires layout 4".to_owned()));
         }
         let group = group.ok_or_else(|| state_format("missing cumulative group".to_owned()))?;
@@ -844,12 +1089,86 @@ impl<'a> StateDecoder<'a> {
                 "cumulative row references a different group type".to_owned(),
             ));
         };
-        let accumulator = super::CumulativeAccumulator::decode(
+        let accumulator = super::CumulativeAccumulator::decode_for_layout(
             payload,
             *statistic,
             self.input_schema.field(*input_index).data_type(),
+            self.compiled.state_layout_version,
         )?;
         Ok((group_index, accumulator))
+    }
+
+    fn decode_indicator(
+        &mut self,
+        entity_id: u64,
+        group: Option<u64>,
+        payload: Option<&[u8]>,
+    ) -> Result<()> {
+        let (group, index) = self.indicator_identity(entity_id, group)?;
+        let payload = payload.ok_or_else(|| state_format("missing indicator payload"))?;
+        let (entity, indicator) = self.indicator_payload(entity_id, index, payload)?;
+        self.install_indicator(entity, index, indicator);
+        self.indicator_groups.insert((entity_id, group));
+        self.mark_used(entity_id)
+    }
+
+    fn indicator_identity(&self, entity_id: u64, group: Option<u64>) -> Result<(u64, usize)> {
+        let group = group.ok_or_else(|| state_format("missing indicator group"))?;
+        if self
+            .indicator_groups
+            .last()
+            .is_some_and(|previous| *previous >= (entity_id, group))
+        {
+            return Err(state_format("indicator rows must be ordered and unique"));
+        }
+        let index = usize::try_from(group).map_err(|_| state_format("invalid indicator group"))?;
+        Ok((group, index))
+    }
+
+    fn indicator_payload(
+        &self,
+        entity_id: u64,
+        index: usize,
+        payload: &[u8],
+    ) -> Result<(Vec<Option<KeyValue>>, super::indicators::State)> {
+        let declaration = self
+            .compiled
+            .indicator_groups
+            .get(index)
+            .ok_or_else(|| state_format("unknown indicator group"))?;
+        let entity = self.entity(entity_id)?.0.clone();
+        let entity_index =
+            usize::try_from(entity_id).map_err(|_| state_format("invalid indicator entity ID"))?;
+        let count = self.transition_counts[entity_index];
+        if count == 0 {
+            return Err(state_format(
+                "buffer-only entity must not carry indicator state",
+            ));
+        }
+        Ok((entity, declaration.decode(payload, count)?))
+    }
+
+    fn install_indicator(
+        &mut self,
+        entity: Vec<Option<KeyValue>>,
+        index: usize,
+        indicator: super::indicators::State,
+    ) {
+        let state = self
+            .decoded
+            .histories
+            .by_entity
+            .entry(entity)
+            .or_insert_with(|| EntityRollingState::fresh(self.compiled));
+        if state.indicators.is_empty() {
+            state.indicators = self
+                .compiled
+                .indicator_groups
+                .iter()
+                .map(super::indicators::Group::fresh)
+                .collect();
+        }
+        state.indicators[index] = indicator;
     }
 
     fn entity(&self, entity_id: u64) -> Result<&(Vec<Option<KeyValue>>, Vec<ScalarValue>)> {
@@ -903,38 +1222,139 @@ impl<'a> StateDecoder<'a> {
         Ok(())
     }
 
-    fn finish(mut self) -> Result<DecodedRollingState> {
-        if self.used_entities.iter().any(|used| !used) {
+    fn validate_pending_row(&self, values: &[ScalarValue]) -> Result<()> {
+        if self.compiled.state_layout_version == super::ROLLING_INDICATOR_STATE_LAYOUT_VERSION {
+            super::indicators::validate_row(
+                &self.compiled.indicator_groups,
+                values,
+                "rolling checkpoint",
+                super::indicators::Coordinate::PendingRow(self.decoded.buffer.len()),
+            )
+            .map_err(|error| {
+                state_format(format!(
+                    "rolling pending state violates input-domain admission: {error}"
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
+    fn validate_buffer_only_entities(&self, check: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+        if self.compiled.state_layout_version != super::ROLLING_INDICATOR_STATE_LAYOUT_VERSION {
+            return Ok(());
+        }
+        for (index, (entity, _)) in self.entities.iter().enumerate() {
+            check()?;
+            if self.transition_counts[index] == 0 {
+                self.validate_zero_count_entity(index, entity)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_zero_count_entity(&self, index: usize, entity: &[Option<KeyValue>]) -> Result<()> {
+        if !self.pending_entities[index] || self.decoded.histories.by_entity.contains_key(entity) {
             return Err(state_format(
-                "rolling entity dictionary contains an unused entry".to_owned(),
+                "layout5 zero-count entity requires actual pending rows and no finalized history or window records",
             ));
         }
+        Ok(())
+    }
+
+    fn validate_indicator_inventory(&self, check: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+        for (entity, &count) in self.transition_counts.iter().enumerate() {
+            check()?;
+            for group in 0..self.compiled.indicator_groups.len() {
+                check()?;
+                let present = self
+                    .indicator_groups
+                    .contains(&(entity as u64, group as u64));
+                if present != (count > 0) {
+                    return Err(state_format(
+                        "rolling indicator inventory does not match entity transition counts"
+                            .to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_used_entities(&self, check: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+        for used in &self.used_entities {
+            check()?;
+            if !used {
+                return Err(state_format(
+                    "rolling entity dictionary contains an unused entry",
+                ));
+            }
+        }
+        Ok(())
+    }
+    fn install_transition_counts(&mut self, check: &mut dyn FnMut() -> Result<()>) -> Result<()> {
         for ((entity, _), transition_count) in self.entities.iter().zip(&self.transition_counts) {
+            check()?;
             if let Some(state) = self.decoded.histories.by_entity.get_mut(entity) {
                 state.transition_count = *transition_count;
             } else if *transition_count != 0 {
                 return Err(state_format(
-                    "rolling entity transition count has no retained state".to_owned(),
+                    "rolling entity transition count has no retained state",
                 ));
             }
         }
+        Ok(())
+    }
+    fn validate_cumulative_inventory(&self, check: &mut dyn FnMut() -> Result<()>) -> Result<()> {
         for (entity_id, (entity, _)) in self.entities.iter().enumerate() {
+            check()?;
             if self.decoded.histories.by_entity.contains_key(entity) {
-                for (group, declaration) in self.compiled.window_groups.iter().enumerate() {
-                    if matches!(declaration, CompiledWindowGroup::Cumulative { .. })
-                        && !self
-                            .cumulative_groups
-                            .contains(&(entity_id as u64, group as u64))
-                    {
-                        return Err(state_format(
-                            "entity is missing a cumulative summary".to_owned(),
-                        ));
-                    }
-                }
+                self.validate_cumulative_entity(entity_id, check)?;
             }
         }
-        validate_decoded_state(&self.decoded, self.compiled)?;
-        rebuild_windows(&mut self.decoded.histories, self.compiled, "rolling")?;
+        Ok(())
+    }
+    fn validate_cumulative_entity(
+        &self,
+        entity: usize,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        for (group, declaration) in self.compiled.window_groups.iter().enumerate() {
+            check()?;
+            if matches!(declaration, CompiledWindowGroup::Cumulative { .. })
+                && !self
+                    .cumulative_groups
+                    .contains(&(entity as u64, group as u64))
+            {
+                return Err(state_format("entity is missing a cumulative summary"));
+            }
+        }
+        Ok(())
+    }
+    fn prepare_inventory_checked(&mut self, check: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+        self.validate_buffer_only_entities(check)?;
+        self.validate_used_entities(check)?;
+        self.install_transition_counts(check)?;
+        self.validate_cumulative_inventory(check)?;
+        self.validate_indicator_inventory(check)
+    }
+    fn finish(self) -> Result<DecodedRollingState> {
+        self.finish_checked("rolling", &mut || Ok(()))
+    }
+    fn finish_checked(
+        mut self,
+        node: &str,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<DecodedRollingState> {
+        check()?;
+        self.prepare_inventory_checked(check)?;
+        super::state_codec::validate_decoded_state_checked(&self.decoded, self.compiled, check)?;
+        super::state_codec::rebuild_windows_checked(
+            &mut self.decoded.histories,
+            self.compiled,
+            node,
+            check,
+        )?;
+        check()?;
         Ok(self.decoded)
     }
 }
@@ -1050,6 +1470,59 @@ mod tests {
 
     fn decoder<'a>(schema: &'a Schema, compiled: &'a CompiledRollingSpec) -> StateDecoder<'a> {
         StateDecoder::new(schema, compiled, history_projection(compiled))
+    }
+
+    #[test]
+    fn test_controlled_layout_five_decoder_binds_expected_metadata_and_cancels() {
+        let schema = input_schema();
+        let spec = serde_json::from_value(json!({
+            "configuration_version":1,"state_layout_version":5,
+            "partition_by":["symbol"],"event_time":"event_time","sequence_by":["sequence"],
+            "outputs":[{"kind":"rsi","primitive_version":1,"input":"price","output":"rsi","period":2}],
+            "allowed_lateness_micros":0,"late_policy":{"kind":"error","scope":"envelope"},
+            "value_policy":"stateful_numeric_v1"
+        })).unwrap();
+        let compiled = compile_spec(&spec, &schema).unwrap();
+        let mut values = row_values(1, 1, 2.0);
+        values[1] = ScalarValue::Utf8(Some("a".into()));
+        let row = buffered_row_from_values(values, &compiled).unwrap();
+        let buffer = BTreeMap::from([(row.identity.clone(), row)]);
+        let encoded = encode(
+            &RollingHistories::default(),
+            &buffer,
+            &schema,
+            &compiled,
+            "graph",
+            "features",
+        )
+        .unwrap();
+        let mut reader = FileReader::try_new(Cursor::new(encoded), None).unwrap();
+        let record = reader.next().unwrap().unwrap();
+        let decoded =
+            decode_record_checked(&record, &schema, &compiled, "features", &mut || Ok(())).unwrap();
+        let ScalarValue::TimestampMicrosecond(_, Some(actual)) =
+            &decoded.buffer.values().next().unwrap().values[0]
+        else {
+            panic!("timestamp")
+        };
+        let DataType::Timestamp(_, Some(expected)) = schema.field(0).data_type() else {
+            panic!("timestamp")
+        };
+        assert!(Arc::ptr_eq(actual, expected));
+        let mut calls = 0;
+        let error = decode_record_checked(&record, &schema, &compiled, "features", &mut || {
+            calls += 1;
+            if calls == 3 {
+                Err(crate::CalcFlowError::Cancelled {
+                    run_id: "decode".into(),
+                })
+            } else {
+                Ok(())
+            }
+        })
+        .err()
+        .unwrap();
+        assert!(matches!(error, crate::CalcFlowError::Cancelled { run_id } if run_id == "decode"));
     }
 
     #[test]
@@ -1332,10 +1805,16 @@ mod tests {
         let schema = Arc::new(Schema::new(state_fields(&input_schema)));
         let mut columns = EncodedColumns::new(&input_schema);
         columns.push(99, 0, None, entity_values("a"), None);
-        let record = columns.finish(schema).unwrap();
+        let record = columns
+            .finish(schema, super::super::ROLLING_COLUMNAR_STATE_LAYOUT_VERSION)
+            .unwrap();
         let arrays = StateArrays::new(&record, input_schema.fields().len()).unwrap();
         let mut state = decoder(&input_schema, &compiled);
-        assert!(state.decode_row(&record, &arrays, 0).is_err());
+        assert!(
+            state
+                .decode_row(&record, &arrays, 0, &mut || Ok(()))
+                .is_err()
+        );
 
         let groups = UInt64Array::from(vec![Some(0)]);
         let counts = UInt64Array::from(vec![None]);
@@ -1360,6 +1839,10 @@ mod tests {
             counts: arrays.counts,
             values: arrays.values,
         };
-        assert!(state.decode_row(&record, &null_keys, 0).is_err());
+        assert!(
+            state
+                .decode_row(&record, &null_keys, 0, &mut || Ok(()))
+                .is_err()
+        );
     }
 }

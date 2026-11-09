@@ -189,6 +189,8 @@ _ROLLING_PRIMITIVES: Final = _ROLLING_AGGREGATES | frozenset(
         "lag",
         "delta",
         "ewma",
+        "rsi",
+        "atr",
         "cumulative_mean",
         "cumulative_sum",
         "cumulative_min",
@@ -342,6 +344,175 @@ def _schema_fields(value: CValue, /) -> tuple[Field, ...]:
         field for item in value.items if (field := _declared_field(item)) is not None
     ]
     return tuple(fields)
+
+
+def _indicator_row_set(table: Node) -> tuple[str, bytes]:
+    while table.op.name in {"project", "with_columns", "attach_columns"}:
+        table = table.args[0]
+    return table.digest, table.node_bytes
+
+
+def _indicator_column_definition(
+    table: Node, name: str | None
+) -> tuple[Node, Node] | None:
+    """Find the consumed definition and its own evaluation table."""
+    while table.op.name in {"project", "filter", "with_columns", "attach_columns"}:
+        if table.op.name == "with_columns":
+            names = _cstr_seq(table.attr("names"))
+            if name in names:
+                return table.args[names.index(name) + 1], table.args[0]
+        table = table.args[0]
+    return None
+
+
+def _indicator_expression_nodes(node: Node) -> tuple[Node, ...]:
+    nodes: list[Node] = []
+    visited: set[tuple[str, bytes]] = set()
+
+    def visit(current: Node) -> None:
+        key = current.digest, current.node_bytes
+        if key in visited:
+            return
+        visited.add(key)
+        nodes.append(current)
+        if current.op.name == "column_ref":
+            return
+        for argument in current.args:
+            visit(argument)
+
+    visit(node)
+    return tuple(nodes)
+
+
+def _indicator_references(node: Node) -> tuple[Node, ...]:
+    return tuple(
+        current
+        for current in _indicator_expression_nodes(node)
+        if current.op.name == "column_ref"
+    )
+
+
+def _indicator_sources(node: Node) -> tuple[Node, ...]:
+    sources = {
+        (reference.args[0].digest, reference.args[0].node_bytes): reference.args[0]
+        for reference in _indicator_references(node)
+        if reference.args
+    }
+    return tuple(sources.values())
+
+
+def _indicator_added_binding(table: Node, name: str) -> tuple[object, ...] | None:
+    if table.op.name not in {"with_columns", "attach_columns"}:
+        return None
+    names = _cstr_seq(table.attr("names"))
+    if name not in names:
+        return None
+    index = names.index(name)
+    column = table.op.name == "with_columns"
+    value = table.args[index + 1] if column else table.args[1]
+    return (
+        "column" if column else "array",
+        value.digest,
+        value.node_bytes,
+        -1 if column else index,
+        *_indicator_row_set(table.args[0]),
+    )
+
+
+def _indicator_declared_binding(table: Node, name: str) -> tuple[object, ...] | None:
+    schema = table.attr("schema")
+    if isinstance(schema, CSeq) and not any(
+        field.name == name for field in _schema_fields(schema)
+    ):
+        return None
+    return "field", table.digest, table.node_bytes, name
+
+
+def _indicator_column_binding(table: Node, name: str) -> tuple[object, ...] | None:
+    if table.op.name == "project" and name not in _cstr_seq(table.attr("columns")):
+        return None
+    added = _indicator_added_binding(table, name)
+    if added is not None:
+        return added
+    if table.op.name in {"project", "filter", "with_columns", "attach_columns"}:
+        return _indicator_column_binding(table.args[0], name)
+    return _indicator_declared_binding(table, name)
+
+
+def _indicator_definition_matches(
+    reference: Node, memo: dict[tuple[str, bytes, str, bytes], bool]
+) -> bool:
+    if not reference.args:
+        return False
+    return _indicator_table_definition_matches(
+        reference.args[0], _cstr_or_none(reference.attr("name")), memo
+    )
+
+
+def _indicator_table_definition_matches(
+    table: Node, name: str | None, memo: dict[tuple[str, bytes, str, bytes], bool]
+) -> bool:
+    definition = _indicator_column_definition(table, name)
+    return definition is None or _indicator_expression_matches(*definition, memo)
+
+
+def _indicator_reference_matches(
+    reference: Node, target: Node, memo: dict[tuple[str, bytes, str, bytes], bool]
+) -> bool:
+    name = _cstr_or_none(reference.attr("name"))
+    if not reference.args or name is None:
+        return False
+    source = reference.args[0]
+    if _indicator_row_set(source) != _indicator_row_set(target):
+        return False
+    binding = _indicator_column_binding(source, name)
+    if binding is None or binding != _indicator_column_binding(target, name):
+        return False
+    return _indicator_definition_matches(
+        reference, memo
+    ) and _indicator_table_definition_matches(target, name, memo)
+
+
+def _indicator_expression_matches(
+    node: Node, target: Node, memo: dict[tuple[str, bytes, str, bytes], bool]
+) -> bool:
+    """Validate consumed definitions at their own pre-filter boundary."""
+    key = node.digest, node.node_bytes, target.digest, target.node_bytes
+    if key in memo:
+        return memo[key]
+    memo[key] = False
+    for reference in _indicator_references(node):
+        if not _indicator_reference_matches(reference, target, memo):
+            return False
+    memo[key] = True
+    return True
+
+
+def _indicator_inputs_match(node: Node) -> bool:
+    sources = _indicator_sources(node)
+    memo: dict[tuple[str, bytes, str, bytes], bool] = {}
+    return len({_indicator_row_set(source) for source in sources}) <= 1 and all(
+        _indicator_definition_matches(reference, memo)
+        for reference in _indicator_references(node)
+    )
+
+
+def _indicator_occurrences(node: Node) -> tuple[Node, ...]:
+    return tuple(
+        current
+        for current in _indicator_expression_nodes(node)
+        if current.op.name in {"rsi", "atr"}
+    )
+
+
+def _indicator_target_error(expression: Node, target: Node) -> str | None:
+    indicators = _indicator_occurrences(expression)
+    if indicators and not _indicator_expression_matches(expression, target, {}):
+        return (
+            f"{indicators[0].op.name} expressions and evaluation target must use"
+            " the same row set and matching referenced column definitions"
+        )
+    return None
 
 
 def _resolves_to_input_column(node: Node, /) -> bool:
@@ -815,6 +986,9 @@ class _Analyzer:
     def _filter_table(self, node: Node, path: str, /) -> TableFacts:
         child = self.table(node.args[0], f"{path}.filter.value")
         predicate = self.column(node.args[1], f"{path}.filter.predicate")
+        self._check_indicator_target(
+            node.args[1], node.args[0], child, f"{path}.filter.predicate"
+        )
         if child.state & {
             "stream_join",
             "stream_asof_join",
@@ -848,6 +1022,9 @@ class _Analyzer:
         for index, name in enumerate(names):
             expression = node.args[index + 1]
             facts = self.column(expression, f"{path}.{name}")
+            self._check_indicator_target(
+                expression, node.args[0], child, f"{path}.{name}"
+            )
             states |= facts.state
             if facts.lineage is not None and facts.lineage != child.lineage:
                 self.issue(
@@ -2006,6 +2183,89 @@ class _Analyzer:
             return ColumnFacts(None, True, operand.lineage, states)
         return ColumnFacts("float64", True, operand.lineage, states)
 
+    def _indicator(self, node: Node, path: str, /) -> ColumnFacts:
+        role = f"{path}.{node.op.name}"
+        names = ("value",) if node.op.name == "rsi" else ("high", "low", "close")
+        paths = tuple(f"{role}.{name}" for name in names)
+        operands = self._anchored_operands(node.args, paths)
+        self._indicator_inputs(node, role)
+        for argument, operand, operand_path in zip(
+            node.args, operands, paths, strict=True
+        ):
+            self._require_rolling_operand(
+                argument,
+                operand_path,
+                f"{node.op.name} requires input columns or row-local expressions",
+            )
+            if operand.lineage is not None:
+                self._temporal_lineages.add(operand.lineage)
+            if (
+                operand.data_type is not None
+                and operand.data_type not in _FLOATING_TYPES
+            ):
+                self.issue(
+                    f"{operand_path}.dtype",
+                    "unsupported_type",
+                    f"{node.op.name} requires float32 or float64 operands;"
+                    " use row.cast for an explicit conversion",
+                )
+        states = _column_state_union(operands) | frozenset(
+            {f"constant(period={_cint(node.attr('period'))})"}
+        )
+        return ColumnFacts("float64", True, self._running_anchor(operands), states)
+
+    def _indicator_inputs(self, node: Node, path: str) -> None:
+        sources = _indicator_sources(node)
+        if not _indicator_inputs_match(node):
+            self.issue(
+                f"{path}.lineage",
+                "schema_mismatch",
+                f"{node.op.name} operands must use the same row set"
+                " and matching referenced column definitions",
+            )
+        for source in sources:
+            self._indicator_ordering(self.table(source, f"{path}.source"), path)
+
+    def _check_indicator_target(
+        self, expression: Node, target: Node, facts: TableFacts, path: str
+    ) -> None:
+        if not _indicator_occurrences(expression):
+            return
+        error = _indicator_target_error(expression, target)
+        if error is not None:
+            self.issue(f"{path}.lineage", "schema_mismatch", error)
+        self._indicator_ordering(facts, path)
+
+    def _indicator_ordering(self, facts: TableFacts, path: str) -> None:
+        fields = {field.name: field for field in facts.schema}
+        event_time = fields.get(facts.event_time)
+        if (
+            event_time is None
+            or event_time.data_type != _EVENT_TIME_TYPE
+            or event_time.nullable
+        ):
+            self.issue(
+                f"{path}.event_time",
+                "ordering_required",
+                "indicators require a declared non-null timestamp[us, UTC] event time",
+            )
+        self._ordering_key_fields(
+            CSeq(tuple(CStr(name) for name in facts.entity_by)),
+            fields,
+            f"{path}.entity_by",
+            "indicators require a non-empty entity key",
+            _entity_field_is_valid,
+            _entity_field_message,
+        )
+        self._ordering_key_fields(
+            CSeq(tuple(CStr(name) for name in facts.sequence_by)),
+            fields,
+            f"{path}.sequence_by",
+            "indicators require a non-empty sequence key",
+            _sequence_field_is_valid,
+            _sequence_field_message,
+        )
+
     def _cumulative_mean(self, node: Node, path: str, /) -> ColumnFacts:
         role = f"{path}.{node.op.name}"
         operand = self._operand(node.args[0], f"{role}.value", None)
@@ -2623,6 +2883,8 @@ _COLUMN_HANDLERS: Final[dict[str, Callable[[_Analyzer, Node, str], ColumnFacts]]
     "isnan": _Analyzer._isnan,
     **dict.fromkeys(("lag", "delta"), _Analyzer._lag_like),
     "ewma": _Analyzer._ewma,
+    "rsi": _Analyzer._indicator,
+    "atr": _Analyzer._indicator,
     **dict.fromkeys(
         (
             "cumulative_mean",

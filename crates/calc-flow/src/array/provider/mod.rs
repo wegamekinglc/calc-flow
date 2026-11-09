@@ -19,7 +19,7 @@ mod sequence_pending;
 mod stream;
 pub use stream::NativeArraySequenceFactory;
 pub(crate) use stream::inventory::{
-    NativeIoCompletion, NativeSequenceFailure, NativeSequenceInventory, NativeSequenceRecord,
+    NativeCheckpointRecord, NativeIoCompletion, NativeSequenceFailure, NativeSequenceInventory,
     is_native_sequence_operator,
 };
 mod shape;
@@ -27,6 +27,8 @@ mod table;
 pub use table::NativeTableArrayFactory;
 mod validate;
 mod worker;
+pub(crate) use sequence_pending::Pending;
+pub(crate) use worker::{RollingWorkerIdentity, Scope, Workers};
 
 #[cfg(test)]
 mod sequence_pending_tests;
@@ -47,7 +49,7 @@ mod sequence_pending_tests;
 /// ```
 #[derive(Default)]
 pub struct NativeArrayFactory {
-    workers: Arc<worker::Workers>,
+    workers: Arc<Workers>,
 }
 
 impl NativeArrayFactory {
@@ -95,7 +97,7 @@ impl NativeArrayFactory {
 /// Returns [`crate::CalcFlowError::InvalidArgument`] on duplicate registration;
 /// all existing registry entries remain unchanged.
 pub fn register_native(registry: &ProviderRegistry) -> Result<()> {
-    let workers = Arc::new(worker::Workers::default());
+    let workers = Arc::new(Workers::default());
     let array = Arc::new(NativeArrayFactory {
         workers: Arc::clone(&workers),
     });
@@ -138,7 +140,7 @@ impl BatchOperatorFactory for NativeArrayFactory {
 
 struct NativeOperator {
     program: Arc<infer::Plan>,
-    workers: Arc<worker::Workers>,
+    workers: Arc<Workers>,
     inputs: Vec<Port>,
     outputs: Vec<Port>,
     options: JsonMap,

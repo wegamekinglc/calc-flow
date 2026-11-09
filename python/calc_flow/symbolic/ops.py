@@ -65,6 +65,14 @@ def _column(value: object, function: str, parameter: str, /) -> ColumnExpr:
     return value
 
 
+def _indicator_period(period: int, function: str) -> CInt:
+    path = f"calc_flow.symbolic.{function}.period"
+    require_int(period, path)
+    if not 1 <= period <= 2**64 - 1:
+        raise ValueError(f"{path}: invalid_literal: must be a positive u64")
+    return CInt(period)
+
+
 def _table(value: object, function: str, parameter: str, /) -> TableExpr:
     if not isinstance(value, TableExpr):
         raise namespace_error(function, parameter, "TableExpr", value)
@@ -515,6 +523,37 @@ class TsNamespace:
                         )
                     ),
                 },
+            )
+        )
+
+    def rsi(self, value: ColumnExpr, /, *, period: int) -> ColumnExpr:
+        """Declare Wilder RSI with a mandatory difference warm-up period."""
+        return ColumnExpr(
+            build(
+                "rsi",
+                (_column(value, "ts.rsi", "value")._node,),
+                {"period": _indicator_period(period, "ts.rsi")},
+            )
+        )
+
+    def atr(
+        self,
+        high: ColumnExpr,
+        low: ColumnExpr,
+        close: ColumnExpr,
+        /,
+        *,
+        period: int,
+    ) -> ColumnExpr:
+        """Declare Wilder ATR over synchronized high, low and close columns."""
+        return ColumnExpr(
+            build(
+                "atr",
+                tuple(
+                    _column(value, "ts.atr", name)._node
+                    for name, value in (("high", high), ("low", low), ("close", close))
+                ),
+                {"period": _indicator_period(period, "ts.atr")},
             )
         )
 

@@ -4785,6 +4785,7 @@ fn primary_task_failure_wins_over_cancel_and_deadline_same_round() {
     let report = SupervisionReport {
         primary_error_count: 1,
         errors: vec![super::super::supervisor::TaskFailure {
+            indicator_diagnostic: None,
             task_id: primary_task_id,
             task_name: "operator:node".into(),
             error: CalcFlowError::Operator {

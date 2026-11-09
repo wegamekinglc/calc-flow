@@ -97,3 +97,65 @@ per-alias digest golden、非 native 行为与 bounded worker settlement 验收�
 
 本归档不修改产品，不运行构建/产品测试/benchmark，不操作 remote；没有未决
 边界设计问题，但上述源码和行为证明责任仍属于对应 M2 实现阶段。
+
+## A7 indicator contract focused review
+
+最终设计结论：**Pass after revision**。归档对象为
+[A7 已批准合同](../api-notes/native-array-runtime.md#8-a7-approved-indicator-contract)，
+与[父规范 A7](../specs/native-array-runtime.md) 一起生效。精确 reviewed input 名为
+`a7-indicators-api.md`，1,206 行，SHA-256：
+
+```text
+9016f0c67d219490a80a9750d316fa5256373f3355a32d3eb27e982913e84fee
+```
+
+原始设计源码检查基线为 `c9e39cea33f7661062ba50640ddbfa30ba7a3f5b`。
+初次 920 行草案（SHA-256
+`0d8c4692963683ad41806aff37a7453c443880804d6894c9a592ec97851ff253`）
+结论为 Revise；最终定点复核关闭两个 blocker 与四个 Table clarification：
+
+1. **RSI oracle blocker 关闭。** 保持 IEEE 操作顺序并明确接受最小次正规数
+   反例 RSI=100；严格 oracle 覆盖全部 IEEE 情况。Fraction 精度仅约束预固定
+   well-scaled fixture 域，不能用全局宽容差遮盖下溢归一化的真实偏差。
+2. **Table peak blocker 关闭。** 精确复用现有 StateBudget.max_bytes，仅当
+   layout5/6 节点含至少一个新指标时按整节点 S+C+O+T+K 计费，mixed 整体纳入；
+   max_rows 保持 retained，old-only 节点保持原语义。默认 2^53-1、无当前
+   Python/project override、finite/stream/capture/restore/reset/pending leases
+   与 setter 降限都明确，不增加未声明的限额或通用内存框架。
+3. **Table callback 原子性关闭。** 明确 A7 必须补齐有序/重排 watermark/EOF
+   的整 callback 零输出准备事务，失败保留 pending rows/order proof、数值、
+   计费、sequence 和 frontier；不假设所有旧路径已有保证。已接受坏行不能用
+   corrected-chunk retry 冒充未接收，父规范已加入这一限定。
+4. **零 transition inventory 关闭。** count=0 必须有 pending rows 且无
+   indicator records；正 count 必须有每个 compiled group，包括全 missing/
+   reset 和 MACD subset。保留 pending 字典项不能隐藏最后一个 group 的删除。
+5. **Table terminal 验证关闭。** 明确在 terminal runner 分支对实际 compiled
+   Rolling layout5/6 使用正常 decoder/admission 校验 schema、dictionary、
+   counts、inventory、raw payload 和选定预算，在完成或 sink 打开前失败。
+   测试须包含有效 managed checksum 但内部 indicator 状态无效的反例。
+6. **built-in capability 清单关闭。** 完整 RSI/ATR PR 才发布真实 rolling
+   layouts (1,2,3,4,5)，完整 MACD PR 才加 6；独立于 sequence layouts/记录数，
+   保持 capability 结构版本和已有语义 state version，不提前宣称能力。
+
+复核未发现新增合同矛盾。既有签名、数值公式和 byte layout 延续原审查；
+固定 charge 48/40/56、sequence header 68、segments 116/108/156、Table payload
+64/56/104 均一致。旧 `ts.macd`、IR1、sequence layout1、Table layout1-4 和
+NumPy/JAX 合同保持；Rust exhaustive-match 迁移和受限 generated-schema 增量
+已明确。所有阶段继续禁止 TA-Lib 代码依赖。
+
+本节只归档设计 Pass，不代替实现 review、实际测试、required CI 或 merge
+判断，不授权合并/发布。A6b 完成仍是实施前置；之后按完整 RSI/ATR、完整 MACD
+两个单元 test-first 交付，保持父规范的 Table callback 和 peak-budget 限定。
+此次审查/归档未运行构建、产品测试或 benchmark，也未修改产品或 remote。
+
+
+## A7 Python source-binding review
+
+The incremental source proof passed specialist re-review at
+bfb32889e6606473450f52787deb2b38ee3b23ea after correcting target row-set, hidden
+pre-filter definition and transitive target-definition holes. Both source and
+target definitions are checked in their own contexts before lowering; canonical
+digest/full-byte comparisons and complete-success memoization prevent silent
+column retargeting. The 98 symbolic checks are source-contract evidence, not
+native numerical or managed-recovery acceptance. Whole-stage numerical, budget,
+codec, runtime, installed-wheel and required CI gates remain independent.

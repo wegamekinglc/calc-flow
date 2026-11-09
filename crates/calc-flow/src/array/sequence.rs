@@ -6,6 +6,7 @@ use crate::Result;
 pub(in crate::array) mod capture;
 pub(in crate::array) mod codec;
 mod ewma;
+mod indicator;
 mod mean;
 
 #[cfg(test)]
@@ -18,6 +19,7 @@ mod candidate_tests;
 mod capture_tests;
 
 pub use ewma::EwmaState;
+pub use indicator::{AtrState, RsiState, atr, rsi};
 pub use mean::RollingMeanState;
 
 /// Retained-storage limits for owned native sequence states.
@@ -110,6 +112,7 @@ impl<T> Prepared<T> {
 }
 
 struct Budget<'a> {
+    peak_field: &'static str,
     old: usize,
     candidate: usize,
     captures: usize,
@@ -130,10 +133,10 @@ impl Budget<'_> {
         ]
         .into_iter()
         .try_fold(0_usize, usize::checked_add)
-        .ok_or_else(|| invalid("state.peak_bytes", "live byte count overflowed usize"))?;
+        .ok_or_else(|| invalid(self.peak_field, "live byte count overflowed usize"))?;
         if peak > self.execution.max_allocation_bytes() {
             return Err(invalid(
-                "state.peak_bytes",
+                self.peak_field,
                 format!(
                     "requires {peak} live state/output/scratch/capture bytes; limit is {}",
                     self.execution.max_allocation_bytes()
@@ -222,3 +225,6 @@ fn next_positions(old: u64, len: usize) -> Result<u64> {
     old.checked_add(len)
         .ok_or_else(|| invalid("input.rows", "sequence position exceeds u64"))
 }
+
+#[cfg(test)]
+mod indicator_codec_tests;

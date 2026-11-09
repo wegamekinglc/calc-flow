@@ -85,25 +85,26 @@ impl NativePolicy {
     }
     async fn verify_entry(
         &self,
-        record: &crate::array::NativeSequenceRecord,
+        record: &crate::array::NativeCheckpointRecord,
         entry: &crate::OperatorManifestEntry,
         guard: &Operation<'_>,
         session: Option<&parking_lot::Mutex<SessionSegments>>,
         cancellation: &CancellationToken,
     ) -> Result<()> {
         record.admit_retained(entry)?;
-        let handle = record.handle(entry)?;
-        if !session.is_some_and(|state| state.lock().verified.contains(handle)) {
-            let verified: crate::array::NativeIoCompletion = record
-                .verify(
-                    Arc::clone(&self.local),
-                    guard.shared(),
-                    handle,
-                    cancellation,
-                )
-                .await?;
-            if let Some(session) = session {
-                session.lock().verified.insert(verified.handle().clone());
+        for handle in record.handles(entry)? {
+            if !session.is_some_and(|state| state.lock().verified.contains(handle)) {
+                let verified: crate::array::NativeIoCompletion = record
+                    .verify(
+                        Arc::clone(&self.local),
+                        guard.shared(),
+                        handle,
+                        cancellation,
+                    )
+                    .await?;
+                if let Some(session) = session {
+                    session.lock().verified.insert(verified.handle().clone());
+                }
             }
         }
         Ok(())
@@ -136,7 +137,16 @@ impl ManifestTransaction {
             }
                 })?;
         record.admit_entry(entry)?;
-        let reader = policy.local.native_reader(record.handle(entry)?)?;
+        let handle =
+            record
+                .handles(entry)?
+                .first()
+                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                    message: format!(
+                        "operator {node:?} state.reader: empty snapshot has no segment to read"
+                    ),
+                })?;
+        let reader = policy.local.native_reader(handle)?;
         Ok((Arc::clone(&policy.local), reader))
     }
 
@@ -155,15 +165,13 @@ impl ManifestTransaction {
         local: Arc<LocalStateLineageBackend>,
     ) -> std::result::Result<Self, NativeSequenceFailure> {
         if Arc::as_ptr(&self.lineage).cast::<()>() != Arc::as_ptr(&local).cast::<()>() {
-            return Err(inventory.first_failure(CalcFlowError::CheckpointMismatch {
-                message:"native:array_sequence@1 state.reader: reader must own the actual transaction lineage".into(),
-            }));
+            return Err(inventory.first_failure(
+                inventory.mismatch("reader", "reader must own the actual transaction lineage"),
+            ));
         }
         if !local.supports_prepaid_load() {
-            return Err(inventory.first_failure(CalcFlowError::CheckpointMismatch {
-                message: "native:array_sequence@1 state.reader: requires a certified local reader"
-                    .into(),
-            }));
+            return Err(inventory
+                .first_failure(inventory.mismatch("reader", "requires a certified local reader")));
         }
         self.native = Some(Arc::new(NativePolicy { inventory, local }));
         Ok(self)

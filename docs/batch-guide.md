@@ -235,6 +235,53 @@ Collection accepts optional `runtime` and `options` arguments, and
 with reusable mappings for returns, Bollinger bands, RSI, EMA/MACD, and
 cross-section statistics. See [expression workflows](symbolic-workflows.md).
 
+### Native RSI and ATR
+
+`cf.ts.rsi(price, period=14)` and
+`cf.ts.atr(high, low, close, period=14)` declare native Wilder indicators.
+Operands must be float32/float64 columns with the same row lineage and temporal
+ordering. Both return nullable float64. For the ordered `source` above:
+
+```python
+indicators = source.select(
+    "symbol",
+    "ts",
+    rsi=cf.ts.rsi(source["price"], period=2),
+)
+assert indicators.collect(quotes)["rsi"].to_pylist() == [None, None, 100.0 / 1.5]
+```
+
+Each segment needs one initial price/close followed by `period` valid
+differences/true ranges before its first result. Subsequent values use Wilder
+smoothing. Null or valid NaN resets the complete segment. Infinity is an error;
+ATR also rejects finite high values below low, including when another operand
+is missing. Finite arithmetic overflow fails the calculation. A flat RSI
+segment produces 50. These rules also apply to the eager functions in
+`calc_flow.array` and to owned Rust states; see the
+[numerical contract](rust-api.md#native-rsi-and-atr).
+
+Table collection uses the same entity order and indicator transitions as
+[continuous streams](streaming-guide.md#native-table-indicators).
+The [Rust Table example](../crates/calc-flow/examples/native_table_indicators.rs)
+combines RSI, ATR and lag in one native operator.
+
+Rust callers can set `RollingOperator::set_state_budget` before compiling a
+finite plan. For an operator containing RSI or ATR, `max_bytes` bounds its
+participating peak: state, isolated candidates, prepared output, scratch and
+live checkpoint storage. Mixed old/new outputs share the limit. `max_rows`
+keeps its retained-row meaning. An old-only operator keeps its existing
+retained-state accounting, including when explicitly using layout 5.
+Both default counters are 9,007,199,254,740,991; no smaller implicit byte cap
+or Python/project rolling-budget option is added. This logical charge is
+separate from process RSS, DataFusion pools and application-owned results.
+Retained footprints count observable buffer storage and identifiable Array/
+container descriptors; private immutable Buffer owner control blocks are
+excluded. Construction reservations may conservatively include that overhead.
+Pure accounting owner-key/reservation indexes are not recursively charged;
+they may only reference already funded owners and numeric charges. This
+excludes no computational or payload containers and does not shorten their
+funded lifetime when ownership moves into a lease.
+
 ## Async execution and deadlines
 
 Run [05_async_execution.py](../examples/05_async_execution.py):

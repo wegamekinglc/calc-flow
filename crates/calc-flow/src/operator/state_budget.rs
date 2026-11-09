@@ -1,4 +1,4 @@
-//! Reusable logical row and byte limits for retained stream state.
+//! Reusable logical row and byte limits for operator state and admitted work.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
@@ -7,10 +7,24 @@ use crate::{CalcFlowError, Result};
 
 const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// Maximum retained rows and logical bytes for one stream state component.
+/// Maximum retained rows and operator-defined logical bytes.
 ///
 /// The byte count is an operator-defined deterministic logical charge; it is
 /// not a process-wide resident-memory measurement.
+/// Rolling operators containing RSI or ATR bound participating peak storage,
+/// including isolated candidates, prepared output, scratch and live checkpoint
+/// segments. This applies to both finite and streaming evaluation, including
+/// other rolling outputs in the same operator. Old-only rolling operators
+/// retain their retained-state limit and exclude checkpoint copies, including
+/// when explicitly declared with indicator state layout 5.
+/// Indicator logical footprints include observable Arrow buffer storage and
+/// Array/container descriptors, excluding private immutable Buffer owner
+/// control blocks whose shared identity Arrow does not expose.
+/// Owned String, Box and Vec storage retain their defined logical charges.
+/// Pure accounting owner-key/reservation indexes are not recursively charged;
+/// they may only reference already funded owners and numerical charges. This
+/// does not exempt computation, row/key/history, schema, output, segment or
+/// workspace containers, or shorten the funded lifetime of data in a lease.
 /// The default uses the largest JSON-safe counters. Use [`StateBudget::new`]
 /// to impose operational row and byte limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
@@ -49,7 +63,10 @@ impl StateBudget {
         self.max_rows
     }
 
-    /// Maximum logical retained bytes.
+    /// Maximum operator-defined logical bytes.
+    ///
+    /// Indicator-containing rolling operators include participating peak
+    /// storage; other operators define their own retained-state charges.
     pub const fn max_bytes(self) -> u64 {
         self.max_bytes
     }

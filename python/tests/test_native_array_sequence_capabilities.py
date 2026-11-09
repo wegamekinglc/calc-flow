@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import FrozenInstanceError, asdict
+from pathlib import Path
 
 import pytest
 
@@ -116,23 +117,9 @@ def test_sequence_rule_identities_are_closed_and_versioned(name: str) -> None:
 
 
 def _sequence_descriptor() -> dict[str, object]:
-    return {
-        **_arguments(),
-        "provider": "native",
-        "name": "array_sequence",
-        "input_ports": [{"name": "input", "kind": "array", "required": True}],
-        "output_ports": [{"name": "output", "kind": "array", "required": True}],
-        "modes": ["stream"],
-        "state_layouts": [1],
-        "partition_contract": "single_ordered_sequence",
-        "port_binding": "fixed",
-        "options_json_schema": _SCHEMA,
-        "array_rules": {
-            "supported_dtypes": ["float32", "float64"],
-            "safe_dtype_rule": {"name": "native_float_dtype", "version": "1"},
-            "shape_rules": [{"name": "native_sequence_vector", "version": "1"}],
-        },
-    }
+    return next(
+        value for value in _bundle_descriptors() if value["name"] == "array_sequence"
+    )
 
 
 def test_sequence_descriptor_parses_fixed_json_ports_and_state_layouts() -> None:
@@ -152,37 +139,12 @@ def test_sequence_descriptor_parses_fixed_json_ports_and_state_layouts() -> None
 
 
 def _bundle_descriptors() -> list[dict[str, object]]:
-    array = {
-        **_sequence_descriptor(),
-        "name": "array_expr",
-        "input_ports": [],
-        "output_ports": [],
-        "modes": ["batch"],
-        "finality": "unproven",
-        "stateful": False,
-        "microbatch_invariant": False,
-        "checkpoint_support": "unproven",
-        "state_version": None,
-        "state_layouts": [],
-        "supports_static_inputs": True,
-        "partition_contract": "none",
-        "port_binding": "options",
-        "array_rules": {
-            "supported_dtypes": ["bool", "float32", "float64"],
-            "safe_dtype_rule": {"name": "native_float_bool_dtype", "version": "1"},
-            "shape_rules": [{"name": "native_scalar_vector_broadcast", "version": "1"}],
-        },
-    }
-    table = {
-        **array,
-        "name": "table_array",
-        "modes": ["batch", "stream"],
-        "finality": "per_row_final",
-        "microbatch_invariant": True,
-        "checkpoint_support": "stateless",
-        "partition_contract": "row_axis_independent",
-    }
-    return [array, _sequence_descriptor(), table]
+    fixture = (
+        Path(__file__).with_name("fixtures")
+        / "native_array_capabilities"
+        / "rust_sequence_bundle_ir1.json"
+    )
+    return json.loads(fixture.read_text())
 
 
 def test_native_bundle_accepts_three_canonical_frozen_records() -> None:

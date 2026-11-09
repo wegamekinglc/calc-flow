@@ -107,7 +107,7 @@ async fn terminal_snapshot() -> OperatorStateSnapshot {
 
 fn restore(snapshot: OperatorStateSnapshot) -> OperatorRestoreState {
     OperatorRestoreState {
-        snapshot,
+        snapshot: Arc::new(crate::state::PreloadedSnapshot::uncredited(snapshot)),
         progress: ["left", "right"]
             .into_iter()
             .map(|id| {
@@ -247,9 +247,9 @@ fn test_terminal_join_native_state_ingress_priority_and_frontier_contract() {
 
 async fn check_native_and_priority(service: &TestService) {
     let valid = restore(terminal_snapshot().await);
-    let mut empty_nonended = restore(valid.snapshot.clone());
-    empty_nonended
-        .snapshot
+    let mut empty_nonended = restore(valid.snapshot.clone_legacy().unwrap());
+    crate::state::PreloadedSnapshot::legacy_mut(&mut empty_nonended.snapshot)
+        .unwrap()
         .inline_metadata
         .insert("ended".into(), serde_json::json!(false));
     assert_eq!(empty_nonended.snapshot.segments, valid.snapshot.segments);
@@ -295,17 +295,17 @@ async fn check_native_and_priority(service: &TestService) {
     assert_eq!(status.emitted_match_rows, 1);
     drain(operator, job, &pool).await;
     let mut malformed = valid;
-    malformed
-        .snapshot
+    crate::state::PreloadedSnapshot::legacy_mut(&mut malformed.snapshot)
+        .unwrap()
         .inline_metadata
         .insert("layout_version".into(), serde_json::json!("bad"));
     let expected = join().restore(&malformed.snapshot).unwrap_err().to_string();
-    let mut bad_ids = restore(malformed.snapshot.clone());
+    let mut bad_ids = restore(malformed.snapshot.clone_legacy().unwrap());
     let right = bad_ids.progress.remove("right").unwrap();
     bad_ids.progress.insert("alien".into(), right);
     println!("A phase: ingress IDs before malformed metadata");
     reject(service, &bad_ids, "ingress set does not match", 0).await;
-    let mut active = restore(malformed.snapshot.clone());
+    let mut active = restore(malformed.snapshot.clone_legacy().unwrap());
     active.progress.get_mut("left").unwrap().state = ManifestIngressState::Active;
     println!("A phase: non-ended ingress before malformed metadata");
     reject(service, &active, "requires ended ingresses", 0).await;

@@ -576,6 +576,7 @@ impl JoinedNumericPair {
             && let Some(owner) = owner
         {
             owner.retain_diagnostic(TaskFailure {
+                indicator_diagnostic: None,
                 task_id: self.task_id,
                 task_name: self.task_name.to_string(),
                 error,

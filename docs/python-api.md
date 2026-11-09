@@ -721,8 +721,8 @@ formats remain 3. `OperatorCapability` and
 `modes`, `finality`, `stateful`, `microbatch_invariant`, `requires_watermark`,
 `checkpoint_support`, `state_version`, `deterministic`, and `replay_safe`;
 both report `state_layouts`, the advertised checkpoint layout inventory.
-Inspect the native operator contract when evaluating checkpoint compatibility;
-the rolling catalog limitation is described below. Providers additionally report
+Inspect the native operator contract when evaluating checkpoint compatibility.
+Providers additionally report
 `supports_static_inputs`, `partition_contract`,
 and optional `array_rules`. The vocabularies are closed: execution modes are
 `batch` and `stream`; output finality is `per_row_final`,
@@ -758,12 +758,16 @@ are `array_api_safe_dtype@1`, `elementwise_broadcast@1`,
 `feature_axis_reduction@1`, `table_matmul_static_rhs@1`,
 `native_float_bool_dtype@1`, `native_scalar_vector_broadcast@1`,
 `native_packed_rank2@1`, `native_matmul@1`, `native_axis_reduction@1`,
-`native_table_static_rhs@1`, `native_float_dtype@1` and
-`native_sequence_vector@1`; any other name/version pair fails construction.
+`native_table_static_rhs@1`, `native_float_dtype@1`,
+`native_sequence_vector@1` and `native_sequence_indicators@2`; any other
+name/version pair fails construction.
 The three matrix rules describe IR2 packed shapes, multiplication and axis
-reductions; IR1 retains its scalar/vector shape rules. The two sequence rules
-describe one f32/f64 vector ingress and aligned f64 output; they do not establish
-table lineage or a general array stream API. `ProviderArrayRules` pairs the exact
+reductions; IR1 retains its scalar/vector shape rules. The sequence vector rule
+retains IR1 vector shapes. The indicator rule names IR2's per-kernel alternatives:
+RSI uses a vector and ATR uses packed high/low/close rows. Dispatch by IR version
+and kernel; listed alternatives do not allow every kernel to use every shape.
+These rules establish neither table lineage nor a general array stream API.
+`ProviderArrayRules` pairs the exact
 `supported_dtypes` tuple with a `safe_dtype_rule` and `shape_rules`, and
 stores both tuples sorted by identity.
 
@@ -776,17 +780,14 @@ the engine implementation:
 |------------------------|-----------------|---------------------------|-------------------------|-----------------|-----------------|
 | `cross_section@1`      | batch, stream   | group_final_append_only   | checkpointed_stateful   | 1               | 1               |
 | `expression@1`         | batch, stream   | per_row_final             | stateless               | —               | —               |
-| `rolling@1`            | batch, stream   | per_row_final             | checkpointed_stateful   | 1               | 1, 2            |
+| `rolling@1`            | batch, stream   | per_row_final             | checkpointed_stateful   | 1               | 1, 2, 3, 4, 5   |
 | `sql@1`                | batch, stream   | unproven                  | checkpointed_stateful   | 2               | 3, 4            |
 | `stream_asof_join@1`   | stream          | group_final_append_only   | checkpointed_stateful   | 3               | 10              |
 | `stream_join@1`        | stream          | unproven                  | checkpointed_stateful   | 1               | 1, 2, 3         |
 | `window@1`             | stream          | group_final_append_only   | checkpointed_stateful   | 1               | 1               |
 
-The Python capability catalog currently reports only layouts `1` and `2`
-for `rolling@1`, while the native operator writes columnar checkpoint layout
-`3`, or layout `4` for cumulative sum/min/max/variance. The catalog therefore
-omits the current writer layouts; do not use this inventory alone to decide
-rolling checkpoint compatibility. See
+The rolling inventory includes retained-history and accumulator layouts as well
+as columnar layout `3` and cumulative layout `4`. See
 [native rolling state](symbolic-design.md#native-rolling-state) for the
 implemented encoding and restore rules.
 
@@ -860,11 +861,16 @@ profile; these claims do not promise cross-platform bitwise equality or delivery
 guarantees. The sequence factory instead reports `modes=("stream",)`,
 `stateful=True`, `microbatch_invariant=True`, `requires_watermark=False`,
 `checkpoint_support="checkpointed_stateful"`, `state_version=1`,
-`state_layouts=(1,)`, `supports_static_inputs=False`,
+`state_layouts=(1, 2)` for the IR1/IR2 implementation, `supports_static_inputs=False`,
 `partition_contract="single_ordered_sequence"` and `finality="per_row_final"`.
 It uses explicit required array `input`/`output` ports and its own closed options
 schema. Its checkpoint and managed restart contract belongs to that native
 factory, not to a Python stateless-provider marker.
+Its earlier IR1-only profile remains valid frozen evidence with layouts `(1,)`
+and `native_sequence_vector@1`. The IR1/IR2 profile requires both supported
+layouts, the vector rule and `native_sequence_indicators@2`, and the complete
+closed schema alternatives. Mixed profile fields or unimplemented v3 rules fail
+validation. Registration always records its actual Rust producer's descriptor.
 
 Use the array/table factories through native ArrayExpr declarations, advanced
 `PipelineBuilder.external` or project surfaces. The sequence factory uses
@@ -1104,6 +1110,11 @@ for record in records:
 assert worker.capabilities().providers == capabilities.providers
 ```
 
+This example replays within the same native implementation/profile. Frozen
+IR1 evidence is not rewritten into IR2 evidence. A target registration queries
+its own Rust descriptor; equality or portability across implementation profiles
+and package upgrades is not promised by these process-local records.
+
 ## Execution options and provider context
 
 Use the frozen native `ExecutionOptions` value to attach run-scoped settings
@@ -1312,6 +1323,42 @@ samples. `min_periods` must be between one and the window size. The default
 retains the table `stable_v1` transition; `stable_v2` selects the existing
 preview profile explicitly. Both return aligned float64 vectors.
 
+`rsi(values, period=n)` and `atr(high, low, close, period=n)` use Wilder
+transitions and return nullable float64 vectors aligned to the inputs. Period
+is required and must be an exact positive Python integer no larger than
+`2**64 - 1`; Boolean values are rejected. Inputs must be immutable NativeArray
+float32/float64 vectors. ATR permits mixed floating dtypes, requires equal
+lengths and uses no broadcasting. The eager functions need no provider
+registration or NumPy/JAX import.
+
+```python
+import pyarrow as pa
+import calc_flow.array as cfa
+
+close = cfa.from_arrow(pa.array([10.0, 11.0, 12.0, 11.0, 11.0]))
+high = cfa.from_arrow(pa.array([11.0, 12.0, 13.0, 12.0, 12.0]))
+low = cfa.from_arrow(pa.array([9.0, 10.0, 11.0, 10.0, 10.0]))
+assert cfa.rsi(close, period=2).to_arrow().to_pylist() == [None, None, 100.0, 50.0, 50.0]
+assert cfa.atr(high, low, close, period=2).to_arrow().to_pylist() == [None, None, 2.0, 2.0, 2.0]
+```
+
+The first complete row establishes the previous price/close. The first valid
+output follows `period` differences or true ranges, at index `period` in a
+complete segment. A null or NaN resets warm-up; any missing ATR operand resets
+all three inputs' segment. Valid infinities and unrepresentable finite
+differences fail the call before publishing output. ATR checks every valid
+operand for infinity even when another operand is missing, and validates
+finite `high >= low` and `high - low` whenever that pair is present.
+
+Flat RSI is 50; a positive-gain/zero-loss mean gives 100 and the reverse gives
+0. Seeds and later means use the specified float64 incremental operation
+order. Underflow can change the normalized ratio substantially: period 2 over
+`[0.0, 2**-1074, 0.0]` yields `[None, None, 100.0]`, although its exact rational
+ratio would give 50. All valid results follow the float64 transition, including
+that case. Period one first returns at the second complete row. Large periods
+use constant numerical state; `period=2**64 - 1` cannot complete warm-up before
+the checked processed-position counter is exhausted.
+
 The native eager elementwise functions accept explicit `NativeArray` operands:
 
 - Floating arithmetic: `neg`, `abs`, `sqrt`, `log`, `exp`, `add`, `subtract`,
@@ -1372,22 +1419,28 @@ moving-mean, conditional-selection and reduction example.
 ### Native sequence provider
 
 The advanced stream identity `native:array_sequence@1` consumes one real native
-float32 or float64 vector ingress and emits one aligned float64 vector Batch per
-input, including empty chunks. Its descriptor pins the input dtype; scalars,
-matrices, Boolean values, static inputs and second dynamic ingresses are rejected.
-Vector positions advance state in arrival order. Batch metadata sequence numbers
+float32 or float64 ingress and emits one aligned float64 vector Batch per input,
+including empty chunks. Its descriptor pins the input dtype. EWMA, rolling mean
+and RSI take vectors; ATR takes packed row-major `[n, 3]` high, low, close rows.
+Packed ATR has one dtype, no implicit zip or broadcasting, and accepts `[0, 3]`.
+Scalars, Boolean values, other shapes, static inputs and second dynamic ingresses
+are rejected. Ordered positions advance state in arrival order. Batch metadata sequence numbers
 do not reset, reorder or deduplicate the sequence. Table entities and event-time
 reordering continue to use table operators.
 
-The strict options object requires `ir_version=1`, `input_dtype` and `kernel`.
-The kernel is either `{"function":"rolling_mean","window":20}` with optional
+The strict options object requires `ir_version`, `input_dtype` and `kernel`.
+IR1 accepts `{"function":"rolling_mean","window":20}` with optional
 `min_periods` and `numerical_profile`, or `{"function":"ewma","span":20}` with
-optional `min_periods`. `execution` holds output/allocation limits and `state`
+optional `min_periods`. IR2 retains those kernels and adds
+`{"function":"rsi","period":14}` and `{"function":"atr","period":14}` with
+mandatory positive-u64 period. Missing/NaN resets and finite-domain errors use
+the indicator contract above. `execution` holds output/allocation limits and `state`
 holds `max_state_bytes`; both are optional and reject unknown keys. These options
 use the sequence factory's schema, independently of array_expr IR1/IR2.
 Compile it through `PipelineBuilder.external` with an explicitly registered
-Runtime and run it through explicit native source/sink bindings. Checkpoint layout
-1 and state version 1 identify its real native codec/recovery contract; they are
+Runtime and run it through explicit native source/sink bindings. The old kernels
+retain checkpoint layout 1 even in IR2; RSI and ATR use layout 2. Semantic state
+version 1 identifies their codec/recovery contracts independently of layout; these are
 separate from capability schema 5 and project/manifest version 3.
 
 The Python API adds no owned state class, `ArrayExpr.stream`, implicit input zip,

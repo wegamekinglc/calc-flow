@@ -7,9 +7,12 @@
 mod backend;
 mod local;
 mod manifest;
+mod preloaded_snapshot;
 mod segment;
 mod source_history;
 mod transaction;
+
+pub(crate) use preloaded_snapshot::PreloadedSnapshot;
 
 #[cfg(test)]
 pub(crate) use transaction::ManifestTransactionFaultPoint;

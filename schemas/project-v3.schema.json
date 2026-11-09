@@ -1986,6 +1986,92 @@
       "oneOf": [
         {
           "additionalProperties": false,
+          "description": "Relative strength index with a complete-period Wilder seed.",
+          "properties": {
+            "input": {
+              "description": "Float32 or Float64 price column.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "rsi",
+              "type": "string"
+            },
+            "output": {
+              "description": "Nullable Float64 output column.",
+              "type": "string"
+            },
+            "period": {
+              "description": "Positive number of seed differences and Wilder period.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "primitive_version": {
+              "description": "Primitive version; must equal `1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "primitive_version",
+            "input",
+            "output",
+            "period"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Average true range over floating high, low and close columns.",
+          "properties": {
+            "close": {
+              "description": "Float32 or Float64 close column.",
+              "type": "string"
+            },
+            "high": {
+              "description": "Float32 or Float64 high column.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "atr",
+              "type": "string"
+            },
+            "low": {
+              "description": "Float32 or Float64 low column.",
+              "type": "string"
+            },
+            "output": {
+              "description": "Nullable Float64 output column.",
+              "type": "string"
+            },
+            "period": {
+              "description": "Positive number of seed true ranges and Wilder period.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "primitive_version": {
+              "description": "Primitive version; must equal `1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "primitive_version",
+            "high",
+            "low",
+            "close",
+            "output",
+            "period"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "description": "Value of the same column `periods` earlier in the entity total order.",
           "properties": {
             "input": {
@@ -3078,7 +3164,7 @@
           "type": "array"
         },
         "state_layout_version": {
-          "description": "Durable state-layout version. Existing primitives use\n[`ROLLING_STATE_LAYOUT_VERSION`]; EWMA requires\n[`ROLLING_EWMA_STATE_LAYOUT_VERSION`]. Cumulative sum/min/max/variance\nrequire [`ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION`].",
+          "description": "Durable state-layout version. Existing primitives use\n[`ROLLING_STATE_LAYOUT_VERSION`]; EWMA requires\n[`ROLLING_EWMA_STATE_LAYOUT_VERSION`]. Cumulative sum/min/max/variance\nrequire [`ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION`]. RSI and ATR require\n[`ROLLING_INDICATOR_STATE_LAYOUT_VERSION`].",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"

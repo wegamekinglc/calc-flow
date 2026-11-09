@@ -25,6 +25,9 @@ from calc_flow._native_array import (
     add as add,
 )
 from calc_flow._native_array import (
+    atr as atr,
+)
+from calc_flow._native_array import (
     divide as divide,
 )
 from calc_flow._native_array import (
@@ -94,6 +97,9 @@ from calc_flow._native_array import (
 from calc_flow._native_array import reshape as reshape
 from calc_flow._native_array import (
     rolling_mean as rolling_mean,
+)
+from calc_flow._native_array import (
+    rsi as rsi,
 )
 from calc_flow._native_array import (
     sqrt as sqrt,

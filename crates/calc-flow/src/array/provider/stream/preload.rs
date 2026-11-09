@@ -4,25 +4,27 @@ use tokio::sync::{OwnedMutexGuard, OwnedSemaphorePermit};
 
 use super::{
     NativeStreamOperator,
-    inventory::{self, NativeSequenceFailure, NativeSequenceInventory},
+    inventory::{self, NativeCheckpointRecord, NativeSequenceFailure, NativeSequenceInventory},
     options::Options,
 };
 use crate::{
-    OperatorManifestEntry, OperatorStateSnapshot, Result, StateHandle, StateSegment,
-    StreamJobContext,
+    OperatorManifestEntry, OperatorStateSnapshot, Result, RollingOperator, StateHandle,
+    StateSegment, StreamJobContext,
     array::{
         provider::worker::Scope,
         sequence::{capture::Preload, codec},
     },
     pipeline::CompiledStreamOperator,
-    state::{LocalStateLineageBackend, ManifestTransaction, NativeSegmentReader},
+    state::{
+        LocalStateLineageBackend, ManifestTransaction, NativeSegmentReader, PreloadedSnapshot,
+    },
 };
 
 struct Leases {
     transaction: Arc<ManifestTransaction>,
     _operation: OwnedMutexGuard<()>,
     _publication: OwnedMutexGuard<()>,
-    _pending: OwnedSemaphorePermit,
+    _pending: Option<OwnedSemaphorePermit>,
     _lineage: Arc<LocalStateLineageBackend>,
 }
 struct Read {
@@ -80,7 +82,7 @@ impl NativeStreamOperator {
                 transaction: Arc::clone(transaction),
                 _operation: operation,
                 _publication: publication,
-                _pending: pending,
+                _pending: Some(pending),
                 _lineage: lineage,
             },
         };
@@ -99,27 +101,118 @@ impl NativeSequenceInventory {
         entry: &OperatorManifestEntry,
         transaction: &Arc<ManifestTransaction>,
         job: &StreamJobContext,
-    ) -> std::result::Result<OperatorStateSnapshot, NativeSequenceFailure> {
+    ) -> std::result::Result<PreloadedSnapshot, NativeSequenceFailure> {
         let record = self
             .record(node)
             .expect("native recovery node was admitted");
         let load = async {
             record.admit_entry(entry)?;
-            let operator = inventory::compiled(operator).ok_or_else(|| {
-                codec::mismatch("identity", "requires actual native sequence operator")
-            })?;
-            let complete = operator.read(transaction, node, entry, job).await?;
-            job.check_cancelled()?;
-            verified(&complete, record.handle(entry)?);
-            let Complete { segment, leases } = complete;
-            drop(leases);
-            Ok(OperatorStateSnapshot {
-                inline_metadata: entry.inline_metadata.clone(),
-                segments: BTreeMap::from([("state".into(), segment)]),
-            })
+            match record.as_ref() {
+                NativeCheckpointRecord::Sequence(record) => {
+                    sequence_snapshot(record, operator, node, entry, transaction, job)
+                        .await
+                        .map(PreloadedSnapshot::uncredited)
+                }
+                NativeCheckpointRecord::IndicatorRolling(record) => {
+                    rolling_snapshot(record, operator, node, entry, transaction, job).await
+                }
+            }
         };
         load.await.map_err(|error| record.failure(error))
     }
+}
+async fn sequence_snapshot(
+    record: &inventory::NativeSequenceRecord,
+    operator: &CompiledStreamOperator,
+    node: &str,
+    entry: &OperatorManifestEntry,
+    transaction: &Arc<ManifestTransaction>,
+    job: &StreamJobContext,
+) -> Result<OperatorStateSnapshot> {
+    let operator = inventory::compiled(operator)
+        .ok_or_else(|| codec::mismatch("identity", "requires actual native sequence operator"))?;
+    let complete = operator.read(transaction, node, entry, job).await?;
+    job.check_cancelled()?;
+    verified(&complete, record.handle(entry)?);
+    let Complete { segment, leases } = complete;
+    drop(leases);
+    Ok(OperatorStateSnapshot {
+        inline_metadata: entry.inline_metadata.clone(),
+        segments: BTreeMap::from([("state".into(), segment)]),
+    })
+}
+async fn rolling_snapshot(
+    record: &crate::operator::rolling::IndicatorRollingRecord,
+    operator: &CompiledStreamOperator,
+    node: &str,
+    entry: &OperatorManifestEntry,
+    transaction: &Arc<ManifestTransaction>,
+    job: &StreamJobContext,
+) -> Result<PreloadedSnapshot> {
+    let operator = match operator {
+        CompiledStreamOperator::Rolling(operator)
+            if operator.state_layout_version() == crate::ROLLING_INDICATOR_STATE_LAYOUT_VERSION =>
+        {
+            operator
+        }
+        _ => {
+            return Err(record.mismatch(
+                "identity",
+                "requires actual compiled rolling layout five operator",
+            ));
+        }
+    };
+    let segment = match record.handle(entry)? {
+        Some(handle) => {
+            let (segment, leases) = read_rolling(operator, node, entry, transaction, job).await?;
+            leases.transaction.native_mark_verified(handle);
+            drop(leases);
+            Some((handle.segment_id(), segment))
+        }
+        None => None,
+    };
+    job.check_cancelled()?;
+    record.preloaded_snapshot(&entry.inline_metadata, segment)
+}
+async fn read_rolling(
+    operator: &RollingOperator,
+    node: &str,
+    entry: &OperatorManifestEntry,
+    transaction: &Arc<ManifestTransaction>,
+    job: &StreamJobContext,
+) -> Result<(StateSegment, Leases)> {
+    let pending = operator.native_checkpoint_guard(node, job).await?;
+    let (reader, leases) = rolling_read_leases(transaction, node, entry, job, pending).await?;
+    let complete = operator
+        .read_native_segment(node, reader, leases, job)
+        .await?;
+    job.check_cancelled()?;
+    Ok(complete)
+}
+async fn rolling_read_leases(
+    transaction: &Arc<ManifestTransaction>,
+    node: &str,
+    entry: &OperatorManifestEntry,
+    job: &StreamJobContext,
+    pending: OwnedSemaphorePermit,
+) -> Result<(NativeSegmentReader, Leases)> {
+    let operation = transaction
+        .native_load_guard(|| job.check_cancelled())
+        .await?;
+    let (lineage, reader) = transaction.native_reader(node, entry)?;
+    let publication = lineage
+        .native_publication_guard(|| job.check_cancelled())
+        .await?;
+    Ok((
+        reader,
+        Leases {
+            transaction: Arc::clone(transaction),
+            _operation: operation,
+            _publication: publication,
+            _pending: Some(pending),
+            _lineage: lineage,
+        },
+    ))
 }
 fn verified(complete: &Complete, handle: &StateHandle) {
     complete.leases.transaction.native_mark_verified(handle);

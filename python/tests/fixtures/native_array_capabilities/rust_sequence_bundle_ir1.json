@@ -1,0 +1,167 @@
+[
+  {
+    "array_rules": {
+      "safe_dtype_rule": {
+        "name": "native_float_bool_dtype",
+        "version": "1"
+      },
+      "shape_rules": [
+        {
+          "name": "native_scalar_vector_broadcast",
+          "version": "1"
+        },
+        {
+          "name": "native_packed_rank2",
+          "version": "1"
+        },
+        {
+          "name": "native_matmul",
+          "version": "1"
+        },
+        {
+          "name": "native_axis_reduction",
+          "version": "1"
+        }
+      ],
+      "supported_dtypes": [
+        "bool",
+        "float32",
+        "float64"
+      ]
+    },
+    "checkpoint_support": "unproven",
+    "deterministic": true,
+    "finality": "unproven",
+    "input_ports": [],
+    "microbatch_invariant": false,
+    "modes": [
+      "batch"
+    ],
+    "name": "array_expr",
+    "options_json_schema": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"additionalProperties\":false,\"description\":\"native:array_expr@1 batch-only IR1 rank-0/1 and IR2 packed rank-0/1/2 programs. IR2 permits at most one matmul; concrete shapes use checked element counts and scalar-or-identical-shape broadcasting. Node references must be acyclic and reachable. Output assertions must equal abstract inference. Pow requires a finite numeric literal exponent of magnitude <=64 before float32 conversion. Runtime concrete extents and shared owned allocation are revalidated.\",\"oneOf\":[{\"additionalProperties\":false,\"properties\":{\"execution\":{\"additionalProperties\":false,\"properties\":{\"max_allocation_bytes\":{\"default\":268435456,\"maximum\":18446744073709551615,\"minimum\":0,\"type\":\"integer\"},\"max_elements\":{\"default\":10000000,\"maximum\":18446744073709551615,\"minimum\":0,\"type\":\"integer\"}},\"required\":[],\"type\":\"object\"},\"inputs\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"dtype\":{\"enum\":[\"bool\",\"float32\",\"float64\"]},\"name\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"shape\":{\"items\":{\"anyOf\":[{\"type\":\"null\"},{\"maximum\":18446744073709551615,\"minimum\":0,\"type\":\"integer\"}]},\"maxItems\":1,\"type\":\"array\"}},\"required\":[\"name\",\"dtype\",\"shape\"],\"type\":\"object\"},\"maxItems\":32,\"minItems\":1,\"type\":\"array\"},\"ir_version\":{\"const\":1},\"nodes\":{\"items\":{\"oneOf\":[{\"additionalProperties\":false,\"properties\":{\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"name\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"input\"}},\"required\":[\"id\",\"op\",\"name\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"dtype\":{\"const\":\"bool\"},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"literal\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"id\",\"op\",\"dtype\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"dtype\":{\"const\":\"float32\"},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"literal\"},\"value\":{\"description\":\"Finite serde_json numeric literal. Retained i64/u64 representations must lie in [-9007199254740992,9007199254740992]; finite f64 representations retain their full range. Upstream parsing can round integer tokens outside i64/u64 to f64; their original spelling cannot be recovered. The native factory enforces representation-dependent validation; this value-level JSON Schema cannot express it.\",\"exclusiveMaximum\":3.4028235677973366e+38,\"exclusiveMinimum\":-3.4028235677973366e+38,\"type\":\"number\"}},\"required\":[\"id\",\"op\",\"dtype\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"dtype\":{\"const\":\"float64\"},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"literal\"},\"value\":{\"description\":\"Finite serde_json numeric literal. Retained i64/u64 representations must lie in [-9007199254740992,9007199254740992]; finite f64 representations retain their full range. Upstream parsing can round integer tokens outside i64/u64 to f64; their original spelling cannot be recovered. The native factory enforces representation-dependent validation; this value-level JSON Schema cannot express it.\",\"type\":\"number\"}},\"required\":[\"id\",\"op\",\"dtype\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"function\":{\"enum\":[\"neg\",\"abs\",\"sqrt\",\"log\",\"exp\",\"logical_not\"]},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"input\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"unary\"}},\"required\":[\"id\",\"op\",\"function\",\"input\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"function\":{\"enum\":[\"add\",\"subtract\",\"multiply\",\"divide\",\"pow\",\"equal\",\"not_equal\",\"less\",\"less_equal\",\"greater\",\"greater_equal\",\"logical_and\",\"logical_or\",\"logical_xor\"]},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"left\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"binary\"},\"right\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"}},\"required\":[\"id\",\"op\",\"function\",\"left\",\"right\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"condition\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"if_false\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"if_true\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"where\"}},\"required\":[\"id\",\"op\",\"condition\",\"if_true\",\"if_false\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"function\":{\"enum\":[\"sum\",\"mean\",\"min\",\"max\"]},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"input\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"reduce\"},\"skip_nulls\":{\"default\":false,\"type\":\"boolean\"}},\"required\":[\"id\",\"op\",\"function\",\"input\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"input\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"min_periods\":{\"default\":1,\"maximum\":18446744073709551615,\"minimum\":1,\"type\":\"integer\"},\"numerical_profile\":{\"default\":\"stable_v1\",\"enum\":[\"stable_v1\",\"stable_v2\"]},\"op\":{\"const\":\"rolling_mean\"},\"window\":{\"maximum\":18446744073709551615,\"minimum\":1,\"type\":\"integer\"}},\"required\":[\"id\",\"op\",\"input\",\"window\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"input\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"min_periods\":{\"default\":1,\"maximum\":18446744073709551615,\"minimum\":1,\"type\":\"integer\"},\"op\":{\"const\":\"ewma\"},\"span\":{\"maximum\":18446744073709551615,\"minimum\":1,\"type\":\"integer\"}},\"required\":[\"id\",\"op\",\"input\",\"span\"],\"type\":\"object\"}]},\"maxItems\":128,\"minItems\":1,\"type\":\"array\"},\"outputs\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"dtype\":{\"enum\":[\"bool\",\"float32\",\"float64\"]},\"name\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"node\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"shape\":{\"items\":{\"anyOf\":[{\"type\":\"null\"},{\"maximum\":18446744073709551615,\"minimum\":0,\"type\":\"integer\"}]},\"maxItems\":1,\"type\":\"array\"}},\"required\":[\"name\",\"node\",\"dtype\",\"shape\"],\"type\":\"object\"},\"maxItems\":16,\"minItems\":1,\"type\":\"array\"}},\"required\":[\"ir_version\",\"inputs\",\"nodes\",\"outputs\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"execution\":{\"additionalProperties\":false,\"properties\":{\"max_allocation_bytes\":{\"default\":268435456,\"maximum\":18446744073709551615,\"minimum\":0,\"type\":\"integer\"},\"max_elements\":{\"default\":10000000,\"maximum\":18446744073709551615,\"minimum\":0,\"type\":\"integer\"}},\"required\":[],\"type\":\"object\"},\"inputs\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"dtype\":{\"enum\":[\"bool\",\"float32\",\"float64\"]},\"name\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"shape\":{\"items\":{\"anyOf\":[{\"type\":\"null\"},{\"maximum\":18446744073709551615,\"minimum\":0,\"type\":\"integer\"}]},\"maxItems\":2,\"type\":\"array\"}},\"required\":[\"name\",\"dtype\",\"shape\"],\"type\":\"object\"},\"maxItems\":32,\"minItems\":1,\"type\":\"array\"},\"ir_version\":{\"const\":2},\"nodes\":{\"items\":{\"oneOf\":[{\"additionalProperties\":false,\"properties\":{\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"name\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"input\"}},\"required\":[\"id\",\"op\",\"name\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"dtype\":{\"const\":\"bool\"},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"literal\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"id\",\"op\",\"dtype\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"dtype\":{\"const\":\"float32\"},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"literal\"},\"value\":{\"description\":\"Finite serde_json numeric literal. Retained i64/u64 representations must lie in [-9007199254740992,9007199254740992]; finite f64 representations retain their full range. Upstream parsing can round integer tokens outside i64/u64 to f64; their original spelling cannot be recovered. The native factory enforces representation-dependent validation; this value-level JSON Schema cannot express it.\",\"exclusiveMaximum\":3.4028235677973366e+38,\"exclusiveMinimum\":-3.4028235677973366e+38,\"type\":\"number\"}},\"required\":[\"id\",\"op\",\"dtype\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"dtype\":{\"const\":\"float64\"},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"literal\"},\"value\":{\"description\":\"Finite serde_json numeric literal. Retained i64/u64 representations must lie in [-9007199254740992,9007199254740992]; finite f64 representations retain their full range. Upstream parsing can round integer tokens outside i64/u64 to f64; their original spelling cannot be recovered. The native factory enforces representation-dependent validation; this value-level JSON Schema cannot express it.\",\"type\":\"number\"}},\"required\":[\"id\",\"op\",\"dtype\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"function\":{\"enum\":[\"neg\",\"abs\",\"sqrt\",\"log\",\"exp\",\"logical_not\"]},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"input\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"unary\"}},\"required\":[\"id\",\"op\",\"function\",\"input\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"function\":{\"enum\":[\"add\",\"subtract\",\"multiply\",\"divide\",\"pow\",\"equal\",\"not_equal\",\"less\",\"less_equal\",\"greater\",\"greater_equal\",\"logical_and\",\"logical_or\",\"logical_xor\"]},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"left\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"binary\"},\"right\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"}},\"required\":[\"id\",\"op\",\"function\",\"left\",\"right\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"condition\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"if_false\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"if_true\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"where\"}},\"required\":[\"id\",\"op\",\"condition\",\"if_true\",\"if_false\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"axis\":{\"anyOf\":[{\"type\":\"null\"},{\"enum\":[0,1]}],\"default\":null},\"function\":{\"enum\":[\"sum\",\"mean\",\"min\",\"max\"]},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"input\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"keepdims\":{\"default\":false,\"type\":\"boolean\"},\"op\":{\"const\":\"reduce\"},\"skip_nulls\":{\"default\":false,\"type\":\"boolean\"}},\"required\":[\"id\",\"op\",\"function\",\"input\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"input\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"min_periods\":{\"default\":1,\"maximum\":18446744073709551615,\"minimum\":1,\"type\":\"integer\"},\"numerical_profile\":{\"default\":\"stable_v1\",\"enum\":[\"stable_v1\",\"stable_v2\"]},\"op\":{\"const\":\"rolling_mean\"},\"window\":{\"maximum\":18446744073709551615,\"minimum\":1,\"type\":\"integer\"}},\"required\":[\"id\",\"op\",\"input\",\"window\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"input\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"min_periods\":{\"default\":1,\"maximum\":18446744073709551615,\"minimum\":1,\"type\":\"integer\"},\"op\":{\"const\":\"ewma\"},\"span\":{\"maximum\":18446744073709551615,\"minimum\":1,\"type\":\"integer\"}},\"required\":[\"id\",\"op\",\"input\",\"span\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"left\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"matmul\"},\"right\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"}},\"required\":[\"id\",\"op\",\"left\",\"right\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"input\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"reshape\"},\"shape\":{\"items\":{\"maximum\":18446744073709551615,\"minimum\":0,\"type\":\"integer\"},\"maxItems\":2,\"type\":\"array\"}},\"required\":[\"id\",\"op\",\"input\",\"shape\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"input\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"transpose\"}},\"required\":[\"id\",\"op\",\"input\"],\"type\":\"object\"}]},\"maxItems\":128,\"minItems\":1,\"type\":\"array\"},\"outputs\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"dtype\":{\"enum\":[\"bool\",\"float32\",\"float64\"]},\"name\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"node\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"shape\":{\"items\":{\"anyOf\":[{\"type\":\"null\"},{\"maximum\":18446744073709551615,\"minimum\":0,\"type\":\"integer\"}]},\"maxItems\":2,\"type\":\"array\"}},\"required\":[\"name\",\"node\",\"dtype\",\"shape\"],\"type\":\"object\"},\"maxItems\":16,\"minItems\":1,\"type\":\"array\"}},\"required\":[\"ir_version\",\"inputs\",\"nodes\",\"outputs\"],\"type\":\"object\"}],\"properties\":{\"execution\":{},\"inputs\":{},\"ir_version\":{},\"nodes\":{},\"outputs\":{}},\"required\":[\"ir_version\",\"inputs\",\"nodes\",\"outputs\"],\"type\":\"object\",\"x-calc-flow-max-compact-json-bytes\":65536,\"x-calc-flow-max-node-depth\":24}",
+    "options_schema": null,
+    "output_ports": [],
+    "partition_contract": "none",
+    "port_binding": "options",
+    "provider": "native",
+    "replay_safe": true,
+    "requires_watermark": false,
+    "state_layouts": [],
+    "state_version": null,
+    "stateful": false,
+    "supports_static_inputs": true,
+    "version": "1"
+  },
+  {
+    "array_rules": {
+      "safe_dtype_rule": {
+        "name": "native_float_dtype",
+        "version": "1"
+      },
+      "shape_rules": [
+        {
+          "name": "native_sequence_vector",
+          "version": "1"
+        }
+      ],
+      "supported_dtypes": [
+        "float32",
+        "float64"
+      ]
+    },
+    "checkpoint_support": "checkpointed_stateful",
+    "deterministic": true,
+    "finality": "per_row_final",
+    "input_ports": [
+      {
+        "kind": "array",
+        "name": "input",
+        "required": true
+      }
+    ],
+    "microbatch_invariant": true,
+    "modes": [
+      "stream"
+    ],
+    "name": "array_sequence",
+    "options_json_schema": "{\"additionalProperties\":false,\"properties\":{\"execution\":{\"additionalProperties\":false,\"properties\":{\"max_allocation_bytes\":{\"default\":268435456,\"maximum\":18446744073709551615,\"minimum\":0,\"type\":\"integer\"},\"max_elements\":{\"default\":10000000,\"maximum\":18446744073709551615,\"minimum\":0,\"type\":\"integer\"}},\"required\":[],\"type\":\"object\"},\"input_dtype\":{\"enum\":[\"float32\",\"float64\"]},\"ir_version\":{\"const\":1},\"kernel\":{\"oneOf\":[{\"additionalProperties\":false,\"properties\":{\"function\":{\"const\":\"rolling_mean\"},\"min_periods\":{\"default\":1,\"maximum\":18446744073709551615,\"minimum\":1,\"type\":\"integer\"},\"numerical_profile\":{\"default\":\"stable_v1\",\"enum\":[\"stable_v1\",\"stable_v2\"]},\"window\":{\"maximum\":18446744073709551615,\"minimum\":1,\"type\":\"integer\"}},\"required\":[\"function\",\"window\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"function\":{\"const\":\"ewma\"},\"min_periods\":{\"default\":1,\"maximum\":18446744073709551615,\"minimum\":1,\"type\":\"integer\"},\"span\":{\"maximum\":18446744073709551615,\"minimum\":1,\"type\":\"integer\"}},\"required\":[\"function\",\"span\"],\"type\":\"object\"}]},\"state\":{\"additionalProperties\":false,\"properties\":{\"max_state_bytes\":{\"default\":268435456,\"maximum\":18446744073709551615,\"minimum\":0,\"type\":\"integer\"}},\"required\":[],\"type\":\"object\"}},\"required\":[\"ir_version\",\"input_dtype\",\"kernel\"],\"type\":\"object\"}",
+    "options_schema": null,
+    "output_ports": [
+      {
+        "kind": "array",
+        "name": "output",
+        "required": true
+      }
+    ],
+    "partition_contract": "single_ordered_sequence",
+    "port_binding": "fixed",
+    "provider": "native",
+    "replay_safe": true,
+    "requires_watermark": false,
+    "state_layouts": [
+      1
+    ],
+    "state_version": 1,
+    "stateful": true,
+    "supports_static_inputs": false,
+    "version": "1"
+  },
+  {
+    "array_rules": {
+      "safe_dtype_rule": {
+        "name": "native_float_bool_dtype",
+        "version": "1"
+      },
+      "shape_rules": [
+        {
+          "name": "native_scalar_vector_broadcast",
+          "version": "1"
+        },
+        {
+          "name": "native_packed_rank2",
+          "version": "1"
+        },
+        {
+          "name": "native_matmul",
+          "version": "1"
+        },
+        {
+          "name": "native_axis_reduction",
+          "version": "1"
+        },
+        {
+          "name": "native_table_static_rhs",
+          "version": "1"
+        }
+      ],
+      "supported_dtypes": [
+        "bool",
+        "float32",
+        "float64"
+      ]
+    },
+    "checkpoint_support": "stateless",
+    "deterministic": true,
+    "finality": "per_row_final",
+    "input_ports": [],
+    "microbatch_invariant": true,
+    "modes": [
+      "batch",
+      "stream"
+    ],
+    "name": "table_array",
+    "options_json_schema": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"additionalProperties\":false,\"description\":\"native:table_array@1 IR2 requires exactly one exact-schema table input with homogeneous selected bool/float32/float64 columns, at most one static matrix used only as a direct matmul RHS, and one row-proven array or attached-table output. Attachment requires the original table lineage and known positive width; full/axis0 reduction and rank2 transpose erase row lineage. Stream additionally rejects rolling/EWMA, axis0 reductions, concrete reshape, and rank2 transpose. Output ports and schemas must exactly match. Null static RHS values are rejected before source open. Static aliases retain per-name digest-v1; native preparation and numerical work share checked per-consumer allocation limits.\",\"properties\":{\"execution\":{\"additionalProperties\":false,\"properties\":{\"max_allocation_bytes\":{\"default\":268435456,\"maximum\":18446744073709551615,\"minimum\":0,\"type\":\"integer\"},\"max_elements\":{\"default\":10000000,\"maximum\":18446744073709551615,\"minimum\":0,\"type\":\"integer\"}},\"required\":[],\"type\":\"object\"},\"inputs\":{\"items\":{\"oneOf\":[{\"additionalProperties\":false,\"properties\":{\"columns\":{\"items\":{\"type\":\"string\"},\"minItems\":1,\"type\":\"array\",\"uniqueItems\":true},\"kind\":{\"const\":\"table\"},\"name\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"}},\"required\":[\"name\",\"kind\",\"columns\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"binding\":{\"const\":\"static\"},\"dtype\":{\"enum\":[\"bool\",\"float32\",\"float64\"]},\"kind\":{\"const\":\"array\"},\"name\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"shape\":{\"items\":{\"anyOf\":[{\"type\":\"null\"},{\"maximum\":18446744073709551615,\"minimum\":0,\"type\":\"integer\"}]},\"maxItems\":2,\"type\":\"array\"}},\"required\":[\"name\",\"kind\",\"binding\",\"dtype\",\"shape\"],\"type\":\"object\"}]},\"maxItems\":2,\"minItems\":1,\"type\":\"array\"},\"ir_version\":{\"const\":2},\"nodes\":{\"items\":{\"oneOf\":[{\"additionalProperties\":false,\"properties\":{\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"name\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"input\"}},\"required\":[\"id\",\"op\",\"name\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"dtype\":{\"const\":\"bool\"},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"literal\"},\"value\":{\"type\":\"boolean\"}},\"required\":[\"id\",\"op\",\"dtype\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"dtype\":{\"const\":\"float32\"},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"literal\"},\"value\":{\"description\":\"Finite serde_json numeric literal. Retained i64/u64 representations must lie in [-9007199254740992,9007199254740992]; finite f64 representations retain their full range. Upstream parsing can round integer tokens outside i64/u64 to f64; their original spelling cannot be recovered. The native factory enforces representation-dependent validation; this value-level JSON Schema cannot express it.\",\"exclusiveMaximum\":3.4028235677973366e+38,\"exclusiveMinimum\":-3.4028235677973366e+38,\"type\":\"number\"}},\"required\":[\"id\",\"op\",\"dtype\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"dtype\":{\"const\":\"float64\"},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"literal\"},\"value\":{\"description\":\"Finite serde_json numeric literal. Retained i64/u64 representations must lie in [-9007199254740992,9007199254740992]; finite f64 representations retain their full range. Upstream parsing can round integer tokens outside i64/u64 to f64; their original spelling cannot be recovered. The native factory enforces representation-dependent validation; this value-level JSON Schema cannot express it.\",\"type\":\"number\"}},\"required\":[\"id\",\"op\",\"dtype\",\"value\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"function\":{\"enum\":[\"neg\",\"abs\",\"sqrt\",\"log\",\"exp\",\"logical_not\"]},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"input\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"unary\"}},\"required\":[\"id\",\"op\",\"function\",\"input\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"function\":{\"enum\":[\"add\",\"subtract\",\"multiply\",\"divide\",\"pow\",\"equal\",\"not_equal\",\"less\",\"less_equal\",\"greater\",\"greater_equal\",\"logical_and\",\"logical_or\",\"logical_xor\"]},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"left\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"binary\"},\"right\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"}},\"required\":[\"id\",\"op\",\"function\",\"left\",\"right\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"condition\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"if_false\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"if_true\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"where\"}},\"required\":[\"id\",\"op\",\"condition\",\"if_true\",\"if_false\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"axis\":{\"anyOf\":[{\"type\":\"null\"},{\"enum\":[0,1]}],\"default\":null},\"function\":{\"enum\":[\"sum\",\"mean\",\"min\",\"max\"]},\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"input\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"keepdims\":{\"default\":false,\"type\":\"boolean\"},\"op\":{\"const\":\"reduce\"},\"skip_nulls\":{\"default\":false,\"type\":\"boolean\"}},\"required\":[\"id\",\"op\",\"function\",\"input\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"input\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"min_periods\":{\"default\":1,\"maximum\":18446744073709551615,\"minimum\":1,\"type\":\"integer\"},\"numerical_profile\":{\"default\":\"stable_v1\",\"enum\":[\"stable_v1\",\"stable_v2\"]},\"op\":{\"const\":\"rolling_mean\"},\"window\":{\"maximum\":18446744073709551615,\"minimum\":1,\"type\":\"integer\"}},\"required\":[\"id\",\"op\",\"input\",\"window\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"input\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"min_periods\":{\"default\":1,\"maximum\":18446744073709551615,\"minimum\":1,\"type\":\"integer\"},\"op\":{\"const\":\"ewma\"},\"span\":{\"maximum\":18446744073709551615,\"minimum\":1,\"type\":\"integer\"}},\"required\":[\"id\",\"op\",\"input\",\"span\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"left\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"matmul\"},\"right\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"}},\"required\":[\"id\",\"op\",\"left\",\"right\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"input\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"reshape\"},\"shape\":{\"items\":{\"maximum\":18446744073709551615,\"minimum\":0,\"type\":\"integer\"},\"maxItems\":2,\"type\":\"array\"}},\"required\":[\"id\",\"op\",\"input\",\"shape\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"id\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"input\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"op\":{\"const\":\"transpose\"}},\"required\":[\"id\",\"op\",\"input\"],\"type\":\"object\"}]},\"maxItems\":128,\"minItems\":1,\"type\":\"array\"},\"outputs\":{\"items\":{\"oneOf\":[{\"additionalProperties\":false,\"properties\":{\"attach_to\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"kind\":{\"const\":\"table\"},\"name\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"names\":{\"items\":{\"type\":\"string\"},\"minItems\":1,\"type\":\"array\",\"uniqueItems\":true},\"node\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"}},\"required\":[\"name\",\"kind\",\"node\",\"attach_to\",\"names\"],\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"dtype\":{\"enum\":[\"bool\",\"float32\",\"float64\"]},\"kind\":{\"const\":\"array\"},\"name\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"node\":{\"maxLength\":64,\"minLength\":1,\"pattern\":\"^[A-Za-z0-9_.-]+$\",\"type\":\"string\"},\"shape\":{\"items\":{\"anyOf\":[{\"type\":\"null\"},{\"maximum\":18446744073709551615,\"minimum\":0,\"type\":\"integer\"}]},\"maxItems\":2,\"type\":\"array\"}},\"required\":[\"name\",\"node\",\"dtype\",\"shape\",\"kind\"],\"type\":\"object\"}]},\"maxItems\":1,\"minItems\":1,\"type\":\"array\"}},\"required\":[\"ir_version\",\"inputs\",\"nodes\",\"outputs\"],\"type\":\"object\",\"x-calc-flow-max-compact-json-bytes\":65536,\"x-calc-flow-max-node-depth\":24}",
+    "options_schema": null,
+    "output_ports": [],
+    "partition_contract": "row_axis_independent",
+    "port_binding": "options",
+    "provider": "native",
+    "replay_safe": true,
+    "requires_watermark": false,
+    "state_layouts": [],
+    "state_version": null,
+    "stateful": false,
+    "supports_static_inputs": true,
+    "version": "1"
+  }
+]

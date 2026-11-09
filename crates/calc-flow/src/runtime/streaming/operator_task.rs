@@ -14,7 +14,7 @@ use super::{
     EnvelopeCost, StreamMessage, StreamMessageKind,
     context::{StreamTaskContext, wait_for_task_gate},
     entity_work::TaskEntityWorkClient,
-    failure::panic_message,
+    failure::{indicator_diagnostic::SafeIndicatorDiagnostic, panic_message},
     local_edge::{LocalEdgeOwner, OperatorEdgeReceiver, OperatorEdgeSender},
     metrics::MetricsRecorder,
     progress::{
@@ -98,7 +98,7 @@ pub(crate) enum OperatorCheckpointCommand {
 
 #[derive(Clone)]
 pub(crate) struct OperatorRestoreState {
-    pub(crate) snapshot: crate::OperatorStateSnapshot,
+    pub(crate) snapshot: Arc<crate::state::PreloadedSnapshot>,
     pub(crate) progress: BTreeMap<String, OperatorIngressManifestEntry>,
     pub(crate) output_frontier: Option<EventTime>,
     pub(crate) next_epoch: Epoch,
@@ -616,8 +616,29 @@ async fn run_retained_operator_task(
     )
     .await
     .and_then(std::convert::identity);
+    let indicator_diagnostic = result.as_ref().err().and_then(|error| {
+        retained
+            .inputs
+            .as_ref()
+            .and_then(|inputs| indicator_error(&inputs.node_id, &inputs.operator, error))
+    });
     let retained = result.is_err().then_some(retained);
-    RetainedTaskResult { result, retained }
+    RetainedTaskResult {
+        indicator_diagnostic,
+        result,
+        retained,
+    }
+}
+
+fn indicator_error(
+    node_id: &str,
+    operator: &CompiledStreamOperator,
+    error: &CalcFlowError,
+) -> Option<SafeIndicatorDiagnostic> {
+    let CompiledStreamOperator::Rolling(operator) = operator else {
+        return None;
+    };
+    SafeIndicatorDiagnostic::from_rolling(node_id, operator, error)
 }
 
 async fn run_retained_body(
@@ -653,7 +674,7 @@ async fn run_retained_body(
             let operator = CheckpointWorkOperator::from_compiled(operator);
             let request = SqlRestoreRequest {
                 operator,
-                snapshot: std::mem::take(&mut restored.snapshot),
+                snapshot: crate::state::PreloadedSnapshot::take_legacy(&mut restored.snapshot)?,
                 identity: SqlWorkIdentity {
                     node_id: frame.node_id.clone(),
                     node_order: client.node_order,
@@ -814,12 +835,17 @@ async fn reset_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Res
     match &inputs.operator {
         CompiledStreamOperator::StreamJoin(_) => reset_join_metadata(inputs, task_id).await,
         CompiledStreamOperator::StreamAsofJoin(_) => reset_managed_asof(inputs, task_id).await,
-        CompiledStreamOperator::External(_) => reset_external_operator(inputs, task_id).await,
+        CompiledStreamOperator::External(_) => reset_async_operator(inputs, task_id).await,
+        CompiledStreamOperator::Rolling(operator)
+            if operator.state_layout_version() == crate::ROLLING_INDICATOR_STATE_LAYOUT_VERSION =>
+        {
+            reset_async_operator(inputs, task_id).await
+        }
         _ => reset_legacy_operator(inputs, task_id),
     }
 }
 
-async fn reset_external_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<()> {
+async fn reset_async_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<()> {
     inputs.context.bind_task_id(task_id);
     let restore = inputs.restore.as_ref().expect("restore presence checked");
     let context = StreamOperatorContext::new(inputs.context.job(), &inputs.node_id, None);
@@ -857,7 +883,7 @@ async fn reset_managed_asof(inputs: &mut OperatorTaskInputs, task_id: TaskId) ->
         restore.output_frontier,
     )?
     .snapshot()?;
-    let snapshot = std::mem::take(&mut restore.snapshot);
+    let snapshot = crate::state::PreloadedSnapshot::take_legacy(&mut restore.snapshot)?;
     restore_asof_managed(
         &mut inputs.operator,
         snapshot,
@@ -895,7 +921,11 @@ async fn reset_join_metadata(inputs: &mut OperatorTaskInputs, task_id: TaskId) -
             unreachable!("Join dispatch checked");
         };
         operator
-            .restore_managed_snapshot(&mut restore.snapshot, job, Some(task_id))
+            .restore_managed_snapshot(
+                crate::state::PreloadedSnapshot::legacy_mut(&mut restore.snapshot)?,
+                job,
+                Some(task_id),
+            )
             .await
     };
     match AssertUnwindSafe(operation).catch_unwind().await {
@@ -969,7 +999,7 @@ pub(super) async fn restore_terminal_asof<'a>(
         OperatorInputProgress::restore(ingresses, &restore.progress, restore.output_frontier)?;
     restore_asof_managed(
         operator,
-        std::mem::take(&mut restore.snapshot),
+        crate::state::PreloadedSnapshot::take_legacy(&mut restore.snapshot)?,
         inputs.snapshot()?,
         restore.output_frontier,
         job,
@@ -1013,7 +1043,11 @@ pub(super) async fn restore_terminal_owned_join<'a>(
         });
     };
     operator
-        .restore_managed_snapshot(&mut restore.snapshot, job, None)
+        .restore_managed_snapshot(
+            crate::state::PreloadedSnapshot::legacy_mut(&mut restore.snapshot)?,
+            job,
+            None,
+        )
         .await?;
     operator.validate_terminal_recovery_state()?;
     job.check_cancelled()?;
@@ -4473,7 +4507,7 @@ pub(super) mod tests {
             let snapshot = operator.checkpoint(crate::Epoch::INITIAL).unwrap();
             let output_port = operator.output_ports()[0].clone();
             let restore = restored.then(|| OperatorRestoreState {
-                snapshot,
+                snapshot: Arc::new(crate::state::PreloadedSnapshot::uncredited(snapshot)),
                 progress: BTreeMap::from([
                     (
                         "left".into(),
@@ -4530,10 +4564,12 @@ pub(super) mod tests {
             observed_watermark: Arc::clone(&observed_watermark),
         };
         let restore = OperatorRestoreState {
-            snapshot: crate::OperatorStateSnapshot {
-                inline_metadata: BTreeMap::from([("restored".into(), serde_json::json!(true))]),
-                segments: BTreeMap::new(),
-            },
+            snapshot: Arc::new(crate::state::PreloadedSnapshot::uncredited(
+                crate::OperatorStateSnapshot {
+                    inline_metadata: BTreeMap::from([("restored".into(), serde_json::json!(true))]),
+                    segments: BTreeMap::new(),
+                },
+            )),
             progress: BTreeMap::from([(
                 "input".into(),
                 crate::OperatorIngressManifestEntry {
@@ -4603,7 +4639,9 @@ pub(super) mod tests {
                 alignment_fault: None,
             }),
             Some(OperatorRestoreState {
-                snapshot: crate::OperatorStateSnapshot::default(),
+                snapshot: Arc::new(crate::state::PreloadedSnapshot::uncredited(
+                    crate::OperatorStateSnapshot::default(),
+                )),
                 progress: BTreeMap::from([(
                     "input".into(),
                     crate::OperatorIngressManifestEntry {
@@ -4651,7 +4689,9 @@ pub(super) mod tests {
             output_port,
             None,
             Some(OperatorRestoreState {
-                snapshot: crate::OperatorStateSnapshot::default(),
+                snapshot: Arc::new(crate::state::PreloadedSnapshot::uncredited(
+                    crate::OperatorStateSnapshot::default(),
+                )),
                 progress: BTreeMap::from([(
                     "other".into(),
                     crate::OperatorIngressManifestEntry {
@@ -5110,3 +5150,25 @@ pub(super) mod tests {
 #[cfg(feature = "benchmark-internals")]
 #[path = "operator_task/benchmark_replay.rs"]
 pub(crate) mod benchmark_replay;
+
+#[cfg(test)]
+mod indicator_error_tests {
+    use super::{CompiledStreamOperator, indicator_error};
+    use crate::{
+        CalcFlowError, runtime::streaming::failure::indicator_diagnostic::tests::operator,
+    };
+
+    #[test]
+    fn only_actual_builtin_indicator_tasks_receive_numerical_evidence() {
+        let error = CalcFlowError::InvalidArgument {
+            field: "high".into(),
+            message: r#"rolling node "features", ordered position 0: must be greater than or equal to low"#.into(),
+        };
+        let builtin = CompiledStreamOperator::Rolling(operator(true));
+        assert!(indicator_error("features", &builtin, &error).is_some());
+        let external = CompiledStreamOperator::External(Box::new(operator(true)));
+        assert!(indicator_error("features", &external, &error).is_none());
+        let legacy = CompiledStreamOperator::Rolling(operator(false));
+        assert!(indicator_error("features", &legacy, &error).is_none());
+    }
+}

@@ -910,6 +910,1261 @@ which own backend retention-history maintenance. Existing examples, selected
 checks and final implementation review must verify the complete feature under
 normal repository policy; this clarification supplies no performance claim.
 
+## 8. A7 approved indicator contract
+
+Status: **Design Pass after revision**, archived as the authoritative A7
+surface and numerical contract for `native-array-runtime`. The reviewed input
+was titled `a7-indicators-api.md`, 1,206 lines, SHA-256
+`9016f0c67d219490a80a9750d316fa5256373f3355a32d3eb27e982913e84fee`.
+The [focused final review](../critiques/native-array-runtime.md#a7-indicator-contract-focused-review)
+closed two blockers and four Table clarifications. The [parent specification](../specs/native-array-runtime.md)
+incorporates the Table callback, numerical-oracle and budget qualifications.
+
+This archive changes heading scope, review metadata, historical source paths
+and adoption wording only; the approved actionable contract below is preserved.
+Earlier sections remain historical contracts; this section supplies their
+previously deferred A7 design. It is not a claim of implementation, executed
+acceptance tests, CI or merge readiness. A7 implementation still depends on
+completed A6b factory, worker ownership and managed recovery work.
+
+The original IEEE operation order is retained. The orchestrator accepted the
+narrow use of existing Rolling StateBudget.max_bytes as an indicator-node peak
+limit; its current default and lack of a Python/project override remain
+explicit below. No TA-Lib code dependency is introduced.
+
+### Audiences
+
+- Rust users: synchronous calculations and owned sequence states with aligned,
+  immutable float64 output, bounded storage and atomic errors.
+- Python users: `calc_flow.array` eager functions and `ts` table declarations,
+  with the same algorithms in finite execution and managed streaming.
+- Integrators: strict project declarations, truthful native capabilities and
+  versioned state that survives a new job and process.
+
+This design uses calc-flow implementations only. It adds no TA-Lib dependency,
+FFI, vendored implementation, test import, or universal indicator framework.
+The three indicators are specific extensions of the existing native numerical
+module and RollingOperator. Existing `ts.ema` and `ts.macd` remain unchanged.
+
+### Surface today and source findings
+
+The source baseline inspected is `c9e39cea33f7661062ba50640ddbfa30ba7a3f5b`.
+Repository-relative source references below refer to that revision. Sources are
+`docs/introduction.md`, the canonical native-array-runtime specification/API,
+`crates/calc-flow/src/{lib.rs,array/,operator/rolling.rs,operator/rolling/}`,
+`python/calc_flow/{array.py,_native_array.py,_native.pyi,symbolic/ops.py}`, the
+symbolic analyzer/lowerer, error projection, and native array/state examples.
+The approved A6 contracts in sections 6/7 above and their
+[review archive](../critiques/native-array-runtime.md) were also consulted.
+This is source research, not a new test or performance result.
+
+Current Rust exposes `ewma(FloatView, EwmaOptions, &ArrayExecutionOptions)`,
+`EwmaState`, `RollingMeanState`, immutable `ArrayView`/`NativeArray` and the
+existing table RollingOperator. Python eager functions take `NativeArray`.
+A6b's approved sequence identity is `native:array_sequence@1`, with fixed
+required array ports `input` and `output`, one ordered dynamic ingress,
+capability schema 5, semantic state version 1 and layout 1.
+
+Facts that constrain MACD:
+
+- `symbolic/ops.py:611` implements `ts.macd` as two EWMA expressions and a
+  subtraction. It **already rejects `fast_span >= slow_span`**. Its defaults
+  are 12, 26 and `min_periods=1`; both EWMA readouts get that same minimum.
+- `ts.ema` delegates to `ts.ewma`. EWMA accepts positive span and positive
+  min_periods; min_periods may exceed span. Its first valid sample seeds it.
+- Native/table EWMA uses `previous + alpha * (sample - previous)`, with
+  `alpha = 2.0 / (span as f64 + 1.0)`, and direct replacement at span one.
+  Null and input NaN do not advance it. After warm-up they carry its output.
+  Inf and arithmetic-generated NaN are valid state/output.
+- Existing finance-reference tests explicitly show that a carried MACD line
+  updates an outer EWMA on a missing original price. The new signal must do so.
+- Table EWMA accepts Arrow signed/unsigned integers of widths 8/16/32/64 and
+  Float32/Float64. Integer samples use the existing conversion to float64.
+  Direct native arrays accept only their supported floating input types here.
+- `RollingOutputSpec` is a public, currently exhaustive Rust enum. Adding
+  variants is a Rust source-compatibility change for exhaustive matches; this
+  is called out below rather than described as universally nonbreaking.
+
+### Approved Rust surface
+
+Export the following from `calc_flow::array`. Options have private fields,
+getters and consuming setters. All fallible functions return `calc_flow::Result`.
+These signatures are approved for implementation; approval does not make them
+current callable APIs.
+
+```rust
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RsiOptions { /* period: u64 */ }
+impl RsiOptions {
+    pub fn new(period: u64) -> Result<Self>;
+    pub const fn period(&self) -> u64;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AtrOptions { /* period: u64 */ }
+impl AtrOptions {
+    pub fn new(period: u64) -> Result<Self>;
+    pub const fn period(&self) -> u64;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MacdOptions { /* five private u64 parameters */ }
+impl Default for MacdOptions { /* 12, 26, 9, 1, 1 */ }
+impl MacdOptions {
+    pub fn new(fast_span: u64, slow_span: u64, signal_span: u64) -> Result<Self>;
+    pub fn with_min_periods(self, min_periods: u64) -> Result<Self>;
+    pub fn with_signal_min_periods(self, signal_min_periods: u64) -> Result<Self>;
+    pub const fn fast_span(&self) -> u64;
+    pub const fn slow_span(&self) -> u64;
+    pub const fn signal_span(&self) -> u64;
+    pub const fn min_periods(&self) -> u64;
+    pub const fn signal_min_periods(&self) -> u64;
+}
+
+pub struct MacdOutputs { /* immutable NativeArray owners, private fields */ }
+impl MacdOutputs {
+    pub const fn line(&self) -> &NativeArray;
+    pub const fn signal(&self) -> &NativeArray;
+    pub const fn histogram(&self) -> &NativeArray;
+    pub fn into_arrays(self) -> (NativeArray, NativeArray, NativeArray);
+}
+
+pub fn rsi(
+    input: ArrayView<'_>, options: RsiOptions,
+    execution: &ArrayExecutionOptions,
+) -> Result<NativeArray>;
+pub fn atr(
+    high: ArrayView<'_>, low: ArrayView<'_>, close: ArrayView<'_>,
+    options: AtrOptions, execution: &ArrayExecutionOptions,
+) -> Result<NativeArray>;
+pub fn macd_components(
+    input: ArrayView<'_>, options: MacdOptions,
+    execution: &ArrayExecutionOptions,
+) -> Result<MacdOutputs>;
+
+pub struct RsiState { /* private owned state */ }
+impl RsiState {
+    pub fn new(options: RsiOptions, state: ArrayStateOptions) -> Result<Self>;
+    pub fn process(
+        &mut self, input: ArrayView<'_>, execution: &ArrayExecutionOptions,
+    ) -> Result<NativeArray>;
+    pub fn reset(&mut self);
+    pub fn state_bytes(&self) -> usize;
+}
+
+pub struct AtrState { /* private owned state */ }
+impl AtrState {
+    pub fn new(options: AtrOptions, state: ArrayStateOptions) -> Result<Self>;
+    pub fn process(
+        &mut self, high: ArrayView<'_>, low: ArrayView<'_>, close: ArrayView<'_>,
+        execution: &ArrayExecutionOptions,
+    ) -> Result<NativeArray>;
+    pub fn reset(&mut self);
+    pub fn state_bytes(&self) -> usize;
+}
+
+pub struct MacdState { /* one owner of all three recurrences */ }
+impl MacdState {
+    pub fn new(options: MacdOptions, state: ArrayStateOptions) -> Result<Self>;
+    pub fn process(
+        &mut self, input: ArrayView<'_>, execution: &ArrayExecutionOptions,
+    ) -> Result<MacdOutputs>;
+    pub fn reset(&mut self);
+    pub fn state_bytes(&self) -> usize;
+}
+```
+
+All parameters are positive exact u64 values. MACD also requires fast_span to
+be less than slow_span, preserving the existing `ts.macd` constraint. Neither
+minimum is capped by a span; signal_span has no relation to either other span.
+RSI/ATR have no separate min_periods, adjust, seed or missing-value option:
+their period fixes the stated warm-up. Requiring period follows existing
+`rolling_mean(window=...)`/`ewma(span=...)`; there is no hidden period-14 default.
+
+Every new eager/state input must be a rank-one Float32/Float64 view, including
+`[0]`; scalar, Boolean and matrix views fail. ArrayView is deliberate: FloatView
+alone loses the rank that the owned-state contract must validate. ATR requires
+equal lengths, permits each operand to have either float dtype, and never
+broadcasts. Each valid f32 sample widens exactly to f64 before arithmetic;
+f64 bits remain unchanged. Direct states are not bound to a dtype across calls.
+
+All results are rank-one float64 arrays of the same length as input. Invalid
+slots contain +0.0 and false validity; valid signed zero is preserved unless
+the RSI/ATR nonnegative normalization below specifies +0.0. Each new function
+returns an explicit validity bitmap, including an empty bitmap for `[0]`.
+Outputs outlive inputs/state; no caller-owned value or bitmap is modified.
+
+The three owned states have the A6a lifecycle: no public Clone, serialization,
+snapshot bytes, restore, transaction hooks or async CPU aliases. `reset` keeps
+options/limits, clears numerical state and counters, and cannot fail. Eager
+functions start fresh using the same private controlled transitions; they do
+not inherit an independent state cap. Failed calls leave committed values,
+counters and charges unchanged. Empty calls produce empty outputs without
+advancing or resetting state, but still validate shape, dtype and limits.
+
+### Approved Python surface
+
+Public eager exports are under `calc_flow.array` (`cfa` below), matching the
+current module. One generic immutable data container is exported as
+`calc_flow.MacdOutputs` and re-exported by `calc_flow.array`; it holds either
+three array owners or three ColumnExpr references. Implement with the existing
+Python 3.9-compatible frozen/slot dataclass helper and `Generic[TypeVar]`.
+
+```python
+@dataclass(frozen=True, slots=True)
+class MacdOutputs(Generic[T]):
+    line: T
+    signal: T
+    histogram: T
+
+# calc_flow.array
+def rsi(
+    array: NativeArray, *, period: int,
+    execution: ArrayExecutionOptions | None = None,
+) -> NativeArray: ...
+def atr(
+    high: NativeArray, low: NativeArray, close: NativeArray, *, period: int,
+    execution: ArrayExecutionOptions | None = None,
+) -> NativeArray: ...
+def macd_components(
+    array: NativeArray, *, fast_span: int = 12, slow_span: int = 26,
+    signal_span: int = 9, min_periods: int = 1, signal_min_periods: int = 1,
+    execution: ArrayExecutionOptions | None = None,
+) -> MacdOutputs[NativeArray]: ...
+
+# Methods on the existing calc_flow.ts declaration namespace.
+def rsi(value: ColumnExpr, /, *, period: int) -> ColumnExpr: ...
+def atr(
+    high: ColumnExpr, low: ColumnExpr, close: ColumnExpr, /, *, period: int,
+) -> ColumnExpr: ...
+def macd_components(
+    value: ColumnExpr, /, *, fast_span: int = 12, slow_span: int = 26,
+    signal_span: int = 9, min_periods: int = 1, signal_min_periods: int = 1,
+) -> MacdOutputs[ColumnExpr]: ...
+```
+
+Only native owners enter eager functions. Existing `from_arrow`/`from_numpy`
+are the explicit import boundaries, so mutable arrays are frozen before GIL
+release or worker transfer. Arrow-to-native-to-Arrow requires no NumPy/JAX.
+Python bool, negative/zero, fractional, and >u64::MAX counts are rejected before
+native conversion; Rust revalidates every parameter. There are no Python state
+handle classes, high-level array streams, mixed Program outputs or indicators
+inside array_expr IR in this delivery. Table `collect`/`stream` retain their
+existing return types and lifecycle.
+
+The private binding/stub contract is concrete:
+
+```python
+def _native_array_rsi(
+    array: NativeArray, period: int, max_elements: int, max_allocation_bytes: int,
+) -> NativeArray: ...
+def _native_array_atr(
+    high: NativeArray, low: NativeArray, close: NativeArray, period: int,
+    max_elements: int, max_allocation_bytes: int,
+) -> NativeArray: ...
+def _native_array_macd_components(
+    array: NativeArray,
+    options: tuple[int, int, int, int, int],
+    max_elements: int, max_allocation_bytes: int,
+) -> tuple[NativeArray, NativeArray, NativeArray]: ...
+```
+
+The MACD tuple order is fast_span, slow_span, signal_span, min_periods,
+signal_min_periods. The adapter exposes named arguments and wraps returned
+owners in MacdOutputs. No mapping, source text, import path or callback enters
+these options. PyO3 reuses existing exception translation and detaches only
+after retaining all immutable inputs and validating admission.
+
+### Numerical contract: RSI and ATR
+
+Numeric semantics version is 1 for each new indicator. The following operation
+order is part of the contract. Use individual float64 operations with IEEE
+round-to-nearest ties-to-even, no reassociation, no FMA substitution, no
+fast-math and no alternative seed hidden behind a numerical profile.
+Finite underflow, including a rounded zero, is allowed. A nonfinite result at
+any required finite arithmetic step is an error, not a null or saturation.
+Underflow can materially change RSI's normalized ratio, even when the exact
+real-number gain/loss average is balanced. In particular, for period 2 and
+prices `[0.0, 2^-1074, 0.0]`, the required output is `[null, null, 100.0]`:
+the second gain update retains the minimum subnormal, while the second loss
+update rounds to zero. The exact rational seed would yield 50. This is an
+accepted consequence of the specified IEEE algorithm, not an error or a
+reason to change the algorithm or enlarge a global tolerance. The Fraction
+accuracy check below deliberately excludes this domain.
+
+#### Missing values, validation and counters
+
+Read validity before reading a payload slot. A null payload must not be
+converted, tested for finiteness, compared or otherwise inspected. A valid NaN
+is missing. A valid positive or negative Inf is an error.
+
+For ATR, at each row inspect all **valid** operands in high, low, close order
+for Inf before deciding whether any operand is missing. A valid Inf must not
+hide behind a null/NaN in another operand. Whenever high and low are both valid
+and finite, require high >= low and finite `high - low`, even if close is
+missing or this is the first row of a segment. This is an explicit input-domain
+check; the first complete row still contributes no true-range sample. When
+either high or low is missing, do not compare or subtract that pair.
+
+A missing RSI price or any missing ATR operand emits null and resets the entire
+segment: previous price/close absent, seed count zero, and all means +0.0. The
+next complete finite row only establishes the previous price/close. Missing
+rows advance total processed positions, but not any warm-up count.
+
+Each state has a checked total processed-position u64. Segment sample count is
+the number of differences/TRs used for seeding, capped at period once ready.
+Never allocate period history or form `period + 1` in u64. With period=1,
+the second complete row is the first result and each later sample replaces
+the respective means directly. Period=u64::MAX is valid, constant-space and
+cannot finish warm-up before the total-position counter is exhausted: the
+first row uses a position without supplying a difference/TR. A further
+nonempty call then fails atomically; an empty call still succeeds if admitted.
+This unusual but precise boundary is documented, not silently clamped.
+
+#### Mean seed and Wilder transition
+
+Gains, losses and true ranges are nonnegative finite float64 samples. Normalize
+their zero to +0.0. For the kth sample of the seed:
+
+```text
+k == 1: mean = sample
+k > 1:  difference = sample - mean
+        increment = difference / (k as f64)
+        mean = mean + increment
+```
+
+At k=period the first output becomes valid. Later samples use the same three
+operations with denominator `(period as f64)`; period=1 uses direct assignment.
+The u64-to-f64 conversion is the ordinary correctly rounded conversion, including
+counts above 2^53. Check every difference, increment and updated mean for finite
+representation. No raw running sum, `(period - 1) * mean` product, or unbounded
+history is used. This avoids sum/product overflow for representable nonnegative
+means without changing the specified price-difference/TR overflow errors.
+
+#### RSI
+
+After the previous price exists, compute `delta = price - previous_price` and
+reject a nonfinite delta. Set gain to delta if positive, otherwise +0; loss
+to -delta if negative, otherwise +0. Update both means as specified above,
+then replace previous price. Warm-up needs period differences after the first
+complete price, so a no-missing result first appears at zero-based index period.
+
+For ready average gain G and average loss L:
+
+```text
+G == 0 and L == 0: RSI = 50
+L == 0 and G > 0:  RSI = 100
+G == 0 and L > 0:  RSI = 0
+G >= L > 0:       ratio = L / G; RSI = 100 / (1 + ratio)
+0 < G < L:        ratio = G / L; RSI = 100 * (ratio / (1 + ratio))
+```
+
+Use that parenthesization. The ratio is at most one; do not compute an
+overflowing G/L, form G+L, or clamp a nonfinite result. Every valid result is
+finite and in [0,100]. The flat result 50 is this API's explicit contract.
+`[1e308, -1e308, 1e308]` must fail at the first unrepresentable difference,
+even during warm-up, and leave a previously existing state unchanged.
+
+#### ATR
+
+After a complete row has established previous close, compute, in order:
+
+```text
+range = high - low                         # already domain-validated
+high_gap = high - previous_close
+low_gap = low - previous_close
+TR = max(range, abs(high_gap), abs(low_gap))
+```
+
+Check the two signed gap differences before abs. Use comparisons over these
+finite nonnegative values and normalize zero to +0.0. Feed TR to the seed or
+Wilder transition and then replace previous close. Close need not lie within
+[low,high]. A no-missing first result is at zero-based index period.
+
+`high=1e308, low=-1e308` fails the range domain check even on a first row or
+with missing close. A finite current high/low and an opposite extreme previous
+close can fail a gap subtraction separately. Neither case emits Inf ATR or
+commits any partial candidate. These checks are not applied to MACD.
+
+### Numerical contract: full MACD
+
+For each position, literally compose these operations using the shared native
+EWMA transition and the existing missing normalization:
+
+```text
+fast = EWMA(price, fast_span, min_periods)
+slow = EWMA(price, slow_span, min_periods)
+line = fast - slow                         # null if either is null
+signal = EWMA(line, signal_span, signal_min_periods)
+histogram = line - signal                  # null if either is null
+```
+
+An original null/NaN price skips fast/slow updates but may yield a carried valid
+line. That line **is still offered to signal**. A valid NaN line is normalized
+to missing by EWMA, so it does not increment signal's valid-sample count;
+signal may carry its prior valid result. A valid Inf line updates signal.
+Histogram subtraction preserves validity of operands, so NaN arithmetic is
+valid NaN, not null. Finite-input overflow follows existing EWMA/subtraction
+IEEE behavior rather than becoming an RSI/ATR-style error.
+
+All three recurrences advance in one owned candidate even if only line or
+histogram is consumed. Signal's valid count may exceed the original price's
+valid count because carried lines count. For finite, nonmissing, nonoverflowing
+inputs, line first becomes valid at min_periods-1 and signal/histogram at
+min_periods+signal_min_periods-2. These are descriptive mathematical indices;
+use checked counters, not unchecked parameter addition, in implementation.
+
+`macd_components(...).line` must match existing `ts.macd` on their common input
+domain, and Table MACD accepts exactly the current integer/float numeric types
+listed above. Table integer conversion keeps the existing f64 rounding contract;
+it is not a new integer-exact array API. New table RSI/ATR accept Float32/Float64
+only, with mixed floating ATR columns allowed. All derived columns are nullable
+Float64. No TA-Lib lookback, adjusted seed, RSI reset rule or finite-only filter
+is imposed on old or new MACD.
+
+### Table declarations, shared lowering and schema
+
+The new ts functions require the existing declared entity_by, event_time and
+sequence_by order and a common table row lineage for every operand. ATR cannot
+combine columns from different tables or differently filtered row sets.
+Existing materialization of column expressions occurs before the stateful
+stage; exact input schemas and unsupported temporal compositions still fail
+through the analyzer/compile boundary. No new table engine is introduced.
+
+Extend the existing Rust `RollingOutputSpec` with these **new** variants:
+
+```rust
+Rsi {
+    primitive_version: u32, input: String, output: String, period: u64,
+},
+Atr {
+    primitive_version: u32, high: String, low: String, close: String,
+    output: String, period: u64,
+},
+MacdComponent {
+    primitive_version: u32, input: String, output: String,
+    fast_span: u64, slow_span: u64, signal_span: u64,
+    min_periods: u64, signal_min_periods: u64, component: MacdComponent,
+},
+
+// Export with the other rolling declaration types at the crate root.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MacdComponent { Line, Signal, Histogram }
+```
+
+Serialized kinds are `rsi`, `atr`, `macd_component`; primitive_version is
+exactly 1. Period is required. MACD spans and minima use the defaults from the
+Python surface when omitted in JSON and serialize canonically to their
+normalized values. Unknown fields, invalid counts and unsupported versions
+fail closed. Do not add these primitives to fused `RollingFloatPrimitiveSpec`
+as another route; existing post-stage row arithmetic is sufficient.
+
+Each Python MACD reference is an ordinary immutable component node with the
+same value node and five parameters plus its component selector. Its owner key
+excludes component/output name and includes input lineage, temporal order,
+all five parameters and numeric semantics version. Lowering emits only the
+consumed column declarations, but the compiled owner always contains fast,
+slow and signal state. The Rust compiler groups matching declarations by that
+same state identity, independently of the Python frontend. Duplicate aliases
+may read one component without advancing it twice.
+
+All components in one Program with the same owner key are evaluated in one
+physical RollingOperator before output branches fork. Extend the existing
+shared-state lowering for this specific group; do not produce three separately
+owned stages or duplicate a state owner per logical Program output. The node's
+single table output can contain any requested subset of columns. No consumer
+is required for the other components; they remain state, not extra required
+ports. A Program consuming none of the three has no live owner.
+
+The existing table `input`/`output` ports, optional late diagnostic port,
+event-time ordering, duplicate identity rules, lateness policy, watermarks and
+delivery proofs remain the lifecycle contract. `with_late_output` treats one
+MACD owner as one stateful stage and keeps its existing operand/upstream-stage
+restrictions. Late rows dropped or routed to `late` do not update indicator
+state; they follow the existing late policy, not an indicator retry path.
+
+For admitted rows, Inf and ATR high/low domain checks happen before a new input
+Batch is accepted into the table reorder buffer. Sequence-dependent delta/gap
+checks happen when the ordered row is actually finalized. That may occur on a
+later watermark after its original Batch was buffered. Such an error aborts
+the current transition and job; it cannot retroactively unaccept an earlier
+buffered Batch. An unordered input Batch cannot be completely numerically
+validated before its neighbors arrive. Direct/array-sequence calls validate
+and evaluate the whole ordered chunk before emitting any output.
+
+**A7 adds a required preparation transaction for indicator-containing Table
+nodes on both ordered and reordered paths.** Do not assume every existing
+rolling branch already supplies it: baseline on_watermark/on_end can take
+reordered rows out of the buffer before numerical preparation fails. For one
+triggering process/watermark/EOF callback, retain the original numerical state,
+pending rows/order proof, charge, output sequence, metrics and finality frontier
+until the whole preparation succeeds. Its candidate covers every row that
+this callback would finalize, including all output chunks. Complete all
+arithmetic, output construction and edge-size admission, sequence-count checks,
+candidate/peak admission and the final pre-emission cancellation check before
+**any** output from that callback escapes. Do not validate and emit a valid
+prefix before calculating a later chunk that could fail.
+
+A preparation error emits zero rows and leaves those committed fields and
+pending rows unchanged. A detached/taken buffer may be used internally only
+with ownership that restores it on every preparation failure, including an
+aborted awaiter; its bytes remain charged while detached. Include the ordered
+last-identity/order-proof state, last_input_watermark, ended flag and both main
+and late output sequences in this invariant. For a zero-output callback, the
+same preparation checks precede the frontier/EOF commit. Any off-task
+preparation owns an isolated candidate and cannot commit after waiter loss.
+
+After preparation, existing output-emission/delivery rules still apply. A
+failure after one of several prepared chunks was accepted fails the job and
+does not promise to retract that chunk. After the final successful emission,
+commit prepared numerical/buffer/sequence/frontier state without another
+fallible check or await. The zero-output case uses the same nonfallible commit.
+
+Correcting and retrying an input chunk is promised only when that chunk was
+rejected before acceptance. A bad row already accepted into a Table buffer
+cannot be replaced by retrying its watermark/EOF callback: it stays pending
+when preparation fails, and the managed job follows its failure/recovery and
+source replay contract. Tests may retry a cancellation/admission-only callback
+after its cause is removed, but must not pretend a numerical buffered row was
+never accepted. The parent A7 specification qualifies “whole batch” with this
+Table callback boundary while retaining full direct and single-ordered-chunk
+atomicity.
+
+Keep `RollingValuePolicy::StatefulNumericV1` for existing declarations. Its
+existing per-primitive rules remain unchanged; the new primitive_version=1
+definitions specify RSI/ATR reset and MACD composition separately. Old
+StableV1/StableV2 behavior and counters are unchanged in mixed nodes; neither
+profile selects an alternative RSI/ATR/MACD algorithm.
+
+#### Versioned table state and intentional generated-schema changes
+
+- New constant `ROLLING_INDICATOR_STATE_LAYOUT_VERSION = 5` admits RSI/ATR and
+  every prior primitive. Use it only when an indicator needs it, or when the
+  caller explicitly selects it; old graphs retain their current layout and
+  canonical bytes. It retains layout-4 columnar dictionary, pending rows,
+  old primitive summaries and per-entity transition counts.
+- New `ROLLING_MACD_STATE_LAYOUT_VERSION = 6` additionally admits MACD groups.
+  RSI/ATR-only default to 5 after MACD ships. MACD-containing graphs use 6.
+  Versions 1-4 keep their exact readers/writers and fingerprint interpretation;
+  a new indicator in an old layout is rejected. Layout 5 rejects MACD.
+- Layouts 5/6 add nullable Binary `_indicator_state` after layout 4's fields,
+  and row-kind 5 for a unique `(entity_id, compiled_indicator_group)` record.
+  That row carries only entity_id, group and the indicator payload; unrelated
+  history/scalar/count fields are null. Legacy row kinds keep their meaning
+  and have null `_indicator_state`. Entity rows always include transition
+  counts. The exact zero/positive-transition inventory rule below determines
+  when indicator records are present; absence must not erase a finalized prefix.
+- Reuse the table state schema metadata, pipeline/operator identity, ordering,
+  key dictionary, pending-buffer and segment inventory checks. No indicator
+  reconstructs its recurrence from retained table history or a warm-up tail.
+- Project format and managed manifest remain 3; Rolling configuration version
+  remains 1. `schemas/project-v3.schema.json` intentionally gains the three
+  output variants, MacdComponent enum/defaults, and the documented new layout
+  range where generated. Matching schema generator fixtures and strict project
+  validation change in the same PR. Unrelated schema changes are a failure.
+- Existing project bytes/fingerprints do not acquire new default fields. New
+  options, component selection and layout enter the ordinary project hash;
+  grouped owner identity ignores output aliases only for state sharing. The
+  full pipeline fingerprint still distinguishes output routing/projections.
+
+Adding RollingOutputSpec variants breaks downstream exhaustive Rust matches.
+Release notes must explicitly name the new variants and require callers to add
+branches (or a deliberate fallback) when upgrading/recompiling. Do not also add
+`#[non_exhaustive]` to old types in this feature. Existing serialized graphs
+remain readable; older binaries reject new kinds/layouts. New state cannot be
+downgraded by changing a version tag; recover it with a supporting binary or
+replay inputs into a fresh compatible job.
+
+### Native ordered array stream
+
+Extend the existing sequence factory; do not add provider identities or extra
+asynchronous ingress ports. `input` and `output` remain required array ports
+without Arrow schemas, with Batch metadata preserved for every emitted Batch.
+The actual payload must be immutable NativeArray with the declared float dtype.
+
+| Kernel            | Input shape and order                      | Output shape and order                                    |
+|-------------------|--------------------------------------------|-----------------------------------------------------------|
+| rolling_mean/ewma | `[n]`, unchanged                           | float64 `[n]`, unchanged                                  |
+| rsi               | `[n]` price                                | float64 `[n]` RSI                                         |
+| atr               | packed row-major `[n,3]`: high, low, close | float64 `[n]` ATR                                         |
+| macd_components   | `[n]` price                                | packed row-major float64 `[n,3]`: line, signal, histogram |
+
+The ATR input is one synchronized row record per matrix row. It is not called
+OHLC because no open value is used. Reject width other than three, rank-one
+`[3*n]`, transpose/reinterpretation, mixed dtypes inside a matrix, static input,
+second ingress and any implicit zip. `[0,3]` is valid. The existing Matrix
+NativeArray constructor/import with explicit shape suffices; the adapter reads
+the packed rows directly without allocating three deinterleaved copies.
+
+MACD emits one packed Batch so a row's three components have one acceptance
+point and cannot be split across partial port emissions. It always computes
+and emits all three columns on this low-level surface. Table users select
+columns by name; direct eager users get MacdOutputs. A low-level sink may choose
+to use only one component after accepting the Batch, with no effect on state.
+`Batch.len()` remains n, while packed output element admission counts 3*n.
+Do not advertise `[n,3]` MACD output as acceptable vector input to another
+sequence operator without an explicit supported transformation.
+
+RSI/ATR PR adds **sequence IR2**, preserving IR1 unchanged. IR2 accepts all IR1
+kernels plus `{"function":"rsi","period":14}` and
+`{"function":"atr","period":14}`. MACD PR adds **IR3**, preserving IR1/2
+unchanged; IR3 additionally accepts:
+
+```json
+{
+  "ir_version": 3,
+  "input_dtype": "float64",
+  "kernel": {
+    "function": "macd_components",
+    "fast_span": 12,
+    "slow_span": 26,
+    "signal_span": 9,
+    "min_periods": 1,
+    "signal_min_periods": 1
+  }
+}
+```
+
+Required outer fields stay ir_version/input_dtype/kernel. Function is required;
+RSI/ATR period is required; omitted MACD parameters use the public defaults.
+Existing optional execution/state objects and defaults are unchanged. All
+grammar branches reject unknown keys and retain the 64 KiB/depth/duplicate-key
+and exact-integer guards from A6b. Old kernels retain numeric/layout identity 1
+even in IR2/3; new kernels choose their specified layouts below. The declared
+IR version is still part of the full project fingerprint.
+
+#### Capability and registration projection
+
+Capability schema stays **5**: its structural fields already express these
+operators. RSI/ATR extend sequence `state_layouts` to `[1,2]`; MACD extends
+it to `[1,2,3]`. Semantic `state_version=1` remains. No extra provider record
+or registration count is added. Registration snapshots/replay, descriptors,
+native admission and Python strict validators change together and continue
+to insert/rollback the native bundle atomically.
+
+Keep `native_sequence_vector@1` as the IR1 rule. Add
+`native_sequence_indicators@2` for the exact IR2 per-kernel shapes and
+`native_sequence_indicators@3` for IR3 shapes. Descriptor shape_rules lists
+the supported versioned alternatives; consumers must dispatch by ir_version
+and kernel, not infer that every kernel accepts every listed shape. The full
+options_json_schema has separate version branches and exact kernel unions.
+Unknown rule/version combinations fail closed. Do not weaken the old vector
+rule to accept arbitrary matrices or mark the sequence row-axis independent.
+
+All new sequence variants truthfully retain: stream-only, stateful,
+checkpointed_stateful, microbatch_invariant, deterministic/replay_safe,
+per_row_final, no watermark requirement, no static inputs, and
+single_ordered_sequence partition contract. Microbatch invariance concerns
+concatenated ordered positions, not identical Batch envelopes. Direct eager
+and table entry points do not imply array_expr/ArrayExpr indicator support.
+The table_array stateless bridge and all NumPy/JAX records remain unchanged.
+
+The **built-in rolling capability** is a separate required update in
+`python/calc_flow/capabilities.py`, its Rust/source projection where present,
+and `test_capability_catalog_reports_every_durable_state_layout`. Preserve
+existing supported layouts 1-4; advertise 5 only with the complete RSI/ATR PR,
+then 6 only with the complete MACD PR. On the inspected baseline the catalog
+still lists `(1,2)` although the runtime implements 3/4, so integration must
+reconcile the actual supported set: `(1,2,3,4,5)` after the first PR and
+`(1,2,3,4,5,6)` after the second. This is a rolling@1 inventory correction and
+extension, not a provider registration, capability structural-version change,
+or reason to alter sequence provider record counts. Keep the capability schema
+at the A6b version 5 and preserve the existing built-in semantic state version.
+
+### Exact state, codec and budget contract
+
+#### Numerical state and fixed charges
+
+Each direct/sequence state has these logical fields and deterministic charge:
+
+| Owner | Fields excluding immutable parameters                                     | Bytes |
+|-------|---------------------------------------------------------------------------|-------|
+| RSI   | positions, has_previous, seed_count, previous_price, mean_gain, mean_loss | 48    |
+| ATR   | positions, has_previous, seed_count, previous_close, mean_tr              | 40    |
+| MACD  | positions, fast_count/value, slow_count/value, signal_count/value         | 56    |
+
+Charge each flag as eight bytes. These charges exclude allocator/options/object
+overhead and are neither ABI sizes nor RSS. Each group is constant space;
+table entity/key/reorder-buffer storage remains separately budgeted. Constructor
+and reset retain exactly the stated fixed charge. No period-proportional reserve,
+three price histories, cached result vectors or alternative EMA seed is needed.
+
+For an owned call use A6's participating-peak rule:
+
+```text
+P = committed S + isolated candidate C + outputs O + scratch T
+  + distinct retained checkpoint/capture allocations K
+P <= execution.max_allocation_bytes
+C <= state.max_state_bytes
+```
+
+Count actual overlapping allocations, with checked arithmetic and reservation
+before allocation. Shared immutable storage is charged once per allocation
+owner; copied candidates and separate buffers count independently. These are
+the native-array execution/state limits. Table has no ArrayExecutionOptions;
+its exact independent mapping to the existing StateBudget is defined next.
+
+For direct MACD, max_elements counts the sum of all three returned lengths, 3*n;
+O includes three value buffers, three bitmaps and three rank-one shapes.
+Packed stream MACD also counts 3*n, with one bitmap of 3*n bits and rank-two
+shape. RSI/ATR count n. Actual allocated capacities, conversion/packing scratch
+and any staging buffers must fit too. Table may materialize only selected
+MACD columns while maintaining the full 56-byte recurrence. Eager calls admit
+their fresh candidate plus outputs/scratch without an independent state limit.
+Neither a retained capture nor a worker survives for free after waiter loss.
+
+#### Exact Table limit and compatibility boundary
+
+The sole Table limit used here is the `StateBudget` already owned by
+RollingOperator and set by `RollingOperator::set_state_budget`. Its
+`max_rows()` and `max_bytes()` are positive JSON-safe u64 values. The inspected
+`operator/state_budget.rs` defaults **both to 9,007,199,254,740,991**. The
+`config.rs::rolling_node` path constructs the operator with that default;
+there is currently no project field, Python ts option or StreamRuntimeConfig
+rolling-budget override. Keep those facts: this design adds no Python/config
+knob and no implicit 256 MiB Table cap. The very large default is a counter
+bound, not a promise of a useful operational memory ceiling. Rust callers can
+set a finite budget before compiling either execution mode.
+
+Define an **indicator node** precisely as a RollingOperator containing at
+least one Rsi, Atr or MacdComponent output, necessarily using layout 5 or 6.
+For this predicate only, change max_bytes to bound the operator's participating
+peak. A mixed node containing any old rolling/cumulative outputs plus a new
+indicator uses the new rule for the **whole node**, including its old groups,
+row histories, buffers and all emitted columns. Nodes containing only old
+primitives retain the exact old retained-only semantics, including checkpoint
+copy exclusion, even if a caller explicitly selects layout 5/6 for such a node.
+Layouts 1-4 and existing graph defaults/fingerprints do not change. Adding enum
+variants must not accidentally change old-node state charges through a changed
+`size_of::<WindowState>()`; preserve the old accounting result for those nodes.
+
+For an indicator node, distinguish retained state from overlapping work:
+
+```text
+R_rows = existing retained-row charge for entities + history + pending rows
+R_bytes = existing deterministic retained-state charge + indicator group state
+P_table = S + C + O + T + K
+
+At every committed/candidate state: R_rows <= state_budget.max_rows()
+At every participating peak:       P_table <= state_budget.max_bytes()
+```
+
+Keep existing row-count meanings; do not multiply max_rows by the number of
+MACD components or charge output/capture rows against it. Each initialized
+indicator group adds its fixed 48/40/56-byte numerical charge once, replacing
+any otherwise duplicated generic window-slot charge for that group. Existing
+entity/key/history/buffer charges remain. A buffer-only entity with no
+finalized transitions has no indicator group allocation or charge. It is still
+charged for its pending rows and keys. The hypothetical candidate must meet the
+same retained-row check before replacing the old state.
+
+In P_table, S is all currently committed retained storage; C is the complete
+additional isolated candidate/transition storage while S remains live; O is
+the complete prepared output backing storage and chunk/metadata structures;
+T is additional sorting, row materialization, copy/packing, encode/decode and
+worker scratch; K is distinct encoded snapshot/restore-segment storage still
+owned on behalf of this operator. Use deterministic retained component charges
+for S/C, and allocated capacities plus deterministic descriptors for new
+output/scratch/segment allocations. Existing conservative structural charges
+are not claims about RSS. Include typed numerical state and its materialized
+checkpoint/history copy if both exist; do not regard two representations as
+one state allocation.
+
+The Table ledger uses observable buffer storage and specified descriptors.
+For every Arrow buffer, its payload charge is the maximum of reported capacity
+and checked `ptr_offset + len`; aliases with the same backing base take the
+maximum charge. Array Arc allocations and identifiable container descriptors
+remain charged, including owned String, Box and Vec storage and their defined
+capacity charges. Immutable Arrow Buffer/Bytes private owner control blocks are
+excluded from retained S/C/O/K: the public backing pointer does not identify
+that private owner, and independent wrappers can share data while owning
+different control blocks. The convention applies to imported and newly created
+buffers alike; it is not a claim to account for all heap allocations.
+Construction/workspace reservations may conservatively include new private
+control blocks and converge to the retained logical charge after preparation.
+Allocation-counter construction peaks must therefore be distinguished from
+retained logical-footprint checks. This exclusion does not remove payload,
+Array/container descriptors, segment reservations, capture leases or unsettled
+work from the ledger. No private-owner provenance registry is introduced.
+
+P_table does not recursively charge the container allocations of owner-key
+indexes used solely by Footprint/Charges accounting or the numeric reservation
+registry. These indexes may only reference already funded owners and numerical
+charges; they must not retain another unfunded data representation. This narrow
+boundary does not apply to computation, sorting, deduplication, schema,
+row/key/history, output, segment, or encode/decode/workspace containers. Their
+data and positive fallback/residual charges remain included. Moving data or
+work ownership into an accounting owner or lease does not change its charge
+or funded lifetime.
+
+Shared immutable state/output/segment components are charged once at their
+underlying ownership boundary. Their largest applicable component charge is
+used while several references overlap; an Arc clone does not create another
+allocation. A deep copy or newly allocated candidate representation is distinct
+and is charged separately, even if its values match. Shared MACD state is charged
+once per entity/group, while distinct output value/validity buffers are charged
+individually. Implement this as narrow Rolling-owned reservations/leases on
+existing buffers and StateSegment owners, not a global allocator or a new public
+memory framework. Admission includes the sum of all simultaneously live work
+reservations; moving work to another task cannot reset that sum.
+
+Borrowed caller input is excluded until the operator retains it in a buffer,
+candidate or output. A shared Arrow output column that is also retained state
+does not get counted twice, but its backing storage remains charged while the
+operator still owns either reference. Admission uses checked u64/usize sizes
+and occurs before copying/reserving; an unexpectedly larger allocation capacity
+must be checked before further work or publication. Output transferred wholly
+to downstream/application ownership is outside this operator after its last
+reference drops; edge budgets continue to charge every delivered Batch.
+
+The same selected StateBudget applies at these lifecycle boundaries:
+
+| Boundary                       | Retained-row admission                                                                                                              | Peak-byte admission and ownership                                                                                                                                                                                                                                                    |
+|--------------------------------|-------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Finite BatchOperator::process  | Check ephemeral rolling entities/history at each prefix; temporary sort/input materialization and output rows are not retained rows | Start a fresh calculation; C is its ephemeral recurrence/history, T is complete sort/materialization scratch, O all returned columns. Include any actually live S/K on the operator. No streaming state is committed; release reservations as results transfer and temporaries drop. |
+| Stream input admission         | Check resulting pending rows/entities/history, including mixed old/new groups                                                       | S remains; candidate pending rows/copies and any late output enter C/O/T. Inf/domain/late checks finish before accepting the envelope.                                                                                                                                               |
+| Watermark/EOF preparation      | Check the whole prepared next state                                                                                                 | Hold S, all selected pending rows, C and every prepared output chunk under one peak. Numerical preparation errors release C/O/T after work settles and preserve S/pending rows/frontier.                                                                                             |
+| Checkpoint preparation/capture | Existing retained state still meets max_rows; encoded rows add no row charge                                                        | S plus any live work/captures, encoding/materialization T and newly allocated K must fit together. Attach a lease to each immutable StateSegment owner; retained snapshot bytes stay charged after the prepare/checkpoint call returns.                                              |
+| Normal or terminal restore     | Validate complete decoded retained rows before replacement/completion                                                               | Reserve known encoded lengths as K before reading, then incrementally admit decoded candidate C and scratch T alongside old S and other captures. Never preload/decode an unbounded snapshot and check only afterward.                                                               |
+| Reset or budget change         | Reset clears committed rows; a lower budget must admit the current live ledger                                                      | Reset cannot drop K or pending-work credits while their owners exist. set_state_budget rejects a limit below current rows or total reserved peak without changing the old limits.                                                                                                    |
+
+Finite execution uses this same max_bytes rule for typed fast paths and scalar
+fallbacks. The current finite implementation does not already enforce this
+peak contract; adding it for indicator nodes is part of A7. There is no hidden
+ArrayExecutionOptions default on Table. The default makes no smaller memory
+guarantee, but explicitly selected finite StateBudgets must be honored.
+
+Checkpoint preparation for indicator nodes is bounded/cancellable and runs
+through the existing asynchronous preparation/owned-worker mechanism; the
+following checkpoint capture only attaches/clones the prepared immutable
+segment and metadata for that exact revision. For direct synchronous trait
+callers, an unprepared revision returns a clear checkpoint-preparation error,
+following A6b's new-node policy, rather than falling back to an unadmitted
+scan. A stale preparation cannot become a checkpoint of newer state. Every
+encoding/copy/hash allocation and actual overlap is admitted before use.
+
+Normal managed restore and the terminal dispatch described below reserve
+known segment lengths before read, then use bounded decode under this same
+operator ledger. A direct synchronous restore validates already-supplied
+segment ownership against the limit before decoding and accounts for those
+encoded bytes while live; it cannot undo the caller's prior allocation. These
+new-node paths use A6b's async restore hook/private admission seam where needed.
+
+The lease ledger belongs to operator resource ownership, outside resettable
+RollingStreamState. Pending workers retain input/candidate/scratch reservations
+until they settle, even if their awaiter or the operator disappears; existing
+supervisor/reaper ownership joins them. A reset cancels old work and changes
+its generation, clears committed numerical state and prevents a stale result
+from committing, but preserves the pending reservation. Subsequent calls must settle
+it or include it in P_table. Captures retain their accounting owner until the
+last StateSegment/allocation reference drops, including asynchronous staging
+and storage failure; resetting/replacing/dropping live numerical state cannot
+return that credit early. A future lower set_state_budget must include these
+live reservations. No public reset/prepare/commit or capture-handle API is added.
+
+Document this versioned exception in StateBudget/RollingOperator rustdoc and
+the streaming/batch guides: the old statement “checkpoint copies are outside
+this limit” stays true for old-only nodes, while indicator nodes use the new
+peak meaning. DataFusion memory pools, other operators, downstream queues and
+application-retained results remain independent; P_table is not total-process
+memory. Explicit limit changes retain the existing fingerprint/configuration
+mechanism; do not invent a project budget field or claim the current Rust-only
+setter has become serialized.
+
+Array sequence continues A6's prepare -> successful `emit("output", batch)` ->
+nonfallible immediate commit ordering. All numerical/size/cancellation checks
+finish before emit; no new check or allocation can interrupt successful emit
+and commit. Error before acceptance discards the candidate. Existing fanout
+partial-delivery failure still fails the job; there is no new exactly-once or
+all-consumer rollback promise. Pending worker ownership, cancellation/reaper
+settlement and per-operator reservation gates carry over unchanged.
+
+#### Sequence layouts 2 and 3
+
+Retain A6's layout-1 reader/writer byte-for-byte for mean/EWMA. New RSI/ATR use
+layout **2**; MACD uses layout **3**. New kernel tags are 3=RSI, 4=ATR,
+5=MACD. Every new kernel has numeric_semantics=1, and is persisted in exactly
+one `state` segment, including empty/reset numerical state. The runtime keeps
+manifest/version wrapper/progress/checksum ownership. Inline metadata is strict
+and repeats the operator/kernel/layout/numerical identity and state fingerprint.
+
+New segment encoding is fixed little-endian, without variable collections:
+
+```text
+68-byte header:
+  magic[8] = "CFAIND\0\0"
+  layout:u32                         # 2 RSI/ATR, 3 MACD
+  numeric_semantics:u32 = 1
+  kernel:u8                          # 3, 4, 5
+  input_dtype:u8                     # 1 f32, 2 f64
+  reserved:u16 = 0
+  state_fingerprint[32]
+  processed_positions:u64
+  parameter_bytes:u32
+  payload_bytes:u32
+
+parameters, all u64:
+  RSI/ATR: period                    # 8 bytes
+  MACD: fast_span, slow_span, signal_span, min_periods, signal_min_periods
+                                     # 40 bytes
+
+RSI payload, 40 bytes:
+  has_previous:u8, reserved[7]=0, seed_count:u64,
+  previous_price_bits:u64, mean_gain_bits:u64, mean_loss_bits:u64
+ATR payload, 32 bytes:
+  has_previous:u8, reserved[7]=0, seed_count:u64,
+  previous_close_bits:u64, mean_tr_bits:u64
+MACD payload, 48 bytes:
+  fast_count:u64, fast_value_bits:u64, slow_count:u64, slow_value_bits:u64,
+  signal_count:u64, signal_value_bits:u64
+```
+
+Exact total lengths are RSI=116, ATR=108 and MACD=156. Reject other lengths,
+trailing bytes, reserved values, unsupported combinations and extra segments.
+The state fingerprint hashes canonical provider identity, input dtype/shape
+rule, kernel and normalized parameters, numeric semantics and state layout.
+The full pipeline fingerprint separately verifies budgets, outputs and binding
+identity. Budget changes do not bypass full managed recovery validation.
+
+Save every f64 as raw bits, including MACD Inf, signed zero and generated NaN
+payloads. Never use nonfinite JSON numbers or the static-input canonical-NaN
+digest policy. RSI/ATR state values must be finite, means nonnegative, and
+inactive/empty means +0.0; previous_price/close may be negative. Reset state has
+has_previous=0, seed_count=0 and all floating bits +0. A present previous with
+seed_count=0 also has all means +0. has_previous is only 0 or 1. Validate
+seed_count <= period and <= positions.saturating_sub(1); presence requires
+positions>0. Once ready, seed_count remains period, not an unbounded total.
+
+MACD requires fast_count=slow_count<=positions. Zero-count values must have
++0 bits; otherwise raw finite/nonfinite bits are preserved. Signal count is
+bounded by positions, **not** by fast_count. If fast_count<min_periods it must
+be zero; if min_periods<=positions, it cannot exceed
+positions-(min_periods-1). This permits valid carried-line updates. Parameter
+and count validation happens before replacing any committed state.
+
+Checksums detect accidental corruption, not authenticity or proof that every
+arbitrary numerical bit pattern arose from a real history. Validate structural
+and numerical invariants without replaying guessed history or normalizing
+valid restored bits. Restore/capture admission covers encoded bytes, old state,
+decoded candidate, immutable captures and scratch before loading/allocating.
+Normal and terminal managed restore both perform these validations before
+source open or successful terminal completion. Genuine restart uses the
+existing StateBackend/session/manifest path; direct state handles acquire no
+public file format.
+
+#### Table indicator payload
+
+The table `_indicator_state` payload uses these exact fields:
+
+```text
+numeric_semantics:u32=1, kernel:u8, reserved[3]=0, processed_positions:u64
+normalized kernel parameters in the sequence order above
+kernel payload in the sequence order above
+```
+
+Thus RSI is 64 bytes, ATR 56 bytes and MACD 104 bytes. The enclosing rolling
+layout/kernel tag determines the length; no trailing data is accepted. Table
+parameters and derived group identity must match the compiled declaration.
+The numerical processed_positions equals that entity's transition count for
+the group, including missing finalized rows; pending rows do not advance it.
+For each entity/group validate the same numerical invariants and the outer
+dictionary/group uniqueness/order. Mixed Float32/Float64 ATR types are
+represented in the exact input schema and full rolling fingerprint; the
+payload stores normalized f64 recurrence only. No MACD field is pruned because
+a component lacks a consumer.
+
+The inventory rule is deterministic and based on the explicit entity row's
+transition count, not inferred from the presence of a summary or pending row:
+
+- **Count zero:** this is a buffer-only entity. Require at least one pending
+  row; there is no finalized history or indicator record. Encode no indicator
+  records and reject even zero-valued indicator records at count zero. Restore
+  the pending rows without allocating indicator states. Their first finalized
+  row creates all declared indicator groups and advances each to position one.
+- **Count positive:** require exactly one record for every compiled indicator
+  group, even when all finalized inputs were missing, the most recent row
+  reset warm-up, there is no retained history, or every MACD component except
+  one is unconsumed. Each payload position must equal that positive entity
+  count. Missing/duplicate/unknown groups fail. Such an entity remains retained
+  with its group records even when there are no pending rows or legacy history;
+  do not evict it merely because its numerical warm-up state is empty.
+
+Legacy group/history checks still apply in mixed nodes. A zero-count dictionary
+entry without any pending row is unused and rejected. Deleting the last
+indicator record of a positive-count entity must fail even when pending rows
+keep its dictionary entry alive. No decoder is allowed to turn a missing
+positive-count group into fresh state. Empty global state may retain the
+existing no-segment representation; these rules apply to every entity that
+appears in a layout-5/6 segment, with no arbitrary empty entity inserted.
+
+#### Explicit Table terminal recovery dispatch
+
+A6b's native sequence terminal validation does not cover RollingOperator.
+Add a targeted Rolling layout-5/6 validation dispatch in the existing
+`runtime/streaming/runner.rs` terminal-manifest branch, before
+`recover_terminal_manifest`, successful completion, or any sink opening.
+Select the actual compiled Rolling operator/layout, not a provider name or a
+user metadata claim. Validate each selected operator's segment inventory,
+exact schema/metadata and kernel identity, entity dictionary, transition
+counts, complete indicator-group inventory, raw payloads and selected budget
+using the same checked decoder/admission as normal Rolling restore. Include
+the explicit zero-count rule above and mixed legacy groups. Release decoded
+candidates/reservations after validation if terminal completion needs no live
+state; that does not permit skipping the decode or peak checks.
+
+Both normal managed restore and this terminal path must admit encoded bytes
+before load and decoded rows/storage before allocation. Indicator nodes use
+the new P_table limit; old-only nodes explicitly using layouts 5/6 use their
+unchanged selected retained-budget semantics, while still validating the new
+format. Unrelated terminal behavior for layouts 1-4 remains unchanged. A
+valid outer checksum does not make an invalid indicator payload trustworthy.
+This is a narrow additional terminal dispatch, not a new universal recovery
+framework or changes to unrelated operators.
+
+### Error cases and cross-layer projection
+
+Direct native invalid input/limits/numerics use the existing
+`CalcFlowError::InvalidArgument { field, message }`; PyO3 maps it to ConfigError.
+This preserves the established array exception taxonomy, even for a numerical
+domain failure. Python declaration argument checks retain TypeError/ValueError
+and analyzer compile errors in the existing style. Operator/runner wrapping
+retains the field/position text and adds existing node/job context; it does not
+turn a numerical error into a missing result. Corrupt checkpoint state remains
+a checkpoint error. Do not add a new broad exception/reason-code hierarchy here.
+
+Positions below are zero-based within the submitted direct/sequence chunk.
+Table errors identify the input column and the coordinate actually available
+at the validation boundary. Admission rejects a bad row before it enters the
+accepted sequence, after late-row classification. Report `input row N; ordered
+position not assigned` there, using the original submitted Batch row. Do not
+label that envelope index as an ordered index or defer rejection merely to
+obtain one: later stream arrivals can still change event-time order.
+
+During finalized numerical processing, report the entity-local cumulative
+`ordered position M`, adding the original Batch row when available. Rejected
+rows have no assigned ordered position. These coordinate labels clarify the
+same existing diagnostics; they add no public exception class, reason-code
+hierarchy or serialized state field. Do not expose entity keys or sample values.
+
+| Input violation                  | Field/path                                                 | Required message content                                                                            |
+|----------------------------------|------------------------------------------------------------|-----------------------------------------------------------------------------------------------------|
+| Zero RSI/ATR period              | `options.period`                                           | `must be a positive u64`                                                                            |
+| Reversed/equal MACD spans        | `options.fast_span`                                        | `must be less than slow_span`                                                                       |
+| Invalid warm-up                  | `options.signal_min_periods` or `options.min_periods`      | `must be a positive u64`                                                                            |
+| ATR scalar/matrix direct input   | `inputs.high.shape` (likewise low/close)                   | `expected a rank-one floating vector`                                                               |
+| Unequal ATR length               | `inputs.low.shape` or `inputs.close.shape`                 | `expected length <n> to match inputs.high, received <m>`                                            |
+| Invalid floating type            | `input.dtype` or `inputs.<operand>.dtype`                  | `expected float32 or float64, received <dtype>`                                                     |
+| Valid Inf                        | `input[<i>]` or `inputs.<operand>[<i>]`                    | `RSI/ATR requires finite non-missing samples`                                                       |
+| ATR high below low               | `inputs.high[<i>]`                                         | `must be greater than or equal to inputs.low[<i>]`                                                  |
+| RSI delta overflow               | `input[<i>]`                                               | `RSI price difference from previous price is not representable as finite float64`                   |
+| ATR range/gap overflow           | `inputs.high[<i>]` or `inputs.low[<i>]`                    | name `high - low`, `high - previous_close`, or `low - previous_close` and finite-float64 constraint |
+| Seed/Wilder arithmetic overflow  | offending row field                                        | name indicator, seed/recurrence and finite-float64 constraint                                       |
+| Position overflow                | `input.rows`                                               | `processed position count would exceed u64::MAX`                                                    |
+| MACD output element limit        | `outputs.elements`                                         | `three MACD components require <3*n> elements; limit is <limit>`                                    |
+| State/peak limit                 | `state.max_state_bytes` / `execution.max_allocation_bytes` | required participating charge and configured limit                                                  |
+| Packed ATR wrong width           | `input.shape`                                              | `ATR sequence input requires [n, 3] in high, low, close order`                                      |
+| New kernel under old IR/layout   | precise kernel/version field                               | supported kernel/version pairing                                                                    |
+| Corrupt or incompatible snapshot | existing checkpoint context                                | indicator/layout plus failed field, length, count, identity or limit                                |
+
+Validate configuration and descriptors before numerical iteration. ATR validates
+operand descriptors in high/low/close order, lengths next, then checked sizes,
+admission and row values. Scan rows in input order and operand validity/Inf in
+the defined order; report the first violation encountered by that deterministic
+procedure. A later bad value cannot publish an already-computed prefix.
+
+### Example
+
+This proposed eager example needs no NumPy or provider registration. It is the
+seed for a 20-50-line shipped example after the complete implementation lands;
+it has not been run against today's package.
+
+```python
+from __future__ import annotations
+
+import pyarrow as pa
+import calc_flow.array as cfa
+
+
+def main() -> None:
+    close = cfa.from_arrow(pa.array([10.0, 11.0, 12.0, 11.0, 11.0]))
+    high = cfa.from_arrow(pa.array([11.0, 12.0, 13.0, 12.0, 12.0]))
+    low = cfa.from_arrow(pa.array([9.0, 10.0, 11.0, 10.0, 10.0]))
+    rsi = cfa.rsi(close, period=2)
+    atr = cfa.atr(high, low, close, period=2)
+    macd = cfa.macd_components(close, fast_span=2, slow_span=4, signal_span=3)
+    result = pa.table({
+        "rsi": rsi.to_arrow(), "atr": atr.to_arrow(),
+        "line": macd.line.to_arrow(), "signal": macd.signal.to_arrow(),
+        "histogram": macd.histogram.to_arrow(),
+    })
+    assert result["rsi"].to_pylist() == [None, None, 100.0, 50.0, 50.0]
+    assert result["atr"].to_pylist() == [None, None, 2.0, 2.0, 2.0]
+    print(result)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+Table use after declaring `quotes` with its schema and entity/time/sequence:
+
+```python
+parts = cf.ts.macd_components(quotes["close"], signal_span=9)
+signals = quotes.with_columns(
+    rsi=cf.ts.rsi(quotes["close"], period=14),
+    atr=cf.ts.atr(quotes["high"], quotes["low"], quotes["close"], period=14),
+    histogram=parts.histogram,
+)
+```
+
+Selecting only histogram in this example still retains all three MACD states.
+Finite execution uses `collect`; continuous execution uses the existing owned
+`async with ...stream(...)` result. Durable restart examples must use explicit
+replayable SourceBinding/SinkBinding and a new StreamingRunner/managed state
+root, not claim that an ordinary async iterable is restartable.
+
+### Independent numerical oracles and acceptance
+
+Use two complementary references without importing implementation transitions:
+
+1. Small hand-derived vectors pin warm-up positions, zero/flat rules, reset
+   boundaries and exact outputs. The independent scalar Python float64
+   reference expresses the specified individual operation order and serves as
+   the **primary oracle for every admitted IEEE case**, including normal,
+   subnormal, underflow, signed zero, NaN/Inf, finite extremes, required
+   overflow errors and synthetic large counters. It imports no production
+   transition. Compare finite results/signed zero bit-for-bit across Rust
+   eager, owned state, Python eager, table and sequence on the same platform;
+   compare validity and nonfinite classification as specified for MACD. The
+   named `RSI(period=2, [0, 2^-1074, 0])` regression requires exactly
+   `[null, null, 100.0]`, never 50. Codec round-trip separately preserves raw
+   NaN payload bits, rather than requiring cross-platform NaN payload equality.
+2. A supplementary **well-scaled fixture set** uses standard-library Fraction
+   arithmetic. Its explicit domain predicate is: period is 1..32; each finite
+   segment has at most 64 difference/TR updates; normalized prices/high/low/
+   close are multiples of 1/16 in [-4096,4096]; high>=low; and every positive
+   exact seed/recurrence mean for G, L or TR lies in [2^-20,2^13] at every
+   update (zero is also allowed). Validate that predicate using the exact
+   reference before applying this accuracy assertion; missing-value segment
+   boundaries are checked separately. These bounded dyadic inputs have exact
+   representable finite differences/TRs and keep all positive mean/ratio
+   quantities far from underflow. The named subnormal example and extreme or
+   long-decay fixtures do not satisfy this predicate and use oracle 1 only.
+
+   For this concrete fixed fixture set, form the exact seed as a sum divided
+   by period, then exact `(previous*(period-1)+sample)/period` and exact
+   `100*G/(G+L)` with explicit zero cases. This is a different formulation from
+   the production incremental mean. Require ATR relative error <=256*2^-52
+   and RSI absolute error <=100*256*2^-52; an exact-zero ATR must be +0.0.
+   These are accuracy acceptance bounds for this set, not a universal finite-
+   input error promise or permission to approximate the primary IEEE oracle.
+   The set and predicate must be fixed in the fixture provenance, not filtered
+   after observing test failures. Denominator/count rounding above 2^53 is
+   outside this set and uses the primary operation-order oracle.
+
+No tolerance applies to validity, first output, segment resets, count behavior,
+the named underflow result or required errors. Do not change the arithmetic or
+enlarge any tolerance to mask a seed/operation-order disagreement. In particular,
+the exact rational ratio need not be close to the chosen IEEE result near
+underflow; the public numerical documentation must say so explicitly.
+
+MACD's primary oracle is the independent scalar composition of three existing
+EWMA recurrences with intermediate line validity, plus parity against actual
+old `ts.macd` and `ts.ewma(old_line, ...)`. Reusing the production EWMA result
+alone is insufficient. Keep the existing nonfinite behavior rather than using
+the rational RSI/ATR oracle to redefine it.
+
+Required focused behaviors:
+
+- Parameter/dtype/rank/length checks; mixed f32/f64 ATR; null payload slots with
+  sentinel Inf/NaN bits that must not be read; ownership, offsets and Arrow
+  chunk boundaries; no NumPy/JAX import on the Arrow path.
+- Flat/up/down sequences, gaps, period one, period u64::MAX, reset before/at/
+  after warm-up, zero rows, finite extremes, +/-Inf, NaN, signed zeros,
+  underflow and the specified +/-1e308 errors. Inf in one ATR operand must
+  fail even when another is missing; high/low domain checks with missing close
+  follow this explicit policy.
+- Prefix then failed mixed-validity/overflow chunk then corrected retry equals
+  uninterrupted output. Check counters and state bits as well as final values.
+  Constructor/state/output/peak limits fail without partial output/commit.
+- For Table ordered and reordered buffers, accept finite prices whose later
+  ordered delta/gap overflows, then trigger watermark and EOF separately.
+  Ensure an earlier valid output chunk could have been produced. Each full
+  callback's preparation must emit zero chunks and preserve numerical bits,
+  all pending rows/order proof, retained/peak reservations after work settles,
+  output sequences, last watermark and ended/finality state. Do not replace an
+  accepted bad row by replaying a corrected chunk into that same job. Include
+  cancellation/budget preparation failures whose cause can actually be removed
+  for a legitimate callback retry.
+- MACD minima greater than spans, fast>=slow rejection, span-one signal, the
+  existing missing-price carried-line example, signal_count>price_count,
+  generated NaN and Inf. Single-component consumers still update all states.
+- Same ordered rows under different chunk boundaries, interleaved entities,
+  event-time reorder and late policy; group dedup across component aliases and
+  separate Program outputs; compare both values and one-owner state charge.
+- Managed capture then **new job and new process** with replayable sources:
+  warm-up, ready state, reset segment, mixed entities, MACD subset and retained
+  nonfinite bits. Prefix-plus-restored-suffix must match uninterrupted output.
+  A restore onto the same live object is not this acceptance test.
+- Checkpoint corrupt/truncated/extra bytes, wrong kernel/layout/parameters/
+  dtype/fingerprint, nonzero reserved bytes, wrong flag/count, missing/duplicate
+  table group, oversized encoded state and terminal recovery. Fail before
+  source open/terminal success; keep old state if direct restore fails.
+- Table layout-5/6 inventory: count-zero buffer-only entity has no indicator
+  records and restores without synthesizing them; positive-count all-missing
+  or reset state retains every group; deleting the last group while pending
+  rows preserve the dictionary entry must fail. Check mixed legacy groups too.
+- Targeted Table terminal dispatch: a checksum-valid segment with an invalid
+  internal payload, missing positive-count group, oversized encoded/decoded
+  state, and a valid completed checkpoint. The invalid cases fail before sink
+  open/completion; the valid case completes without rerunning outputs. Generic
+  checksum-corruption tests alone do not prove this path.
+- Budget overlap with old state, candidate, output, scratch and live capture;
+  shared captures charged once; cancellation during worker, output backpressure,
+  capture and restore; waiter loss/reaper settlement; no post-emit cancellation
+  check before commit. MACD packed output has one acceptance point.
+- Explicit finite and stream Table StateBudgets on pure indicator and mixed
+  nodes: retained rows fit but S+C+O+T+K exceeds max_bytes; output and capture
+  have independent test cases. Hold a capture across reset and attempt a new
+  call/lower budget; hold an aborted pending worker until settlement. Check
+  exact release on the final owner drop, plus an old-only graph showing its
+  prior retained-only budget and checkpoint-copy exclusion remain unchanged.
+  Built-in rolling layout inventory and sequence provider inventories must
+  reflect only the corresponding fully implemented PR's layouts.
+
+### Delivery split and review status
+
+Two implementation PRs, each complete across its promised surfaces:
+
+1. **RSI/ATR**: native options/eager/owned state and focused numerical tests;
+   Python adapters/stubs/exports; table primitives and layout 5; packed ATR and
+   vector RSI sequence IR2/layout2/capability rules; real managed/terminal
+   recovery; cancellation/budgets; project schema/fixtures; runnable examples,
+   docs and release notes. Require A6b foundation first. It must not advertise
+   a stream kernel whose codec or restart path is absent.
+2. **MACD components**: one shared recurrence group and immutable output
+   containers; direct/Python/table surfaces; shared/subset Program lowering;
+   packed sequence IR3/layout3 and table layout6; capability/schema/codec
+   updates; missing-line and legacy parity tests; subset/new-job recovery;
+   budgets/cancellation; examples/docs and release notes. Build on the first PR
+   without rewriting its already-released IR2/layout2 meaning.
+
+Use focused test-first red/green and affected module formatting/lint/type/schema
+checks; record the expected failure before implementation. Full coverage and
+cross-platform regression gates remain CI responsibilities. No benchmark
+matrix or speedup claim belongs to this API task. Any later performance task
+must select a small bounded case set under the repository's existing protocol.
+
+The signatures and choices in this section are approved: packed ATR, packed
+low-level MACD, mandatory period, five MACD parameters, stable seeds, float-only
+RSI/ATR table input, the preserved old MACD constraint, shared owner, new layouts
+and Rust enum migration. The specialist critic passed the revised numerical,
+Table transaction/codec, budget and capability contracts. After completed A6b,
+hand off the two stated units to cf-implementer under the normal test-first
+policy and final implementation review. This design archive supplies no product
+implementation, test/CI result, merge authority or performance claim.
+
 
 ## Managed Python error projection clarification
 
@@ -933,3 +2188,23 @@ terminal success. Acceptance must exercise a real managed restart with valid
 outer state/manifest integrity and corrupt inner native codec, asserting the
 public managed exception category, operator and state field. Custom provider
 errors retain their existing redaction boundary.
+
+
+## A7 indicator source bindings
+
+The common-row-set requirement also preserves the meaning of every consumed
+column at its actual materialization context. For expressions containing a new
+RSI/ATR primitive, compare referenced source and target column definitions with
+canonical digest and full bytes. Recursively validate each consumed derived
+definition on both sides at its own evaluation context, including definitions
+before a later filter. Equal alias names, row origins or immediate definition
+tags alone are insufficient.
+
+Row-preserving project/with_columns/attach wrappers remain admissible when their
+referenced definitions agree. Missing aliases, conflicting definitions and
+references to overwritten ancestor columns fail with schema_mismatch; use
+references from the actual target or explicitly materialize the desired input
+there. This delivery does not add general foreign-derived-definition inlining.
+The same proof covers references in outer arithmetic around the indicator.
+Analysis and lowering independently enforce it before any name-based inlining.
+Legacy-only EMA/MACD and row-local declarations retain their existing admission.

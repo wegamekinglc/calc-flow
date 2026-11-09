@@ -13,7 +13,7 @@ use crate::{Batch, BatchKind, CalcFlowError, EventTime, LatePolicySpec, Port, Re
 
 pub(super) mod identity;
 mod plan;
-pub(super) use plan::{LateOutputPlan, PreparedLateOutput};
+pub(super) use plan::{LateOutputPlan, PreparedLateOutput, validate_scratch};
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

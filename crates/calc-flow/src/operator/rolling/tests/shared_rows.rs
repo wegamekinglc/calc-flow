@@ -332,7 +332,7 @@ fn p3_admit_owned_record(operator: &mut RollingOperator, record: &RecordBatch) {
     let charge = budget::ordered_buffer_record_charge(record, &operator.compiled, "rolling")
         .unwrap()
         .unwrap();
-    operator.state.charge = operator
+    operator.state.owned_mut().unwrap().charge = operator
         .state
         .charge
         .checked_add(charge, "rolling")

@@ -6,10 +6,10 @@ use super::{
     CompiledRollingOutput, CompiledRollingSpec, CompiledScan, CompiledWindowGroup, DataType,
     Digest, Field, JsonMap, ROLLING_COLUMNAR_STATE_LAYOUT_VERSION, ROLLING_CONFIGURATION_VERSION,
     ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION, ROLLING_EWMA_STATE_LAYOUT_VERSION,
-    ROLLING_STATE_LAYOUT_VERSION, Result, RollingFloatPrimitiveSpec, RollingFrameSpec,
-    RollingKernelPlan, RollingOutputSpec, RollingSpec, ScanKind, Schema, Sha256, Statistic,
-    SumClass, TimeUnit, Value, canonical_json, compile_error, internal_error, json,
-    state_schema_fingerprint,
+    ROLLING_INDICATOR_STATE_LAYOUT_VERSION, ROLLING_STATE_LAYOUT_VERSION, Result,
+    RollingFloatPrimitiveSpec, RollingFrameSpec, RollingKernelPlan, RollingOutputSpec, RollingSpec,
+    ScanKind, Schema, Sha256, Statistic, SumClass, TimeUnit, Value, canonical_json, compile_error,
+    internal_error, json, state_schema_fingerprint,
 };
 
 pub(super) fn validate_arguments(spec: &RollingSpec) -> Result<()> {
@@ -24,6 +24,7 @@ pub(super) fn validate_arguments(spec: &RollingSpec) -> Result<()> {
         ROLLING_STATE_LAYOUT_VERSION
             | ROLLING_EWMA_STATE_LAYOUT_VERSION
             | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+            | ROLLING_INDICATOR_STATE_LAYOUT_VERSION
     ) {
         return Err(invalid_argument(
             "rolling.state_layout_version",
@@ -36,7 +37,9 @@ pub(super) fn validate_arguments(spec: &RollingSpec) -> Result<()> {
         .any(RollingOutputSpec::requires_ewma_layout)
         && !matches!(
             spec.state_layout_version,
-            ROLLING_EWMA_STATE_LAYOUT_VERSION | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+            ROLLING_EWMA_STATE_LAYOUT_VERSION
+                | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+                | ROLLING_INDICATOR_STATE_LAYOUT_VERSION
         )
     {
         return Err(invalid_argument(
@@ -48,13 +51,14 @@ pub(super) fn validate_arguments(spec: &RollingSpec) -> Result<()> {
         .outputs
         .iter()
         .any(RollingOutputSpec::requires_cumulative_layout)
-        && spec.state_layout_version != ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+        && spec.state_layout_version < ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
     {
         return Err(invalid_argument(
             "rolling.state_layout_version",
             "cumulative outputs require state layout version 4",
         ));
     }
+    super::indicators::validate_spec(spec)?;
     validate_key_names("rolling.partition_by", &spec.partition_by)?;
     validate_key_names("rolling.sequence_by", &spec.sequence_by)?;
     validate_outputs(&spec.outputs)?;
@@ -121,7 +125,10 @@ fn validate_outputs(outputs: &[RollingOutputSpec]) -> Result<()> {
             && !output.requires_cumulative_layout()
             && !matches!(
                 output,
-                RollingOutputSpec::Difference { .. } | RollingOutputSpec::CumulativeMean { .. }
+                RollingOutputSpec::Rsi { .. }
+                    | RollingOutputSpec::Atr { .. }
+                    | RollingOutputSpec::Difference { .. }
+                    | RollingOutputSpec::CumulativeMean { .. }
             )
         {
             return Err(invalid_argument(
@@ -129,24 +136,7 @@ fn validate_outputs(outputs: &[RollingOutputSpec]) -> Result<()> {
                 "must be greater than zero",
             ));
         }
-        if let Some(min_periods) = output.min_periods() {
-            if min_periods == 0 {
-                return Err(invalid_argument(
-                    &format!("{base}.min_periods"),
-                    "must be greater than zero",
-                ));
-            }
-            // Only row-count frames cap min_periods at their size; a duration
-            // frame has no row-count ceiling (SCE-00 D5).
-            if matches!(output.frame(), Some(RollingFrameSpec::Rows { .. }))
-                && min_periods > output.retained_rows()
-            {
-                return Err(invalid_argument(
-                    &format!("{base}.min_periods"),
-                    "must not exceed the row-frame size",
-                ));
-            }
-        }
+        validate_output_min_periods(output, &base)?;
         if let Some(ddof) = output.ddof()
             && ddof > 1
         {
@@ -179,6 +169,28 @@ fn validate_outputs(outputs: &[RollingOutputSpec]) -> Result<()> {
             return Err(invalid_argument(
                 &format!("{base}.output"),
                 "duplicates an earlier rolling output",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_output_min_periods(output: &RollingOutputSpec, base: &str) -> Result<()> {
+    if let Some(min_periods) = output.min_periods() {
+        if min_periods == 0 {
+            return Err(invalid_argument(
+                &format!("{base}.min_periods"),
+                "must be greater than zero",
+            ));
+        }
+        // Only row-count frames cap min_periods at their size; a duration
+        // frame has no row-count ceiling (SCE-00 D5).
+        if matches!(output.frame(), Some(RollingFrameSpec::Rows { .. }))
+            && min_periods > output.retained_rows()
+        {
+            return Err(invalid_argument(
+                &format!("{base}.min_periods"),
+                "must not exceed the row-frame size",
             ));
         }
     }
@@ -302,11 +314,20 @@ fn compile_spec_against_schema(
         .map(|column| compile_key_column(input_schema, column, KeyRole::Sequence))
         .collect::<Result<Vec<_>>>()?;
     let mut window_groups = Vec::new();
+    let mut indicator_groups = Vec::new();
     let outputs = spec
         .outputs
         .iter()
         .enumerate()
-        .map(|(ordinal, output)| compile_output(input_schema, output, ordinal, &mut window_groups))
+        .map(|(ordinal, output)| {
+            compile_output(
+                input_schema,
+                output,
+                ordinal,
+                &mut window_groups,
+                &mut indicator_groups,
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
     let max_row_retention = spec
         .outputs
@@ -319,15 +340,18 @@ fn compile_spec_against_schema(
         .iter()
         .filter_map(RollingOutputSpec::retained_micros)
         .max();
-    let state_layout_version = if spec
-        .outputs
-        .iter()
-        .any(RollingOutputSpec::requires_cumulative_layout)
-    {
-        ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
-    } else {
-        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
-    };
+    let state_layout_version =
+        if spec.state_layout_version == ROLLING_INDICATOR_STATE_LAYOUT_VERSION {
+            ROLLING_INDICATOR_STATE_LAYOUT_VERSION
+        } else if spec
+            .outputs
+            .iter()
+            .any(RollingOutputSpec::requires_cumulative_layout)
+        {
+            ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+        } else {
+            ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
+        };
     let kernel_plan = RollingKernelPlan::compile(
         input_schema,
         state_layout_version,
@@ -346,6 +370,7 @@ fn compile_spec_against_schema(
         sequence_columns,
         outputs,
         window_groups,
+        indicator_groups,
         kernel_plan,
         max_row_retention,
         max_duration_micros,
@@ -408,6 +433,7 @@ fn compile_output(
     output: &RollingOutputSpec,
     ordinal: usize,
     window_groups: &mut Vec<CompiledWindowGroup>,
+    indicator_groups: &mut Vec<super::indicators::Group>,
 ) -> Result<CompiledRollingOutput> {
     if input_schema
         .fields()
@@ -422,6 +448,9 @@ fn compile_output(
     let input_index = exact_field_index(input_schema, output.input())?;
     let input_type = input_schema.field(input_index).data_type().clone();
     let evaluation = match output {
+        RollingOutputSpec::Rsi { .. } | RollingOutputSpec::Atr { .. } => {
+            super::indicators::compile(input_schema, output, indicator_groups)?
+        }
         RollingOutputSpec::Lag { periods, .. } => CompiledEvaluation::Lag { periods: *periods },
         RollingOutputSpec::Delta { periods, .. } => {
             require_numeric(output.input(), &input_type, "delta")?;
@@ -470,22 +499,15 @@ fn compile_output(
             min_periods,
             ddof,
             ..
-        } => {
-            let correlation = matches!(output, RollingOutputSpec::Correlation { .. });
-            let left_index = exact_field_index(input_schema, left)?;
-            let right_index = exact_field_index(input_schema, right)?;
-            let left_type = input_schema.field(left_index).data_type().clone();
-            let right_type = input_schema.field(right_index).data_type().clone();
-            require_numeric(left, &left_type, "covariance")?;
-            require_numeric(right, &right_type, "covariance")?;
-            let group = compile_pair_group(left_index, right_index, *frame, window_groups);
-            CompiledEvaluation::Pair(CompiledPairAggregate {
-                group,
-                correlation,
-                min_periods: *min_periods,
-                ddof: *ddof,
-            })
-        }
+        } => compile_pair_output(
+            input_schema,
+            (left, right),
+            *frame,
+            *min_periods,
+            *ddof,
+            matches!(output, RollingOutputSpec::Correlation { .. }),
+            window_groups,
+        )?,
         RollingOutputSpec::Difference { left, right, .. } => {
             CompiledEvaluation::Difference(CompiledDifference {
                 left: compile_float_readout(input_schema, left, window_groups)?,
@@ -508,6 +530,30 @@ fn compile_output(
         input_type,
         evaluation,
     })
+}
+
+fn compile_pair_output(
+    input_schema: &Schema,
+    (left, right): (&str, &str),
+    frame: RollingFrameSpec,
+    min_periods: u64,
+    ddof: u8,
+    correlation: bool,
+    window_groups: &mut Vec<CompiledWindowGroup>,
+) -> Result<CompiledEvaluation> {
+    let left_index = exact_field_index(input_schema, left)?;
+    let right_index = exact_field_index(input_schema, right)?;
+    let left_type = input_schema.field(left_index).data_type().clone();
+    let right_type = input_schema.field(right_index).data_type().clone();
+    require_numeric(left, &left_type, "covariance")?;
+    require_numeric(right, &right_type, "covariance")?;
+    let group = compile_pair_group(left_index, right_index, frame, window_groups);
+    Ok(CompiledEvaluation::Pair(CompiledPairAggregate {
+        group,
+        correlation,
+        min_periods,
+        ddof,
+    }))
 }
 
 fn compile_cumulative_output(
@@ -550,7 +596,8 @@ fn compile_cumulative_output(
 fn compiled_output_type(evaluation: &CompiledEvaluation, input_type: &DataType) -> DataType {
     match evaluation {
         CompiledEvaluation::Lag { .. } | CompiledEvaluation::Delta { .. } => input_type.clone(),
-        CompiledEvaluation::Ewma(_)
+        CompiledEvaluation::Indicator(_)
+        | CompiledEvaluation::Ewma(_)
         | CompiledEvaluation::Pair(_)
         | CompiledEvaluation::Difference(_) => DataType::Float64,
         CompiledEvaluation::Scan(scan) => match scan.kind {
@@ -807,7 +854,9 @@ fn compile_aggregate_output(
         RollingOutputSpec::Max {
             frame, min_periods, ..
         } => (*frame, *min_periods, 0, Statistic::Max),
-        RollingOutputSpec::Lag { .. }
+        RollingOutputSpec::Rsi { .. }
+        | RollingOutputSpec::Atr { .. }
+        | RollingOutputSpec::Lag { .. }
         | RollingOutputSpec::Delta { .. }
         | RollingOutputSpec::Ewma { .. }
         | RollingOutputSpec::CumulativeMean { .. }
@@ -925,7 +974,7 @@ pub(super) fn compile_aggregate(
     })
 }
 
-fn exact_field_index(schema: &Schema, column: &str) -> Result<usize> {
+pub(super) fn exact_field_index(schema: &Schema, column: &str) -> Result<usize> {
     let matches = schema
         .fields()
         .iter()

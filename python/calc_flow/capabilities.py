@@ -49,6 +49,7 @@ _CAPABILITY_RULES = frozenset(
         ("native_table_static_rhs", "1"),
         ("native_float_dtype", "1"),
         ("native_sequence_vector", "1"),
+        ("native_sequence_indicators", "2"),
     )
 )
 
@@ -642,6 +643,15 @@ def _require_native_regular_capability(capability: ProviderCapability) -> None:
 
 
 def _require_native_sequence_capability(capability: ProviderCapability) -> None:
+    if capability.state_layouts not in {(1,), (1, 2)}:
+        raise ValueError(
+            "native array_sequence capability has unsupported state_layouts"
+        )
+    shape_rules = (CapabilityRule("native_sequence_vector", "1"),) + (
+        (CapabilityRule("native_sequence_indicators", "2"),)
+        if capability.state_layouts == (1, 2)
+        else ()
+    )
     expected = {
         "input_ports": (ProviderPort("input", "array", True),),
         "output_ports": (ProviderPort("output", "array", True),),
@@ -654,7 +664,7 @@ def _require_native_sequence_capability(capability: ProviderCapability) -> None:
         "finality": "per_row_final",
         "checkpoint_support": "checkpointed_stateful",
         "state_version": 1,
-        "state_layouts": (1,),
+        "state_layouts": capability.state_layouts,
         "deterministic": True,
         "replay_safe": True,
         "supports_static_inputs": False,
@@ -662,7 +672,7 @@ def _require_native_sequence_capability(capability: ProviderCapability) -> None:
         "array_rules": ProviderArrayRules(
             supported_dtypes=("float32", "float64"),
             safe_dtype_rule=CapabilityRule("native_float_dtype", "1"),
-            shape_rules=(CapabilityRule("native_sequence_vector", "1"),),
+            shape_rules=shape_rules,
         ),
     }
     _require_native_capability_fields(capability, expected)
@@ -670,6 +680,134 @@ def _require_native_sequence_capability(capability: ProviderCapability) -> None:
         raise ValueError(
             "native array_sequence capability requires options_json_schema"
         )
+    _require_native_sequence_schema(
+        capability.options_json_schema, capability.state_layouts
+    )
+
+
+def _sequence_schema_error(field: str) -> ValueError:
+    return ValueError(
+        f"native array_sequence capability has incompatible options_json_schema.{field}"
+    )
+
+
+def _sequence_schema_object(
+    value: object,
+    properties: tuple[str, ...],
+    required: tuple[str, ...],
+    alternatives: bool = False,
+) -> dict[str, Any]:
+    keys = {"type", "additionalProperties", "properties", "required"}
+    if alternatives:
+        keys.add("oneOf")
+    schema = _descriptor_object(value, frozenset(keys))
+    if schema["type"] != "object" or schema["additionalProperties"] is not False:
+        raise _sequence_schema_error("object")
+    fields = _descriptor_object(schema["properties"], frozenset(properties))
+    if schema["required"] != list(required):
+        raise _sequence_schema_error("required")
+    return fields
+
+
+def _sequence_schema_count(
+    value: object, minimum: int, default: int | None = None
+) -> None:
+    expected = {"type": "integer", "minimum": minimum, "maximum": 2**64 - 1}
+    if default is not None:
+        expected["default"] = default
+    schema = _descriptor_object(value, frozenset(expected))
+    for name, required in expected.items():
+        if type(schema[name]) is not type(required) or schema[name] != required:
+            raise _sequence_schema_error(name)
+
+
+def _sequence_schema_common_options(properties: dict[str, Any]) -> None:
+    if properties["input_dtype"] != {"enum": ["float32", "float64"]}:
+        raise _sequence_schema_error("input_dtype")
+    for field, defaults in (
+        (
+            "execution",
+            {"max_elements": 10_000_000, "max_allocation_bytes": 256 * 1024 * 1024},
+        ),
+        ("state", {"max_state_bytes": 256 * 1024 * 1024}),
+    ):
+        options = _sequence_schema_object(properties[field], tuple(defaults), ())
+        for name, default in defaults.items():
+            _sequence_schema_count(options[name], 0, default)
+
+
+def _sequence_schema_version(value: object, versions: tuple[int, ...]) -> None:
+    field = "const" if len(versions) == 1 else "enum"
+    schema = _descriptor_object(value, frozenset({field}))
+    observed = [schema[field]] if field == "const" else schema[field]
+    if (
+        type(observed) is not list
+        or any(type(version) is not int for version in observed)
+        or tuple(observed) != versions
+    ):
+        raise _sequence_schema_error("ir_version")
+
+
+def _sequence_schema_kernel_defaults(properties: dict[str, Any]) -> None:
+    if "min_periods" in properties:
+        _sequence_schema_count(properties["min_periods"], 1, 1)
+    if "numerical_profile" in properties and properties["numerical_profile"] != {
+        "enum": ["stable_v1", "stable_v2"],
+        "default": "stable_v1",
+    }:
+        raise _sequence_schema_error("numerical_profile")
+
+
+def _sequence_schema_kernel_branch(value: object, function: str) -> None:
+    count, optional = {
+        "rolling_mean": ("window", ("min_periods", "numerical_profile")),
+        "ewma": ("span", ("min_periods",)),
+        "rsi": ("period", ()),
+        "atr": ("period", ()),
+    }[function]
+    properties = _sequence_schema_object(
+        value, ("function", count, *optional), ("function", count)
+    )
+    if properties["function"] != {"const": function}:
+        raise _sequence_schema_error("function")
+    _sequence_schema_count(properties[count], 1)
+    _sequence_schema_kernel_defaults(properties)
+
+
+def _sequence_schema_kernels(value: object, functions: tuple[str, ...]) -> None:
+    schema = _descriptor_object(value, frozenset({"oneOf"}))
+    branches = _descriptor_list(schema["oneOf"])
+    if len(branches) != len(functions):
+        raise _sequence_schema_error("kernel.oneOf")
+    for branch, function in zip(branches, functions, strict=True):
+        _sequence_schema_kernel_branch(branch, function)
+
+
+def _sequence_schema_branch(
+    value: object, versions: tuple[int, ...], alternatives: bool = False
+) -> None:
+    properties = _sequence_schema_object(
+        value,
+        ("ir_version", "input_dtype", "kernel", "execution", "state"),
+        ("ir_version", "input_dtype", "kernel"),
+        alternatives,
+    )
+    _sequence_schema_version(properties["ir_version"], versions)
+    _sequence_schema_common_options(properties)
+    functions = ("rolling_mean", "ewma") + (("rsi", "atr") if 2 in versions else ())
+    _sequence_schema_kernels(properties["kernel"], functions)
+
+
+def _require_native_sequence_schema(text: str, versions: tuple[int, ...]) -> None:
+    """Validate the advertised Rust schema against known metadata profiles."""
+    schema = json.loads(text)
+    _sequence_schema_branch(schema, versions, alternatives=versions == (1, 2))
+    if versions == (1, 2):
+        branches = _descriptor_list(schema["oneOf"])
+        if len(branches) != 2:
+            raise _sequence_schema_error("oneOf")
+        for version, branch in enumerate(branches, 1):
+            _sequence_schema_branch(branch, (version,))
 
 
 def _require_native_factory_capability(capability: ProviderCapability) -> None:
@@ -903,7 +1041,7 @@ def runtime_capabilities(
                 requires_watermark=True,
                 checkpoint_support="checkpointed_stateful",
                 state_version=1,
-                state_layouts=(1, 2),
+                state_layouts=(1, 2, 3, 4, 5),
                 deterministic=True,
                 replay_safe=True,
             ),

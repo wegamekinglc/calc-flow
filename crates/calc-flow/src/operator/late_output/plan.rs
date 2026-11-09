@@ -108,19 +108,7 @@ impl<'a> LateOutputPlan<'a> {
             .len()
             .checked_add(1)
             .ok_or_else(|| error(self.node, "late scratch row count overflowed"))?;
-        let bytes = count
-            .checked_mul(size_of::<LateRow>())
-            .ok_or_else(|| error(self.node, "late scratch byte count overflowed"))?;
-        if count > self.budget.max_rows || bytes > self.budget.max_bytes {
-            return Err(error(
-                self.node,
-                &format!(
-                    "late scratch requires rows={count}, bytes={bytes}; limits rows={}, bytes={}",
-                    self.budget.max_rows, self.budget.max_bytes
-                ),
-            ));
-        }
-        Ok(())
+        validate_scratch(count, self.budget, self.node)
     }
 
     fn reserve_scratch(&mut self) -> Result<()> {
@@ -268,4 +256,21 @@ impl PreparedLateOutput<'_> {
         }
         Ok(next)
     }
+}
+
+/// Keeps the existing per-envelope scratch boundary for alternative owned preparation.
+pub(crate) fn validate_scratch(count: usize, budget: EdgeBudget, node: &str) -> Result<()> {
+    let bytes = count
+        .checked_mul(size_of::<LateRow>())
+        .ok_or_else(|| error(node, "late scratch byte count overflowed"))?;
+    if count > budget.max_rows || bytes > budget.max_bytes {
+        return Err(error(
+            node,
+            &format!(
+                "late scratch requires rows={count}, bytes={bytes}; limits rows={}, bytes={}",
+                budget.max_rows, budget.max_bytes,
+            ),
+        ));
+    }
+    Ok(())
 }

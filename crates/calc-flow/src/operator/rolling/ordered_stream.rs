@@ -15,13 +15,13 @@ use crate::runtime::streaming::entity_work::ReservePair;
 
 use super::{
     Arc, Array, BTreeMap, Batch, BufferedRow, CompiledRollingSpec, EntityRollingState, EventTime,
-    KeyValue, RecordBatch, Result, RollingHistories, RollingOperator, RowIdentity, ScalarValue,
-    StreamCollector, StreamOperatorContext, TableBatch, VecDeque, chunk_output_record,
-    closing_coordinate, concat_batches, internal_error, operator_error, read_buffered_row,
-    reconstruct_typed_state,
+    KeyValue, RecordBatch, Result, RollingHistories, RollingOperator, RollingStreamState,
+    RowIdentity, ScalarValue, StreamCollector, StreamOperatorContext, TableBatch, VecDeque,
+    chunk_output_record, closing_coordinate, concat_batches, internal_error, operator_error,
+    read_buffered_row, reconstruct_typed_state,
 };
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct OrderedStreamBuffer {
     records: VecDeque<RecordBatch>,
     last_identity: Option<Vec<u8>>,
@@ -133,7 +133,10 @@ impl RollingOperator {
         error: super::CalcFlowError,
         node: &str,
     ) -> Result<()> {
-        self.state.ordered.restore_front(records, last_identity);
+        self.state
+            .owned_mut()?
+            .ordered
+            .restore_front(records, last_identity);
         if let Ok(charge) = super::budget::full_state_charge(
             &self.state.buffer,
             &self.state.ordered,
@@ -141,7 +144,7 @@ impl RollingOperator {
             &self.compiled,
             node,
         ) {
-            self.state.charge = charge;
+            self.state.owned_mut()?.charge = charge;
         }
         Err(error)
     }
@@ -154,7 +157,7 @@ impl RollingOperator {
         node: &str,
     ) -> Result<(super::budget::StateCharge, super::budget::StateCharge)> {
         if !was_warm {
-            self.state.charge = super::budget::full_state_charge(
+            self.state.owned_mut()?.charge = super::budget::full_state_charge(
                 &self.state.buffer,
                 &self.state.ordered,
                 &self.state.histories,
@@ -238,9 +241,9 @@ impl RollingOperator {
         };
         let next_charge = self.state.charge.checked_add(incoming, &self.name)?;
         self.check_state_budget(next_charge, &self.name)?;
-        self.state.ordered.records.extend(prepared);
-        self.state.ordered.last_identity = last;
-        self.state.charge = next_charge;
+        self.state.owned_mut()?.ordered.records.extend(prepared);
+        self.state.owned_mut()?.ordered.last_identity = last;
+        self.state.owned_mut()?.charge = next_charge;
         Ok(true)
     }
 
@@ -260,9 +263,9 @@ impl RollingOperator {
             &self.name,
         )?;
         self.check_state_budget(next_charge, &self.name)?;
-        self.state.buffer.extend(materialized);
-        self.state.ordered.clear();
-        self.state.charge = next_charge;
+        self.state.owned_mut()?.buffer.extend(materialized);
+        self.state.owned_mut()?.ordered.clear();
+        self.state.owned_mut()?.charge = next_charge;
         Ok(())
     }
 
@@ -292,16 +295,18 @@ impl RollingOperator {
     ) -> Result<()> {
         if self.state.typed_kernel_state.is_none() {
             let _stage = observer.map(|recorder| recorder.stage(RollingStage::StatePreparation));
-            self.state
-                .histories
-                .materialize_columnar(&self.compiled, node_id, observer)?;
+            self.state.owned_mut()?.histories.materialize_columnar(
+                &self.compiled,
+                node_id,
+                observer,
+            )?;
             let restored = reconstruct_typed_state(
                 &self.state.histories,
                 &self.compiled,
                 &input.schema(),
                 node_id,
             )?;
-            self.state.typed_kernel_state = Some(Box::new(restored));
+            self.state.owned_mut()?.typed_kernel_state = Some(Box::new(restored));
         }
         Ok(())
     }
@@ -529,13 +534,14 @@ impl RollingOperator {
                 );
             }
         };
-        self.state.charge = current_charge;
+        let state = self.state.owned_mut()?;
+        state.charge = current_charge;
         for batch in std::mem::take(&mut prepared.batches) {
             output.emit("output", batch).await?;
         }
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
-        prepared.commit(self);
-        self.state.charge = next_charge;
+        prepared.commit(state, &self.compiled);
+        state.charge = next_charge;
         Ok(())
     }
 }
@@ -590,28 +596,22 @@ impl PreparedOrderedOutput {
         current.checked_sub(old)?.checked_add(new, node)
     }
 
-    fn commit(self, operator: &mut RollingOperator) {
-        let retention = usize::try_from(operator.compiled.max_row_retention).unwrap_or(usize::MAX);
+    fn commit(self, state: &mut RollingStreamState, compiled: &CompiledRollingSpec) {
+        let retention = usize::try_from(compiled.max_row_retention).unwrap_or(usize::MAX);
         for tail in self.touched {
             let seeds = self
                 .recurrence_seeds
                 .get(tail.entity_id)
                 .expect("every touched entity has a prepared recurrence seed");
-            tail.commit(
-                &mut operator.state.histories,
-                retention,
-                &operator.compiled,
-                seeds,
-            );
+            tail.commit(&mut state.histories, retention, compiled, seeds);
         }
         self.update.commit(
-            operator
-                .state
+            state
                 .typed_kernel_state
                 .as_deref_mut()
                 .expect("state initialized above"),
         );
-        operator.state.next_output_sequence = self.next_sequence;
+        state.next_output_sequence = self.next_sequence;
     }
 }
 

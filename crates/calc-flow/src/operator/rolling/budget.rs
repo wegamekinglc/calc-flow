@@ -204,6 +204,14 @@ pub(super) fn history_entity_charge(
     node: &str,
 ) -> Result<StateCharge> {
     let mut charge = history_entity_base_charge(key, state.windows.len(), node)?;
+    for indicator in &state.indicators {
+        charge.bytes = charge
+            .bytes
+            .checked_add(indicator.logical_bytes())
+            .ok_or_else(|| {
+                operator_error(node, "rolling indicator state byte charge overflowed")
+            })?;
+    }
     for row in &state.rows {
         charge = charge.checked_add(scalar_history_row_charge(row, node)?, node)?;
     }

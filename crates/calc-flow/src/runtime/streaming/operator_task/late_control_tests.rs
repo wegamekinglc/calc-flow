@@ -293,7 +293,7 @@ async fn collect_outputs(
         observed.restores.insert(
             ack.node_id,
             OperatorRestoreState {
-                snapshot,
+                snapshot: Arc::new(crate::state::PreloadedSnapshot::uncredited(snapshot)),
                 progress: ack.state.progress,
                 output_frontier: None,
                 next_epoch: epoch.next().unwrap(),
