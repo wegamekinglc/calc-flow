@@ -11,6 +11,7 @@ On this page:
 - [Bounded stream joins](#symbolic-bounded-stream-joins)
 - [Bounded backward ASOF Join](#symbolic-bounded-backward-asof-join)
 - [RSI and ATR calculations](#rsi-and-atr-calculations)
+- [MACD components](#macd-components)
 - [Native array compilation](#native-array-compilation)
 - [Matrix compilation](#symbolic-matrix-compilation)
 
@@ -606,6 +607,58 @@ Indicator-containing Rust RollingOperator nodes use their selected StateBudget
 byte limit for participating state, candidate, output, scratch and retained
 checkpoint storage. Python adds no rolling-budget option. Existing `ts.ema`
 and `ts.macd` retain their declarations and numerical contracts.
+
+## MACD components
+
+`ts.macd_components(value, fast_span=12, slow_span=26, signal_span=9,
+min_periods=1, signal_min_periods=1)` returns
+`calc_flow.MacdOutputs[ColumnExpr]`. Its frozen `line`, `signal` and `histogram`
+fields are ordinary immutable column expressions. All five parameters must
+be exact positive u64 values; the fast span must be less than the slow span.
+Minima are not capped by spans. The existing `ts.macd` keeps its original
+fast-minus-slow declaration and numerical semantics.
+
+Table inputs accept signed and unsigned 8–64-bit integers and float32/float64,
+with the existing conversion to float64, including integer rounding. Boolean
+and decimal inputs are rejected. RSI/ATR remain floating-only. Both batch and
+stream declarations require entity, event-time and sequence ordering. The
+whole expression, including arithmetic outside a component reference, must
+use the actual evaluation table's row set and matching referenced column
+definitions. Consumed source and target definitions are checked recursively
+at their own evaluation boundaries. Materialize the desired column or use
+references from the actual target table to resolve a mismatch.
+
+```python
+parts = cf.ts.macd_components(quotes["close"], signal_span=9)
+result = quotes.with_columns(
+    macd_line=parts.line,
+    macd_signal=parts.signal,
+    macd_histogram=parts.histogram,
+)
+```
+
+Component selection and output aliases do not create separate state owners.
+Matching input meaning, ordering, all five parameters and numerical version
+identify one MACD owner across a Program's named outputs, before branches
+fork. Only consumed columns are emitted; all three recurrences remain active
+when only histogram or line is consumed. An unused container creates no live
+state. The declaration uses `macd_component@1` with a `line`, `signal` or
+`histogram` selector, and a stage containing MACD selects rolling layout 6;
+RSI/ATR-only stages retain layout 5. Explanation reports shared groups and
+the general-path fallback until a typed MACD kernel exists.
+
+When components are consumed on both sides of a native array attachment or a
+projection, the compiler forwards private component columns through proven
+row-preserving stages. Those columns are included in physical schemas and
+removed from every logical output. Different filtered row sets retain separate
+owners; SQL receives only its declared input columns. An upstream stateful
+calculation and filter finish before a MACD over that filtered table begins.
+
+`with_late_output` treats the component group as one stateful stage and keeps
+its existing-column operand and upstream-stage restrictions. Its local lateness
+and side-output policy form a separate owner context from ordinary branches.
+Main and late
+results retain their existing Table return types and owned stream lifecycle.
 
 ## Native array compilation
 

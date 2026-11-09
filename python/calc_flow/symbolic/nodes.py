@@ -409,6 +409,27 @@ _PRIMITIVES: dict[str, PrimitiveSpec] = {
     ),
     "rsi": PrimitiveSpec(frozenset({"period"}), CMap(())),
     "atr": PrimitiveSpec(frozenset({"period"}), CMap(())),
+    "macd_component": PrimitiveSpec(
+        frozenset(
+            {
+                "component",
+                "fast_span",
+                "slow_span",
+                "signal_span",
+                "min_periods",
+                "signal_min_periods",
+            }
+        ),
+        CMap.from_mapping(
+            {
+                "fast_span": CInt(12),
+                "slow_span": CInt(26),
+                "signal_span": CInt(9),
+                "min_periods": CInt(1),
+                "signal_min_periods": CInt(1),
+            }
+        ),
+    ),
     "cumulative_mean": PrimitiveSpec(
         frozenset({"min_periods"}),
         CMap.from_mapping({"min_periods": CInt(1)}),
@@ -545,9 +566,13 @@ def build(
 ) -> Node:
     """Build one normalized node with materialized defaults and its digest."""
 
-    if name in {"stream_asof_join", "snapshot_sql", "rsi", "atr"} and (
-        type(version) is not int or version != 1
-    ):
+    if name in {
+        "stream_asof_join",
+        "snapshot_sql",
+        "rsi",
+        "atr",
+        "macd_component",
+    } and (type(version) is not int or version != 1):
         raise ValueError(
             f"unknown_primitive_version: symbolic primitive {name!r}@{version}"
         )

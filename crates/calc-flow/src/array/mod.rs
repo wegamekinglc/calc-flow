@@ -51,7 +51,7 @@ pub use elementwise::{
     subtract, where_,
 };
 pub use execution::ArrayExecutionOptions;
-pub use indicators::{AtrOptions, RsiOptions};
+pub use indicators::{AtrOptions, MacdOptions, RsiOptions};
 pub use matrix::{matmul, reshape, transpose};
 pub(crate) use provider::preparation::settlement::{Preparation, channel as preparation_channel};
 pub(crate) use provider::preparation::{NativeScope, NativeStaticPlan};
@@ -65,7 +65,10 @@ pub(crate) use provider::{
 pub use reduction::{Reduction, ReductionOptions, max, mean, min, reduce, sum};
 pub use rolling::{EwmaOptions, ewma};
 pub use rolling_mean::{RollingMeanOptions, rolling_mean};
-pub use sequence::{ArrayStateOptions, AtrState, EwmaState, RollingMeanState, RsiState, atr, rsi};
+pub use sequence::{
+    ArrayStateOptions, AtrState, EwmaState, MacdOutputs, MacdState, RollingMeanState, RsiState,
+    atr, macd_components, rsi,
+};
 pub use storage::NativeArray;
 
 /// Supported native element types.

@@ -173,3 +173,71 @@ fn test_prebuffer_input_row_is_kept_without_inventing_an_ordered_position() {
     );
     assert!(!diagnostic.message().contains("ordered position 19"));
 }
+
+fn layout_six_operator(mixed: bool) -> RollingOperator {
+    let base = operator(true);
+    let mut spec = base.spec().clone();
+    spec.state_layout_version = crate::ROLLING_MACD_STATE_LAYOUT_VERSION;
+    if !mixed {
+        spec.outputs.clear();
+    }
+    spec.outputs.push(
+        serde_json::from_value(json!({
+            "kind":"macd_component", "primitive_version":1,
+            "input":"close", "output":"line", "component":"line"
+        }))
+        .unwrap(),
+    );
+    RollingOperator::new(
+        "features",
+        Arc::clone(base.input_ports()[0].schema().unwrap()),
+        spec,
+    )
+    .unwrap()
+}
+
+#[test]
+fn test_layout_six_keeps_mixed_atr_input_coordinate_evidence() {
+    let error = CalcFlowError::InvalidArgument {
+        field: "high".into(),
+        message: r#"rolling node "features", input row 2; ordered position not assigned: must be greater than or equal to low"#.into(),
+    };
+    let diagnostic =
+        SafeIndicatorDiagnostic::from_rolling("features", &layout_six_operator(true), &error)
+            .expect("mixed layout-six ATR diagnostic");
+    assert!(diagnostic.message().contains("high"));
+    assert!(
+        diagnostic
+            .message()
+            .contains("input row 2; ordered position not assigned")
+    );
+}
+
+#[test]
+fn test_layout_six_keeps_macd_position_counter_evidence() {
+    let error = numerical_error(
+        "input.rows",
+        "processed position count would exceed u64::MAX",
+    );
+    let diagnostic =
+        SafeIndicatorDiagnostic::from_rolling("features", &layout_six_operator(false), &error)
+            .expect("native MACD position counter diagnostic");
+    assert!(diagnostic.message().contains("input.rows"));
+    assert!(diagnostic.message().contains("ordered position 0"));
+    assert!(diagnostic.message().contains("u64::MAX"));
+}
+
+#[test]
+fn test_layout_six_does_not_trust_unknown_macd_error_details() {
+    let operator = layout_six_operator(false);
+    for error in [
+        numerical_error("close", "secret-value"),
+        numerical_error("input.rows", "secret-value"),
+        numerical_error(
+            "input.rows",
+            "processed position count would exceed u64::MAX secret",
+        ),
+    ] {
+        assert!(SafeIndicatorDiagnostic::from_rolling("features", &operator, &error).is_none());
+    }
+}

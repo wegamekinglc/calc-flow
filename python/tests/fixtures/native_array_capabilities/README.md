@@ -11,6 +11,15 @@ These fixtures contain Rust-produced data, not Python capability producers.
   `6a7e34bb3b6951dcdfa8d97891371dd30e560606`. SHA-256:
   `efa17b876ce33f00903bb51577d85ae87c5f5b1be302313fd45fb57dd642a5b4`.
 
-Tests inspect the two known schema-5 profiles, deliberately corrupt metadata
+- `rust_sequence_ir3.json`: actual candidate-library output of
+  `NativeArraySequenceFactory::capability_descriptor()` from source
+  `846ff7a3b6b9c15aac8a5e4c0816946c31c80094`. Library SHA-256:
+  `9eab145664f06e5c26e1944eb3864dd3b6998febe24eca3f9a7734a6463cb54b`.
+  Fixture SHA-256:
+  `bae2bb62e47c081d2b6cfabd447cb0634fa364dc5c7b1c1bf08f0148ab6f2160`.
+  The canonical Rust schema string is retained verbatim. This is current Rust
+  metadata evidence, not installed-wheel or final-parent equality evidence.
+
+Tests inspect the three known schema-5 profiles, deliberately corrupt metadata
 for rejection cases, and preserve frozen IR1 evidence. They do not install a
-fake Rust factory or establish numeric/managed execution of the new IR2 wheel.
+fake Rust factory or establish numeric/managed execution of a new combined wheel.

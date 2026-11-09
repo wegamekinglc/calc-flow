@@ -51,6 +51,12 @@ aligned ATR vectors using the shared finite-only native indicator kernels.
 [`native_table_indicators.rs`](native_table_indicators.rs) combines native
 Table RSI, ATR and lag under an explicit whole-operator byte budget.
 
+[`native_table_macd.rs`](native_table_macd.rs) computes all three components
+from nullable integer Table prices with one shared recurrence.
+
+[`native_macd.rs`](native_macd.rs) carries a ready MACD line through a missing
+price, advances its signal and keeps immutable component outputs after reset.
+
 [`native_sequence_stream.rs`](native_sequence_stream.rs) uses the checkpointed
 EWMA factory and validates a fresh managed terminal restart without reopening
 the source.
@@ -60,6 +66,8 @@ cargo run -p calc-flow --example native_arrays
 cargo run -p calc-flow --example native_array_state
 cargo run -p calc-flow --example native_indicators
 cargo run -p calc-flow --example native_table_indicators
+cargo run -p calc-flow --example native_macd
+cargo run -p calc-flow --example native_table_macd
 cargo run -p calc-flow --example native_sequence_stream
 ```
 

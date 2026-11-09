@@ -1156,6 +1156,26 @@
         }
       ]
     },
+    "MacdComponent": {
+      "description": "One readout of a shared complete MACD recurrence.",
+      "oneOf": [
+        {
+          "const": "line",
+          "description": "Fast average minus slow average.",
+          "type": "string"
+        },
+        {
+          "const": "signal",
+          "description": "Exponential average of the line, including carried valid lines.",
+          "type": "string"
+        },
+        {
+          "const": "histogram",
+          "description": "Line minus signal.",
+          "type": "string"
+        }
+      ]
+    },
     "NodeSpec": {
       "additionalProperties": false,
       "properties": {
@@ -1984,6 +2004,77 @@
     "RollingOutputSpec": {
       "description": "One declared rolling output and its output column name.\n\n# Examples\n\n```\nuse calc_flow::{RollingFrameSpec, RollingOutputSpec};\n\nlet output = RollingOutputSpec::Decay {\n    primitive_version: 1,\n    input: \"price\".into(),\n    output: \"weighted_price\".into(),\n    frame: RollingFrameSpec::Rows { size: 5 },\n    min_periods: 1,\n};\nassert!(matches!(output, RollingOutputSpec::Decay { .. }));\n```",
       "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "One nullable Float64 component of a shared unadjusted MACD recurrence.",
+          "properties": {
+            "component": {
+              "$ref": "#/$defs/MacdComponent",
+              "description": "Line, signal or histogram readout; all share one state owner."
+            },
+            "fast_span": {
+              "default": 12,
+              "description": "Positive fast span, strictly smaller than the slow span.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "input": {
+              "description": "Signed/unsigned integer or floating input column.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "macd_component",
+              "type": "string"
+            },
+            "min_periods": {
+              "default": 1,
+              "description": "Independent positive fast/slow warm-up count, without a span cap.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "output": {
+              "description": "Selected nullable Float64 output column.",
+              "type": "string"
+            },
+            "primitive_version": {
+              "description": "Primitive version; must equal `1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "signal_min_periods": {
+              "default": 1,
+              "description": "Independent positive signal warm-up count, without a span cap.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "signal_span": {
+              "default": 9,
+              "description": "Independent positive signal span.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "slow_span": {
+              "default": 26,
+              "description": "Positive slow span.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "primitive_version",
+            "input",
+            "output",
+            "component"
+          ],
+          "type": "object"
+        },
         {
           "additionalProperties": false,
           "description": "Relative strength index with a complete-period Wilder seed.",
@@ -3164,7 +3255,7 @@
           "type": "array"
         },
         "state_layout_version": {
-          "description": "Durable state-layout version. Existing primitives use\n[`ROLLING_STATE_LAYOUT_VERSION`]; EWMA requires\n[`ROLLING_EWMA_STATE_LAYOUT_VERSION`]. Cumulative sum/min/max/variance\nrequire [`ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION`]. RSI and ATR require\n[`ROLLING_INDICATOR_STATE_LAYOUT_VERSION`].",
+          "description": "Durable state-layout version. Existing primitives use\n[`ROLLING_STATE_LAYOUT_VERSION`]; EWMA requires\n[`ROLLING_EWMA_STATE_LAYOUT_VERSION`]. Cumulative sum/min/max/variance\nrequire [`ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION`]. RSI and ATR require\n[`ROLLING_INDICATOR_STATE_LAYOUT_VERSION`]; MACD components require\n[`ROLLING_MACD_STATE_LAYOUT_VERSION`].",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"

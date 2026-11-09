@@ -12,6 +12,7 @@ from typing_extensions import Never
 
 from calc_flow import _native
 from calc_flow._compat import dataclass
+from calc_flow._macd import MacdOutputs as MacdOutputs
 from calc_flow._native_array import (
     ArrayExecutionOptions as ArrayExecutionOptions,
 )
@@ -72,6 +73,7 @@ from calc_flow._native_array import (
 from calc_flow._native_array import (
     logical_xor as logical_xor,
 )
+from calc_flow._native_array import macd_components as macd_components
 from calc_flow._native_array import matmul as matmul
 from calc_flow._native_array import (
     max as max,

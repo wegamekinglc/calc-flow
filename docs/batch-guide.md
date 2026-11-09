@@ -266,7 +266,7 @@ The [Rust Table example](../crates/calc-flow/examples/native_table_indicators.rs
 combines RSI, ATR and lag in one native operator.
 
 Rust callers can set `RollingOperator::set_state_budget` before compiling a
-finite plan. For an operator containing RSI or ATR, `max_bytes` bounds its
+finite plan. For an operator containing RSI, ATR or MACD, `max_bytes` bounds its
 participating peak: state, isolated candidates, prepared output, scratch and
 live checkpoint storage. Mixed old/new outputs share the limit. `max_rows`
 keeps its retained-row meaning. An old-only operator keeps its existing
@@ -281,6 +281,19 @@ Pure accounting owner-key/reservation indexes are not recursively charged;
 they may only reference already funded owners and numeric charges. This
 excludes no computational or payload containers and does not shorten their
 funded lifetime when ownership moves into a lease.
+
+### Complete MACD
+
+`ts.macd_components(price, fast_span=12, slow_span=26, signal_span=9,
+min_periods=1, signal_min_periods=1)` returns `MacdOutputs` with `line`,
+`signal` and `histogram` column references. Select any subset or aliases; one
+shared native recurrence advances per ordered entity row. Signed/unsigned
+8–64-bit integers and float32/float64 use the existing float64 EWMA conversion.
+The fast span must be less than slow; all counts are positive u64 values and
+both minima may exceed spans. A missing price can carry the line, which still
+updates the signal. The stage uses layout 6 and can include earlier rolling
+outputs. See [component ownership](symbolic-api.md#macd-components) and the
+[Python example](../examples/native_macd.py).
 
 ## Async execution and deadlines
 

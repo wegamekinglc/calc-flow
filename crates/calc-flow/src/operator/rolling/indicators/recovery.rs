@@ -3,8 +3,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use super::super::{
-    CompiledRollingSpec, LatePolicySpec, ROLLING_INDICATOR_STATE_LAYOUT_VERSION, RollingOperator,
-    RollingSnapshotMetadata, state_codec,
+    CompiledRollingSpec, LatePolicySpec, RollingOperator, RollingSnapshotMetadata, state_codec,
 };
 use super::{Resources, resources::Credit};
 use crate::{
@@ -53,18 +52,16 @@ impl RollingOperator {
         capability: OperatorCheckpointCapability,
         control: Arc<StreamJobControl>,
     ) -> Option<IndicatorRollingRecord> {
-        (self.compiled.state_layout_version == ROLLING_INDICATOR_STATE_LAYOUT_VERSION).then(|| {
-            IndicatorRollingRecord {
-                node: node.to_owned(),
-                graph,
-                compiled: Arc::clone(&self.compiled),
-                policy: self.spec.late_policy,
-                budget: self.state_budget,
-                resources: self.indicator_resources.clone(),
-                workers: self.native_checkpoint_workers(),
-                capability,
-                control,
-            }
+        super::is_layout(self.compiled.state_layout_version).then(|| IndicatorRollingRecord {
+            node: node.to_owned(),
+            graph,
+            compiled: Arc::clone(&self.compiled),
+            policy: self.spec.late_policy,
+            budget: self.state_budget,
+            resources: self.indicator_resources.clone(),
+            workers: self.native_checkpoint_workers(),
+            capability,
+            control,
         })
     }
 }
@@ -186,7 +183,7 @@ impl IndicatorRollingRecord {
     }
 
     fn validate_identity(&self, metadata: &RollingSnapshotMetadata) -> Result<()> {
-        if metadata.state_layout_version != ROLLING_INDICATOR_STATE_LAYOUT_VERSION
+        if metadata.state_layout_version != self.compiled.state_layout_version
             || metadata.pipeline_fingerprint.as_deref() != Some(self.graph.as_ref())
             || metadata.operator_id.as_deref() != Some(self.node.as_str())
         {
@@ -230,7 +227,7 @@ impl IndicatorRollingRecord {
         descriptor: &SegmentDescriptor,
     ) -> Result<()> {
         if descriptor.kind != SegmentKind::Base
-            || descriptor.state_layout_version != ROLLING_INDICATOR_STATE_LAYOUT_VERSION
+            || descriptor.state_layout_version != self.compiled.state_layout_version
             || descriptor.schema_fingerprint != self.compiled.state_schema_fingerprint
             || descriptor.handle.operator_id() != self.node
             || descriptor.handle.epoch() > metadata.epoch

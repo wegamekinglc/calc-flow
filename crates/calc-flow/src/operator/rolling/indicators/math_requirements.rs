@@ -128,7 +128,8 @@ fn windows(
     scope: usize,
     check: Check<'_>,
 ) -> Result<u64> {
-    let mut bytes = growing::<Option<f64>>(source.compiled.indicator_groups.len())?;
+    let mut bytes =
+        growing::<Option<f64>>(super::readout_width(&source.compiled.indicator_groups)?)?;
     for group in &source.compiled.window_groups {
         check()?;
         let CompiledWindowGroup::Extrema { input_index, .. } = group else {

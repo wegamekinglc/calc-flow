@@ -340,6 +340,8 @@ class _NativeGraph(_SQLGraph):
         )
 
     def outputs(self) -> None:
+        if self.macd_active:
+            self._append_macd_frontiers()
         for logical, expression in self.graph.program.outputs:
             if isinstance(expression, ArrayExpr):
                 self._array_output(logical, expression._node)

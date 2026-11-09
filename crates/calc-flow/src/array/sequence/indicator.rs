@@ -10,7 +10,7 @@ mod rsi;
 pub use atr::{AtrState, atr};
 pub use rsi::{RsiState, rsi};
 
-fn validate(input: ArrayView<'_>, name: &str) -> Result<()> {
+pub(super) fn validate(input: ArrayView<'_>, name: &str) -> Result<()> {
     if input.shape().len() != 1 {
         return Err(invalid(
             &format!("{name}.shape"),
@@ -26,7 +26,7 @@ fn validate(input: ArrayView<'_>, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn positions(previous: u64, len: usize) -> Result<()> {
+pub(super) fn positions(previous: u64, len: usize) -> Result<()> {
     let rows = u64::try_from(len)
         .ok()
         .and_then(|rows| previous.checked_add(rows));

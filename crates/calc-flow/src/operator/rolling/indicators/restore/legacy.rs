@@ -1,7 +1,6 @@
 use super::{StateOwner, empty};
 use crate::operator::rolling::{
-    DecodedRollingState, ROLLING_INDICATOR_STATE_LAYOUT_VERSION, RollingOperator,
-    RollingSnapshotMetadata, RollingStreamState,
+    DecodedRollingState, RollingOperator, RollingSnapshotMetadata, RollingStreamState,
     budget::{self, StateCharge},
     state_codec,
 };
@@ -35,7 +34,7 @@ impl RollingOperator {
         Ok(())
     }
     fn legacy_restore_error(&self, error: CalcFlowError) -> CalcFlowError {
-        if self.compiled.state_layout_version == ROLLING_INDICATOR_STATE_LAYOUT_VERSION {
+        if super::super::is_layout(self.compiled.state_layout_version) {
             state_codec::layout_five_restore_error(error, &self.name)
         } else {
             error

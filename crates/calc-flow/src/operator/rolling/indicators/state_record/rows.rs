@@ -73,7 +73,9 @@ pub(super) fn validate(inputs: Inputs<'_>, check: Check<'_>) -> Result<()> {
     validate_buffer(inputs, check)
 }
 fn validate_mode(inputs: Inputs<'_>) -> Result<()> {
-    if inputs.compiled.state_layout_version != 5 || inputs.compiled.indicator_groups.is_empty() {
+    if !super::super::is_layout(inputs.compiled.state_layout_version)
+        || inputs.compiled.indicator_groups.is_empty()
+    {
         return Err(invalid());
     }
     if !inputs.state.ordered.is_empty() || inputs.state.typed_kernel_state.is_some() {

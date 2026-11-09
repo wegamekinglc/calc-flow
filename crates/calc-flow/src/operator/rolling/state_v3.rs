@@ -43,7 +43,7 @@ pub(super) fn state_fields_for_layout(input_schema: &Schema, layout: u32) -> Vec
     if layout >= super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION {
         fields.push(Field::new("_cumulative_summary", DataType::Binary, true));
     }
-    if layout == super::ROLLING_INDICATOR_STATE_LAYOUT_VERSION {
+    if super::indicators::is_layout(layout) {
         fields.push(Field::new("_indicator_state", DataType::Binary, true));
     }
     fields
@@ -208,7 +208,7 @@ pub(super) fn decode(
             "rolling columnar state segment column count does not match layout v3".to_owned(),
         ));
     }
-    if compiled.state_layout_version == super::ROLLING_INDICATOR_STATE_LAYOUT_VERSION {
+    if super::indicators::is_layout(compiled.state_layout_version) {
         return decode_record_checked(&record, input_schema, compiled, "rolling", &mut || Ok(()));
     }
     let arrays = StateArrays::new(&record, width)?;
@@ -253,7 +253,7 @@ fn validate_controlled_record(
     compiled: &CompiledRollingSpec,
 ) -> Result<()> {
     let columns = input.fields().len().checked_add(8);
-    if compiled.state_layout_version != super::ROLLING_INDICATOR_STATE_LAYOUT_VERSION
+    if !super::indicators::is_layout(compiled.state_layout_version)
         || columns != Some(record.num_columns())
     {
         return Err(state_format("invalid controlled layout5 record shape"));
@@ -501,7 +501,7 @@ impl EncodedColumns {
                     .collect::<BinaryArray>(),
             ));
         }
-        if layout == super::ROLLING_INDICATOR_STATE_LAYOUT_VERSION {
+        if super::indicators::is_layout(layout) {
             arrays.push(Arc::new(
                 self.indicators
                     .iter()
@@ -694,8 +694,7 @@ impl<'a> StateDecoder<'a> {
         let tail = self.input_schema.fields().len() + 6;
         let layout = self.compiled.state_layout_version;
         let summary = (layout >= super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION).then_some(tail);
-        let indicator =
-            (layout == super::ROLLING_INDICATOR_STATE_LAYOUT_VERSION).then_some(tail + 1);
+        let indicator = (super::indicators::is_layout(layout)).then_some(tail + 1);
         Ok((
             binary_payload(record, summary, row)?,
             binary_payload(record, indicator, row)?,
@@ -1223,7 +1222,7 @@ impl<'a> StateDecoder<'a> {
     }
 
     fn validate_pending_row(&self, values: &[ScalarValue]) -> Result<()> {
-        if self.compiled.state_layout_version == super::ROLLING_INDICATOR_STATE_LAYOUT_VERSION {
+        if super::indicators::is_layout(self.compiled.state_layout_version) {
             super::indicators::validate_row(
                 &self.compiled.indicator_groups,
                 values,
@@ -1240,7 +1239,7 @@ impl<'a> StateDecoder<'a> {
     }
 
     fn validate_buffer_only_entities(&self, check: &mut dyn FnMut() -> Result<()>) -> Result<()> {
-        if self.compiled.state_layout_version != super::ROLLING_INDICATOR_STATE_LAYOUT_VERSION {
+        if !super::indicators::is_layout(self.compiled.state_layout_version) {
             return Ok(());
         }
         for (index, (entity, _)) in self.entities.iter().enumerate() {

@@ -52,11 +52,12 @@ pub(crate) use rolling::{
     DataFusionRollingWindow,
 };
 pub use rolling::{
-    LateErrorScope, LatePolicySpec, ROLLING_COLUMNAR_STATE_LAYOUT_VERSION,
+    LateErrorScope, LatePolicySpec, MacdComponent, ROLLING_COLUMNAR_STATE_LAYOUT_VERSION,
     ROLLING_CONFIGURATION_VERSION, ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION,
     ROLLING_EWMA_STATE_LAYOUT_VERSION, ROLLING_INDICATOR_STATE_LAYOUT_VERSION,
-    ROLLING_STATE_LAYOUT_VERSION, RollingFloatPrimitiveSpec, RollingFrameSpec,
-    RollingNumericalProfile, RollingOperator, RollingOutputSpec, RollingSpec, RollingValuePolicy,
+    ROLLING_MACD_STATE_LAYOUT_VERSION, ROLLING_STATE_LAYOUT_VERSION, RollingFloatPrimitiveSpec,
+    RollingFrameSpec, RollingNumericalProfile, RollingOperator, RollingOutputSpec, RollingSpec,
+    RollingValuePolicy,
 };
 pub use snapshot_sql::SnapshotSqlOperator;
 pub use sql::SqlOperator;

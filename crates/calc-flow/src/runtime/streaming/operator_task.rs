@@ -837,7 +837,11 @@ async fn reset_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Res
         CompiledStreamOperator::StreamAsofJoin(_) => reset_managed_asof(inputs, task_id).await,
         CompiledStreamOperator::External(_) => reset_async_operator(inputs, task_id).await,
         CompiledStreamOperator::Rolling(operator)
-            if operator.state_layout_version() == crate::ROLLING_INDICATOR_STATE_LAYOUT_VERSION =>
+            if matches!(
+                operator.state_layout_version(),
+                crate::ROLLING_INDICATOR_STATE_LAYOUT_VERSION
+                    | crate::ROLLING_MACD_STATE_LAYOUT_VERSION
+            ) =>
         {
             reset_async_operator(inputs, task_id).await
         }

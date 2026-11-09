@@ -7,6 +7,7 @@ pub(in crate::array) mod capture;
 pub(in crate::array) mod codec;
 mod ewma;
 mod indicator;
+mod macd;
 mod mean;
 
 #[cfg(test)]
@@ -20,6 +21,7 @@ mod capture_tests;
 
 pub use ewma::EwmaState;
 pub use indicator::{AtrState, RsiState, atr, rsi};
+pub use macd::{MacdOutputs, MacdState, macd_components};
 pub use mean::RollingMeanState;
 
 /// Retained-storage limits for owned native sequence states.

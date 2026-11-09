@@ -43,7 +43,7 @@ fn test_native_descriptors_have_explicit_sequence_only_state_layouts() {
     let sequence = NativeArraySequenceFactory::capability_descriptor();
     assert_eq!(array["state_layouts"], json!([]));
     assert_eq!(table["state_layouts"], json!([]));
-    assert_eq!(sequence["state_layouts"], json!([1, 2]));
+    assert_eq!(sequence["state_layouts"], json!([1, 2, 3]));
     assert_eq!(sequence["partition_contract"], "single_ordered_sequence");
 }
 

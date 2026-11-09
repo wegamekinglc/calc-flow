@@ -1776,14 +1776,14 @@ Existing delivery rules still apply if an emission fails after a prepared
 chunk has already been accepted downstream.
 
 Rust `RollingOperator::set_state_budget` supplies the existing limit. For a
-node containing at least one RSI or ATR, `max_bytes` covers all simultaneously
+node containing at least one RSI, ATR or MACD, `max_bytes` covers all simultaneously
 participating committed state, isolated candidates, prepared outputs, scratch
 and live encoded checkpoint/restore segments. This includes old rolling
 outputs in a mixed node. Shared Arrow allocations are charged once at their
 observable ownership boundary; distinct copies are separate. `max_rows`
 retains its existing entity/history/pending-row meaning. Old-only nodes keep
 retained-state accounting and checkpoint-copy exclusion, even with explicit
-layout 5. The defaults remain 9,007,199,254,740,991 rows and logical bytes,
+layout 5 or 6. The defaults remain 9,007,199,254,740,991 rows and logical bytes,
 with no smaller implicit cap or new Python/project setting. These charges
 do not bound process RSS, independent operators, queues or transferred results.
 Retained logical charges count observable Arrow buffer capacity/extent and
@@ -1795,7 +1795,7 @@ they may only reference already funded owners and numeric charges. This
 excludes no computational or payload containers and does not shorten their
 funded lifetime when ownership moves into a lease.
 
-Layout 5 persists complete indicator state and fingerprints alongside mixed
+Layouts 5 and 6 persist complete indicator state and fingerprints alongside mixed
 history and pending rows. Asynchronous checkpoint preparation admits encoding
 work before allocation. Capture reuses immutable prepared bytes for the exact
 revision; a direct synchronous capture of an unprepared revision fails with a
@@ -1807,19 +1807,31 @@ until their owners settle or drop. A lower budget must still admit those owners.
 Managed local recovery validates metadata, encoded lengths, checksums, schema,
 indicator groups and numerical state before opening source or sink connectors.
 Ordinary and terminal manifests receive the same validation, including
-old-only declarations using layout 5. Diagnostic errors retain the operator
+old-only declarations using layout 5 or 6. Diagnostic errors retain the operator
 identity and safe `state.*` path without echoing checkpoint values or unknown
 metadata keys. Existing layouts 1–4 keep their compatibility rules.
+
+
+MACD components use the same owned streaming lifecycle with rolling layout 6.
+`ts.macd_components` shares one complete group across aliases, subsets and named
+output forks. Each group retains 56 logical numerical bytes and a 104-byte raw
+Table checkpoint payload, including all five parameters and all three EWMA
+states. Missing prices can carry a valid line and continue updating the signal;
+Inf/generated NaN follow existing EWMA arithmetic. Previous rolling layouts and
+RSI/ATR-only layout-5 payloads retain their contracts. Both ordinary and terminal
+layout-6 recovery validate the full group and identity before connectors open.
 
 ## Native array sequence recovery
 
 The Rust `NativeArraySequenceFactory` provides a single ordered Array ingress
-with one rolling-mean, EWMA, RSI or ATR kernel. Rolling mean and EWMA retain
-IR1/layout1. RSI vectors and packed ATR inputs use IR2/layout2; packed ATR has
-shape `[rows, 3]` in high/low/close order. Both indicators return nullable
-float64 vectors with complete-period warm-up and missing-segment resets.
-The factory uses the runner's normal bounded edges, barriers and EOF
-checkpoints. Equal dynamic batches remain valid;
+with one rolling-mean, EWMA, RSI, ATR or complete MACD kernel. Rolling mean
+and EWMA retain IR1/layout1. RSI vectors and packed ATR inputs use IR2/layout2;
+packed ATR has shape `[rows, 3]` in high/low/close order. Both indicators return
+nullable float64 vectors with complete-period warm-up and missing-segment resets.
+IR3 MACD input is a native float vector and its output is packed `[rows, 3]` in
+line, signal, histogram order, with layout-3 recovery. The factory uses the
+runner's normal bounded edges, barriers and EOF checkpoints. Equal dynamic
+batches remain valid;
 static declarations, implicit entity grouping and multi-input sequence joins
 are unsupported. See the [Rust sequence contract](rust-api.md#checkpointed-native-array-sequences)
 and [executable example](../crates/calc-flow/examples/native_sequence_stream.rs).

@@ -35,14 +35,13 @@ from calc_flow.symbolic.lower.event_windows import (
     _check_window_lateness_options,
     _lower_event_window_program,
 )
+from calc_flow.symbolic.lower.macd import _plan_rolling_program
 from calc_flow.symbolic.lower.planners import (
     _check_declared_inputs,
     _CrossSectionPlan,
     _LoweringProgram,
     _plan_cross_section,
-    _plan_rolling,
     _share_cross_section_plans,
-    _share_rolling_plans,
 )
 from calc_flow.symbolic.lower.segments import (
     _TABLE_OUTPUT_PRIMITIVES,
@@ -134,17 +133,7 @@ def _lower_program(
         if sum(1 for _, segment in segments if segment.input_node.digest == digest) > 1
     }
     fanout = len(program.inputs) > 1 or bool(multi_output_lineages)
-    plans = {
-        output_name: _plan_rolling(
-            output_name,
-            segment,
-            f"outputs.{output_name}",
-            allowed_lateness_micros,
-            late_policy,
-        )
-        for output_name, segment in segments
-    }
-    plans = _share_rolling_plans(segments, plans)
+    plans = _plan_rolling_program(segments, (allowed_lateness_micros, late_policy))
     rolling_digests = {
         segment.input_node.digest
         for (output_name, segment), plan in zip(segments, plans.values(), strict=True)
@@ -221,9 +210,10 @@ def _lower_program(
         final_predicate = segment.predicate
         if (rolling is not None or cross is not None) and segment.predicate is not None:
             state_plan = _required_segment_state_plan(rolling, cross)
+            macd_prefix = None if rolling is None else rolling.macd_prefix_id
             prefilter_id = (
-                f"{state_plan.node_id}__prefilter"
-                if shared_plan_counts[state_plan.node_id] > 1
+                f"{macd_prefix or state_plan.node_id}__prefilter"
+                if macd_prefix is not None or shared_plan_counts[state_plan.node_id] > 1
                 else f"{output_name}__cf_prefilter"
             )
             input_fields = _schema_fields(segment.input_node.attr("schema"))
@@ -691,6 +681,14 @@ def _lower_program_document(
 ) -> dict[str, object]:
     """Lower validated declarations while their registration revision is locked."""
     analyzer, capabilities = _check_expression_capability(program, selected, mode_value)
+    from calc_flow.symbolic.lower.macd_forward import _forward_native_macd
+
+    forwarded = _forward_native_macd(program, analyzer)
+    if forwarded is not program:
+        program = forwarded
+        analyzer, capabilities = _check_expression_capability(
+            program, selected, mode_value
+        )
     analyzer._bindings = _bindings
     _check_stateful_lowering(
         program, capabilities, mode_value, allowed_lateness_micros, late_policy

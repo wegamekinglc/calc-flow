@@ -129,8 +129,13 @@ pub(super) fn validate(
     compiled: &CompiledRollingSpec,
     snapshot: &OperatorStateSnapshot,
 ) -> Result<()> {
-    if metadata.state_layout_version != 5 {
-        return Err(mismatch("metadata", "indicator state requires layout five"));
+    if metadata.state_layout_version != compiled.state_layout_version
+        || !super::super::is_layout(metadata.state_layout_version)
+    {
+        return Err(mismatch(
+            "metadata",
+            "indicator state requires the compiled layout five or six",
+        ));
     }
     state_codec::validate_snapshot_metadata(metadata, compiled, snapshot)?;
     if metadata.segment_inventory.is_empty() && metadata.next_output_sequence > 0 {

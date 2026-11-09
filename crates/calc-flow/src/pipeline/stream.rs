@@ -616,8 +616,11 @@ impl CompiledStreamOperator {
         match self {
             Self::External(operator) => operator.restore_async(snapshot, context).await,
             Self::Rolling(operator)
-                if operator.state_layout_version()
-                    == crate::ROLLING_INDICATOR_STATE_LAYOUT_VERSION =>
+                if matches!(
+                    operator.state_layout_version(),
+                    crate::ROLLING_INDICATOR_STATE_LAYOUT_VERSION
+                        | crate::ROLLING_MACD_STATE_LAYOUT_VERSION
+                ) =>
             {
                 operator.restore_async(snapshot, context).await
             }

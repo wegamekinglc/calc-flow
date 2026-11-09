@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 use crate::{
     JsonMap, Result, RollingNumericalProfile,
     array::{
-        ArrayDType, ArrayExecutionOptions, ArrayStateOptions, AtrOptions, EwmaOptions,
+        ArrayDType, ArrayExecutionOptions, ArrayStateOptions, AtrOptions, EwmaOptions, MacdOptions,
         RollingMeanOptions, RsiOptions, invalid,
         sequence::codec::{KernelOptions, SequenceSpec},
     },
@@ -31,10 +31,10 @@ fn validate_document(options: &JsonMap) -> Result<u64> {
         "options",
     )?;
     match options.get("ir_version").and_then(Value::as_u64) {
-        Some(version @ (1 | 2)) => Ok(version),
+        Some(version @ 1..=3) => Ok(version),
         _ => Err(invalid(
             "options.ir_version",
-            "requires integer version 1 or 2",
+            "requires integer version 1, 2 or 3",
         )),
     }
 }
@@ -84,6 +84,7 @@ fn kernel(values: &Map<String, Value>, version: u64) -> Result<KernelOptions> {
         Some("rolling_mean") => mean(values),
         Some("ewma") => ewma(values),
         Some("rsi" | "atr") => indicator(values, version),
+        Some("macd_components") => macd(values, version),
         _ => Err(invalid(
             "options.kernel.function",
             "requires a supported sequence kernel for the declared IR version",
@@ -201,4 +202,51 @@ fn indicator(values: &Map<String, Value>, version: u64) -> Result<KernelOptions>
         Some("rsi") => RsiOptions::new(period).map(KernelOptions::Rsi),
         _ => AtrOptions::new(period).map(KernelOptions::Atr),
     }
+}
+
+fn macd(values: &Map<String, Value>, version: u64) -> Result<KernelOptions> {
+    if version < 3 {
+        return Err(invalid(
+            "options.kernel.function",
+            "MACD requires sequence IR version 3",
+        ));
+    }
+    fields(
+        values.keys().map(String::as_str),
+        &[
+            "function",
+            "fast_span",
+            "slow_span",
+            "signal_span",
+            "min_periods",
+            "signal_min_periods",
+        ],
+        "options.kernel",
+    )?;
+    let defaults = MacdOptions::default();
+    let options = macd_spans(values, defaults)?;
+    macd_minima(values, options).map(KernelOptions::Macd)
+}
+fn macd_spans(values: &Map<String, Value>, defaults: MacdOptions) -> Result<MacdOptions> {
+    MacdOptions::new(
+        optional_count(values, "fast_span", defaults.fast_span())?,
+        optional_count(values, "slow_span", defaults.slow_span())?,
+        optional_count(values, "signal_span", defaults.signal_span())?,
+    )
+}
+fn optional_count(values: &Map<String, Value>, field: &str, default: u64) -> Result<u64> {
+    match values.get(field) {
+        Some(value) => count(Some(value), &format!("options.kernel.{field}")),
+        None => Ok(default),
+    }
+}
+
+fn macd_minima(values: &Map<String, Value>, options: MacdOptions) -> Result<MacdOptions> {
+    options
+        .with_min_periods(minimum(values)?)?
+        .with_signal_min_periods(optional_count(
+            values,
+            "signal_min_periods",
+            options.signal_min_periods(),
+        )?)
 }

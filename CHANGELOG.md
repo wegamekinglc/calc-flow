@@ -9,6 +9,15 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-09: Add complete MACD line, signal and histogram outputs through
+  native Rust owned state, Python `MacdOutputs` and shared Table declarations.
+  Normalize all five parameters into one recurrence per entity, preserve the
+  existing integer/float EWMA conversion and carried-line signal updates, and
+  emit only consumed Table components. Add packed native sequence IR3/layout3
+  and Table layout6 ordinary/terminal recovery while preserving previous layouts.
+  Rust exhaustive matches must handle `RollingOutputSpec::MacdComponent` and
+  the exported `MacdComponent` selector.
+
 - 2026-11-09: Add native RSI/ATR calculations and atomic constant-space owned
   states with explicit missing-segment resets, checked position counters and
   shared seed/Wilder transitions. Add ordered Table declarations and layout-5

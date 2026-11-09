@@ -50,6 +50,7 @@ _CAPABILITY_RULES = frozenset(
         ("native_float_dtype", "1"),
         ("native_sequence_vector", "1"),
         ("native_sequence_indicators", "2"),
+        ("native_sequence_indicators", "3"),
     )
 )
 
@@ -643,14 +644,14 @@ def _require_native_regular_capability(capability: ProviderCapability) -> None:
 
 
 def _require_native_sequence_capability(capability: ProviderCapability) -> None:
-    if capability.state_layouts not in {(1,), (1, 2)}:
+    if capability.state_layouts not in {(1,), (1, 2), (1, 2, 3)}:
         raise ValueError(
             "native array_sequence capability has unsupported state_layouts"
         )
-    shape_rules = (CapabilityRule("native_sequence_vector", "1"),) + (
-        (CapabilityRule("native_sequence_indicators", "2"),)
-        if capability.state_layouts == (1, 2)
-        else ()
+    shape_rules = (CapabilityRule("native_sequence_vector", "1"),) + tuple(
+        CapabilityRule("native_sequence_indicators", str(layout))
+        for layout in capability.state_layouts
+        if layout >= 2
     )
     expected = {
         "input_ports": (ProviderPort("input", "array", True),),
@@ -759,6 +760,9 @@ def _sequence_schema_kernel_defaults(properties: dict[str, Any]) -> None:
 
 
 def _sequence_schema_kernel_branch(value: object, function: str) -> None:
+    if function == "macd_components":
+        _sequence_schema_macd(value)
+        return
     count, optional = {
         "rolling_mean": ("window", ("min_periods", "numerical_profile")),
         "ewma": ("span", ("min_periods",)),
@@ -772,6 +776,21 @@ def _sequence_schema_kernel_branch(value: object, function: str) -> None:
         raise _sequence_schema_error("function")
     _sequence_schema_count(properties[count], 1)
     _sequence_schema_kernel_defaults(properties)
+
+
+def _sequence_schema_macd(value: object) -> None:
+    defaults = {
+        "fast_span": 12,
+        "slow_span": 26,
+        "signal_span": 9,
+        "min_periods": 1,
+        "signal_min_periods": 1,
+    }
+    properties = _sequence_schema_object(value, ("function", *defaults), ("function",))
+    if properties["function"] != {"const": "macd_components"}:
+        raise _sequence_schema_error("function")
+    for name, default in defaults.items():
+        _sequence_schema_count(properties[name], 1, default)
 
 
 def _sequence_schema_kernels(value: object, functions: tuple[str, ...]) -> None:
@@ -794,17 +813,21 @@ def _sequence_schema_branch(
     )
     _sequence_schema_version(properties["ir_version"], versions)
     _sequence_schema_common_options(properties)
-    functions = ("rolling_mean", "ewma") + (("rsi", "atr") if 2 in versions else ())
+    functions = ("rolling_mean", "ewma")
+    if versions[-1] >= 2:
+        functions += ("rsi", "atr")
+    if versions[-1] >= 3:
+        functions += ("macd_components",)
     _sequence_schema_kernels(properties["kernel"], functions)
 
 
 def _require_native_sequence_schema(text: str, versions: tuple[int, ...]) -> None:
     """Validate the advertised Rust schema against known metadata profiles."""
     schema = json.loads(text)
-    _sequence_schema_branch(schema, versions, alternatives=versions == (1, 2))
-    if versions == (1, 2):
+    _sequence_schema_branch(schema, versions, alternatives=len(versions) > 1)
+    if len(versions) > 1:
         branches = _descriptor_list(schema["oneOf"])
-        if len(branches) != 2:
+        if len(branches) != len(versions):
             raise _sequence_schema_error("oneOf")
         for version, branch in enumerate(branches, 1):
             _sequence_schema_branch(branch, (version,))
@@ -1041,7 +1064,7 @@ def runtime_capabilities(
                 requires_watermark=True,
                 checkpoint_support="checkpointed_stateful",
                 state_version=1,
-                state_layouts=(1, 2, 3, 4, 5),
+                state_layouts=(1, 2, 3, 4, 5, 6),
                 deterministic=True,
                 replay_safe=True,
             ),

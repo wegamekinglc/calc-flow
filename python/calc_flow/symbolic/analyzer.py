@@ -26,6 +26,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Final, Union
 
 from calc_flow._compat import TypeAliasType, dataclass
+from calc_flow._macd import _MACD_PARAMETER_NAMES
 from calc_flow.capabilities import ProviderPort, RuntimeCapabilities
 from calc_flow.errors import CompileError, ConfigError, ExecutionError
 from calc_flow.pipeline import Runtime
@@ -191,6 +192,7 @@ _ROLLING_PRIMITIVES: Final = _ROLLING_AGGREGATES | frozenset(
         "ewma",
         "rsi",
         "atr",
+        "macd_component",
         "cumulative_mean",
         "cumulative_sum",
         "cumulative_min",
@@ -501,7 +503,7 @@ def _indicator_occurrences(node: Node) -> tuple[Node, ...]:
     return tuple(
         current
         for current in _indicator_expression_nodes(node)
-        if current.op.name in {"rsi", "atr"}
+        if current.op.name in {"rsi", "atr", "macd_component"}
     )
 
 
@@ -2185,7 +2187,7 @@ class _Analyzer:
 
     def _indicator(self, node: Node, path: str, /) -> ColumnFacts:
         role = f"{path}.{node.op.name}"
-        names = ("value",) if node.op.name == "rsi" else ("high", "low", "close")
+        names = ("high", "low", "close") if node.op.name == "atr" else ("value",)
         paths = tuple(f"{role}.{name}" for name in names)
         operands = self._anchored_operands(node.args, paths)
         self._indicator_inputs(node, role)
@@ -2199,20 +2201,29 @@ class _Analyzer:
             )
             if operand.lineage is not None:
                 self._temporal_lineages.add(operand.lineage)
-            if (
-                operand.data_type is not None
-                and operand.data_type not in _FLOATING_TYPES
-            ):
-                self.issue(
-                    f"{operand_path}.dtype",
-                    "unsupported_type",
-                    f"{node.op.name} requires float32 or float64 operands;"
-                    " use row.cast for an explicit conversion",
-                )
-        states = _column_state_union(operands) | frozenset(
-            {f"constant(period={_cint(node.attr('period'))})"}
+            self._indicator_operand_type(node.op.name, operand.data_type, operand_path)
+        state = (
+            "constant(macd="
+            + ",".join(str(_cint(node.attr(name))) for name in _MACD_PARAMETER_NAMES)
+            + ")"
+            if node.op.name == "macd_component"
+            else f"constant(period={_cint(node.attr('period'))})"
         )
+        states = _column_state_union(operands) | frozenset({state})
         return ColumnFacts("float64", True, self._running_anchor(operands), states)
+
+    def _indicator_operand_type(
+        self, name: str, data_type: str | None, path: str
+    ) -> None:
+        if name == "macd_component":
+            self._numeric_or_issue(data_type, path, name)
+        elif data_type is not None and data_type not in _FLOATING_TYPES:
+            self.issue(
+                f"{path}.dtype",
+                "unsupported_type",
+                f"{name} requires float32 or float64 operands;"
+                " use row.cast for an explicit conversion",
+            )
 
     def _indicator_inputs(self, node: Node, path: str) -> None:
         sources = _indicator_sources(node)
@@ -2885,6 +2896,7 @@ _COLUMN_HANDLERS: Final[dict[str, Callable[[_Analyzer, Node, str], ColumnFacts]]
     "ewma": _Analyzer._ewma,
     "rsi": _Analyzer._indicator,
     "atr": _Analyzer._indicator,
+    "macd_component": _Analyzer._indicator,
     **dict.fromkeys(
         (
             "cumulative_mean",

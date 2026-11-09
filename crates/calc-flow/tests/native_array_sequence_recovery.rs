@@ -101,6 +101,7 @@ fn sequence_operator(
 ) -> Box<dyn calc_flow::StreamOperator> {
     let version = match kernel.get("function").and_then(serde_json::Value::as_str) {
         Some("rsi" | "atr") => 2,
+        Some("macd_components") => 3,
         _ => 1,
     };
     let options = JsonMap::from([
@@ -263,6 +264,7 @@ async fn test_native_sequence_terminal_preflights_encoded_and_candidate_limits_b
 }
 
 struct Replay {
+    open_calls: Option<Arc<AtomicUsize>>,
     values: Vec<Batch>,
     position: usize,
     events: tokio::sync::mpsc::UnboundedReceiver<()>,
@@ -282,6 +284,9 @@ impl StreamSource for Replay {
         }
     }
     async fn open(&mut self, cursor: Option<Cursor>) -> Result<()> {
+        if let Some(calls) = &self.open_calls {
+            calls.fetch_add(1, Ordering::SeqCst);
+        }
         if let Some(cursor) = cursor {
             self.position = usize::from(cursor.order()[0]);
             self.resumed.lock().unwrap().push(cursor.order().to_vec());
@@ -372,6 +377,7 @@ fn replay_with_values(
         BTreeMap::from([(
             source.clone(),
             SourceBinding::new(Replay {
+                open_calls: None,
                 values: inputs,
                 position: 0,
                 events,
@@ -770,3 +776,6 @@ async fn test_indicator_sequence_normal_restore_rejects_valid_checksum_bad_state
         assert!(received.try_recv().is_err());
     }
 }
+
+#[path = "native_array_sequence_recovery/macd.rs"]
+mod macd;

@@ -1,0 +1,63 @@
+{
+  "cases": [
+    {
+      "name": "carried_line",
+      "parameters": [
+        1,
+        3,
+        3,
+        1,
+        1
+      ],
+      "rows": 12
+    },
+    {
+      "name": "independent_warmups",
+      "parameters": [
+        1,
+        2,
+        1,
+        5,
+        3
+      ],
+      "rows": 12
+    },
+    {
+      "name": "nonfinite",
+      "parameters": [
+        1,
+        3,
+        3,
+        1,
+        1
+      ],
+      "rows": 10
+    },
+    {
+      "name": "large_spans",
+      "parameters": [
+        9223372036854775809,
+        18446744073709551615,
+        9223372036854775808,
+        1,
+        2
+      ],
+      "rows": 8
+    },
+    {
+      "name": "default",
+      "parameters": [
+        12,
+        26,
+        9,
+        1,
+        1
+      ],
+      "rows": 10
+    }
+  ],
+  "comparison": "validity and finite/signed-zero bits exact; generated NaN classification",
+  "golden_sha256": "3298d6ee12d0b07b7be31a954dda7a3fc4036c78d16afb0377213880f3001d1c",
+  "reference": "independent stdlib Python float64; no production/TA imports",
+  "semantics": "three first-valid seeded, unadjusted EWMA recurrences; carried lines update signal; only null/NaN skip"
+}

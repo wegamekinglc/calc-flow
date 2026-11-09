@@ -497,6 +497,18 @@ def _rolling_group_key(output: dict[str, object], /) -> tuple[object, ...] | Non
 
 def _indicator_group_key(output: dict[str, object]) -> tuple[object, ...] | None:
     kind = output.get("kind")
+    if kind == "macd_component":
+        return (
+            "indicator",
+            kind,
+            output.get("primitive_version"),
+            output.get("input"),
+            output.get("fast_span"),
+            output.get("slow_span"),
+            output.get("signal_span"),
+            output.get("min_periods"),
+            output.get("signal_min_periods"),
+        )
     if kind not in {"rsi", "atr"}:
         return None
     return (

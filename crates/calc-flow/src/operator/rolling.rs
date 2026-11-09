@@ -104,6 +104,8 @@ pub const ROLLING_COLUMNAR_STATE_LAYOUT_VERSION: u32 = 3;
 pub const ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION: u32 = 4;
 /// Columnar rolling state with complete RSI and ATR recurrence records.
 pub const ROLLING_INDICATOR_STATE_LAYOUT_VERSION: u32 = 5;
+/// Columnar indicator state additionally admitting complete MACD recurrences.
+pub const ROLLING_MACD_STATE_LAYOUT_VERSION: u32 = 6;
 
 /// Versioned floating-point behavior for rolling numeric transitions.
 ///
@@ -515,6 +517,39 @@ impl RollingFloatPrimitiveSpec {
     }
 }
 
+/// One readout of a shared complete MACD recurrence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MacdComponent {
+    /// Fast average minus slow average.
+    Line,
+    /// Exponential average of the line, including carried valid lines.
+    Signal,
+    /// Line minus signal.
+    Histogram,
+}
+impl MacdComponent {
+    const fn ordinal(self) -> usize {
+        match self {
+            Self::Line => 0,
+            Self::Signal => 1,
+            Self::Histogram => 2,
+        }
+    }
+}
+const fn default_macd_fast_span() -> u64 {
+    12
+}
+const fn default_macd_slow_span() -> u64 {
+    26
+}
+const fn default_macd_signal_span() -> u64 {
+    9
+}
+const fn default_macd_minimum() -> u64 {
+    1
+}
+
 /// One declared rolling output and its output column name.
 ///
 /// # Examples
@@ -534,6 +569,37 @@ impl RollingFloatPrimitiveSpec {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RollingOutputSpec {
+    /// One nullable Float64 component of a shared unadjusted MACD recurrence.
+    MacdComponent {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Signed/unsigned integer or floating input column.
+        input: String,
+        /// Selected nullable Float64 output column.
+        output: String,
+        /// Positive fast span, strictly smaller than the slow span.
+        #[serde(default = "default_macd_fast_span")]
+        #[schemars(range(min = 1))]
+        fast_span: u64,
+        /// Positive slow span.
+        #[serde(default = "default_macd_slow_span")]
+        #[schemars(range(min = 1))]
+        slow_span: u64,
+        /// Independent positive signal span.
+        #[serde(default = "default_macd_signal_span")]
+        #[schemars(range(min = 1))]
+        signal_span: u64,
+        /// Independent positive fast/slow warm-up count, without a span cap.
+        #[serde(default = "default_macd_minimum")]
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+        /// Independent positive signal warm-up count, without a span cap.
+        #[serde(default = "default_macd_minimum")]
+        #[schemars(range(min = 1))]
+        signal_min_periods: u64,
+        /// Line, signal or histogram readout; all share one state owner.
+        component: MacdComponent,
+    },
     /// Relative strength index with a complete-period Wilder seed.
     Rsi {
         /// Primitive version; must equal `1`.
@@ -915,7 +981,10 @@ pub enum RollingOutputSpec {
 impl RollingOutputSpec {
     fn primitive_version(&self) -> u32 {
         match self {
-            Self::Rsi {
+            Self::MacdComponent {
+                primitive_version, ..
+            }
+            | Self::Rsi {
                 primitive_version, ..
             }
             | Self::Atr {
@@ -999,7 +1068,8 @@ impl RollingOutputSpec {
     /// Declared operand column; pair outputs report their left operand.
     fn input(&self) -> &str {
         match self {
-            Self::Rsi { input, .. }
+            Self::MacdComponent { input, .. }
+            | Self::Rsi { input, .. }
             | Self::Lag { input, .. }
             | Self::Delta { input, .. }
             | Self::Ewma { input, .. }
@@ -1037,7 +1107,8 @@ impl RollingOutputSpec {
 
     fn output(&self) -> &str {
         match self {
-            Self::Rsi { output, .. }
+            Self::MacdComponent { output, .. }
+            | Self::Rsi { output, .. }
             | Self::Atr { output, .. }
             | Self::Lag { output, .. }
             | Self::Delta { output, .. }
@@ -1071,7 +1142,8 @@ impl RollingOutputSpec {
     const fn retained_rows(&self) -> u64 {
         match self {
             Self::Lag { periods, .. } | Self::Delta { periods, .. } => *periods,
-            Self::Rsi { .. }
+            Self::MacdComponent { .. }
+            | Self::Rsi { .. }
             | Self::Atr { .. }
             | Self::Ewma { .. }
             | Self::CumulativeMean { .. }
@@ -1106,7 +1178,8 @@ impl RollingOutputSpec {
     /// retention.
     const fn retained_micros(&self) -> Option<u64> {
         match self {
-            Self::Rsi { .. }
+            Self::MacdComponent { .. }
+            | Self::Rsi { .. }
             | Self::Atr { .. }
             | Self::Lag { .. }
             | Self::Delta { .. }
@@ -1149,7 +1222,8 @@ impl RollingOutputSpec {
 
     const fn frame(&self) -> Option<RollingFrameSpec> {
         match self {
-            Self::Rsi { .. }
+            Self::MacdComponent { .. }
+            | Self::Rsi { .. }
             | Self::Atr { .. }
             | Self::Lag { .. }
             | Self::Delta { .. }
@@ -1180,7 +1254,8 @@ impl RollingOutputSpec {
 
     const fn min_periods(&self) -> Option<u64> {
         match self {
-            Self::Rsi { .. }
+            Self::MacdComponent { .. }
+            | Self::Rsi { .. }
             | Self::Atr { .. }
             | Self::Lag { .. }
             | Self::Delta { .. }
@@ -1259,7 +1334,8 @@ pub struct RollingSpec {
     /// [`ROLLING_STATE_LAYOUT_VERSION`]; EWMA requires
     /// [`ROLLING_EWMA_STATE_LAYOUT_VERSION`]. Cumulative sum/min/max/variance
     /// require [`ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION`]. RSI and ATR require
-    /// [`ROLLING_INDICATOR_STATE_LAYOUT_VERSION`].
+    /// [`ROLLING_INDICATOR_STATE_LAYOUT_VERSION`]; MACD components require
+    /// [`ROLLING_MACD_STATE_LAYOUT_VERSION`].
     pub state_layout_version: u32,
     /// Versioned floating-point behavior. `stable_v1` is omitted from the
     /// canonical configuration so existing project and checkpoint hashes stay
@@ -1360,14 +1436,14 @@ impl RollingOperator {
 
     /// Sets retained-row and logical-byte limits for this operator.
     ///
-    /// For operators containing RSI or ATR, the byte limit covers the
+    /// For operators containing RSI, ATR or MACD, the byte limit covers the
     /// participating peak: committed state, isolated candidates, prepared
     /// output, scratch and live checkpoint segments. Mixed old/new outputs
     /// share this whole-operator limit in finite and streaming evaluation.
     /// Reset retains credits held by unfinished workers and captures.
     ///
     /// Old-only operators retain their retained-state byte accounting and
-    /// exclude checkpoint copies, even with explicit indicator layout 5.
+    /// exclude checkpoint copies, even with explicit indicator layout 5 or 6.
     /// The default is 9,007,199,254,740,991 rows and logical bytes. Process
     /// resident memory, other operators and transferred results are separate.
     /// This runtime setting is not serialized into project configuration.
