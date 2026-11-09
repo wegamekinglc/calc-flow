@@ -299,7 +299,7 @@ def test_installed_layout_five_inventory_and_native_project_export() -> None:
     rolling = next(
         item for item in runtime.capabilities().operators if item.kind == "rolling"
     )
-    assert rolling.state_layouts == (1, 2, 3, 4, 5)
+    assert rolling.state_layouts == (1, 2, 3, 4, 5, 6)
     assert rolling.state_version == 1
     data = _prices()
     program = cf.Program(
