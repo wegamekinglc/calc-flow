@@ -170,10 +170,10 @@ fn record(snapshot: &OperatorStateSnapshot) -> RecordBatch {
         .unwrap()
 }
 
-fn replace_record(snapshot: &OperatorStateSnapshot, record: RecordBatch) -> OperatorStateSnapshot {
+fn replace_record(snapshot: &OperatorStateSnapshot, record: &RecordBatch) -> OperatorStateSnapshot {
     let mut bytes = Vec::new();
     let mut writer = FileWriter::try_new(&mut bytes, &record.schema()).unwrap();
-    writer.write(&record).unwrap();
+    writer.write(record).unwrap();
     writer.finish().unwrap();
     drop(writer);
     let segment = StateSegment::new(bytes);
@@ -228,7 +228,7 @@ fn zero_count_without_indicators(
     let mut columns = record.columns().to_vec();
     columns[2] = Arc::new(counters);
     let record = RecordBatch::try_new(record.schema(), columns).unwrap();
-    replace_record(snapshot, filter_record_batch(&record, &keep).unwrap())
+    replace_record(snapshot, &filter_record_batch(&record, &keep).unwrap())
 }
 
 #[tokio::test]
@@ -274,7 +274,7 @@ async fn test_layout_five_pending_infinity_is_rejected_by_restore() {
     columns[6] = Arc::new(prices);
     let corrupted = replace_record(
         &snapshot,
-        RecordBatch::try_new(record.schema(), columns).unwrap(),
+        &RecordBatch::try_new(record.schema(), columns).unwrap(),
     );
     let mut operator = RollingOperator::new("features", schema, spec(5)).unwrap();
     let result = operator.restore(&corrupted);

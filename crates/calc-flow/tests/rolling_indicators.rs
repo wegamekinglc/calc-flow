@@ -14,7 +14,7 @@ use datafusion::arrow::{
 };
 use serde_json::{Value, json};
 
-fn document(outputs: Value) -> Value {
+fn document(outputs: &Value) -> Value {
     json!({"configuration_version":1, "state_layout_version":5,
         "partition_by":["entity"], "event_time":"ts", "sequence_by":["seq"],
         "outputs": outputs, "allowed_lateness_micros":0,
@@ -64,7 +64,7 @@ fn input() -> Batch {
 
 #[test]
 fn test_indicator_declarations_roundtrip_and_require_layout_five() {
-    let value = document(declarations());
+    let value = document(&declarations());
     let spec: RollingSpec = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(serde_json::to_value(&spec).unwrap(), value);
     assert_eq!(
@@ -86,7 +86,7 @@ fn test_indicator_declarations_roundtrip_and_require_layout_five() {
 
 #[tokio::test]
 async fn test_table_rsi_atr_use_fixed_ieee_seed_with_mixed_floating_operands() {
-    let spec: RollingSpec = serde_json::from_value(document(declarations())).unwrap();
+    let spec: RollingSpec = serde_json::from_value(document(&declarations())).unwrap();
     let operator = RollingOperator::new("features", schema(), spec).unwrap();
     let plan = PipelineBuilder::new("indicators")
         .unwrap()
@@ -117,7 +117,7 @@ async fn test_table_rsi_atr_use_fixed_ieee_seed_with_mixed_floating_operands() {
     }
 }
 
-fn with_values(input: Batch, name: &str, values: ArrayRef) -> Batch {
+fn with_values(input: &Batch, name: &str, values: ArrayRef) -> Batch {
     let record = &input.table_payload().unwrap().batches()[0];
     let mut columns = record.columns().to_vec();
     columns[record.schema().index_of(name).unwrap()] = values;
@@ -134,7 +134,7 @@ async fn test_atr_infinity_is_rejected_before_buffering_even_with_missing_close(
         CancellationToken, EdgeCollector, JsonMap, OperatorMetadata, StreamJobContext,
         StreamOperator, StreamOperatorContext,
     };
-    let spec = serde_json::from_value(document(declarations())).unwrap();
+    let spec = serde_json::from_value(document(&declarations())).unwrap();
     let mut operator = RollingOperator::new("features", schema(), spec).unwrap();
     let job = StreamJobContext::new(
         1,
@@ -146,11 +146,11 @@ async fn test_atr_infinity_is_rejected_before_buffering_even_with_missing_close(
     let context = StreamOperatorContext::new(&job, "features", None);
     let mut output = EdgeCollector::new(operator.output_ports().to_vec());
     let batch = with_values(
-        input(),
+        &input(),
         "high",
         Arc::new(Float32Array::from(vec![f32::INFINITY; 4])),
     );
-    let batch = with_values(batch, "close", Arc::new(Float32Array::from(vec![None; 4])));
+    let batch = with_values(&batch, "close", Arc::new(Float32Array::from(vec![None; 4])));
     let error = operator
         .process_data("input", batch, &context, &mut output)
         .await
@@ -187,7 +187,7 @@ async fn test_numerical_failure_preserves_pending_rows_for_whole_finalization_ca
         StreamOperator, StreamOperatorContext,
     };
     for ending in [false, true] {
-        let spec = serde_json::from_value(document(declarations())).unwrap();
+        let spec = serde_json::from_value(document(&declarations())).unwrap();
         let mut operator = RollingOperator::new("features", schema(), spec).unwrap();
         let job = StreamJobContext::new(
             1,
@@ -199,7 +199,7 @@ async fn test_numerical_failure_preserves_pending_rows_for_whole_finalization_ca
         let context = StreamOperatorContext::new(&job, "features", None);
         let mut output = EdgeCollector::new(operator.output_ports().to_vec());
         let batch = with_values(
-            input(),
+            &input(),
             "price",
             Arc::new(Float64Array::from(vec![1.0, 2.0, -1e308, 1e308])),
         );
@@ -225,7 +225,7 @@ async fn test_numerical_failure_preserves_pending_rows_for_whole_finalization_ca
 #[tokio::test]
 async fn test_finite_indicator_peak_budget_covers_candidate_and_output() {
     use calc_flow::StateBudget;
-    let spec = serde_json::from_value(document(declarations())).unwrap();
+    let spec = serde_json::from_value(document(&declarations())).unwrap();
     let mut operator = RollingOperator::new("features", schema(), spec).unwrap();
     operator
         .set_state_budget(StateBudget::new(128, 512).unwrap())
@@ -258,7 +258,7 @@ async fn test_layout_five_restores_full_indicator_prefix_in_new_operator() {
         CancellationToken, EdgeCollector, Epoch, EventTime, JsonMap, OperatorMetadata,
         StreamJobContext, StreamOperator, StreamOperatorContext,
     };
-    let spec: RollingSpec = serde_json::from_value(document(declarations())).unwrap();
+    let spec: RollingSpec = serde_json::from_value(document(&declarations())).unwrap();
     let mut first = RollingOperator::new("features", schema(), spec.clone()).unwrap();
     let job = StreamJobContext::new(
         1,
@@ -321,7 +321,7 @@ async fn test_finalization_peak_rejection_preserves_pending_rows_for_retry() {
         CancellationToken, EdgeCollector, JsonMap, OperatorMetadata, StateBudget, StreamJobContext,
         StreamOperator, StreamOperatorContext,
     };
-    let spec = serde_json::from_value(document(declarations())).unwrap();
+    let spec = serde_json::from_value(document(&declarations())).unwrap();
     let mut operator = RollingOperator::new("features", schema(), spec).unwrap();
     operator
         .set_state_budget(StateBudget::new(128, 4096).unwrap())
@@ -362,7 +362,30 @@ async fn test_indicator_capture_credit_survives_reset_until_last_snapshot_owner_
         CancellationToken, EdgeCollector, Epoch, JsonMap, OperatorMetadata, StateBudget,
         StreamJobContext, StreamOperator, StreamOperatorContext,
     };
-    let spec = serde_json::from_value(document(declarations())).unwrap();
+    let spec: RollingSpec = serde_json::from_value(document(&declarations())).unwrap();
+    let budget = {
+        let mut empty = RollingOperator::new("features", schema(), spec.clone()).unwrap();
+        let (mut rejected, mut accepted) = (0, StateBudget::default().max_bytes());
+        while accepted - rejected > 1 {
+            let limit = rejected + (accepted - rejected) / 2;
+            let budget = StateBudget::new(128, limit).unwrap();
+            if empty.set_state_budget(budget).is_ok() {
+                accepted = limit;
+            } else {
+                rejected = limit;
+            }
+        }
+        let budget = StateBudget::new(128, accepted).unwrap();
+        if accepted > 1 {
+            assert!(
+                empty
+                    .set_state_budget(StateBudget::new(128, accepted - 1).unwrap())
+                    .is_err()
+            );
+        }
+        empty.set_state_budget(budget).unwrap();
+        budget
+    };
     let mut operator = RollingOperator::new("features", schema(), spec).unwrap();
     let job = StreamJobContext::new(
         1,
@@ -383,7 +406,6 @@ async fn test_indicator_capture_credit_survives_reset_until_last_snapshot_owner_
     let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
     let shared_snapshot = snapshot.clone();
     operator.reset().unwrap();
-    let budget = StateBudget::new(128, 1).unwrap();
     assert!(operator.set_state_budget(budget).is_err());
     drop(snapshot);
     assert!(operator.set_state_budget(budget).is_err());
@@ -397,7 +419,7 @@ async fn test_indicator_capture_requires_preparation_of_current_revision() {
         CancellationToken, EdgeCollector, Epoch, JsonMap, OperatorMetadata, StreamJobContext,
         StreamOperator, StreamOperatorContext,
     };
-    let spec = serde_json::from_value(document(declarations())).unwrap();
+    let spec = serde_json::from_value(document(&declarations())).unwrap();
     let mut operator = RollingOperator::new("features", schema(), spec).unwrap();
     let job = StreamJobContext::new(
         1,
@@ -428,63 +450,80 @@ async fn test_indicator_capture_requires_preparation_of_current_revision() {
     operator.checkpoint(Epoch::new(2).unwrap()).unwrap();
 }
 
+fn nested_context_input(shared_backing: bool) -> (Arc<Schema>, Batch) {
+    use datafusion::arrow::{array::ListArray, buffer::OffsetBuffer};
+    let input = input();
+    let record = &input.table_payload().unwrap().batches()[0];
+    let item = Arc::new(Field::new("item", DataType::Float64, true));
+    let mut fields = record.schema().fields().to_vec();
+    fields.push(Arc::new(Field::new(
+        "context",
+        DataType::List(Arc::clone(&item)),
+        true,
+    )));
+    let schema = Arc::new(Schema::new(fields));
+    let offsets = OffsetBuffer::new(vec![0, 8192, 16384, 24576, 32768].into());
+    let shared_values =
+        shared_backing.then(|| Arc::new(Float64Array::from(vec![42.0; 32768])) as ArrayRef);
+    let batches = (0..4)
+        .map(|row| {
+            let values = shared_values.as_ref().map_or_else(
+                || Arc::new(Float64Array::from(vec![42.0; 32768])) as ArrayRef,
+                Arc::clone,
+            );
+            let context = ListArray::new(Arc::clone(&item), offsets.clone(), values, None);
+            let mut columns = record.slice(row, 1).columns().to_vec();
+            columns.push(Arc::new(context.slice(row, 1)));
+            RecordBatch::try_new(Arc::clone(&schema), columns).unwrap()
+        })
+        .collect();
+    let batch = Batch::table(batches, BatchMetadata::default()).unwrap();
+    (schema, batch)
+}
+
 #[tokio::test]
 async fn test_indicator_peak_counts_shared_nested_input_backing_once() {
     use calc_flow::{
         CancellationToken, EdgeCollector, JsonMap, OperatorMetadata, StateBudget, StreamJobContext,
         StreamOperator, StreamOperatorContext,
     };
-    use datafusion::arrow::{array::ListArray, buffer::OffsetBuffer};
-    let input = input();
-    let record = &input.table_payload().unwrap().batches()[0];
-    let context_values: ArrayRef = Arc::new(Float64Array::from(vec![42.0; 32768]));
-    let context = ListArray::new(
-        Arc::new(Field::new("item", DataType::Float64, true)),
-        OffsetBuffer::new(vec![0, 8192, 16384, 24576, 32768].into()),
-        context_values,
-        None,
-    );
-    let mut fields = record.schema().fields().to_vec();
-    fields.push(Arc::new(Field::new(
-        "context",
-        context.data_type().clone(),
-        true,
-    )));
-    let schema = Arc::new(Schema::new(fields));
-    let mut columns = record.columns().to_vec();
-    columns.push(Arc::new(context));
-    let batch = Batch::table(
-        vec![RecordBatch::try_new(schema.clone(), columns).unwrap()],
-        BatchMetadata::default(),
-    )
-    .unwrap();
-    let spec = serde_json::from_value(document(declarations())).unwrap();
-    let mut operator = RollingOperator::new("features", schema, spec).unwrap();
-    operator
-        .set_state_budget(StateBudget::new(128, 768 << 10).unwrap())
-        .unwrap();
-    let job = StreamJobContext::new(
-        1,
-        "a".repeat(64),
-        JsonMap::new(),
-        None,
-        CancellationToken::new(),
-    );
-    let context = StreamOperatorContext::new(&job, "features", None);
-    let mut output = EdgeCollector::new(operator.output_ports().to_vec());
-    operator
-        .process_data("input", batch, &context, &mut output)
-        .await
-        .unwrap();
-    operator.on_end(&context, &mut output).await.unwrap();
-    assert_eq!(
-        output
-            .drain("output")
-            .iter()
-            .map(|message| message.as_data().unwrap().num_rows())
-            .sum::<usize>(),
-        4
-    );
+    for shared_backing in [true, false] {
+        let (schema, batch) = nested_context_input(shared_backing);
+        let spec = serde_json::from_value(document(&declarations())).unwrap();
+        let mut operator = RollingOperator::new("features", schema, spec).unwrap();
+        // Four distinct retained child buffers alone fill this budget.
+        operator
+            .set_state_budget(StateBudget::new(128, 1 << 20).unwrap())
+            .unwrap();
+        let job = StreamJobContext::new(
+            1,
+            "a".repeat(64),
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let context = StreamOperatorContext::new(&job, "features", None);
+        let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+        let result = operator
+            .process_data("input", batch, &context, &mut output)
+            .await;
+        if !shared_backing {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("budget"), "{error}");
+            assert!(output.drain("output").is_empty());
+            continue;
+        }
+        result.unwrap();
+        operator.on_end(&context, &mut output).await.unwrap();
+        assert_eq!(
+            output
+                .drain("output")
+                .iter()
+                .map(|message| message.as_data().unwrap().num_rows())
+                .sum::<usize>(),
+            4
+        );
+    }
 }
 
 #[tokio::test]
@@ -493,7 +532,7 @@ async fn test_cancelled_indicator_input_leaves_no_pending_rows_for_retry() {
         CalcFlowError, CancellationToken, EdgeCollector, JsonMap, OperatorMetadata,
         StreamJobContext, StreamOperator, StreamOperatorContext,
     };
-    let spec = serde_json::from_value(document(declarations())).unwrap();
+    let spec = serde_json::from_value(document(&declarations())).unwrap();
     let mut operator = RollingOperator::new("features", schema(), spec).unwrap();
     let token = CancellationToken::new();
     token.cancel();
@@ -576,7 +615,7 @@ fn assert_input_budget_before_copy(extra: ArrayRef) {
         BatchMetadata::default(),
     )
     .unwrap();
-    let spec = serde_json::from_value(document(declarations())).unwrap();
+    let spec = serde_json::from_value(document(&declarations())).unwrap();
     let mut operator = RollingOperator::new("features", schema, spec).unwrap();
     operator
         .set_state_budget(StateBudget::new(128, 64 << 10).unwrap())
