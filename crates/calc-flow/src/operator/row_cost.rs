@@ -79,8 +79,13 @@ pub(crate) fn variable_offsets(column: &dyn Array) -> Option<Offsets<'_>> {
     }
 }
 
-fn add_offset_charges<O: OffsetSizeTrait>(rows: &mut [usize], offsets: &[O]) -> Result<()> {
-    for (cost, pair) in rows.iter_mut().zip(offsets.windows(2)) {
+fn add_offset_charges<O: OffsetSizeTrait>(
+    rows: &mut [usize],
+    offsets: &[O],
+    check: &mut (impl FnMut() -> Result<()> + ?Sized),
+) -> Result<()> {
+    for (index, (cost, pair)) in rows.iter_mut().zip(offsets.windows(2)).enumerate() {
+        super::output_chunk::tick(index, check)?;
         let width = (pair[1] - pair[0])
             .to_usize()
             .expect("validated Arrow offsets fit the address space");
@@ -91,9 +96,16 @@ fn add_offset_charges<O: OffsetSizeTrait>(rows: &mut [usize], offsets: &[O]) -> 
 
 impl Offsets<'_> {
     pub(crate) fn add_charges(&self, rows: &mut [usize]) -> Result<()> {
+        self.add_charges_checked(rows, &mut || Ok(()))
+    }
+    pub(crate) fn add_charges_checked(
+        &self,
+        rows: &mut [usize],
+        check: &mut (impl FnMut() -> Result<()> + ?Sized),
+    ) -> Result<()> {
         match self {
-            Self::Narrow(offsets) => add_offset_charges(rows, offsets),
-            Self::Wide(offsets) => add_offset_charges(rows, offsets),
+            Self::Narrow(offsets) => add_offset_charges(rows, offsets, check),
+            Self::Wide(offsets) => add_offset_charges(rows, offsets, check),
         }
     }
 
@@ -143,27 +155,45 @@ impl<'a> ColumnCharges<'a> {
         Ok(Some(charges))
     }
 
-    fn add_null_charges(&self, rows: &mut [usize]) -> Result<()> {
+    fn add_null_charges(
+        &self,
+        rows: &mut [usize],
+        check: &mut (impl FnMut() -> Result<()> + ?Sized),
+    ) -> Result<()> {
         // Arrow removes a zero-null bitmap when constructing ArrayData for a
         // one-row slice. Only a null row incurs the one-byte charge.
         for nulls in &self.validity {
-            for (cost, valid) in rows.iter_mut().zip(nulls.iter()) {
+            for (index, (cost, valid)) in rows.iter_mut().zip(nulls.iter()).enumerate() {
+                super::output_chunk::tick(index, check)?;
                 *cost = checked_accumulate(*cost, usize::from(!valid), "batch")?;
             }
         }
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn materialize(&self, row_count: usize) -> Result<RowCosts> {
-        if self.variable.is_empty() && self.validity.is_empty() {
+        self.materialize_checked(row_count, &mut || Ok(()))
+    }
+    pub(crate) fn materialize_checked(
+        &self,
+        row_count: usize,
+        check: &mut (impl FnMut() -> Result<()> + ?Sized),
+    ) -> Result<RowCosts> {
+        check()?;
+        if self.is_fixed() {
             return Ok(RowCosts::Fixed(self.fixed));
         }
         let mut rows = vec![self.fixed; row_count];
         for offsets in &self.variable {
-            offsets.add_charges(&mut rows)?;
+            offsets.add_charges_checked(&mut rows, check)?;
         }
-        self.add_null_charges(&mut rows)?;
+        self.add_null_charges(&mut rows, check)?;
         Ok(RowCosts::Variable(rows))
+    }
+
+    fn is_fixed(&self) -> bool {
+        self.variable.is_empty() && self.validity.is_empty()
     }
 
     fn total(&self, row_count: usize) -> Option<usize> {

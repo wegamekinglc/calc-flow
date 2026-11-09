@@ -84,17 +84,46 @@ pub(crate) fn chunk_output_record(
     budget: EdgeBudget,
     errors: OutputChunkErrors,
 ) -> Result<Vec<Batch>> {
+    chunk_output_record_checked(
+        record,
+        operator_id,
+        first_sequence,
+        budget,
+        errors,
+        &mut || Ok(()),
+    )
+}
+
+pub(crate) fn chunk_output_record_checked(
+    record: &RecordBatch,
+    operator_id: &str,
+    first_sequence: u64,
+    budget: EdgeBudget,
+    errors: OutputChunkErrors,
+    check: &mut (impl FnMut() -> Result<()> + ?Sized),
+) -> Result<Vec<Batch>> {
+    check()?;
     if record.num_rows() == 0 {
         return Ok(Vec::new());
     }
-    // The emission must fit the remaining sequence range before any batch is
-    // built, so a restored u64::MAX sequence fails instead of emitting.
+    let batches =
+        nonempty_record_batches(record, operator_id, first_sequence, budget, errors, check)?;
+    check()?;
+    Ok(batches)
+}
+fn nonempty_record_batches(
+    record: &RecordBatch,
+    operator_id: &str,
+    first_sequence: u64,
+    budget: EdgeBudget,
+    errors: OutputChunkErrors,
+    check: &mut (impl FnMut() -> Result<()> + ?Sized),
+) -> Result<Vec<Batch>> {
     validate_output_sequence_range(operator_id, first_sequence, 1)?;
-    // A record that already fits one message skips the per-row charge scan.
     if let Some(batch) = whole_record_batch(record, operator_id, first_sequence, budget)? {
         return Ok(vec![batch]);
     }
-    chunked_record_batches(record, operator_id, first_sequence, budget, errors)
+    chunked_record_batches(record, operator_id, first_sequence, budget, errors, check)
 }
 
 /// The whole-record fast path, or `None` when the record needs the per-row
@@ -123,11 +152,20 @@ fn chunked_record_batches(
     first_sequence: u64,
     budget: EdgeBudget,
     errors: OutputChunkErrors,
+    check: &mut (impl FnMut() -> Result<()> + ?Sized),
 ) -> Result<Vec<Batch>> {
-    let plan = ChargePlan::read(record)?;
-    let ranges = plan.chunk_ranges(record.num_rows(), budget, operator_id, errors)?;
+    let plan = ChargePlan::read(record, check)?;
+    let ranges = plan.chunk_ranges(record.num_rows(), budget, operator_id, errors, check)?;
     validate_output_sequence_range(operator_id, first_sequence, ranges.len())?;
-    build_output_batches(record, operator_id, first_sequence, budget, ranges, errors)
+    build_output_batches(
+        record,
+        operator_id,
+        first_sequence,
+        budget,
+        ranges,
+        errors,
+        check,
+    )
 }
 
 /// Charging scheme for one output record.
@@ -145,13 +183,17 @@ struct ChargePlan<'a> {
 }
 
 impl<'a> ChargePlan<'a> {
-    fn read(record: &'a RecordBatch) -> Result<Self> {
+    fn read(
+        record: &'a RecordBatch,
+        check: &mut (impl FnMut() -> Result<()> + ?Sized),
+    ) -> Result<Self> {
         let mut charges = ColumnCharges::default();
         let mut chunk = 0_usize;
-        for column in record.columns() {
-            accumulate_column(column.as_ref(), &mut charges, &mut chunk)?;
+        for (index, column) in record.columns().iter().enumerate() {
+            tick(index, check)?;
+            accumulate_column(column.as_ref(), &mut charges, &mut chunk, check)?;
         }
-        let rows = charges.materialize(record.num_rows())?;
+        let rows = charges.materialize_checked(record.num_rows(), check)?;
         Ok(Self {
             rows,
             nulls: charges.validity,
@@ -170,20 +212,14 @@ impl<'a> ChargePlan<'a> {
         budget: EdgeBudget,
         operator_id: &str,
         errors: OutputChunkErrors,
+        check: &mut (impl FnMut() -> Result<()> + ?Sized),
     ) -> Result<Vec<(usize, usize)>> {
-        // A row that cannot fit a message on its own fails loudly before any
-        // chunk range is formed.
-        for row in 0..row_count {
-            let charge = self.single_row_charge(row)?;
-            if charge > budget.max_bytes {
-                return Err(errors.over_budget_row(charge, budget.max_bytes));
-            }
-        }
+        self.validate_rows(row_count, budget, errors, check)?;
         let mut ranges = Vec::<(usize, usize)>::new();
         let mut null_counts = vec![0_usize; self.nulls.len()];
         let mut start = 0;
         while start < row_count {
-            let end = self.scan_chunk_end(row_count, budget, start, &mut null_counts)?;
+            let end = self.scan_chunk_end(row_count, budget, start, &mut null_counts, check)?;
             if end == start {
                 return Err(operator_error(
                     operator_id,
@@ -199,6 +235,25 @@ impl<'a> ChargePlan<'a> {
         Ok(ranges)
     }
 
+    fn validate_rows(
+        &self,
+        row_count: usize,
+        budget: EdgeBudget,
+        errors: OutputChunkErrors,
+        check: &mut (impl FnMut() -> Result<()> + ?Sized),
+    ) -> Result<()> {
+        // A row that cannot fit a message on its own fails loudly before any
+        // chunk range is formed.
+        for row in 0..row_count {
+            tick(row, check)?;
+            let charge = self.single_row_charge(row)?;
+            if charge > budget.max_bytes {
+                return Err(errors.over_budget_row(charge, budget.max_bytes));
+            }
+        }
+        Ok(())
+    }
+
     /// Extends one chunk from `start` until the next row would exceed the
     /// row or byte budget, charging unsliced child data once per chunk.
     fn scan_chunk_end(
@@ -207,28 +262,54 @@ impl<'a> ChargePlan<'a> {
         budget: EdgeBudget,
         start: usize,
         null_counts: &mut [usize],
+        check: &mut (impl FnMut() -> Result<()> + ?Sized),
     ) -> Result<usize> {
         null_counts.fill(0);
         let mut end = start;
         let mut row_bytes = self.chunk;
         while end < row_count && end - start < budget.max_rows {
-            let adjustment = self.validity_adjustment(end - start + 1, end, null_counts)?;
-            let Some(next_bytes) = row_bytes.checked_add(self.rows.get(end)) else {
+            tick(end - start, check)?;
+            let Some(next_bytes) =
+                self.next_row_bytes(end, end - start + 1, row_bytes, budget, null_counts, check)?
+            else {
                 break;
             };
-            let Some(candidate) = next_bytes.checked_add(adjustment) else {
-                break;
-            };
-            if candidate > budget.max_bytes {
-                break;
-            }
-            for (count, nulls) in null_counts.iter_mut().zip(self.nulls.iter()) {
-                *count += usize::from(nulls.is_null(end));
-            }
             row_bytes = next_bytes;
             end += 1;
         }
         Ok(end)
+    }
+
+    fn next_row_bytes(
+        &self,
+        end: usize,
+        candidate_len: usize,
+        row_bytes: usize,
+        budget: EdgeBudget,
+        null_counts: &mut [usize],
+        check: &mut (impl FnMut() -> Result<()> + ?Sized),
+    ) -> Result<Option<usize>> {
+        let adjustment = self.validity_adjustment(candidate_len, end, null_counts, check)?;
+        let candidate = row_bytes
+            .checked_add(self.rows.get(end))
+            .and_then(|bytes| bytes.checked_add(adjustment))
+            .filter(|bytes| *bytes <= budget.max_bytes);
+        if candidate.is_some() {
+            self.observe_nulls(end, null_counts, check)?;
+        }
+        Ok(candidate.map(|_| row_bytes + self.rows.get(end)))
+    }
+    fn observe_nulls(
+        &self,
+        row: usize,
+        counts: &mut [usize],
+        check: &mut (impl FnMut() -> Result<()> + ?Sized),
+    ) -> Result<()> {
+        for (index, (count, nulls)) in counts.iter_mut().zip(&self.nulls).enumerate() {
+            tick(index, check)?;
+            *count += usize::from(nulls.is_null(row));
+        }
+        Ok(())
     }
 
     /// Tops the per-null-cell row charges up to the sliced validity bitmap
@@ -238,9 +319,11 @@ impl<'a> ChargePlan<'a> {
         candidate_len: usize,
         end: usize,
         null_counts: &[usize],
+        check: &mut (impl FnMut() -> Result<()> + ?Sized),
     ) -> Result<usize> {
         let mut adjustment = 0_usize;
-        for (count, nulls) in null_counts.iter().zip(self.nulls.iter()) {
+        for (index, (count, nulls)) in null_counts.iter().zip(self.nulls.iter()).enumerate() {
+            tick(index, check)?;
             let in_range = count + usize::from(nulls.is_null(end));
             let bitmap = if in_range == 0 {
                 0
@@ -262,9 +345,11 @@ fn accumulate_column<'a>(
     column: &'a dyn Array,
     charges: &mut ColumnCharges<'a>,
     chunk: &mut usize,
+    check: &mut (impl FnMut() -> Result<()> + ?Sized),
 ) -> Result<()> {
+    check()?;
     if matches!(column.data_type(), DataType::Struct(_)) {
-        return accumulate_struct_column(column, charges, chunk);
+        return accumulate_struct_column(column, charges, chunk, check);
     }
     let terminal = terminal_offset_width(column.data_type());
     *chunk = checked_accumulate(*chunk, terminal, "batch")?;
@@ -272,7 +357,7 @@ fn accumulate_column<'a>(
         charges.fixed -= terminal;
         return Ok(());
     }
-    accumulate_nested_column(column, charges, chunk)
+    accumulate_nested_column(column, charges, chunk, check)
 }
 
 /// Struct columns recurse because Arrow slices their children; the struct's
@@ -281,14 +366,16 @@ fn accumulate_struct_column<'a>(
     column: &'a dyn Array,
     charges: &mut ColumnCharges<'a>,
     chunk: &mut usize,
+    check: &mut (impl FnMut() -> Result<()> + ?Sized),
 ) -> Result<()> {
+    check()?;
     charges.validity.extend(column.nulls());
     let struct_array = column
         .as_any()
         .downcast_ref::<StructArray>()
         .expect("struct column matches its data type");
     for child in struct_array.columns() {
-        accumulate_column(child, charges, chunk)?;
+        accumulate_column(child, charges, chunk, check)?;
     }
     Ok(())
 }
@@ -299,14 +386,24 @@ fn accumulate_nested_column<'a>(
     column: &'a dyn Array,
     charges: &mut ColumnCharges<'a>,
     chunk: &mut usize,
+    check: &mut (impl FnMut() -> Result<()> + ?Sized),
 ) -> Result<()> {
+    check()?;
     charges.fixed = checked_accumulate(
         charges.fixed,
         nested_row_width(column.data_type())?,
         "batch",
     )?;
     charges.validity.extend(column.nulls());
-    for child in column.to_data().child_data() {
+    accumulate_children(column, chunk, check)
+}
+fn accumulate_children(
+    column: &dyn Array,
+    chunk: &mut usize,
+    check: &mut (impl FnMut() -> Result<()> + ?Sized),
+) -> Result<()> {
+    for (index, child) in column.to_data().child_data().iter().enumerate() {
+        tick(index, check)?;
         *chunk = checked_accumulate(*chunk, child_slice_memory(child)?, "batch")?;
     }
     Ok(())
@@ -376,31 +473,56 @@ fn build_output_batches(
     budget: EdgeBudget,
     ranges: Vec<(usize, usize)>,
     errors: OutputChunkErrors,
+    check: &mut (impl FnMut() -> Result<()> + ?Sized),
 ) -> Result<Vec<Batch>> {
     ranges
         .into_iter()
         .enumerate()
         .map(|(ordinal, (start, end))| {
+            check()?;
             let ordinal = u64::try_from(ordinal).map_err(|_| {
                 operator_error(operator_id, "output chunk ordinal does not fit u64")
             })?;
             let sequence = first_sequence
                 .checked_add(ordinal)
                 .expect("complete sequence range validated above");
-            let metadata = BatchMetadata::new(operator_id, sequence, BTreeMap::new())?;
-            let batch = Batch::table(vec![record.slice(start, end - start)], metadata)?;
-            if batch.estimated_bytes()? > budget.max_bytes {
-                return Err(operator_error(
-                    operator_id,
-                    &format!(
-                        "conservative row charges underreported a {} output chunk",
-                        errors.family
-                    ),
-                ));
-            }
-            Ok(batch)
+            output_batch(
+                record.slice(start, end - start),
+                operator_id,
+                sequence,
+                budget,
+                errors,
+            )
         })
         .collect()
+}
+
+fn output_batch(
+    record: RecordBatch,
+    operator_id: &str,
+    sequence: u64,
+    budget: EdgeBudget,
+    errors: OutputChunkErrors,
+) -> Result<Batch> {
+    let metadata = BatchMetadata::new(operator_id, sequence, BTreeMap::new())?;
+    let batch = Batch::table(vec![record], metadata)?;
+    if batch.estimated_bytes()? > budget.max_bytes {
+        return Err(operator_error(
+            operator_id,
+            &format!(
+                "conservative row charges underreported a {} output chunk",
+                errors.family
+            ),
+        ));
+    }
+    Ok(batch)
+}
+
+pub(super) fn tick(index: usize, check: &mut (impl FnMut() -> Result<()> + ?Sized)) -> Result<()> {
+    if index.is_multiple_of(4096) {
+        check()?;
+    }
+    Ok(())
 }
 
 fn operator_error(operator_id: &str, message: &str) -> CalcFlowError {
@@ -539,7 +661,7 @@ mod tests {
             ),
         ])
         .unwrap();
-        let plan = ChargePlan::read(&record).unwrap();
+        let plan = ChargePlan::read(&record, &mut || Ok(())).unwrap();
         // Every contiguous range must stay at or above the estimator charge
         // for the same slice.
         for start in 0..record.num_rows() {
@@ -686,3 +808,7 @@ mod tests {
         assert_eq!(chunks[0].metadata().sequence(), 3);
     }
 }
+
+#[cfg(test)]
+#[path = "output_chunk/controlled_tests.rs"]
+mod controlled_tests;

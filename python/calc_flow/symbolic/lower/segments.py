@@ -8,6 +8,7 @@ from calc_flow._compat import dataclass
 from calc_flow.symbolic import errors
 from calc_flow.symbolic.analyzer import (
     _ROW_LOCAL_PRIMITIVES,
+    _indicator_target_error,
     _literal_dtype,
     _schema_fields,
 )
@@ -60,6 +61,8 @@ _ROLLING_PRIMITIVES: Final = frozenset(
         "lag",
         "delta",
         "ewma",
+        "rsi",
+        "atr",
         "cumulative_mean",
         "cumulative_sum",
         "cumulative_min",
@@ -242,6 +245,7 @@ def _filter_needs_stateful_tail(child: _Segment, predicate: Node, /) -> bool:
 
 
 def _resolve_filter(node: Node, path: str, /) -> _Segment:
+    _require_indicator_target(node.args[1], node.args[0], f"{path}.filter.predicate")
     child = _resolve_table(node.args[0], f"{path}.filter.value")
     input_types = {
         field.name: field for field in _schema_fields(child.input_node.attr("schema"))
@@ -269,9 +273,11 @@ def _resolve_filter(node: Node, path: str, /) -> _Segment:
 
 
 def _resolve_with_columns(node: Node, path: str, /) -> _Segment:
+    names = _cstr_seq(node.attr("names"))
+    for index, name in enumerate(names):
+        _require_indicator_target(node.args[index + 1], node.args[0], f"{path}.{name}")
     child = _resolve_table(node.args[0], f"{path}.with_columns.value")
     env = dict(child.env)
-    names = _cstr_seq(node.attr("names"))
     input_types = {
         field.name: field for field in _schema_fields(child.input_node.attr("schema"))
     }
@@ -286,6 +292,12 @@ def _resolve_with_columns(node: Node, path: str, /) -> _Segment:
         child.predicate,
         child.post_predicate,
     )
+
+
+def _require_indicator_target(expression: Node, target: Node, path: str) -> None:
+    error = _indicator_target_error(expression, target)
+    if error is not None:
+        errors.raise_compile(f"{path}.lineage", errors.SCHEMA_MISMATCH, error)
 
 
 def _segment_has_rolling(segment: _Segment, /) -> bool:

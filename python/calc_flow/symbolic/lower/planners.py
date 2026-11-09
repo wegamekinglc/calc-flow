@@ -61,6 +61,38 @@ if sys.version_info < (3, 10):
     from calc_flow._compat import zip as zip
 
 
+def _rolling_indicator_declaration(
+    subtree: Node, output: str, operands: list[tuple[str, str, Field]]
+) -> dict[str, object] | None:
+    kind = subtree.op.name
+    if kind not in {"rsi", "atr"}:
+        return None
+    roles = ("input",) if kind == "rsi" else ("high", "low", "close")
+    return {
+        "kind": kind,
+        "primitive_version": 1,
+        "period": _cint(subtree.attr("period")),
+        "output": output,
+        **{role: operand[1] for role, operand in zip(roles, operands, strict=True)},
+    }
+
+
+def _rolling_state_layout_version(declarations: list[dict[str, object]]) -> int:
+    if any(item["kind"] in {"rsi", "atr"} for item in declarations):
+        return 5
+    if any(
+        item["kind"]
+        in {"cumulative_sum", "cumulative_min", "cumulative_max", "cumulative_variance"}
+        for item in declarations
+    ):
+        return 4
+    return (
+        2
+        if any(_rolling_declaration_requires_ewma(item) for item in declarations)
+        else 1
+    )
+
+
 # Rolling planning validates every lag/delta/aggregate occurrence with
 # stable, declaration-ordered error paths before emitting the frozen node
 # shape.
@@ -165,6 +197,11 @@ def _plan_rolling_stage(
                     " input schema",
                 )
             operands.append((role, input_name, field))
+        indicator = _rolling_indicator_declaration(subtree, name, operands)
+        if indicator is not None:
+            declarations.append(indicator)
+            derived_fields.append(Field(name, "float64", nullable=True))
+            continue
         periods = _cint(subtree.attr("periods"))
         if periods is not None:
             declarations.append(
@@ -266,20 +303,7 @@ def _plan_rolling_stage(
             "kind": "rolling",
             "spec": {
                 "configuration_version": 1,
-                "state_layout_version": (
-                    4
-                    if any(
-                        str(item["kind"]).startswith("cumulative_")
-                        and item["kind"] != "cumulative_mean"
-                        for item in declarations
-                    )
-                    else 2
-                    if any(
-                        _rolling_declaration_requires_ewma(item)
-                        for item in declarations
-                    )
-                    else 1
-                ),
+                "state_layout_version": _rolling_state_layout_version(declarations),
                 "partition_by": list(entity_by),
                 "event_time": event_time,
                 "sequence_by": list(sequence_by),

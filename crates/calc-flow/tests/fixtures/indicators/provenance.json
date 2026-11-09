@@ -1,0 +1,37 @@
+{
+  "accuracy": {
+    "atr_relative": "256*2^-52",
+    "rsi_absolute": "100*256*2^-52"
+  },
+  "atr_offsets": {
+    "close": "price+1/8",
+    "high": "price+1/2",
+    "low": "price-3/4"
+  },
+  "exact_positive_mean_bounds": [
+    "2^-20",
+    "2^13"
+  ],
+  "fixed_input_formula": "((17*i*i+13*i+7)%127-63)/16, i=0..63",
+  "fraction_predicate_verified": true,
+  "fraction_recurrence": "(previous*(period-1)+sample)/period",
+  "fraction_rsi": "100*gain/(gain+loss), with explicit zero/flat rules",
+  "fraction_seed": "sum(samples)/count; ready at period differences/TRs",
+  "golden_sha256": "9c41d134adcbc0d1398544072d9d75009ce7b0aa75663f4b2476b37132f9e8cf",
+  "input_grid_and_bounds": "multiples of 1/16 in [-4096,4096]; high>=low",
+  "oracle_correction": {
+    "affected_references": "period2 fraction_rsi rows54 and62, one ULP each",
+    "old_issue": "zero-only integer sums divided by count became float0.0, contaminating later supposedly exact Fraction recurrence",
+    "unchanged": "all input/primary IEEE bits and accuracy tolerances"
+  },
+  "periods": [
+    1,
+    2,
+    3,
+    7,
+    32
+  ],
+  "reference": "independent standard-library Python float64 and Fraction; no production imports",
+  "rows": 64,
+  "updates_per_segment": 63
+}

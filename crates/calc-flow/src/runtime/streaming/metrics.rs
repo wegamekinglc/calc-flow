@@ -683,6 +683,13 @@ impl MetricsRecorder {
                 | FailureOrigin::NativeSequenceRecovery { node_id } => {
                     attempt_node_error(&mut snapshot.nodes, node_id, &mut first_overflow);
                 }
+                FailureOrigin::RollingIndicator { diagnostic } => {
+                    attempt_node_error(
+                        &mut snapshot.nodes,
+                        diagnostic.node_id(),
+                        &mut first_overflow,
+                    );
+                }
                 FailureOrigin::SourceOpen { binding_id }
                 | FailureOrigin::SourceClose { binding_id } => {
                     attempt_source_error(&mut snapshot.sources, binding_id, &mut first_overflow);

@@ -10,6 +10,7 @@ On this page:
 - [Event-time window aggregation](#symbolic-event-time-window-aggregation)
 - [Bounded stream joins](#symbolic-bounded-stream-joins)
 - [Bounded backward ASOF Join](#symbolic-bounded-backward-asof-join)
+- [RSI and ATR calculations](#rsi-and-atr-calculations)
 - [Native array compilation](#native-array-compilation)
 - [Matrix compilation](#symbolic-matrix-compilation)
 
@@ -559,6 +560,52 @@ watermark closure, limits, frontier lag, and state ownership. `compile_stream`
 lateness settings apply to rolling/cross-section stages; ASOF uses its own
 spec's late policy and has no allowed-lateness parameter. Batch analysis,
 compilation, and collection reject ASOF. There is no Python matching engine.
+
+## RSI and ATR calculations
+
+`ts.rsi(value, period=n)` and `ts.atr(high, low, close, period=n)` declare
+nullable float64 columns using Wilder transitions. Period is mandatory and
+must be an exact positive u64; Boolean, fractional and out-of-range arguments
+fail before declaration. Operands must have float32/float64 types; ATR permits
+mixed floating columns. Use `row.cast` for an explicit integer conversion.
+
+Both batch and stream calculations require declared `entity_by`,
+`event_time` and `sequence_by`, with valid non-null ordering fields. Every
+operand must refer to the same row set. Separately constructed equivalent
+declarations are accepted; columns from differently filtered tables are
+rejected even if their schemas and row counts match. Referenced column
+definitions must also match those available on the actual evaluation table.
+An absent derived alias or another definition of the same alias fails with
+`schema_mismatch`. Materialize the intended column on that table or build the
+expression from its own column references. These checks cover the whole
+expression containing RSI/ATR, including surrounding row-local arithmetic.
+Consumed derived definitions on both the reference source and actual target
+are recursively checked at their own evaluation stages. Identical expression
+tags alone do not establish that their dependency columns have the same
+meaning. A valid derive-then-filter calculation retains its original meaning.
+Row-local inputs and derived columns are materialized before the stateful stage.
+
+```python
+features = quotes.with_columns(
+    rsi=cf.ts.rsi(quotes["close"], period=14),
+    atr=cf.ts.atr(quotes["high"], quotes["low"], quotes["close"], period=14),
+)
+```
+
+Each entity warms up independently. Missing/NaN inputs reset its current
+segment; a complete segment first emits at index `period`. Finite input
+differences must remain representable, and valid infinity fails before
+publishing a prepared result. See the [native numerical
+semantics](python-api.md#native-arrays) for eager use, zero rules and the
+specified float64 underflow result.
+
+These primitives use rolling `primitive_version=1` and state layout 5. A mixed
+stage containing RSI/ATR uses layout 5 for its other rolling outputs too;
+old-only declarations retain their existing layout selection and semantics.
+Indicator-containing Rust RollingOperator nodes use their selected StateBudget
+byte limit for participating state, candidate, output, scratch and retained
+checkpoint storage. Python adds no rolling-budget option. Existing `ts.ema`
+and `ts.macd` retain their declarations and numerical contracts.
 
 ## Native array compilation
 

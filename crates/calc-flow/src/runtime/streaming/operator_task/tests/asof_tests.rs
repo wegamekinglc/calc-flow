@@ -712,7 +712,7 @@ async fn test_asof_restore_rejects_pending_left_at_or_behind_output_frontier_bef
         port,
         None,
         Some(super::OperatorRestoreState {
-            snapshot,
+            snapshot: Arc::new(crate::state::PreloadedSnapshot::uncredited(snapshot)),
             progress,
             output_frontier: Some(EventTime::from_micros(105)),
             next_epoch: Epoch::new(2).unwrap(),

@@ -11,6 +11,9 @@ use std::{any::Any, sync::Arc};
 use crate::CalcFlowError;
 
 use super::supervisor::TaskId;
+#[path = "failure/indicator_diagnostic.rs"]
+pub(crate) mod indicator_diagnostic;
+use indicator_diagnostic::SafeIndicatorDiagnostic;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum FailureOrigin {
@@ -21,6 +24,9 @@ pub(crate) enum FailureOrigin {
     },
     NativeSequenceRecovery {
         node_id: String,
+    },
+    RollingIndicator {
+        diagnostic: SafeIndicatorDiagnostic,
     },
     SourceOpen {
         binding_id: String,

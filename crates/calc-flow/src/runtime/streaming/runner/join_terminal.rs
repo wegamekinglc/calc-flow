@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use std::collections::BTreeMap;
 
 use super::{
@@ -100,7 +102,7 @@ async fn load_restore(
         .inline_metadata
         .remove(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1);
     Ok(OperatorRestoreState {
-        snapshot,
+        snapshot: Arc::new(crate::state::PreloadedSnapshot::uncredited(snapshot)),
         progress: entry.progress.clone(),
         output_frontier: restored_output_frontier_value(id, true, frontier)?,
         next_epoch: checkpoint.next_epoch,

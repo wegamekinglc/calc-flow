@@ -1,4 +1,5 @@
 mod decay_tests;
+mod indicators;
 mod late;
 mod shared_rows;
 
@@ -2297,7 +2298,7 @@ async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
     let charge = budget::ordered_buffer_record_charge(&record, &operator.compiled, "rolling")
         .unwrap()
         .unwrap();
-    operator.state.charge = operator
+    operator.state.owned_mut().unwrap().charge = operator
         .state
         .charge
         .checked_add(charge, "rolling")
@@ -2557,7 +2558,7 @@ async fn general_rolling_observations_distinguish_routing_from_numeric_work() {
         let callback = store.begin(RollingCallback::Watermark, cancellation.clone());
         let context = StreamOperatorContext::new(&job, "rolling", None)
             .with_rolling_metrics(callback.recorder());
-        operator.state.charge = operator
+        operator.state.owned_mut().unwrap().charge = operator
             .state
             .charge
             .checked_add(

@@ -3,8 +3,8 @@ use serde_json::{Map, Value};
 use crate::{
     JsonMap, Result, RollingNumericalProfile,
     array::{
-        ArrayDType, ArrayExecutionOptions, ArrayStateOptions, EwmaOptions, RollingMeanOptions,
-        invalid,
+        ArrayDType, ArrayExecutionOptions, ArrayStateOptions, AtrOptions, EwmaOptions,
+        RollingMeanOptions, RsiOptions, invalid,
         sequence::codec::{KernelOptions, SequenceSpec},
     },
 };
@@ -16,29 +16,33 @@ pub(super) struct Options {
 }
 
 pub(super) fn parse(options: &JsonMap) -> Result<Options> {
-    validate_document(options)?;
+    let version = validate_document(options)?;
     Ok(Options {
-        spec: specification(options)?,
+        spec: specification(options, version)?,
         execution: execution(options.get("execution"))?,
         state: state(options.get("state"))?,
     })
 }
-fn validate_document(options: &JsonMap) -> Result<()> {
+fn validate_document(options: &JsonMap) -> Result<u64> {
     super::super::validate::bounded(options)?;
     fields(
         options.keys().map(String::as_str),
         &["ir_version", "input_dtype", "kernel", "execution", "state"],
         "options",
     )?;
-    if options.get("ir_version").and_then(Value::as_u64) != Some(1) {
-        return Err(invalid("options.ir_version", "requires integer version 1"));
+    match options.get("ir_version").and_then(Value::as_u64) {
+        Some(version @ (1 | 2)) => Ok(version),
+        _ => Err(invalid(
+            "options.ir_version",
+            "requires integer version 1 or 2",
+        )),
     }
-    Ok(())
 }
-fn specification(options: &JsonMap) -> Result<SequenceSpec> {
+fn specification(options: &JsonMap, version: u64) -> Result<SequenceSpec> {
     let values = object(options.get("kernel"), "options.kernel")?;
-    SequenceSpec::new(dtype(options.get("input_dtype"))?, kernel(values)?)
+    SequenceSpec::new(dtype(options.get("input_dtype"))?, kernel(values, version)?)
 }
+
 fn dtype(value: Option<&Value>) -> Result<ArrayDType> {
     match value.and_then(Value::as_str) {
         Some("float32") => Ok(ArrayDType::Float32),
@@ -75,13 +79,14 @@ fn minimum(values: &Map<String, Value>) -> Result<u64> {
         None => Ok(1),
     }
 }
-fn kernel(values: &Map<String, Value>) -> Result<KernelOptions> {
+fn kernel(values: &Map<String, Value>, version: u64) -> Result<KernelOptions> {
     match values.get("function").and_then(Value::as_str) {
         Some("rolling_mean") => mean(values),
         Some("ewma") => ewma(values),
+        Some("rsi" | "atr") => indicator(values, version),
         _ => Err(invalid(
             "options.kernel.function",
-            "requires rolling_mean or ewma",
+            "requires a supported sequence kernel for the declared IR version",
         )),
     }
 }
@@ -177,4 +182,23 @@ fn state(value: Option<&Value>) -> Result<ArrayStateOptions> {
         }
     }
     Ok(options)
+}
+
+fn indicator(values: &Map<String, Value>, version: u64) -> Result<KernelOptions> {
+    if version < 2 {
+        return Err(invalid(
+            "options.kernel.function",
+            "RSI/ATR requires sequence IR version 2",
+        ));
+    }
+    fields(
+        values.keys().map(String::as_str),
+        &["function", "period"],
+        "options.kernel",
+    )?;
+    let period = count(values.get("period"), "options.kernel.period")?;
+    match values.get("function").and_then(Value::as_str) {
+        Some("rsi") => RsiOptions::new(period).map(KernelOptions::Rsi),
+        _ => AtrOptions::new(period).map(KernelOptions::Atr),
+    }
 }

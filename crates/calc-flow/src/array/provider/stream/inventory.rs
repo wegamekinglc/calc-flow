@@ -12,6 +12,7 @@ use crate::{
         capture::Captures,
         codec::{self, RestoreLimits},
     },
+    operator::rolling::IndicatorRollingRecord,
     pipeline::{CompiledStreamOperator, OperatorCheckpointCapability, StreamRuntimePlanParts},
     runtime::streaming::StreamJobControl,
 };
@@ -32,7 +33,11 @@ impl NativeSequenceFailure {
 
 pub(crate) struct NativeSequenceInventory {
     graph: String,
-    records: BTreeMap<String, Arc<NativeSequenceRecord>>,
+    records: BTreeMap<String, Arc<NativeCheckpointRecord>>,
+}
+pub(crate) enum NativeCheckpointRecord {
+    Sequence(NativeSequenceRecord),
+    IndicatorRolling(IndicatorRollingRecord),
 }
 pub(crate) struct NativeSequenceRecord {
     node: String,
@@ -69,13 +74,14 @@ impl NativeSequenceInventory {
         job: &StreamJobContext,
     ) -> Option<Arc<Self>> {
         let control = Arc::new(job.native_control());
+        let graph: Arc<str> = plan.fingerprint.as_str().into();
         let mut records = BTreeMap::new();
         for node in &plan.nodes {
+            let id = node.operator_id.as_str().to_owned();
             if let Some(operator) = compiled(&node.operator) {
-                let id = node.operator_id.as_str().to_owned();
                 records.insert(
                     id.clone(),
-                    Arc::new(NativeSequenceRecord {
+                    Arc::new(NativeCheckpointRecord::Sequence(NativeSequenceRecord {
                         node: id,
                         configured: Arc::clone(&operator.configured),
                         workers: Arc::clone(&operator.workers),
@@ -83,7 +89,19 @@ impl NativeSequenceInventory {
                         initial: operator.state.state_bytes(),
                         capability: node.checkpoint_capability,
                         control: Arc::clone(&control),
-                    }),
+                    })),
+                );
+            } else if let CompiledStreamOperator::Rolling(operator) = &node.operator
+                && let Some(record) = operator.native_checkpoint_record(
+                    &id,
+                    Arc::clone(&graph),
+                    node.checkpoint_capability,
+                    Arc::clone(&control),
+                )
+            {
+                records.insert(
+                    id,
+                    Arc::new(NativeCheckpointRecord::IndicatorRolling(record)),
                 );
             }
         }
@@ -101,6 +119,13 @@ impl NativeSequenceInventory {
             .expect("native inventory is nonempty")
             .failure(error)
     }
+    pub(crate) fn mismatch(&self, field: &str, message: &str) -> CalcFlowError {
+        self.records
+            .values()
+            .next()
+            .expect("native inventory is nonempty")
+            .mismatch(field, message)
+    }
     pub(crate) fn cancelled(&self) -> CalcFlowError {
         let record = self
             .records
@@ -108,10 +133,10 @@ impl NativeSequenceInventory {
             .next()
             .expect("native inventory is nonempty");
         CalcFlowError::Cancelled {
-            run_id: record.control.job_id().to_string(),
+            run_id: record.control().job_id().to_string(),
         }
     }
-    pub(crate) fn record(&self, node: &str) -> Option<&Arc<NativeSequenceRecord>> {
+    pub(crate) fn record(&self, node: &str) -> Option<&Arc<NativeCheckpointRecord>> {
         self.records.get(node)
     }
     pub(crate) fn contains(&self, node: &str) -> bool {
@@ -122,7 +147,7 @@ impl NativeSequenceInventory {
             .values()
             .next()
             .expect("native inventory is nonempty")
-            .control
+            .control()
             .check_cancelled()
     }
     pub(crate) fn admit_manifest(
@@ -144,7 +169,7 @@ impl NativeSequenceInventory {
     ) -> std::result::Result<(), NativeSequenceFailure> {
         for (node, record) in &self.records {
             let entry = manifest.operators().get(node).ok_or_else(|| {
-                record.failure(codec::mismatch("segments", "missing native operator entry"))
+                record.failure(record.mismatch("segments", "missing native operator entry"))
             })?;
             (if recovery {
                 record.admit_entry(entry)
@@ -159,9 +184,65 @@ impl NativeSequenceInventory {
                 .values()
                 .next()
                 .expect("native inventory is nonempty");
-            return Err(record.failure(codec::mismatch("identity", "graph fingerprint differs")));
+            return Err(record.failure(record.mismatch("identity", "graph fingerprint differs")));
         }
         Ok(())
+    }
+}
+
+impl NativeCheckpointRecord {
+    pub(crate) fn mismatch(&self, field: &str, message: &str) -> CalcFlowError {
+        match self {
+            Self::Sequence(_) => codec::mismatch(field, message),
+            Self::IndicatorRolling(record) => record.mismatch(field, message),
+        }
+    }
+    pub(crate) fn failure(&self, error: CalcFlowError) -> NativeSequenceFailure {
+        match self {
+            Self::Sequence(record) => record.failure(error),
+            Self::IndicatorRolling(record) => NativeSequenceFailure {
+                node: record.node().to_owned(),
+                error: Box::new(error),
+            },
+        }
+    }
+    pub(super) fn control(&self) -> &Arc<StreamJobControl> {
+        match self {
+            Self::Sequence(record) => &record.control,
+            Self::IndicatorRolling(record) => record.control(),
+        }
+    }
+    pub(crate) fn admit_entry(&self, entry: &OperatorManifestEntry) -> Result<()> {
+        match self {
+            Self::Sequence(record) => record.admit_entry(entry),
+            Self::IndicatorRolling(record) => record.admit_entry(entry),
+        }
+    }
+    pub(crate) fn admit_retained(&self, entry: &OperatorManifestEntry) -> Result<()> {
+        match self {
+            Self::Sequence(record) => record.admit_retained(entry),
+            Self::IndicatorRolling(record) => record.admit_retained(entry),
+        }
+    }
+    pub(crate) fn admit_snapshot(&self, snapshot: &OperatorStateSnapshot) -> Result<()> {
+        match self {
+            Self::Sequence(record) => record.admit_snapshot(snapshot),
+            Self::IndicatorRolling(record) => record.admit_snapshot(snapshot),
+        }
+    }
+    pub(crate) fn handles<'a>(
+        &self,
+        entry: &'a OperatorManifestEntry,
+    ) -> Result<&'a [StateHandle]> {
+        match self {
+            Self::Sequence(record) => {
+                record.handle(entry)?;
+            }
+            Self::IndicatorRolling(record) => {
+                record.handle(entry)?;
+            }
+        }
+        Ok(&entry.segments)
     }
 }
 impl NativeSequenceRecord {

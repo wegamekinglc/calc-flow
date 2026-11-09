@@ -1,6 +1,6 @@
 //! Rolling checkpoint state serialization and typed restoration.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::BTreeSet};
 
 use super::{
     Arc, Array, ArrayRef, BTreeMap, Batch, BufferedRow, CompiledFrame, CompiledRollingSpec,
@@ -8,20 +8,56 @@ use super::{
     DictionaryTracker, Digest, EntityRollingState, EwmaAccumulator, ExtremaAccumulator, ExtremaKey,
     Field, FileReader, FileWriter, Float64Array, HashMap, HistoryUpdates, IpcSchemaEncoder,
     KeyValue, ROLLING_COLUMNAR_STATE_LAYOUT_VERSION, ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION,
-    ROLLING_EWMA_STATE_LAYOUT_VERSION, RecordBatch, Result, RollingHistories, RollingKernelState,
-    RollingMetricsRecorder, RollingSnapshotMetadata, RollingStage, RowIdentity, ScalarValue,
-    Schema, SchemaRef, SegmentDescriptor, Sha256, StateInventory, StateRowOrderKey, SumClass,
-    TableBatch, UInt8Array, UInt64Array, Value, WindowState, checkpoint_mismatch, concat_batches,
-    evict_retained_history, ewma_entity_values, float_sample, format_error, fresh_windows,
-    group_rows_by_entity, history_event_time, internal_error, is_valid_sample, kernel,
-    new_null_array, operator_error, spec_uses_stable_v2, state_format, state_v3,
+    ROLLING_EWMA_STATE_LAYOUT_VERSION, ROLLING_INDICATOR_STATE_LAYOUT_VERSION, RecordBatch, Result,
+    RollingHistories, RollingKernelState, RollingMetricsRecorder, RollingSnapshotMetadata,
+    RollingStage, RowIdentity, ScalarValue, Schema, SchemaRef, SegmentDescriptor, Sha256,
+    StateInventory, StateRowOrderKey, SumClass, TableBatch, UInt8Array, UInt64Array, Value,
+    WindowState, checkpoint_mismatch, concat_batches, evict_retained_history, ewma_entity_values,
+    float_sample, format_error, fresh_windows, group_rows_by_entity, history_event_time,
+    internal_error, is_valid_sample, kernel, new_null_array, operator_error, spec_uses_stable_v2,
+    state_format, state_v3,
 };
 use kernel::{StreamKernelUpdate, TypedStreamTransition};
+
+include!("state_codec/fresh_schema.rs");
+
+pub(super) fn state_schema_prepared(
+    input_schema: &Schema,
+    compiled: &CompiledRollingSpec,
+    pipeline_fingerprint: &str,
+    operator_id: &str,
+) -> FreshStateSchema {
+    FreshStateSchema {
+        schema: Arc::new(state_schema(
+            input_schema,
+            compiled,
+            pipeline_fingerprint,
+            operator_id,
+        )),
+    }
+}
+
+pub(super) fn layout_five_restore_error(
+    error: crate::CalcFlowError,
+    node: &str,
+) -> crate::CalcFlowError {
+    match error {
+        crate::CalcFlowError::Format { message } => {
+            checkpoint_mismatch(format!("rolling operator {node:?} state.format: {message}"))
+        }
+        crate::CalcFlowError::InvalidArgument { field, message } => {
+            checkpoint_mismatch(format!("rolling operator {node:?} {field}: {message}"))
+        }
+        other => other,
+    }
+}
 
 fn state_fields(input_schema: &Schema, state_layout_version: u32) -> Vec<Field> {
     if matches!(
         state_layout_version,
-        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
+            | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+            | ROLLING_INDICATOR_STATE_LAYOUT_VERSION
     ) {
         return state_v3::state_fields_for_layout(input_schema, state_layout_version);
     }
@@ -81,7 +117,9 @@ pub(super) fn state_schema(
     ]);
     if matches!(
         compiled.state_layout_version,
-        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
+            | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+            | ROLLING_INDICATOR_STATE_LAYOUT_VERSION
     ) {
         metadata.insert(
             "calc_flow.rolling_kernel_fingerprint".into(),
@@ -111,7 +149,9 @@ pub(super) fn encode_state_segment(
 ) -> Result<Vec<u8>> {
     if matches!(
         compiled.state_layout_version,
-        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
+            | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+            | ROLLING_INDICATOR_STATE_LAYOUT_VERSION
     ) {
         return state_v3::encode(
             histories,
@@ -272,7 +312,9 @@ pub(super) fn decode_state_segment(
 ) -> Result<DecodedRollingState> {
     if matches!(
         metadata.state_layout_version,
-        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
+            | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+            | ROLLING_INDICATOR_STATE_LAYOUT_VERSION
     ) {
         return state_v3::decode(bytes, input_schema, compiled, metadata);
     }
@@ -395,7 +437,9 @@ pub(super) fn validate_segment_schema_metadata(
     ];
     if matches!(
         snapshot.state_layout_version,
-        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
+            | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+            | ROLLING_INDICATOR_STATE_LAYOUT_VERSION
     ) {
         expected.extend([
             (
@@ -636,253 +680,59 @@ pub(super) fn validate_decoded_state(
     decoded: &DecodedRollingState,
     compiled: &CompiledRollingSpec,
 ) -> Result<()> {
+    validate_decoded_state_checked(decoded, compiled, &mut || Ok(()))
+}
+pub(super) fn validate_decoded_state_checked(
+    decoded: &DecodedRollingState,
+    compiled: &CompiledRollingSpec,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
     let max_retained = usize::try_from(compiled.max_row_retention)
         .map_err(|_| internal_error("rolling max retained rows does not fit usize"))?;
     for state in decoded.histories.by_entity.values() {
-        let bound = compiled
-            .max_duration_micros
-            .zip(
-                state
-                    .rows
-                    .back()
-                    .map(|values| history_event_time(values, compiled)),
-            )
-            .map(|(micros, last)| i128::from(last) - i128::from(micros));
-        for (index, values) in state.rows.iter().enumerate() {
-            let needed_by_count = state.rows.len() - index <= max_retained;
-            let needed_by_time =
-                bound.is_some_and(|bound| i128::from(history_event_time(values, compiled)) > bound);
-            if !needed_by_count && !needed_by_time {
-                return Err(state_format(
-                    "rolling state segment retains more history than the declared frames"
-                        .to_owned(),
-                ));
-            }
-        }
+        check()?;
+        validate_retained_history(state, compiled, max_retained, check)?;
     }
     Ok(())
 }
-
-/// Rebuilds every window accumulator as the ordered fold over the retained
-/// history tail; the segment stores rows only, and the accumulator is the
-/// deterministic function of those rows frozen in D5/D11. Extrema groups
-/// fold pushes and expiries so the rebuilt queue front is the window
-/// extremum, exactly as the live slide left it (SCE-08).
-// #lizard forgives
-pub(super) fn rebuild_windows(
-    histories: &mut RollingHistories,
-    compiled: &CompiledRollingSpec,
-    node_id: &str,
-) -> Result<()> {
-    for state in histories.by_entity.values_mut() {
-        let persisted = std::mem::take(&mut state.windows);
-        let mut windows = fresh_windows(compiled);
-        let last_time = state
-            .rows
-            .back()
-            .map(|values| history_event_time(values, compiled));
-        for (group_index, group) in compiled.window_groups.iter().enumerate() {
-            match group {
-                CompiledWindowGroup::Numeric {
-                    input_index,
-                    frame,
-                    sum_class,
-                } => {
-                    let WindowState::Numeric(accumulator) = &mut windows[group_index] else {
-                        return Err(internal_error("rolling numeric group state mismatch"));
-                    };
-                    let start = retained_window_start(*frame, state, compiled);
-                    if spec_uses_stable_v2(compiled) && *sum_class == SumClass::Float {
-                        *accumulator = kernel::stable_v2_float64_accumulator(
-                            state.rows.iter().skip(start).filter_map(|values| {
-                                let value = &values[*input_index];
-                                is_valid_sample(value).then(|| float_sample(value))
-                            }),
-                            node_id,
-                        )?;
-                    } else {
-                        for values in state.rows.iter().skip(start) {
-                            let value = &values[*input_index];
-                            if is_valid_sample(value) {
-                                accumulator.add(value, node_id)?;
-                            }
-                        }
-                    }
-                    if let CompiledFrame::Duration(micros) = frame {
-                        accumulator.expired_through = expired_through_bound(last_time, *micros);
-                    }
-                }
-                CompiledWindowGroup::Extrema {
-                    input_index, frame, ..
-                } => {
-                    let WindowState::Extrema(accumulator) = &mut windows[group_index] else {
-                        return Err(internal_error("rolling extrema group state mismatch"));
-                    };
-                    rebuild_extrema_group(
-                        accumulator,
-                        state,
-                        *input_index,
-                        *frame,
-                        compiled,
-                        node_id,
-                    )?;
-                }
-                CompiledWindowGroup::Pair {
-                    left_index,
-                    right_index,
-                    frame,
-                } => {
-                    let WindowState::Pair(accumulator) = &mut windows[group_index] else {
-                        return Err(internal_error("rolling pair group state mismatch"));
-                    };
-                    let start = retained_window_start(*frame, state, compiled);
-                    if spec_uses_stable_v2(compiled) {
-                        *accumulator = kernel::stable_v2_pair_accumulator(
-                            state.rows.iter().skip(start).filter_map(|values| {
-                                let x = &values[*left_index];
-                                let y = &values[*right_index];
-                                (is_valid_sample(x) && is_valid_sample(y))
-                                    .then(|| (float_sample(x), float_sample(y)))
-                            }),
-                            node_id,
-                        )?;
-                    } else {
-                        for values in state.rows.iter().skip(start) {
-                            let x = &values[*left_index];
-                            let y = &values[*right_index];
-                            if is_valid_sample(x) && is_valid_sample(y) {
-                                accumulator.add(x, y, node_id)?;
-                            }
-                        }
-                    }
-                    if let CompiledFrame::Duration(micros) = frame {
-                        accumulator.expired_through = expired_through_bound(last_time, *micros);
-                    }
-                }
-                CompiledWindowGroup::Cumulative { .. } => {
-                    if let Some(WindowState::Cumulative(saved)) = persisted.get(group_index) {
-                        windows[group_index] = WindowState::Cumulative(saved.clone());
-                    }
-                }
-                CompiledWindowGroup::Ewma { .. } => {
-                    if let Some(WindowState::Ewma(saved)) = persisted.get(group_index) {
-                        windows[group_index] = WindowState::Ewma(*saved);
-                    }
-                }
-            }
-        }
-        state.windows = windows;
-    }
-    Ok(())
-}
-
-/// Duration-frame expiry bound for a rebuild: the last retained row's
-/// window lower edge, or "nothing expired" when no row is retained.
-fn expired_through_bound(last_time: Option<i64>, micros: u64) -> i128 {
-    last_time.map_or(i128::MIN, |last| i128::from(last) - i128::from(micros))
-}
-
-/// Canonical expiry key of one retained history row.
-fn history_extrema_key(
-    values: &[ScalarValue],
-    compiled: &CompiledRollingSpec,
-    node_id: &str,
-) -> Result<ExtremaKey> {
-    Ok(ExtremaKey {
-        event_time: history_event_time(values, compiled),
-        sequence: compiled
-            .sequence_columns
-            .iter()
-            .map(|column| KeyValue::from_required_scalar(&values[column.index], node_id))
-            .collect::<Result<Vec<_>>>()?,
-    })
-}
-
-/// Rebuilds one extrema queue as the ordered push/expire fold over the
-/// retained rows, mirroring the live slide so queue front, expiry keys, and
-/// valid count match an uninterrupted run exactly.
-// #lizard forgives
-fn rebuild_extrema_group(
-    accumulator: &mut ExtremaAccumulator,
-    state: &EntityRollingState,
-    input_index: usize,
-    frame: CompiledFrame,
-    compiled: &CompiledRollingSpec,
-    node_id: &str,
-) -> Result<()> {
-    let rows = usize::try_from(frame.rows())
-        .map_err(|_| internal_error("rolling frame rows do not fit usize"))?;
-    let mut cursor = 0_usize;
-    for position in 0..state.rows.len() {
-        let values = &state.rows[position];
-        let key = history_extrema_key(values, compiled, node_id)?;
-        let value = &values[input_index];
-        if is_valid_sample(value) {
-            accumulator.add(key.clone(), value.clone());
-        }
-        match frame {
-            CompiledFrame::Rows(..) => {
-                if position >= rows {
-                    let leaving_row = &state.rows[position - rows];
-                    if is_valid_sample(&leaving_row[input_index]) {
-                        accumulator.remove();
-                    }
-                    accumulator.expire_through_key(&history_extrema_key(
-                        leaving_row,
-                        compiled,
-                        node_id,
-                    )?);
-                }
-            }
-            CompiledFrame::Duration(micros) => {
-                let bound = i128::from(key.event_time) - i128::from(micros);
-                while cursor < position
-                    && i128::from(history_event_time(&state.rows[cursor], compiled)) <= bound
-                {
-                    if is_valid_sample(&state.rows[cursor][input_index]) {
-                        accumulator.remove();
-                    }
-                    cursor += 1;
-                }
-                accumulator.expire_through_time(bound);
-                accumulator.expired_through = bound;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Start position of the retained window of the last retained row: the last
-/// `rows` positions for row frames, the positions with event time in
-/// `(t_last - d, t_last]` for duration frames. Restore-time only, so a
-/// linear scan over the retained tail is acceptable.
-fn retained_window_start(
-    frame: CompiledFrame,
+fn validate_retained_history(
     state: &EntityRollingState,
     compiled: &CompiledRollingSpec,
-) -> usize {
-    let len = state.rows.len();
-    let last_time = state
-        .rows
-        .back()
-        .map(|values| history_event_time(values, compiled));
-    match frame {
-        CompiledFrame::Rows(rows) => {
-            let rows = usize::try_from(rows).unwrap_or(usize::MAX);
-            len.saturating_sub(rows)
+    max_retained: usize,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
+    let bound = compiled
+        .max_duration_micros
+        .zip(
+            state
+                .rows
+                .back()
+                .map(|values| history_event_time(values, compiled)),
+        )
+        .map(|(micros, last)| i128::from(last) - i128::from(micros));
+    for (index, values) in state.rows.iter().enumerate() {
+        check()?;
+        let needed_by_count = state.rows.len() - index <= max_retained;
+        let needed_by_time =
+            bound.is_some_and(|bound| i128::from(history_event_time(values, compiled)) > bound);
+        if !needed_by_count && !needed_by_time {
+            return Err(state_format(
+                "rolling state segment retains more history than the declared frames",
+            ));
         }
-        CompiledFrame::Duration(micros) => match last_time {
-            None => 0,
-            Some(last) => {
-                let bound = i128::from(last) - i128::from(micros);
-                state
-                    .rows
-                    .iter()
-                    .position(|values| i128::from(history_event_time(values, compiled)) > bound)
-                    .unwrap_or(len)
-            }
-        },
     }
+    Ok(())
+}
+
+#[path = "state_codec/rebuild/control.rs"]
+mod rebuild_control;
+include!("state_codec/rebuild.rs");
+
+pub(super) fn project_restore_columns<E>(
+    items: impl Iterator<Item = Option<usize>>,
+    check: &mut dyn FnMut() -> std::result::Result<(), E>,
+) -> std::result::Result<BTreeSet<usize>, E> {
+    rebuild_control::projection(items, check)
 }
 
 pub(super) fn parse_snapshot_metadata(
@@ -899,6 +749,25 @@ pub(super) fn validate_snapshot_metadata(
     compiled: &CompiledRollingSpec,
     snapshot: &crate::OperatorStateSnapshot,
 ) -> Result<StateInventory> {
+    validate_metadata_header(metadata, compiled)?;
+    super::super::checkpoint::validate_inventory(
+        &super::super::checkpoint::SnapshotContract {
+            name: "rolling",
+            state_layout_version: metadata.state_layout_version,
+            schema_fingerprint: &metadata.state_schema_fingerprint,
+            epoch: metadata.epoch,
+            pipeline_fingerprint: metadata.pipeline_fingerprint.as_deref(),
+            operator_id: metadata.operator_id.as_deref(),
+            segment_inventory: metadata.segment_inventory.clone(),
+        },
+        snapshot,
+    )
+}
+
+pub(super) fn validate_metadata_header(
+    metadata: &RollingSnapshotMetadata,
+    compiled: &CompiledRollingSpec,
+) -> Result<()> {
     let expected_schema_fingerprint =
         if metadata.state_layout_version == compiled.state_layout_version {
             &compiled.state_schema_fingerprint
@@ -924,7 +793,9 @@ pub(super) fn validate_snapshot_metadata(
     }
     if matches!(
         metadata.state_layout_version,
-        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
+            | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+            | ROLLING_INDICATOR_STATE_LAYOUT_VERSION
     ) && (metadata.kernel_fingerprint.as_deref() != Some(compiled.kernel_plan.fingerprint())
         || metadata.numerical_profile.as_deref() != Some(compiled.kernel_plan.numerical_profile()))
     {
@@ -932,18 +803,7 @@ pub(super) fn validate_snapshot_metadata(
             "rolling kernel fingerprint or numerical profile does not match the compiled operator",
         ));
     }
-    super::super::checkpoint::validate_inventory(
-        &super::super::checkpoint::SnapshotContract {
-            name: "rolling",
-            state_layout_version: metadata.state_layout_version,
-            schema_fingerprint: &metadata.state_schema_fingerprint,
-            epoch: metadata.epoch,
-            pipeline_fingerprint: metadata.pipeline_fingerprint.as_deref(),
-            operator_id: metadata.operator_id.as_deref(),
-            segment_inventory: metadata.segment_inventory.clone(),
-        },
-        snapshot,
-    )
+    Ok(())
 }
 
 pub(super) fn snapshot_segments(
@@ -1047,15 +907,43 @@ pub(super) fn read_buffered_row(
 ) -> Result<BufferedRow> {
     let mut values = Vec::with_capacity(record.num_columns());
     for column in record.columns() {
-        values.push(
-            ScalarValue::try_from_array(column, row_index).map_err(|error| {
-                operator_error(
-                    node_id,
-                    &format!("rolling input row could not be read: {error}"),
-                )
-            })?,
-        );
+        values.push(super::indicators::materialize::read_scalar(
+            column.as_ref(),
+            row_index,
+            node_id,
+            !compiled.indicator_groups.is_empty(),
+        )?);
     }
+    live_row_from_values(values, compiled, node_id, &mut || Ok(()))
+}
+
+pub(super) fn read_buffered_row_checked(
+    record: &RecordBatch,
+    row: usize,
+    compiled: &CompiledRollingSpec,
+    expected: &Schema,
+    node: &str,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<BufferedRow> {
+    let mut values = Vec::with_capacity(record.num_columns());
+    for (index, column) in record.columns().iter().enumerate() {
+        values.push(super::indicators::materialize::read_scalar_as(
+            column.as_ref(),
+            row,
+            expected.field(index).data_type(),
+            node,
+            check,
+        )?);
+    }
+    live_row_from_values(values, compiled, node, check)
+}
+
+fn live_row_from_values(
+    values: Vec<ScalarValue>,
+    compiled: &CompiledRollingSpec,
+    node_id: &str,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<BufferedRow> {
     let event_time = match &values[compiled.event_time_index] {
         ScalarValue::TimestampMicrosecond(Some(value), _) => *value,
         _ => {
@@ -1068,12 +956,18 @@ pub(super) fn read_buffered_row(
     let entity = compiled
         .partition_columns
         .iter()
-        .map(|column| KeyValue::from_nullable_scalar(&values[column.index], node_id))
+        .map(|column| {
+            check()?;
+            KeyValue::from_nullable_scalar(&values[column.index], node_id)
+        })
         .collect::<Result<Vec<_>>>()?;
     let sequence = compiled
         .sequence_columns
         .iter()
-        .map(|column| KeyValue::from_required_scalar(&values[column.index], node_id))
+        .map(|column| {
+            check()?;
+            KeyValue::from_required_scalar(&values[column.index], node_id)
+        })
         .collect::<Result<Vec<_>>>()?;
     Ok(BufferedRow::new(entity, sequence, event_time, values))
 }

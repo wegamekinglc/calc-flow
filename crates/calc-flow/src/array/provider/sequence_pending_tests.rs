@@ -102,3 +102,21 @@ async fn test_sequence_pending_admission_checks_actual_job_cancellation() {
         .unwrap();
     assert!(matches!(result, Err(CalcFlowError::Cancelled { run_id }) if run_id == "77"));
 }
+
+#[test]
+fn test_rolling_pending_gate_reports_builtin_identity_without_changing_sequence_default() {
+    let rolling = Pending::rolling("features");
+    let _held = rolling.try_enter().unwrap();
+    let error = rolling.try_enter().unwrap_err();
+    assert!(matches!(error, CalcFlowError::Operator { ref node_id, .. } if node_id == "features"));
+    assert!(error.to_string().contains("state.pending"));
+    let sequence = Pending::default();
+    let _held = sequence.try_enter().unwrap();
+    assert!(
+        sequence
+            .try_enter()
+            .unwrap_err()
+            .to_string()
+            .contains("native:array_sequence@1")
+    );
+}

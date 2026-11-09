@@ -252,7 +252,7 @@ pub(super) async fn restore_terminal(
         .await?;
         let (snapshot, output_frontier) = decode_terminal_snapshot(node, snapshot)?;
         let mut restore = OperatorRestoreState {
-            snapshot,
+            snapshot: Arc::new(crate::state::PreloadedSnapshot::uncredited(snapshot)),
             progress: entry.progress.clone(),
             output_frontier,
             next_epoch: checkpoint.next_epoch,

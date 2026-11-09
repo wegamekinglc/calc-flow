@@ -300,8 +300,30 @@ impl CumulativeAccumulator {
         statistic: Statistic,
         input_type: &DataType,
     ) -> Result<Self> {
-        let state: Self = serde_json::from_slice(bytes)
-            .map_err(|error| state_format(format!("invalid cumulative summary: {error}")))?;
+        Self::decode_with_privacy(bytes, statistic, input_type, false)
+    }
+
+    pub(super) fn decode_for_layout(
+        bytes: &[u8],
+        statistic: Statistic,
+        input_type: &DataType,
+        layout: u32,
+    ) -> Result<Self> {
+        if layout >= super::ROLLING_INDICATOR_STATE_LAYOUT_VERSION {
+            Self::decode_with_privacy(bytes, statistic, input_type, true)
+        } else {
+            Self::decode(bytes, statistic, input_type)
+        }
+    }
+
+    fn decode_with_privacy(
+        bytes: &[u8],
+        statistic: Statistic,
+        input_type: &DataType,
+        private: bool,
+    ) -> Result<Self> {
+        let state: Self =
+            serde_json::from_slice(bytes).map_err(|error| summary_parse_error(&error, private))?;
         if state.valid_count == 0 {
             return if state == Self::default() {
                 Ok(state)
@@ -338,6 +360,14 @@ impl CumulativeAccumulator {
     }
 }
 
+fn summary_parse_error(error: &serde_json::Error, private: bool) -> CalcFlowError {
+    if private {
+        state_format("invalid cumulative summary".to_owned())
+    } else {
+        state_format(format!("invalid cumulative summary: {error}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,6 +379,26 @@ mod tests {
             min_periods: 1,
             ddof,
         }
+    }
+
+    #[test]
+    fn test_cumulative_private_layout_hides_values_and_keeps_legacy_errors() {
+        let mut payload = serde_json::to_value(CumulativeAccumulator::default()).unwrap();
+        payload["valid_count"] = serde_json::json!("cumulative-credential-canary");
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        let legacy =
+            CumulativeAccumulator::decode(&bytes, Statistic::Sum, &DataType::Float64).unwrap_err();
+        assert!(legacy.to_string().contains("cumulative-credential-canary"));
+        let old_layout =
+            CumulativeAccumulator::decode_for_layout(&bytes, Statistic::Sum, &DataType::Float64, 4)
+                .unwrap_err();
+        assert_eq!(legacy.to_string(), old_layout.to_string());
+        let private =
+            CumulativeAccumulator::decode_for_layout(&bytes, Statistic::Sum, &DataType::Float64, 5)
+                .unwrap_err();
+        assert!(
+            matches!(private, CalcFlowError::Format { message } if message == "invalid cumulative summary")
+        );
     }
 
     #[test]

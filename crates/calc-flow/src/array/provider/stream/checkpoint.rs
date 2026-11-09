@@ -12,15 +12,19 @@ use crate::{
 };
 
 pub(super) fn metadata(spec: &SequenceSpec) -> JsonMap {
-    std::collections::BTreeMap::from([
+    let mut metadata = std::collections::BTreeMap::from([
         ("identity".into(), "native:array_sequence@1".into()),
-        ("layout".into(), 1.into()),
+        ("layout".into(), spec.layout().into()),
         ("numeric_semantics".into(), 1.into()),
         (
             "state_fingerprint".into(),
             hex::encode(spec.fingerprint()).into(),
         ),
-    ])
+    ]);
+    if let Some(kernel) = spec.indicator_tag() {
+        metadata.insert("kernel".into(), kernel.into());
+    }
+    metadata
 }
 
 pub(super) struct Restored {

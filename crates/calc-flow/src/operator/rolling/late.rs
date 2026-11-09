@@ -38,7 +38,7 @@ impl RollingOperator {
             context,
         )?;
         if self.try_buffer_ordered(batch.table_payload()?, watermark, context.rolling_metrics())? {
-            self.install_context_identity(context);
+            self.install_context_identity(context)?;
             return Ok(());
         }
         let (accepted, next_metrics, metrics, prepared) =
@@ -59,16 +59,16 @@ impl RollingOperator {
         // is the only recovery. This poison -> emit -> commit -> unpoison
         // sequence is deliberately duplicated in cross_section/late.rs
         // (borrow/async constraints block a shared helper); change both.
-        self.state.late_output_failed = true;
+        self.state.owned_mut()?.late_output_failed = true;
         let next_sequence = prepared.emit(output).await?;
-        self.state.buffer.extend(accepted);
-        self.state.ordered.clear();
-        self.state.metrics = next_metrics;
-        self.state.charge = next_charge;
-        self.state.next_late_output_sequence = next_sequence;
+        self.state.owned_mut()?.buffer.extend(accepted);
+        self.state.owned_mut()?.ordered.clear();
+        self.state.owned_mut()?.metrics = next_metrics;
+        self.state.owned_mut()?.charge = next_charge;
+        self.state.owned_mut()?.next_late_output_sequence = next_sequence;
         metrics.commit();
-        self.install_context_identity(context);
-        self.state.late_output_failed = false;
+        self.install_context_identity(context)?;
+        self.state.owned_mut()?.late_output_failed = false;
         Ok(())
     }
 
@@ -176,6 +176,12 @@ impl RollingOperator {
         row: BufferedRow,
         node: &str,
     ) -> Result<()> {
+        super::indicators::validate_row(
+            &self.compiled.indicator_groups,
+            &row.values,
+            node,
+            super::indicators::Coordinate::AcceptedRow(accepted.len()),
+        )?;
         if self.state.buffer.contains_key(&row.identity) || accepted.contains_key(&row.identity) {
             return Err(operator_error(
                 node,

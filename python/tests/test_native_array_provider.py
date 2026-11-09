@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import builtins
+import json
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 
 import pyarrow as pa
 import pytest
@@ -171,27 +173,16 @@ def _descriptors(first: dict[str, object] | None = None) -> list[dict[str, objec
         "microbatch_invariant": True,
         "partition_contract": "row_axis_independent",
     }
-    sequence = {
-        **_descriptor(),
-        "name": "array_sequence",
-        "input_ports": [{"name": "input", "kind": "array", "required": True}],
-        "output_ports": [{"name": "output", "kind": "array", "required": True}],
-        "modes": ["stream"],
-        "stateful": True,
-        "microbatch_invariant": True,
-        "finality": "per_row_final",
-        "checkpoint_support": "checkpointed_stateful",
-        "state_version": 1,
-        "state_layouts": [1],
-        "supports_static_inputs": False,
-        "partition_contract": "single_ordered_sequence",
-        "port_binding": "fixed",
-        "array_rules": {
-            "supported_dtypes": ["float32", "float64"],
-            "safe_dtype_rule": {"name": "native_float_dtype", "version": "1"},
-            "shape_rules": [{"name": "native_sequence_vector", "version": "1"}],
-        },
-    }
+    fixture = (
+        Path(__file__).with_name("fixtures")
+        / "native_array_capabilities"
+        / "rust_sequence_bundle_ir1.json"
+    )
+    sequence = next(
+        descriptor
+        for descriptor in json.loads(fixture.read_text())
+        if descriptor["name"] == "array_sequence"
+    )
     return [_descriptor() if first is None else first, sequence, table]
 
 
@@ -201,9 +192,9 @@ class _NativeRegistration:
         self.error: Exception | None = None
 
     def _register_native_array(self) -> None:
+        self.calls += 1
         if self.error is not None:
             raise self.error
-        self.calls += 1
 
 
 def test_native_registration_commits_one_frozen_capability_bundle(
@@ -306,7 +297,7 @@ def test_native_registration_error_keeps_snapshots_and_both_caches(
     with pytest.raises(RuntimeError, match="native rejected registration"):
         array_module.register_native(runtime)
 
-    assert inner.calls == 1
+    assert inner.calls == 2
     assert _registration_state(runtime) == before
     inner.error = None
     runtime._cached_symbolic_compile("new", lambda: "retried")
@@ -366,13 +357,15 @@ def test_registration_during_cache_factory_keeps_the_new_generation_uncached(
     monkeypatch.setattr(
         _native, "_native_array_capabilities", _descriptors, raising=False
     )
-    runtime = Runtime(_inner=_NativeRegistration())  # type: ignore[arg-type]
+    inner = _NativeRegistration()
+    runtime = Runtime(_inner=inner)  # type: ignore[arg-type]
 
     def compile_after_registration() -> object:
         array_module.register_native(runtime)
         return object()
 
     result = runtime._cached_symbolic_compile("pending", compile_after_registration)
+    assert inner.calls == 1
     assert "pending" not in runtime._symbolic_compile_cache
     assert runtime._symbolic_cache_generation == 1
     assert runtime._cached_symbolic_compile("pending", lambda: result) is result
@@ -392,6 +385,7 @@ def test_cleared_native_registration_leaves_the_empty_runtime_unchanged(
     before = _registration_state(runtime)
     with pytest.raises(RuntimeError, match="Runtime has been cleared"):
         array_module.register_native(runtime)
+    assert inner.calls == 1
     assert _registration_state(runtime) == before
 
 

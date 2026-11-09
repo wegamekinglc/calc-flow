@@ -17,6 +17,7 @@ On this page:
 
 - [Choose batch or stream](#choose-batch-or-stream)
 - [First Python continuous job](#first-python-continuous-job)
+- [Native Table indicators](#native-table-indicators)
 - [Named streaming outputs](#named-streaming-outputs)
 - [Stock account positions](#stock-account-positions)
 - [Account market values](#account-market-values)
@@ -1743,11 +1744,82 @@ hide that signal behind an unbounded queue inside a connector. If the external
 transport cannot pause, declare the loss explicitly and use a best-effort
 route.
 
+## Native Table indicators
+
+`cf.ts.rsi(price, period=14)` and
+`cf.ts.atr(high, low, close, period=14)` use the same native Wilder transitions
+in collection and continuous streams. Declare non-empty entity and sequence
+keys and non-null UTC microsecond event time, as in the
+[batch indicator example](batch-guide.md#native-rsi-and-atr). Inputs must be
+float32/float64 columns from the same row lineage and temporal order; outputs
+are nullable float64. Null/NaN resets the complete segment. Initialization
+needs one price/close followed by `period` differences/true ranges. See the
+[numerical contract](rust-api.md#native-rsi-and-atr) for validation and arithmetic.
+
+State is shared by outputs with identical operands, period and numerical
+semantics, independently within each entity. Aliases do not advance a group
+twice. RSI and ATR can coexist with lag, windows and cumulative summaries.
+Indicator-containing nodes currently use the general row execution path;
+their presence does not imply typed Arrow-kernel execution. Existing late-row
+policies and `with_late_output` remain applicable. Dropped or routed late rows
+do not update the indicator.
+
+Input admission checks infinity and the ATR high/low domain before accepting
+the envelope. Differences and gaps depend on finalized entity order, so
+arithmetic errors may surface on a later watermark or EOF. Each finalization
+prepares the entire candidate and all output chunks before emitting any row.
+A preparation failure preserves committed numerical state, pending rows,
+ordering proofs, frontiers, output sequences and metrics. A numerical error
+in an already accepted row does not make that row replaceable by retrying its
+original input. Recovery follows the source replay and job failure contract.
+Existing delivery rules still apply if an emission fails after a prepared
+chunk has already been accepted downstream.
+
+Rust `RollingOperator::set_state_budget` supplies the existing limit. For a
+node containing at least one RSI or ATR, `max_bytes` covers all simultaneously
+participating committed state, isolated candidates, prepared outputs, scratch
+and live encoded checkpoint/restore segments. This includes old rolling
+outputs in a mixed node. Shared Arrow allocations are charged once at their
+observable ownership boundary; distinct copies are separate. `max_rows`
+retains its existing entity/history/pending-row meaning. Old-only nodes keep
+retained-state accounting and checkpoint-copy exclusion, even with explicit
+layout 5. The defaults remain 9,007,199,254,740,991 rows and logical bytes,
+with no smaller implicit cap or new Python/project setting. These charges
+do not bound process RSS, independent operators, queues or transferred results.
+Retained logical charges count observable Arrow buffer capacity/extent and
+identifiable Array/container descriptors. Private immutable Buffer owner control
+blocks are excluded because their shared identity is not exposed; construction
+reservations may conservatively include their overhead.
+Pure accounting owner-key/reservation indexes are not recursively charged;
+they may only reference already funded owners and numeric charges. This
+excludes no computational or payload containers and does not shorten their
+funded lifetime when ownership moves into a lease.
+
+Layout 5 persists complete indicator state and fingerprints alongside mixed
+history and pending rows. Asynchronous checkpoint preparation admits encoding
+work before allocation. Capture reuses immutable prepared bytes for the exact
+revision; a direct synchronous capture of an unprepared revision fails with a
+preparation error. Unchanged payload bytes may be shared across epochs, while
+each epoch receives its own state inventory. Reset invalidates old preparations
+and prevents stale worker commits; live workers and captures keep their credit
+until their owners settle or drop. A lower budget must still admit those owners.
+
+Managed local recovery validates metadata, encoded lengths, checksums, schema,
+indicator groups and numerical state before opening source or sink connectors.
+Ordinary and terminal manifests receive the same validation, including
+old-only declarations using layout 5. Diagnostic errors retain the operator
+identity and safe `state.*` path without echoing checkpoint values or unknown
+metadata keys. Existing layouts 1–4 keep their compatibility rules.
+
 ## Native array sequence recovery
 
 The Rust `NativeArraySequenceFactory` provides a single ordered Array ingress
-with one rolling-mean or EWMA kernel. It uses the runner's normal bounded
-edges, barriers and EOF checkpoints. Equal dynamic batches remain valid;
+with one rolling-mean, EWMA, RSI or ATR kernel. Rolling mean and EWMA retain
+IR1/layout1. RSI vectors and packed ATR inputs use IR2/layout2; packed ATR has
+shape `[rows, 3]` in high/low/close order. Both indicators return nullable
+float64 vectors with complete-period warm-up and missing-segment resets.
+The factory uses the runner's normal bounded edges, barriers and EOF
+checkpoints. Equal dynamic batches remain valid;
 static declarations, implicit entity grouping and multi-input sequence joins
 are unsupported. See the [Rust sequence contract](rust-api.md#checkpointed-native-array-sequences)
 and [executable example](../crates/calc-flow/examples/native_sequence_stream.rs).

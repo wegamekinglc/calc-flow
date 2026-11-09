@@ -202,6 +202,53 @@ def rolling_mean(
     )
 
 
+def _indicator_period(period: int) -> int:
+    if type(period) is not int:
+        raise TypeError("options.period must be an integer")
+    if not 1 <= period <= 2**64 - 1:
+        raise _native.ConfigError("options.period: must be a positive u64")
+    return period
+
+
+def _indicator_owner(array: NativeArray, name: str) -> None:
+    if not isinstance(array, NativeArray):
+        raise TypeError(f"{name} must be a NativeArray")
+
+
+def rsi(
+    array: NativeArray,
+    *,
+    period: int,
+    execution: ArrayExecutionOptions | None = None,
+) -> NativeArray:
+    """Return aligned Wilder RSI; missing prices reset its warm-up segment."""
+    count = _indicator_period(period)
+    _indicator_owner(array, "array")
+    limits = _execution(execution)
+    return _native._native_array_rsi(
+        array, count, limits.max_elements, limits.max_allocation_bytes
+    )
+
+
+def atr(
+    high: NativeArray,
+    low: NativeArray,
+    close: NativeArray,
+    *,
+    period: int,
+    execution: ArrayExecutionOptions | None = None,
+) -> NativeArray:
+    """Return aligned Wilder ATR for equal-length floating high/low/close vectors."""
+    count = _indicator_period(period)
+    _indicator_owner(high, "high")
+    _indicator_owner(low, "low")
+    _indicator_owner(close, "close")
+    limits = _execution(execution)
+    return _native._native_array_atr(
+        high, low, close, count, limits.max_elements, limits.max_allocation_bytes
+    )
+
+
 def _unary(
     array: NativeArray, operation: str, execution: ArrayExecutionOptions | None
 ) -> NativeArray:

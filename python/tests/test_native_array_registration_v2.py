@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import runpy
 from pathlib import Path
 
@@ -11,42 +12,12 @@ from calc_flow import Batch, CapabilityRule, Runtime, _native
 
 
 def _bundle() -> list[dict[str, object]]:
-    array = {
-        **_native._native_array_capability(),
-        "state_layouts": [],
-    }
-    table = {
-        **array,
-        "name": "table_array",
-        "modes": ["batch", "stream"],
-        "finality": "per_row_final",
-        "microbatch_invariant": True,
-        "checkpoint_support": "stateless",
-        "supports_static_inputs": True,
-        "partition_contract": "row_axis_independent",
-    }
-    sequence = {
-        **array,
-        "name": "array_sequence",
-        "input_ports": [{"name": "input", "kind": "array", "required": True}],
-        "output_ports": [{"name": "output", "kind": "array", "required": True}],
-        "modes": ["stream"],
-        "stateful": True,
-        "microbatch_invariant": True,
-        "finality": "per_row_final",
-        "checkpoint_support": "checkpointed_stateful",
-        "state_version": 1,
-        "state_layouts": [1],
-        "supports_static_inputs": False,
-        "partition_contract": "single_ordered_sequence",
-        "port_binding": "fixed",
-        "array_rules": {
-            "supported_dtypes": ["float32", "float64"],
-            "safe_dtype_rule": {"name": "native_float_dtype", "version": "1"},
-            "shape_rules": [{"name": "native_sequence_vector", "version": "1"}],
-        },
-    }
-    return [array, sequence, table]
+    fixture = (
+        Path(__file__).with_name("fixtures")
+        / "native_array_capabilities"
+        / "rust_sequence_bundle_ir1.json"
+    )
+    return json.loads(fixture.read_text())
 
 
 class _NativeInsertion:
@@ -200,7 +171,24 @@ def test_real_native_bundle_descriptors_preserve_lifecycle_contracts() -> None:
     array, sequence, table = descriptors
     assert sequence["modes"] == ["stream"]
     assert sequence["checkpoint_support"] == "checkpointed_stateful"
-    assert sequence["state_layouts"] == [1]
+    assert sequence["state_layouts"] == [1, 2]
+    assert sequence["array_rules"]["shape_rules"] == [
+        {"name": "native_sequence_vector", "version": "1"},
+        {"name": "native_sequence_indicators", "version": "2"},
+    ]
+    schema = json.loads(sequence["options_json_schema"])
+    assert schema["properties"]["ir_version"] == {"enum": [1, 2]}
+    assert [branch["properties"]["ir_version"] for branch in schema["oneOf"]] == [
+        {"const": 1},
+        {"const": 2},
+    ]
+    assert [
+        [
+            kernel["properties"]["function"]["const"]
+            for kernel in branch["properties"]["kernel"]["oneOf"]
+        ]
+        for branch in schema["oneOf"]
+    ] == [["rolling_mean", "ewma"], ["rolling_mean", "ewma", "rsi", "atr"]]
     assert sequence["partition_contract"] == "single_ordered_sequence"
     assert sequence["supports_static_inputs"] is False
     assert array == _native._native_array_capability()
@@ -217,6 +205,12 @@ def test_real_native_bundle_descriptors_preserve_lifecycle_contracts() -> None:
     cfa.register_native(runtime)
     snapshot, records = runtime.capability_registration_snapshot()
     assert snapshot.scope.revision == len(records) == 3
+    assert snapshot.providers[1].state_layouts == (1, 2)
+    assert snapshot.providers[1].array_rules.shape_rules == (
+        CapabilityRule("native_sequence_indicators", "2"),
+        CapabilityRule("native_sequence_vector", "1"),
+    )
+    assert snapshot.providers[1].options_json_schema == sequence["options_json_schema"]
     assert runtime._symbolic_cache_generation == 1
     from calc_flow import CalcFlowError, PipelineBuilder
 

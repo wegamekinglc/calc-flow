@@ -1,12 +1,15 @@
 use sha2::{Digest as _, Sha256};
 
-use super::{ArrayStateOptions, EwmaState, RollingMeanState};
+use super::{ArrayStateOptions, AtrState, EwmaState, RollingMeanState, RsiState};
 use crate::{
     CalcFlowError, Result, RollingNumericalProfile,
-    array::{ArrayDType, ArrayExecutionOptions, EwmaOptions, RollingMeanOptions},
+    array::{
+        ArrayDType, ArrayExecutionOptions, AtrOptions, EwmaOptions, RollingMeanOptions, RsiOptions,
+    },
 };
 
 mod ewma;
+mod indicator;
 mod mean;
 
 const MAGIC: &[u8; 8] = b"CFASEQ\0\0";
@@ -17,6 +20,8 @@ const EWMA_BYTES: usize = 92;
 pub(in crate::array) enum KernelOptions {
     Mean(RollingMeanOptions),
     Ewma(EwmaOptions),
+    Rsi(RsiOptions),
+    Atr(AtrOptions),
 }
 
 impl KernelOptions {
@@ -29,6 +34,8 @@ impl KernelOptions {
             Self::Ewma(options) => {
                 serde_json::json!({"function":"ewma", "span":options.span(), "min_periods":options.min_periods()})
             }
+            Self::Rsi(options) => serde_json::json!({"function":"rsi", "period":options.period()}),
+            Self::Atr(options) => serde_json::json!({"function":"atr", "period":options.period()}),
         }
     }
 }
@@ -58,10 +65,14 @@ impl SequenceSpec {
                 ));
             }
         };
-        let document = serde_json::json!({
+        let mut document = serde_json::json!({
             "identity": "native:array_sequence@1", "input_dtype": dtype_name,
             "kernel": kernel.document(), "layout": 1, "numeric_semantics": 1,
         });
+        if let Some(shape) = indicator::shape_rule(kernel) {
+            document["layout"] = 2.into();
+            document["input_shape_rule"] = shape.into();
+        }
         let bytes = crate::json::canonical_json(&document)
             .map_err(|error| super::super::invalid("options.kernel", error.to_string()))?;
         Ok(Self {
@@ -73,6 +84,41 @@ impl SequenceSpec {
 
     pub(in crate::array) const fn fingerprint(&self) -> &[u8; 32] {
         &self.fingerprint
+    }
+
+    pub(in crate::array) const fn layout(&self) -> u32 {
+        match self.kernel {
+            KernelOptions::Rsi(_) | KernelOptions::Atr(_) => 2,
+            _ => 1,
+        }
+    }
+
+    pub(in crate::array) fn validate_input_shape(&self, shape: &[usize]) -> Result<()> {
+        if matches!(self.kernel, KernelOptions::Atr(_)) {
+            if !matches!(shape, [_, 3]) {
+                return Err(super::super::invalid(
+                    "input.shape",
+                    "ATR sequence input requires [n, 3] in high, low, close order",
+                ));
+            }
+        } else if shape.len() != 1 {
+            return Err(super::super::invalid(
+                "inputs.input.shape",
+                format!(
+                    "requires a rank-one sequence; received rank {}",
+                    shape.len()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(in crate::array) fn indicator_tag(&self) -> Option<u8> {
+        match self.kernel {
+            KernelOptions::Rsi(_) => Some(3),
+            KernelOptions::Atr(_) => Some(4),
+            _ => None,
+        }
     }
 
     pub(in crate::array) const fn dtype(&self) -> ArrayDType {
@@ -96,6 +142,8 @@ impl SequenceSpec {
                 0,
             ],
             KernelOptions::Ewma(_) => [2, dtype, 0, 0],
+            KernelOptions::Rsi(_) => [3, dtype, 0, 0],
+            KernelOptions::Atr(_) => [4, dtype, 0, 0],
         }
     }
 
@@ -103,6 +151,8 @@ impl SequenceSpec {
         match self.kernel {
             KernelOptions::Mean(options) => (options.window(), options.min_periods()),
             KernelOptions::Ewma(options) => (options.span(), options.min_periods()),
+            KernelOptions::Rsi(options) => (options.period(), 0),
+            KernelOptions::Atr(options) => (options.period(), 0),
         }
     }
 
@@ -114,6 +164,8 @@ impl SequenceSpec {
             (KernelOptions::Ewma(expected), SequenceState::Ewma(state)) => {
                 state.options == *expected
             }
+            (KernelOptions::Rsi(expected), SequenceState::Rsi(state)) => state.options == *expected,
+            (KernelOptions::Atr(expected), SequenceState::Atr(state)) => state.options == *expected,
             _ => false,
         };
         if !matches {
@@ -126,6 +178,8 @@ impl SequenceSpec {
 pub(in crate::array) enum SequenceState {
     Mean(RollingMeanState),
     Ewma(EwmaState),
+    Rsi(RsiState),
+    Atr(AtrState),
 }
 
 impl SequenceState {
@@ -133,6 +187,8 @@ impl SequenceState {
         match spec.kernel {
             KernelOptions::Mean(options) => RollingMeanState::new(options, limits).map(Self::Mean),
             KernelOptions::Ewma(options) => EwmaState::new(options, limits).map(Self::Ewma),
+            KernelOptions::Rsi(options) => RsiState::new(options, limits).map(Self::Rsi),
+            KernelOptions::Atr(options) => AtrState::new(options, limits).map(Self::Atr),
         }
     }
 
@@ -140,6 +196,8 @@ impl SequenceState {
         match self {
             Self::Mean(state) => state.state_bytes(),
             Self::Ewma(state) => state.state_bytes(),
+            Self::Rsi(state) => state.state_bytes(),
+            Self::Atr(state) => state.state_bytes(),
         }
     }
 
@@ -147,6 +205,8 @@ impl SequenceState {
         match self {
             Self::Mean(state) => state.reset(),
             Self::Ewma(state) => state.reset(),
+            Self::Rsi(state) => state.reset(),
+            Self::Atr(state) => state.reset(),
         }
     }
 
@@ -158,20 +218,18 @@ impl SequenceState {
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<super::Prepared<Self>> {
         match self {
-            Self::Mean(state) => {
-                let prepared = state.prepare_checked(input, execution, captures, check)?;
-                Ok(super::Prepared {
-                    candidate: prepared.candidate.map(Self::Mean),
-                    output: prepared.output,
-                })
-            }
-            Self::Ewma(state) => {
-                let prepared = state.prepare_checked(input, execution, captures, check)?;
-                Ok(super::Prepared {
-                    candidate: prepared.candidate.map(Self::Ewma),
-                    output: prepared.output,
-                })
-            }
+            Self::Mean(state) => state
+                .prepare_checked(input, execution, captures, check)
+                .map(|prepared| wrap(prepared, Self::Mean)),
+            Self::Ewma(state) => state
+                .prepare_checked(input, execution, captures, check)
+                .map(|prepared| wrap(prepared, Self::Ewma)),
+            Self::Rsi(state) => state
+                .prepare_checked(input, execution, captures, check)
+                .map(|prepared| wrap(prepared, Self::Rsi)),
+            Self::Atr(state) => state
+                .prepare_packed_checked(input, execution, captures, check)
+                .map(|prepared| wrap(prepared, Self::Atr)),
         }
     }
 
@@ -179,6 +237,8 @@ impl SequenceState {
         match self {
             Self::Mean(state) => state.kernel.positions(),
             Self::Ewma(state) => state.positions,
+            Self::Rsi(state) => state.kernel.positions,
+            Self::Atr(state) => state.kernel.positions,
         }
     }
 
@@ -186,6 +246,8 @@ impl SequenceState {
         match self {
             Self::Mean(state) => mean::encoded_bytes(state.kernel.history_len()),
             Self::Ewma(_) => Ok(EWMA_BYTES),
+            Self::Rsi(_) => Ok(116),
+            Self::Atr(_) => Ok(108),
         }
     }
 }
@@ -219,11 +281,24 @@ pub(in crate::array) fn encode(
 ) -> Result<Vec<u8>> {
     check()?;
     spec.validate_state(state)?;
-    let mut bytes = allocate(state, execution, captures)?;
+    let bytes = allocate(state, execution, captures)?;
+    if spec.layout() == 2 {
+        return indicator::encode(spec, state, bytes, check);
+    }
+    write_legacy(spec, state, bytes, check)
+}
+
+fn write_legacy(
+    spec: &SequenceSpec,
+    state: &SequenceState,
+    mut bytes: Vec<u8>,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<Vec<u8>> {
     write_header(spec, state.positions(), &mut bytes);
     match state {
         SequenceState::Mean(state) => mean::write(state, &mut bytes, check)?,
         SequenceState::Ewma(state) => ewma::write(state, &mut bytes),
+        _ => unreachable!("indicator encodings use their versioned writer"),
     }
     check()?;
     Ok(bytes)
@@ -306,6 +381,9 @@ impl Reader<'_> {
 }
 
 fn read_header(spec: &SequenceSpec, reader: &mut Reader<'_>) -> Result<u64> {
+    if spec.layout() == 2 {
+        return indicator::read_header(spec, reader);
+    }
     reader.require(MAGIC, "magic")?;
     reader.require(&VERSION.to_le_bytes(), "layout")?;
     reader.require(&VERSION.to_le_bytes(), "numeric_semantics")?;
@@ -374,6 +452,8 @@ fn encoded_requirements(spec: &SequenceSpec, length: usize) -> Result<(usize, us
     match spec.kernel {
         KernelOptions::Mean(options) => mean::encoded_requirements(options, length),
         KernelOptions::Ewma(_) => ewma_encoded_requirements(length),
+        KernelOptions::Rsi(_) => indicator::requirements(length, 116, 48),
+        KernelOptions::Atr(_) => indicator::requirements(length, 108, 40),
     }
 }
 fn ewma_encoded_requirements(length: usize) -> Result<(usize, usize)> {
@@ -411,5 +491,18 @@ fn read_state(
     match spec.kernel {
         KernelOptions::Mean(options) => mean::read(options, positions, reader, limits, check),
         KernelOptions::Ewma(options) => ewma::read(options, positions, &mut reader, limits),
+        KernelOptions::Rsi(_) | KernelOptions::Atr(_) => {
+            indicator::read_state(spec, positions, reader, limits)
+        }
+    }
+}
+
+fn wrap<T>(
+    prepared: super::Prepared<T>,
+    constructor: impl FnOnce(T) -> SequenceState,
+) -> super::Prepared<SequenceState> {
+    super::Prepared {
+        candidate: prepared.candidate.map(constructor),
+        output: prepared.output,
     }
 }

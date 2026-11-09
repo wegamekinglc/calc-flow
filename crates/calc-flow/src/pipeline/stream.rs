@@ -243,33 +243,29 @@ impl OperatorCheckpointCapability {
         operator_id: &str,
         mut snapshot: crate::OperatorStateSnapshot,
     ) -> Result<crate::OperatorStateSnapshot> {
+        self.validate_snapshot_fields(
+            operator_id,
+            &snapshot.inline_metadata,
+            snapshot.segments.is_empty(),
+        )?;
+        snapshot.inline_metadata.remove(OPERATOR_STATE_VERSION_KEY);
+        Ok(snapshot)
+    }
+
+    pub(crate) fn validate_snapshot_fields(
+        self,
+        operator_id: &str,
+        fields: &crate::JsonMap,
+        segments_empty: bool,
+    ) -> Result<()> {
         match self {
-            Self::Stateless if snapshot_is_empty(&snapshot) => Ok(snapshot),
+            Self::Stateless if fields.is_empty() && segments_empty => Ok(()),
             Self::Stateless => Err(checkpoint_capability_mismatch(
                 operator_id,
                 "declared stateless but its restored checkpoint contains state",
             )),
             Self::CheckpointedStateful { state_version } => {
-                let restored_version = snapshot
-                    .inline_metadata
-                    .remove(OPERATOR_STATE_VERSION_KEY)
-                    .and_then(|value| value.as_u64())
-                    .and_then(|value| u32::try_from(value).ok())
-                    .ok_or_else(|| {
-                        checkpoint_capability_mismatch(
-                            operator_id,
-                            "checkpoint is missing a valid operator state version",
-                        )
-                    })?;
-                if restored_version != state_version {
-                    return Err(checkpoint_capability_mismatch(
-                        operator_id,
-                        &format!(
-                            "checkpoint state version {restored_version} is incompatible with declared version {state_version}"
-                        ),
-                    ));
-                }
-                Ok(snapshot)
+                validate_restored_version(operator_id, fields, state_version)
             }
             Self::Unproven => Err(checkpoint_capability_mismatch(
                 operator_id,
@@ -277,6 +273,40 @@ impl OperatorCheckpointCapability {
             )),
         }
     }
+
+    pub(crate) fn restored_metadata_fields(
+        fields: &crate::JsonMap,
+    ) -> impl Iterator<Item = (&String, &serde_json::Value)> + Clone {
+        fields
+            .iter()
+            .filter(|(key, _)| key.as_str() != OPERATOR_STATE_VERSION_KEY)
+    }
+}
+
+fn validate_restored_version(
+    operator_id: &str,
+    fields: &crate::JsonMap,
+    expected: u32,
+) -> Result<()> {
+    let restored = fields
+        .get(OPERATOR_STATE_VERSION_KEY)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| {
+            checkpoint_capability_mismatch(
+                operator_id,
+                "checkpoint is missing a valid operator state version",
+            )
+        })?;
+    if restored != expected {
+        return Err(checkpoint_capability_mismatch(
+            operator_id,
+            &format!(
+                "checkpoint state version {restored} is incompatible with declared version {expected}"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn snapshot_is_empty(snapshot: &crate::OperatorStateSnapshot) -> bool {
@@ -585,6 +615,12 @@ impl CompiledStreamOperator {
     ) -> Result<()> {
         match self {
             Self::External(operator) => operator.restore_async(snapshot, context).await,
+            Self::Rolling(operator)
+                if operator.state_layout_version()
+                    == crate::ROLLING_INDICATOR_STATE_LAYOUT_VERSION =>
+            {
+                operator.restore_async(snapshot, context).await
+            }
             _ => self.restore(snapshot),
         }
     }

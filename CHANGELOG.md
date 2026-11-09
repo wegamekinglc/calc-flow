@@ -9,6 +9,18 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-09: Add native RSI/ATR calculations and atomic constant-space owned
+  states with explicit missing-segment resets, checked position counters and
+  shared seed/Wilder transitions. Add ordered Table declarations and layout-5
+  recovery with transactional finalization and whole-operator peak admission
+  for indicator-containing nodes. Old-only nodes retain their existing byte
+  accounting, including checkpoint-copy exclusion. Extend ordered native array
+  streams with IR2, packed ATR input and layout-2 recovery while retaining the
+  old IR1/layout-1 bytes. Managed recovery validates ordinary and terminal
+  indicator state before opening connectors. No TA-Lib dependency is used.
+  Rust callers exhaustively matching `RollingOutputSpec` must handle the new
+  `Rsi` and `Atr` variants.
+
 - 2026-11-09: Validate native static array names against actual exposed graph
   bindings and omit them from finite data-source coverage, preserving legacy
   Table/NumPy/JAX static validation and source requirements.

@@ -630,6 +630,12 @@ fn safe_failure_fields(
         FailureOrigin::NativeSequenceRecovery { node_id } => {
             native_sequence_recovery_fields(node_id, &failure.error)
         }
+        FailureOrigin::RollingIndicator { diagnostic } => (
+            StreamingErrorCategory::Operator,
+            diagnostic.message(),
+            Some(ComponentKind::Operator),
+            Some(diagnostic.node_id().into()),
+        ),
         FailureOrigin::SourceOpen { binding_id } => {
             connector_failure_fields(ComponentKind::Source, binding_id, "source", "open")
         }
@@ -2624,5 +2630,59 @@ mod tests {
                 assert!(!rendered.contains(sentinel.as_str().unwrap()));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod indicator_diagnostic_tests {
+    use super::{ComponentKind, StreamingErrorCategory, project_runtime_failures};
+    use crate::{
+        CalcFlowError,
+        runtime::streaming::{
+            failure::indicator_diagnostic::{SafeIndicatorDiagnostic, tests::operator},
+            runner::{FailureOrigin, RuntimeFailure},
+            supervisor::TaskId,
+        },
+    };
+    use std::sync::Arc;
+
+    #[test]
+    fn indicator_evidence_is_projected_without_unredacting_other_operator_errors() {
+        let original = CalcFlowError::InvalidArgument {
+            field: "high".into(),
+            message: r#"rolling node "features", ordered position 0: must be greater than or equal to low"#.into(),
+        };
+        let diagnostic =
+            SafeIndicatorDiagnostic::from_rolling("features", &operator(true), &original).unwrap();
+        let failures = [
+            RuntimeFailure {
+                origin: FailureOrigin::RollingIndicator { diagnostic },
+                error: original,
+            },
+            RuntimeFailure {
+                origin: FailureOrigin::Task {
+                    task_id: TaskId::new(2),
+                    task_name: "operator:features".into(),
+                },
+                error: CalcFlowError::Operator {
+                    node_id: "features".into(),
+                    message:
+                        "secret-provider-sentinel high: rolling node features, ordered position 0"
+                            .into(),
+                },
+            },
+        ];
+        let public =
+            project_runtime_failures(1, failures.into_iter().map(Arc::new).collect(), None);
+        assert_eq!(public[0].category(), StreamingErrorCategory::Operator);
+        assert_eq!(public[0].component_kind(), Some(ComponentKind::Operator));
+        assert_eq!(public[0].component_id(), Some("features"));
+        assert!(public[0].message().contains("high"));
+        assert!(public[0].message().contains("ordered position 0"));
+        assert_eq!(
+            public[1].message(),
+            "operator \"features\" execution failed"
+        );
+        assert!(!format!("{public:?}").contains("secret-provider-sentinel"));
     }
 }

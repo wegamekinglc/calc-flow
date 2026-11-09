@@ -217,7 +217,10 @@ async fn p2_cache_refusal_and_recovery_preserve_mean_and_logical_budget() {
     let budget = StateBudget::new(1000, 1 << 20).unwrap();
     cached.set_state_budget(budget).unwrap();
     reference.set_state_budget(budget).unwrap();
-    reference.compiled.kernel_plan.set_decay_pool_for_test(0);
+    Arc::get_mut(&mut reference.compiled)
+        .expect("reference compiled spec is unshared")
+        .kernel_plan
+        .set_decay_pool_for_test(0);
     let job = crate::StreamJobContext::new(
         7,
         TEST_FINGERPRINT,
@@ -256,8 +259,8 @@ async fn p2_cache_refusal_and_recovery_preserve_mean_and_logical_budget() {
     );
     drop(retained_owner);
     assert_eq!(pool.reserved(), 0);
-    reference
-        .compiled
+    Arc::get_mut(&mut reference.compiled)
+        .expect("reference compiled spec is unshared")
         .kernel_plan
         .set_decay_pool_for_test(64 << 20);
     let final_rows = [
@@ -478,106 +481,112 @@ async fn buffered_step(
 
 #[tokio::test]
 async fn p2_buffered_profiles_mix_cache_reference_and_recover_without_rephasing_mean() {
-    use crate::operator::rolling_metrics::RollingMetricsStore;
-    use datafusion::execution::memory_pool::MemoryConsumer;
     for profile in [
         RollingNumericalProfile::StableV1,
         RollingNumericalProfile::StableV2Preview,
     ] {
-        let mut spec = decay_spec(2, true);
-        spec.numerical_profile = profile;
-        let mut cached =
-            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
-        let mut reference =
-            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
-        reference.compiled.kernel_plan.set_decay_pool_for_test(0);
-        let budget = StateBudget::new(1000, 1 << 20).unwrap();
-        cached.set_state_budget(budget).unwrap();
-        reference.set_state_budget(budget).unwrap();
-        let fingerprint = cached.compiled.kernel_plan.fingerprint().to_owned();
-        let job = decay_job();
-        let store = RollingMetricsStore::default();
-        let reference_store = RollingMetricsStore::default();
-        let prefix = (1..=63_u32)
-            .flat_map(|time| {
-                [
-                    (i64::from(time), "a", u64::from(time), Some(1e155)),
-                    (i64::from(time), "b", u64::from(time), Some(2e155)),
-                ]
-            })
-            .rev()
-            .collect::<Vec<_>>();
-        let left = buffered_step(&mut cached, &job, float64_fast_record(&prefix), 63, &store).await;
-        let right = buffered_step(
-            &mut reference,
-            &job,
-            float64_fast_record(&prefix),
-            63,
-            &reference_store,
-        )
-        .await;
-        assert_equivalent_columns(&left, &right);
-        assert_eq!(left.column(7).to_data(), right.column(7).to_data());
-        let pool = cached.compiled.kernel_plan.decay_pool_for_test();
-        let old_owners = cached.state.typed_kernel_state.clone();
-        let before = pool.reserved();
-        assert!(before > 0);
-        let pressure = MemoryConsumer::new("mixed decay quota").register(&pool);
-        pressure
-            .try_grow((64 << 20) - before - (before - 1))
-            .unwrap();
-        let next = [
-            (65, "b", 65, Some(4.0)),
-            (64, "b", 64, Some(-2e155)),
-            (65, "a", 65, Some(3.0)),
-            (64, "a", 64, Some(-1e155)),
-        ];
-        let left = buffered_step(&mut cached, &job, float64_fast_record(&next), 65, &store).await;
-        let right = buffered_step(
-            &mut reference,
-            &job,
-            float64_fast_record(&next),
-            65,
-            &reference_store,
-        )
-        .await;
-        assert_equivalent_columns(&left, &right);
-        assert_eq!(left.column(7).to_data(), right.column(7).to_data());
-        assert_eq!(cached.state.charge, reference.state.charge);
-        drop(pressure);
-        assert_eq!(
-            pool.reserved(),
-            before + before / 2,
-            "two retained owners and one new cached entity"
-        );
-        drop(old_owners);
-        assert_eq!(
-            pool.reserved(),
-            before / 2,
-            "one entity cached while the other uses reference"
-        );
-        let next = [
-            (67, "b", 67, Some(8.0)),
-            (66, "b", 66, Some(6.0)),
-            (67, "a", 67, Some(7.0)),
-            (66, "a", 66, Some(5.0)),
-        ];
-        let left = buffered_step(&mut cached, &job, float64_fast_record(&next), 67, &store).await;
-        let right = buffered_step(
-            &mut reference,
-            &job,
-            float64_fast_record(&next),
-            67,
-            &reference_store,
-        )
-        .await;
-        assert_equivalent_columns(&left, &right);
-        assert_eq!(left.column(7).to_data(), right.column(7).to_data());
-        assert_eq!(cached.state.charge, reference.state.charge);
-        assert_eq!(pool.reserved(), before, "both entity caches admitted again");
-        assert_eq!(cached.compiled.kernel_plan.fingerprint(), fingerprint);
-        assert_eq!(store.snapshot().watermark.numeric_rows, 134);
+        assert_mixed_buffered_decay_profile(profile).await;
     }
+}
+
+async fn assert_mixed_buffered_decay_profile(profile: RollingNumericalProfile) {
+    use crate::operator::rolling_metrics::RollingMetricsStore;
+    use datafusion::execution::memory_pool::MemoryConsumer;
+    let mut spec = decay_spec(2, true);
+    spec.numerical_profile = profile;
+    let mut cached =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
+    let mut reference = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+    Arc::get_mut(&mut reference.compiled)
+        .expect("reference compiled spec is unshared")
+        .kernel_plan
+        .set_decay_pool_for_test(0);
+    let budget = StateBudget::new(1000, 1 << 20).unwrap();
+    cached.set_state_budget(budget).unwrap();
+    reference.set_state_budget(budget).unwrap();
+    let fingerprint = cached.compiled.kernel_plan.fingerprint().to_owned();
+    let job = decay_job();
+    let store = RollingMetricsStore::default();
+    let reference_store = RollingMetricsStore::default();
+    let prefix = (1..=63_u32)
+        .flat_map(|time| {
+            [
+                (i64::from(time), "a", u64::from(time), Some(1e155)),
+                (i64::from(time), "b", u64::from(time), Some(2e155)),
+            ]
+        })
+        .rev()
+        .collect::<Vec<_>>();
+    let left = buffered_step(&mut cached, &job, float64_fast_record(&prefix), 63, &store).await;
+    let right = buffered_step(
+        &mut reference,
+        &job,
+        float64_fast_record(&prefix),
+        63,
+        &reference_store,
+    )
+    .await;
+    assert_equivalent_columns(&left, &right);
+    assert_eq!(left.column(7).to_data(), right.column(7).to_data());
+    let pool = cached.compiled.kernel_plan.decay_pool_for_test();
+    let old_owners = cached.state.typed_kernel_state.clone();
+    let before = pool.reserved();
+    assert!(before > 0);
+    let pressure = MemoryConsumer::new("mixed decay quota").register(&pool);
+    pressure
+        .try_grow((64 << 20) - before - (before - 1))
+        .unwrap();
+    let next = [
+        (65, "b", 65, Some(4.0)),
+        (64, "b", 64, Some(-2e155)),
+        (65, "a", 65, Some(3.0)),
+        (64, "a", 64, Some(-1e155)),
+    ];
+    let left = buffered_step(&mut cached, &job, float64_fast_record(&next), 65, &store).await;
+    let right = buffered_step(
+        &mut reference,
+        &job,
+        float64_fast_record(&next),
+        65,
+        &reference_store,
+    )
+    .await;
+    assert_equivalent_columns(&left, &right);
+    assert_eq!(left.column(7).to_data(), right.column(7).to_data());
+    assert_eq!(cached.state.charge, reference.state.charge);
+    drop(pressure);
+    assert_eq!(
+        pool.reserved(),
+        before + before / 2,
+        "two retained owners and one new cached entity"
+    );
+    drop(old_owners);
+    assert_eq!(
+        pool.reserved(),
+        before / 2,
+        "one entity cached while the other uses reference"
+    );
+    let next = [
+        (67, "b", 67, Some(8.0)),
+        (66, "b", 66, Some(6.0)),
+        (67, "a", 67, Some(7.0)),
+        (66, "a", 66, Some(5.0)),
+    ];
+    let left = buffered_step(&mut cached, &job, float64_fast_record(&next), 67, &store).await;
+    let right = buffered_step(
+        &mut reference,
+        &job,
+        float64_fast_record(&next),
+        67,
+        &reference_store,
+    )
+    .await;
+    assert_equivalent_columns(&left, &right);
+    assert_eq!(left.column(7).to_data(), right.column(7).to_data());
+    assert_eq!(cached.state.charge, reference.state.charge);
+    assert_eq!(pool.reserved(), before, "both entity caches admitted again");
+    assert_eq!(cached.compiled.kernel_plan.fingerprint(), fingerprint);
+    assert_eq!(store.snapshot().watermark.numeric_rows, 134);
 }
 
 #[tokio::test]

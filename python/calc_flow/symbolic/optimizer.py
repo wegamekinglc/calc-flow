@@ -492,7 +492,20 @@ def _rolling_group_key(output: dict[str, object], /) -> tuple[object, ...] | Non
         return "ewma", output.get("input"), output.get("span", 0)
     if kind in {"argmax", "argmin", "unique_count", "decay"}:
         return "scan", kind, output.get("input"), *frame
-    return None
+    return _indicator_group_key(output)
+
+
+def _indicator_group_key(output: dict[str, object]) -> tuple[object, ...] | None:
+    kind = output.get("kind")
+    if kind not in {"rsi", "atr"}:
+        return None
+    return (
+        "indicator",
+        kind,
+        output.get("primitive_version"),
+        *_rolling_input_columns(output, "indicator"),
+        output.get("period"),
+    )
 
 
 def _first_rolling_fallback(
@@ -508,6 +521,8 @@ def _first_rolling_fallback(
 def _rolling_input_columns(
     output: dict[str, object], transition: object, /
 ) -> tuple[object, ...]:
+    if output.get("kind") == "atr":
+        return output.get("high"), output.get("low"), output.get("close")
     if transition == "pair":
         return output.get("left"), output.get("right")
     return (output.get("input"),)

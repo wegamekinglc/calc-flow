@@ -407,6 +407,8 @@ _PRIMITIVES: dict[str, PrimitiveSpec] = {
         frozenset({"span", "min_periods"}),
         CMap.from_mapping({"min_periods": CInt(1)}),
     ),
+    "rsi": PrimitiveSpec(frozenset({"period"}), CMap(())),
+    "atr": PrimitiveSpec(frozenset({"period"}), CMap(())),
     "cumulative_mean": PrimitiveSpec(
         frozenset({"min_periods"}),
         CMap.from_mapping({"min_periods": CInt(1)}),
@@ -543,7 +545,7 @@ def build(
 ) -> Node:
     """Build one normalized node with materialized defaults and its digest."""
 
-    if name in {"stream_asof_join", "snapshot_sql"} and (
+    if name in {"stream_asof_join", "snapshot_sql", "rsi", "atr"} and (
         type(version) is not int or version != 1
     ):
         raise ValueError(

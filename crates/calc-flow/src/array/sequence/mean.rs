@@ -117,6 +117,7 @@ impl RollingMeanState {
         self.limits.validate(candidate)?;
         let scratch = self.scratch_bytes(len);
         let budget = Budget {
+            peak_field: "state.peak_bytes",
             old: self.bytes,
             candidate,
             captures,

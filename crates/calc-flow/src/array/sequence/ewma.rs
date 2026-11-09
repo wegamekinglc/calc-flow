@@ -121,6 +121,7 @@ impl EwmaState {
         captures: usize,
     ) -> Budget<'a> {
         Budget {
+            peak_field: "state.peak_bytes",
             old: self.state_bytes(),
             candidate: if len == 0 { 0 } else { 24 },
             captures,

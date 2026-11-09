@@ -7,10 +7,12 @@ fn view(values: &[f64]) -> ArrayView<'_> {
 }
 
 fn step(state: &mut SequenceState, input: ArrayView<'_>) -> Result<NativeArray> {
-    match state {
-        SequenceState::Mean(state) => state.process(input, &ArrayExecutionOptions::default()),
-        SequenceState::Ewma(state) => state.process(input, &ArrayExecutionOptions::default()),
+    let prepared =
+        state.prepare_checked(input, &ArrayExecutionOptions::default(), 0, &mut || Ok(()))?;
+    if let Some(candidate) = prepared.candidate {
+        *state = candidate;
     }
+    Ok(prepared.output)
 }
 
 #[test]

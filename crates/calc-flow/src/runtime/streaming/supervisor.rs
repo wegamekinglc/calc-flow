@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use tokio::{sync::oneshot, task::JoinSet};
 
 use self::terminal::TerminalArbiter;
-use super::failure::panic_message;
+use super::failure::{indicator_diagnostic::SafeIndicatorDiagnostic, panic_message};
 use crate::{CalcFlowError, CancellationToken, Result};
 
 #[cfg(test)]
@@ -40,6 +40,7 @@ impl TaskId {
 /// One failed supervised task, retained with its stable identity.
 #[derive(Debug)]
 pub(crate) struct TaskFailure {
+    pub(crate) indicator_diagnostic: Option<SafeIndicatorDiagnostic>,
     pub(crate) task_id: TaskId,
     pub(crate) task_name: String,
     pub(crate) error: CalcFlowError,
@@ -96,6 +97,7 @@ impl SupervisionReport {
 }
 
 struct TaskExit {
+    indicator_diagnostic: Option<SafeIndicatorDiagnostic>,
     task_id: TaskId,
     task_name: String,
     result: Result<()>,
@@ -103,6 +105,7 @@ struct TaskExit {
 
 /// Resources that must outlive failure publication and sibling convergence.
 pub(crate) struct RetainedTaskResult<R> {
+    pub(crate) indicator_diagnostic: Option<SafeIndicatorDiagnostic>,
     pub(crate) result: Result<()>,
     pub(crate) retained: R,
 }
@@ -110,22 +113,27 @@ pub(crate) struct RetainedTaskResult<R> {
 pub(crate) trait TaskOutput: Send + 'static {
     type Retained: Send + 'static;
 
-    fn into_parts(self) -> (Result<()>, Self::Retained);
+    fn into_parts(self) -> (Result<()>, Self::Retained, Option<SafeIndicatorDiagnostic>);
 }
 
 impl TaskOutput for Result<()> {
     type Retained = ();
 
-    fn into_parts(self) -> (Result<()>, ()) {
-        (self, ())
+    fn into_parts(self) -> (Result<()>, (), Option<SafeIndicatorDiagnostic>) {
+        (self, (), None)
     }
 }
 
 impl<R: Send + 'static> TaskOutput for RetainedTaskResult<R> {
     type Retained = R;
 
-    fn into_parts(self) -> (Result<()>, R) {
-        (self.result, self.retained)
+    fn into_parts(self) -> (Result<()>, R, Option<SafeIndicatorDiagnostic>) {
+        let diagnostic = if self.result.is_err() {
+            self.indicator_diagnostic
+        } else {
+            None
+        };
+        (self.result, self.retained, diagnostic)
     }
 }
 
@@ -331,18 +339,19 @@ impl TaskRegistration {
                 message: format!("task {:?} start gate was dropped", self.task_name),
             })
         };
-        let (result, retained) = match completion {
+        let (result, retained, indicator_diagnostic) = match completion {
             Ok(output) => {
-                let (result, retained) = output.into_parts();
-                (result, Some(retained))
+                let (result, retained, diagnostic) = output.into_parts();
+                (result, Some(retained), diagnostic)
             }
-            Err(error) => (Err(error), None),
+            Err(error) => (Err(error), None, None),
         };
         let failed = result.is_err();
         if failed {
             self.failure_signal.record_before_cancellation();
         }
         let exit = TaskExit {
+            indicator_diagnostic,
             task_id: self.task_id,
             task_name: self.task_name,
             result,
@@ -725,6 +734,7 @@ impl TaskSupervisor {
             failure_signal.record_before_cancellation();
             failure_signal.cancel_siblings();
             self.joined_errors.push(TaskFailure {
+                indicator_diagnostic: None,
                 task_id,
                 task_name,
                 error: CalcFlowError::Internal {
@@ -738,6 +748,7 @@ impl TaskSupervisor {
         self.registry.remove(exit.task_id);
         if let Err(error) = exit.result {
             self.joined_errors.push(TaskFailure {
+                indicator_diagnostic: exit.indicator_diagnostic,
                 task_id: exit.task_id,
                 task_name: exit.task_name,
                 error,
@@ -950,6 +961,7 @@ mod tests {
             |_| async move {
                 entered.send(()).unwrap();
                 super::RetainedTaskResult {
+                    indicator_diagnostic: None,
                     result: Err(CalcFlowError::OperatorReason {
                         node_id: "asof".into(),
                         reason_code: crate::StreamingFailureReason::AsofDuplicateIdentity,
@@ -1124,5 +1136,75 @@ mod tests {
                 if message == "connector invariant"
         ));
         assert_eq!(supervisor.task_count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod indicator_diagnostic_tests {
+    use super::{RetainedTaskResult, TaskOutput};
+    use crate::{
+        CalcFlowError,
+        runtime::streaming::failure::indicator_diagnostic::{
+            SafeIndicatorDiagnostic, tests::operator,
+        },
+    };
+
+    #[tokio::test]
+    async fn settled_failures_keep_evidence_after_retained_inputs_are_dropped() {
+        use super::TaskSupervisor;
+        use crate::CancellationToken;
+        use std::sync::Arc;
+        let error = CalcFlowError::InvalidArgument {
+            field: "high".into(),
+            message: r#"rolling node "features", input row 0; ordered position not assigned: must be greater than or equal to low"#.into(),
+        };
+        let diagnostic =
+            SafeIndicatorDiagnostic::from_rolling("features", &operator(true), &error).unwrap();
+        let expected = diagnostic.clone();
+        let lifetime = Arc::new(());
+        let weak = Arc::downgrade(&lifetime);
+        let mut supervisor = TaskSupervisor::new(CancellationToken::new());
+        supervisor.spawn_with_failure_signal("operator:features", |_| async move {
+            RetainedTaskResult {
+                result: Err(error),
+                retained: lifetime,
+                indicator_diagnostic: Some(diagnostic),
+            }
+        });
+        let report = supervisor.join_all().await;
+        assert_eq!(supervisor.task_count(), 0);
+        assert!(weak.upgrade().is_none());
+        assert_eq!(report.errors.len(), 1);
+        assert_eq!(
+            report.errors[0].indicator_diagnostic.as_ref(),
+            Some(&expected)
+        );
+    }
+
+    #[test]
+    fn only_failed_retained_output_passes_indicator_evidence_to_supervision() {
+        let error = CalcFlowError::InvalidArgument {
+            field: "high".into(),
+            message: r#"rolling node "features", ordered position 0: must be greater than or equal to low"#.into(),
+        };
+        let diagnostic =
+            SafeIndicatorDiagnostic::from_rolling("features", &operator(true), &error).unwrap();
+        let successful = RetainedTaskResult {
+            result: Ok(()),
+            retained: (),
+            indicator_diagnostic: Some(diagnostic.clone()),
+        };
+        assert!(successful.into_parts().2.is_none());
+        let failed = RetainedTaskResult {
+            result: Err(error),
+            retained: (),
+            indicator_diagnostic: Some(diagnostic.clone()),
+        };
+        assert_eq!(failed.into_parts().2, Some(diagnostic));
+        let ordinary: crate::Result<()> = Err(CalcFlowError::Operator {
+            node_id: "features".into(),
+            message: "secret-provider-sentinel".into(),
+        });
+        assert!(ordinary.into_parts().2.is_none());
     }
 }

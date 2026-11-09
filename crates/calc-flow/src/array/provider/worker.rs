@@ -10,10 +10,13 @@ use crate::{CalcFlowError, CancellationToken, Result, RunContext, StreamJobConte
 
 use super::preparation::settlement::Preparation;
 
+mod rolling_identity;
+pub(crate) use rolling_identity::RollingWorkerIdentity;
+
 const WORKERS: usize = 2;
 const ADMISSION_CHECK: Duration = Duration::from_millis(10);
 
-pub(super) struct Workers {
+pub(crate) struct Workers {
     permits: Arc<Semaphore>,
 }
 impl Default for Workers {
@@ -34,7 +37,7 @@ impl Drop for CancelOnDrop {
 struct OwnedWorker<T: Send + 'static> {
     handle: Option<JoinHandle<Result<T>>>,
     stop: CancellationToken,
-    name: &'static str,
+    identity: WorkerIdentity,
 }
 impl<T: Send + 'static> OwnedWorker<T> {
     async fn settle(mut self) -> Result<T> {
@@ -44,7 +47,7 @@ impl<T: Send + 'static> OwnedWorker<T> {
             .expect("worker handle remains owned")
             .await;
         self.handle.take();
-        result.map_err(|_| worker_error(self.name))?
+        result.map_err(|_| self.identity.error())?
     }
 }
 impl<T: Send + 'static> Drop for OwnedWorker<T> {
@@ -55,20 +58,38 @@ impl<T: Send + 'static> Drop for OwnedWorker<T> {
     }
 }
 
-fn worker_error(name: &str) -> CalcFlowError {
-    CalcFlowError::ExternalProvider {
-        provider: "native".into(),
-        name: name.into(),
-        version: "1".into(),
-        message: "native computation worker terminated".into(),
+#[derive(Clone)]
+enum WorkerIdentity {
+    External(&'static str),
+    Rolling(String),
+    CreditedRolling(Arc<RollingWorkerIdentity>),
+}
+impl WorkerIdentity {
+    fn error(&self) -> CalcFlowError {
+        match self {
+            Self::External(name) => CalcFlowError::ExternalProvider {
+                provider: "native".into(),
+                name: (*name).into(),
+                version: "1".into(),
+                message: "native computation worker terminated".into(),
+            },
+            Self::Rolling(node) => CalcFlowError::Operator {
+                node_id: node.clone(),
+                message: "rolling computation worker terminated".into(),
+            },
+            Self::CreditedRolling(identity) => CalcFlowError::Operator {
+                node_id: identity.as_str().into(),
+                message: "rolling computation worker terminated".into(),
+            },
+        }
     }
 }
-pub(super) enum Scope {
+pub(crate) enum Scope {
     Batch(RunContext),
     Stream(StreamJobControl),
 }
 impl Scope {
-    pub(super) fn stream(job: &StreamJobContext) -> Self {
+    pub(crate) fn stream(job: &StreamJobContext) -> Self {
         Self::Stream(job.native_control())
     }
     fn check_cancelled(&self) -> Result<()> {
@@ -122,14 +143,48 @@ impl Workers {
         self.run_scoped(Scope::stream(context), "table_array", job)
             .await
     }
-    pub(super) async fn run_scoped<T: Send + 'static>(
+    pub(crate) async fn run_scoped<T: Send + 'static>(
         &self,
         context: Scope,
         name: &'static str,
         job: impl FnOnce(&mut dyn FnMut() -> Result<()>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let mut result = self
-            .run_work(context, name, Preparation::from_parts(job, None))
+            .run_work(
+                context,
+                WorkerIdentity::External(name),
+                Preparation::from_parts(job, None),
+            )
+            .await?;
+        Ok(result.take_value())
+    }
+    pub(crate) async fn run_rolling_scoped<T: Send + 'static>(
+        &self,
+        context: Scope,
+        node: &str,
+        job: impl FnOnce(&mut dyn FnMut() -> Result<()>) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let mut result = self
+            .run_work(
+                context,
+                WorkerIdentity::Rolling(node.to_owned()),
+                Preparation::from_parts(job, None),
+            )
+            .await?;
+        Ok(result.take_value())
+    }
+    pub(crate) async fn run_rolling_credited<T: Send + 'static>(
+        &self,
+        context: Scope,
+        identity: Arc<RollingWorkerIdentity>,
+        job: impl FnOnce(&mut dyn FnMut() -> Result<()>) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let mut result = self
+            .run_work(
+                context,
+                WorkerIdentity::CreditedRolling(identity),
+                Preparation::from_parts(job, None),
+            )
             .await?;
         Ok(result.take_value())
     }
@@ -141,17 +196,18 @@ impl Workers {
             impl FnOnce(&mut dyn FnMut() -> Result<()>) -> Result<T> + Send + 'static,
         >,
     ) -> Result<Preparation<T>> {
-        self.run_work(context, name, pending).await
+        self.run_work(context, WorkerIdentity::External(name), pending)
+            .await
     }
     async fn run_work<T: Send + 'static>(
         &self,
         context: Scope,
-        name: &'static str,
+        identity: WorkerIdentity,
         pending: Preparation<
             impl FnOnce(&mut dyn FnMut() -> Result<()>) -> Result<T> + Send + 'static,
         >,
     ) -> Result<Preparation<T>> {
-        let permit = self.admit(&context, name).await?;
+        let permit = self.admit(&context, &identity).await?;
         context.check_cancelled()?;
         let (job, lease) = pending.into_parts();
         let stop = CancellationToken::new();
@@ -168,27 +224,27 @@ impl Workers {
         let owned = OwnedWorker {
             handle: Some(worker),
             stop,
-            name,
+            identity: identity.clone(),
         };
         let (sender, receiver) = oneshot::channel();
         drop(tokio::spawn(async move {
             let packet = Preparation::from_parts(owned.settle().await, lease);
             let _ = sender.send(packet);
         }));
-        receiver.await.map_err(|_| worker_error(name))?.transpose()
+        receiver.await.map_err(|_| identity.error())?.transpose()
     }
 
     async fn admit(
         &self,
         context: &Scope,
-        name: &str,
+        identity: &WorkerIdentity,
     ) -> Result<tokio::sync::OwnedSemaphorePermit> {
         let permit = Arc::clone(&self.permits).acquire_owned();
         tokio::pin!(permit);
         loop {
             context.check_cancelled()?;
             tokio::select! {
-                permit=&mut permit=>return permit.map_err(|_|worker_error(name)),
+                permit=&mut permit=>return permit.map_err(|_|identity.error()),
                 ()=tokio::time::sleep(ADMISSION_CHECK)=>{},
             }
         }

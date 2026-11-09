@@ -185,15 +185,7 @@ fn native<'a>(batch: &'a Batch, spec: &SequenceSpec) -> Result<&'a NativeArray> 
             ),
         ));
     }
-    if array.shape().len() != 1 {
-        return Err(invalid(
-            "inputs.input.shape",
-            format!(
-                "requires a rank-one sequence; received rank {}",
-                array.shape().len()
-            ),
-        ));
-    }
+    spec.validate_input_shape(array.shape())?;
     Ok(array)
 }
 fn dtype(dtype: crate::array::ArrayDType) -> &'static str {
@@ -235,7 +227,7 @@ impl NativeStreamOperator {
         if ingress != "input" || context.native_static_input("input").is_some() {
             return Err(invalid(
                 "inputs.input",
-                "requires exactly one dynamic vector ingress named input",
+                "requires exactly one dynamic ingress named input",
             ));
         }
         native(batch, &self.configured.spec)?;

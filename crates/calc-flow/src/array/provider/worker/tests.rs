@@ -223,3 +223,22 @@ async fn test_borrowed_stream_control_observes_the_jobs_test_clock() {
         matches!(scope.check_cancelled(),Err(CalcFlowError::Cancelled{run_id}) if run_id=="93")
     );
 }
+
+#[tokio::test]
+async fn test_rolling_worker_panic_preserves_builtin_operator_identity() {
+    let job = crate::StreamJobContext::new(
+        9,
+        "rolling-worker",
+        crate::JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let error = Workers::default()
+        .run_rolling_scoped(super::Scope::stream(&job), "features", |_| -> Result<()> {
+            panic!("payload-free worker test");
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, CalcFlowError::Operator { ref node_id, .. } if node_id == "features"));
+    assert!(!error.to_string().contains("native:"));
+}

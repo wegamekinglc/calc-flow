@@ -187,7 +187,7 @@ async fn test_native_late_rolling_mixed_envelope_matches_drop_and_retains_late_o
     assert_eq!(values, vec![8, 8, 7]);
     assert_eq!(indices, vec![1, 2, 4]);
     assert_eq!(closing, vec![10, 10, 9]);
-    let accepted = side.take_all_buffered();
+    let accepted = side.take_all_buffered().unwrap();
     side.emit_rows(accepted, &context, &mut side_output)
         .await
         .unwrap();
@@ -403,10 +403,10 @@ async fn test_native_late_rolling_preflight_errors_leave_the_whole_envelope_unin
         let mut side = side_operator(2);
         let input = faulty_input(case);
         if case == "sequence" {
-            side.state.next_late_output_sequence = u64::MAX - 1;
+            side.state.owned_mut().unwrap().next_late_output_sequence = u64::MAX - 1;
         }
         if case == "metrics" {
-            side.state.metrics.late_rows = u64::MAX;
+            side.state.owned_mut().unwrap().metrics.late_rows = u64::MAX;
         }
         let expected = preflight_error(case);
         let metrics = side.state.metrics;
@@ -488,7 +488,7 @@ async fn test_native_late_ordered_wholly_normal_output_matches_drop() {
     assert!(side.state.buffer.is_empty());
     assert!(side_output.drain("late").is_empty());
     let last_identity = side.state.ordered.last_identity();
-    let records = side.state.ordered.take_all();
+    let records = side.state.owned_mut().unwrap().ordered.take_all();
     side.emit_ordered(records, last_identity, &context, &mut side_output)
         .await
         .unwrap();

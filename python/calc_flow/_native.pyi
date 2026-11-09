@@ -80,6 +80,20 @@ def _native_array_ewma(
     max_elements: int,
     max_allocation_bytes: int,
 ) -> NativeArray: ...
+def _native_array_rsi(
+    array: NativeArray,
+    period: int,
+    max_elements: int,
+    max_allocation_bytes: int,
+) -> NativeArray: ...
+def _native_array_atr(
+    high: NativeArray,
+    low: NativeArray,
+    close: NativeArray,
+    period: int,
+    max_elements: int,
+    max_allocation_bytes: int,
+) -> NativeArray: ...
 def _native_array_rolling_mean(
     array: NativeArray,
     window: int,
