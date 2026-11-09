@@ -11,12 +11,12 @@ const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 ///
 /// The byte count is an operator-defined deterministic logical charge; it is
 /// not a process-wide resident-memory measurement.
-/// Rolling operators containing RSI or ATR bound participating peak storage,
+/// Rolling operators containing RSI, ATR or MACD bound participating peak storage,
 /// including isolated candidates, prepared output, scratch and live checkpoint
 /// segments. This applies to both finite and streaming evaluation, including
 /// other rolling outputs in the same operator. Old-only rolling operators
 /// retain their retained-state limit and exclude checkpoint copies, including
-/// when explicitly declared with indicator state layout 5.
+/// when explicitly declared with indicator state layout 5 or 6.
 /// Indicator logical footprints include observable Arrow buffer storage and
 /// Array/container descriptors, excluding private immutable Buffer owner
 /// control blocks whose shared identity Arrow does not expose.

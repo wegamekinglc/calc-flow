@@ -63,6 +63,7 @@ _ROLLING_PRIMITIVES: Final = frozenset(
         "ewma",
         "rsi",
         "atr",
+        "macd_component",
         "cumulative_mean",
         "cumulative_sum",
         "cumulative_min",
@@ -598,6 +599,7 @@ class _RollingPlan:
     input_field_names: tuple[str, ...]
     output_fields: tuple[Field, ...]
     replacements: tuple[tuple[str, str], ...]
+    macd_input_identity: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -609,6 +611,7 @@ class _RollingPipeline:
     post_predicate: Node | None
     input_field_names: tuple[str, ...]
     output_fields: tuple[Field, ...]
+    macd_prefix_id: str | None = None
 
     @property
     def node_id(self) -> str:

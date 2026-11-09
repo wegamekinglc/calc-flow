@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from calc_flow import _native
 from calc_flow._compat import dataclass
+from calc_flow._macd import MacdOutputs, _macd_parameters
 
 if TYPE_CHECKING:
     import numpy as np
@@ -246,6 +247,34 @@ def atr(
     limits = _execution(execution)
     return _native._native_array_atr(
         high, low, close, count, limits.max_elements, limits.max_allocation_bytes
+    )
+
+
+# The versioned public API exposes five named MACD parameters plus execution.
+def macd_components(  # noqa: PLR0913
+    array: NativeArray,
+    *,
+    fast_span: int = 12,
+    slow_span: int = 26,
+    signal_span: int = 9,
+    min_periods: int = 1,
+    signal_min_periods: int = 1,
+    execution: ArrayExecutionOptions | None = None,
+) -> MacdOutputs[NativeArray]:
+    """Return three aligned native arrays from one composed EWMA state."""
+    try:
+        options = _macd_parameters(
+            (fast_span, slow_span, signal_span, min_periods, signal_min_periods),
+            "options",
+        )
+    except ValueError as error:
+        raise _native.ConfigError(str(error)) from error
+    _indicator_owner(array, "array")
+    limits = _execution(execution)
+    return MacdOutputs(
+        *_native._native_array_macd_components(
+            array, options, limits.max_elements, limits.max_allocation_bytes
+        )
     )
 
 

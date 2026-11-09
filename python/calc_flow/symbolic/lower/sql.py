@@ -10,6 +10,13 @@ from calc_flow.symbolic.analyzer import _Analyzer
 from calc_flow.symbolic.expr import TableExpr, table_input
 from calc_flow.symbolic.lower.bindings import _BatchBindings
 from calc_flow.symbolic.lower.event_windows import _rewrite_nodes, _WindowGraph
+from calc_flow.symbolic.lower.macd_boundaries import (
+    _ROW_FRONTIERS,
+    _macd_frontiers,
+    _macd_input_boundaries,
+    _program_has_macd,
+    _ready_macd_frontiers,
+)
 from calc_flow.symbolic.lower.schema import (
     _arrow_schema,
     _fields,
@@ -162,6 +169,11 @@ class _SQLGraph:
         self.replacements: dict[str, Node] = {}
         self.materialized: dict[str, str] = {}
         self.virtual_sources: dict[str, str] = {}
+        self.macd_boundaries = _macd_input_boundaries(program)
+        self._macd_boundary_ids = frozenset(
+            node.digest for node in self.macd_boundaries
+        )
+        self.macd_active = _program_has_macd(program)
 
     def table(self, node: Node) -> str:
         existing = self.materialized.get(node.digest)
@@ -227,9 +239,15 @@ class _SQLGraph:
         )
 
     def _append_expression(self, node: Node) -> str:
+        self._prepare_expression_inputs(node)
+        self._append_expressions((node,))
+        return self.materialized[node.digest]
 
+    def _prepare_expression_inputs(
+        self, node: Node, deferred: frozenset[str] = frozenset()
+    ) -> None:
         for boundary in reversed(_walk_nodes(node)):
-            if boundary.digest == node.digest:
+            if boundary.digest == node.digest or boundary.digest in deferred:
                 continue
             if (
                 boundary.op.name
@@ -242,10 +260,9 @@ class _SQLGraph:
                     "late_rows",
                 }
                 or boundary.digest in self.shared
+                or boundary.digest in self._macd_boundary_ids
             ):
                 self.table(boundary)
-        self._append_expressions((node,))
-        return self.materialized[node.digest]
 
     def _append_expressions(self, nodes: tuple[Node, ...]) -> None:
         from calc_flow.symbolic.lower.program import lower_program_document
@@ -253,13 +270,20 @@ class _SQLGraph:
         outputs = {
             self.graph.allocate(f"cf_sql_{node.digest[:24]}"): node for node in nodes
         }
+        if self.macd_active:
+            from calc_flow.symbolic.lower.macd_rewrite import _MacdMaterializedRewriter
+
+            rewriter = _MacdMaterializedRewriter(self.analyzer, self.replacements)
+            rewritten = {name: rewriter.rewrite(node) for name, node in outputs.items()}
+        else:
+            rewritten = {
+                name: _rewrite_nodes(node, self.replacements)
+                for name, node in outputs.items()
+            }
         fragment = Program(
             self.graph.program.name,
             engine=self.graph.program.engine,
-            outputs={
-                name: TableExpr(_rewrite_nodes(node, self.replacements))
-                for name, node in outputs.items()
-            },
+            outputs={name: TableExpr(node) for name, node in rewritten.items()},
         )
         bindings = _BatchBindings()
         document = lower_program_document(
@@ -379,11 +403,35 @@ class _SQLGraph:
                 for node, port in endpoints
             )
 
+    def _append_macd_frontiers(self) -> None:
+        candidates = _macd_frontiers(self.graph.program, self.macd_boundaries)
+        while any(node.digest not in self.materialized for node in candidates):
+            ready = _ready_macd_frontiers(
+                candidates, self.macd_boundaries, self.materialized
+            )
+            if not ready:
+                raise RuntimeError("MACD evaluation boundaries are not acyclic")
+            self._append_ready_macd_frontiers(ready)
+
+    def _append_ready_macd_frontiers(self, ready: tuple[Node, ...]) -> None:
+        rows = tuple(node for node in ready if node.op.name in _ROW_FRONTIERS)
+        if rows:
+            deferred = frozenset(node.digest for node in rows)
+            for node in rows:
+                self._prepare_expression_inputs(node, deferred)
+            self._append_expressions(rows)
+        else:
+            for node in ready:
+                self.table(node)
+
     def outputs(self) -> None:
-        frontiers = _expression_frontiers(self.graph.program)
-        if len(frontiers) > 1:
-            # Preserve the existing planner's CSE and filter admission across SQL cuts.
-            self._append_expressions(frontiers)
+        if self.macd_boundaries:
+            self._append_macd_frontiers()
+        else:
+            frontiers = _expression_frontiers(self.graph.program)
+            if len(frontiers) > 1:
+                # Keep the existing CSE and filter admission across SQL cuts.
+                self._append_expressions(frontiers)
         for name, value in self.graph.program.outputs:
             upstream = self.table(value._node)
             if value._node.op.name == "snapshot_sql":
@@ -415,7 +463,7 @@ def lower_sql_program(
     allowed_lateness_micros: int,
     late_policy: str,
 ) -> dict[str, object] | None:
-    if not any(
+    if not _macd_input_boundaries(program) and not any(
         node.op.name in {"sql", "snapshot_sql", "late_output", "late_rows"}
         for _, value in program.outputs
         for node in _walk_nodes(value._node)

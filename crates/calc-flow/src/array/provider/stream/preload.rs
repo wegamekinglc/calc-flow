@@ -151,7 +151,11 @@ async fn rolling_snapshot(
 ) -> Result<PreloadedSnapshot> {
     let operator = match operator {
         CompiledStreamOperator::Rolling(operator)
-            if operator.state_layout_version() == crate::ROLLING_INDICATOR_STATE_LAYOUT_VERSION =>
+            if matches!(
+                operator.state_layout_version(),
+                crate::ROLLING_INDICATOR_STATE_LAYOUT_VERSION
+                    | crate::ROLLING_MACD_STATE_LAYOUT_VERSION
+            ) =>
         {
             operator
         }

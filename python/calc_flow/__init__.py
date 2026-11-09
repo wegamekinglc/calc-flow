@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from calc_flow import _native as _native
 from calc_flow import symbolic
+from calc_flow._macd import MacdOutputs as MacdOutputs
 from calc_flow.array import register_jax, register_numpy
 from calc_flow.asof_join_spec import AsofJoinSide, AsofJoinSpec, AsofStateLimits
 from calc_flow.capabilities import (
@@ -144,6 +145,7 @@ __all__ = [
     "TableExpr",
     "ArrayExpr",
     "LateOutputs",
+    "MacdOutputs",
     "with_late_output",
     "Parameter",
     "Field",

@@ -34,7 +34,11 @@ impl RollingOperator {
     }
 
     fn capture_snapshot(&self, epoch: Epoch, capture: &Capture) -> Result<OperatorStateSnapshot> {
-        let descriptor = capture.descriptor(epoch, &self.compiled.state_schema_fingerprint)?;
+        let descriptor = capture.descriptor(
+            epoch,
+            self.compiled.state_layout_version,
+            &self.compiled.state_schema_fingerprint,
+        )?;
         let inventory = StateInventory::new(descriptor.into_iter().collect())?;
         let metadata = self.capture_metadata(epoch, capture, &inventory);
         let serde_json::Value::Object(inline) = serde_json::to_value(metadata)
@@ -85,7 +89,12 @@ impl RollingOperator {
 }
 
 impl Capture {
-    fn descriptor(&self, epoch: Epoch, schema: &str) -> Result<Option<SegmentDescriptor>> {
+    fn descriptor(
+        &self,
+        epoch: Epoch,
+        layout: u32,
+        schema: &str,
+    ) -> Result<Option<SegmentDescriptor>> {
         let Some(segment) = &self.segment else {
             return Ok(None);
         };
@@ -99,7 +108,7 @@ impl Capture {
             .map_err(|_| checkpoint_mismatch("rolling state.encoded_bytes exceeds u64"))?;
         Ok(Some(SegmentDescriptor {
             kind: SegmentKind::Base,
-            state_layout_version: 5,
+            state_layout_version: layout,
             schema_fingerprint: schema.into(),
             handle: StateHandle::new(&self.node, epoch, &id, &path, length, segment.sha256())?,
         }))

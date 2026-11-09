@@ -192,10 +192,10 @@ async fn test_atr_stream_reads_packed_rows_and_rejects_wrong_shapes_atomically()
 #[test]
 fn test_indicator_descriptor_keeps_old_ir_branch_and_adds_layout_two() {
     let descriptor = NativeArraySequenceFactory::capability_descriptor();
-    assert_eq!(descriptor["state_layouts"], json!([1, 2]));
+    assert_eq!(descriptor["state_layouts"], json!([1, 2, 3]));
     assert_eq!(
         descriptor["array_rules"]["shape_rules"],
-        json!([{"name":"native_sequence_vector","version":"1"},{"name":"native_sequence_indicators","version":"2"}])
+        json!([{"name":"native_sequence_vector","version":"1"},{"name":"native_sequence_indicators","version":"2"},{"name":"native_sequence_indicators","version":"3"}])
     );
     let schema: Value =
         serde_json::from_str(descriptor["options_json_schema"].as_str().unwrap()).unwrap();

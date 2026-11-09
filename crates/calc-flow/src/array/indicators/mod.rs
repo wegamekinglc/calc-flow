@@ -1,7 +1,11 @@
-//! Shared finite-only indicator transitions; see the native array guide.
+//! Shared native indicator transitions; see the native array guide.
 
 mod atr;
+mod macd;
 mod rsi;
+
+pub use macd::MacdOptions;
+pub(crate) use macd::{MacdKernel, MacdParameters};
 
 pub(crate) use atr::{AtrKernel, samples as validate_atr_samples};
 pub(crate) use rsi::{RsiKernel, checked_sample as validate_rsi_sample};

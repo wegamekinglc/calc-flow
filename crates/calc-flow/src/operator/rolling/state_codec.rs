@@ -8,14 +8,14 @@ use super::{
     DictionaryTracker, Digest, EntityRollingState, EwmaAccumulator, ExtremaAccumulator, ExtremaKey,
     Field, FileReader, FileWriter, Float64Array, HashMap, HistoryUpdates, IpcSchemaEncoder,
     KeyValue, ROLLING_COLUMNAR_STATE_LAYOUT_VERSION, ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION,
-    ROLLING_EWMA_STATE_LAYOUT_VERSION, ROLLING_INDICATOR_STATE_LAYOUT_VERSION, RecordBatch, Result,
-    RollingHistories, RollingKernelState, RollingMetricsRecorder, RollingSnapshotMetadata,
-    RollingStage, RowIdentity, ScalarValue, Schema, SchemaRef, SegmentDescriptor, Sha256,
-    StateInventory, StateRowOrderKey, SumClass, TableBatch, UInt8Array, UInt64Array, Value,
-    WindowState, checkpoint_mismatch, concat_batches, evict_retained_history, ewma_entity_values,
-    float_sample, format_error, fresh_windows, group_rows_by_entity, history_event_time,
-    internal_error, is_valid_sample, kernel, new_null_array, operator_error, spec_uses_stable_v2,
-    state_format, state_v3,
+    ROLLING_EWMA_STATE_LAYOUT_VERSION, ROLLING_INDICATOR_STATE_LAYOUT_VERSION,
+    ROLLING_MACD_STATE_LAYOUT_VERSION, RecordBatch, Result, RollingHistories, RollingKernelState,
+    RollingMetricsRecorder, RollingSnapshotMetadata, RollingStage, RowIdentity, ScalarValue,
+    Schema, SchemaRef, SegmentDescriptor, Sha256, StateInventory, StateRowOrderKey, SumClass,
+    TableBatch, UInt8Array, UInt64Array, Value, WindowState, checkpoint_mismatch, concat_batches,
+    evict_retained_history, ewma_entity_values, float_sample, format_error, fresh_windows,
+    group_rows_by_entity, history_event_time, internal_error, is_valid_sample, kernel,
+    new_null_array, operator_error, spec_uses_stable_v2, state_format, state_v3,
 };
 use kernel::{StreamKernelUpdate, TypedStreamTransition};
 
@@ -58,6 +58,7 @@ fn state_fields(input_schema: &Schema, state_layout_version: u32) -> Vec<Field> 
         ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
             | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
             | ROLLING_INDICATOR_STATE_LAYOUT_VERSION
+            | ROLLING_MACD_STATE_LAYOUT_VERSION
     ) {
         return state_v3::state_fields_for_layout(input_schema, state_layout_version);
     }
@@ -120,6 +121,7 @@ pub(super) fn state_schema(
         ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
             | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
             | ROLLING_INDICATOR_STATE_LAYOUT_VERSION
+            | ROLLING_MACD_STATE_LAYOUT_VERSION
     ) {
         metadata.insert(
             "calc_flow.rolling_kernel_fingerprint".into(),
@@ -152,6 +154,7 @@ pub(super) fn encode_state_segment(
         ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
             | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
             | ROLLING_INDICATOR_STATE_LAYOUT_VERSION
+            | ROLLING_MACD_STATE_LAYOUT_VERSION
     ) {
         return state_v3::encode(
             histories,
@@ -315,6 +318,7 @@ pub(super) fn decode_state_segment(
         ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
             | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
             | ROLLING_INDICATOR_STATE_LAYOUT_VERSION
+            | ROLLING_MACD_STATE_LAYOUT_VERSION
     ) {
         return state_v3::decode(bytes, input_schema, compiled, metadata);
     }
@@ -440,6 +444,7 @@ pub(super) fn validate_segment_schema_metadata(
         ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
             | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
             | ROLLING_INDICATOR_STATE_LAYOUT_VERSION
+            | ROLLING_MACD_STATE_LAYOUT_VERSION
     ) {
         expected.extend([
             (
@@ -796,6 +801,7 @@ pub(super) fn validate_metadata_header(
         ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
             | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
             | ROLLING_INDICATOR_STATE_LAYOUT_VERSION
+            | ROLLING_MACD_STATE_LAYOUT_VERSION
     ) && (metadata.kernel_fingerprint.as_deref() != Some(compiled.kernel_plan.fingerprint())
         || metadata.numerical_profile.as_deref() != Some(compiled.kernel_plan.numerical_profile()))
     {

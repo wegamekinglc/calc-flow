@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Literal
 
 from typing_extensions import Unpack
 
+from calc_flow._macd import _MACD_PARAMETER_NAMES, MacdOutputs, _macd_parameters
 from calc_flow.symbolic.domains import (
     is_strict_scalar_type,
     namespace_error,
@@ -646,6 +647,40 @@ class TsNamespace:
         """Latest valid numeric sample for each entity."""
 
         return self.ewma(_column(value, "ts.last", "value"), span=1)
+
+    # The versioned public API exposes five named MACD parameters.
+    def macd_components(  # noqa: PLR0913
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        fast_span: int = 12,
+        slow_span: int = 26,
+        signal_span: int = 9,
+        min_periods: int = 1,
+        signal_min_periods: int = 1,
+    ) -> MacdOutputs[ColumnExpr]:
+        """Declare line, signal and histogram references sharing one MACD owner."""
+        column = _column(value, "ts.macd_components", "value")
+        counts = _macd_parameters(
+            (fast_span, slow_span, signal_span, min_periods, signal_min_periods),
+            "calc_flow.symbolic.ts.macd_components",
+        )
+        attributes = {
+            name: CInt(count) for name, count in zip(_MACD_PARAMETER_NAMES, counts)
+        }
+        return MacdOutputs(
+            *(
+                ColumnExpr(
+                    build(
+                        "macd_component",
+                        (column._node,),
+                        {**attributes, "component": CEnum("macd_component", component)},
+                    )
+                )
+                for component in ("line", "signal", "histogram")
+            )
+        )
 
     def macd(
         self,

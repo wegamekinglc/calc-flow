@@ -12,7 +12,7 @@ const MAGIC: &[u8; 8] = b"CFAIND\0\0";
 
 pub(super) fn shape_rule(kernel: KernelOptions) -> Option<&'static str> {
     match kernel {
-        KernelOptions::Rsi(_) => Some("rank_one"),
+        KernelOptions::Rsi(_) | KernelOptions::Macd(_) => Some("rank_one"),
         KernelOptions::Atr(_) => Some("packed_high_low_close"),
         _ => None,
     }

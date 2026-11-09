@@ -237,6 +237,53 @@ def test_installed_table_domain_error_keeps_the_owned_stream_projection() -> Non
     asyncio.run(asyncio.wait_for(run(), 10))
 
 
+def test_installed_mixed_macd_error_keeps_the_owned_stream_projection() -> None:
+    data, _ = _invalid_range()
+    data = data.set_column(
+        data.schema.get_field_index("entity"),
+        data.schema.field("entity"),
+        pa.array(["secret-entity-value"]),
+    )
+    source = _source(data)
+    macd = cf.ts.macd_components(
+        source["close"], fast_span=1, slow_span=2, signal_span=1
+    )
+    output = source.select(
+        atr=cf.ts.atr(source["high"], source["low"], source["close"], period=2),
+        line=macd.line,
+    )
+    program = cf.Program(
+        "mixed-diagnostic", engine="streaming", outputs={"result": output}
+    )
+    rolling = _rolling_specs(program)
+    assert len(rolling) == 1
+    assert rolling[0]["state_layout_version"] == 6
+    assert sorted(item["kind"] for item in rolling[0]["outputs"]) == [
+        "atr",
+        "macd_component",
+    ]
+
+    async def run() -> None:
+        closed = asyncio.Event()
+        results = program.stream({"quotes": _feed((data,), closed)})
+        with pytest.raises(cf.StreamingRuntimeError) as captured:
+            async with results:
+                async for _ in results:
+                    pytest.fail("invalid mixed indicator callback emitted output")
+        error = captured.value
+        assert error.category == "operator"
+        assert error.component_kind == "operator"
+        assert error.component_id.endswith("rolling")
+        assert "high" in str(error)
+        assert "input row 0; ordered position not assigned" in str(error)
+        assert "greater than or equal" in str(error)
+        assert "secret-entity-value" not in str(error)
+        assert closed.is_set()
+        assert results.job.status()["task_count"] == 0
+
+    asyncio.run(asyncio.wait_for(run(), 10))
+
+
 def _rolling_specs(program: cf.Program) -> list[dict[str, object]]:
     document = program.to_project().root
     assert document["format_version"] == 3
@@ -252,7 +299,7 @@ def test_installed_layout_five_inventory_and_native_project_export() -> None:
     rolling = next(
         item for item in runtime.capabilities().operators if item.kind == "rolling"
     )
-    assert rolling.state_layouts == (1, 2, 3, 4, 5)
+    assert rolling.state_layouts == (1, 2, 3, 4, 5, 6)
     assert rolling.state_version == 1
     data = _prices()
     program = cf.Program(

@@ -4,11 +4,13 @@ Moved verbatim from ``symbolic/lower.py``."""
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from dataclasses import replace
 from typing import TYPE_CHECKING, TypeVar, Union
 
 from calc_flow._compat import dataclass
+from calc_flow._macd import _MACD_PARAMETER_NAMES
 from calc_flow.pipeline import (
     _canonical,
 )
@@ -65,6 +67,24 @@ def _rolling_indicator_declaration(
     subtree: Node, output: str, operands: list[tuple[str, str, Field]]
 ) -> dict[str, object] | None:
     kind = subtree.op.name
+    if kind == "macd_component":
+        component = subtree.attr("component")
+        if not isinstance(component, CEnum) or component.variant not in {
+            "line",
+            "signal",
+            "histogram",
+        }:
+            errors.raise_compile(
+                output, errors.INVALID_LITERAL, "invalid MACD component selector"
+            )
+        return {
+            "kind": kind,
+            "primitive_version": 1,
+            "input": operands[0][1],
+            "output": output,
+            "component": component.variant,
+            **{name: _cint(subtree.attr(name)) for name in _MACD_PARAMETER_NAMES},
+        }
     if kind not in {"rsi", "atr"}:
         return None
     roles = ("input",) if kind == "rsi" else ("high", "low", "close")
@@ -78,8 +98,12 @@ def _rolling_indicator_declaration(
 
 
 def _rolling_state_layout_version(declarations: list[dict[str, object]]) -> int:
-    if any(item["kind"] in {"rsi", "atr"} for item in declarations):
-        return 5
+    indicator_layouts = {"macd_component": 6, "rsi": 5, "atr": 5}
+    indicator_version = max(
+        (indicator_layouts.get(item["kind"], 0) for item in declarations), default=0
+    )
+    if indicator_version:
+        return indicator_version
     if any(
         item["kind"]
         in {"cumulative_sum", "cumulative_min", "cumulative_max", "cumulative_variance"}
@@ -90,6 +114,67 @@ def _rolling_state_layout_version(declarations: list[dict[str, object]]) -> int:
         2
         if any(_rolling_declaration_requires_ewma(item) for item in declarations)
         else 1
+    )
+
+
+def _macd_input_request(
+    request: _StatefulInputRequest,
+    segment: _Segment,
+    occurrences: tuple[Node, ...],
+    input_fields: tuple[Field, ...],
+) -> tuple[_StatefulInputRequest, str | None]:
+    if not occurrences or any(node.op.name != "macd_component" for node in occurrences):
+        return request, None
+    arguments = _macd_materialized_arguments(occurrences)
+    if all(argument.op.name == "column_ref" for argument in arguments):
+        return request, None
+    identity = _macd_materialization_identity(
+        segment, arguments, input_fields, request.column_stem
+    )
+    stem = "cf_macd_" + hashlib.sha256(identity.encode()).hexdigest()
+    return replace(request, output_name=stem, node_id=f"{stem}_input"), identity
+
+
+def _macd_materialized_arguments(occurrences: tuple[Node, ...]) -> tuple[Node, ...]:
+    arguments = {
+        (argument.digest, argument.node_bytes): argument
+        for node in occurrences
+        for argument in node.args
+    }
+    return tuple(arguments[key] for key in sorted(arguments))
+
+
+def _rolling_materialization_arguments(
+    occurrences: tuple[Node, ...], macd_input_identity: str | None
+) -> tuple[tuple[str, Node], ...]:
+    if macd_input_identity is not None:
+        return tuple(
+            ("macd_component", argument)
+            for argument in _macd_materialized_arguments(occurrences)
+        )
+    return tuple(
+        (node.op.name, argument) for node in occurrences for argument in node.args
+    )
+
+
+def _macd_materialization_identity(
+    segment: _Segment,
+    arguments: tuple[Node, ...],
+    input_fields: tuple[Field, ...],
+    stage: str,
+) -> str:
+    return _canonical(
+        {
+            "source": [segment.input_node.digest, segment.input_node.node_bytes.hex()],
+            "predicate": None
+            if segment.predicate is None
+            else [segment.predicate.digest, segment.predicate.node_bytes.hex()],
+            "arguments": [
+                [argument.digest, argument.node_bytes.hex()] for argument in arguments
+            ],
+            "fields": [_field_json(field) for field in input_fields],
+            "stage": stage,
+        }
     )
 
 
@@ -140,7 +225,7 @@ def _plan_rolling_stage(
     used_names = set(input_types) | {name for name, _ in segment.env}
     stage_fragment = "" if stage_count == 1 else f"{stage_number}_"
     stage_suffix = "" if stage_count == 1 else f"_{stage_number}"
-    materialization = _plan_stateful_inputs(
+    materialization_request, macd_input_identity = _macd_input_request(
         _StatefulInputRequest(
             output_name,
             path,
@@ -148,13 +233,15 @@ def _plan_rolling_stage(
             f"{output_name}__cf_rolling_input{stage_suffix}",
             "rolling",
         ),
+        segment,
+        occurrences,
+        input_fields,
+    )
+    materialization = _plan_stateful_inputs(
+        materialization_request,
         input_fields,
         used_names,
-        tuple(
-            (subtree.op.name, argument)
-            for subtree in occurrences
-            for argument in subtree.args
-        ),
+        _rolling_materialization_arguments(occurrences, macd_input_identity),
     )
     materializations = dict(materialization.names)
     state_input_fields = materialization.input_fields
@@ -355,6 +442,7 @@ def _plan_rolling_stage(
         input_field_names=(*input_types, *(field.name for field in derived_fields)),
         output_fields=(*state_input_fields, *derived_fields),
         replacements=tuple(replacements.items()),
+        macd_input_identity=macd_input_identity,
     )
 
 
@@ -408,12 +496,25 @@ def _plan_rolling(
 ) -> _RollingPipeline | None:
     """Plan every innermost-first rolling layer for one output branch."""
 
+    return _plan_rolling_with_fields(
+        (output_name, path, allowed_lateness_micros, late_policy), segment, None
+    )
+
+
+def _plan_rolling_with_fields(
+    settings: tuple[str, str, int, str],
+    segment: _Segment,
+    input_fields: tuple[Field, ...] | None,
+) -> _RollingPipeline | None:
+    output_name, path, allowed_lateness_micros, late_policy = settings
+
     stage_count = _rolling_stage_count(segment)
     if stage_count == 0:
         return None
     stages: list[_RollingPlan] = []
     current = segment
-    input_fields = _schema_fields(segment.input_node.attr("schema"))
+    if input_fields is None:
+        input_fields = _schema_fields(segment.input_node.attr("schema"))
     for stage_number in range(1, stage_count + 1):
         occurrences = _ready_rolling_occurrences(current)
         if not occurrences:
@@ -1017,12 +1118,18 @@ def _shared_state_node(
 ) -> dict[str, object]:
     operator = plan.node["operator"]
     spec = operator["spec"]  # type: ignore[index]
+    macd_layout = (
+        {"state_layout_version": 6}
+        if operator["kind"] == "rolling"
+        and any(item["kind"] == "macd_component" for item in declarations)
+        else {}
+    )
     return {
         **plan.node,
         "id": node_id,
         "operator": {
             **operator,  # type: ignore[arg-type]
-            "spec": {**spec, "outputs": declarations},  # type: ignore[arg-type]
+            "spec": {**spec, "outputs": declarations, **macd_layout},  # type: ignore[arg-type]
         },
         "output_ports": [
             {
@@ -1036,13 +1143,21 @@ def _shared_state_node(
 
 
 def _unique_shared_node_id(stem: str, reserved: set[str], /) -> str:
-    candidate = stem
+    base = _bounded_shared_node_stem(stem)
+    candidate = base
     counter = 1
     while candidate in reserved:
-        candidate = f"{stem}_{counter}"
+        suffix = f"_{counter}"
+        candidate = f"{base[: 64 - len(suffix)]}{suffix}"
         counter += 1
     reserved.add(candidate)
     return candidate
+
+
+def _bounded_shared_node_stem(stem: str) -> str:
+    if len(stem) <= 64:
+        return stem
+    return "cf_shared_" + hashlib.sha256(stem.encode()).hexdigest()[:40]
 
 
 def _reserved_state_node_ids(
@@ -1128,7 +1243,7 @@ def _share_single_rolling_stages(
     plans: dict[str, _RollingPlan | None],
     /,
 ) -> dict[str, _RollingPlan | None]:
-    groups: dict[tuple[str, str | None, str | None], list[str]] = {}
+    groups: dict[tuple[str, str | None, str | None, str | None], list[str]] = {}
     for output_name, segment in segments:
         plan = plans[output_name]
         if plan is not None:
@@ -1139,7 +1254,13 @@ def _share_single_rolling_stages(
                 else _canonical(plan.materialization_node)
             )
             groups.setdefault(
-                (segment.input_node.digest, predicate, materialization), []
+                (
+                    segment.input_node.digest,
+                    predicate,
+                    materialization,
+                    plan.macd_input_identity,
+                ),
+                [],
             ).append(output_name)
     return _share_state_groups(
         list(groups.values()), segments, plans, "roll", "rolling"

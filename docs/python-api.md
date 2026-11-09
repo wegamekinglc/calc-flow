@@ -759,12 +759,14 @@ are `array_api_safe_dtype@1`, `elementwise_broadcast@1`,
 `native_float_bool_dtype@1`, `native_scalar_vector_broadcast@1`,
 `native_packed_rank2@1`, `native_matmul@1`, `native_axis_reduction@1`,
 `native_table_static_rhs@1`, `native_float_dtype@1`,
-`native_sequence_vector@1` and `native_sequence_indicators@2`; any other
+`native_sequence_vector@1`, `native_sequence_indicators@2` and
+`native_sequence_indicators@3`; any other
 name/version pair fails construction.
 The three matrix rules describe IR2 packed shapes, multiplication and axis
 reductions; IR1 retains its scalar/vector shape rules. The sequence vector rule
 retains IR1 vector shapes. The indicator rule names IR2's per-kernel alternatives:
-RSI uses a vector and ATR uses packed high/low/close rows. Dispatch by IR version
+RSI uses a vector and ATR uses packed high/low/close rows. The version-3 rule
+adds MACD vector input with packed `[n, 3]` line/signal/histogram output. Dispatch by IR version
 and kernel; listed alternatives do not allow every kernel to use every shape.
 These rules establish neither table lineage nor a general array stream API.
 `ProviderArrayRules` pairs the exact
@@ -776,15 +778,15 @@ The `operators` tuple contains exactly `cross_section@1`, `expression@1`,
 with truths anchored in
 the engine implementation:
 
-| Operator               | Modes           | Finality                  | Checkpoint support      | State version   | State layouts   |
-|------------------------|-----------------|---------------------------|-------------------------|-----------------|-----------------|
-| `cross_section@1`      | batch, stream   | group_final_append_only   | checkpointed_stateful   | 1               | 1               |
-| `expression@1`         | batch, stream   | per_row_final             | stateless               | —               | —               |
-| `rolling@1`            | batch, stream   | per_row_final             | checkpointed_stateful   | 1               | 1, 2, 3, 4, 5   |
-| `sql@1`                | batch, stream   | unproven                  | checkpointed_stateful   | 2               | 3, 4            |
-| `stream_asof_join@1`   | stream          | group_final_append_only   | checkpointed_stateful   | 3               | 10              |
-| `stream_join@1`        | stream          | unproven                  | checkpointed_stateful   | 1               | 1, 2, 3         |
-| `window@1`             | stream          | group_final_append_only   | checkpointed_stateful   | 1               | 1               |
+| Operator             | Modes         | Finality                | Checkpoint support    | State version | State layouts    |
+|----------------------|---------------|-------------------------|-----------------------|---------------|------------------|
+| `cross_section@1`    | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1                |
+| `expression@1`       | batch, stream | per_row_final           | stateless             | —             | —                |
+| `rolling@1`          | batch, stream | per_row_final           | checkpointed_stateful | 1             | 1, 2, 3, 4, 5, 6 |
+| `sql@1`              | batch, stream | unproven                | checkpointed_stateful | 2             | 3, 4             |
+| `stream_asof_join@1` | stream        | group_final_append_only | checkpointed_stateful | 3             | 10               |
+| `stream_join@1`      | stream        | unproven                | checkpointed_stateful | 1             | 1, 2, 3          |
+| `window@1`           | stream        | group_final_append_only | checkpointed_stateful | 1             | 1                |
 
 The rolling inventory includes retained-history and accumulator layouts as well
 as columnar layout `3` and cumulative layout `4`. See
@@ -861,7 +863,7 @@ profile; these claims do not promise cross-platform bitwise equality or delivery
 guarantees. The sequence factory instead reports `modes=("stream",)`,
 `stateful=True`, `microbatch_invariant=True`, `requires_watermark=False`,
 `checkpoint_support="checkpointed_stateful"`, `state_version=1`,
-`state_layouts=(1, 2)` for the IR1/IR2 implementation, `supports_static_inputs=False`,
+`state_layouts=(1, 2, 3)` for the IR1/IR2/IR3 implementation, `supports_static_inputs=False`,
 `partition_contract="single_ordered_sequence"` and `finality="per_row_final"`.
 It uses explicit required array `input`/`output` ports and its own closed options
 schema. Its checkpoint and managed restart contract belongs to that native
@@ -869,7 +871,9 @@ factory, not to a Python stateless-provider marker.
 Its earlier IR1-only profile remains valid frozen evidence with layouts `(1,)`
 and `native_sequence_vector@1`. The IR1/IR2 profile requires both supported
 layouts, the vector rule and `native_sequence_indicators@2`, and the complete
-closed schema alternatives. Mixed profile fields or unimplemented v3 rules fail
+closed schema alternatives. The IR3 profile adds layout 3,
+`native_sequence_indicators@3` and a third schema branch for MACD while preserving
+the two earlier branches. Incomplete or crossed profile evidence fails
 validation. Registration always records its actual Rust producer's descriptor.
 
 Use the array/table factories through native ArrayExpr declarations, advanced
@@ -1359,6 +1363,23 @@ that case. Period one first returns at the second complete row. Large periods
 use constant numerical state; `period=2**64 - 1` cannot complete warm-up before
 the checked processed-position counter is exhausted.
 
+`macd_components(values, fast_span=12, slow_span=26, signal_span=9,
+min_periods=1, signal_min_periods=1)` returns a frozen, slotted
+`calc_flow.MacdOutputs[NativeArray]`, also exported by `calc_flow.array`.
+Its `line`, `signal` and `histogram` fields hold three immutable, aligned
+nullable float64 arrays. Input must be one native float32/float64 vector;
+`from_arrow` and `from_numpy` remain the explicit import boundaries.
+
+All five counts are exact positive u64 values, with `fast_span < slow_span`.
+Both minima may exceed their respective spans. The line is fast EWMA minus
+slow EWMA, signal is the EWMA of that line, and histogram is line minus signal.
+A null or NaN price skips the price averages but can yield a carried line;
+that carried line still advances the signal average. Infinity and generated
+NaN follow existing EWMA/subtraction arithmetic. The three recurrences advance
+together even when the caller consumes only one field. `execution.max_elements`
+counts all three output lengths, and the allocation limit includes all three
+arrays. There are no Python indicator state handles.
+
 The native eager elementwise functions accept explicit `NativeArray` operands:
 
 - Floating arithmetic: `neg`, `abs`, `sqrt`, `log`, `exp`, `add`, `subtract`,
@@ -1439,7 +1460,12 @@ holds `max_state_bytes`; both are optional and reject unknown keys. These option
 use the sequence factory's schema, independently of array_expr IR1/IR2.
 Compile it through `PipelineBuilder.external` with an explicitly registered
 Runtime and run it through explicit native source/sink bindings. The old kernels
-retain checkpoint layout 1 even in IR2; RSI and ATR use layout 2. Semantic state
+retain checkpoint layout 1 in every IR; RSI and ATR use layout 2. IR3 additionally
+accepts `{"function":"macd_components"}` with the five optional MACD parameters
+and their 12/26/9/1/1 defaults. Input is one float32/float64 vector; its single
+float64 output has shape `[n, 3]` in line/signal/histogram order. The element
+limit counts all `3*n` positions. MACD uses layout 3 and retains its full 56-byte
+numerical group even when a downstream consumer selects one component. Semantic state
 version 1 identifies their codec/recovery contracts independently of layout; these are
 separate from capability schema 5 and project/manifest version 3.
 

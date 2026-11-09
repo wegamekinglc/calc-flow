@@ -97,7 +97,7 @@ def test_empty_runtime_capabilities_are_frozen_and_session_scoped() -> None:
             requires_watermark=True,
             checkpoint_support="checkpointed_stateful",
             state_version=1,
-            state_layouts=(1, 2, 3, 4, 5),
+            state_layouts=(1, 2, 3, 4, 5, 6),
             deterministic=True,
             replay_safe=True,
         ),
@@ -1004,7 +1004,7 @@ def test_capability_catalog_reports_every_durable_state_layout() -> None:
         operator.kind: operator for operator in Runtime().capabilities().operators
     }
 
-    assert operators["rolling"].state_layouts == (1, 2, 3, 4, 5)
+    assert operators["rolling"].state_layouts == (1, 2, 3, 4, 5, 6)
     assert operators["cross_section"].state_layouts == (1,)
     assert operators["stream_join"].state_version == 1
     assert operators["stream_join"].state_layouts == (1, 2, 3)

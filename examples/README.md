@@ -22,6 +22,12 @@ is standalone; the [learning paths](../docs/examples.md) group them by task.
 [`native_matrices.py`](native_matrices.py) demonstrates packed rank-2 multiplication,
 axis means, reshape and transpose using only Arrow and the native core.
 
+[`native_macd.py`](native_macd.py) computes the three immutable MACD owners,
+including signal updates carried through missing prices; its
+[Rust counterpart](../crates/calc-flow/examples/native_macd.rs) also demonstrates
+owned state reset. Table composition uses `ts.macd_components` and the same
+shared recurrence.
+
 [`native_arrays.py`](native_arrays.py) demonstrates Arrow imports, native row-window
 means, explicit scalar broadcasting, Boolean selection and scalar reduction.
 It requires no NumPy/JAX provider or optional array backend. Run it with

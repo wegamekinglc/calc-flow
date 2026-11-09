@@ -1,4 +1,4 @@
-//! Payload-free numerical evidence from a concrete layout-five Rolling owner.
+//! Payload-free numerical evidence from a concrete native-indicator Rolling owner.
 
 use crate::{CalcFlowError, OperatorMetadata, RollingOperator, RollingOutputSpec};
 
@@ -30,7 +30,11 @@ impl SafeIndicatorDiagnostic {
         operator: &RollingOperator,
         error: &CalcFlowError,
     ) -> Option<Self> {
-        if operator.spec().state_layout_version != crate::ROLLING_INDICATOR_STATE_LAYOUT_VERSION {
+        if !matches!(
+            operator.spec().state_layout_version,
+            crate::ROLLING_INDICATOR_STATE_LAYOUT_VERSION
+                | crate::ROLLING_MACD_STATE_LAYOUT_VERSION
+        ) {
             return None;
         }
         operator.spec().outputs.iter().find_map(|output| {
@@ -72,6 +76,7 @@ impl<'a> Candidate<'a> {
             } => [high, low, close]
                 .into_iter()
                 .find_map(|field| self.field(field)),
+            RollingOutputSpec::MacdComponent { .. } => None,
             _ => return None,
         };
         diagnostic.or_else(|| self.counter())

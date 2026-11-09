@@ -82,7 +82,7 @@ fn test_sequence_descriptor_declares_fixed_vector_ports_and_strict_stream_option
     let descriptor = NativeArraySequenceFactory::capability_descriptor();
     assert_eq!(descriptor["modes"], json!(["stream"]));
     assert_eq!(descriptor["port_binding"], "fixed");
-    assert_eq!(descriptor["state_layouts"], json!([1, 2]));
+    assert_eq!(descriptor["state_layouts"], json!([1, 2, 3]));
     assert_eq!(descriptor["partition_contract"], "single_ordered_sequence");
     assert_eq!(
         descriptor["input_ports"],

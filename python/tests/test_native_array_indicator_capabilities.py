@@ -49,9 +49,10 @@ def test_actual_legacy_rust_ir1_sequence_evidence_stays_unchanged() -> None:
     assert capability.options_json_schema == descriptor["options_json_schema"]
 
 
-def test_native_sequence_indicator_rule_is_version_two_only() -> None:
-    assert CapabilityRule("native_sequence_indicators", "2").version == "2"
-    for version in ("1", "3"):
+def test_native_sequence_indicator_rules_keep_versions_two_and_three() -> None:
+    for version in ("2", "3"):
+        assert CapabilityRule("native_sequence_indicators", version).version == version
+    for version in ("1", "4"):
         with pytest.raises(ValueError, match="unknown capability rule"):
             CapabilityRule("native_sequence_indicators", version)
 
@@ -73,7 +74,7 @@ def test_native_sequence_profiles_reject_crossed_actual_producer_evidence(
         _native_array_provider_capability(descriptor)
 
 
-@pytest.mark.parametrize("layouts", [[2], [1, 3], [1, 2, 3]])
+@pytest.mark.parametrize("layouts", [[2], [1, 3], [1, 2, 4]])
 def test_native_sequence_profiles_reject_unimplemented_layout_inventory(
     layouts: list[int],
 ) -> None:
@@ -254,3 +255,9 @@ def test_real_documented_replay_uses_the_same_actual_native_profile(
         len(parent.registration_snapshot()) == len(worker.registration_snapshot()) == 4
     )
     assert parent.capabilities().providers == worker.capabilities().providers
+
+
+def test_ir2_record_cannot_claim_ir3_without_its_actual_rules_and_schema() -> None:
+    descriptor = {**_sequence_descriptor(2), "state_layouts": [1, 2, 3]}
+    with pytest.raises(ValueError, match="array_rules"):
+        _native_array_provider_capability(descriptor)

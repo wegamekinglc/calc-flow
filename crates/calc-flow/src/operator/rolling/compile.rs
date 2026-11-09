@@ -6,10 +6,11 @@ use super::{
     CompiledRollingOutput, CompiledRollingSpec, CompiledScan, CompiledWindowGroup, DataType,
     Digest, Field, JsonMap, ROLLING_COLUMNAR_STATE_LAYOUT_VERSION, ROLLING_CONFIGURATION_VERSION,
     ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION, ROLLING_EWMA_STATE_LAYOUT_VERSION,
-    ROLLING_INDICATOR_STATE_LAYOUT_VERSION, ROLLING_STATE_LAYOUT_VERSION, Result,
-    RollingFloatPrimitiveSpec, RollingFrameSpec, RollingKernelPlan, RollingOutputSpec, RollingSpec,
-    ScanKind, Schema, Sha256, Statistic, SumClass, TimeUnit, Value, canonical_json, compile_error,
-    internal_error, json, state_schema_fingerprint,
+    ROLLING_INDICATOR_STATE_LAYOUT_VERSION, ROLLING_MACD_STATE_LAYOUT_VERSION,
+    ROLLING_STATE_LAYOUT_VERSION, Result, RollingFloatPrimitiveSpec, RollingFrameSpec,
+    RollingKernelPlan, RollingOutputSpec, RollingSpec, ScanKind, Schema, Sha256, Statistic,
+    SumClass, TimeUnit, Value, canonical_json, compile_error, internal_error, json,
+    state_schema_fingerprint,
 };
 
 pub(super) fn validate_arguments(spec: &RollingSpec) -> Result<()> {
@@ -25,6 +26,7 @@ pub(super) fn validate_arguments(spec: &RollingSpec) -> Result<()> {
             | ROLLING_EWMA_STATE_LAYOUT_VERSION
             | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
             | ROLLING_INDICATOR_STATE_LAYOUT_VERSION
+            | ROLLING_MACD_STATE_LAYOUT_VERSION
     ) {
         return Err(invalid_argument(
             "rolling.state_layout_version",
@@ -40,6 +42,7 @@ pub(super) fn validate_arguments(spec: &RollingSpec) -> Result<()> {
             ROLLING_EWMA_STATE_LAYOUT_VERSION
                 | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
                 | ROLLING_INDICATOR_STATE_LAYOUT_VERSION
+                | ROLLING_MACD_STATE_LAYOUT_VERSION
         )
     {
         return Err(invalid_argument(
@@ -125,7 +128,8 @@ fn validate_outputs(outputs: &[RollingOutputSpec]) -> Result<()> {
             && !output.requires_cumulative_layout()
             && !matches!(
                 output,
-                RollingOutputSpec::Rsi { .. }
+                RollingOutputSpec::MacdComponent { .. }
+                    | RollingOutputSpec::Rsi { .. }
                     | RollingOutputSpec::Atr { .. }
                     | RollingOutputSpec::Difference { .. }
                     | RollingOutputSpec::CumulativeMean { .. }
@@ -340,18 +344,17 @@ fn compile_spec_against_schema(
         .iter()
         .filter_map(RollingOutputSpec::retained_micros)
         .max();
-    let state_layout_version =
-        if spec.state_layout_version == ROLLING_INDICATOR_STATE_LAYOUT_VERSION {
-            ROLLING_INDICATOR_STATE_LAYOUT_VERSION
-        } else if spec
-            .outputs
-            .iter()
-            .any(RollingOutputSpec::requires_cumulative_layout)
-        {
-            ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
-        } else {
-            ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
-        };
+    let state_layout_version = if super::indicators::is_layout(spec.state_layout_version) {
+        spec.state_layout_version
+    } else if spec
+        .outputs
+        .iter()
+        .any(RollingOutputSpec::requires_cumulative_layout)
+    {
+        ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
+    } else {
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
+    };
     let kernel_plan = RollingKernelPlan::compile(
         input_schema,
         state_layout_version,
@@ -448,7 +451,9 @@ fn compile_output(
     let input_index = exact_field_index(input_schema, output.input())?;
     let input_type = input_schema.field(input_index).data_type().clone();
     let evaluation = match output {
-        RollingOutputSpec::Rsi { .. } | RollingOutputSpec::Atr { .. } => {
+        RollingOutputSpec::MacdComponent { .. }
+        | RollingOutputSpec::Rsi { .. }
+        | RollingOutputSpec::Atr { .. } => {
             super::indicators::compile(input_schema, output, indicator_groups)?
         }
         RollingOutputSpec::Lag { periods, .. } => CompiledEvaluation::Lag { periods: *periods },
@@ -854,7 +859,8 @@ fn compile_aggregate_output(
         RollingOutputSpec::Max {
             frame, min_periods, ..
         } => (*frame, *min_periods, 0, Statistic::Max),
-        RollingOutputSpec::Rsi { .. }
+        RollingOutputSpec::MacdComponent { .. }
+        | RollingOutputSpec::Rsi { .. }
         | RollingOutputSpec::Atr { .. }
         | RollingOutputSpec::Lag { .. }
         | RollingOutputSpec::Delta { .. }

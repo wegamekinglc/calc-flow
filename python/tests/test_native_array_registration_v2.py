@@ -171,16 +171,18 @@ def test_real_native_bundle_descriptors_preserve_lifecycle_contracts() -> None:
     array, sequence, table = descriptors
     assert sequence["modes"] == ["stream"]
     assert sequence["checkpoint_support"] == "checkpointed_stateful"
-    assert sequence["state_layouts"] == [1, 2]
+    assert sequence["state_layouts"] == [1, 2, 3]
     assert sequence["array_rules"]["shape_rules"] == [
         {"name": "native_sequence_vector", "version": "1"},
         {"name": "native_sequence_indicators", "version": "2"},
+        {"name": "native_sequence_indicators", "version": "3"},
     ]
     schema = json.loads(sequence["options_json_schema"])
-    assert schema["properties"]["ir_version"] == {"enum": [1, 2]}
+    assert schema["properties"]["ir_version"] == {"enum": [1, 2, 3]}
     assert [branch["properties"]["ir_version"] for branch in schema["oneOf"]] == [
         {"const": 1},
         {"const": 2},
+        {"const": 3},
     ]
     assert [
         [
@@ -188,7 +190,11 @@ def test_real_native_bundle_descriptors_preserve_lifecycle_contracts() -> None:
             for kernel in branch["properties"]["kernel"]["oneOf"]
         ]
         for branch in schema["oneOf"]
-    ] == [["rolling_mean", "ewma"], ["rolling_mean", "ewma", "rsi", "atr"]]
+    ] == [
+        ["rolling_mean", "ewma"],
+        ["rolling_mean", "ewma", "rsi", "atr"],
+        ["rolling_mean", "ewma", "rsi", "atr", "macd_components"],
+    ]
     assert sequence["partition_contract"] == "single_ordered_sequence"
     assert sequence["supports_static_inputs"] is False
     assert array == _native._native_array_capability()
@@ -205,9 +211,10 @@ def test_real_native_bundle_descriptors_preserve_lifecycle_contracts() -> None:
     cfa.register_native(runtime)
     snapshot, records = runtime.capability_registration_snapshot()
     assert snapshot.scope.revision == len(records) == 3
-    assert snapshot.providers[1].state_layouts == (1, 2)
+    assert snapshot.providers[1].state_layouts == (1, 2, 3)
     assert snapshot.providers[1].array_rules.shape_rules == (
         CapabilityRule("native_sequence_indicators", "2"),
+        CapabilityRule("native_sequence_indicators", "3"),
         CapabilityRule("native_sequence_vector", "1"),
     )
     assert snapshot.providers[1].options_json_schema == sequence["options_json_schema"]

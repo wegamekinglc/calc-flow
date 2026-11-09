@@ -20,6 +20,7 @@ On this page:
 - [Native elementwise arrays](#native-elementwise-arrays)
 - [Packed matrices and axes](#packed-matrices-and-axes)
 - [Native RSI and ATR](#native-rsi-and-atr)
+- [Native MACD components](#native-macd-components)
 - [Native array batch provider](#native-array-batch-provider)
 - [Native table/array bridge](#native-tablearray-bridge)
 - [Expression pipeline](#expression-pipeline)
@@ -428,6 +429,63 @@ execution limit; candidates must also fit the state limit. Eager calls charge
 one fresh candidate plus output and have no independent state cap.
 The standalone [indicator example](../crates/calc-flow/examples/native_indicators.rs)
 shows chunked RSI and aligned ATR output.
+
+## Native MACD components
+
+`macd_components(view, options, &execution)` computes one aligned float64 line,
+signal and histogram from a rank-one float32/float64 input. `MacdOptions::default()`
+uses spans 12/26/9 and both warm-up minima one. `MacdOptions::new(fast, slow, signal)`
+requires positive `u64` spans and fast<slow; consuming `with_min_periods` and
+`with_signal_min_periods` setters accept independent positive minima, including
+values greater than their spans. Direct states may change float dtype between
+calls. Scalars, matrices and Boolean inputs are rejected without reading values.
+
+The computation literally composes the existing unadjusted EWMA transition:
+fast minus slow is line; EWMA(line) is signal; line minus signal is histogram.
+Null/NaN prices skip fast/slow updates and carry a ready line. That carried line
+still updates signal, so its valid-sample count can exceed the price count.
+A valid NaN line is missing only for the signal update; signal can carry an
+already valid result. Infinity updates signal. Arithmetic-generated NaN remains
+valid for line/signal/histogram. Finite overflow keeps the old EWMA/subtraction
+IEEE behavior. This is Calc Flow's first-valid seed, rather than a TA-Lib lookback
+or an adjusted/alternative profile.
+
+`MacdOutputs::{line,signal,histogram}` borrow immutable NativeArray owners;
+`into_arrays()` moves all three without copying their buffers. Outputs outlive
+inputs/state and retain explicit validity, including empty arrays. Null slots
+contain positive zero and valid floating bits follow the individual operation.
+
+`MacdState::new(options, state_limits)` owns all three recurrences with a fixed
+56-byte numerical charge, including empty/reset states. Every call prepares one
+isolated candidate and all three outputs before committing; errors/cancellation
+preserve committed counters and values. `reset` retains options/limits and clears
+the complete recurrence. There is no public cloning, serialization or async CPU
+alias. No history proportional to a span or minimum is retained.
+
+The output element limit counts `3*n`, and allocation limits include three
+independent value buffers, three bitmaps and three rank-one shape descriptors.
+Eager calls charge one fresh candidate plus outputs; owned calls charge committed
+state, candidate (zero for empty input), all output/scratch and retained captures.
+Limits are checked before allocation and rechecked against actual capacities.
+All inputs stay read-only. The three outputs always advance one shared state,
+even when only line or histogram is consumed.
+
+The ordered `native:array_sequence@1` provider accepts `ir_version: 3` and
+`kernel: {"function":"macd_components"}` with the same five optional parameters.
+Its floating input is `[n]`; its single output is row-major `[n,3]` with line,
+signal and histogram in that order. It writes one packed value buffer, one
+validity bitmap and one rank-two shape directly. Its element budget is `3*n`,
+and its peak includes committed state, candidate, packed output and captures.
+Empty inputs emit `[0,3]` without advancing counts. A declared input dtype stays
+fixed across this provider's stream.
+
+The fixed 156-byte layout 3 checkpoint preserves all three recurrence counts
+and raw floating bits, including active infinities, NaNs and signed zero.
+Ordinary and terminal managed recovery validate parameters, identity and state
+invariants before any source opens. Existing IR1/layout1 and IR2/layout2 kernels
+retain their versions and byte layouts; IR3 also accepts those kernels.
+The standalone [MACD example](../crates/calc-flow/examples/native_macd.rs)
+shows carried-line updates and immutable component ownership.
 
 ## Native array batch provider
 
@@ -925,6 +983,22 @@ rank for ties; signed zero values tie and a singleton quantile is null.
 Decay weights valid samples
 linearly, newest highest.
 
+MACD components use `RollingOutputSpec::MacdComponent` with
+`MacdComponent::{Line, Signal, Histogram}` and require
+`ROLLING_MACD_STATE_LAYOUT_VERSION` (6). The input accepts signed/unsigned 8–64-bit integers and
+Float32/Float64, using the existing EWMA float64 conversion. The five positive u64 parameters default to fast/slow/signal
+spans 12/26/9 and price/signal minima 1/1; fast must be less than slow. Minima
+may exceed their spans. Components and aliases sharing the same input and all
+five parameters advance one full recurrence per finalized row. A ready carried
+line still advances the signal after a missing price. Selecting only histogram
+keeps the complete 56-byte logical numerical group and 104-byte checkpoint
+payload. Layout 6 also accepts RSI, ATR and the previous rolling outputs;
+layout 5 rejects MACD and keeps its previous payloads. The same bounded worker,
+state budget, checkpoint preparation and managed recovery apply.
+[`native_table_macd.rs`](../crates/calc-flow/examples/native_table_macd.rs) shows
+all three components over nullable integer prices.
+
+
 Cumulative sum/min/max/variance require
 `ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION` (4) in both declarations and writer
 state. Layout 4 extends the columnar layout with exact per-group summaries
@@ -965,9 +1039,9 @@ state growth before committing it, and restore rejects an oversized snapshot.
 Old-only batch evaluation does not use this budget. Project-created operators use the
 default, and this runtime limit does not change the project fingerprint.
 The preceding retained-only rule applies to old-only nodes, including old-only
-declarations that explicitly select layout 5.
+declarations that explicitly select layout 5 or 6.
 
-For nodes containing RSI or ATR, the same `StateBudget.max_bytes` instead
+For nodes containing RSI, ATR or MACD, the same `StateBudget.max_bytes` instead
 bounds the whole operator's participating peak: committed state, isolated
 candidates, all prepared output chunks, scratch and live encoded
 checkpoint/restore segments. Mixed old rolling outputs participate too.

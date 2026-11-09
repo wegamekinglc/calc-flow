@@ -92,7 +92,9 @@ impl<'a> Source<'a> {
     }
 }
 fn mode(record: &RecordBatch, input: &Schema, compiled: &CompiledRollingSpec) -> Result<()> {
-    if compiled.state_layout_version != 5 || compiled.indicator_groups.is_empty() {
+    if !super::super::is_layout(compiled.state_layout_version)
+        || compiled.indicator_groups.is_empty()
+    {
         return Err(invalid());
     }
     if input.fields().len().checked_add(8) != Some(record.num_columns()) {

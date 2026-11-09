@@ -1,27 +1,30 @@
 use sha2::{Digest as _, Sha256};
 
-use super::{ArrayStateOptions, AtrState, EwmaState, RollingMeanState, RsiState};
+use super::{ArrayStateOptions, AtrState, EwmaState, MacdState, RollingMeanState, RsiState};
 use crate::{
     CalcFlowError, Result, RollingNumericalProfile,
     array::{
-        ArrayDType, ArrayExecutionOptions, AtrOptions, EwmaOptions, RollingMeanOptions, RsiOptions,
+        ArrayDType, ArrayExecutionOptions, AtrOptions, EwmaOptions, MacdOptions,
+        RollingMeanOptions, RsiOptions,
     },
 };
 
 mod ewma;
 mod indicator;
+mod macd;
 mod mean;
 
 const MAGIC: &[u8; 8] = b"CFASEQ\0\0";
 const VERSION: u32 = 1;
 const EWMA_BYTES: usize = 92;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub(in crate::array) enum KernelOptions {
     Mean(RollingMeanOptions),
     Ewma(EwmaOptions),
     Rsi(RsiOptions),
     Atr(AtrOptions),
+    Macd(MacdOptions),
 }
 
 impl KernelOptions {
@@ -36,6 +39,7 @@ impl KernelOptions {
             }
             Self::Rsi(options) => serde_json::json!({"function":"rsi", "period":options.period()}),
             Self::Atr(options) => serde_json::json!({"function":"atr", "period":options.period()}),
+            Self::Macd(options) => macd::document(options),
         }
     }
 }
@@ -70,7 +74,7 @@ impl SequenceSpec {
             "kernel": kernel.document(), "layout": 1, "numeric_semantics": 1,
         });
         if let Some(shape) = indicator::shape_rule(kernel) {
-            document["layout"] = 2.into();
+            document["layout"] = kernel_layout(kernel).into();
             document["input_shape_rule"] = shape.into();
         }
         let bytes = crate::json::canonical_json(&document)
@@ -87,10 +91,7 @@ impl SequenceSpec {
     }
 
     pub(in crate::array) const fn layout(&self) -> u32 {
-        match self.kernel {
-            KernelOptions::Rsi(_) | KernelOptions::Atr(_) => 2,
-            _ => 1,
-        }
+        kernel_layout(self.kernel)
     }
 
     pub(in crate::array) fn validate_input_shape(&self, shape: &[usize]) -> Result<()> {
@@ -117,6 +118,7 @@ impl SequenceSpec {
         match self.kernel {
             KernelOptions::Rsi(_) => Some(3),
             KernelOptions::Atr(_) => Some(4),
+            KernelOptions::Macd(_) => Some(5),
             _ => None,
         }
     }
@@ -144,6 +146,7 @@ impl SequenceSpec {
             KernelOptions::Ewma(_) => [2, dtype, 0, 0],
             KernelOptions::Rsi(_) => [3, dtype, 0, 0],
             KernelOptions::Atr(_) => [4, dtype, 0, 0],
+            KernelOptions::Macd(_) => [5, dtype, 0, 0],
         }
     }
 
@@ -153,22 +156,12 @@ impl SequenceSpec {
             KernelOptions::Ewma(options) => (options.span(), options.min_periods()),
             KernelOptions::Rsi(options) => (options.period(), 0),
             KernelOptions::Atr(options) => (options.period(), 0),
+            KernelOptions::Macd(_) => unreachable!("MACD uses its five-parameter header"),
         }
     }
 
     fn validate_state(&self, state: &SequenceState) -> Result<()> {
-        let matches = match (&self.kernel, state) {
-            (KernelOptions::Mean(expected), SequenceState::Mean(state)) => {
-                state.options == *expected
-            }
-            (KernelOptions::Ewma(expected), SequenceState::Ewma(state)) => {
-                state.options == *expected
-            }
-            (KernelOptions::Rsi(expected), SequenceState::Rsi(state)) => state.options == *expected,
-            (KernelOptions::Atr(expected), SequenceState::Atr(state)) => state.options == *expected,
-            _ => false,
-        };
-        if !matches {
+        if self.kernel != state.kernel_options() {
             return Err(mismatch("parameters", "state and configured kernel differ"));
         }
         Ok(())
@@ -180,6 +173,7 @@ pub(in crate::array) enum SequenceState {
     Ewma(EwmaState),
     Rsi(RsiState),
     Atr(AtrState),
+    Macd(MacdState),
 }
 
 impl SequenceState {
@@ -189,6 +183,7 @@ impl SequenceState {
             KernelOptions::Ewma(options) => EwmaState::new(options, limits).map(Self::Ewma),
             KernelOptions::Rsi(options) => RsiState::new(options, limits).map(Self::Rsi),
             KernelOptions::Atr(options) => AtrState::new(options, limits).map(Self::Atr),
+            KernelOptions::Macd(options) => MacdState::new(options, limits).map(Self::Macd),
         }
     }
 
@@ -198,6 +193,7 @@ impl SequenceState {
             Self::Ewma(state) => state.state_bytes(),
             Self::Rsi(state) => state.state_bytes(),
             Self::Atr(state) => state.state_bytes(),
+            Self::Macd(state) => state.state_bytes(),
         }
     }
 
@@ -207,6 +203,7 @@ impl SequenceState {
             Self::Ewma(state) => state.reset(),
             Self::Rsi(state) => state.reset(),
             Self::Atr(state) => state.reset(),
+            Self::Macd(state) => state.reset(),
         }
     }
 
@@ -230,6 +227,19 @@ impl SequenceState {
             Self::Atr(state) => state
                 .prepare_packed_checked(input, execution, captures, check)
                 .map(|prepared| wrap(prepared, Self::Atr)),
+            Self::Macd(state) => state
+                .prepare_packed_checked(input, execution, captures, check)
+                .map(|prepared| wrap(prepared, Self::Macd)),
+        }
+    }
+
+    fn kernel_options(&self) -> KernelOptions {
+        match self {
+            Self::Mean(state) => KernelOptions::Mean(state.options),
+            Self::Ewma(state) => KernelOptions::Ewma(state.options),
+            Self::Rsi(state) => KernelOptions::Rsi(state.options),
+            Self::Atr(state) => KernelOptions::Atr(state.options),
+            Self::Macd(state) => KernelOptions::Macd(state.options),
         }
     }
 
@@ -239,6 +249,7 @@ impl SequenceState {
             Self::Ewma(state) => state.positions,
             Self::Rsi(state) => state.kernel.positions,
             Self::Atr(state) => state.kernel.positions,
+            Self::Macd(state) => state.kernel.positions,
         }
     }
 
@@ -248,6 +259,7 @@ impl SequenceState {
             Self::Ewma(_) => Ok(EWMA_BYTES),
             Self::Rsi(_) => Ok(116),
             Self::Atr(_) => Ok(108),
+            Self::Macd(_) => Ok(156),
         }
     }
 }
@@ -284,6 +296,9 @@ pub(in crate::array) fn encode(
     let bytes = allocate(state, execution, captures)?;
     if spec.layout() == 2 {
         return indicator::encode(spec, state, bytes, check);
+    }
+    if spec.layout() == 3 {
+        return macd::encode(spec, state, bytes, check);
     }
     write_legacy(spec, state, bytes, check)
 }
@@ -384,6 +399,9 @@ fn read_header(spec: &SequenceSpec, reader: &mut Reader<'_>) -> Result<u64> {
     if spec.layout() == 2 {
         return indicator::read_header(spec, reader);
     }
+    if spec.layout() == 3 {
+        return macd::read_header(spec, reader);
+    }
     reader.require(MAGIC, "magic")?;
     reader.require(&VERSION.to_le_bytes(), "layout")?;
     reader.require(&VERSION.to_le_bytes(), "numeric_semantics")?;
@@ -454,6 +472,7 @@ fn encoded_requirements(spec: &SequenceSpec, length: usize) -> Result<(usize, us
         KernelOptions::Ewma(_) => ewma_encoded_requirements(length),
         KernelOptions::Rsi(_) => indicator::requirements(length, 116, 48),
         KernelOptions::Atr(_) => indicator::requirements(length, 108, 40),
+        KernelOptions::Macd(_) => macd::requirements(length),
     }
 }
 fn ewma_encoded_requirements(length: usize) -> Result<(usize, usize)> {
@@ -494,6 +513,7 @@ fn read_state(
         KernelOptions::Rsi(_) | KernelOptions::Atr(_) => {
             indicator::read_state(spec, positions, reader, limits)
         }
+        KernelOptions::Macd(options) => macd::read_state(options, positions, reader, limits),
     }
 }
 
@@ -504,5 +524,13 @@ fn wrap<T>(
     super::Prepared {
         candidate: prepared.candidate.map(constructor),
         output: prepared.output,
+    }
+}
+
+const fn kernel_layout(kernel: KernelOptions) -> u32 {
+    match kernel {
+        KernelOptions::Macd(_) => 3,
+        KernelOptions::Rsi(_) | KernelOptions::Atr(_) => 2,
+        _ => 1,
     }
 }
