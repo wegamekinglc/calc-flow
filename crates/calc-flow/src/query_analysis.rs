@@ -7,6 +7,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use datafusion::arrow::datatypes::{DataType, Schema, SchemaRef, TimeUnit};
 use serde::{Deserialize, Serialize};
 
+use crate::config::canonical_arrow_field_type;
 use crate::{ArrowFieldSpec, CalcFlowError, NullPlacement, Result, SortDirection};
 
 macro_rules! vocabulary {
@@ -304,7 +305,8 @@ pub(crate) fn schema_fields(schema: &SchemaRef) -> Vec<ArrowFieldSpec> {
         .iter()
         .map(|field| ArrowFieldSpec {
             name: field.name().clone(),
-            data_type: type_name(field.data_type()),
+            data_type: canonical_arrow_field_type(field)
+                .unwrap_or_else(|| type_name(field.data_type())),
             nullable: field.is_nullable(),
         })
         .collect()

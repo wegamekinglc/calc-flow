@@ -487,3 +487,32 @@ def test_query_schema_keeps_portable_time_type_spellings(dtype, spelling):
     )
     root = next(node for node in report.nodes if node.path == "inputs.times")
     assert root.schema == (cf.Field("clock", spelling, False),)
+
+
+@pytest.mark.parametrize("ordered", [False, True])
+def test_native_dictionary_schema_report_preserves_field_identity(ordered):
+    import json
+
+    from calc_flow.symbolic.query_analysis import _from_dict
+
+    spelling = f"dictionary<index=int32;value=string;ordered={str(ordered).lower()}>"
+    field = dict(name="category", data_type=spelling, nullable=False)
+    graph = dict(
+        nodes=[
+            dict(
+                path="outputs.result",
+                kind="sql",
+                query="SELECT category FROM input",
+                schema=[field],
+            )
+        ],
+        edges=[],
+        options=dict(portability=None),
+    )
+    encoded = cf.Runtime()._inner._analyze_query_graph(json.dumps(graph))
+    payload = json.loads(encoded)
+    assert payload["nodes"][0]["schema"] == [field]
+    report = _from_dict(payload)
+    assert report.nodes[0].schema == (cf.Field("category", spelling, False),)
+    with pytest.raises(AttributeError):
+        report.nodes[0].schema = ()

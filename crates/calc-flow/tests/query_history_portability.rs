@@ -64,6 +64,78 @@ async fn row_local_checked_compile_keeps_the_original_identity() {
     assert_eq!(checked_stream.fingerprint(), original_stream.fingerprint());
 }
 
+async fn assert_dictionary_schema_roundtrip(ordered: bool) {
+    let field = Field::new(
+        "category",
+        DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+        false,
+    )
+    .with_dict_is_ordered(ordered);
+    let build = || {
+        let operator = SqlOperator::new(
+            "select",
+            "SELECT category FROM input",
+            vec!["input".into()],
+            vec![],
+        )
+        .unwrap()
+        .with_ports(
+            vec![Port::new("input", BatchKind::Table, true, Some(vec![field.clone()])).unwrap()],
+            Port::new("output", BatchKind::Table, true, None).unwrap(),
+        )
+        .unwrap();
+        PipelineBuilder::new("dictionary")
+            .unwrap()
+            .add_node("select", Box::new(operator))
+            .unwrap()
+    };
+    let udfs = UdfRegistrySnapshot::default();
+    let ordinary = build().compile_batch(&udfs).unwrap();
+    let report = build()
+        .analyze(&udfs, &AnalysisOptions::default())
+        .await
+        .unwrap();
+    assert!(report.diagnostics.is_empty());
+    assert_eq!(report.nodes[0].schema.as_ref().unwrap().field(0), &field);
+    let encoded = serde_json::to_value(&report).unwrap();
+    assert_eq!(
+        encoded["nodes"][0]["schema"][0],
+        serde_json::json!({
+            "name": "category",
+            "data_type": format!("dictionary<index=int32;value=string;ordered={ordered}>"),
+            "nullable": false,
+        })
+    );
+    let request = PortabilityRequest::new(
+        Comparison::PerBatch,
+        HistoryScope::CurrentBatch,
+        ComparisonCutoff::BatchBoundary,
+    )
+    .unwrap();
+    let checked = build()
+        .compile_batch_checked(&udfs, &request)
+        .await
+        .unwrap();
+    assert_eq!(checked.fingerprint(), ordinary.fingerprint());
+    let requirements = calc_flow::StreamRequirements::default();
+    let ordinary_stream = build().compile_stream(&udfs, &requirements).unwrap();
+    let checked_stream = build()
+        .compile_stream_checked(&udfs, &requirements, &request)
+        .await
+        .unwrap();
+    assert_eq!(checked_stream.fingerprint(), ordinary_stream.fingerprint());
+}
+
+#[tokio::test]
+async fn unordered_dictionary_schema_roundtrips_through_public_analysis() {
+    assert_dictionary_schema_roundtrip(false).await;
+}
+
+#[tokio::test]
+async fn ordered_dictionary_schema_roundtrips_through_public_analysis() {
+    assert_dictionary_schema_roundtrip(true).await;
+}
+
 #[tokio::test]
 async fn aggregate_history_and_snapshot_append_edges_are_distinct() {
     use calc_flow::{Edge, PortEndpoint, QueryFinality, UpdateKind};
