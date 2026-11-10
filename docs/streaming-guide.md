@@ -903,6 +903,16 @@ continues to count cumulative accepted input, not live groups.
 
 ### SQL aggregate recovery compatibility
 
+`Runtime().capabilities()` lists SQL `state_version=2` with
+`state_layouts=(3, 4, 5)`: ordinary compact, retained input, and ordered compact
+state, respectively. The operator's semantic state version is separate from
+the checkpoint layout and its native accumulator semantics. Compact control
+records use `native_semantics=1` for layout 3 and `native_semantics=2` for
+layout 5; retained layout 4 has no native accumulator semantics field.
+These are stream checkpoints; the inventory does not provide batch query
+resume. Layout numbers belong to each operator: rolling layouts 5/6 are
+independent of SQL's formats.
+
 Compatible layout-3 compact and layout-4 retained checkpoints remain supported.
 A nonempty retained checkpoint resumes retained execution even if its query
 would compact in a fresh job. An explicit compact budget rejects that restore;
