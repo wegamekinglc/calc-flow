@@ -235,9 +235,33 @@ class BenchmarkWorkflowTests(unittest.TestCase):
                 self.assertNotIn(module, prepare)
                 self.assertIn(module, installed)
 
+    def test_array_and_p3_guards_use_installed_dependencies(self):
+        suite = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
+            encoding="utf-8"
+        )
+        prepare = suite.split("  build:", 1)[0]
+        native = suite.split("- name: Verify native Array benchmark scenarios\n", 1)[
+            1
+        ].split("      - name:", 1)[0]
+        warm = suite.split(
+            "- name: Verify benchmark controllers and warm-stream scenarios\n", 1
+        )[1].split("      - name:", 1)[0]
+        self.assertNotIn("scripts.test_native_array_benchmarks", prepare)
+        self.assertNotIn("test_profile_warm_stream_p3", prepare)
+        self.assertIn("if: matrix.id == 'python-overhead'", native)
+        self.assertIn("target/releases/candidate/*.whl", native)
+        self.assertIn("-m unittest scripts.test_native_array_benchmarks", native)
+        self.assertIn("if: matrix.id == 'warm-10'", warm)
+        self.assertIn(
+            "-m pytest \\\n            scripts/test_profile_warm_stream_p3.py -q", warm
+        )
+
     def test_script_tests_run_in_the_matching_workflow(self):
         linux = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
         suite = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
+            encoding="utf-8"
+        )
+        rust_release = (ROOT / ".github/workflows/release-rust.yml").read_text(
             encoding="utf-8"
         )
         self.assertNotIn("unittest discover", linux)
@@ -257,7 +281,13 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         for workflow in (linux, suite):
             for module in shared:
                 self.assertEqual(workflow.count(module), 1)
-        counts = Counter(re.findall(r"scripts\.test_[a-z0-9_]+", linux + suite))
+        references = re.findall(
+            r"scripts(?:\.test_[a-z0-9_]+|/test_[a-z0-9_]+\.py)",
+            linux + suite + rust_release,
+        )
+        counts = Counter(
+            name.replace("/", ".").removesuffix(".py") for name in references
+        )
         self.assertEqual(
             counts, {module: 2 if module in shared else 1 for module in expected}
         )

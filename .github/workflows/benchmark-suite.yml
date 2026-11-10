@@ -264,6 +264,13 @@ jobs:
             benchmarks/test_engine_comparison.py benchmarks/test_engine_stream.py \
             benchmarks/test_retained_stream.py benchmarks/test_sql_operators.py \
             benchmarks/test_polars_operators.py -q
+      - name: Verify native Array benchmark scenarios
+        if: matrix.id == 'python-overhead'
+        run: |
+          uv pip install --python target/benchmark-venv/bin/python --no-deps \
+            --target target/adapter-site target/releases/candidate/*.whl
+          PYTHONPATH=target/adapter-site:. JAX_PLATFORMS=cpu \
+            target/benchmark-venv/bin/python -m unittest scripts.test_native_array_benchmarks
       - name: Verify benchmark controllers and warm-stream scenarios
         if: matrix.id == 'warm-10'
         run: |
@@ -280,6 +287,9 @@ jobs:
             scripts.test_interval_acceptance
           PYTHONPATH=target/adapter-site:. JAX_PLATFORMS=cpu \
             target/benchmark-venv/bin/python -m pytest benchmarks/test_warm_stream.py -q
+          PYTHONPATH=target/adapter-site:. JAX_PLATFORMS=cpu \
+            target/benchmark-venv/bin/python -m pytest \
+            scripts/test_profile_warm_stream_p3.py -q
       - name: Verify RisingWave comparison support
         if: matrix.id == 'warm-10'
         run: |
