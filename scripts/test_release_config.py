@@ -771,6 +771,7 @@ class ReleaseConfigTests(unittest.TestCase):
             set(bench_targets(ROOT)),
             {
                 "core",
+                "native_array",
                 "stream_union",
                 "m4_state_window",
                 "stream_join_perf",
