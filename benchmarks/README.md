@@ -83,22 +83,23 @@ this complete comparison retain separate immutable evidence.
 
 ## Layout
 
-| Path                                               | Contents                                                         |
-|----------------------------------------------------|------------------------------------------------------------------|
-| `support.py`                                       | Scale selection, metric recording, and identity fingerprints     |
-| `engine_comparison.py`, `engine_stream.py`         | Correctness-gated SQL, native stream and external-engine cases   |
-| `warm_stream.py`                                   | Actual warm StreamingRunner append-to-Arrow measurements         |
-| `requirements.lock`                                | Hash-pinned shared Linux benchmark dependencies                  |
-| `array_support.py`, `test_array_*.py`              | Array API kernel, provider, plan, and ownership scopes           |
-| `symbolic_support.py`, `test_symbolic_baseline.py` | Symbolic baselines, milestone pairs, and stream lifecycle        |
-| `test_stream_operators.py`                         | End-to-end coverage of principal native stream operators         |
-| `test_program_engine.py`                           | Selected `Program.execute` SQL and streaming lifecycle cases     |
-| `test_datafusion.py`, `test_runtime.py`            | DataFusion operator scenarios and graph fan-out                  |
-| `test_rolling_kernel.py`                           | Paired rolling-kernel gate against a DataFusion window reference |
-| `rolling_indicator_comparison.py`                  | Standalone cross-library rolling comparison driver               |
-| `finance_python_rolling_runner.py`                 | Isolated Finance-Python worker for rolling and engine cases      |
-| `test_rolling_indicator_comparison.py`             | Correctness tests for the comparison harness                     |
-| `rolling/`, `symbolic/`                            | Frozen JSON and Markdown evidence referenced by this README      |
+| Path                                                 | Contents                                                           |
+|------------------------------------------------------|--------------------------------------------------------------------|
+| `support.py`                                         | Scale selection, metric recording, and identity fingerprints       |
+| `engine_comparison.py`, `engine_stream.py`           | Correctness-gated SQL, native stream and external-engine cases     |
+| `warm_stream.py`                                     | Actual warm StreamingRunner append-to-Arrow measurements           |
+| `requirements.lock`                                  | Hash-pinned shared Linux benchmark dependencies                    |
+| `array_support.py`, `test_array_*.py`                | Array API kernel, provider, plan, and ownership scopes             |
+| `native_array_*.py`, `test_native_array.py`          | Native eager, ingestion, ArrayExpr, Table bridge and stream APIs   |
+| `symbolic_support.py`, `test_symbolic_baseline.py`   | Symbolic baselines, milestone pairs, and stream lifecycle          |
+| `test_stream_operators.py`                           | End-to-end coverage of principal native stream operators           |
+| `test_program_engine.py`                             | Selected `Program.execute` SQL and streaming lifecycle cases       |
+| `test_datafusion.py`, `test_runtime.py`              | DataFusion operator scenarios and graph fan-out                    |
+| `test_rolling_kernel.py`                             | Paired rolling-kernel gate against a DataFusion window reference   |
+| `rolling_indicator_comparison.py`                    | Standalone cross-library rolling comparison driver                 |
+| `finance_python_rolling_runner.py`                   | Isolated Finance-Python worker for rolling and engine cases        |
+| `test_rolling_indicator_comparison.py`               | Correctness tests for the comparison harness                       |
+| `rolling/`, `symbolic/`                              | Frozen JSON and Markdown evidence referenced by this README        |
 
 Install and run the overhead suite:
 
@@ -162,6 +163,47 @@ The v2 suite covers DataFusion projections, filters, aggregates, joins,
 windows, trusted Python scalar UDFs, explicit session configuration, and
 repeated execution of a compiled plan. The runtime scenario covers graph
 fan-out.
+
+## Native Array API coverage
+
+`test_native_array.py` adds sixteen cases to each existing Python scale:
+eleven eager workloads (arithmetic, selection, sum, axis mean, matrix product,
+transpose/reshape, rolling mean, EWMA, RSI, ATR and all MACD components), two
+NumPy/Arrow ingestion cases, ArrayExpr collection, Table-to-Array-to-Table
+collection, and an owned MACD stream lifecycle. The stream uses four entities,
+640-row batches and a 20,000-row cap; every result records the actual row count.
+
+Fixtures and independent NumPy/scalar references are prepared before timing.
+Values, dtype, shape and null warm-up positions are checked before measurement
+and again afterward. Each case records input hashes, parameters, shapes,
+thread settings, dependency/machine/workload identities and the loaded native
+binary hash. Collection uses one correctness preflight, one warmup and ten
+single-call measured rounds.
+
+The scopes are public API boundaries: eager calls include Python/PyO3 dispatch
+and result allocation; ArrayExpr and Table collection include fresh planning;
+the owned stream includes startup, processing, Arrow concatenation and awaited
+cleanup. They have new identities and preserve existing NumPy/JAX scopes.
+Native-only additions absent from the baseline remain new coverage, with no
+fabricated baseline or speedup verdict.
+
+The Rust `native_array` Criterion target adds five direct library microcases:
+sum, rolling mean, flat-price RSI, constant-price MACD and matrix multiplication.
+It uses 1,024 constant Float64 samples and a 16-by-16 ones matrix, with analytic
+shape/value/null oracles outside timers. The scheduled Rust shard discovers
+this registered target automatically.
+
+Check native Python cases without collecting timings:
+
+```bash
+CALC_FLOW_BENCHMARK_SCALE=overhead \
+  uv run --extra benchmark pytest benchmarks/test_native_array.py \
+  --benchmark-disable -q
+```
+
+Use the normal scheduled collector for complete measurements. A local feature
+measurement still follows the five-case and ten-minute limits in
+[the suite protocol](../docs/benchmark-suite.md#feature-measurement-scope).
 
 ## ASOF settlement benchmark
 

@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-10: Extend the benchmark suite with sixteen native Array API cases
+  and five direct Rust microcases, numerical/null-mask oracles and fixed
+  sample collection. Restore scheduled preparation by accounting for verifier
+  tests in the Rust release workflow and running the P3 guards with pytest
+  after their benchmark dependencies are installed.
+
 - 2026-11-09: Add complete MACD line, signal and histogram outputs through
   native Rust owned state, Python `MacdOutputs` and shared Table declarations.
   Normalize all five parameters into one recurrence per entity, preserve the

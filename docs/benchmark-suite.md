@@ -34,6 +34,7 @@ On this page:
 
 - [Feature measurement scope](#feature-measurement-scope)
 - [Complete inventory](#complete-inventory)
+- [Native Array interfaces](#native-array-interfaces)
 - [Inputs, correctness and timing boundaries](#inputs-correctness-and-timing-boundaries)
 - [Streaming operator examples](#streaming-operator-examples)
 - [ASOF settlement measurements](#asof-settlement-measurements)
@@ -167,6 +168,38 @@ untimed warm output with a SHA-256 digest; the parent checks that warm output
 against the independent Arrow oracle. The additional native and Finance-Python
 rolling and cross-section cases run at every tier through 10M rows. `window_sum`
 and `asof_join` have no equivalent Finance-Python operator in this comparison.
+
+## Native Array interfaces
+
+The Python shards additionally collect sixteen native Array API cases per
+scale from `benchmarks/test_native_array.py`. Eleven eager cases cover
+arithmetic/selection, scalar and axis reductions, matrix operations and the
+shared rolling/indicator kernels. Two ingestion cases exercise immutable
+NumPy snapshots and read-only Arrow input. Separate cases measure ArrayExpr
+collection, a static-weight Table/Array/Table bridge, and a four-entity owned
+MACD stream. Its 640-row batches and 20,000-row cap are recorded explicitly.
+
+These cases validate numerical values, dtypes, shapes and null masks against
+independent finite-input references. They record a correctness preflight and
+one warmup outside ten single-call samples. Oracle construction, validation
+and identity hashing stay outside timers. Eager scopes include binding and
+allocation costs; collection scopes include fresh planning; stream scope
+includes the complete owned lifecycle through Arrow concatenation and cleanup.
+The native binary hash is evidence, separate from comparable dependencies.
+Input hashes, shapes, parameters and thread settings enter workload identity.
+
+The new Rust `native_array` target supplies five direct library microcases at
+fixed small sizes. Constant/flat inputs have analytic output and null-warmup
+oracles; the Python cases use bounded periodic prices. Both are discovered by
+the existing suite, with unchanged schedules, shards and historical NumPy/JAX
+timing contracts. Missing baseline-native cases are reported as new coverage.
+
+Native benchmark controller tests run in `python-overhead` after locked
+dependencies and the candidate wheel are installed. The P3 warm controller
+guards run with pytest in `warm-10`; they are function-style tests and must not
+be handed to unittest discovery. The preparation inventory also accounts for
+the Rust release workflow's existing verifier tests. Neither check is waived
+to make a failed preparation job pass.
 
 ## Inputs, correctness and timing boundaries
 
