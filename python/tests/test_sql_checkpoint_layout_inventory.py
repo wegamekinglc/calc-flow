@@ -8,6 +8,7 @@ from pathlib import Path
 import pyarrow as pa
 
 import calc_flow as cf
+from calc_flow._compat import zip
 
 
 class _CollectSink:

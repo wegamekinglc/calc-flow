@@ -113,3 +113,50 @@ The runtime brief's `.codex/references/{code-style,unit-test-style,component-bou
 are absent from this baseline; the actual repository AGENTS.md,
 `.codex/agents/cf-implementer.toml` and `.agents/skills/code-style/SKILL.md`
 provided the applicable local rules. No examples or component dependencies changed.
+
+## Python 3.9 review correction
+
+Review of `36c3f89bd834ffb443b888c59afbd452f8428083` identified that the
+new capture test called builtin `zip(strict=True)`, which Python 3.9 rejects.
+The correction imports the existing `calc_flow._compat.zip`; `strict=True`
+and every capture/result/digest/inventory assertion remain in place. Only
+the test import and this evidence section change in the follow-up.
+
+The existing CPython 3.9.25 interpreter ran the actual `actual = dict(zip(...))`
+value expression extracted from `_capture` with `ast`. Minimal column objects
+implement `to_pylist`; no Arrow or native package is imported. The probe binds
+only compatibility imports actually present in the test, loading the existing
+pure-Python helper via `runpy`. After verifying the expected mapping including
+a null key/value, it verifies that unequal lengths still raise `ValueError`.
+The probe remains under the checkout's ignored target tree.
+
+```bash
+python3.9 target/sql-checkpoint-layout-inventory/check-python39-expression.py
+```
+
+RED before the import: exit 1, `TypeError: zip() takes no keyword arguments`
+at the extracted call to `zip`, as expected.
+
+```bash
+PYTHONPATH=/home/wegamekinglc/anaconda3/lib/python3.13/site-packages \
+  python3.9 target/sql-checkpoint-layout-inventory/check-python39-expression.py
+```
+
+GREEN after the import: exit 0,
+`3.9.25 actual capture expression and strict length rejection passed; no native module imported`.
+The standalone 3.9 interpreter lacks `typing_extensions`; the explicit path
+reuses that already installed pure-Python dependency for `_compat.py`.
+This is expression/helper verification on 3.9, not a full 3.9 native test.
+
+```bash
+PYTHONPATH=target/sql-checkpoint-layout-inventory/python JAX_PLATFORMS=cpu \
+  python -m pytest python/tests/test_sql_checkpoint_layout_inventory.py -q \
+  --basetemp=target/sql-checkpoint-layout-inventory/review-fix
+```
+
+1 passed in 1.27s on CPython 3.13.9, using the original extension and adapter
+imports under `target/sql-checkpoint-layout-inventory/python`. Its native
+SHA-256 still matches the provenance above. Ruff 0.16.0 `check` and
+`format --check` passed for `python/tests/test_sql_checkpoint_layout_inventory.py`;
+`git diff --check` passed. The original Rust/native and byte-identity evidence
+is reused: no native rebuild, Rust rerun, full regression or performance run.
