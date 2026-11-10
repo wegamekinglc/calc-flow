@@ -99,7 +99,10 @@ pub(crate) fn compile_graph(
 
 /// Runs the validation passes that precede compilation and returns the
 /// deterministic topological order of the graph.
-fn validate_and_order(builder: &PipelineBuilder, requires_datafusion: bool) -> Result<Vec<String>> {
+pub(crate) fn validate_and_order(
+    builder: &PipelineBuilder,
+    requires_datafusion: bool,
+) -> Result<Vec<String>> {
     if requires_datafusion {
         builder.datafusion_config.validate()?;
     }

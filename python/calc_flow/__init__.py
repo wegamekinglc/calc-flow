@@ -123,13 +123,58 @@ from calc_flow.symbolic import (
     window,
     with_late_output,
 )
+from calc_flow.symbolic.query_analysis import (
+    AnalysisOptions,
+    Comparison,
+    ComparisonCutoff,
+    ComparisonOrdering,
+    HistoryScope,
+    InputInterpretation,
+    PortabilityRequest,
+    QueryAnalysis,
+    QueryDiagnostic,
+    QueryEdgeFacts,
+    QueryEdgeModeFacts,
+    QueryFinality,
+    QueryModeFacts,
+    QueryNodeFacts,
+    QueryOrderingFacts,
+    QueryRowOrder,
+    QuerySortKey,
+    QueryTemporalIdentity,
+    QueryTieOrder,
+    SupportStatus,
+    UpdateKind,
+)
 
 __version__ = "2026.11.2"
 Batch = _native.Batch
 ExecutionOptions = _native.ExecutionOptions
 ProviderContext = _native.ProviderContext
 RunResult = _native.RunResult
+
 __all__ = [
+    "AnalysisOptions",
+    "Comparison",
+    "ComparisonCutoff",
+    "ComparisonOrdering",
+    "HistoryScope",
+    "InputInterpretation",
+    "PortabilityRequest",
+    "QueryAnalysis",
+    "QueryDiagnostic",
+    "QueryEdgeFacts",
+    "QueryEdgeModeFacts",
+    "QueryFinality",
+    "QueryModeFacts",
+    "QueryNodeFacts",
+    "QueryOrderingFacts",
+    "QueryRowOrder",
+    "QuerySortKey",
+    "QueryTemporalIdentity",
+    "QueryTieOrder",
+    "SupportStatus",
+    "UpdateKind",
     "AsofJoinSide",
     "AsofJoinSpec",
     "AsofStateLimits",

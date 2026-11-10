@@ -48,6 +48,7 @@ mod json;
 mod operator;
 mod pipeline;
 mod project_store;
+mod query_analysis;
 mod runtime;
 mod state;
 mod state_memory_pool;
@@ -123,6 +124,12 @@ pub use project_store::{
     export_project_yaml, import_project_json, import_project_json_with_limit, import_project_yaml,
     import_project_yaml_with_limit,
 };
+pub use query_analysis::{
+    AnalysisOptions, Comparison, ComparisonCutoff, ComparisonOrdering, HistoryScope,
+    InputInterpretation, PortabilityRequest, QueryAnalysis, QueryDiagnostic, QueryEdgeFacts,
+    QueryEdgeModeFacts, QueryFinality, QueryModeFacts, QueryNodeFacts, QueryOrderingFacts,
+    QueryRowOrder, QuerySortKey, QueryTemporalIdentity, QueryTieOrder, SupportStatus, UpdateKind,
+};
 pub use runtime::{
     ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, StreamJobContext, StreamMessage,
     StreamMessageKind, edge_channel,
@@ -150,3 +157,6 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg(feature = "benchmark-internals")]
 #[doc(hidden)]
 pub mod benchmark_internals;
+
+#[doc(hidden)]
+pub use query_analysis::analyze_query_graph_json;

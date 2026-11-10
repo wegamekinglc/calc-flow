@@ -1657,6 +1657,13 @@ optional JAX paths are in
 
 ## Symbolic declarations and static analysis
 
+`Program.analyze(options=AnalysisOptions(portability=request))` adds immutable
+query history, update, finality, ordering and consumption-edge facts. Explicit
+`portability=request` on Program compilation and execution checks those facts
+before reading inputs or starting a job, including preparation-cache hits.
+See [query history and portability](query-history-portability.md) for requests,
+stable codes, comparison premises and proof limits.
+
 The [expression API reference](symbolic-api.md) covers typed declarations,
 `FeatureSet`, `Program`, static analysis, ordering, and the supported
 batch/stream compilation shapes. Use the [expression workflow guide](symbolic-workflows.md)

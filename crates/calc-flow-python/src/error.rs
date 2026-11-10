@@ -63,6 +63,23 @@ pub(crate) fn to_py_err(error: calc_flow::CalcFlowError) -> PyErr {
                 translated
             })
         }
+        calc_flow::CalcFlowError::QueryPortability { report } => Python::attach(|py| {
+            let translated = CompileError::new_err(message);
+            let attach = || -> PyResult<()> {
+                let encoded = serde_json::to_string(&report)
+                    .map_err(|error| ExecutionError::new_err(error.to_string()))?;
+                let value = py.import("json")?.call_method1("loads", (encoded,))?;
+                let projected = py
+                    .import("calc_flow.symbolic.query_analysis")?
+                    .getattr("_from_dict")?
+                    .call1((value,))?;
+                translated.value(py).setattr("query_analysis", projected)
+            };
+            match attach() {
+                Ok(()) => translated,
+                Err(error) => error,
+            }
+        }),
         calc_flow::CalcFlowError::Compile { .. } => CompileError::new_err(message),
         calc_flow::CalcFlowError::Operator { .. }
         | calc_flow::CalcFlowError::DataFusion { .. }
@@ -261,6 +278,55 @@ mod tests {
             ExpectedException::Execution,
             "task 17 panicked: connector invariant",
         );
+    }
+
+    #[test]
+    fn query_portability_errors_keep_the_immutable_report() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let builder = calc_flow::PipelineBuilder::new("unproved")
+            .unwrap()
+            .add_node(
+                "distinct",
+                Box::new(
+                    calc_flow::SqlOperator::new(
+                        "distinct",
+                        "SELECT DISTINCT x FROM input",
+                        vec!["input".into()],
+                        vec![],
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        let request = calc_flow::PortabilityRequest::new(
+            calc_flow::Comparison::FinalRelation,
+            calc_flow::HistoryScope::AcceptedHistory,
+            calc_flow::ComparisonCutoff::AllSourcesEof,
+        )
+        .unwrap();
+        let Err(error) = runtime.block_on(
+            builder.compile_batch_checked(&calc_flow::UdfRegistrySnapshot::default(), &request),
+        ) else {
+            panic!("unproved comparison compiled")
+        };
+        Python::initialize();
+        Python::attach(|py| {
+            let translated = to_py_err(error);
+            assert!(
+                translated.is_instance_of::<CompileError>(py),
+                "{translated}"
+            );
+            let report = translated.value(py).getattr("query_analysis").unwrap();
+            assert_eq!(
+                report
+                    .getattr("schema_version")
+                    .unwrap()
+                    .extract::<u32>()
+                    .unwrap(),
+                1
+            );
+            assert!(report.setattr("analysis_revision", 0).is_err());
+        });
     }
 
     #[test]

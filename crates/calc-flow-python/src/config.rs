@@ -753,6 +753,12 @@ impl PyRuntime {
         pyo3_arrow::PySchema::new(schema).into_pyarrow(py)
     }
 
+    fn _analyze_query_graph(&self, py: Python<'_>, declaration: &str) -> PyResult<String> {
+        let _snapshot = self.snapshot()?;
+        py.detach(|| calc_flow::analyze_query_graph_json(declaration))
+            .map_err(crate::error::to_py_err)
+    }
+
     fn _infer_sql_schema<'py>(
         &self,
         py: Python<'py>,

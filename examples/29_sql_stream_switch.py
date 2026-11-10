@@ -47,6 +47,11 @@ def main() -> None:
 
     for engine in ("sql", "streaming") if selected == "both" else (selected,):
         program = make_program(engine)
+        analysis = program.analyze().query
+        total = next(node for node in analysis.nodes if node.path == "outputs.totals")
+        assert total.batch.history == "current_batch"
+        assert total.stream.history == "accepted_history"
+        assert total.stream.update == "complete_snapshot"
         if engine == "sql":
             table = program.execute({"events": pa.concat_tables(batches)})["totals"]
             actual = [table.to_pydict()]
