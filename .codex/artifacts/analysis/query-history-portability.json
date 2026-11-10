@@ -1,0 +1,21 @@
+{
+  "build_commit": "93f06e2784aa8eeccaf6c74aff7cbcceddbe0e9f",
+  "base_commit": "2114e374441fa5099902f511bf23914c286d0c87",
+  "native_source_digest_format": "sha256(sorted UTF-8 path + NUL + file bytes + NUL), tracked crates/vendor/manifests/toolchain",
+  "native_source_sha256": "811247c48920b1c5d8691b5d4abb7ed475230bda2a337448e0206eb3a3535743",
+  "native_source_file_count": 1639,
+  "python_package_source_sha256": "fa14fa66a64fbb063354bbae5b4cd87638cd8523b90c01bf324da6b75cb7e463",
+  "python_package_path": "python/calc_flow/__init__.py",
+  "native_path": "target/query-history-portability/python/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+  "native_sha256": "191904d73010e17a55bc855d0995b4a1ff882d230b48027031c4f90f0b4de453",
+  "wheel_path": "target/query-history-portability/wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl",
+  "wheel_sha256": "f96fa975bf31673cbbeff71e31ab94e923fb4dfa76da3a76691b2fb3f038bf54",
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+  "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+  "pyarrow": "24.0.0",
+  "jax": "0.10.2",
+  "profile": "release; calc-flow and calc-flow-python opt-level=0, codegen-units=256; dependencies use normal release settings",
+  "cargo_target_dir": "target/query-history-portability/cargo",
+  "source_native_files": [],
+  "runtime_sources_differ_from_build_commit": false
+}

@@ -30,7 +30,9 @@ def test_row_local_report_and_checked_compile_preserve_identity():
     assert checked.fingerprint == ordinary.fingerprint
     assert program.fingerprint == before
     assert program.collect(
-        {"values": pa.table({"x": [-1, 2]})}, runtime=runtime, portability=_request()
+        {"values": pa.table({"x": [-1, None, 2]})},
+        runtime=runtime,
+        portability=_request(),
     )["result"].to_pydict() == {"x": [2]}
 
 
