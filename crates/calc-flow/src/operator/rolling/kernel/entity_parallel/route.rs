@@ -192,6 +192,12 @@ pub(crate) enum RouteStep {
     Invalid,
 }
 
+enum WordStep {
+    Loaded,
+    Poll,
+    Invalid,
+}
+
 pub(crate) struct RouteCursor<'a> {
     route: &'a LaneRoute,
     entity_ids: &'a [usize],
@@ -205,38 +211,50 @@ pub(crate) struct RouteCursor<'a> {
 
 impl RouteCursor<'_> {
     pub(crate) fn next_step(&mut self) -> Option<RouteStep> {
-        let Storage::Bitmap {
-            words, universe, ..
-        } = &self.route.storage
-        else {
-            let Storage::Explicit(rows) = &self.route.storage else {
-                unreachable!()
-            };
-            let row = rows.get(self.index).copied()?;
-            self.index += 1;
-            return Some(RouteStep::Row(row));
-        };
+        let route = self.route;
+        match &route.storage {
+            Storage::Explicit(rows) => {
+                let row = rows.get(self.index).copied()?;
+                self.index += 1;
+                Some(RouteStep::Row(row))
+            }
+            Storage::Bitmap {
+                words, universe, ..
+            } => self.next_bitmap_step(words, *universe),
+        }
+    }
+
+    fn next_bitmap_step(&mut self, words: &[u64], universe: usize) -> Option<RouteStep> {
         loop {
             if self.word != 0 {
                 let bit = self.word.trailing_zeros() as usize;
                 self.word &= self.word - 1;
-                return Some(self.decode(self.base.checked_add(bit), *universe));
+                return Some(self.decode(self.base.checked_add(bit), universe));
             }
-            let word = *words.get(self.index)?;
-            if self.index.is_multiple_of(4) && !self.polled {
-                self.polled = true;
-                return Some(RouteStep::Poll);
+            match self.load_bitmap_word(words)? {
+                WordStep::Loaded => {}
+                WordStep::Poll => return Some(RouteStep::Poll),
+                WordStep::Invalid => return Some(RouteStep::Invalid),
             }
-            self.polled = false;
-            let Some(base) = self.index.checked_mul(64) else {
-                return Some(RouteStep::Invalid);
-            };
-            self.base = base;
-            self.word = word;
-            self.index += 1;
-            #[cfg(test)]
-            super::ROUTE_WORD_VISITS.set(super::ROUTE_WORD_VISITS.get() + 1);
         }
+    }
+
+    fn load_bitmap_word(&mut self, words: &[u64]) -> Option<WordStep> {
+        let word = *words.get(self.index)?;
+        if self.index.is_multiple_of(4) && !self.polled {
+            self.polled = true;
+            return Some(WordStep::Poll);
+        }
+        self.polled = false;
+        let Some(base) = self.index.checked_mul(64) else {
+            return Some(WordStep::Invalid);
+        };
+        self.base = base;
+        self.word = word;
+        self.index += 1;
+        #[cfg(test)]
+        super::ROUTE_WORD_VISITS.set(super::ROUTE_WORD_VISITS.get() + 1);
+        Some(WordStep::Loaded)
     }
 
     fn decode(&self, row: Option<usize>, universe: usize) -> RouteStep {

@@ -1333,67 +1333,78 @@ fn test_entity_parallel_four_float_outputs_skip_repeated_row_validation() {
 }
 
 #[test]
-fn test_bitmap_result_repacking_and_stale_counts_keep_safe_coverage_errors() {
-    for change in ["repack", "tail", "short_count", "long_count"] {
-        let (seed, mut exits) = merge_fixture(4, 0);
-        let result = complete_result(&mut exits[0]);
-        match change {
-            "repack" => result.rows = Arc::new(result.rows.as_ref().clone()),
-            "tail" => Arc::make_mut(&mut result.rows)
+fn test_bitmap_result_repacking_keeps_safe_forward_validation() {
+    let (seed, mut exits) = merge_fixture(4, 0);
+    let result = complete_result(&mut exits[0]);
+    result.rows = Arc::new(result.rows.as_ref().clone());
+    MERGE_VALIDATION_VISITS.set(0);
+    ROUTE_WORD_VISITS.set(0);
+    let result = merge_numeric_results(seed, &mut exits, "job").unwrap();
+    assert!(ROUTE_WORD_VISITS.get() <= 2 * 64_000_usize.div_ceil(64) + 1);
+    assert!(MERGE_VALIDATION_VISITS.get() > 0);
+    for (column, array) in result.execution.columns.iter().enumerate() {
+        let array = array.as_any().downcast_ref::<Float64Array>().unwrap();
+        for (row, value) in array.values().iter().enumerate() {
+            assert_eq!(value.to_bits(), merge_value_bits(row, column));
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BitmapCorruption {
+    Tail,
+    ShortCount,
+    LongCount,
+}
+
+fn corrupt_bitmap_result(result: &mut NumericLaneResult, change: BitmapCorruption) {
+    match change {
+        BitmapCorruption::Tail => Arc::make_mut(&mut result.rows)
+            .bitmap_mut_for_test()
+            .unwrap()
+            .0
+            .push(1),
+        BitmapCorruption::ShortCount => {
+            *Arc::make_mut(&mut result.rows)
                 .bitmap_mut_for_test()
                 .unwrap()
-                .0
-                .push(1),
-            "short_count" => {
-                *Arc::make_mut(&mut result.rows)
-                    .bitmap_mut_for_test()
-                    .unwrap()
-                    .1 -= 1;
-                for column in result.columns_for_test() {
-                    *column = column.slice(0, column.len() - 1);
-                }
+                .1 -= 1;
+            for column in result.columns_for_test() {
+                *column = column.slice(0, column.len() - 1);
             }
-            "long_count" => {
-                *Arc::make_mut(&mut result.rows)
-                    .bitmap_mut_for_test()
-                    .unwrap()
-                    .1 += 1;
-                for column in result.columns_for_test() {
-                    *column = column.iter().chain([Some(1.0)]).collect();
-                }
-            }
-            _ => unreachable!(),
         }
+        BitmapCorruption::LongCount => {
+            *Arc::make_mut(&mut result.rows)
+                .bitmap_mut_for_test()
+                .unwrap()
+                .1 += 1;
+            for column in result.columns_for_test() {
+                *column = column.iter().chain([Some(1.0)]).collect();
+            }
+        }
+    }
+}
+
+#[test]
+fn test_bitmap_result_corrupt_tail_and_stale_counts_keep_safe_coverage_errors() {
+    for change in [
+        BitmapCorruption::Tail,
+        BitmapCorruption::ShortCount,
+        BitmapCorruption::LongCount,
+    ] {
+        let (seed, mut exits) = merge_fixture(4, 0);
+        let result = complete_result(&mut exits[0]);
+        corrupt_bitmap_result(result, change);
         MERGE_VALIDATION_VISITS.set(0);
         ROUTE_WORD_VISITS.set(0);
         let result = merge_numeric_results(seed, &mut exits, "job");
         assert!(ROUTE_WORD_VISITS.get() <= 2 * 64_000_usize.div_ceil(64) + 1);
         assert!(MERGE_VALIDATION_VISITS.get() > 0);
-        match change {
-            "repack" => {
-                let result = result.unwrap();
-                for (column, array) in result.execution.columns.iter().enumerate() {
-                    let array = array.as_any().downcast_ref::<Float64Array>().unwrap();
-                    for (row, value) in array.values().iter().enumerate() {
-                        assert_eq!(value.to_bits(), merge_value_bits(row, column));
-                    }
-                }
-            }
-            "short_count" => assert!(
-                result
-                    .err()
-                    .unwrap()
-                    .to_string()
-                    .contains("row coverage is incomplete")
-            ),
-            _ => assert!(
-                result
-                    .err()
-                    .unwrap()
-                    .to_string()
-                    .contains("row coverage has extra rows")
-            ),
-        }
+        let expected = match change {
+            BitmapCorruption::ShortCount => "row coverage is incomplete",
+            BitmapCorruption::Tail | BitmapCorruption::LongCount => "row coverage has extra rows",
+        };
+        assert!(result.err().unwrap().to_string().contains(expected));
     }
 }
 
