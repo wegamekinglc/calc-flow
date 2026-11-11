@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use calc_flow::arrow::{
-    array::Int64Array,
+    array::{Float64Array, Int64Array},
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
@@ -431,6 +431,7 @@ async fn check_stream_state(stream: &Program) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     check_aggregate().await?;
+    check_aggregate_groups().await?;
     check_unsigned_negation().await?;
     check_metadata_stream().await?;
     for shape in ["dataframe", "sql", "df_sql_df_sql", "sql_df_sql"] {
@@ -516,6 +517,9 @@ async fn check_aggregate() -> Result<()> {
             source.column("x")?.sum().alias("total")?,
             source.column("x")?.count().alias("non_null")?,
             calc_flow::count_rows().alias("rows")?,
+            source.column("x")?.min().alias("minimum")?,
+            source.column("x")?.max().alias("maximum")?,
+            source.column("x")?.mean().alias("mean")?,
         ],
         vec![],
     )?;
@@ -530,6 +534,18 @@ async fn check_aggregate() -> Result<()> {
     assert_eq!(
         schema.field(1),
         &Field::new("non_null", DataType::Int64, false)
+    );
+    assert_eq!(
+        schema.field(3),
+        &Field::new("minimum", DataType::Int64, true)
+    );
+    assert_eq!(
+        schema.field(4),
+        &Field::new("maximum", DataType::Int64, true)
+    );
+    assert_eq!(
+        schema.field(5),
+        &Field::new("mean", DataType::Float64, true)
     );
     let plan = program
         .compile_batch(&udfs, &CompileOptions::default())
@@ -551,6 +567,29 @@ async fn check_aggregate() -> Result<()> {
             vec![Some(non_null)]
         );
         assert_eq!(values(&out.outputs["result"], "rows"), vec![Some(rows)]);
+        assert_eq!(
+            values(&out.outputs["result"], "minimum"),
+            vec![sum.map(|_| 1)]
+        );
+        assert_eq!(
+            values(&out.outputs["result"], "maximum"),
+            vec![sum.map(|_| 3)]
+        );
+        let means = out.outputs["result"]
+            .table_payload()?
+            .batches()
+            .iter()
+            .flat_map(|record| {
+                record
+                    .column_by_name("mean")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .iter()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(means, vec![sum.map(|_| 2.0)]);
     }
     let latest = Program::new(
         "external-replacement",
@@ -575,5 +614,41 @@ async fn check_aggregate() -> Result<()> {
         vec![Some(1), Some(6)]
     );
     println!("aggregate: root exports, exact schema, empty/NULL oracles and latest 1/6 passed");
+    Ok(())
+}
+
+async fn check_aggregate_groups() -> Result<()> {
+    let source = source_input()?;
+    let grouped = source.aggregate(
+        vec![calc_flow::count_rows().alias("rows")?],
+        vec!["x".into()],
+    )?;
+    let program = Program::new(
+        "groups",
+        CompileMode::Batch,
+        BTreeMap::from([("result".into(), grouped)]),
+    )?;
+    let plan = program
+        .compile_batch(&UdfRegistry::new().snapshot(), &CompileOptions::default())
+        .await?;
+    let out = plan
+        .execute(
+            BTreeMap::from([("events".into(), data(vec![Some(1), None, Some(1)])?)]),
+            ExecutionOptions::default(),
+        )
+        .await?;
+    let mut actual = values(&out.outputs["result"], "x")
+        .into_iter()
+        .zip(values(&out.outputs["result"], "rows"))
+        .collect::<Vec<_>>();
+    actual.sort();
+    assert_eq!(actual, vec![(None, Some(1)), (Some(1), Some(2))]);
+    let empty = plan
+        .execute(
+            BTreeMap::from([("events".into(), data(vec![])?)]),
+            ExecutionOptions::default(),
+        )
+        .await?;
+    assert_eq!(empty.outputs["result"].num_rows(), 0);
     Ok(())
 }
