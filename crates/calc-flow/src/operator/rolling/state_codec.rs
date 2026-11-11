@@ -2,20 +2,21 @@
 
 use std::{borrow::Cow, collections::BTreeSet};
 
+use super::history::{PreparedHistoryUpdate, prepare_scalar_appends};
 use super::{
     Arc, Array, ArrayRef, BTreeMap, Batch, BufferedRow, CompiledFrame, CompiledRollingSpec,
     CompiledWindowGroup, Cursor, DataType, DecodedRollingState, Deserialize, Deserializer,
     DictionaryTracker, Digest, EntityRollingState, EwmaAccumulator, ExtremaAccumulator, ExtremaKey,
-    Field, FileReader, FileWriter, Float64Array, HashMap, HistoryUpdates, IpcSchemaEncoder,
-    KeyValue, ROLLING_COLUMNAR_STATE_LAYOUT_VERSION, ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION,
+    Field, FileReader, FileWriter, Float64Array, HashMap, IpcSchemaEncoder, KeyValue,
+    ROLLING_COLUMNAR_STATE_LAYOUT_VERSION, ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION,
     ROLLING_EWMA_STATE_LAYOUT_VERSION, ROLLING_INDICATOR_STATE_LAYOUT_VERSION,
     ROLLING_MACD_STATE_LAYOUT_VERSION, RecordBatch, Result, RollingHistories, RollingKernelState,
     RollingMetricsRecorder, RollingSnapshotMetadata, RollingStage, RowIdentity, ScalarValue,
     Schema, SchemaRef, SegmentDescriptor, Sha256, StateInventory, StateRowOrderKey, SumClass,
     TableBatch, UInt8Array, UInt64Array, Value, WindowState, checkpoint_mismatch, concat_batches,
-    evict_retained_history, ewma_entity_values, float_sample, format_error, fresh_windows,
-    group_rows_by_entity, history_event_time, internal_error, is_valid_sample, kernel,
-    new_null_array, operator_error, spec_uses_stable_v2, state_format, state_v3,
+    ewma_entity_values, float_sample, format_error, fresh_windows, history_event_time,
+    internal_error, is_valid_sample, kernel, new_null_array, operator_error, spec_uses_stable_v2,
+    state_format, state_v3,
 };
 use kernel::{StreamKernelUpdate, TypedStreamTransition};
 
@@ -1074,7 +1075,11 @@ pub(super) fn build_typed_batch_output(
         })
 }
 
-type TypedStreamOutput = (RecordBatch, Option<TypedStreamTransition>, HistoryUpdates);
+type TypedStreamOutput = (
+    RecordBatch,
+    Option<TypedStreamTransition>,
+    PreparedHistoryUpdate,
+);
 
 // Bootstrap, transition, output slicing, and history replacement form one
 // failure-atomic stream update; none of them may escape independently.
@@ -1106,7 +1111,7 @@ pub(super) fn build_typed_stream_output(
     };
     let touched = {
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
-        typed_history_updates(rows, histories, compiled, &update, node_id)?
+        prepare_scalar_appends(rows, histories, compiled, &update, node_id)?
     };
     Ok(Some((
         record,
@@ -1301,45 +1306,6 @@ fn build_value_record(
             &format!("typed rolling restore entity batch is invalid: {error}"),
         )
     })
-}
-
-fn typed_history_updates(
-    rows: &[BufferedRow],
-    histories: &RollingHistories,
-    compiled: &CompiledRollingSpec,
-    update: &StreamKernelUpdate,
-    node_id: &str,
-) -> Result<HistoryUpdates> {
-    let seeds = update.recurrence_seeds();
-    let has_ewma = compiled
-        .window_groups
-        .iter()
-        .any(|group| matches!(group, CompiledWindowGroup::Ewma { .. }));
-    group_rows_by_entity(rows)
-        .into_iter()
-        .map(|(entity, indices)| {
-            let mut state = histories.by_entity.get(entity).cloned().unwrap_or_default();
-            let transitions = u64::try_from(indices.len()).map_err(|_| {
-                operator_error(node_id, "rolling micro-batch row count does not fit u64")
-            })?;
-            state.windows = recurrence_windows(compiled, &seeds[update.entity_ids()[indices[0]]]);
-            if state.windows.is_empty() && has_ewma {
-                state.windows = fresh_windows(compiled);
-            }
-            state
-                .rows
-                .extend(indices.into_iter().map(|index| rows[index].values.clone()));
-            state.transition_count =
-                state
-                    .transition_count
-                    .checked_add(transitions)
-                    .ok_or_else(|| {
-                        operator_error(node_id, "rolling entity transition count overflowed")
-                    })?;
-            evict_retained_history(&mut state, compiled);
-            Ok((entity.clone(), state))
-        })
-        .collect()
 }
 
 pub(super) fn recurrence_windows(

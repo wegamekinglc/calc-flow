@@ -52,6 +52,8 @@ mod compile;
 mod cumulative;
 use cumulative::CumulativeAccumulator;
 mod generated_kernel_manifest;
+mod history;
+use history::PreparedHistoryUpdate;
 mod indicators;
 pub(crate) use indicators::{IndicatorRollingRecord, RollingIoReservation};
 mod kernel;
@@ -1938,15 +1940,14 @@ impl RollingOperator {
     fn projected_rows_charge(
         &self,
         rows: &[BufferedRow],
-        touched: &HistoryUpdates,
+        touched: &PreparedHistoryUpdate,
         node: &str,
     ) -> Result<(StateCharge, StateCharge)> {
         let current = self
             .state
             .charge
             .checked_sub(budget::buffered_charge(rows.iter(), node)?)?;
-        let (old_histories, new_histories) =
-            budget::changed_histories_charge(&self.state.histories, touched, node)?;
+        let (old_histories, new_histories) = touched.changed_charge(&self.state.histories, node)?;
         let next = current
             .checked_sub(old_histories)?
             .checked_add(new_histories, node)?;
@@ -2156,7 +2157,7 @@ impl RollingOperator {
                     context.operator_id(),
                 )?,
                 None,
-                computed.touched,
+                PreparedHistoryUpdate::Replace(computed.touched),
             )
         };
         let (current_charge, next_charge) =
@@ -2211,7 +2212,7 @@ impl RollingOperator {
             .checked_add(chunk_count)
             .ok_or_else(|| operator_error(context.operator_id(), "output sequence overflowed"))?;
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
-        state.histories.apply(touched);
+        touched.commit(&mut state.histories);
         TypedStreamTransition::replace(next_kernel_state, &mut state.typed_kernel_state);
         state.charge = next_charge;
         Ok(())

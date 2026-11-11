@@ -14,6 +14,7 @@ from scripts.benchmark_suite.rust_provenance import (
     compiled_dependencies,
     with_compiled_dependencies,
 )
+from scripts.toolkit import git_output
 
 REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
 
@@ -82,7 +83,148 @@ def add_vendored_dependency(root: Path, messages: list[dict]) -> list[dict]:
     return [*messages[:-1], dependency, messages[-1]]
 
 
+def canonical_vendor_inputs(parent: Path) -> tuple[Path, Path, Path, list[dict]]:
+    canonical = parent / "repository"
+    canonical.mkdir()
+    _, messages = write_inputs(canonical)
+    messages = add_vendored_dependency(canonical, messages)
+    for arguments in (
+        ["init", "--quiet"],
+        ["config", "user.email", "benchmark@example.invalid"],
+        ["config", "user.name", "Benchmark fixture"],
+        ["config", "commit.gpgsign", "false"],
+        ["add", "Cargo.toml", "Cargo.lock", "vendor"],
+        ["commit", "--quiet", "-m", "Record vendor fixture"],
+    ):
+        git_output(canonical, *arguments)
+    measured = parent / "measured"
+    git_output(
+        canonical, "worktree", "add", "--detach", "--quiet", str(measured), "HEAD"
+    )
+    messages[1]["manifest_path"] = str(measured / "crates/calc-flow/Cargo.toml")
+    return canonical, measured, measured / "build-core.jsonl", messages
+
+
 class CompiledDependencyTests(unittest.TestCase):
+    def test_canonical_vendor_is_same_dependency_with_raw_mapping_evidence(self):
+        with TemporaryDirectory() as raw:
+            canonical, root, log, messages = canonical_vendor_inputs(Path(raw))
+            original = copy.deepcopy(messages)
+            canonical_result = measure(root, log, messages)
+            local = copy.deepcopy(messages)
+            vendor = root / "vendor/arrow-ipc"
+            local[-2].update(
+                manifest_path=str(vendor / "Cargo.toml"),
+                package_id=f"path+{vendor.as_uri()}#59.2.0",
+            )
+            self.assertEqual(canonical_result, measure(root, log, local))
+            measure(root, log, messages)
+            identity = with_compiled_dependencies(
+                {"dependency_identity": {"rustc": "1.94", "cargo": "1.94"}},
+                root,
+                {"core": log},
+            )
+            mapping = identity["canonical_vendor_mappings"]["core"][0]
+            self.assertEqual(mapping["manifest_path"], messages[-2]["manifest_path"])
+            self.assertEqual(mapping["package_id"], messages[-2]["package_id"])
+            self.assertEqual(mapping["logical_source"], "path+vendor/arrow-ipc")
+            self.assertEqual(mapping["canonical_root"], str(canonical))
+            self.assertRegex(mapping["vendor_tree"], "^[0-9a-f]{40}$")
+            self.assertRegex(mapping["source_sha256"], "^[0-9a-f]{64}$")
+            self.assertEqual(messages, original)
+
+    def test_canonical_vendor_ignores_unrelated_dirty_product_files(self):
+        with TemporaryDirectory() as raw:
+            canonical, root, log, messages = canonical_vendor_inputs(Path(raw))
+            before = measure(root, log, messages)
+            (canonical / "unrelated.txt").write_text("caller changes\n")
+            self.assertEqual(measure(root, log, messages), before)
+
+    def test_canonical_vendor_accepts_modern_package_ids_without_path_fingerprints(
+        self,
+    ):
+        with TemporaryDirectory() as raw:
+            _, root, log, messages = canonical_vendor_inputs(Path(raw))
+            before = measure(root, log, messages)
+            messages[-2]["package_id"] = messages[-2]["package_id"].replace(
+                "#59.2.0", "#arrow-ipc@59.2.0"
+            )
+            self.assertEqual(measure(root, log, messages), before)
+
+    def test_canonical_vendor_rejects_clean_but_different_vendor_commits(self):
+        with TemporaryDirectory() as raw:
+            canonical, root, log, messages = canonical_vendor_inputs(Path(raw))
+            (canonical / "vendor/arrow-ipc/src/lib.rs").write_text(
+                "pub fn upgraded() {}\n"
+            )
+            for arguments in (
+                ["add", "vendor"],
+                ["commit", "--quiet", "-m", "Change canonical vendor"],
+            ):
+                git_output(canonical, *arguments)
+            with self.assertRaisesRegex(ValueError, "content differs"):
+                measure(root, log, messages)
+
+    def test_canonical_vendor_rejects_changed_or_untracked_sources(self):
+        for change in ("changed", "both-dirty", "untracked", "ignored"):
+            with self.subTest(change=change), TemporaryDirectory() as raw:
+                canonical, root, log, messages = canonical_vendor_inputs(Path(raw))
+                vendor = Path("vendor/arrow-ipc")
+                if change in ("changed", "both-dirty"):
+                    (canonical / vendor / "src/lib.rs").write_text(
+                        "pub fn changed() {}\n"
+                    )
+                    if change == "both-dirty":
+                        (root / vendor / "src/lib.rs").write_text(
+                            "pub fn changed() {}\n"
+                        )
+                else:
+                    for source in (canonical, root):
+                        (source / vendor / "untracked.rs").write_text("// generated\n")
+                    if change == "ignored":
+                        (canonical / ".git/info/exclude").write_text("untracked.rs\n")
+                with self.assertRaises(ValueError):
+                    measure(root, log, messages)
+
+    def test_canonical_vendor_rejects_other_repositories_and_other_worktrees(self):
+        with TemporaryDirectory() as raw:
+            parent = Path(raw)
+            canonical, root, log, messages = canonical_vendor_inputs(parent)
+            other = parent / "other-worktree"
+            git_output(
+                canonical, "worktree", "add", "--detach", "--quiet", str(other), "HEAD"
+            )
+            outside = parent / "outside"
+            outside.mkdir()
+            _, other_messages = write_inputs(outside)
+            add_vendored_dependency(outside, other_messages)
+            for location in (other, outside):
+                changed = copy.deepcopy(messages)
+                vendor = location / "vendor/arrow-ipc"
+                changed[-2].update(
+                    manifest_path=str(vendor / "Cargo.toml"),
+                    package_id=f"path+{vendor.as_uri()}#59.2.0",
+                )
+                with self.subTest(location=location), self.assertRaises(ValueError):
+                    measure(root, log, changed)
+
+    def test_canonical_vendor_rejects_symlink_and_package_id_escape(self):
+        with TemporaryDirectory() as raw:
+            canonical, root, log, messages = canonical_vendor_inputs(Path(raw))
+            changed = copy.deepcopy(messages)
+            changed[-2]["package_id"] = f"path+{root.as_uri()}#59.2.0"
+            with self.assertRaises(ValueError):
+                measure(root, log, changed)
+            vendor = canonical / "vendor/arrow-ipc"
+            outside = canonical.parent / "aliased-vendor"
+            vendor.rename(outside)
+            try:
+                vendor.symlink_to(outside, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+            with self.assertRaises(ValueError):
+                measure(root, log, messages)
+
     def test_vendored_patch_records_relative_source_and_content_fingerprint(self):
         with TemporaryDirectory() as raw:
             root = Path(raw)

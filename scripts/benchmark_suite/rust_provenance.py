@@ -6,7 +6,7 @@ import json
 import tomllib
 from pathlib import Path
 
-from scripts.toolkit import canonical_json, fingerprint_json, sha256_file
+from scripts.toolkit import canonical_json, fingerprint_json, git_output, sha256_file
 
 
 def _encoded(value: object) -> str:
@@ -91,10 +91,97 @@ def _vendored_source_fingerprint(directory: Path) -> str:
     )
 
 
-def _package_identity(root: Path, artifact: dict, locked: dict) -> dict:
+def _clean_vendor_tree(root: Path, relative: Path) -> str:
+    if git_output(
+        root,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--ignored=matching",
+        "--",
+        relative.as_posix(),
+    ):
+        raise ValueError("canonical vendored dependency has dirty or untracked sources")
+    tracked = set(
+        git_output(root, "ls-files", "-z", "--", relative.as_posix()).split("\0")
+    )
+    tracked.discard("")
+    actual = {
+        path.relative_to(root).as_posix()
+        for path in (root / relative).rglob("*")
+        if path.is_file()
+    }
+    if not actual or tracked != actual:
+        raise ValueError("canonical vendored dependency file inventory is not tracked")
+    return git_output(root, "rev-parse", f"HEAD:{relative.as_posix()}")
+
+
+def _canonical_vendor_package(root: Path, artifact: dict, locked: dict) -> tuple:
+    common = Path(
+        git_output(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    ).resolve()
+    canonical = common.parent
+    if (
+        common.name != ".git"
+        or Path(git_output(canonical, "rev-parse", "--show-toplevel")).resolve()
+        != canonical
+    ):
+        raise ValueError("canonical vendored dependency needs the main worktree")
+    if (
+        Path(
+            git_output(
+                canonical, "rev-parse", "--path-format=absolute", "--git-common-dir"
+            )
+        ).resolve()
+        != common
+    ):
+        raise ValueError("canonical vendored dependency belongs to another repository")
+    manifest = Path(artifact["manifest_path"])
+    try:
+        relative = manifest.parent.relative_to(canonical)
+    except ValueError as error:
+        raise ValueError(
+            "canonical vendored dependency is outside the main worktree"
+        ) from error
+    source = f"path+{relative.as_posix()}"
+    package = locked.get(source)
+    if (
+        package is None
+        or not relative.is_relative_to("vendor")
+        or manifest.name != "Cargo.toml"
+        or manifest.resolve() != manifest
+        or artifact["package_id"]
+        not in (
+            f"path+{manifest.parent.as_uri()}#{package['version']}",
+            f"path+{manifest.parent.as_uri()}#{package['name']}@{package['version']}",
+        )
+    ):
+        raise ValueError("invalid canonical vendored dependency path or package ID")
+    measured_tree = _clean_vendor_tree(root, relative)
+    canonical_tree = _clean_vendor_tree(canonical, relative)
+    if (
+        canonical_tree != measured_tree
+        or _vendored_source_fingerprint(manifest.parent) != package["source_sha256"]
+    ):
+        raise ValueError(
+            "canonical vendored dependency content differs from the worktree"
+        )
+    return package, {
+        "package_id": artifact["package_id"],
+        "manifest_path": artifact["manifest_path"],
+        "logical_source": source,
+        "canonical_root": str(canonical),
+        "measured_root": str(root),
+        "git_common_dir": str(common),
+        "vendor_tree": canonical_tree,
+        "source_sha256": package["source_sha256"],
+    }
+
+
+def _package_identity(root: Path, artifact: dict, locked: dict) -> tuple:
     manifest = Path(artifact["manifest_path"])
     if manifest == root / "crates/calc-flow/Cargo.toml":
-        return {"workspace_package": "crates/calc-flow"}
+        return {"workspace_package": "crates/calc-flow"}, None
     package_id = artifact["package_id"]
     package = locked.get(package_id) if package_id.startswith("registry+") else None
     if (
@@ -110,20 +197,25 @@ def _package_identity(root: Path, artifact: dict, locked: dict) -> dict:
         ):
             package = None
     if package is None:
-        raise ValueError(f"unrecognized compiled dependency: {artifact['package_id']}")
-    return package
+        if manifest.name != "Cargo.toml" or manifest.is_relative_to(root):
+            raise ValueError(
+                f"unrecognized compiled dependency: {artifact['package_id']}"
+            )
+        return _canonical_vendor_package(root, artifact, locked)
+    return package, None
 
 
-def _artifact_identity(root: Path, artifact: dict, locked: dict) -> dict:
+def _artifact_identity(root: Path, artifact: dict, locked: dict) -> tuple:
+    package, mapping = _package_identity(root, artifact, locked)
     return {
-        "package": _package_identity(root, artifact, locked),
+        "package": package,
         "target": {
             key: artifact["target"][key]
             for key in ("name", "kind", "crate_types", "edition")
         },
         "features": sorted(artifact["features"]),
         "profile": artifact["profile"],
-    }
+    }, mapping
 
 
 def _build_messages(name: str, log: Path) -> list[dict]:
@@ -138,14 +230,19 @@ def _build_messages(name: str, log: Path) -> list[dict]:
     return messages
 
 
-def _build_identity(root: Path, name: str, log: Path, locked: dict) -> list[dict]:
-    artifacts = [
+def _build_identity(root: Path, name: str, log: Path, locked: dict) -> tuple:
+    records = [
         _artifact_identity(root, row, locked)
         for row in _build_messages(name, log)
         if row.get("reason") == "compiler-artifact"
     ]
+    artifacts = [record[0] for record in records]
+    mappings = [record[1] for record in records if record[1] is not None]
     _validate_artifacts(name, artifacts)
-    return [json.loads(row) for row in sorted({_encoded(row) for row in artifacts})]
+    return (
+        [json.loads(row) for row in sorted({_encoded(row) for row in artifacts})],
+        [json.loads(row) for row in sorted({_encoded(row) for row in mappings})],
+    )
 
 
 def _is_benchmark(name: str, row: dict) -> bool:
@@ -172,13 +269,23 @@ def compiled_dependencies(
     Registry checksums and declared vendor patch contents identify dependencies
     independently of checkout locations. Other dependency sources fail closed.
     """
+    return _compiled_dependency_records(root, logs, build_roots=build_roots)[0]
+
+
+def _compiled_dependency_records(
+    root: Path, logs: dict[str, Path], *, build_roots: dict[str, Path] | None = None
+) -> tuple:
     if not logs:
         raise ValueError("missing Rust benchmark build logs")
     locked = _locked_packages(root)
-    return {
+    records = {
         name: _build_identity((build_roots or {}).get(name, root), name, log, locked)
         for name, log in sorted(logs.items())
     }
+    return (
+        {name: record[0] for name, record in records.items()},
+        {name: record[1] for name, record in records.items() if record[1]},
+    )
 
 
 def with_compiled_dependencies(
@@ -189,14 +296,16 @@ def with_compiled_dependencies(
     build_roots: dict[str, Path] | None = None,
 ) -> dict:
     """Preserve full-lock provenance and add the compiled comparison identity."""
+    builds, mappings = _compiled_dependency_records(root, logs, build_roots=build_roots)
     dependency_identity = {
         "schema": "calc-flow.compiled-benchmark-dependencies.v1",
         "rustc": identity["dependency_identity"]["rustc"],
         "cargo": identity["dependency_identity"]["cargo"],
-        "builds": compiled_dependencies(root, logs, build_roots=build_roots),
+        "builds": builds,
     }
     return {
         **identity,
+        "canonical_vendor_mappings": mappings,
         "compiled_dependency_identity": dependency_identity,
         "compiled_dependency_fingerprint": fingerprint_json(
             dependency_identity, ensure_ascii=True
