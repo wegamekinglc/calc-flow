@@ -1,30 +1,36 @@
 {
   "issue": "DAL-514",
   "baseline_sha": "c4f1749c0595ed3df0fe7eaf4c6331c6093dcfab",
-  "validated_source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+  "validated_source_sha": "1d3147fc5375b83964158833e0129129c8337c89",
   "branch": "feature/dal-514-aggregate-replacement",
   "native": {
-    "package": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/ci-python/calc_flow/__init__.py",
-    "extension": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/ci-python/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+    "wheel": "target/review-fixes/wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl",
+    "wheel_sha256": "257f9008de1c8551bf49edc2807643440915efaa5376a20bf9b3bc429b221945",
+    "package": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-6355fe6cd3ea/workdir/calc-flow/target/review-fixes/site/calc_flow/__init__.py",
+    "extension": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-6355fe6cd3ea/workdir/calc-flow/target/review-fixes/site/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+    "extension_sha256": "9343f4a367e95056f1e8188b9aad6e4447f6584dedf9d75c2806111bcecbccdb",
+    "python_source_files_verified": 55,
+    "source_manifest_files": 2115,
+    "source_stable": true,
+    "source_manifest_sha256": "e1195409f2970014db15a4ba6821677c004c068f8008051027f6cc1d42de40f8",
     "python_version": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
     "pyarrow": "24.0.0",
-    "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
     "interpreter": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
-    "wheel": "target/aggregate/ci-wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl",
-    "wheel_sha256": "33ba324b056c3c300ec54d620d0b4ad16b0a28c3449318db985f1b55ac757f50",
-    "extension_sha256": "dde797aca5962739faf5c136bbd6383492a733f43e429f439a886a0e302e61e8",
-    "python_source_files_verified": 55,
-    "source_manifest_sha256": "314b1eae2a3e50e3cd2d0ae829c1c8ccfd8967e691028fcbeb7674ef42740626",
-    "python39_syntax_files": 54,
-    "source_manifest_commit_verified_files": 1154
+    "import_verified": true,
+    "source_sha": "1d3147fc5375b83964158833e0129129c8337c89",
+    "source_manifest_commit_verified_files": 2115
   },
   "component_trees": {
-    "core": "124068c90da0662733f998d6ec34751835be6388",
-    "binding": "fd8dd7cc31ccf1d867c5df0f99cc87c5bca5ec9c",
-    "python": "168d5c6cbde1764f42ade4acb8beab4a2f95d2ca",
+    "core": "3b4ff71c8031e3078dc1f83cdb5ab3fa85b50365",
+    "binding": "105c8ddb89f68cdf6a839e5a78903ddf0311e83a",
+    "python": "83d14621b5c32dff61b3d713ebe5d65ad9311c40",
     "snapshot_policy": "48e35d5cab7b5213ab93c841f9e8f80d94c5f00e"
   },
   "changed_files": [
+    ".codex/artifacts/analysis/relational-aggregate-replacement-independent-tests.json",
+    ".codex/artifacts/analysis/relational-aggregate-replacement-independent-tests.md",
+    ".codex/artifacts/analysis/relational-aggregate-replacement.json",
+    ".codex/artifacts/analysis/relational-aggregate-replacement.md",
     ".codex/artifacts/api-notes/relational-aggregate-replacement.md",
     "crates/calc-flow-python/src/continuous.rs",
     "crates/calc-flow-python/src/error.rs",
@@ -45,6 +51,7 @@
     "crates/calc-flow/src/pipeline/analysis.rs",
     "crates/calc-flow/src/pipeline/stream.rs",
     "crates/calc-flow/src/program.rs",
+    "crates/calc-flow/src/program/admission_tests.rs",
     "crates/calc-flow/src/program/lower.rs",
     "crates/calc-flow/src/query_analysis.rs",
     "crates/calc-flow/src/query_analysis/sql.rs",
@@ -73,6 +80,8 @@
     "python/tests/test_aggregate_replacement.py",
     "python/tests/test_capabilities.py",
     "python/tests/test_query_history_portability.py",
+    "python/tests/test_sql_checkpoint_layout_inventory.py",
+    "python/tests/test_symbolic_expr.py",
     "python/tests/test_update_semantics.py"
   ],
   "verification": [
@@ -833,6 +842,252 @@
       "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "log_tail": "",
       "phase": "codacy_followup"
+    },
+    {
+      "name": "group-key-red",
+      "phase": "review_followup",
+      "source_sha": "12ca086f0de24211f76f5168e5d7767e92fafc43",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--lib",
+        "program::admission_tests::replacement_group_keys_resolve_equivalent_bound_columns",
+        "--",
+        "--exact"
+      ],
+      "environment": {
+        "CARGO_TARGET_DIR": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug",
+        "CARGO_BUILD_JOBS": "2"
+      },
+      "exit_code": 101,
+      "expected_exit": 101,
+      "result": "Expected update_interpretation_mismatch on SELECT input.g ... GROUP BY g; 0 passed / 1 failed after the same-form control succeeded.",
+      "log": "target/review-fixes/red.log",
+      "log_sha256": "6092ca8bfe1d8d64389e46d9be9f9b021b852e57ba4469cd982ea7e280fcc83e",
+      "log_tail": "   Compiling arrow-ipc v59.2.0 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-6355fe6cd3ea/workdir/calc-flow/vendor/arrow-ipc)\n   Compiling arrow v59.2.0\n   Compiling datafusion-common v55.0.0\n   Compiling datafusion-expr-common v55.0.0\n   Compiling datafusion-physical-expr-common v55.0.0\n   Compiling datafusion-functions-aggregate-common v55.0.0\n   Compiling datafusion-functions-window-common v55.0.0\n   Compiling datafusion-expr v55.0.0\n   Compiling datafusion-physical-expr v55.0.0\n   Compiling datafusion-execution v55.0.0\n   Compiling datafusion-functions v55.0.0\n   Compiling datafusion-functions-aggregate v55.0.0\n   Compiling datafusion-physical-plan v55.0.0\n   Compiling datafusion-session v55.0.0\n   Compiling datafusion-physical-expr-adapter v55.0.0\n   Compiling datafusion-datasource v55.0.0\n   Compiling datafusion-catalog v55.0.0\n   Compiling datafusion-pruning v55.0.0\n   Compiling datafusion-functions-nested v55.0.0\n   Compiling datafusion-sql v55.0.0\n   Compiling datafusion-physical-optimizer v55.0.0\n   Compiling datafusion-datasource-csv v55.0.0\n   Compiling datafusion-datasource-arrow v55.0.0\n   Compiling datafusion-datasource-json v55.0.0\n   Compiling datafusion-optimizer v55.0.0\n   Compiling datafusion-functions-window v55.0.0\n   Compiling datafusion-functions-table v55.0.0\n   Compiling datafusion-catalog-listing v55.0.0\n   Compiling datafusion v55.0.0\n   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-6355fe6cd3ea/workdir/calc-flow/crates/calc-flow)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 12m 57s\n     Running unittests src/lib.rs (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug/debug/deps/calc_flow-a032a9f4fe8a06a3)\n\nrunning 1 test\ntest program::admission_tests::replacement_group_keys_resolve_equivalent_bound_columns ... FAILED\n\nfailures:\n\n---- program::admission_tests::replacement_group_keys_resolve_equivalent_bound_columns stdout ----\n\nthread 'program::admission_tests::replacement_group_keys_resolve_equivalent_bound_columns' (74404) panicked at crates/calc-flow/src/program/admission_tests.rs:229:37:\nSELECT input.g, SUM(input.x) AS total FROM input GROUP BY g: outputs.result.sql.tables.input: update_interpretation_mismatch: latest_relation requires complete replacement at this input; producer emits complete_snapshot but consumer appends; operand/group key type or query modifiers are outside the replacement allowlist\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    program::admission_tests::replacement_group_keys_resolve_equivalent_bound_columns\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3167 filtered out; finished in 0.05s\n\nerror: test failed, to rerun pass `-p calc-flow --lib`\n",
+      "source_overlay": {
+        "head": "12ca086f0de24211f76f5168e5d7767e92fafc43",
+        "files": {
+          "crates/calc-flow/src/query_analysis/sql/replacement.rs": "02d2173f514e865c43dd81c377fb5effde67045a4ce4a76b98a9d19162fc3423",
+          "crates/calc-flow/src/program/admission_tests.rs": "e55dee2d12718475ee59d95b2be03b0e127aa36bb73905823800b22388d369d7"
+        }
+      }
+    },
+    {
+      "name": "admission-green",
+      "phase": "review_followup",
+      "source_sha": "1d3147fc5375b83964158833e0129129c8337c89",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--lib",
+        "program::admission_tests::"
+      ],
+      "environment": {
+        "CARGO_TARGET_DIR": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug",
+        "CARGO_BUILD_JOBS": "2"
+      },
+      "exit_code": 0,
+      "expected_exit": 0,
+      "result": "7 passed: six existing admission tests and one new regression containing seven equivalent SQL forms.",
+      "log": "target/review-fixes/green-rust.log",
+      "log_sha256": "cf62ecc434f2b8b7e501e8c1253cc2ee7425573b59db1d77ce6cddf09f3924a0",
+      "log_tail": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-6355fe6cd3ea/workdir/calc-flow/crates/calc-flow)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 09s\n     Running unittests src/lib.rs (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug/debug/deps/calc_flow-a032a9f4fe8a06a3)\n\nrunning 7 tests\ntest program::admission_tests::missing_aggregate_group_uses_group_role_path ... ok\ntest program::admission_tests::aggregate_stream_mode_error_uses_aggregate_input_path ... ok\ntest program::admission_tests::replacement_requires_alias_metadata_in_declaration_analysis ... ok\ntest program::admission_tests::append_sql_keeps_qualified_reference_admission ... ok\ntest program::admission_tests::replacement_rejects_undeclared_relations_and_qualifiers_before_runtime ... ok\ntest program::admission_tests::replacement_accepts_bound_aliases_with_sql_identifier_rules ... ok\ntest program::admission_tests::replacement_group_keys_resolve_equivalent_bound_columns ... ok\n\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 3161 filtered out; finished in 0.16s\n\n"
+    },
+    {
+      "name": "matching-native",
+      "phase": "review_followup",
+      "source_sha": "1d3147fc5375b83964158833e0129129c8337c89",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "maturin",
+        "build",
+        "--locked",
+        "--profile",
+        "dev",
+        "--interpreter",
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "--out",
+        "target/review-fixes/wheels"
+      ],
+      "environment": {
+        "CARGO_TARGET_DIR": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug",
+        "CARGO_BUILD_JOBS": "2",
+        "PYO3_PYTHON": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python"
+      },
+      "exit_code": 0,
+      "expected_exit": 0,
+      "result": "Fresh CPython 3.13 Linux dev wheel from this checkout; 55 packaged Python/stub files match source; 2115 manifest files stable and matched to the committed Git blobs.",
+      "log": "target/review-fixes/native-build.log",
+      "log_sha256": "3df75ccf22865ffc2a74afd00b2c7dee532cc8ae451827b6c22fe1bd82078fa3",
+      "log_tail": "   Compiling num-complex v0.4.6\n   Compiling ahash v0.8.12\n   Compiling arrow-buffer v59.3.2\n   Compiling arrow-schema v59.3.2\n   Compiling arrow-data v59.3.2\n   Compiling arrow-array v59.2.0\n   Compiling jobserver v0.1.35\n   Compiling cc v1.2.67\n   Compiling arrow-select v59.2.0\n   Compiling zstd-sys v2.1.2+zstd.1.5.7\n   Compiling futures-channel v0.3.32\n   Compiling futures-util v0.3.32\n   Compiling tokio v1.53.3\n   Compiling zstd-safe v8.2.0\n   Compiling arrow-ord v59.2.0\n   Compiling twox-hash v2.1.2\n   Compiling lz4_flex v0.14.0\n   Compiling zstd v0.14.3\n   Compiling parking_lot_core v0.9.12\n   Compiling arrow-ipc v59.2.0 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-6355fe6cd3ea/workdir/calc-flow/vendor/arrow-ipc)\n   Compiling arrow-cast v59.2.0\n   Compiling getrandom v0.4.3\n   Compiling arrow-json v59.2.0\n   Compiling arrow-csv v59.2.0\n   Compiling parking_lot v0.12.5\n   Compiling arrow-string v59.2.0\n   Compiling arrow-arith v59.2.0\n   Compiling arrow-row v59.2.0\n   Compiling object_store v0.13.2\n   Compiling arrow v59.2.0\n   Compiling uuid v1.23.5\n   Compiling futures-executor v0.3.32\n   Compiling rand_core v0.9.5\n   Compiling target-lexicon v0.13.5\n   Compiling rand_chacha v0.9.0\n   Compiling datafusion-common v55.0.0\n   Compiling futures v0.3.32\n   Compiling tokio-util v0.7.18\n   Compiling tempfile v3.27.0\n   Compiling dashmap v6.2.1\n   Compiling rand v0.9.5\n   Compiling datafusion-expr-common v55.0.0\n   Compiling datafusion-physical-expr-common v55.0.0\n   Compiling datafusion-functions-window-common v55.0.0\n   Compiling datafusion-functions-aggregate-common v55.0.0\n   Compiling datafusion-expr v55.0.0\n   Compiling pyo3-build-config v0.28.3\n   Compiling datafusion-common-runtime v55.0.0\n   Compiling pyo3-macros-backend v0.28.3\n   Compiling pyo3-ffi v0.28.3\n   Compiling heck v0.5.0\n   Compiling datafusion-physical-expr v55.0.0\n   Compiling datafusion-execution v55.0.0\n   Compiling datafusion-functions v55.0.0\n   Compiling datafusion-physical-plan v55.0.0\n   Compiling datafusion-session v55.0.0\n   Compiling datafusion-physical-expr-adapter v55.0.0\n   Compiling datafusion-datasource v55.0.0\n   Compiling datafusion-catalog v55.0.0\n   Compiling datafusion-functions-aggregate v55.0.0\n   Compiling pyo3 v0.28.3\n   Compiling num-bigint v0.4.8\n   Compiling matrixmultiply v0.3.10\n   Compiling crc32fast v1.5.0\n   Compiling bigdecimal v0.4.10\n   Compiling datafusion-functions-nested v55.0.0\n   Compiling datafusion-pruning v55.0.0\n   Compiling pyo3-macros v0.28.3\n   Compiling tokio-stream v0.1.18\n   Compiling rawpointer v0.2.1\n   Compiling snap v1.1.2\n   Compiling anstyle v1.0.14\n   Compiling adler2 v2.0.1\n   Compiling simd-adler32 v0.3.10\n   Compiling miniz_oxide v0.8.9\n   Compiling annotate-snippets v0.12.16\n   Compiling datafusion-datasource-json v55.0.0\n   Compiling datafusion-catalog-listing v55.0.0\n   Compiling datafusion-functions-table v55.0.0\n   Compiling datafusion-physical-optimizer v55.0.0\n   Compiling datafusion-sql v55.0.0\n   Compiling datafusion-datasource-arrow v55.0.0\n   Compiling datafusion-datasource-csv v55.0.0\n   Compiling datafusion-functions-window v55.0.0\n   Compiling datafusion-optimizer v55.0.0\n   Compiling numpy v0.28.0\n   Compiling thiserror v1.0.69\n   Compiling serde-saphyr v0.0.29\n   Compiling datafusion v55.0.0\n   Compiling flate2 v1.1.9\n   Compiling ndarray v0.17.2\n   Compiling fs2 v0.4.3\n   Compiling thiserror-impl v1.0.69\n   Compiling rustc-hash v2.1.3\n   Compiling seq-macro v0.3.6\n   Compiling parquet v59.2.0 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-6355fe6cd3ea/workdir/calc-flow/vendor/parquet)\n   Compiling calc-flow-python v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-6355fe6cd3ea/workdir/calc-flow/crates/calc-flow-python)\n   Compiling pyo3-arrow v0.18.0\n   Compiling pyo3-async-runtimes v0.28.0\n   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-6355fe6cd3ea/workdir/calc-flow/crates/calc-flow)\n   Compiling calc-flow-connectors v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-6355fe6cd3ea/workdir/calc-flow/crates/calc-flow-connectors)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9m 08s\n⚠️  Warning: No compatible platform tag found, using the linux tag instead. You won't be able to upload those wheels to PyPI.\n📦 Built wheel for CPython 3.13 to target/review-fixes/wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl\n"
+    },
+    {
+      "name": "python-minimal-execution",
+      "phase": "review_followup",
+      "source_sha": "1d3147fc5375b83964158833e0129129c8337c89",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "pytest",
+        "python/tests/test_aggregate_replacement.py",
+        "python/tests/test_sql_checkpoint_layout_inventory.py",
+        "-q",
+        "-k",
+        "mixed_chain or budget_preflight or replacement_analysis_edges or native_budget_pairs or grouped_replacement or sql_layout_inventory"
+      ],
+      "environment": {
+        "PYTHONPATH": "target/review-fixes/site",
+        "JAX_PLATFORMS": "cpu"
+      },
+      "exit_code": 0,
+      "expected_exit": 0,
+      "result": "29 passed / 18 deselected in 6.61s: six mixed chains, two preflights, alias metadata, paired budgets/project reload, fourteen equivalent grouped chains, four illegal controls and one layouts 3/4/5/6 inventory.",
+      "log": "target/review-fixes/python.log",
+      "log_sha256": "2b3adc72f34a249344efdf8249e45cde0351d065bba6022ce447f113abe5b4dc",
+      "log_tail": ".............................                                            [100%]\n29 passed, 18 deselected in 6.61s\n"
+    },
+    {
+      "name": "core-clippy",
+      "phase": "review_followup",
+      "source_sha": "1d3147fc5375b83964158833e0129129c8337c89",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "environment": {
+        "CARGO_TARGET_DIR": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug",
+        "CARGO_BUILD_JOBS": "2"
+      },
+      "exit_code": 0,
+      "expected_exit": 0,
+      "result": "Passed; no lint relaxation.",
+      "log": "target/review-fixes/clippy.log",
+      "log_sha256": "955030471010e51f70d9f752c74ab572ada692262755c9ea32bb300e29bca517",
+      "log_tail": "    Checking libc v0.2.186\n    Checking getrandom v0.3.4\n   Compiling jobserver v0.1.35\n    Checking ahash v0.8.12\n   Compiling cc v1.2.67\n    Checking arrow-array v59.2.0\n   Compiling zstd-sys v2.1.2+zstd.1.5.7\n    Checking arrow-select v59.2.0\n    Checking tokio v1.53.3\n    Checking arrow-ord v59.2.0\n    Checking arrow-cast v59.2.0\n    Checking parking_lot_core v0.9.12\n    Checking getrandom v0.4.3\n    Checking arrow-json v59.2.0\n    Checking arrow-csv v59.2.0\n    Checking arrow-string v59.2.0\n    Checking parking_lot v0.12.5\n    Checking arrow-row v59.2.0\n    Checking arrow-arith v59.2.0\n    Checking object_store v0.13.2\n    Checking uuid v1.23.5\n    Checking rand_core v0.9.5\n    Checking rand_chacha v0.9.0\n    Checking tokio-util v0.7.18\n    Checking dashmap v6.2.1\n    Checking tempfile v3.27.0\n    Checking rand v0.9.5\n    Checking datafusion-common-runtime v55.0.0\n    Checking tokio-stream v0.1.18\n    Checking anstyle v1.0.14\n    Checking annotate-snippets v0.12.16\n    Checking serde-saphyr v0.0.29\n    Checking fs2 v0.4.3\n   Compiling zstd-safe v8.2.0\n    Checking zstd v0.14.3\n    Checking arrow-ipc v59.2.0 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-6355fe6cd3ea/workdir/calc-flow/vendor/arrow-ipc)\n    Checking arrow v59.2.0\n    Checking datafusion-common v55.0.0\n    Checking datafusion-expr-common v55.0.0\n    Checking datafusion-physical-expr-common v55.0.0\n    Checking datafusion-functions-aggregate-common v55.0.0\n    Checking datafusion-functions-window-common v55.0.0\n    Checking datafusion-expr v55.0.0\n    Checking datafusion-physical-expr v55.0.0\n    Checking datafusion-execution v55.0.0\n    Checking datafusion-functions v55.0.0\n    Checking datafusion-functions-aggregate v55.0.0\n    Checking datafusion-physical-plan v55.0.0\n    Checking datafusion-physical-expr-adapter v55.0.0\n    Checking datafusion-functions-nested v55.0.0\n    Checking datafusion-sql v55.0.0\n    Checking datafusion-functions-window v55.0.0\n    Checking datafusion-optimizer v55.0.0\n    Checking datafusion-session v55.0.0\n    Checking datafusion-datasource v55.0.0\n    Checking datafusion-catalog v55.0.0\n    Checking datafusion-pruning v55.0.0\n    Checking datafusion-physical-optimizer v55.0.0\n    Checking datafusion-datasource-json v55.0.0\n    Checking datafusion-datasource-csv v55.0.0\n    Checking datafusion-datasource-arrow v55.0.0\n    Checking datafusion-catalog-listing v55.0.0\n    Checking datafusion-functions-table v55.0.0\n    Checking datafusion v55.0.0\n    Checking calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-6355fe6cd3ea/workdir/calc-flow/crates/calc-flow)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3m 27s\n"
+    },
+    {
+      "name": "complexity",
+      "phase": "review_followup",
+      "source_sha": "1d3147fc5375b83964158833e0129129c8337c89",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "scripts/verify_complexity_gates.py"
+      ],
+      "environment": {},
+      "exit_code": 0,
+      "expected_exit": 0,
+      "result": "complexity ratchet holds",
+      "log": "target/review-fixes/complexity.log",
+      "log_sha256": "28c0f0ab344cc7f838249423ae355d6721a4a977d35165c20462fa028b1a5d7d",
+      "log_tail": "complexity ratchet holds\n"
+    },
+    {
+      "name": "rustfmt",
+      "phase": "review_followup",
+      "source_sha": "1d3147fc5375b83964158833e0129129c8337c89",
+      "command": [
+        "rustfmt",
+        "--edition",
+        "2024",
+        "--check",
+        "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "crates/calc-flow/src/program/admission_tests.rs"
+      ],
+      "environment": {},
+      "exit_code": 0,
+      "expected_exit": 0,
+      "result": "Passed with no formatter differences."
+    },
+    {
+      "name": "ruff",
+      "phase": "review_followup",
+      "source_sha": "1d3147fc5375b83964158833e0129129c8337c89",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "ruff",
+        "check",
+        "python/tests/test_aggregate_replacement.py"
+      ],
+      "environment": {},
+      "exit_code": 0,
+      "expected_exit": 0,
+      "result": "All checks passed!"
+    },
+    {
+      "name": "ruff-format",
+      "phase": "review_followup",
+      "source_sha": "1d3147fc5375b83964158833e0129129c8337c89",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "ruff",
+        "format",
+        "--check",
+        "python/tests/test_aggregate_replacement.py"
+      ],
+      "environment": {},
+      "exit_code": 0,
+      "expected_exit": 0,
+      "result": "1 file already formatted"
+    },
+    {
+      "name": "spec-references",
+      "phase": "review_followup",
+      "source_sha": "1d3147fc5375b83964158833e0129129c8337c89",
+      "command": [
+        "python3",
+        "scripts/check_spec_references.py"
+      ],
+      "environment": {},
+      "exit_code": 0,
+      "expected_exit": 0,
+      "result": "spec reference check passed: every spec tag section resolves"
+    },
+    {
+      "name": "schema-no-drift",
+      "phase": "review_followup",
+      "source_sha": "1d3147fc5375b83964158833e0129129c8337c89",
+      "command": [
+        "git",
+        "diff",
+        "--exit-code",
+        "--",
+        "schemas/project-v3.schema.json"
+      ],
+      "environment": {},
+      "exit_code": 0,
+      "expected_exit": 0,
+      "result": "No working-tree schema drift."
+    },
+    {
+      "name": "whitespace",
+      "phase": "review_followup",
+      "source_sha": "1d3147fc5375b83964158833e0129129c8337c89",
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "environment": {},
+      "exit_code": 0,
+      "expected_exit": 0,
+      "result": "Passed."
     }
   ],
   "reuse": {
@@ -919,13 +1174,14 @@
     "preview_head_sha": "a45c6d60da9ff876ec2719bc991de79216dccd28"
   },
   "verification_environment": {
-    "cwd": "shared checkout calc-flow repository root",
-    "CARGO_TARGET_DIR": "target/aggregate/cargo",
-    "CARGO_BUILD_JOBS": "4",
+    "CARGO_TARGET_DIR": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug",
+    "CARGO_BUILD_JOBS": "2",
     "PYO3_PYTHON": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
-    "PYTHONPATH": "target/aggregate/ci-python",
+    "PYTHONPATH": "target/review-fixes/site",
     "JAX_PLATFORMS": "cpu",
-    "standalone_core_and_consumer": "PYO3_PYTHON removed"
+    "checkout": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-6355fe6cd3ea/workdir/calc-flow",
+    "profile": "dev",
+    "native_import": "Verified exact unpacked wheel module paths and extension SHA256 before executing Python tests."
   },
   "prior_validation": {
     "validated_source_sha": "ddd8bd872ad4d1524cf5f97e8e6112197d71584d",
@@ -1569,5 +1825,157 @@
     "reused": "Unchanged atomicity/recovery tests, binding-lint/rustdoc and unrelated frontend checks retain original SHA and scope. New source has fresh core build, 20 affected Rust integration tests, external public consumer, both examples, native wheel, 120 focused Python tests and gate checks.",
     "source_manifest_sha256": "314b1eae2a3e50e3cd2d0ae829c1c8ccfd8967e691028fcbeb7674ef42740626",
     "source_manifest_commit_verified_files": 1154
+  },
+  "review_followup": {
+    "findings_addressed": [
+      "F1: resolve bound grouping fields instead of comparing raw SQL AST",
+      "F2: align the frontend guide with supported bounded replacement aggregation"
+    ],
+    "published_parent_sha": "12ca086f0de24211f76f5168e5d7767e92fafc43",
+    "validated_source_sha": "1d3147fc5375b83964158833e0129129c8337c89",
+    "before_review_fix": {
+      "validated_source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+      "native": {
+        "package": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/ci-python/calc_flow/__init__.py",
+        "extension": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/ci-python/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+        "python_version": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+        "pyarrow": "24.0.0",
+        "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+        "interpreter": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "wheel": "target/aggregate/ci-wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl",
+        "wheel_sha256": "33ba324b056c3c300ec54d620d0b4ad16b0a28c3449318db985f1b55ac757f50",
+        "extension_sha256": "dde797aca5962739faf5c136bbd6383492a733f43e429f439a886a0e302e61e8",
+        "python_source_files_verified": 55,
+        "source_manifest_sha256": "314b1eae2a3e50e3cd2d0ae829c1c8ccfd8967e691028fcbeb7674ef42740626",
+        "python39_syntax_files": 54,
+        "source_manifest_commit_verified_files": 1154
+      },
+      "component_trees": {
+        "core": "124068c90da0662733f998d6ec34751835be6388",
+        "binding": "fd8dd7cc31ccf1d867c5df0f99cc87c5bca5ec9c",
+        "python": "168d5c6cbde1764f42ade4acb8beab4a2f95d2ca",
+        "snapshot_policy": "48e35d5cab7b5213ab93c841f9e8f80d94c5f00e"
+      },
+      "changed_files": [
+        ".codex/artifacts/api-notes/relational-aggregate-replacement.md",
+        "crates/calc-flow-python/src/continuous.rs",
+        "crates/calc-flow-python/src/error.rs",
+        "crates/calc-flow-python/src/pipeline.rs",
+        "crates/calc-flow/benches/support/streaming_soak.rs",
+        "crates/calc-flow/examples/32_sql_expression_pipeline.rs",
+        "crates/calc-flow/src/continuous.rs",
+        "crates/calc-flow/src/dataframe.rs",
+        "crates/calc-flow/src/dataframe/aggregate.rs",
+        "crates/calc-flow/src/datafusion.rs",
+        "crates/calc-flow/src/lib.rs",
+        "crates/calc-flow/src/operator/snapshot_sql/checkpoint.rs",
+        "crates/calc-flow/src/operator/snapshot_sql/mod.rs",
+        "crates/calc-flow/src/operator/snapshot_sql/replacement_tests.rs",
+        "crates/calc-flow/src/operator/sql.rs",
+        "crates/calc-flow/src/operator/sql/compact.rs",
+        "crates/calc-flow/src/operator/sql/restore.rs",
+        "crates/calc-flow/src/pipeline/analysis.rs",
+        "crates/calc-flow/src/pipeline/stream.rs",
+        "crates/calc-flow/src/program.rs",
+        "crates/calc-flow/src/program/lower.rs",
+        "crates/calc-flow/src/query_analysis.rs",
+        "crates/calc-flow/src/query_analysis/sql.rs",
+        "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "crates/calc-flow/src/query_analysis/updates.rs",
+        "crates/calc-flow/src/runtime/streaming/sql_recovery_work/operator.rs",
+        "crates/calc-flow/tests/latest_relation.rs",
+        "crates/calc-flow/tests/relational-consumer/README.md",
+        "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "docs/relational-frontends.md",
+        "docs/streaming-guide.md",
+        "examples/32_sql_expression_pipeline.py",
+        "python/calc_flow/__init__.py",
+        "python/calc_flow/_native.pyi",
+        "python/calc_flow/capabilities.py",
+        "python/calc_flow/runtime.py",
+        "python/calc_flow/stream.py",
+        "python/calc_flow/symbolic/__init__.py",
+        "python/calc_flow/symbolic/aggregate.py",
+        "python/calc_flow/symbolic/analyzer.py",
+        "python/calc_flow/symbolic/expr.py",
+        "python/calc_flow/symbolic/lower/sql.py",
+        "python/calc_flow/symbolic/nodes.py",
+        "python/calc_flow/symbolic/program.py",
+        "python/calc_flow/symbolic/query_analysis.py",
+        "python/tests/test_aggregate_replacement.py",
+        "python/tests/test_capabilities.py",
+        "python/tests/test_query_history_portability.py",
+        "python/tests/test_update_semantics.py"
+      ],
+      "verification_environment": {
+        "cwd": "shared checkout calc-flow repository root",
+        "CARGO_TARGET_DIR": "target/aggregate/cargo",
+        "CARGO_BUILD_JOBS": "4",
+        "PYO3_PYTHON": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "PYTHONPATH": "target/aggregate/ci-python",
+        "JAX_PLATFORMS": "cpu",
+        "standalone_core_and_consumer": "PYO3_PYTHON removed"
+      }
+    },
+    "changed_files": [
+      "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+      "crates/calc-flow/src/program/admission_tests.rs",
+      "python/tests/test_aggregate_replacement.py",
+      "docs/relational-frontends.md",
+      ".codex/artifacts/analysis/relational-aggregate-replacement.md",
+      ".codex/artifacts/analysis/relational-aggregate-replacement.json"
+    ],
+    "verification_names": [
+      "group-key-red",
+      "admission-green",
+      "matching-native",
+      "python-minimal-execution",
+      "core-clippy",
+      "complexity",
+      "rustfmt",
+      "ruff",
+      "ruff-format",
+      "spec-references",
+      "schema-no-drift",
+      "whitespace"
+    ],
+    "preserved_tester_commit": "016e96fa9c8b3b3f5bc8e2cda75263d6b371a5c2",
+    "native": {
+      "wheel": "target/review-fixes/wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl",
+      "wheel_sha256": "257f9008de1c8551bf49edc2807643440915efaa5376a20bf9b3bc429b221945",
+      "package": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-6355fe6cd3ea/workdir/calc-flow/target/review-fixes/site/calc_flow/__init__.py",
+      "extension": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-6355fe6cd3ea/workdir/calc-flow/target/review-fixes/site/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+      "extension_sha256": "9343f4a367e95056f1e8188b9aad6e4447f6584dedf9d75c2806111bcecbccdb",
+      "python_source_files_verified": 55,
+      "source_manifest_files": 2115,
+      "source_stable": true,
+      "source_manifest_sha256": "e1195409f2970014db15a4ba6821677c004c068f8008051027f6cc1d42de40f8",
+      "python_version": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+      "pyarrow": "24.0.0",
+      "interpreter": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+      "import_verified": true,
+      "source_sha": "1d3147fc5375b83964158833e0129129c8337c89",
+      "source_manifest_commit_verified_files": 2115,
+      "component_trees": {
+        "core": "3b4ff71c8031e3078dc1f83cdb5ab3fa85b50365",
+        "binding": "105c8ddb89f68cdf6a839e5a78903ddf0311e83a",
+        "python": "83d14621b5c32dff61b3d713ebe5d65ad9311c40",
+        "snapshot_policy": "48e35d5cab7b5213ab93c841f9e8f80d94c5f00e"
+      }
+    },
+    "source_manifest_scope": "All 2115 tracked .rs/.py/.pyi files, Cargo.toml files, Cargo.lock and rust-toolchain.toml, including vendored build sources; SHA256 stable across build and verified against committed Git blobs.",
+    "reuse_scope": [
+      "Snapshot policy subtree remains 48e35d5cab7b5213ab93c841f9e8f80d94c5f00e. Reuse the original 12 snapshot cases and the independent tester nine-case evidence within the review-approved component scope; not rerun.",
+      "Earlier 119/120 Python, 20 Rust integration, standalone core, consumer and examples retain their original source SHAs and native provenance; not relabeled as full validation of this source.",
+      "Prior interrupted admission build (exit -15) and old native do not count as passing. New seven Rust and 29 matching-native Python cases close the explicitly requested execution gaps."
+    ],
+    "design_deviations": [],
+    "limits": [
+      "Only focused local verification; full regression, combined coverage, connector services and cross-platform checks remain CI-owned.",
+      "CPython 3.13.9/PyArrow 24.0.0 Linux dev wheel for local behavior evidence; no new Python 3.9 runtime or performance claim.",
+      "Historical merge-tree preview predates repairs and is not used as validation of this source.",
+      "Independent follow-up review of F1/F2 and direct effects remains with the coordinator; issue stays in_progress."
+    ],
+    "ci_handoff": "No polling/watch. One nonblocking post-push snapshot and the existing checks_finished durable condition; exact published delivery head and observed checks are recorded in the final issue comment."
   }
 }

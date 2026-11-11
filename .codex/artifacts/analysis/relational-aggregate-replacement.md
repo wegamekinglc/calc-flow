@@ -1,7 +1,7 @@
 # DAL-514 implementation and verification
 
-最新验证源码：`217040d9b91635a410c64b416da4046dbac550bd`；基线：`c4f1749c0595ed3df0fe7eaf4c6331c6093dcfab`。分支 `feature/dal-514-aggregate-replacement`。
-以下原始验证保留各自 SHA；Codacy follow-up 的新源码、component trees 与匹配 native 见末节和 JSON。
+最新验证源码：`1d3147fc5375b83964158833e0129129c8337c89`；原始基线：`c4f1749c0595ed3df0fe7eaf4c6331c6093dcfab`。分支 `feature/dal-514-aggregate-replacement`。
+以下历史验证保留各自 SHA；最新主审 F1/F2 修复、component trees、匹配 native 和最小补验见末节及 JSON 的 `review_followup`，不把旧结果重标为新源码通过。
 
 ## Behavior and changed files
 
@@ -112,3 +112,42 @@ RED 使用 git 导出的精确 c4f1749c Python 源码；native 仅供 import，�
 额外核对 manifest 中全部 1154 个 Rust/Python/stub 源文件与 `217040d9` 的 Git blob 一致；新 wheel 的 55 个 Python/stub 文件与同一 manifest 一致。
 
 本轮只做必要定向验证；full/coverage/服务容器/跨平台仍由 CI 承担，Python3.9仍只有语法证据。旧 clean merge-tree preview 只属于原 head，未验证 merged tree。推送后仅取一次非阻塞 CI 快照，pending 交持久条件唤醒；远端新 head 通过与否以最终 issue 评论为准。DAL-514 保持 in_progress，交协调器接独立 reviewer，不合并或扩派。
+
+## Review blocker follow-up — 1d3147fc
+
+针对主审 F1/F2，复用本 runtime 已有专用 checkout，确认远端仍为 `12ca086f0de24211f76f5168e5d7767e92fafc43` 后提交产品修复 `1d3147fc5375b83964158833e0129129c8337c89`。保留 tester `016e96fa` 和全部后续修复；仅修改以下四个产品/回归/指南文件，另更新本分析 MD/JSON。用户已明确要求复用可用 checkout，没有另建环境、扩派或合并。
+
+- `crates/calc-flow/src/query_analysis/sql/replacement.rs`：先沿现有单 alias/限定符检查证明绑定，再通过同一 schema 字段比较投影列与分组列；复用既有未加引号小写归一化和引号精确匹配。合法限定名、反向限定、大小写等价及表别名不再被原始 AST 相等比较误拒；没有扩大类型、函数、关系或预算白名单，也没有改变恢复身份。
+- `crates/calc-flow/src/program/admission_tests.rs`：新增一个含七种合法 SQL 写法的公共 stream 编译回归。
+- `python/tests/test_aggregate_replacement.py`：新增七种合法写法在 latest/legacy 两种选择下的手算执行对照，以及四种未分组、错误限定符、引号大小写错误的拒绝对照。局部观察 helper 按实际命名输出初始化，原 mixed-chain 断言保持。
+- `docs/relational-frontends.md`：同步旧范围、SUM 链和 batch 段落；有显式预算的支持域 latest 为 `1,6`，legacy 为 `1,7`，域外仍在 Source 前拒绝，batch 每次独立且不要求 replacement 状态预算。
+
+**RED：** 在 `12ca086f` 的生产源码上仅加入新 Rust 回归，运行：
+
+```sh
+CARGO_TARGET_DIR=/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug CARGO_BUILD_JOBS=2 cargo test --locked -p calc-flow --lib program::admission_tests::replacement_group_keys_resolve_equivalent_bound_columns -- --exact
+```
+
+正常同形对照通过，随后 `SELECT input.g, SUM(input.x) AS total FROM input GROUP BY g` 以 `update_interpretation_mismatch` 失败；退出101，0 passed / 1 failed。不是构建中止或测试错误。原生产文件及新测试 overlay 哈希保存在 JSON。
+
+**GREEN：** 同一 CARGO 环境运行 `cargo test --locked -p calc-flow --lib program::admission_tests::`，六项既有测试加新增回归 **7 passed / 0 failed**。首轮构建完成后只改最小字段身份比较，再运行受影响入口，没有运行全量测试。
+
+新 native 使用 CPython3.13.9 / PyArrow24.0.0，显式 interpreter `/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python`，从本 checkout 执行 `python -m maturin build --locked --profile dev --interpreter <同一 interpreter> --out target/review-fixes/wheels`。`PYO3_PYTHON` 为同一 interpreter，`CARGO_TARGET_DIR` 复用上列依赖缓存，`CARGO_BUILD_JOBS=2`。core/binding 编译路径均为本 checkout；没有使用别处的现成 native。此 dev 构建只用于行为验证，不作性能或发布验证声明。
+
+从新 wheel 解包至 `target/review-fixes/site`，明确验证实际导入路径与 extension 哈希，再执行：
+
+```sh
+PYTHONPATH=target/review-fixes/site JAX_PLATFORMS=cpu /home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python -m pytest python/tests/test_aggregate_replacement.py python/tests/test_sql_checkpoint_layout_inventory.py -q -k "mixed_chain or budget_preflight or replacement_analysis_edges or native_budget_pairs or grouped_replacement or sql_layout_inventory"
+```
+
+结果 **29 passed / 18 deselected**（6.61s）：原 mixed-chain 6项、预算 preflight 2项、alias metadata 1项、paired budget/project reload 1项、新合法等价写法 14项、新非法写法4项、真实 layouts3/4/5/6 inventory 1项。新分组链逐事件手算 latest `1,6` / legacy `1,7`；有限 `g=[a,a], x=[1,2]` 得到 `g=[a], total=[3]`。
+
+定向 core Clippy `cargo clippy --locked -p calc-flow --lib -- -D warnings` 退出0；两份 Rust 文件 rustfmt、受影响 Python Ruff lint/format、complexity ratchet、spec references、schema 无漂移及 whitespace 检查通过。完整命令、日志哈希和结果在 JSON 的 `phase=review_followup`。
+
+来源：wheel SHA256 `257f9008de1c8551bf49edc2807643440915efaa5376a20bf9b3bc429b221945`；extension SHA256 `9343f4a367e95056f1e8188b9aad6e4447f6584dedf9d75c2806111bcecbccdb`。55个打包 Python/stub 与源码逐字节一致；构建前后2115个 Rust/Python/stub/Cargo/toolchain 清单文件稳定，全部与 `1d3147fc` Git blob 匹配，manifest SHA256 `e1195409f2970014db15a4ba6821677c004c068f8008051027f6cc1d42de40f8`。
+
+component trees：core `3b4ff71c8031e3078dc1f83cdb5ab3fa85b50365`，binding `105c8ddb89f68cdf6a839e5a78903ddf0311e83a`，Python `83d14621b5c32dff61b3d713ebe5d65ad9311c40`；snapshot policy 仍为 `48e35d5cab7b5213ab93c841f9e8f80d94c5f00e`。
+
+**复用边界：** 原119/120 Python、20 Rust 集成、core/consumer/示例及先前 Arc/storage 结果保留原始来源，不扩为本轮完整源码验证。未变 snapshot 子树的原12项与独立 tester 9项原子性/恢复证据继续按主审确认的范围复用，没有重跑。此前 exit −15 的准入构建和旧 native 不计作通过；本轮新7项 Rust和匹配 native 的29项 Python 补齐主审列出的最小缺口。无公共设计偏离。
+
+全量、combined coverage、服务及跨平台仍交 CI；Python3.9 仍不具有本轮运行证据。历史 merge preview 不作为本次候选集成验证。推送后仅取一次非阻塞快照，沿既有 checks_finished 条件接续；最终 head/检查事实见交付评论。DAL-514 保持 in_progress，交协调器安排 F1/F2 与直接影响的独立复核。
