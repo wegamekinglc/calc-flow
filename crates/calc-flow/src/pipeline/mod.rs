@@ -134,6 +134,13 @@ pub struct PipelineBuilder {
     pub(crate) datafusion_config: crate::DataFusionConfig,
     pub(crate) nodes: BTreeMap<String, NodeDefinition>,
     pub(crate) edges: Vec<Edge>,
+    pub(crate) frontend_bindings: Option<FrontendBindings>,
+}
+
+#[derive(Clone)]
+pub(crate) struct FrontendBindings {
+    pub inputs: BTreeMap<String, PortEndpoint>,
+    pub outputs: BTreeMap<String, PortEndpoint>,
 }
 
 impl PipelineBuilder {
@@ -154,6 +161,7 @@ impl PipelineBuilder {
             datafusion_config: crate::DataFusionConfig::default(),
             nodes: BTreeMap::new(),
             edges: Vec::new(),
+            frontend_bindings: None,
         })
     }
 

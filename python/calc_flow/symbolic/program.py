@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Awaitable, Mapping, Sequence
-from typing import TYPE_CHECKING, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, TypedDict, cast, overload
 
 from typing_extensions import Unpack
 
@@ -39,6 +39,30 @@ if TYPE_CHECKING:
     from calc_flow.symbolic.types import LatePolicy
 
 _PROGRAM_TAG = 0x21
+_OMITTED = object()
+
+
+def _engine_selection(engine: object, mode: object) -> Literal["sql", "streaming"]:
+    if engine is _OMITTED and mode is _OMITTED:
+        raise TypeError(
+            "Program.mode: invalid_literal: provide exactly one of mode or engine"
+        )
+    if engine is not _OMITTED and mode is not _OMITTED:
+        raise ValueError(
+            "Program.mode: invalid_literal: mode and legacy engine "
+            "cannot both be supplied"
+        )
+    field, value, allowed = (
+        ("engine", engine, ("sql", "streaming"))
+        if mode is _OMITTED
+        else ("mode", mode, ("batch", "stream"))
+    )
+    message = f"Program.{field}: invalid_literal: expected {allowed!r}"
+    if type(value) is not str:
+        raise TypeError(message)
+    if value not in allowed:
+        raise ValueError(message)
+    return "sql" if value in ("sql", "batch") else "streaming"
 
 
 class _StreamingExecuteOptions(TypedDict, total=False):
@@ -381,12 +405,37 @@ class Program:
     _engine: Literal["sql", "streaming"]
     _inputs_inferred: bool
 
+    @overload
+    def __init__(
+        self,
+        name: str,
+        /,
+        *,
+        mode: CompileMode,
+        inputs: Sequence[TableExpr | ArrayExpr | Parameter[object]] | None = None,
+        outputs: Mapping[str, TableExpr | ArrayExpr]
+        | Sequence[tuple[str, TableExpr | ArrayExpr]] = (),
+    ) -> None: ...
+
+    @overload
     def __init__(
         self,
         name: str,
         /,
         *,
         engine: Literal["sql", "streaming"],
+        inputs: Sequence[TableExpr | ArrayExpr | Parameter[object]] | None = None,
+        outputs: Mapping[str, TableExpr | ArrayExpr]
+        | Sequence[tuple[str, TableExpr | ArrayExpr]] = (),
+    ) -> None: ...
+
+    def __init__(
+        self,
+        name: str,
+        /,
+        *,
+        engine: object = _OMITTED,
+        mode: object = _OMITTED,
         inputs: Sequence[TableExpr | ArrayExpr | Parameter[object]] | None = None,
         outputs: Mapping[str, TableExpr | ArrayExpr]
         | Sequence[tuple[str, TableExpr | ArrayExpr]] = (),
@@ -397,10 +446,7 @@ class Program:
             raise ValueError(
                 "Program.name: invalid_literal: must be a non-empty string"
             )
-        if type(engine) is not str:
-            raise TypeError("Program.engine: expected 'sql' or 'streaming'")
-        if engine not in ("sql", "streaming"):
-            raise ValueError("Program.engine: expected 'sql' or 'streaming'")
+        engine = _engine_selection(engine, mode)
         copied_outputs = _validated_outputs(outputs)
         _validate_engine_outputs(engine, copied_outputs)
         copied_inputs = (
@@ -448,6 +494,20 @@ class Program:
         """The immutable engine selected when this program was constructed."""
 
         return self._engine
+
+    @property
+    def mode(self) -> CompileMode:
+        """The immutable execution lifecycle, independent of frontend syntax."""
+        return "batch" if self._engine == "sql" else "stream"
+
+    def for_mode(self, mode: CompileMode, /) -> Program:
+        """Copy declarations into a fresh wrapper and validate the target mode."""
+        return Program(
+            self._name,
+            mode=mode,
+            inputs=None if self._inputs_inferred else self._inputs,
+            outputs=self._outputs,
+        )
 
     def with_input(
         self, value: TableExpr | ArrayExpr | Parameter[object], /
@@ -558,6 +618,37 @@ class Program:
         selected = _selected_runtime(runtime)
         with selected._registration_lock:
             return analyze_program(self, selected, self._analysis_mode(mode), options)
+
+    def collect_schema(
+        self,
+        runtime: Runtime | None = None,
+        /,
+        *,
+        mode: CompileMode | None = None,
+    ) -> dict[str, pa.Schema]:
+        """Plan exact named table schemas without reading data or starting jobs."""
+        from calc_flow.compute import _require_blocking
+        from calc_flow.symbolic import errors
+        from calc_flow.symbolic.lower import lower_program_document
+        from calc_flow.symbolic.lower.schema import infer_document_schemas
+
+        _require_blocking("collect_schema")
+        for name, value in self._outputs:
+            if not isinstance(value, TableExpr):
+                errors.raise_compile(
+                    f"outputs.{name}.schema",
+                    "unsupported_type",
+                    "collect_schema requires table outputs",
+                )
+        if not self._outputs:
+            errors.raise_compile(
+                "outputs", "unresolved_type", "at least one output is required"
+            )
+        selected = _selected_runtime(runtime)
+        with selected._registration_lock:
+            document = lower_program_document(self, selected, self._analysis_mode(mode))
+            schemas = infer_document_schemas(document, selected)
+            return {name: schemas[name] for name, _ in self._outputs}
 
     def explain(
         self,

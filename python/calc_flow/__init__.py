@@ -93,6 +93,7 @@ from calc_flow.symbolic import (
     AnalysisResult,
     ArrayExpr,
     ColumnExpr,
+    CompileMode,
     CrossSectionGroup,
     DurationFrame,
     EventTimeBucket,
@@ -154,6 +155,7 @@ ProviderContext = _native.ProviderContext
 RunResult = _native.RunResult
 
 __all__ = [
+    "CompileMode",
     "AnalysisOptions",
     "Comparison",
     "ComparisonCutoff",

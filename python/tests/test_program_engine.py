@@ -22,7 +22,12 @@ def _program(engine: str) -> cf.Program:
 def test_program_requires_immutable_engine_at_construction() -> None:
     engine = inspect.signature(cf.Program).parameters["engine"]
     assert engine.kind is inspect.Parameter.KEYWORD_ONLY
-    assert engine.default is inspect.Parameter.empty
+    mode = inspect.signature(cf.Program).parameters["mode"]
+    assert mode.kind is inspect.Parameter.KEYWORD_ONLY
+    with pytest.raises(TypeError, match="provide exactly one"):
+        cf.Program("missing")
+    with pytest.raises(ValueError, match="cannot both be supplied"):
+        cf.Program("conflict", engine="sql", mode="batch")
 
     source = cf.table_input("events", schema=pa.schema([("x", pa.int64())]))
     program = cf.Program("values", engine="streaming")

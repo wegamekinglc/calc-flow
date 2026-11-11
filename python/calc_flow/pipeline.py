@@ -688,6 +688,16 @@ class BatchExecutionPlan:
     def fingerprint(self) -> str:
         return self._inner.fingerprint
 
+    @property
+    def external_inputs(self) -> tuple[str, ...]:
+        """Physical input names accepted by this plan, in deterministic order."""
+        return self._inner.external_inputs
+
+    @property
+    def external_outputs(self) -> tuple[str, ...]:
+        """Physical output names returned by this plan, in deterministic order."""
+        return self._inner.external_outputs
+
     def execute(
         self,
         inputs: Mapping[str, _native.Batch],
