@@ -7,13 +7,19 @@ use std::{sync::Arc, time::Instant};
 
 use super::numeric_rows::SharedRowsShape;
 use super::{
-    ArrayRef, Float64Array, Float64Builder, OutputStorage, RollingKernelPlan,
-    RollingMetricsRecorder, RollingStage, RollingWork, Statistic, TypedEntityState,
-    TypedFloatReadout, TypedFloatReadoutKind, TypedFrame, TypedGroupInput, TypedGroupPlan,
-    TypedOutputKind, TypedOutputPlan, TypedRowInputs, TypedWindowState, float_mean, internal_error,
-    nanos, operator_error, valid_float64,
+    ArrayRef, Float64Array, Float64Builder, Float64NumericState, OutputStorage, RollingKernelPlan,
+    RollingMetricsRecorder, RollingNumericalProfile, RollingStage, RollingWork, Statistic,
+    TypedEntityState, TypedFloatReadout, TypedFloatReadoutKind, TypedFrame, TypedGroupInput,
+    TypedGroupPlan, TypedOutputKind, TypedOutputPlan, TypedRowInputs, TypedWindowState, float_mean,
+    internal_error, nanos, operator_error, valid_float64,
 };
 use crate::Result;
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static SHARED_GROUP_UPDATE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static SHARED_MEAN_READOUT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// One mean read with its output-specific minimum period.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -269,7 +275,8 @@ fn update_owned_groups<const GROUPS: usize>(
             return Err(group_mismatch());
         };
         let sample = valid_float64(values, row, plan.nan_as_value);
-        state.update(
+        update_numeric_group(
+            state,
             event_time,
             sample,
             plan.numerical_profile,
@@ -295,7 +302,26 @@ fn read_mean(groups: &[TypedWindowState], read: MeanRead) -> Result<Option<f64>>
     let Some(TypedWindowState::Numeric(state)) = groups.get(read.group) else {
         return Err(internal_error("typed mean readout state mismatch"));
     };
-    Ok((state.accumulator.valid_count >= read.min_periods).then(|| float_mean(&state.accumulator)))
+    Ok(read_numeric_mean(state, read.min_periods))
+}
+
+pub(super) fn update_numeric_group(
+    state: &mut Float64NumericState,
+    event_time: i64,
+    sample: Option<f64>,
+    profile: RollingNumericalProfile,
+    transition_count: u64,
+    node_id: &str,
+) -> Result<()> {
+    #[cfg(test)]
+    SHARED_GROUP_UPDATE_VISITS.set(SHARED_GROUP_UPDATE_VISITS.get() + 1);
+    state.update(event_time, sample, profile, transition_count, node_id)
+}
+
+pub(super) fn read_numeric_mean(state: &Float64NumericState, min_periods: u64) -> Option<f64> {
+    #[cfg(test)]
+    SHARED_MEAN_READOUT_VISITS.set(SHARED_MEAN_READOUT_VISITS.get() + 1);
+    (state.accumulator.valid_count >= min_periods).then(|| float_mean(&state.accumulator))
 }
 
 #[cfg(test)]

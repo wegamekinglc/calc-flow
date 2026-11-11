@@ -66,6 +66,11 @@ pub(super) fn shared_rows_test_pool(
 
 const ROLLING_KERNEL_PLAN_VERSION: u32 = 1;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static GENERIC_F64_BUILDER_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Selected executable family for one immutable rolling kernel plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum KernelSelection {
@@ -1515,6 +1520,23 @@ fn cast_primitive(array: &ArrayRef, target: &DataType, node_id: &str) -> Result<
 }
 
 impl RollingKernelState {
+    #[cfg(test)]
+    pub(super) fn canonical_state_for_test(&self) -> String {
+        let entities = self
+            .entities
+            .iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        format!(
+            "{:?}",
+            (
+                &self.kernel_fingerprint,
+                entities,
+                &self.states,
+                &self.last_identity
+            )
+        )
+    }
+
     #[cfg(test)]
     pub(super) fn shared_rows_count(&self) -> usize {
         self.states
@@ -3582,6 +3604,10 @@ impl DerivedBuilder {
         output: &TypedOutputPlan,
         node_id: &str,
     ) -> Result<()> {
+        #[cfg(test)]
+        if matches!(self, Self::Float(_, OutputStorage::Float64)) {
+            GENERIC_F64_BUILDER_VISITS.set(GENERIC_F64_BUILDER_VISITS.get() + 1);
+        }
         if let TypedOutputKind::Difference { left, right } = output.kind {
             return self.append_difference(states, left, right);
         }
@@ -3758,6 +3784,46 @@ impl DerivedBuilder {
             }
         }
     }
+}
+
+fn append_numeric_float64(
+    builder: &mut Float64Builder,
+    states: &[TypedWindowState],
+    output: &TypedOutputPlan,
+    node_id: &str,
+) -> Result<()> {
+    if let TypedOutputKind::Difference { left, right } = output.kind {
+        let left = read_typed_float(states, left)?;
+        let right = read_typed_float(states, right)?;
+        builder.append_option(left.zip(right).map(|(left, right)| left - right));
+        return Ok(());
+    }
+    if let (Some(TypedWindowState::Numeric(state)), TypedOutputKind::Statistic(statistic)) =
+        (states.get(output.group), output.kind)
+    {
+        if state.accumulator.valid_count < output.min_periods {
+            builder.append_null();
+            return Ok(());
+        }
+        return append_float(builder, &state.accumulator, statistic, output.ddof);
+    }
+    with_float64_builder(builder, |builder| builder.append(states, output, node_id))
+}
+
+fn with_float64_builder(
+    builder: &mut Float64Builder,
+    append: impl FnOnce(&mut DerivedBuilder) -> Result<()>,
+) -> Result<()> {
+    let mut derived = DerivedBuilder::Float(
+        std::mem::replace(builder, Float64Builder::with_capacity(0)),
+        OutputStorage::Float64,
+    );
+    let result = append(&mut derived);
+    let DerivedBuilder::Float(values, _) = derived else {
+        unreachable!("the fallback cannot replace its owned builder");
+    };
+    *builder = values;
+    result
 }
 
 fn typed_output_mismatch() -> crate::CalcFlowError {

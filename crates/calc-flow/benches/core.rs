@@ -481,6 +481,7 @@ mod rolling_history {
         ColdRowsMean,
         WarmDurationSum,
         WarmRowsMean,
+        ColdMultiGroup,
     }
 
     impl Case {
@@ -492,6 +493,7 @@ mod rolling_history {
                 Self::ColdRowsMean => "cold_rows37_mean_131074_keys1000",
                 Self::WarmDurationSum => "warm_duration_sum60s_132075_keys1000",
                 Self::WarmRowsMean => "warm_rows20_mean_132075_keys1000",
+                Self::ColdMultiGroup => "cold_two_groups_four_outputs_131074_keys1000",
             }
         }
 
@@ -499,7 +501,7 @@ mod rolling_history {
             match self {
                 Self::DurationSum => 100_000,
                 Self::MixedExtrema | Self::RowsSum => 10_000,
-                Self::ColdRowsMean => 131_074,
+                Self::ColdRowsMean | Self::ColdMultiGroup => 131_074,
                 Self::WarmDurationSum | Self::WarmRowsMean => 132_075,
             }
         }
@@ -521,13 +523,16 @@ mod rolling_history {
         fn observes_lanes(self) -> bool {
             matches!(
                 self,
-                Self::ColdRowsMean | Self::WarmDurationSum | Self::WarmRowsMean
+                Self::ColdRowsMean
+                    | Self::WarmDurationSum
+                    | Self::WarmRowsMean
+                    | Self::ColdMultiGroup
             )
         }
 
         fn batch_sizes(self) -> Vec<usize> {
             match self {
-                Self::ColdRowsMean => vec![131_074],
+                Self::ColdRowsMean | Self::ColdMultiGroup => vec![131_074],
                 Self::WarmDurationSum | Self::WarmRowsMean => vec![1_001, 65_537, 65_537],
                 _ => vec![BATCH_ROWS; self.rows() / BATCH_ROWS],
             }
@@ -536,7 +541,7 @@ mod rolling_history {
         fn rows_window(self) -> Option<usize> {
             match self {
                 Self::DurationSum | Self::WarmDurationSum => None,
-                Self::MixedExtrema | Self::ColdRowsMean => Some(37),
+                Self::MixedExtrema | Self::ColdRowsMean | Self::ColdMultiGroup => Some(37),
                 Self::RowsSum | Self::WarmRowsMean => Some(20),
             }
         }
@@ -594,6 +599,7 @@ mod rolling_history {
                         min_periods: 1,
                     },
                 ],
+                Self::ColdMultiGroup => multi_group_outputs(),
             }
         }
 
@@ -604,6 +610,7 @@ mod rolling_history {
                 Self::MixedExtrema => &["min_60s", "max_37"],
                 Self::ColdRowsMean => &["mean_37"],
                 Self::WarmRowsMean => &["mean_20"],
+                Self::ColdMultiGroup => &["sum_a37", "mean_a37", "sum_b61", "mean_b61"],
             }
         }
 
@@ -615,6 +622,54 @@ mod rolling_history {
 
     fn scaled(value: i64) -> f64 {
         f64::from(i32::try_from(value).unwrap()) / 1024.0
+    }
+
+    fn multi_group_outputs() -> Vec<RollingOutputSpec> {
+        [
+            ("a", 37, "sum_a37", "mean_a37"),
+            ("b", 61, "sum_b61", "mean_b61"),
+        ]
+        .into_iter()
+        .flat_map(|(input, size, sum, mean)| {
+            let frame = RollingFrameSpec::Rows { size };
+            [
+                RollingOutputSpec::Sum {
+                    primitive_version: 1,
+                    input: input.into(),
+                    output: sum.into(),
+                    frame,
+                    min_periods: 1,
+                },
+                RollingOutputSpec::Mean {
+                    primitive_version: 1,
+                    input: input.into(),
+                    output: mean.into(),
+                    frame,
+                    min_periods: 1,
+                },
+            ]
+        })
+        .collect()
+    }
+
+    fn second_value(case: Case, row: usize) -> f64 {
+        let numerator = 12_288 * (row / case.groups()) + row % case.groups();
+        f64::from(i32::try_from(numerator).unwrap()) / 2048.0
+    }
+
+    fn multi_group_reference(row: usize, groups: usize) -> [f64; 4] {
+        let n = i64::try_from(row / groups).unwrap();
+        let key = i64::try_from(row % groups).unwrap();
+        let wa = (n + 1).min(37);
+        let wb = (n + 1).min(61);
+        let mean_a = (2 * n - wa + 1) * 1_024 + key;
+        let mean_b = (6 * n - 3 * wb + 3) * 2_048 + key;
+        [
+            scaled(mean_a * wa),
+            scaled(mean_a),
+            f64::from(i32::try_from(mean_b * wb).unwrap()) / 2048.0,
+            f64::from(i32::try_from(mean_b).unwrap()) / 2048.0,
+        ]
     }
 
     struct Fixture {
@@ -634,7 +689,7 @@ mod rolling_history {
             let keys = (0..case.groups())
                 .map(|n| format!("target_{n:04}"))
                 .collect::<Vec<_>>();
-            let input_schema = Arc::new(Schema::new(vec![
+            let mut input_fields = vec![
                 Field::new("target_id", DataType::Utf8, false),
                 Field::new(
                     "event_time",
@@ -643,7 +698,12 @@ mod rolling_history {
                 ),
                 Field::new("seq", DataType::Int64, false),
                 Field::new("value", DataType::Float64, false),
-            ]));
+            ];
+            if matches!(case, Case::ColdMultiGroup) {
+                input_fields[3] = Field::new("a", DataType::Float64, false);
+                input_fields.push(Field::new("b", DataType::Float64, false));
+            }
+            let input_schema = Arc::new(Schema::new(input_fields));
             let mut fields = input_schema.fields().to_vec();
             fields.extend(
                 case.names()
@@ -656,7 +716,7 @@ mod rolling_history {
             let mut start = 0;
             for rows in case.batch_sizes() {
                 let end = start + rows;
-                let arrays: Vec<ArrayRef> = vec![
+                let mut arrays: Vec<ArrayRef> = vec![
                     Arc::new(StringArray::from_iter_values(
                         (start..end).map(|i| keys[i % case.groups()].as_str()),
                     )),
@@ -673,6 +733,11 @@ mod rolling_history {
                         (start..end).map(|i| scaled(case.numerator(i))),
                     )),
                 ];
+                if matches!(case, Case::ColdMultiGroup) {
+                    arrays.push(Arc::new(Float64Array::from_iter_values(
+                        (start..end).map(|i| second_value(case, i)),
+                    )));
+                }
                 let record = RecordBatch::try_new(Arc::clone(&input_schema), arrays).unwrap();
                 max_bytes = max_bytes.max(record.get_array_memory_size());
                 batches.push(Batch::table(vec![record], BatchMetadata::default()).unwrap());
@@ -731,6 +796,14 @@ mod rolling_history {
                 Case::MixedExtrema => {
                     expected[0].push(scaled(time_queue.iter().map(|(_, n)| *n).min().unwrap()));
                     expected[1].push(scaled(*row_queue.iter().max().unwrap()));
+                }
+                Case::ColdMultiGroup => {
+                    for (column, value) in expected
+                        .iter_mut()
+                        .zip(multi_group_reference(row, case.groups()))
+                    {
+                        column.push(value);
+                    }
                 }
             }
         }
@@ -1018,7 +1091,7 @@ mod rolling_history {
                     .as_any()
                     .downcast_ref::<Float64Array>()
                     .unwrap();
-                let derived = record.columns()[4..]
+                let derived = record.columns()[fixture.input_schema.fields().len()..]
                     .iter()
                     .map(|column| column.as_any().downcast_ref::<Float64Array>().unwrap())
                     .collect::<Vec<_>>();
@@ -1078,6 +1151,31 @@ mod rolling_history {
             }
         }
         assert_eq!(position, fixture.case.rows());
+        validate_second_column(fixture, outputs);
+    }
+
+    fn validate_second_column(fixture: &Fixture, outputs: &[Batch]) {
+        if !matches!(fixture.case, Case::ColdMultiGroup) {
+            return;
+        }
+        for batch in outputs.iter().chain(fixture.batches.iter()) {
+            for record in batch.table_payload().unwrap().batches() {
+                let sequences = record
+                    .column(2)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap();
+                let values = record
+                    .column(4)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                for row in 0..record.num_rows() {
+                    let index = usize::try_from(sequences.value(row)).unwrap();
+                    assert_value(values.value(row), second_value(fixture.case, index));
+                }
+            }
+        }
     }
 
     fn proof(
@@ -1101,6 +1199,13 @@ mod rolling_history {
             "output_columns":fixture.case.names(), "tokio_workers":4,
             "checkpointing":false, "validated_all_columns":true, "validated_input_immutable":true,
             "result_sha256":fixture.expected_sha256, "validated_iterations":iterations});
+        if matches!(fixture.case, Case::ColdMultiGroup) {
+            report["input_columns"] = json!(["target_id", "event_time", "seq", "a", "b"]);
+            report["declared_state_groups"] = json!([
+                {"input":"a", "rows":37, "outputs":["sum_a37", "mean_a37"]},
+                {"input":"b", "rows":61, "outputs":["sum_b61", "mean_b61"]}
+            ]);
+        }
         if let Some(lanes) = lanes {
             assert_eq!(lanes.iterations, iterations);
             report["native_metrics_last_validated_job"] = snapshot.unwrap().clone();
@@ -1118,7 +1223,10 @@ mod rolling_history {
                 .collect::<Vec<_>>();
             assert_eq!(layout, fixture.case.batch_sizes());
             report["input_record_batch_rows"] = json!(layout);
-            report["timed_seed_rows"] = json!(if matches!(fixture.case, Case::ColdRowsMean) {
+            report["timed_seed_rows"] = json!(if matches!(
+                fixture.case,
+                Case::ColdRowsMean | Case::ColdMultiGroup
+            ) {
                 0
             } else {
                 1_001
@@ -1222,6 +1330,7 @@ mod rolling_history {
                 Case::ColdRowsMean,
                 Case::WarmDurationSum,
                 Case::WarmRowsMean,
+                Case::ColdMultiGroup,
             ],
         );
     }

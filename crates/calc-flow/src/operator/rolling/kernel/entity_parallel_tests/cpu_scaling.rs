@@ -106,7 +106,7 @@ fn cpu_rolling_primary_error_considers_all_eight_lanes() {
 }
 
 #[test]
-fn cpu_rolling_million_rows_remain_eligible_and_account_large_scratch() {
+fn cpu_rolling_million_rows_remain_eligible_and_account_actual_scratch() {
     let batch = input(1_000_000, 64, false);
     let plan = two_output_plan();
     assert!(
@@ -117,13 +117,13 @@ fn cpu_rolling_million_rows_remain_eligible_and_account_large_scratch() {
     let prepared = plan
         .prepare_ordered_stream_inputs(&state, &batch, "r", None)
         .unwrap();
-    let bytes = prepared
-        .scratch_plan()
-        .expect("large supported input")
-        .accounted_bytes()
-        .unwrap();
-    assert!(bytes > 16 << 20);
-    let (_, requests) = split_for_cpu(prepared, 16).expect("no private 16MiB admission ceiling");
+    let Ok(scratch) = prepared.scratch_plan_for_cpu(16) else {
+        panic!("large supported input");
+    };
+    let bytes = scratch.accounted_bytes().unwrap();
+    assert!(bytes >= batch.num_rows() * plan.outputs.len() * size_of::<f64>());
+    let (_, requests) =
+        split_for_cpu(prepared, 16).expect("representable large input stays eligible");
     assert_eq!(requests.len(), 16);
 }
 

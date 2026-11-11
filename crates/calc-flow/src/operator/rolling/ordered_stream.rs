@@ -349,13 +349,8 @@ impl RollingOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedOrderedOutput> {
         let observer = context.rolling_metrics();
-        // Building/reconstructing typed state keeps this callback on the original
-        // serial route, even when the resulting state happens to be eligible.
-        let was_warm = self.state.typed_kernel_state.is_some();
         self.ensure_ordered_kernel_state(input, context.operator_id(), observer)?;
-        let mut update = self
-            .prepare_ordered_update(input, context, was_warm)
-            .await?;
+        let mut update = self.prepare_ordered_update(input, context).await?;
         let touched = {
             let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
             retained_histories(
@@ -380,7 +375,6 @@ impl RollingOperator {
         &self,
         input: &RecordBatch,
         context: &StreamOperatorContext<'_>,
-        was_warm: bool,
     ) -> Result<StreamKernelUpdate> {
         let observer = context.rolling_metrics();
         let plan = &self.compiled.kernel_plan;
@@ -396,13 +390,6 @@ impl RollingOperator {
                 RollingWork::ParallelFallbackNoWorkClient,
             );
         };
-        if !was_warm {
-            return self.serial_ordered_update(
-                input,
-                context,
-                RollingWork::ParallelFallbackPreparedIneligible,
-            );
-        }
         if let Some(reason) = plan.entity_parallel_fallback(input) {
             return self.serial_ordered_update(input, context, reason);
         }
@@ -418,17 +405,17 @@ impl RollingOperator {
         }
         let prepared =
             plan.prepare_ordered_stream_inputs(prior, input, context.operator_id(), observer)?;
-        let scratch = match prepared.scratch_plan_for_cpu(cpus) {
-            Ok(scratch) => scratch,
-            Err(reason) => {
+        let prepared = match prepared.qualify_parallel(cpus) {
+            Ok(prepared) => prepared,
+            Err((prepared, reason)) => {
                 if let Some(recorder) = observer {
                     recorder.add(reason, 1);
                 }
                 return prepared.finish_serial(observer);
             }
         };
-        match client.try_reserve(scratch) {
-            ReservePair::Reserved(launch) => match prepared.split_lanes(cpus) {
+        match client.try_reserve(prepared.scratch()) {
+            ReservePair::Reserved(launch) => match prepared.split() {
                 Ok((seed, requests)) => {
                     let stage =
                         observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));

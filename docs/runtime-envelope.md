@@ -898,18 +898,29 @@ requirements are met. Mixed windows retain the union of the row suffix and
 the duration interval with an open lower bound, using widened timestamp
 arithmetic.
 
-An already initialized, ordered Native Float64 StableV1 mean calculation can
-assign whole entities to owned CPU lanes. The narrow path requires one or
-two numeric groups and one or two derived Float64 mean/difference columns,
-Rows frames of 5 or 20, and validated typed queues no longer than those frames. A finalized
-batch has at least 64,000 rows and 16 touched entities. The lane count is the
-minimum of available CPU capacity, the batch's 16,000-row work units and touched
-entities; fewer than two lanes use the serial path. Entity routing counts are
-reused, one pass builds stable lane schedules, and each lane visits only its
-assigned rows. No lane may own more than 5/8 of the batch. Initial state
-creation, the first reconstruction after restore, unsupported shapes, small
-or skewed batches and unavailable admission use the original serial loop.
+Ordered typed plans can assign whole entities to owned CPU lanes when every
+group supports the same independent owned transition and every output is
+Float64. This includes Rows, Duration and mixed windows, multiple groups and
+readouts, and both numerical profiles. The workers preserve the plan's profile
+and NaN policy. Scan groups and Count, integer or Float32 outputs use the serial
+path. Cold and restored state can use lanes after reconstruction from the
+authoritative history. A finalized batch has at least 64,000 rows and two
+touched entities. The lane count is the minimum of available CPU capacity, the
+batch's 16,000-row work units and touched entities; fewer than two lanes use the
+serial path. Routing uses incoming transitions, groups, readouts and retained
+work to estimate lane balance; no lane may own more than 5/8 of that estimate.
+This estimate is a scheduling heuristic, not a work quota. Unsupported shapes,
+small or skewed batches and unavailable admission use the original serial loop.
 Preparing a serial fallback does not repeat entity resolution or state copying.
+
+One producer pass builds immutable lane routes. Checked storage costs select
+membership bitmaps or explicit row descriptors, whichever has the smaller
+payload. Workers iterate only their assigned rows in original order. Non-null
+Float64 output columns reuse the producer's immutable route identity and
+validated entity mapping to scatter into final owned buffers. Nullable columns
+or results without that route identity retain the full ordered coverage
+validation. Both representations and all output arities retain forward-only
+route iteration.
 
 Each job admits at most one numeric work group. Its checked scratch ledger
 accounts for the additional declared capacities without a private byte ceiling;
