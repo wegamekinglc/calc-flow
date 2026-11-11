@@ -216,7 +216,7 @@ selectors.
 - SQL result schemas come from private native planning without reading rows.
   SQL output has a new row lineage and no inherited temporal ordering.
   Batch SQL supports multiple aliases; append stream SQL accepts one alias or
-  the exact-schema multi-alias UNION ALL subset. Ordinary and grouped SQL
+  the exact-schema multi-alias `UNION ALL` subset. Ordinary and grouped SQL
   aggregates emit a full cumulative snapshot after each batch.
   Eligible queries, including admitted grouped ordered LAST_VALUE, use compact
   state; unsupported aggregate shapes retain input and rerun over history.
