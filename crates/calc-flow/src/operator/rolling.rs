@@ -1940,7 +1940,7 @@ impl RollingOperator {
     fn projected_rows_charge(
         &self,
         rows: &[BufferedRow],
-        touched: &PreparedHistoryUpdate,
+        touched: &mut PreparedHistoryUpdate,
         node: &str,
     ) -> Result<(StateCharge, StateCharge)> {
         let current = self
@@ -2138,7 +2138,7 @@ impl RollingOperator {
             context.operator_id(),
             observer,
         )?;
-        let (record, next_kernel_state, touched) = if let Some(typed) = typed {
+        let (record, next_kernel_state, mut touched) = if let Some(typed) = typed {
             typed
         } else {
             let computed = compute_output_columns_observed(
@@ -2161,7 +2161,7 @@ impl RollingOperator {
             )
         };
         let (current_charge, next_charge) =
-            match self.projected_rows_charge(&rows, &touched, context.operator_id()) {
+            match self.projected_rows_charge(&rows, &mut touched, context.operator_id()) {
                 Ok(charge) => charge,
                 Err(error) => {
                     for row in rows {
@@ -2740,6 +2740,7 @@ struct EntityRollingState {
     windows: Vec<WindowState>,
     transition_count: u64,
     indicators: Vec<indicators::State>,
+    charge_cache: Option<budget::HistoryCharge>,
 }
 
 impl EntityRollingState {
@@ -2754,6 +2755,7 @@ impl EntityRollingState {
                 .iter()
                 .map(indicators::Group::fresh)
                 .collect(),
+            charge_cache: None,
         }
     }
 }
@@ -2800,7 +2802,8 @@ type HistoryUpdates = Vec<(Vec<Option<KeyValue>>, EntityRollingState)>;
 
 impl RollingHistories {
     fn apply(&mut self, touched: HistoryUpdates) {
-        for (entity, state) in touched {
+        for (entity, mut state) in touched {
+            state.charge_cache = None;
             self.by_entity.insert(entity, state);
         }
     }

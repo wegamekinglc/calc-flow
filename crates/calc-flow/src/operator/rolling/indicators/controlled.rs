@@ -99,6 +99,7 @@ pub(super) fn copy_entity(
         windows,
         transition_count: state.transition_count,
         indicators: copy_indicators(&state.indicators, check)?,
+        charge_cache: None,
     })
 }
 

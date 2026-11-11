@@ -23,10 +23,10 @@ impl RollingOperator {
             self.spec.late_policy,
             metadata.late_output.as_ref(),
         )?;
-        let restored = self
+        let mut restored = self
             .decode_state(&metadata, snapshot)
             .map_err(|error| self.legacy_restore_error(error))?;
-        let charge = self.legacy_restore_charge(&restored)?;
+        let charge = self.legacy_restore_charge(&mut restored)?;
         self.state = StateOwner::new(
             legacy_state(restored, metadata, next_late, charge),
             self.indicator_resources.is_some(),
@@ -40,16 +40,16 @@ impl RollingOperator {
             error
         }
     }
-    fn legacy_restore_charge(&self, restored: &DecodedRollingState) -> Result<StateCharge> {
-        let charge = budget::buffered_charge(restored.buffer.values(), &self.name)?.checked_add(
-            budget::histories_charge(&restored.histories, &self.name)?,
-            &self.name,
-        )?;
+    fn legacy_restore_charge(&self, restored: &mut DecodedRollingState) -> Result<StateCharge> {
+        let buffered = budget::buffered_charge(restored.buffer.values(), &self.name)?;
+        let (histories, cache) = restored.histories.prepare_charge_cache(&self.name)?;
+        let charge = buffered.checked_add(histories, &self.name)?;
         if !self.state_budget.allows(charge.rows, charge.bytes) {
             return Err(crate::operator::checkpoint::checkpoint_mismatch(
                 "restored rolling state exceeds the configured state budget",
             ));
         }
+        restored.histories.install_charge_cache(cache);
         Ok(charge)
     }
 }

@@ -1,4 +1,5 @@
 mod decay_tests;
+mod incremental_accounting;
 mod incremental_history;
 mod indicators;
 mod late;
@@ -3036,6 +3037,41 @@ fn with_large_first_label(record: &RecordBatch) -> RecordBatch {
     RecordBatch::try_new(record.schema(), columns).unwrap()
 }
 
+fn with_sparse_large_first_label(record: &RecordBatch) -> RecordBatch {
+    use datafusion::arrow::array::StringArray;
+
+    let mut columns = record.columns().to_vec();
+    let labels = (0..record.num_rows())
+        .map(|index| match index {
+            0 => Some("x".repeat(8 * 1024 * 1024)),
+            index if index.is_multiple_of(2) => Some("y".to_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    columns[5] = Arc::new(StringArray::from(labels));
+    RecordBatch::try_new(record.schema(), columns).unwrap()
+}
+
+fn assert_cached_rolling_charge(operator: &RollingOperator) {
+    assert_eq!(
+        operator.state.charge,
+        budget::full_state_charge(
+            &operator.state.buffer,
+            &operator.state.ordered,
+            &operator.state.histories,
+            &operator.compiled,
+            "rolling",
+        )
+        .unwrap()
+    );
+    for (key, state) in &operator.state.histories.by_entity {
+        assert_eq!(
+            state.charge_cache,
+            Some(budget::history_entity_charge_snapshot(key, state, "rolling").unwrap())
+        );
+    }
+}
+
 async fn assert_releases_evicted_large_label(window: u32) {
     use crate::{CancellationToken, StreamJobContext};
 
@@ -3064,7 +3100,7 @@ async fn assert_releases_evicted_large_label(window: u32) {
             )
         })
         .collect::<Vec<_>>();
-    let first = with_large_first_label(&float64_fast_record(&rows));
+    let first = with_sparse_large_first_label(&float64_fast_record(&rows));
     let context = StreamOperatorContext::new(&job, "rolling", None);
     operator
         .process_data(
@@ -3085,6 +3121,7 @@ async fn assert_releases_evicted_large_label(window: u32) {
         .unwrap();
     collector.drain("output");
 
+    assert_cached_rolling_charge(&operator);
     let next = window + 1;
     let second = float64_fast_record(&[(i64::from(next), "a", u64::from(next), Some(5.0))]);
     let context = StreamOperatorContext::new(
@@ -3110,6 +3147,7 @@ async fn assert_releases_evicted_large_label(window: u32) {
         .await
         .unwrap();
     collector.drain("output");
+    assert_cached_rolling_charge(&operator);
     let history = operator.state.histories.by_entity.values().next().unwrap();
     let retained_label_bytes: usize = history
         .columnar

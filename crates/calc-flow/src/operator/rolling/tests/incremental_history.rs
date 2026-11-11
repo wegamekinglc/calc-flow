@@ -184,17 +184,7 @@ async fn finalize_record(
 }
 
 fn assert_live_charge(operator: &RollingOperator) {
-    assert_eq!(
-        operator.state.charge,
-        budget::full_state_charge(
-            &operator.state.buffer,
-            &operator.state.ordered,
-            &operator.state.histories,
-            &operator.compiled,
-            "rolling",
-        )
-        .unwrap()
-    );
+    assert_cached_rolling_charge(operator);
 }
 
 fn mixed_spec() -> RollingSpec {
@@ -227,6 +217,7 @@ async fn incremental_history_budget_rejection_preserves_history_and_retries() {
     assert_live_charge(&operator);
     let prior = format!("{:?}", operator.state.typed_kernel_state);
     let retained = first_history(&operator).rows.front().unwrap().as_ptr();
+    let cached_charge = first_history(&operator).charge_cache;
     let sequence = operator.state.next_output_sequence;
     let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(3)));
     operator
@@ -258,6 +249,7 @@ async fn incremental_history_budget_rejection_preserves_history_and_retries() {
     assert_eq!(operator.state.next_output_sequence, sequence);
     assert_eq!(format!("{:?}", operator.state.typed_kernel_state), prior);
     assert_eq!(operator.state.histories.by_entity.len(), 1);
+    assert_eq!(first_history(&operator).charge_cache, cached_charge);
     assert_eq!(
         first_history(&operator).rows.front().unwrap().as_ptr(),
         retained
@@ -325,6 +317,7 @@ async fn incremental_history_rejected_emission_keeps_history_for_manual_retry() 
         .await;
         let prior = format!("{:?}", operator.state.typed_kernel_state);
         let retained = first_history(&operator).rows.front().unwrap().as_ptr();
+        let cached_charge = first_history(&operator).charge_cache;
         let sequence = operator.state.next_output_sequence;
         let next = Batch::table(
             vec![float64_fast_record(&[(4, "a", 4, Some(7.0))])],
@@ -351,6 +344,7 @@ async fn incremental_history_rejected_emission_keeps_history_for_manual_retry() 
         assert_eq!(history.rows.len(), 3);
         assert_eq!(history.rows.front().unwrap().as_ptr(), retained);
         assert_eq!(history.transition_count, 3);
+        assert_eq!(history.charge_cache, cached_charge);
         assert_live_charge(&operator);
         operator
             .process_data("input", next, &context, &mut output)
