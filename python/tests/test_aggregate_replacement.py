@@ -6,6 +6,20 @@ import pytest
 import calc_flow as cf
 
 
+def test_aggregate_schema_quotes_sql_syntax_inside_identifiers():
+    column = 'x"), COUNT(*) AS injected FROM input --'
+    key = 'g" GROUP BY injected --'
+    name = 'total" FROM input; SELECT 1 --'
+    source = cf.table_input(
+        "events", schema=pa.schema([(key, pa.string()), (column, pa.int64())])
+    )
+    result = source.aggregate({name: source[column].sum()}, group_by=[key])
+    program = cf.Program("quoted", mode="batch", outputs={"result": result})
+    assert program.collect_schema()["result"] == pa.schema(
+        [(key, pa.string()), (name, pa.int64())]
+    )
+
+
 @pytest.mark.parametrize(
     "values,total,count,rows",
     [([], None, 0, 0), ([None, None], None, 0, 2), ([1, None, 3], 4, 2, 3)],

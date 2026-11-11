@@ -125,6 +125,26 @@ pub(crate) fn query(
     groups: &[String],
     path: &str,
 ) -> Result<String> {
+    validate_groups(input, schema, groups, path)?;
+    let mut select = groups.iter().map(|key| quote(key)).collect::<Vec<_>>();
+    let reductions = aggregates
+        .iter()
+        .map(|aggregate| selection(input, schema, aggregate, path))
+        .collect::<Result<Vec<_>>>()?;
+    select.extend(reductions);
+    Ok(format!(
+        "SELECT {} FROM input{}",
+        select.join(", "),
+        group_clause(groups)
+    ))
+}
+
+fn validate_groups(
+    input: &TableExpr,
+    schema: &SchemaRef,
+    groups: &[String],
+    path: &str,
+) -> Result<()> {
     for (i, key) in groups.iter().enumerate() {
         let role = format!("{path}.aggregate.group_by[{i}]");
         let dtype = input.column(key)?.dtype(input.lineage(), schema, &role)?;
@@ -136,47 +156,63 @@ pub(crate) fn query(
             ));
         }
     }
-    let mut select = groups.iter().map(|key| quote(key)).collect::<Vec<_>>();
-    for aggregate in aggregates {
-        let role = segment(&format!("{path}.aggregate.aggregates"), &aggregate.name);
-        let operand = if let Some(value) = &aggregate.value.value {
-            let dtype = value.dtype(input.lineage(), schema, &format!("{role}.value"))?;
-            if !matches!(value.0.as_ref(), Scalar::Column { .. })
-                || (aggregate.value.function != "COUNT" && !numeric_type(&dtype))
-            {
-                return Err(invalid(
-                    &format!("{role}.value"),
-                    "unsupported_type",
-                    format!(
-                        "{} requires a direct numeric column; found {dtype}",
-                        aggregate.value.function
-                    ),
-                ));
-            }
-            value.render()
-        } else {
-            "*".into()
-        };
-        select.push(format!(
-            "{}({operand}) AS {}",
-            aggregate.value.function,
-            quote(&aggregate.name)
+    Ok(())
+}
+
+fn selection(
+    input: &TableExpr,
+    schema: &SchemaRef,
+    aggregate: &NamedAggregate,
+    path: &str,
+) -> Result<String> {
+    let role = segment(&format!("{path}.aggregate.aggregates"), &aggregate.name);
+    let operand = operand(input, schema, &aggregate.value, &role)?;
+    Ok(format!(
+        "{}({operand}) AS {}",
+        aggregate.value.function,
+        quote(&aggregate.name)
+    ))
+}
+
+fn operand(
+    input: &TableExpr,
+    schema: &SchemaRef,
+    aggregate: &AggregateExpr,
+    role: &str,
+) -> Result<String> {
+    let Some(value) = &aggregate.value else {
+        return Ok("*".into());
+    };
+    let dtype = value.dtype(input.lineage(), schema, &format!("{role}.value"))?;
+    if !matches!(value.0.as_ref(), Scalar::Column { .. })
+        || (aggregate.function != "COUNT" && !numeric_type(&dtype))
+    {
+        return Err(invalid(
+            &format!("{role}.value"),
+            "unsupported_type",
+            format!(
+                "{} requires a direct numeric column; found {dtype}",
+                aggregate.function
+            ),
         ));
     }
-    let group = if groups.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " GROUP BY {}",
-            groups
-                .iter()
-                .map(|g| quote(g))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
-    Ok(format!("SELECT {} FROM input{group}", select.join(", ")))
+    Ok(value.render())
 }
+
+fn group_clause(groups: &[String]) -> String {
+    if groups.is_empty() {
+        return String::new();
+    }
+    format!(
+        " GROUP BY {}",
+        groups
+            .iter()
+            .map(|g| quote(g))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 pub(crate) fn numeric_type(dtype: &DataType) -> bool {
     matches!(
         dtype,

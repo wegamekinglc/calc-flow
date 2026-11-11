@@ -523,63 +523,78 @@ async fn dataframe_sql_replacement_chain_is_six_legacy_is_seven() -> Result<()> 
         UpdateSemantics::LatestRelation,
         UpdateSemantics::LegacyAppend,
     ] {
-        let source = table_input("events", schema(), InputOptions::default())?;
-        let source = source.sql("SELECT x FROM input")?;
-        let first = source.aggregate(vec![source.column("x")?.sum().alias("total")?], vec![])?;
-        let visible = first.select(vec![first.column("total")?.alias("total")?])?;
-        let visible = visible.filter(visible.column("total")?.ge(lit(0_i64)?))?;
-        let result = visible.sql("SELECT SUM(total) AS total FROM input")?;
-        let program = Program::new(
-            "aggregate",
-            CompileMode::Stream,
-            BTreeMap::from([("result".into(), result)]),
-        )?
-        .with_update_semantics(semantics);
-        let output = Arc::new(Mutex::new(vec![]));
-        let runner = make_runner(
-            plan(&program).await?,
-            vec![data(&[&[1]]), data(&[&[2], &[3]])],
-            None,
-            &Arc::new(AtomicUsize::new(0)),
-            &output,
-        )?
-        .with_runtime_config(calc_flow::StreamRuntimeConfig {
-            checkpointing: false,
-            sql_replacement_state_budget: Some(calc_flow::StateBudget::new(100, 1 << 24)?),
-            ..Default::default()
-        })?;
-        let job = runner.start().await?;
-        assert_eq!(job.wait().await.state, JobState::Completed);
-        let actual = output
-            .lock()
-            .unwrap()
-            .iter()
-            .flat_map(values)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            actual,
-            vec![
-                1,
-                if semantics == UpdateSemantics::LatestRelation {
-                    6
-                } else {
-                    7
-                }
-            ]
-        );
-        let plan = program
-            .for_mode(CompileMode::Batch)?
-            .compile_batch(&UdfRegistry::new().snapshot(), &CompileOptions::default())
+        let program = replacement_chain(semantics)?;
+        check_replacement_chain_stream(&program, semantics).await?;
+        check_replacement_chain_batch(&program).await?;
+    }
+    Ok(())
+}
+
+fn replacement_chain(semantics: UpdateSemantics) -> Result<Program> {
+    let source = table_input("events", schema(), InputOptions::default())?;
+    let source = source.sql("SELECT x FROM input")?;
+    let first = source.aggregate(vec![source.column("x")?.sum().alias("total")?], vec![])?;
+    Program::new(
+        "aggregate",
+        CompileMode::Stream,
+        BTreeMap::from([("result".into(), visible_replacement_total(&first)?)]),
+    )
+    .map(|program| program.with_update_semantics(semantics))
+}
+
+fn visible_replacement_total(first: &calc_flow::TableExpr) -> Result<calc_flow::TableExpr> {
+    let visible = first.select(vec![first.column("total")?.alias("total")?])?;
+    let visible = visible.filter(visible.column("total")?.ge(lit(0_i64)?))?;
+    visible.sql("SELECT SUM(total) AS total FROM input")
+}
+
+async fn check_replacement_chain_stream(
+    program: &Program,
+    semantics: UpdateSemantics,
+) -> Result<()> {
+    let output = Arc::new(Mutex::new(vec![]));
+    let runner = make_runner(
+        plan(program).await?,
+        vec![data(&[&[1]]), data(&[&[2], &[3]])],
+        None,
+        &Arc::new(AtomicUsize::new(0)),
+        &output,
+    )?
+    .with_runtime_config(calc_flow::StreamRuntimeConfig {
+        checkpointing: false,
+        sql_replacement_state_budget: Some(calc_flow::StateBudget::new(100, 1 << 24)?),
+        ..Default::default()
+    })?;
+    let job = runner.start().await?;
+    assert_eq!(job.wait().await.state, JobState::Completed);
+    let actual = output
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(values)
+        .collect::<Vec<_>>();
+    let last = if semantics == UpdateSemantics::LatestRelation {
+        6
+    } else {
+        7
+    };
+    assert_eq!(actual, vec![1, last]);
+    Ok(())
+}
+
+async fn check_replacement_chain_batch(program: &Program) -> Result<()> {
+    let plan = program
+        .for_mode(CompileMode::Batch)?
+        .compile_batch(&UdfRegistry::new().snapshot(), &CompileOptions::default())
+        .await?;
+    for (parts, expected) in [(vec![1], 1), (vec![2, 3], 5)] {
+        let result = plan
+            .execute(
+                BTreeMap::from([("events".into(), data(&[&parts]))]),
+                ExecutionOptions::default(),
+            )
             .await?;
-        for (parts, expected) in [(vec![1], 1), (vec![2, 3], 5)] {
-            let result = plan
-                .execute(
-                    BTreeMap::from([("events".into(), data(&[&parts]))]),
-                    ExecutionOptions::default(),
-                )
-                .await?;
-            assert_eq!(values(&result.outputs["result"]), vec![expected]);
-        }
+        assert_eq!(values(&result.outputs["result"]), vec![expected]);
     }
     Ok(())
 }

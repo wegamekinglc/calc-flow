@@ -123,18 +123,21 @@ async fn execute(batch: &Program, input: Batch) -> Result<Vec<Option<f64>>> {
     Ok(actual)
 }
 
-async fn verify_replacement_budget() -> Result<()> {
+fn replacement_declaration() -> Result<Program> {
     let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)]));
     let source = table_input("events", schema, InputOptions::default())?;
     let first = source.aggregate(vec![source.column("x")?.sum().alias("total")?], vec![])?;
     let result = first.sql("SELECT SUM(total) AS total FROM input")?;
-    let latest = Program::new(
+    Ok(Program::new(
         "replacement-budget",
         CompileMode::Stream,
         BTreeMap::from([("result".into(), result)]),
     )?
-    .with_update_semantics(UpdateSemantics::LatestRelation);
-    let plan = latest
+    .with_update_semantics(UpdateSemantics::LatestRelation))
+}
+
+async fn verify_replacement_budget() -> Result<()> {
+    let plan = replacement_declaration()?
         .compile_stream(
             &UdfRegistry::new().snapshot(),
             &StreamRequirements::default(),

@@ -4,7 +4,7 @@ use super::{
     expression, parse_select_query, simple_aggregate_function, simple_query,
 };
 use crate::ArrowFieldSpec;
-use datafusion::sql::sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArguments};
+use datafusion::sql::sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArguments, Query};
 
 pub(crate) fn supported(text: &str, fields: &[ArrowFieldSpec]) -> bool {
     inspect(text, fields).unwrap_or(false)
@@ -14,21 +14,29 @@ fn inspect(text: &str, fields: &[ArrowFieldSpec]) -> crate::Result<bool> {
     let DFStatement::Statement(statement) = parsed.statement() else {
         return Ok(false);
     };
-    let Statement::Query(query) = statement.as_ref() else {
-        return Ok(false);
+    Ok(statement_supported(&statement, fields))
+}
+fn statement_supported(statement: &Statement, fields: &[ArrowFieldSpec]) -> bool {
+    let Statement::Query(query) = statement else {
+        return false;
     };
     let SetExpr::Select(select) = query.body.as_ref() else {
-        return Ok(false);
+        return false;
     };
-    let GroupByExpr::Expressions(groups, modifiers) = &select.group_by else {
-        return Ok(false);
+    let Some(groups) = group_expressions(&select.group_by) else {
+        return false;
     };
-    if !modifiers.is_empty() || !groups.iter().all(|g| group(g, fields)) {
-        return Ok(false);
+    groups.iter().all(|g| group(g, fields))
+        && projection(select, groups, fields)
+        && normalized_query(query)
+}
+fn group_expressions(group_by: &GroupByExpr) -> Option<&[Expr]> {
+    match group_by {
+        GroupByExpr::Expressions(groups, modifiers) if modifiers.is_empty() => Some(groups),
+        _ => None,
     }
-    if !projection(select, groups, fields) {
-        return Ok(false);
-    }
+}
+fn normalized_query(query: &Query) -> bool {
     let mut normalized = query.clone();
     let SetExpr::Select(normal) = normalized.body.as_mut() else {
         unreachable!()
@@ -37,7 +45,7 @@ fn inspect(text: &str, fields: &[ArrowFieldSpec]) -> crate::Result<bool> {
     normal.projection = vec![SelectItem::UnnamedExpr(Expr::Identifier(Ident::new(
         "__aggregate",
     )))];
-    Ok(simple_query(&normalized))
+    simple_query(&normalized)
 }
 fn field<'a>(expr: &Expr, fields: &'a [ArrowFieldSpec]) -> Option<&'a ArrowFieldSpec> {
     let name = match expr {
@@ -85,23 +93,34 @@ fn projection(select: &Select, groups: &[Expr], fields: &[ArrowFieldSpec]) -> bo
         })
 }
 fn function(function: &Function, fields: &[ArrowFieldSpec]) -> bool {
-    if !simple_aggregate_function(function)
-        || function.uses_odbc_syntax
-        || function.null_treatment.is_some()
-        || !matches!(function.parameters, FunctionArguments::None)
-    {
+    if !unmodified_function(function) {
         return false;
     }
-    let FunctionArguments::List(args) = &function.args else {
-        return false;
-    };
-    if args.duplicate_treatment.is_some() || !args.clauses.is_empty() || args.args.len() != 1 {
-        return false;
-    }
-    let FunctionArg::Unnamed(operand) = &args.args[0] else {
+    let Some(operand) = function_operand(function) else {
         return false;
     };
     let count = function.name.to_string().eq_ignore_ascii_case("count");
+    operand_supported(operand, count, fields)
+}
+fn unmodified_function(function: &Function) -> bool {
+    simple_aggregate_function(function)
+        && !function.uses_odbc_syntax
+        && function.null_treatment.is_none()
+        && matches!(function.parameters, FunctionArguments::None)
+}
+fn function_operand(function: &Function) -> Option<&FunctionArgExpr> {
+    let FunctionArguments::List(args) = &function.args else {
+        return None;
+    };
+    if args.duplicate_treatment.is_some() || !args.clauses.is_empty() || args.args.len() != 1 {
+        return None;
+    }
+    let FunctionArg::Unnamed(operand) = &args.args[0] else {
+        return None;
+    };
+    Some(operand)
+}
+fn operand_supported(operand: &FunctionArgExpr, count: bool, fields: &[ArrowFieldSpec]) -> bool {
     match operand {
         FunctionArgExpr::Wildcard => count,
         FunctionArgExpr::Expr(expr) => field(expr, fields)
@@ -138,49 +157,68 @@ pub(crate) fn rejection_reason(text: &str) -> &'static str {
     let Statement::Query(query) = statement.as_ref() else {
         return "one SELECT is required";
     };
+    query_rejection(query)
+}
+fn query_rejection(query: &Query) -> &'static str {
     if query.with.is_some() {
         return "CTE is outside the replacement allowlist";
     }
     let SetExpr::Select(select) = query.body.as_ref() else {
         return "set operations are outside the replacement allowlist";
     };
-    if select.from.len() != 1 || select.from.iter().any(|from| !from.joins.is_empty()) {
-        return "JOIN or multiple relations are outside the replacement allowlist";
+    relation_rejection(select)
+        .or_else(|| select_modifier_rejection(select))
+        .or_else(|| query_modifier_rejection(query))
+        .or_else(|| select.projection.iter().find_map(item_rejection))
+        .unwrap_or(
+            "operand/group key type or query modifiers are outside the replacement allowlist",
+        )
+}
+fn relation_rejection(select: &Select) -> Option<&'static str> {
+    (select.from.len() != 1 || select.from.iter().any(|from| !from.joins.is_empty()))
+        .then_some("JOIN or multiple relations are outside the replacement allowlist")
+}
+fn select_modifier_rejection(select: &Select) -> Option<&'static str> {
+    [
+        (
+            select.distinct.is_some(),
+            "SELECT DISTINCT is outside the replacement allowlist",
+        ),
+        (
+            select.selection.is_some(),
+            "WHERE must be a separate row-local node",
+        ),
+        (
+            select.having.is_some(),
+            "HAVING is outside the replacement allowlist",
+        ),
+    ]
+    .into_iter()
+    .find_map(|(active, reason)| active.then_some(reason))
+}
+fn query_modifier_rejection(query: &Query) -> Option<&'static str> {
+    [
+        (
+            query.order_by.is_some(),
+            "ORDER BY is outside the replacement allowlist",
+        ),
+        (
+            query.limit_clause.is_some() || query.fetch.is_some(),
+            "LIMIT/OFFSET/FETCH is outside the replacement allowlist",
+        ),
+    ]
+    .into_iter()
+    .find_map(|(active, reason)| active.then_some(reason))
+}
+fn item_rejection(item: &SelectItem) -> Option<&'static str> {
+    match expression(item) {
+        Some(Expr::Function(function)) => function_rejection(function),
+        Some(Expr::Identifier(_) | Expr::CompoundIdentifier(_)) => None,
+        _ => Some("projection requires direct group keys or named reducers"),
     }
-    if select.distinct.is_some() {
-        return "SELECT DISTINCT is outside the replacement allowlist";
-    }
-    if select.selection.is_some() {
-        return "WHERE must be a separate row-local node";
-    }
-    if select.having.is_some() {
-        return "HAVING is outside the replacement allowlist";
-    }
-    if query.order_by.is_some() {
-        return "ORDER BY is outside the replacement allowlist";
-    }
-    if query.limit_clause.is_some() || query.fetch.is_some() {
-        return "LIMIT/OFFSET/FETCH is outside the replacement allowlist";
-    }
-    for item in &select.projection {
-        match expression(item) {
-            Some(Expr::Function(function)) => {
-                if let Some(reason) = function_rejection(function) {
-                    return reason;
-                }
-            }
-            Some(Expr::Identifier(_) | Expr::CompoundIdentifier(_)) => {}
-            _ => return "projection requires direct group keys or named reducers",
-        }
-    }
-    "operand/group key type or query modifiers are outside the replacement allowlist"
 }
 fn function_rejection(function: &Function) -> Option<&'static str> {
-    if !simple_aggregate_function(function)
-        || function.null_treatment.is_some()
-        || function.uses_odbc_syntax
-        || !matches!(function.parameters, FunctionArguments::None)
-    {
+    if !unmodified_function(function) {
         return Some("only unmodified SUM/COUNT/MIN/MAX/AVG reducers are admitted");
     }
     let FunctionArguments::List(args) = &function.args else {
@@ -192,11 +230,14 @@ fn function_rejection(function: &Function) -> Option<&'static str> {
     if args.args.len() != 1 || !args.clauses.is_empty() {
         return Some("one direct column without function clauses is required");
     }
-    match &args.args[0] {
+    (!direct_argument(&args.args[0])).then_some("one direct column operand is required")
+}
+fn direct_argument(arg: &FunctionArg) -> bool {
+    matches!(
+        arg,
         FunctionArg::Unnamed(
             FunctionArgExpr::Expr(Expr::Identifier(_) | Expr::CompoundIdentifier(_))
-            | FunctionArgExpr::Wildcard,
-        ) => None,
-        _ => Some("one direct column operand is required"),
-    }
+                | FunctionArgExpr::Wildcard
+        )
+    )
 }
