@@ -155,7 +155,7 @@ def _observe(program, data, config=None):
 
     async def run():
         async with program.stream({"events": feed()}, config=config) as events:
-            seen = {"result": [], "shared": []}
+            seen = {name: [] for name, _ in program.outputs}
             async for event in events:
                 seen[event.name].append(event.table.to_pydict())
             return seen
@@ -321,3 +321,61 @@ def test_native_budget_pairs_and_project_reload_selection():
     reloaded._inner.validate_runtime_config(config)
     with pytest.raises(TypeError, match="AggregateExpr"):
         cf.AggregateExpr()
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "SELECT g, SUM(x) AS total FROM input GROUP BY g",
+        "SELECT input.g, SUM(input.x) AS total FROM input GROUP BY g",
+        "SELECT g, SUM(x) AS total FROM input GROUP BY input.g",
+        "SELECT G, SUM(x) AS total FROM input GROUP BY g",
+        'SELECT "g", SUM(x) AS total FROM input GROUP BY G',
+        "SELECT r.G, SUM(r.x) AS total FROM input AS r GROUP BY g",
+        'SELECT g, SUM("R".x) AS total FROM input AS "R" GROUP BY "R".g',
+    ],
+)
+@pytest.mark.parametrize(
+    "semantics,last", [("latest_relation", 6), ("legacy_append", 7)]
+)
+def test_grouped_replacement_resolves_equivalent_columns(query, semantics, last):
+    source = cf.table_input(
+        "events", schema=pa.schema([("g", pa.string()), ("x", pa.int64())])
+    )
+    first = source.sql("SELECT g, SUM(x) AS x FROM input GROUP BY g")
+    program = cf.Program(
+        "group-binding", mode="stream", outputs={"result": first.sql(query)}
+    ).with_update_semantics(semantics)
+    config = cf.StreamRuntimeConfig(
+        sql_replacement_state_budget=cf.StateBudget(100, 1 << 24)
+    )
+    assert _observe(
+        program,
+        [pa.table({"g": ["a"], "x": [1]}), pa.table({"g": ["a", "a"], "x": [2, 3]})],
+        config,
+    ) == {"result": [{"g": ["a"], "total": [1]}, {"g": ["a"], "total": [last]}]}
+    result = program.for_mode("batch").collect(
+        {"events": pa.table({"g": ["a", "a"], "x": [1, 2]})}
+    )["result"]
+    assert result.to_pydict() == {"g": ["a"], "total": [3]}
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "SELECT x, SUM(x) AS total FROM input GROUP BY g",
+        "SELECT other.g, SUM(x) AS total FROM input GROUP BY g",
+        'SELECT "G", SUM(x) AS total FROM input GROUP BY g',
+        "SELECT input.g, SUM(r.x) AS total FROM input AS r GROUP BY r.g",
+    ],
+)
+def test_grouped_replacement_rejects_unbound_or_ungrouped_columns(query):
+    source = cf.table_input(
+        "events", schema=pa.schema([("g", pa.string()), ("x", pa.int64())])
+    )
+    first = source.sql("SELECT g, SUM(x) AS x FROM input GROUP BY g")
+    program = cf.Program(
+        "invalid-group-binding", mode="stream", outputs={"result": first.sql(query)}
+    ).with_update_semantics("latest_relation")
+    with pytest.raises(cf.CompileError):
+        program.compile_stream()

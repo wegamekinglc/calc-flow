@@ -191,3 +191,42 @@ fn replacement_requires_alias_metadata_in_declaration_analysis() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn replacement_group_keys_resolve_equivalent_bound_columns() -> Result<()> {
+    let source = table_input(
+        "events",
+        Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, true),
+            Field::new("x", DataType::Int64, true),
+        ])),
+        InputOptions::default(),
+    )?;
+    let upstream = source.sql("SELECT g, SUM(x) AS x FROM input GROUP BY g")?;
+    for query in [
+        "SELECT g, SUM(x) AS total FROM input GROUP BY g",
+        "SELECT input.g, SUM(input.x) AS total FROM input GROUP BY g",
+        "SELECT g, SUM(x) AS total FROM input GROUP BY input.g",
+        "SELECT G, SUM(x) AS total FROM input GROUP BY g",
+        "SELECT \"g\", SUM(x) AS total FROM input GROUP BY G",
+        "SELECT r.G, SUM(r.x) AS total FROM input AS r GROUP BY g",
+        "SELECT g, SUM(\"R\".x) AS total FROM input AS \"R\" GROUP BY \"R\".g",
+    ] {
+        let result = upstream.sql(query)?;
+        let program = Program::new(
+            "group_binding",
+            CompileMode::Stream,
+            BTreeMap::from([("result".into(), result)]),
+        )?
+        .with_update_semantics(UpdateSemantics::LatestRelation);
+        program
+            .compile_stream(
+                &UdfRegistry::new().snapshot(),
+                &StreamRequirements::default(),
+                &CompileOptions::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{query}: {error}"));
+    }
+    Ok(())
+}

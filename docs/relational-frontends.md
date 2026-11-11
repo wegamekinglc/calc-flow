@@ -110,9 +110,11 @@ physical names as immutable `external_inputs` / `external_outputs` tuples; strea
 plans retain `source_binding_ids` / `sink_binding_ids`. Export is not a checkpoint;
 batch query continuation is outside this contract.
 
-This slice covers row-local DataFrame expressions and the existing SQL relation
-surface. It does not add DataFrame aggregation, aggregate replacement consumption, general
-joins, wider portable Arrow types, or comprehensive Polars compatibility.
+The relational frontends cover row-local expressions, named DataFrame aggregates,
+and the existing SQL relation surface. Eligible single-alias aggregates consume
+complete replacements with an explicit state budget, as described below. General
+joins, wider portable Arrow types, and comprehensive Polars compatibility remain
+outside this scope.
 
 ## Explicit relation updates
 
@@ -138,10 +140,11 @@ fn choose(program: &Program) -> Program {
 ```
 
 The default is `legacy_append`. With input batches [1] and [2, 3], the first
-stream SUM emits snapshots 1 and 6. A second ordinary SUM appends those events
-and emits 1 and 7. Explicit latest rejects that second consumption edge before
-opening a Source, without requiring a portability request. This release provides
-safe admission; it does not compute replacement aggregation.
+stream SUM emits snapshots 1 and 6. Under legacy semantics, a second ordinary SUM
+appends those events and emits 1 and 7. Explicit latest admits an eligible second
+aggregate with `sql_replacement_state_budget` and emits 1 and 6. Queries outside
+the replacement allowlist reject before opening a Source, without requiring a
+portability request; a missing replacement budget also rejects before startup.
 
 Latest admits complete snapshots through proved deterministic single-input
 projections, filters and row-local SQL/CTEs. These edges report
@@ -161,8 +164,9 @@ remain separate obligations.
 `for_mode`, `with_input` and `output` preserve the choice. Latest changes
 declaration, plan, cache and checkpoint identities; switching back to legacy
 recomputes the original identity. Batch still consumes one independent finite
-input per execution and has no cross-execution replacement state. Thus a batch
-SUM chain can compile while the same stream declaration rejects.
+input per execution and has no cross-execution replacement state. Batch SUM
+chains therefore need no replacement state budget. Queries outside the stream
+replacement allowlist may still compile for finite batch execution.
 
 Project-v3 persists `graph.update_semantics="latest_relation"`. Missing or explicit
 legacy normalizes to the old omitted-field bytes and identities. The Rust public

@@ -154,9 +154,16 @@ fn projection(select: &Select, groups: &[Expr], fields: &[ArrowFieldSpec]) -> bo
         .any(|i| matches!(expression(i), Some(Expr::Function(_))))
         && select.projection.iter().all(|i| match expression(i) {
             Some(Expr::Function(f)) => function(f, fields),
-            Some(expr) => groups.contains(expr) && field(expr, fields).is_some(),
+            Some(expr) => grouped_field(expr, groups, fields),
             None => false,
         })
+}
+fn grouped_field(expr: &Expr, groups: &[Expr], fields: &[ArrowFieldSpec]) -> bool {
+    field(expr, fields).is_some_and(|projected| {
+        groups
+            .iter()
+            .any(|group| field(group, fields).is_some_and(|key| key.name == projected.name))
+    })
 }
 fn function(function: &Function, fields: &[ArrowFieldSpec]) -> bool {
     if !unmodified_function(function) {
