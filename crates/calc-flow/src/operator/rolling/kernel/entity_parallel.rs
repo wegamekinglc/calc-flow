@@ -17,12 +17,13 @@ use super::{
     RollingKernelState, RollingMetricsRecorder, RollingNumericalProfile, RollingWork,
     RollingWorkBatch, Statistic, StreamKernelUpdate, TimestampMicrosecondArray, TypedEntityState,
     TypedFloatReadout, TypedFloatReadoutKind, TypedFrame, TypedGroupInput, TypedGroupPlan,
-    TypedOutputKind, TypedOutputPlan, TypedWindowState, float_mean, internal_error, operator_error,
-    read_typed_float, typed_output_mismatch, valid_float64,
+    TypedOutputKind, TypedOutputPlan, TypedWindowState, append_numeric_float64, internal_error,
+    operator_error, read_typed_float, typed_output_mismatch, valid_float64, with_float64_builder,
 };
 use crate::{CalcFlowError, Result};
 
 mod route;
+use route::GlobalRowCursor;
 pub(super) use route::{LaneRoute, RouteCursor, RouteStep, RoutingLayout};
 
 const ROWS_PER_LANE: usize = 16_000;
@@ -33,6 +34,8 @@ thread_local! {
     pub(super) static ENTITY_COUNT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static ROUTE_WORD_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static MERGE_VALIDATION_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(in crate::operator::rolling) static QUALIFICATION_ENTITY_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static ROUTE_ENTITY_DECODE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -120,9 +123,21 @@ struct PreparedNumericInput {
     columns: Vec<TypedGroupInput>,
     event_times: TimestampMicrosecondArray,
     outputs: Vec<TypedOutputPlan>,
+    numeric_groups: Option<NumericGroups>,
     numerical_profile: RollingNumericalProfile,
     nan_as_value: bool,
     node_id: String,
+}
+
+struct NumericGroups;
+
+impl NumericGroups {
+    fn compile(plan: &RollingKernelPlan) -> Option<Self> {
+        plan.groups
+            .iter()
+            .all(|group| matches!(group, TypedGroupPlan::Numeric { .. }))
+            .then_some(Self)
+    }
 }
 
 pub(crate) struct NumericLaneRequest {
@@ -394,6 +409,11 @@ pub(in crate::operator::rolling) struct PreparedOrderedKernel<'a> {
     parallel_shape: bool,
 }
 
+pub(in crate::operator::rolling) struct EligibleOrderedKernel<'a> {
+    prepared: PreparedOrderedKernel<'a>,
+    scratch: ScratchPlan,
+}
+
 impl RollingKernelPlan {
     /// The sole route-off control point; managed owner initialization is outside it.
     pub(in crate::operator::rolling) fn supports_entity_parallel(
@@ -463,7 +483,7 @@ impl RollingKernelPlan {
     }
 }
 
-impl PreparedOrderedKernel<'_> {
+impl<'a> PreparedOrderedKernel<'a> {
     #[cfg(test)]
     pub(in crate::operator::rolling) fn scratch_plan(&self) -> Option<ScratchPlan> {
         self.scratch_plan_for_cpu(2).ok()
@@ -503,6 +523,23 @@ impl PreparedOrderedKernel<'_> {
             .ok_or(RollingWork::ParallelFallbackScratchUnrepresentable)
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "rejection preserves the same owned preparation without another allocation"
+    )]
+    pub(in crate::operator::rolling) fn qualify_parallel(
+        self,
+        cpus: usize,
+    ) -> std::result::Result<EligibleOrderedKernel<'a>, (Self, RollingWork)> {
+        match self.scratch_plan_for_cpu(cpus) {
+            Ok(scratch) => Ok(EligibleOrderedKernel {
+                prepared: self,
+                scratch,
+            }),
+            Err(reason) => Err((self, reason)),
+        }
+    }
+
     pub(in crate::operator::rolling) fn finish_serial(
         self,
         observer: Option<&RollingMetricsRecorder>,
@@ -532,31 +569,59 @@ impl PreparedOrderedKernel<'_> {
         clippy::result_large_err,
         reason = "rejection reuses the existing owned serial preparation"
     )]
+    #[cfg(test)]
     pub(in crate::operator::rolling) fn split_lanes(
         self,
         cpus: usize,
     ) -> std::result::Result<(NumericJoinSeed, Vec<NumericLaneRequest>), Self> {
-        let Ok(scratch) = self.scratch_plan_for_cpu(cpus) else {
-            return Err(self);
+        let eligible = match self.qualify_parallel(cpus) {
+            Ok(eligible) => eligible,
+            Err((prepared, _)) => return Err(prepared),
         };
+        eligible.split()
+    }
+}
+
+impl<'a> EligibleOrderedKernel<'a> {
+    pub(in crate::operator::rolling) const fn scratch(&self) -> ScratchPlan {
+        self.scratch
+    }
+
+    pub(in crate::operator::rolling) fn finish_serial(
+        self,
+        observer: Option<&RollingMetricsRecorder>,
+    ) -> Result<StreamKernelUpdate> {
+        self.prepared.finish_serial(observer)
+    }
+
+    #[allow(
+        clippy::result_large_err,
+        reason = "partition rejection returns the same funded serial preparation"
+    )]
+    pub(in crate::operator::rolling) fn split(
+        self,
+    ) -> std::result::Result<(NumericJoinSeed, Vec<NumericLaneRequest>), PreparedOrderedKernel<'a>>
+    {
+        let Self { prepared, scratch } = self;
         let lanes = scratch.lanes();
         let Some(LaneRoutes {
             assignments,
             loads,
             entities,
-        }) = lane_routes(&self.fill, self.plan.outputs.len(), lanes)
+        }) = lane_routes(&prepared.fill, prepared.plan.outputs.len(), lanes)
         else {
-            return Err(self);
+            return Err(prepared);
         };
-        let Some(routes) = prepare_routes(&self.fill, &assignments, &loads, scratch.routing) else {
-            return Err(self);
+        let Some(routes) = prepare_routes(&prepared.fill, &assignments, &loads, scratch.routing)
+        else {
+            return Err(prepared);
         };
         let PreparedTypedFill {
             columns,
             event_times,
             row_count,
             mut stream,
-        } = self.fill;
+        } = prepared.fill;
         let mut lane_entities = entities
             .iter()
             .map(|&count| Vec::with_capacity(count))
@@ -570,10 +635,11 @@ impl PreparedOrderedKernel<'_> {
             routes,
             columns,
             event_times,
-            outputs: self.plan.outputs.clone(),
-            numerical_profile: self.plan.numerical_profile,
-            nan_as_value: self.plan.nan_as_value,
-            node_id: self.node_id.to_owned(),
+            outputs: prepared.plan.outputs.clone(),
+            numeric_groups: NumericGroups::compile(prepared.plan),
+            numerical_profile: prepared.plan.numerical_profile,
+            nan_as_value: prepared.plan.nan_as_value,
+            node_id: prepared.node_id.to_owned(),
         });
         let requests = (0..lanes)
             .map(|lane| NumericLaneRequest {
@@ -598,7 +664,7 @@ impl PreparedOrderedKernel<'_> {
                 metrics: stream.metrics,
                 state: stream.state,
             },
-            output_count: self.plan.outputs.len(),
+            output_count: prepared.plan.outputs.len(),
             #[cfg(test)]
             panic_before_output_finish: false,
         };
@@ -708,6 +774,8 @@ fn balanced_lane_loads(loads: &[usize], row_count: usize) -> bool {
 }
 
 fn parallel_entity_state(entity: &TypedEntityState, groups: &[TypedGroupPlan]) -> bool {
+    #[cfg(test)]
+    QUALIFICATION_ENTITY_VISITS.set(QUALIFICATION_ENTITY_VISITS.get() + 1);
     entity.groups.len() == groups.len()
         && entity.shared_rows_match_groups(groups)
         && entity
@@ -826,11 +894,38 @@ pub(crate) fn run_numeric_lane(
 ) -> std::result::Result<NumericLaneResult, NumericLaneStop> {
     check_cancelled(cancellation, progress)?;
     let input = &request.input;
+    if input.numeric_groups.is_some()
+        && input
+            .outputs
+            .iter()
+            .all(|output| output.storage == OutputStorage::Float64)
+        && input
+            .columns
+            .iter()
+            .all(|column| matches!(column, TypedGroupInput::Single(_)))
+    {
+        let builders = input
+            .outputs
+            .iter()
+            .map(|_| Float64Builder::with_capacity(request.row_count))
+            .collect();
+        return run_numeric_lane_with_builders(request, builders, cancellation, progress);
+    }
     let builders = input
         .outputs
         .iter()
         .map(|output| DerivedBuilder::new(*output, request.row_count))
-        .collect::<Vec<_>>();
+        .collect();
+    run_numeric_lane_with_builders(request, builders, cancellation, progress)
+}
+
+fn run_numeric_lane_with_builders<B: NumericLaneBuilder>(
+    request: NumericLaneRequest,
+    builders: Vec<B>,
+    cancellation: &AtomicBool,
+    progress: &mut LaneProgress,
+) -> std::result::Result<NumericLaneResult, NumericLaneStop> {
+    let input = &request.input;
     let compiled_output = match input.outputs.as_slice() {
         [output]
             if output.storage == OutputStorage::Float64
@@ -845,18 +940,14 @@ pub(crate) fn run_numeric_lane(
     };
     match (input.columns.len(), compiled_output) {
         (1, Some(output)) => {
-            run_compiled_numeric_lane::<1>(request, builders, output, cancellation, progress)
+            run_compiled_numeric_lane::<1, _>(request, builders, output, cancellation, progress)
         }
         (2, Some(output)) => {
-            run_compiled_numeric_lane::<2>(request, builders, output, cancellation, progress)
+            run_compiled_numeric_lane::<2, _>(request, builders, output, cancellation, progress)
         }
-        _ => run_prepared_numeric_lane::<0>(
-            request,
-            builders,
-            cancellation,
-            progress,
-            DerivedBuilder::append,
-        ),
+        _ => {
+            run_prepared_numeric_lane::<0, _>(request, builders, cancellation, progress, B::append)
+        }
     }
 }
 
@@ -880,22 +971,20 @@ struct LaneMeanReadout {
 // The Mean-only capture remains covered by the original, conservative allowance.
 const _: () = assert!(size_of::<[LaneMeanReadout; 2]>() <= size_of::<[TypedFloatReadout; 2]>());
 
-fn run_compiled_numeric_lane<const GROUPS: usize>(
+fn run_compiled_numeric_lane<const GROUPS: usize, B: NumericLaneBuilder>(
     request: NumericLaneRequest,
-    builders: Vec<DerivedBuilder>,
+    builders: Vec<B>,
     output: TypedOutputPlan,
     cancellation: &AtomicBool,
     progress: &mut LaneProgress,
 ) -> std::result::Result<NumericLaneResult, NumericLaneStop> {
     match output.kind {
-        TypedOutputKind::Statistic(Statistic::Mean) => run_prepared_numeric_lane::<GROUPS>(
+        TypedOutputKind::Statistic(Statistic::Mean) => run_prepared_numeric_lane::<GROUPS, _>(
             request,
             builders,
             cancellation,
             progress,
-            move |builder, states, _, node_id| {
-                append_numeric_lane_mean(builder, states, &output, node_id)
-            },
+            move |builder, states, _, node_id| builder.append_mean(states, &output, node_id),
         ),
         TypedOutputKind::Difference { left, right }
             if left.kind == TypedFloatReadoutKind::Mean
@@ -909,23 +998,17 @@ fn run_compiled_numeric_lane<const GROUPS: usize>(
                 group: right.group,
                 min_periods: right.min_periods,
             };
-            run_prepared_numeric_lane::<GROUPS>(
+            run_prepared_numeric_lane::<GROUPS, _>(
                 request,
                 builders,
                 cancellation,
                 progress,
-                move |builder, states, _, _| {
-                    append_numeric_lane_difference(builder, states, left, right)
-                },
+                move |builder, states, _, _| builder.append_mean_difference(states, left, right),
             )
         }
-        _ => run_prepared_numeric_lane::<0>(
-            request,
-            builders,
-            cancellation,
-            progress,
-            DerivedBuilder::append,
-        ),
+        _ => {
+            run_prepared_numeric_lane::<0, _>(request, builders, cancellation, progress, B::append)
+        }
     }
 }
 
@@ -941,14 +1024,15 @@ fn append_numeric_lane_mean(
     let TypedWindowState::Numeric(state) = state else {
         return builder.append(states, output, node_id);
     };
-    if state.accumulator.valid_count < output.min_periods {
+    let value = super::mean::read_numeric_mean(state, output.min_periods);
+    if value.is_none() {
         builder.append_null();
         return Ok(());
     }
     let DerivedBuilder::Float(values, _) = builder else {
         return Err(typed_output_mismatch());
     };
-    values.append_value(float_mean(&state.accumulator));
+    values.append_option(value);
     Ok(())
 }
 
@@ -989,10 +1073,7 @@ fn read_numeric_lane_mean(
             },
         );
     };
-    if state.accumulator.valid_count < readout.min_periods {
-        return Ok(None);
-    }
-    Ok(Some(float_mean(&state.accumulator)))
+    Ok(super::mean::read_numeric_mean(state, readout.min_periods))
 }
 
 #[cfg(test)]
@@ -1041,13 +1122,107 @@ pub(super) fn run_generic_numeric_lane_for_test(
         .iter()
         .map(|output| DerivedBuilder::new(*output, request.row_count))
         .collect();
-    run_prepared_numeric_lane::<0>(
+    run_prepared_numeric_lane::<0, _>(
         request,
         builders,
         cancellation,
         progress,
         DerivedBuilder::append,
     )
+}
+
+trait NumericLaneBuilder: Sized {
+    fn append(
+        &mut self,
+        states: &[TypedWindowState],
+        output: &TypedOutputPlan,
+        node: &str,
+    ) -> Result<()>;
+    fn append_mean(
+        &mut self,
+        states: &[TypedWindowState],
+        output: &TypedOutputPlan,
+        node: &str,
+    ) -> Result<()>;
+    fn append_mean_difference(
+        &mut self,
+        states: &[TypedWindowState],
+        left: LaneMeanReadout,
+        right: LaneMeanReadout,
+    ) -> Result<()>;
+    fn finish_column(self) -> Float64Array;
+}
+
+impl NumericLaneBuilder for DerivedBuilder {
+    fn append(
+        &mut self,
+        states: &[TypedWindowState],
+        output: &TypedOutputPlan,
+        node: &str,
+    ) -> Result<()> {
+        DerivedBuilder::append(self, states, output, node)
+    }
+    fn append_mean(
+        &mut self,
+        states: &[TypedWindowState],
+        output: &TypedOutputPlan,
+        node: &str,
+    ) -> Result<()> {
+        append_numeric_lane_mean(self, states, output, node)
+    }
+    fn append_mean_difference(
+        &mut self,
+        states: &[TypedWindowState],
+        left: LaneMeanReadout,
+        right: LaneMeanReadout,
+    ) -> Result<()> {
+        append_numeric_lane_difference(self, states, left, right)
+    }
+    fn finish_column(self) -> Float64Array {
+        match self {
+            Self::Float(mut values, OutputStorage::Float64) => values.finish(),
+            _ => unreachable!("qualified lane output is Float64"),
+        }
+    }
+}
+
+impl NumericLaneBuilder for Float64Builder {
+    fn append(
+        &mut self,
+        states: &[TypedWindowState],
+        output: &TypedOutputPlan,
+        node: &str,
+    ) -> Result<()> {
+        append_numeric_float64(self, states, output, node)
+    }
+    fn append_mean(
+        &mut self,
+        states: &[TypedWindowState],
+        output: &TypedOutputPlan,
+        node: &str,
+    ) -> Result<()> {
+        if let Some(TypedWindowState::Numeric(state)) = states.get(output.group) {
+            self.append_option(super::mean::read_numeric_mean(state, output.min_periods));
+            return Ok(());
+        }
+        with_float64_builder(self, |builder| {
+            append_numeric_lane_mean(builder, states, output, node)
+        })
+    }
+    fn append_mean_difference(
+        &mut self,
+        states: &[TypedWindowState],
+        left: LaneMeanReadout,
+        right: LaneMeanReadout,
+    ) -> Result<()> {
+        let left = read_numeric_lane_mean(states, left)?;
+        let right = read_numeric_lane_mean(states, right)?;
+        self.append_option(left.zip(right).map(|(left, right)| left - right));
+        Ok(())
+    }
+    fn finish_column(mut self) -> Float64Array {
+        Float64Builder::finish(&mut self)
+    }
 }
 
 struct NumericLaneContext<'a, const GROUPS: usize> {
@@ -1067,7 +1242,7 @@ const _: () =
 impl<'a, const GROUPS: usize> NumericLaneContext<'a, GROUPS> {
     fn new(
         input: &'a PreparedNumericInput,
-        builders: &[DerivedBuilder],
+        builder_count: usize,
         cancellation: &'a AtomicBool,
         #[cfg(test)] test_hook: Option<&'a Arc<dyn Fn(NumericTestPoint) + Send + Sync>>,
     ) -> Self {
@@ -1087,7 +1262,7 @@ impl<'a, const GROUPS: usize> NumericLaneContext<'a, GROUPS> {
                 GROUPS
             },
             output_count: if GROUPS == 0 {
-                builders.len().min(input.outputs.len())
+                builder_count.min(input.outputs.len())
             } else {
                 1
             },
@@ -1113,6 +1288,20 @@ impl<'a, const GROUPS: usize> NumericLaneContext<'a, GROUPS> {
             &self.input.columns[ordinal]
         } else {
             self.fixed_columns[ordinal].1
+        }
+    }
+
+    fn numeric_values<'b>(
+        &'b self,
+        column: &'b TypedGroupInput,
+        ordinal: usize,
+    ) -> Option<&'b Float64Array> {
+        if GROUPS != 0 {
+            return Some(self.fixed_columns[ordinal].0);
+        }
+        match column {
+            TypedGroupInput::Single(values) => Some(values),
+            _ => None,
         }
     }
 
@@ -1212,19 +1401,16 @@ impl<'a, const GROUPS: usize> NumericLaneContext<'a, GROUPS> {
         let state = &mut entity.groups[site.ordinal];
         // Expiration and numerical repair use the serial transition unchanged.
         let event_time = self.input.event_times.value(site.row as usize);
-        match state {
-            TypedWindowState::Numeric(state) if GROUPS != 0 => state.update(
+        match (state, self.numeric_values(column, site.ordinal)) {
+            (TypedWindowState::Numeric(state), Some(values)) => super::mean::update_numeric_group(
+                state,
                 event_time,
-                valid_float64(
-                    self.fixed_columns[site.ordinal].0,
-                    site.row as usize,
-                    self.input.nan_as_value,
-                ),
+                valid_float64(values, site.row as usize, self.input.nan_as_value),
                 self.input.numerical_profile,
                 transition_count,
                 &self.input.node_id,
             ),
-            state => state.update(
+            (state, _) => state.update(
                 event_time,
                 column,
                 site.row as usize,
@@ -1236,18 +1422,13 @@ impl<'a, const GROUPS: usize> NumericLaneContext<'a, GROUPS> {
         }
     }
 
-    fn append_outputs(
+    fn append_outputs<B>(
         &self,
-        builders: &mut [DerivedBuilder],
+        builders: &mut [B],
         entity: &TypedEntityState,
         row: LaneRow,
         progress: &mut LaneProgress,
-        append: &mut impl FnMut(
-            &mut DerivedBuilder,
-            &[TypedWindowState],
-            &TypedOutputPlan,
-            &str,
-        ) -> Result<()>,
+        append: &mut impl FnMut(&mut B, &[TypedWindowState], &TypedOutputPlan, &str) -> Result<()>,
     ) -> std::result::Result<(), NumericLaneStop> {
         for (ordinal, builder) in builders.iter_mut().enumerate().take(self.output_count) {
             let output = &self.input.outputs[ordinal];
@@ -1266,22 +1447,17 @@ impl<'a, const GROUPS: usize> NumericLaneContext<'a, GROUPS> {
     }
 }
 
-fn run_prepared_numeric_lane<const GROUPS: usize>(
+fn run_prepared_numeric_lane<const GROUPS: usize, B: NumericLaneBuilder>(
     mut request: NumericLaneRequest,
-    mut builders: Vec<DerivedBuilder>,
+    mut builders: Vec<B>,
     cancellation: &AtomicBool,
     progress: &mut LaneProgress,
-    mut append: impl FnMut(
-        &mut DerivedBuilder,
-        &[TypedWindowState],
-        &TypedOutputPlan,
-        &str,
-    ) -> Result<()>,
+    mut append: impl FnMut(&mut B, &[TypedWindowState], &TypedOutputPlan, &str) -> Result<()>,
 ) -> std::result::Result<NumericLaneResult, NumericLaneStop> {
     // Borrow only the immutable input and hook, leaving owned row/state buffers mutable.
     let context = NumericLaneContext::<GROUPS>::new(
         &request.input,
-        &builders,
+        builders.len(),
         cancellation,
         #[cfg(test)]
         request.test_hook.as_ref(),
@@ -1348,13 +1524,10 @@ fn next_lane_row(
     Ok(None)
 }
 
-fn finish_numeric_columns(builders: Vec<DerivedBuilder>) -> Vec<Float64Array> {
+fn finish_numeric_columns<B: NumericLaneBuilder>(builders: Vec<B>) -> Vec<Float64Array> {
     builders
         .into_iter()
-        .map(|builder| match builder {
-            DerivedBuilder::Float(mut values, OutputStorage::Float64) => values.finish(),
-            _ => unreachable!("qualified lane output is Float64"),
-        })
+        .map(NumericLaneBuilder::finish_column)
         .collect()
 }
 
@@ -1374,16 +1547,32 @@ enum NumericOutputBuffers {
     Nullable(Vec<Float64Builder>),
 }
 
+#[derive(Clone, Copy)]
+struct NumericOutputShape<'a> {
+    results: &'a [NumericLaneResult],
+    count: usize,
+}
+
+struct TrustedNumericRoutes<'a> {
+    input: &'a PreparedNumericInput,
+    shape: NumericOutputShape<'a>,
+}
+
+// Two producer lanes already fund a second full cursor per lane during merge.
+const _: () = assert!(
+    2 * size_of::<NumericOutputShape<'_>>()
+        + size_of::<TrustedNumericRoutes<'_>>()
+        + size_of::<GlobalRowCursor<'_>>()
+        <= 2 * size_of::<RouteCursor<'_>>()
+);
+
 // Fixed output headers and the largest pair of logical column-view arrays.
 pub(super) const NULL_FREE_MERGE_METADATA_BYTES: usize =
     size_of::<NumericOutputBuffers>() + size_of::<[[&[f64]; 2]; 2]>();
 
 impl NumericOutputBuffers {
-    fn gather(
-        input: &PreparedNumericInput,
-        results: &[NumericLaneResult],
-        count: usize,
-    ) -> Result<Self> {
+    fn gather(input: &PreparedNumericInput, shape: NumericOutputShape<'_>) -> Result<Self> {
+        let NumericOutputShape { results, count } = shape;
         let entity_ids = &input.entity_ids;
         let assignments = &input.assignments;
         let rows = entity_ids.len();
@@ -1391,12 +1580,12 @@ impl NumericOutputBuffers {
             && results
                 .iter()
                 .all(|result| result.columns.iter().all(|column| column.null_count() == 0));
-        if null_free && trusted_numeric_routes(input, results) {
-            return match count {
-                1 => gather_trusted_numeric_columns(input, results).map(Self::One),
-                2 => gather_trusted_numeric_columns(input, results).map(Self::Two),
-                _ => gather_trusted_numeric_columns_many(input, results, count).map(Self::Many),
-            };
+        if null_free && let Some(proof) = trusted_numeric_routes(input, shape) {
+            return Ok(match count {
+                1 => Self::One(gather_trusted_numeric_columns(&proof)),
+                2 => Self::Two(gather_trusted_numeric_columns(&proof)),
+                _ => Self::Many(gather_trusted_numeric_columns_many(&proof)),
+            });
         }
         match count {
             1 if null_free => gather_null_free_numeric_columns_impl(
@@ -1458,7 +1647,18 @@ impl NumericOutputBuffers {
     }
 }
 
-fn trusted_numeric_routes(input: &PreparedNumericInput, results: &[NumericLaneResult]) -> bool {
+fn trusted_numeric_routes<'a>(
+    input: &'a PreparedNumericInput,
+    shape: NumericOutputShape<'a>,
+) -> Option<TrustedNumericRoutes<'a>> {
+    (shape.results.len() >= 2
+        && anchored_numeric_routes(input, shape.results)
+        && numeric_route_totals_match(input, shape.results)
+        && numeric_route_entities_match(input, shape.results))
+    .then_some(TrustedNumericRoutes { input, shape })
+}
+
+fn anchored_numeric_routes(input: &PreparedNumericInput, results: &[NumericLaneResult]) -> bool {
     input.routes.len() == results.len()
         && input
             .routes
@@ -1468,77 +1668,79 @@ fn trusted_numeric_routes(input: &PreparedNumericInput, results: &[NumericLaneRe
             .all(|(lane, (route, result))| {
                 Arc::ptr_eq(route, &result.rows) && route.complete(lane, input.entity_ids.len())
             })
-        && results
-            .iter()
-            .try_fold((0_usize, 0_usize), |(rows, entities), result| {
-                Some((
-                    rows.checked_add(result.rows.len())?,
-                    entities.checked_add(result.entities.len())?,
-                ))
-            })
-            == Some((input.entity_ids.len(), input.assignments.len()))
-        && input
-            .assignments
-            .iter()
-            .enumerate()
-            .all(|(id, assignment)| {
-                results
-                    .get(assignment.lane)
-                    .and_then(|result| result.entities.get(assignment.local))
-                    .is_some_and(|entity| entity.local_id == id)
-            })
+}
+
+fn numeric_route_totals_match(input: &PreparedNumericInput, results: &[NumericLaneResult]) -> bool {
+    results
+        .iter()
+        .try_fold((0_usize, 0_usize), |(rows, entities), result| {
+            Some((
+                rows.checked_add(result.rows.len())?,
+                entities.checked_add(result.entities.len())?,
+            ))
+        })
+        == Some((input.entity_ids.len(), input.assignments.len()))
+}
+
+fn numeric_route_entities_match(
+    input: &PreparedNumericInput,
+    results: &[NumericLaneResult],
+) -> bool {
+    input
+        .assignments
+        .iter()
+        .enumerate()
+        .all(|(id, assignment)| {
+            results
+                .get(assignment.lane)
+                .and_then(|result| result.entities.get(assignment.local))
+                .is_some_and(|entity| entity.local_id == id)
+        })
 }
 
 fn gather_trusted_numeric_columns<const COLUMNS: usize>(
-    input: &PreparedNumericInput,
-    results: &[NumericLaneResult],
-) -> Result<[Vec<f64>; COLUMNS]> {
+    proof: &TrustedNumericRoutes<'_>,
+) -> [Vec<f64>; COLUMNS] {
+    let input = proof.input;
+    let results = proof.shape.results;
     let mut values = std::array::from_fn(|_| vec![0.0; input.entity_ids.len()]);
-    for result in results {
+    for (lane, result) in results.iter().enumerate() {
         let columns: [&[f64]; COLUMNS] =
             std::array::from_fn(|column| result.columns[column].values().as_ref());
-        let mut cursor = result.rows.cursor(&input.entity_ids, &input.assignments);
+        let mut cursor = GlobalRowCursor::new(proof, lane);
         let mut offset = 0;
         while let Some(row) = cursor.next_row() {
-            let row = row.map_err(|()| {
-                internal_error("numeric lane row coverage or entity identity changed")
-            })?;
             for (values, column) in values.iter_mut().zip(columns) {
-                values[row.original_row as usize] = column[offset];
+                values[row] = column[offset];
             }
             offset += 1;
         }
     }
-    Ok(values)
+    values
 }
 
-fn gather_trusted_numeric_columns_many(
-    input: &PreparedNumericInput,
-    results: &[NumericLaneResult],
-    count: usize,
-) -> Result<Vec<Vec<f64>>> {
+fn gather_trusted_numeric_columns_many(proof: &TrustedNumericRoutes<'_>) -> Vec<Vec<f64>> {
+    let input = proof.input;
+    let NumericOutputShape { results, count } = proof.shape;
     let mut values = (0..count)
         .map(|_| vec![0.0; input.entity_ids.len()])
         .collect::<Vec<_>>();
-    for result in results {
+    for (lane, result) in results.iter().enumerate() {
         let columns = result
             .columns
             .iter()
             .map(|column| column.values().as_ref())
             .collect::<Vec<_>>();
-        let mut cursor = result.rows.cursor(&input.entity_ids, &input.assignments);
+        let mut cursor = GlobalRowCursor::new(proof, lane);
         let mut offset = 0;
         while let Some(row) = cursor.next_row() {
-            let row = row.map_err(|()| {
-                internal_error("numeric lane row coverage or entity identity changed")
-            })?;
             for (values, column) in values.iter_mut().zip(&columns) {
-                values[row.original_row as usize] = column[offset];
+                values[row] = column[offset];
             }
             offset += 1;
         }
     }
-    Ok(values)
+    values
 }
 
 #[cfg(test)]
@@ -1749,8 +1951,8 @@ pub(crate) fn merge_numeric_results(
     let results = results.as_mut_slice();
     let input = take_numeric_input(results)?;
     let count = seed.output_count;
-    validate_numeric_shape(results, count)?;
-    let buffers = NumericOutputBuffers::gather(&input, results, count)?;
+    let shape = validate_numeric_shape(results, count)?;
+    let buffers = NumericOutputBuffers::gather(&input, shape)?;
     merge_numeric_entities(&mut seed.execution.state, &input.assignments, results)?;
     seed.execution.entity_ids = input.entity_ids;
     #[cfg(test)]
@@ -1773,7 +1975,10 @@ pub(crate) fn merge_numeric_results(
     })
 }
 
-fn validate_numeric_shape(results: &[NumericLaneResult], count: usize) -> Result<()> {
+fn validate_numeric_shape(
+    results: &[NumericLaneResult],
+    count: usize,
+) -> Result<NumericOutputShape<'_>> {
     if results.iter().any(|result| {
         result.columns.len() != count
             || result.columns.iter().any(|column| {
@@ -1782,7 +1987,7 @@ fn validate_numeric_shape(results: &[NumericLaneResult], count: usize) -> Result
     }) {
         return Err(internal_error("numeric lane output shape changed"));
     }
-    Ok(())
+    Ok(NumericOutputShape { results, count })
 }
 
 fn merge_numeric_entities(

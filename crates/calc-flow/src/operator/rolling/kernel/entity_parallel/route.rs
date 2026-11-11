@@ -1,6 +1,6 @@
 use std::mem::size_of;
 
-use super::{EntityAssignment, LaneRow};
+use super::{EntityAssignment, LaneRow, TrustedNumericRoutes};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum RoutingLayout {
@@ -209,6 +209,55 @@ pub(crate) struct RouteCursor<'a> {
     consumed: usize,
 }
 
+pub(super) struct GlobalRowCursor<'a> {
+    route: &'a LaneRoute,
+    index: usize,
+    word: u64,
+    base: usize,
+}
+
+impl<'a> GlobalRowCursor<'a> {
+    pub(super) fn new(proof: &TrustedNumericRoutes<'a>, lane: usize) -> Self {
+        Self {
+            route: proof.input.routes[lane].as_ref(),
+            index: 0,
+            word: 0,
+            base: 0,
+        }
+    }
+
+    pub(super) fn next_row(&mut self) -> Option<usize> {
+        match &self.route.storage {
+            Storage::Explicit(rows) => {
+                let row = rows.get(self.index)?.original_row as usize;
+                self.index += 1;
+                Some(row)
+            }
+            Storage::Bitmap { words, .. } => self.next_bitmap_row(words),
+        }
+    }
+
+    fn next_bitmap_row(&mut self, words: &[u64]) -> Option<usize> {
+        loop {
+            if self.word != 0 {
+                let bit = self.word.trailing_zeros() as usize;
+                self.word &= self.word - 1;
+                return Some(self.base + bit);
+            }
+            self.word = *words.get(self.index)?;
+            self.base = self.index * 64;
+            self.index += 1;
+            #[cfg(test)]
+            record_word_load();
+        }
+    }
+}
+
+#[cfg(test)]
+fn record_word_load() {
+    super::ROUTE_WORD_VISITS.set(super::ROUTE_WORD_VISITS.get() + 1);
+}
+
 impl RouteCursor<'_> {
     pub(crate) fn next_step(&mut self) -> Option<RouteStep> {
         let route = self.route;
@@ -253,11 +302,13 @@ impl RouteCursor<'_> {
         self.word = word;
         self.index += 1;
         #[cfg(test)]
-        super::ROUTE_WORD_VISITS.set(super::ROUTE_WORD_VISITS.get() + 1);
+        record_word_load();
         Some(WordStep::Loaded)
     }
 
     fn decode(&self, row: Option<usize>, universe: usize) -> RouteStep {
+        #[cfg(test)]
+        super::ROUTE_ENTITY_DECODE_VISITS.set(super::ROUTE_ENTITY_DECODE_VISITS.get() + 1);
         let Some(row) = row.filter(|row| *row < universe) else {
             return RouteStep::Invalid;
         };

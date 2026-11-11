@@ -7,6 +7,21 @@ use crate::runtime::streaming::entity_work::JobEntityWorkOwner;
 use super::*;
 
 #[tokio::test]
+async fn test_work_invariant_parallel_preparation_qualifies_each_entity_once() {
+    use crate::operator::rolling::kernel::entity_parallel::QUALIFICATION_ENTITY_VISITS;
+
+    let input = parallel_rollback_record(0, 64_000);
+    let spec = kernel_spec(json!([aggregate_output("mean", "price", "mean", 37)]));
+    QUALIFICATION_ENTITY_VISITS.set(0);
+    assert_cold_parallel(spec, input).await;
+    assert_eq!(
+        QUALIFICATION_ENTITY_VISITS.replace(0),
+        64,
+        "the same private preparation must qualify each touched entity once"
+    );
+}
+
+#[tokio::test]
 async fn test_capability_parallel_cold_rows37_matches_serial_output_and_state() {
     let mut spec = kernel_spec(json!([aggregate_output("mean", "price", "mean", 37)]));
     spec.numerical_profile = RollingNumericalProfile::StableV1;

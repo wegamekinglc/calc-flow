@@ -405,17 +405,17 @@ impl RollingOperator {
         }
         let prepared =
             plan.prepare_ordered_stream_inputs(prior, input, context.operator_id(), observer)?;
-        let scratch = match prepared.scratch_plan_for_cpu(cpus) {
-            Ok(scratch) => scratch,
-            Err(reason) => {
+        let prepared = match prepared.qualify_parallel(cpus) {
+            Ok(prepared) => prepared,
+            Err((prepared, reason)) => {
                 if let Some(recorder) = observer {
                     recorder.add(reason, 1);
                 }
                 return prepared.finish_serial(observer);
             }
         };
-        match client.try_reserve(scratch) {
-            ReservePair::Reserved(launch) => match prepared.split_lanes(cpus) {
+        match client.try_reserve(prepared.scratch()) {
+            ReservePair::Reserved(launch) => match prepared.split() {
                 Ok((seed, requests)) => {
                     let stage =
                         observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));

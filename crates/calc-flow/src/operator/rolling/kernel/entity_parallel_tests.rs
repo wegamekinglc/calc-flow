@@ -1297,6 +1297,7 @@ fn test_entity_parallel_four_float_outputs_skip_repeated_row_validation() {
         .unwrap();
     MERGE_VALIDATION_VISITS.set(0);
     ROUTE_WORD_VISITS.set(0);
+    ROUTE_ENTITY_DECODE_VISITS.set(0);
     let actual = merge_numeric_results(seed, &mut exits, "job").unwrap();
     let visits = MERGE_VALIDATION_VISITS.replace(0);
     assert_eq!(actual.entity_ids(), expected.entity_ids());
@@ -1329,6 +1330,11 @@ fn test_entity_parallel_four_float_outputs_skip_repeated_row_validation() {
     assert_eq!(
         visits, 0,
         "all non-null Float64 arities must use the producer route proof"
+    );
+    assert_eq!(
+        ROUTE_ENTITY_DECODE_VISITS.replace(0),
+        0,
+        "proven merge routes must not decode entity mapping for every output row"
     );
 }
 
@@ -2315,8 +2321,16 @@ fn entity_parallel_compiled_readout_preserves_generic_lane_allocation_bounds() {
             };
             let generic = measure(true);
             let compiled = measure(false);
+            assert_eq!(plan.outputs.len(), 1);
+            let direct_header_saving = u64::try_from(
+                (size_of::<DerivedBuilder>() - size_of::<Float64Builder>()) * plan.outputs.len(),
+            )
+            .unwrap();
             assert_eq!(compiled.count_total, generic.count_total);
-            assert_eq!(compiled.bytes_total, generic.bytes_total);
+            assert_eq!(
+                compiled.bytes_total + direct_header_saving,
+                generic.bytes_total
+            );
             assert!(compiled.bytes_max <= generic.bytes_max);
             assert_eq!(compiled.count_current, 0);
             assert_eq!(compiled.bytes_current, 0);

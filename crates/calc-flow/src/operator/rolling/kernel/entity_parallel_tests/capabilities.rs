@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn test_work_invariant_lanes_reuse_const_core_and_direct_float_writer() {
+    let batch = input(64_000, 64, true);
+    let mut mean_plan = lane_plan(false);
+    mean_plan.groups[0] = TypedGroupPlan::Numeric {
+        input_index: 3,
+        frame: TypedFrame::Rows(37),
+    };
+    mean_plan.outputs[0].min_periods = 3;
+    mean_plan.numerical_profile = RollingNumericalProfile::StableV2Preview;
+    mean_plan.nan_as_value = true;
+    let mean = assert_parity(&mean_plan, &batch);
+
+    let finite = input(64_000, 64, false);
+    let mut sum_plan = lane_plan(false);
+    sum_plan.groups[0] = TypedGroupPlan::Numeric {
+        input_index: 3,
+        frame: TypedFrame::Duration(2_048),
+    };
+    sum_plan.outputs[0].kind = TypedOutputKind::Statistic(Statistic::Sum);
+    let sum = assert_parity(&sum_plan, &finite);
+    assert_eq!(
+        (mean.0, mean.1, mean.2 + sum.2),
+        (64_000, 64_000, 0),
+        "lanes must execute the shared pure mean core and concrete Float64 writers"
+    );
+}
+
+#[test]
 fn test_capability_parallel_shared_rows_preserve_v2_rebase_and_nan_policy() {
     let batch = input(64_000, 64, true);
     let mut plan = lane_plan(true);
@@ -240,7 +268,7 @@ fn exact_fixture(signed: bool) -> (RollingKernelPlan, RecordBatch) {
     (plan, batch)
 }
 
-fn assert_parity(plan: &RollingKernelPlan, batch: &RecordBatch) {
+fn assert_parity(plan: &RollingKernelPlan, batch: &RecordBatch) -> (usize, usize, usize) {
     let state = warm(plan, batch);
     let before = format!("{:?}", state.states);
     let expected = plan
@@ -253,7 +281,15 @@ fn assert_parity(plan: &RollingKernelPlan, batch: &RecordBatch) {
         .split_two()
         .ok()
         .expect("independent F64 typed transitions split");
+    mean::SHARED_GROUP_UPDATE_VISITS.set(0);
+    mean::SHARED_MEAN_READOUT_VISITS.set(0);
+    GENERIC_F64_BUILDER_VISITS.set(0);
     let mut exits = requests.map(|request| exit(request, &AtomicBool::new(false)));
+    let visits = (
+        mean::SHARED_GROUP_UPDATE_VISITS.replace(0),
+        mean::SHARED_MEAN_READOUT_VISITS.replace(0),
+        GENERIC_F64_BUILDER_VISITS.replace(0),
+    );
     let actual = merge_numeric_results(seed, &mut exits, "job").unwrap();
     assert_eq!(
         actual.execution.columns.len(),
@@ -282,4 +318,5 @@ fn assert_parity(plan: &RollingKernelPlan, batch: &RecordBatch) {
     );
     assert_eq!(format!("{:?}", state.states), before);
     assert_eq!(actual.execution.entity_ids, expected.execution.entity_ids);
+    visits
 }
