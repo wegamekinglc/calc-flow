@@ -491,6 +491,7 @@ fn test_indicator_cells_are_controlled_before_arrow_materialization() {
         &operator.compiled,
         "features",
         None,
+        None,
         &mut || Ok(()),
     )
     .unwrap();
@@ -507,6 +508,7 @@ fn test_indicator_cells_are_controlled_before_arrow_materialization() {
         &histories,
         &operator.compiled,
         "features",
+        None,
         None,
         &mut || {
             Err(CalcFlowError::Cancelled {
@@ -565,6 +567,7 @@ fn test_indicator_lag_warmup_uses_representable_controlled_nested_null() {
         &RollingHistories::default(),
         &compiled,
         "features",
+        None,
         None,
         &mut || Ok(()),
     )

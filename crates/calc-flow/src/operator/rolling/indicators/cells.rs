@@ -2,9 +2,9 @@ use super::controlled;
 use crate::operator::rolling::{
     BTreeMap, BufferedRow, CompiledEvaluation, CompiledRollingOutput, CompiledRollingSpec,
     EntityRollingState, EntityRowView, HistoryUpdates, IncrementalScanState, KeyValue, Result,
-    RollingHistories, RollingMetricsRecorder, RollingStage, RollingWork, ScalarValue, WindowState,
-    compute_output_value, evict_retained_history, history_event_time, operator_error,
-    slide_windows,
+    RollingHistories, RollingMetricsRecorder, RollingStage, RollingWork, RollingWorkBatch,
+    ScalarValue, WindowState, compute_output_value, evict_retained_history, history,
+    history_event_time, operator_error, slide_windows,
 };
 
 type Check<'a> = &'a mut dyn FnMut() -> Result<()>;
@@ -22,6 +22,7 @@ pub(in super::super) fn compute(
     compiled: &CompiledRollingSpec,
     node: &str,
     observer: Option<&RollingMetricsRecorder>,
+    preparations: Option<&mut RollingWorkBatch<'_>>,
     check: Check<'_>,
 ) -> Result<ComputedCells> {
     Evaluation {
@@ -31,7 +32,7 @@ pub(in super::super) fn compute(
         node,
         observer,
     }
-    .run(check)
+    .run(check, preparations)
 }
 struct Evaluation<'a> {
     rows: &'a [BufferedRow],
@@ -47,7 +48,11 @@ struct NumericState<'a> {
     scans: &'a mut [Option<IncrementalScanState>],
 }
 impl Evaluation<'_> {
-    fn run(&self, check: Check<'_>) -> Result<ComputedCells> {
+    fn run(
+        &self,
+        check: Check<'_>,
+        mut preparations: Option<&mut RollingWorkBatch<'_>>,
+    ) -> Result<ComputedCells> {
         check()?;
         let mut columns = self.columns();
         let entities = self.groups(check)?;
@@ -55,6 +60,14 @@ impl Evaluation<'_> {
         for (index, (entity, indices)) in entities.into_iter().enumerate() {
             controlled::tick(index, check)?;
             let state = self.entity(entity, &indices, &mut columns, check)?;
+            if let Some(work) = preparations.as_deref_mut() {
+                history::observe_replacement(
+                    indices.len(),
+                    self.histories.by_entity.get(entity),
+                    &state,
+                    work,
+                );
+            }
             touched.push((entity.clone(), state));
         }
         check()?;
