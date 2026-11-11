@@ -55,15 +55,8 @@ async fn incremental_history_reuses_retained_payload_across_mixed_frames() {
         aggregate_output("min", "price", "row_min", 5),
     ]));
     let mut operator = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
-    let job = crate::StreamJobContext::new(
-        7,
-        TEST_FINGERPRINT,
-        JsonMap::new(),
-        None,
-        crate::CancellationToken::new(),
-    );
+    let (job, mut output) = job_output(&operator);
     let context = StreamOperatorContext::new(&job, "rolling", None);
-    let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
     let first = float64_fast_record(&[
         (1, "a", 1, Some(1.0)),
         (2, "a", 2, Some(3.0)),
@@ -123,8 +116,9 @@ async fn incremental_history_reuses_retained_payload_across_mixed_frames() {
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap()
-            .value(0),
-        5.0
+            .value(0)
+            .to_bits(),
+        5.0_f64.to_bits()
     );
     assert_eq!(
         record
@@ -132,8 +126,9 @@ async fn incremental_history_reuses_retained_payload_across_mixed_frames() {
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap()
-            .value(0),
-        1.0
+            .value(0)
+            .to_bits(),
+        1.0_f64.to_bits()
     );
     let history = first_history(&operator);
     assert_eq!(
@@ -406,29 +401,8 @@ async fn incremental_history_matches_batch_and_checkpoint_across_mixed_boundarie
             ]);
             let mut operator =
                 RollingOperator::new("rolling", input.schema(), spec.clone()).unwrap();
-            let input_batch = Batch::table(vec![input.clone()], BatchMetadata::default()).unwrap();
-            let rows = read_buffered_rows(
-                input_batch.table_payload().unwrap(),
-                &operator.compiled,
-                "rolling",
-            )
-            .unwrap();
-            let expected = compute_output_columns(
-                &rows,
-                &RollingHistories::default(),
-                &operator.compiled,
-                "rolling",
-            )
-            .unwrap();
-            let expected_record = build_output_record(
-                &rows,
-                expected.columns,
-                operator.output_ports()[0].schema().unwrap(),
-                "rolling",
-            )
-            .unwrap();
-            let mut expected_histories = RollingHistories::default();
-            expected_histories.apply(expected.touched);
+            let (expected_record, mut expected_histories, rows) =
+                batch_reference(&operator, &input);
             let (job, mut output) = job_output(&operator);
             let mut emitted =
                 finalize_record(&mut operator, &job, &mut output, input.slice(0, 4), 3).await;
@@ -497,6 +471,36 @@ async fn incremental_history_matches_batch_and_checkpoint_across_mixed_boundarie
             );
         }
     }
+}
+
+fn batch_reference(
+    operator: &RollingOperator,
+    input: &RecordBatch,
+) -> (RecordBatch, RollingHistories, Vec<BufferedRow>) {
+    let input_batch = Batch::table(vec![input.clone()], BatchMetadata::default()).unwrap();
+    let rows = read_buffered_rows(
+        input_batch.table_payload().unwrap(),
+        &operator.compiled,
+        "rolling",
+    )
+    .unwrap();
+    let expected = compute_output_columns(
+        &rows,
+        &RollingHistories::default(),
+        &operator.compiled,
+        "rolling",
+    )
+    .unwrap();
+    let record = build_output_record(
+        &rows,
+        expected.columns,
+        operator.output_ports()[0].schema().unwrap(),
+        "rolling",
+    )
+    .unwrap();
+    let mut histories = RollingHistories::default();
+    histories.apply(expected.touched);
+    (record, histories, rows)
 }
 
 fn checkpoint_with_layout(
