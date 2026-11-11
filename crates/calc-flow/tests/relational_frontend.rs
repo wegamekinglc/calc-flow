@@ -20,8 +20,7 @@ async fn typed_dataframe_plans_without_rows() -> calc_flow::Result<()> {
 
 #[tokio::test]
 async fn dataframe_filter_cast_and_boolean_null_semantics() -> calc_flow::Result<()> {
-    use calc_flow::arrow::{array::Int64Array, record_batch::RecordBatch};
-    use calc_flow::{Batch, BatchMetadata, CompileOptions, ExecutionOptions, Program};
+    use calc_flow::{CompileOptions, Program};
     use std::collections::BTreeMap;
     let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)]));
     let input = table_input("events", schema.clone(), InputOptions::default())?;
@@ -35,35 +34,7 @@ async fn dataframe_filter_cast_and_boolean_null_semantics() -> calc_flow::Result
         .compile_batch(&UdfRegistry::new().snapshot(), &CompileOptions::default())
         .await?;
     for input in [vec![Some(1), None, Some(3), Some(1)], vec![], vec![None]] {
-        let expected: Vec<_> = input.iter().filter_map(|v| v.map(|v| v - 1)).collect();
-        let batch = Batch::table(
-            vec![
-                RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(input))])
-                    .unwrap(),
-            ],
-            BatchMetadata::default(),
-        )?;
-        let out = plan
-            .execute(
-                BTreeMap::from([("events".into(), batch)]),
-                ExecutionOptions::default(),
-            )
-            .await?;
-        let actual: Vec<_> = out.outputs["out"]
-            .table_payload()?
-            .batches()
-            .iter()
-            .flat_map(|r| {
-                r.column(0)
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap()
-                    .iter()
-                    .map(|v| v.unwrap())
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        assert_eq!(actual, expected);
+        assert_projection(&plan, schema.clone(), input).await?;
     }
     Ok(())
 }
@@ -73,41 +44,9 @@ async fn schema_errors_keep_logical_paths_and_codes() -> calc_flow::Result<()> {
     let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)]));
     let input = table_input("events", schema.clone(), InputOptions::default())?;
     let other = table_input("other", schema, InputOptions::default())?;
-    let bad = input.select(vec![
-        (input.column("x")? + other.column("x")?).alias("mixed")?,
-    ])?;
-    let udfs = UdfRegistry::new().snapshot();
-    let error = bad
-        .collect_schema(&udfs, calc_flow::CompileMode::Batch)
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("outputs.result.mixed.right.lineage: schema_mismatch"),
-        "{error}"
-    );
-    let bad = input.filter(input.column("x")?)?;
-    let error = bad
-        .collect_schema(&udfs, calc_flow::CompileMode::Batch)
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains(
-            "filter.predicate: unsupported_type: filter predicate requires bool, found int64"
-        ),
-        "{error}"
-    );
-    let integer_division = input.select(vec![(input.column("x")? / lit(2_i64)?).alias("half")?])?;
-    let error = integer_division
-        .collect_schema(&udfs, calc_flow::CompileMode::Batch)
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("unsupported_type") && error.contains("floating"),
-        "{error}"
-    );
+    check_lineage_error(&input, &other).await?;
+    check_predicate_error(&input).await?;
+    check_division_error(&input).await?;
     Ok(())
 }
 
@@ -185,9 +124,105 @@ fn predicate(x: &calc_flow::ColumnExpr) -> calc_flow::Result<calc_flow::ColumnEx
 }
 fn filtered_projection(input: &calc_flow::TableExpr) -> calc_flow::Result<calc_flow::TableExpr> {
     let x = input.column("x")?;
-    let mut columns = numeric_features(&x)?;
-    columns.extend(nullable_features(&x)?);
-    let added = input.with_columns(columns)?;
+    let added = add_features(input, &x)?;
     let filtered = added.filter(predicate(&x)?)?;
     filtered.select(vec![filtered.column("difference")?.alias("difference")?])
+}
+
+async fn assert_projection(
+    plan: &calc_flow::BatchExecutionPlan,
+    schema: Arc<Schema>,
+    input: Vec<Option<i64>>,
+) -> calc_flow::Result<()> {
+    use calc_flow::arrow::{array::Int64Array, record_batch::RecordBatch};
+    use calc_flow::{Batch, BatchMetadata, ExecutionOptions};
+    use std::collections::BTreeMap;
+    let expected: Vec<_> = input.iter().filter_map(|v| v.map(|v| v - 1)).collect();
+    let batch = Batch::table(
+        vec![
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(input))]).unwrap(),
+        ],
+        BatchMetadata::default(),
+    )?;
+    let out = plan
+        .execute(
+            BTreeMap::from([("events".into(), batch)]),
+            ExecutionOptions::default(),
+        )
+        .await?;
+    let actual: Vec<_> = out.outputs["out"]
+        .table_payload()?
+        .batches()
+        .iter()
+        .flat_map(|r| {
+            r.column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .iter()
+                .map(|v| v.unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(actual, expected);
+    Ok(())
+}
+
+async fn check_lineage_error(
+    input: &calc_flow::TableExpr,
+    other: &calc_flow::TableExpr,
+) -> calc_flow::Result<()> {
+    let bad = input.select(vec![
+        (input.column("x")? + other.column("x")?).alias("mixed")?,
+    ])?;
+    let udfs = UdfRegistry::new().snapshot();
+    let error = bad
+        .collect_schema(&udfs, calc_flow::CompileMode::Batch)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("outputs.result.mixed.right.lineage: schema_mismatch"),
+        "{error}"
+    );
+    Ok(())
+}
+async fn check_predicate_error(input: &calc_flow::TableExpr) -> calc_flow::Result<()> {
+    let udfs = UdfRegistry::new().snapshot();
+    let bad = input.filter(input.column("x")?)?;
+    let error = bad
+        .collect_schema(&udfs, calc_flow::CompileMode::Batch)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(
+            "filter.predicate: unsupported_type: filter predicate requires bool, found int64"
+        ),
+        "{error}"
+    );
+    Ok(())
+}
+async fn check_division_error(input: &calc_flow::TableExpr) -> calc_flow::Result<()> {
+    let udfs = UdfRegistry::new().snapshot();
+    let integer_division = input.select(vec![(input.column("x")? / lit(2_i64)?).alias("half")?])?;
+    let error = integer_division
+        .collect_schema(&udfs, calc_flow::CompileMode::Batch)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("unsupported_type") && error.contains("floating"),
+        "{error}"
+    );
+    Ok(())
+}
+
+fn add_features(
+    input: &calc_flow::TableExpr,
+    x: &calc_flow::ColumnExpr,
+) -> calc_flow::Result<calc_flow::TableExpr> {
+    let mut columns = numeric_features(x)?;
+    columns.extend(nullable_features(x)?);
+    input.with_columns(columns)
 }

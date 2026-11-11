@@ -43,20 +43,17 @@ async fn analysis_reports_schema_errors_at_logical_roles() -> calc_flow::Result<
     let error = program.collect_schema(&udfs).await.unwrap_err();
     assert!(matches!(error, CalcFlowError::Compile { .. }));
     let error = error.to_string();
-    assert!(
-        error.contains("outputs.out")
-            && error.contains("schema_mismatch")
-            && error.contains("missing")
-            && !error.contains("cf_rel_"),
-        "{error}"
-    );
+    for expected in ["outputs.out", "schema_mismatch", "missing"] {
+        assert!(error.contains(expected), "{error}");
+    }
+    assert!(!error.contains("cf_rel_"), "{error}");
     Ok(())
 }
 
 #[tokio::test]
 async fn derived_projection_cannot_replace_existing_field() -> calc_flow::Result<()> {
     let source = input("events")?;
-    let derived = source.select(vec![(source.column("x")? + lit(1_i64)?).alias("x")?])?;
+    let derived = increment(&source, "x")?;
     let error = derived
         .collect_schema(&UdfRegistry::new().snapshot(), CompileMode::Batch)
         .await
@@ -211,17 +208,7 @@ fn projected_names_and_special_input_paths_are_checked_without_planning() -> cal
 async fn schema_planning_rejects_unresolved_or_nonportable_outputs() -> calc_flow::Result<()> {
     let source = input("events")?;
     let udfs = UdfRegistry::new().snapshot();
-    for (table, code) in [
-        (
-            source.select(vec![lit(LiteralValue::Null)?.alias("n")?])?,
-            "unresolved_type",
-        ),
-        (
-            source.sql("SELECT CAST(x AS DECIMAL(20, 2)) AS amount FROM input")?,
-            "unsupported_type",
-        ),
-        (source.sql("SELECT x, x FROM input")?, "duplicate_name"),
-    ] {
+    for (table, code) in schema_failure_cases(&source)? {
         let error = table
             .collect_schema(&udfs, CompileMode::Batch)
             .await
@@ -237,27 +224,7 @@ async fn schema_planning_rejects_unresolved_or_nonportable_outputs() -> calc_flo
 
 #[tokio::test]
 async fn native_input_identity_survives_dataframe_but_is_cleared_by_sql() -> calc_flow::Result<()> {
-    use calc_flow::arrow::datatypes::TimeUnit;
-    let source = table_input(
-        "events",
-        Arc::new(Schema::new(vec![
-            Field::new("symbol", DataType::Utf8, false),
-            Field::new(
-                "ts",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                false,
-            ),
-            Field::new("seq", DataType::Int64, false),
-            Field::new("x", DataType::Int64, true),
-        ])),
-        InputOptions {
-            entity_by: vec!["symbol".into()],
-            event_time: Some("ts".into()),
-            sequence_by: vec!["seq".into()],
-        },
-    )?;
-    let added = source.with_columns(vec![(source.column("x")? + lit(1_i64)?).alias("y")?])?;
-    let filtered = added.filter(added.column("x")?.gt(lit(0_i64)?))?;
+    let filtered = ordered_dataframe()?;
     let sql = filtered.sql("SELECT * FROM input ORDER BY ts")?;
     let program = Program::new(
         "identity",
@@ -348,15 +315,21 @@ fn comparison_columns(x: &calc_flow::ColumnExpr) -> calc_flow::Result<Vec<calc_f
     ])
 }
 fn literal_columns() -> calc_flow::Result<Vec<calc_flow::NamedExpr>> {
+    let mut columns = vec![lit(true)?.alias("flag")?, lit(u64::MAX)?.alias("unsigned")?];
+    columns.extend(string_and_date_literals()?);
+    Ok(columns)
+}
+fn string_and_date_literals() -> calc_flow::Result<Vec<calc_flow::NamedExpr>> {
     Ok(vec![
-        lit(true)?.alias("flag")?,
-        lit(u64::MAX)?.alias("unsigned")?,
         lit("a'b")?.alias("text")?,
         lit(String::from("owned"))?.alias("owned")?,
-        lit(LiteralValue::Null)?
-            .cast(DataType::Date32)?
-            .alias("date")?,
+        date_literal()?,
     ])
+}
+fn date_literal() -> calc_flow::Result<calc_flow::NamedExpr> {
+    lit(LiteralValue::Null)?
+        .cast(DataType::Date32)?
+        .alias("date")
 }
 
 #[tokio::test]
@@ -379,4 +352,51 @@ async fn unsigned_negation_uses_the_shared_row_local_type_constraint() -> calc_f
         "{error}"
     );
     Ok(())
+}
+
+fn increment(source: &calc_flow::TableExpr, name: &str) -> calc_flow::Result<calc_flow::TableExpr> {
+    source.select(vec![(source.column("x")? + lit(1_i64)?).alias(name)?])
+}
+
+fn schema_failure_cases(
+    source: &calc_flow::TableExpr,
+) -> calc_flow::Result<Vec<(calc_flow::TableExpr, &'static str)>> {
+    Ok(vec![
+        (
+            source.select(vec![lit(LiteralValue::Null)?.alias("n")?])?,
+            "unresolved_type",
+        ),
+        (
+            source.sql("SELECT CAST(x AS DECIMAL(20, 2)) AS amount FROM input")?,
+            "unsupported_type",
+        ),
+        (source.sql("SELECT x, x FROM input")?, "duplicate_name"),
+    ])
+}
+
+fn ordered_input() -> calc_flow::Result<calc_flow::TableExpr> {
+    use calc_flow::arrow::datatypes::TimeUnit;
+    table_input(
+        "events",
+        Arc::new(Schema::new(vec![
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("seq", DataType::Int64, false),
+            Field::new("x", DataType::Int64, true),
+        ])),
+        InputOptions {
+            entity_by: vec!["symbol".into()],
+            event_time: Some("ts".into()),
+            sequence_by: vec!["seq".into()],
+        },
+    )
+}
+fn ordered_dataframe() -> calc_flow::Result<calc_flow::TableExpr> {
+    let source = ordered_input()?;
+    let added = source.with_columns(vec![(source.column("x")? + lit(1_i64)?).alias("y")?])?;
+    added.filter(added.column("x")?.gt(lit(0_i64)?))
 }

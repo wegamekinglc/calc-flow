@@ -25,6 +25,11 @@ def pipeline(t: cf.TableExpr) -> cf.TableExpr:
     )
 
 
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise RuntimeError(message)
+
+
 async def run() -> None:
     orders = pa.table(
         {
@@ -41,9 +46,9 @@ async def run() -> None:
         outputs={"gross": add_gross(source), "result": result_expr},
     )
     stream = batch.for_mode("stream")
-    assert stream.fingerprint == batch.fingerprint
+    require(stream.fingerprint == batch.fingerprint, "mode changed the declaration")
     schemas = await asyncio.to_thread(batch.collect_schema)
-    assert schemas["result"].names == ["order_id", "net"]
+    require(schemas["result"].names == ["order_id", "net"], "unexpected result schema")
     result = (await batch.collect_async({"orders": orders}))["result"]
     expected = {"order_id": [1, 3], "net": [18.0, 27.0]}
     if result.to_pydict() != expected:
@@ -53,7 +58,7 @@ async def run() -> None:
         async for event in events:
             if event.name == "result":
                 streamed.extend(event.table.to_pylist())
-    assert streamed == result.to_pylist()
+    require(streamed == result.to_pylist(), "stream and batch results differ")
     print(result.to_pydict())
 
 

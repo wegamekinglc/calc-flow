@@ -25,6 +25,16 @@ fn discounted(table: &TableExpr) -> Result<TableExpr> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let (schema, input) = orders()?;
+    let batch = declaration(schema)?;
+    verify_wrappers(&batch).await?;
+    let actual = execute(&batch, input).await?;
+    assert_eq!(actual, vec![Some(18.0), Some(27.0)]);
+    println!("net = {actual:?}");
+    Ok(())
+}
+
+fn orders() -> Result<(Arc<Schema>, Batch)> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("order_id", DataType::Int64, false),
         Field::new("quantity", DataType::Int64, false),
@@ -44,6 +54,9 @@ async fn main() -> Result<()> {
         ],
         BatchMetadata::default(),
     )?;
+    Ok((schema, input))
+}
+fn declaration(schema: Arc<Schema>) -> Result<Program> {
     let source = table_input("orders", schema, InputOptions::default())?;
     let gross = add_gross(&source)?;
     let selected =
@@ -54,6 +67,9 @@ async fn main() -> Result<()> {
         CompileMode::Batch,
         BTreeMap::from([("gross".into(), gross), ("result".into(), result)]),
     )?;
+    Ok(batch)
+}
+async fn verify_wrappers(batch: &Program) -> Result<()> {
     let stream = batch.for_mode(CompileMode::Stream)?;
     assert_eq!(batch.fingerprint(), stream.fingerprint());
     let udfs = UdfRegistry::new().snapshot();
@@ -61,6 +77,10 @@ async fn main() -> Result<()> {
         batch.collect_schema(&udfs).await?["result"].field(1).name(),
         "net"
     );
+    Ok(())
+}
+async fn execute(batch: &Program, input: Batch) -> Result<Vec<Option<f64>>> {
+    let udfs = UdfRegistry::new().snapshot();
     let plan = batch
         .compile_batch(&udfs, &CompileOptions::default())
         .await?;
@@ -83,7 +103,5 @@ async fn main() -> Result<()> {
                 .collect::<Vec<_>>()
         })
         .collect();
-    assert_eq!(actual, vec![Some(18.0), Some(27.0)]);
-    println!("net = {actual:?}");
-    Ok(())
+    Ok(actual)
 }

@@ -25,6 +25,7 @@ pub(super) struct Lowered {
     diagnostics: Vec<crate::QueryDiagnostic>,
     declaration_edges: Vec<DeclarationEdge>,
     bindings: FrontendBindings,
+    port_schemas: BTreeMap<String, PlannedPorts>,
 }
 
 pub(super) use crate::dataframe::segment;
@@ -101,6 +102,7 @@ pub(super) async fn lower(program: &Program) -> Result<Lowered> {
         declarations: vec![],
         diagnostics: vec![],
         declaration_edges: vec![],
+        port_schemas: BTreeMap::new(),
         bindings: FrontendBindings {
             inputs: BTreeMap::new(),
             outputs: BTreeMap::new(),
@@ -128,6 +130,9 @@ pub(super) async fn lower(program: &Program) -> Result<Lowered> {
         let Some(schema) = lowered.schemas.get(&table.0.id).cloned() else {
             continue;
         };
+        lowered
+            .port_schemas
+            .insert(id.clone(), PlannedPorts::identity(&schema));
         lowered.nodes.push(expression_node(
             &id,
             identity_select(&schema),
@@ -162,62 +167,8 @@ impl Lowered {
         paths: &BTreeMap<String, String>,
         error: crate::CalcFlowError,
     ) {
-        let (error_path, code, message) = match error {
-            crate::CalcFlowError::InvalidArgument { field, message }
-                if field == "sql.output.schema" =>
-            {
-                (
-                    format!("{path}.sql.schema"),
-                    "duplicate_name".into(),
-                    message,
-                )
-            }
-            crate::CalcFlowError::InvalidArgument { field, message } => {
-                let field = if field.starts_with("sql.") {
-                    format!("{path}.sql.schema")
-                } else {
-                    field
-                };
-                let (code, message) = message
-                    .split_once(": ")
-                    .unwrap_or(("schema_mismatch", &message));
-                (field, code.to_owned(), message.to_owned())
-            }
-            crate::CalcFlowError::DataFusion { message, .. } => {
-                let code = if message.contains("Projections require unique expression names") {
-                    "duplicate_name"
-                } else {
-                    "schema_mismatch"
-                };
-                let role = if matches!(table.0.kind, RelationKind::Sql { .. }) {
-                    "sql.schema"
-                } else {
-                    "schema"
-                };
-                (
-                    format!("{path}.{role}"),
-                    code.into(),
-                    format!(
-                        "{message}; location is the relation node; no subexpression span is available"
-                    ),
-                )
-            }
-            error => (path.into(), "schema_mismatch".into(), error.to_string()),
-        };
-        self.diagnostics.push(crate::QueryDiagnostic {
-            path: error_path,
-            code,
-            status: crate::SupportStatus::Unsupported,
-            message,
-        });
-        let (kind, query) = match &table.0.kind {
-            RelationKind::Input { .. } => ("table_input", None),
-            RelationKind::Project { append, .. } => {
-                (if *append { "with_columns" } else { "project" }, None)
-            }
-            RelationKind::Filter { .. } => ("filter", None),
-            RelationKind::Sql { query, .. } => ("sql", Some(query.clone())),
-        };
+        self.diagnostics.push(schema_diagnostic(table, path, error));
+        let (kind, query) = relation_kind(table);
         self.declarations.push(Declaration {
             path: path.into(),
             kind: kind.into(),
@@ -261,6 +212,8 @@ impl Lowered {
                 matches!(&table.0.kind, RelationKind::Sql { tables, .. } if tables.len() != 1)
                     .then_some(crate::SupportStatus::Unsupported),
         });
+        let ports = self.relation_ports(table, &schema);
+        self.port_schemas.insert(node.id.clone(), ports);
         self.schemas.insert(table.0.id.clone(), schema);
         if let RelationKind::Input { name, .. } = &table.0.kind {
             self.bindings
@@ -278,6 +231,19 @@ impl Lowered {
         }
         self.nodes.push(node);
         Ok(())
+    }
+    fn relation_ports(&self, table: &TableExpr, schema: &SchemaRef) -> PlannedPorts {
+        let inputs = match &table.0.kind {
+            RelationKind::Input { schema, .. } => vec![("input".into(), schema.clone())],
+            _ => children(table, "")
+                .into_iter()
+                .map(|(name, child, _)| (name, self.schemas[&child.0.id].clone()))
+                .collect(),
+        };
+        PlannedPorts {
+            inputs,
+            output: schema.clone(),
+        }
     }
     async fn prepare(&self, table: &TableExpr, path: &str) -> Result<Prepared> {
         match &table.0.kind {
@@ -413,17 +379,19 @@ impl Lowered {
     }
     pub fn builder(&self) -> Result<PipelineBuilder> {
         self.ensure_valid()?;
-        let mut builder = PipelineBuilder::new(&self.name)?;
-        for node in &self.nodes {
-            builder = builder.add_node(&node.id, node_operator(node)?)?;
-        }
+        let mut builder = self.node_builder()?;
         for edge in &self.edges {
-            builder = builder.connect(Edge::new(
-                PortEndpoint::new(&edge.source_node, &edge.source_port)?,
-                PortEndpoint::new(&edge.target_node, &edge.target_port)?,
-            ))?;
+            builder = builder.connect(native_edge(edge)?)?;
         }
         builder.frontend_bindings = Some(self.bindings.clone());
+        Ok(builder)
+    }
+    fn node_builder(&self) -> Result<PipelineBuilder> {
+        let mut builder = PipelineBuilder::new(&self.name)?;
+        for node in &self.nodes {
+            let operator = node_operator(node, &self.port_schemas[&node.id])?;
+            builder = builder.add_node(&node.id, operator)?;
+        }
         Ok(builder)
     }
     pub fn project(&self, mode: CompileMode) -> Result<ProjectSpec> {
@@ -465,6 +433,78 @@ impl Lowered {
         })
     }
 }
+fn native_edge(edge: &EdgeSpec) -> Result<Edge> {
+    Ok(Edge::new(
+        PortEndpoint::new(&edge.source_node, &edge.source_port)?,
+        PortEndpoint::new(&edge.target_node, &edge.target_port)?,
+    ))
+}
+fn relation_kind(table: &TableExpr) -> (&'static str, Option<String>) {
+    match &table.0.kind {
+        RelationKind::Input { .. } => ("table_input", None),
+        RelationKind::Project { append, .. } => {
+            (if *append { "with_columns" } else { "project" }, None)
+        }
+        RelationKind::Filter { .. } => ("filter", None),
+        RelationKind::Sql { query, .. } => ("sql", Some(query.clone())),
+    }
+}
+fn schema_diagnostic(
+    table: &TableExpr,
+    path: &str,
+    error: crate::CalcFlowError,
+) -> crate::QueryDiagnostic {
+    let (path, code, message) = match error {
+        crate::CalcFlowError::InvalidArgument { field, message } => {
+            argument_error(path, field, message)
+        }
+        crate::CalcFlowError::DataFusion { message, .. } => {
+            native_schema_error(table, path, &message)
+        }
+        error => (path.into(), "schema_mismatch".into(), error.to_string()),
+    };
+    crate::QueryDiagnostic {
+        path,
+        code,
+        message,
+        status: crate::SupportStatus::Unsupported,
+    }
+}
+fn argument_error(path: &str, field: String, message: String) -> (String, String, String) {
+    if field == "sql.output.schema" {
+        return (
+            format!("{path}.sql.schema"),
+            "duplicate_name".into(),
+            message,
+        );
+    }
+    let field = if field.starts_with("sql.") {
+        format!("{path}.sql.schema")
+    } else {
+        field
+    };
+    let (code, message) = message
+        .split_once(": ")
+        .unwrap_or(("schema_mismatch", &message));
+    (field, code.into(), message.into())
+}
+fn native_schema_error(table: &TableExpr, path: &str, message: &str) -> (String, String, String) {
+    let code = if message.contains("Projections require unique expression names") {
+        "duplicate_name"
+    } else {
+        "schema_mismatch"
+    };
+    let role = if matches!(table.0.kind, RelationKind::Sql { .. }) {
+        "sql.schema"
+    } else {
+        "schema"
+    };
+    (
+        format!("{path}.{role}"),
+        code.into(),
+        format!("{message}; location is the relation node; no subexpression span is available"),
+    )
+}
 fn port_spec(name: &str, schema: &SchemaRef) -> PortSpec {
     PortSpec {
         name: name.into(),
@@ -501,34 +541,66 @@ fn edge_spec(source: &str, target: &str, port: &str) -> EdgeSpec {
         target_port: port.into(),
     }
 }
-fn native_port(spec: &PortSpec) -> Result<Port> {
-    let fields = spec
-        .schema
-        .iter()
-        .map(crate::config::field_from_spec)
-        .collect::<Result<Vec<_>>>()?;
-    Port::new(&spec.name, spec.kind, spec.required, Some(fields))
+struct PlannedPorts {
+    inputs: Vec<(String, SchemaRef)>,
+    output: SchemaRef,
 }
-fn node_operator(node: &NodeSpec) -> Result<NodeOperator> {
-    let inputs = node
-        .input_ports
-        .iter()
-        .map(native_port)
-        .collect::<Result<Vec<_>>>()?;
-    let output = native_port(&node.output_ports[0])?;
+impl PlannedPorts {
+    fn identity(schema: &SchemaRef) -> Self {
+        Self {
+            inputs: vec![("input".into(), schema.clone())],
+            output: schema.clone(),
+        }
+    }
+    fn inputs(&self) -> Result<Vec<Port>> {
+        self.inputs
+            .iter()
+            .map(|(name, schema)| exact_port(name, schema))
+            .collect()
+    }
+}
+fn exact_port(name: &str, schema: &SchemaRef) -> Result<Port> {
+    Port::with_schema_ref(name, BatchKind::Table, true, Some(schema.clone()))
+}
+fn node_operator(node: &NodeSpec, schemas: &PlannedPorts) -> Result<NodeOperator> {
+    let inputs = schemas.inputs()?;
+    let output = exact_port("output", &schemas.output)?;
     match &node.operator {
-        OperatorSpec::Expression { select, filter, .. } => Ok(Box::new(
-            ExpressionOperator::new(&node.id, "", select.clone(), filter.clone(), vec![])?
-                .with_ports(inputs[0].clone(), output)?,
-        )
-        .into()),
-        OperatorSpec::Sql { query, aliases, .. } => Ok(Box::new(
-            SqlOperator::new(&node.id, query, aliases.clone(), vec![])?
-                .with_ports(inputs, output)?,
-        )
-        .into()),
+        OperatorSpec::Expression { select, filter, .. } => {
+            expression_operator(&node.id, select, filter.as_deref(), &inputs[0], output)
+        }
+        OperatorSpec::Sql { query, aliases, .. } => {
+            sql_operator(&node.id, query, aliases, inputs, output)
+        }
         _ => unreachable!("typed row-local frontend emits only expression and SQL nodes"),
     }
+}
+fn expression_operator(
+    id: &str,
+    select: &[String],
+    filter: Option<&str>,
+    input: &Port,
+    output: Port,
+) -> Result<NodeOperator> {
+    Ok(Box::new(
+        ExpressionOperator::new(id, "", select.to_vec(), filter.map(str::to_owned), vec![])?
+            .with_ports(input.clone(), output)?,
+    )
+    .into())
+}
+fn sql_operator(
+    id: &str,
+    query: &str,
+    aliases: &[String],
+    inputs: Vec<Port>,
+    output: Port,
+) -> Result<NodeOperator> {
+    Ok(
+        Box::new(
+            SqlOperator::new(id, query, aliases.to_vec(), vec![])?.with_ports(inputs, output)?,
+        )
+        .into(),
+    )
 }
 
 fn retained_ordering(ordering: &QueryOrderingFacts, schema: &SchemaRef) -> QueryOrderingFacts {

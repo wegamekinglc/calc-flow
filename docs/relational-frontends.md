@@ -51,7 +51,9 @@ for both choices; typing overloads express their mutual exclusion.
 `for_mode` always creates a new wrapper containing declarations only. It preserves
 input inference, explicit inputs and the declaration fingerprint, then checks the
 target shape. Prepared caches still include mode and registration identity;
-compiled plans and running state are never shared by the wrappers. Multi-alias
+plans are distinct across modes and stream contexts always own a fresh job.
+Within batch mode, the existing Runtime cache can reuse a compiled plan; each
+execute call still has independent run state. Multi-alias
 SQL cannot be converted to ordinary append streaming; stream-only relations
 cannot be converted to batch.
 

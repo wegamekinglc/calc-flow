@@ -6,6 +6,39 @@ import pytest
 import calc_flow as cf
 
 
+@pytest.mark.parametrize("mode", ["batch", "stream"])
+def test_schema_distinguishes_known_empty_from_unresolved(mode: str) -> None:
+    source = cf.table_input("events", schema=pa.schema([]))
+    program = cf.Program("empty", mode=mode, outputs={"empty": source})
+    assert program.collect_schema() == {"empty": pa.schema([])}
+    assert source.collect_schema(mode=mode) == pa.schema([])
+    mixed = program.output("constant", source.select(n=cf.lit(1)))
+    assert mixed.collect_schema()["empty"] == pa.schema([])
+    with pytest.raises(cf.CompileError, match="unresolved_type"):
+        cf.Program(
+            "unknown", mode=mode, outputs={"out": source.select(n=cf.lit(None))}
+        ).collect_schema()
+
+
+@pytest.mark.parametrize("mode", ["batch", "stream"])
+@pytest.mark.parametrize("name", ["result", "a.b", 'a"b\n'])
+def test_unsupported_sql_schema_uses_escaped_logical_output(
+    mode: str, name: str
+) -> None:
+    import json
+
+    source = cf.table_input("events", schema=pa.schema([("x", pa.int64())]))
+    result = source.sql("SELECT CAST(x AS DECIMAL(20,2)) AS n FROM input")
+    program = cf.Program("unsupported", mode=mode, outputs={name: result})
+    with pytest.raises(cf.CompileError) as caught:
+        program.collect_schema()
+    root = f"outputs.{name}" if name.isidentifier() else f"outputs[{json.dumps(name)}]"
+    assert str(caught.value).startswith(
+        f"{root}.schema[0].data_type: unsupported_type:"
+    )
+    assert "cf_sql_" not in str(caught.value)
+
+
 def test_mode_alias_copies_only_declarations() -> None:
     batch = cf.Program("values", mode="batch")
     stream = batch.for_mode("stream")
@@ -85,27 +118,43 @@ def test_for_mode_rechecks_structure_without_mutating_original() -> None:
 
 
 def _shape(source: cf.TableExpr, shape: str, values: list[int | None]):
-    if shape == "dataframe":
-        scaled = source.with_columns(y=source["x"] + cf.lit(1))
-        result = scaled.filter(scaled["y"] > cf.lit(1)).select(
-            z=scaled["y"] * cf.lit(2)
-        )
-        expected = [2 * (x + 1) for x in values if x is not None and x > 0]
-    elif shape == "sql":
-        result = source.sql("SELECT x + 1 AS z FROM input")
-        expected = [None if x is None else x + 1 for x in values]
-    elif shape == "df_sql_df_sql":
-        scaled = source.with_columns(y=source["x"] + cf.lit(1))
-        first = cf.sql("SELECT x, y FROM s WHERE y > 1", s=scaled)
-        selected = first.select(z=first["y"] * cf.lit(2))
-        result = selected.sql("SELECT z FROM input")
-        expected = [2 * (x + 1) for x in values if x is not None and x > 0]
-    else:
-        first = source.sql("SELECT x FROM input")
-        selected = first.select(z=first["x"] + cf.lit(1))
-        result = selected.sql("SELECT z FROM input")
-        expected = [None if x is None else x + 1 for x in values]
-    return result, expected
+    return {
+        "dataframe": _dataframe_shape,
+        "sql": _sql_shape,
+        "df_sql_df_sql": _mixed_dataframe_shape,
+        "sql_df_sql": _mixed_sql_shape,
+    }[shape](source, values)
+
+
+def _filtered_expected(values: list[int | None]) -> list[int]:
+    return [2 * (x + 1) for x in values if x is not None and x > 0]
+
+
+def _nullable_expected(values: list[int | None]) -> list[int | None]:
+    return [None if x is None else x + 1 for x in values]
+
+
+def _dataframe_shape(source: cf.TableExpr, values: list[int | None]):
+    scaled = source.with_columns(y=source["x"] + cf.lit(1))
+    result = scaled.filter(scaled["y"] > cf.lit(1)).select(z=scaled["y"] * cf.lit(2))
+    return result, _filtered_expected(values)
+
+
+def _sql_shape(source: cf.TableExpr, values: list[int | None]):
+    return source.sql("SELECT x + 1 AS z FROM input"), _nullable_expected(values)
+
+
+def _mixed_dataframe_shape(source: cf.TableExpr, values: list[int | None]):
+    scaled = source.with_columns(y=source["x"] + cf.lit(1))
+    first = cf.sql("SELECT x, y FROM s WHERE y > 1", s=scaled)
+    selected = first.select(z=first["y"] * cf.lit(2))
+    return selected.sql("SELECT z FROM input"), _filtered_expected(values)
+
+
+def _mixed_sql_shape(source: cf.TableExpr, values: list[int | None]):
+    first = source.sql("SELECT x FROM input")
+    selected = first.select(z=first["x"] + cf.lit(1))
+    return selected.sql("SELECT z FROM input"), _nullable_expected(values)
 
 
 @pytest.mark.parametrize("shape", ["dataframe", "sql", "df_sql_df_sql", "sql_df_sql"])
@@ -236,6 +285,7 @@ def test_mode_wrappers_preserve_batch_and_fresh_stream_state_boundaries() -> Non
     runtime = cf.Runtime()
     plan = batch.compile_batch(runtime)
     assert batch.compile_batch(runtime) is plan
+    assert batch.for_mode("batch").compile_batch(runtime) is plan
     actual = [
         plan.execute({plan.external_inputs[0]: cf.Batch.from_pyarrow(table)})
         .outputs[plan.external_outputs[0]]

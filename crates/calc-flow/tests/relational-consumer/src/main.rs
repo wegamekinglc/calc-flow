@@ -80,20 +80,26 @@ fn declaration(shape: &str) -> Result<(TableExpr, TableExpr, Vec<Option<i64>>)> 
             source.sql("SELECT x + 1 AS z FROM input")?,
             vec![Some(2), None, Some(4), Some(2)],
         )),
-        "sql_df_sql" => {
-            let (shared, result) = sql_df_sql(&source)?;
-            Ok((shared, result, vec![Some(2), None, Some(4), Some(2)]))
-        }
-        _ => {
-            let shared = scaled(&source)?;
-            let result = if shape == "dataframe" {
-                dataframe(&shared)?
-            } else {
-                df_sql_df_sql(&shared)?
-            };
-            Ok((shared, result, vec![Some(4), Some(8), Some(4)]))
-        }
+        "sql_df_sql" => sql_declaration(&source),
+        _ => filtered_declaration(&source, shape),
     }
+}
+
+fn sql_declaration(source: &TableExpr) -> Result<(TableExpr, TableExpr, Vec<Option<i64>>)> {
+    let (shared, result) = sql_df_sql(source)?;
+    Ok((shared, result, vec![Some(2), None, Some(4), Some(2)]))
+}
+fn filtered_declaration(
+    source: &TableExpr,
+    shape: &str,
+) -> Result<(TableExpr, TableExpr, Vec<Option<i64>>)> {
+    let shared = scaled(source)?;
+    let result = if shape == "dataframe" {
+        dataframe(&shared)?
+    } else {
+        df_sql_df_sql(&shared)?
+    };
+    Ok((shared, result, vec![Some(4), Some(8), Some(4)]))
 }
 
 struct Source {
@@ -175,7 +181,7 @@ async fn run_stream(
     let opened = Arc::new(AtomicUsize::new(0));
     let closed = Arc::new(AtomicUsize::new(0));
     let source = Source {
-        schema: data(vec![])?.table_payload()?.schema().clone(),
+        schema: batches[0].table_payload()?.schema().clone(),
         batches: batches.into_iter(),
         opened: opened.clone(),
         closed: closed.clone(),
@@ -335,20 +341,31 @@ async fn check_shape(shape: &str) -> Result<()> {
         .await?;
     assert_ne!(plan.fingerprint(), stream_plan.fingerprint());
     drop(stream_plan);
+    check_shape_execution(shape, &batch, &stream, &plan, &options, expected).await
+}
+async fn check_shape_execution(
+    shape: &str,
+    batch: &Program,
+    stream: &Program,
+    plan: &calc_flow::BatchExecutionPlan,
+    options: &CompileOptions,
+    expected: Vec<Option<i64>>,
+) -> Result<()> {
     let input = data(vec![Some(1), None, Some(3), Some(1)])?;
-    check_case(&plan, &stream, &options, input.clone(), expected.clone()).await?;
+    check_case(plan, stream, options, input.clone(), expected.clone()).await?;
     for empty in [vec![], vec![None, None]] {
         let expected = if matches!(shape, "dataframe" | "df_sql_df_sql") {
             vec![]
         } else {
             empty.clone()
         };
-        check_case(&plan, &stream, &options, data(empty)?, expected).await?;
+        check_case(plan, stream, options, data(empty)?, expected).await?;
     }
-    check_export(&batch, input, expected).await?;
+    check_export(batch, input, expected).await?;
     println!("{shape}: schema, analysis, batch, owned stream, export/reload passed");
     Ok(())
 }
+
 async fn check_batch_state(batch: &Program) -> Result<()> {
     let plan = batch
         .compile_batch(&UdfRegistry::new().snapshot(), &CompileOptions::default())
@@ -400,18 +417,11 @@ async fn check_stream_state(stream: &Program) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     check_unsigned_negation().await?;
+    check_metadata_stream().await?;
     for shape in ["dataframe", "sql", "df_sql_df_sql", "sql_df_sql"] {
         check_shape(shape).await?;
     }
-    let source = source_input()?;
-    let total = source.sql("SELECT SUM(x) AS total FROM input")?;
-    let batch = Program::new(
-        "state",
-        CompileMode::Batch,
-        BTreeMap::from([("result".into(), total)]),
-    )?;
-    check_batch_state(&batch).await?;
-    check_stream_state(&batch.for_mode(CompileMode::Stream)?).await?;
+    check_state().await?;
     Ok(())
 }
 
@@ -433,5 +443,53 @@ async fn check_unsigned_negation() -> Result<()> {
             && error.contains("signed"),
         "{error}"
     );
+    Ok(())
+}
+
+async fn check_state() -> Result<()> {
+    let source = source_input()?;
+    let total = source.sql("SELECT SUM(x) AS total FROM input")?;
+    let batch = Program::new(
+        "state",
+        CompileMode::Batch,
+        BTreeMap::from([("result".into(), total)]),
+    )?;
+    check_batch_state(&batch).await?;
+    check_stream_state(&batch.for_mode(CompileMode::Stream)?).await?;
+    Ok(())
+}
+
+fn metadata_batch() -> Result<Batch> {
+    use std::collections::HashMap;
+    let field = Field::new("x", DataType::Int64, true)
+        .with_metadata(HashMap::from([("unit".into(), "USD".into())]));
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![field],
+        HashMap::from([("origin".into(), "consumer".into())]),
+    ));
+    let record =
+        RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![Some(1)]))]).unwrap();
+    Batch::table(vec![record], BatchMetadata::default())
+}
+fn metadata_program(batch: &Batch) -> Result<Program> {
+    let source = table_input(
+        "events",
+        batch.table_payload()?.schema().clone(),
+        InputOptions::default(),
+    )?;
+    Program::new(
+        "metadata",
+        CompileMode::Stream,
+        BTreeMap::from([("result".into(), source)]),
+    )
+}
+async fn check_metadata_stream() -> Result<()> {
+    let batch = metadata_batch()?;
+    let schema = batch.table_payload()?.schema().clone();
+    let program = metadata_program(&batch)?;
+    let actual = run_stream(&program, vec![batch.clone()], &CompileOptions::default()).await?;
+    assert_eq!(values(&actual["result"][0], "x"), vec![Some(1)]);
+    assert_eq!(batch.table_payload()?.schema(), &schema);
+    println!("metadata: owned stream accepts schema and field metadata without mutating input");
     Ok(())
 }

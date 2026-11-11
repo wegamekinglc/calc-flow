@@ -37,17 +37,13 @@ fn values(batch: &Batch, name: &str) -> Vec<Option<i64>> {
 }
 
 fn mixed_program() -> calc_flow::Result<Program> {
-    let source = table_input(
-        "events",
-        data(vec![])?.table_payload()?.schema().clone(),
-        InputOptions::default(),
-    )?;
-    let scaled = source.with_columns(vec![(source.column("x")? + lit(1_i64)?).alias("y")?])?;
+    let source = relation_input()?;
+    let scaled = scale(&source)?;
     let first = calc_flow::sql::sql(
         "SELECT x, y FROM s WHERE y > 1",
         BTreeMap::from([("s".into(), scaled.clone())]),
     )?;
-    let selected = first.select(vec![(first.column("y")? * lit(2_i64)?).alias("z")?])?;
+    let selected = double_y(&first)?;
     let result = selected.sql("SELECT z FROM input")?;
     Program::new(
         "mixed",
@@ -56,6 +52,19 @@ fn mixed_program() -> calc_flow::Result<Program> {
     )
 }
 
+fn relation_input() -> calc_flow::Result<calc_flow::TableExpr> {
+    table_input(
+        "events",
+        Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)])),
+        InputOptions::default(),
+    )
+}
+fn scale(source: &calc_flow::TableExpr) -> calc_flow::Result<calc_flow::TableExpr> {
+    source.with_columns(vec![(source.column("x")? + lit(1_i64)?).alias("y")?])
+}
+fn double_y(source: &calc_flow::TableExpr) -> calc_flow::Result<calc_flow::TableExpr> {
+    source.select(vec![(source.column("y")? * lit(2_i64)?).alias("z")?])
+}
 #[tokio::test]
 async fn named_mixed_dag_reuses_declarations_and_isolates_executions() -> calc_flow::Result<()> {
     let program = mixed_program()?;
@@ -67,6 +76,16 @@ async fn named_mixed_dag_reuses_declarations_and_isolates_executions() -> calc_f
         schemas["result"].field(0),
         &Field::new("z", DataType::Int64, true)
     );
+    let options = verify_analysis(&program, &udfs).await?;
+    verify_modes(&program, &stream, &udfs, &options).await?;
+    verify_execution(&program, &udfs, &options).await?;
+    Ok(())
+}
+
+async fn verify_analysis(
+    program: &Program,
+    udfs: &calc_flow::UdfRegistrySnapshot,
+) -> calc_flow::Result<CompileOptions> {
     let request = PortabilityRequest::new(
         Comparison::PerBatch,
         HistoryScope::CurrentBatch,
@@ -74,7 +93,7 @@ async fn named_mixed_dag_reuses_declarations_and_isolates_executions() -> calc_f
     )?;
     let report = program
         .analyze(
-            &udfs,
+            udfs,
             &AnalysisOptions {
                 portability: Some(request.clone()),
             },
@@ -92,21 +111,27 @@ async fn named_mixed_dag_reuses_declarations_and_isolates_executions() -> calc_f
     };
     assert!(
         program
-            .explain(&udfs, &AnalysisOptions::default())
+            .explain(udfs, &AnalysisOptions::default())
             .await?
             .contains(program.name())
     );
+    Ok(options)
+}
+async fn verify_modes(
+    program: &Program,
+    stream: &Program,
+    udfs: &calc_flow::UdfRegistrySnapshot,
+    options: &CompileOptions,
+) -> calc_flow::Result<()> {
     let stream_plan = stream
-        .compile_stream(&udfs, &calc_flow::StreamRequirements::default(), &options)
+        .compile_stream(udfs, &calc_flow::StreamRequirements::default(), options)
         .await?;
     assert_ne!(
-        program.compile_batch(&udfs, &options).await?.fingerprint(),
+        program.compile_batch(udfs, options).await?.fingerprint(),
         stream_plan.fingerprint()
     );
-    verify_execution(&program, &udfs, &options).await?;
     Ok(())
 }
-
 async fn verify_execution(
     program: &Program,
     udfs: &calc_flow::UdfRegistrySnapshot,
@@ -146,9 +171,7 @@ async fn verify_export(
     udfs: &calc_flow::UdfRegistrySnapshot,
 ) -> calc_flow::Result<()> {
     let project = program.to_project(udfs).await?;
-    let serialized = calc_flow::export_project_json(&project)?;
-    let reloaded = calc_flow::import_project_json(serialized.as_bytes())?;
-    assert_eq!(project, reloaded);
+    let reloaded = roundtrip(&project)?;
     let reloaded =
         calc_flow::compile_project(&reloaded, &calc_flow::ProviderRegistry::default(), udfs)?;
     let inputs = reloaded
@@ -170,4 +193,11 @@ async fn verify_export(
             && values(batch, "z") == vec![Some(4)]
     }));
     Ok(())
+}
+
+fn roundtrip(project: &calc_flow::ProjectSpec) -> calc_flow::Result<calc_flow::ProjectSpec> {
+    let serialized = calc_flow::export_project_json(project)?;
+    let reloaded = calc_flow::import_project_json(serialized.as_bytes())?;
+    assert_eq!(project, &reloaded);
+    Ok(reloaded)
 }

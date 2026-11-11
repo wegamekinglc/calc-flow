@@ -163,6 +163,27 @@ pub(crate) fn quote(name: &str) -> String {
 pub fn table_input(name: &str, schema: SchemaRef, options: InputOptions) -> Result<TableExpr> {
     let path = segment("inputs", name);
     check_name(name, &path)?;
+    validate_input_fields(&schema, &path)?;
+    validate_input_options(&schema, &options, &path)?;
+    let id = digest(&json!([
+        "input",
+        name,
+        crate::query_analysis::schema_fields(&schema),
+        options.entity_by,
+        options.event_time,
+        options.sequence_by
+    ]));
+    Ok(TableExpr(Arc::new(Relation {
+        id,
+        kind: RelationKind::Input {
+            name: name.into(),
+            schema,
+            options,
+        },
+    })))
+}
+
+fn validate_input_fields(schema: &SchemaRef, path: &str) -> Result<()> {
     let mut names = BTreeSet::new();
     for (index, field) in schema.fields().iter().enumerate() {
         check_name(field.name(), &format!("{path}.schema[{index}]"))?;
@@ -178,21 +199,10 @@ pub fn table_input(name: &str, schema: SchemaRef, options: InputOptions) -> Resu
             &format!("{path}.schema[{index}].data_type"),
         )?;
     }
-    for (role, keys) in [
-        ("entity_by", &options.entity_by),
-        ("sequence_by", &options.sequence_by),
-    ] {
-        let mut seen = BTreeSet::new();
-        for key in keys {
-            if !seen.insert(key) || schema.field_with_name(key).is_err() {
-                return Err(invalid(
-                    &format!("{path}.{role}"),
-                    "schema_mismatch",
-                    "keys must be unique existing fields",
-                ));
-            }
-        }
-    }
+    Ok(())
+}
+fn validate_input_options(schema: &SchemaRef, options: &InputOptions, path: &str) -> Result<()> {
+    validate_input_keys(schema, options, path)?;
     if let Some(key) = &options.event_time {
         let field = schema.field_with_name(key).map_err(|_| {
             invalid(
@@ -215,22 +225,26 @@ pub fn table_input(name: &str, schema: SchemaRef, options: InputOptions) -> Resu
             ));
         }
     }
-    let id = digest(&json!([
-        "input",
-        name,
-        crate::query_analysis::schema_fields(&schema),
-        options.entity_by,
-        options.event_time,
-        options.sequence_by
-    ]));
-    Ok(TableExpr(Arc::new(Relation {
-        id,
-        kind: RelationKind::Input {
-            name: name.into(),
-            schema,
-            options,
-        },
-    })))
+    Ok(())
+}
+
+fn validate_input_keys(schema: &SchemaRef, options: &InputOptions, path: &str) -> Result<()> {
+    for (role, keys) in [
+        ("entity_by", &options.entity_by),
+        ("sequence_by", &options.sequence_by),
+    ] {
+        let mut seen = BTreeSet::new();
+        for key in keys {
+            if !seen.insert(key) || schema.field_with_name(key).is_err() {
+                return Err(invalid(
+                    &format!("{path}.{role}"),
+                    "schema_mismatch",
+                    "keys must be unique existing fields",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Declares a typed scalar literal.
@@ -406,16 +420,7 @@ pub(crate) fn projection(
     append: bool,
     path: &str,
 ) -> Result<Vec<String>> {
-    let mut names: BTreeSet<String> = if append {
-        schema.fields().iter().map(|f| f.name().clone()).collect()
-    } else {
-        BTreeSet::new()
-    };
-    let mut select = if append {
-        schema.fields().iter().map(|f| quote(f.name())).collect()
-    } else {
-        vec![]
-    };
+    let (mut names, mut select) = projection_prefix(schema, append);
     for column in columns {
         if !names.insert(column.name.clone()) {
             return Err(invalid(
@@ -424,16 +429,7 @@ pub(crate) fn projection(
                 format!("field '{}' must be unique", column.name),
             ));
         }
-        if !append
-            && schema.field_with_name(&column.name).is_ok()
-            && !matches!(column.value.0.as_ref(), Scalar::Column { name, lineage } if name == &column.name && lineage == input.lineage())
-        {
-            return Err(invalid(
-                path,
-                "duplicate_name",
-                "derived projection cannot replace an existing field",
-            ));
-        }
+        check_projection_name(input, schema, column, append, path)?;
         column
             .value
             .dtype(input.lineage(), schema, &segment(path, &column.name))?;
@@ -447,6 +443,39 @@ pub(crate) fn projection(
         select.push("*".into());
     }
     Ok(select)
+}
+
+fn projection_prefix(schema: &SchemaRef, append: bool) -> (BTreeSet<String>, Vec<String>) {
+    let names: BTreeSet<String> = if append {
+        schema.fields().iter().map(|f| f.name().clone()).collect()
+    } else {
+        BTreeSet::new()
+    };
+    let select = if append {
+        schema.fields().iter().map(|f| quote(f.name())).collect()
+    } else {
+        vec![]
+    };
+    (names, select)
+}
+fn check_projection_name(
+    input: &TableExpr,
+    schema: &SchemaRef,
+    column: &NamedExpr,
+    append: bool,
+    path: &str,
+) -> Result<()> {
+    if !append
+        && schema.field_with_name(&column.name).is_ok()
+        && !matches!(column.value.0.as_ref(), Scalar::Column { name, lineage } if name == &column.name && lineage == input.lineage())
+    {
+        return Err(invalid(
+            path,
+            "duplicate_name",
+            "derived projection cannot replace an existing field",
+        ));
+    }
+    Ok(())
 }
 
 impl ColumnExpr {
@@ -467,23 +496,13 @@ impl ColumnExpr {
     pub(crate) fn render(&self) -> String {
         match self.0.as_ref() {
             Scalar::Column { name, .. } => quote(name),
-            Scalar::Literal(value) => match value {
-                LiteralValue::Null => "NULL".into(),
-                LiteralValue::Boolean(v) => v.to_string(),
-                LiteralValue::Int64(v) => format!("CAST('{v}' AS BIGINT)"),
-                LiteralValue::UInt64(v) => format!("CAST('{v}' AS BIGINT UNSIGNED)"),
-                LiteralValue::Float64(v) => format!("CAST('{v}' AS DOUBLE)"),
-                LiteralValue::Utf8(v) => format!("'{}'", v.replace('\'', "''")),
-            },
+            Scalar::Literal(value) => render_literal(value),
             Scalar::Cast { value, data_type } => format!(
                 "arrow_cast({}, '{}')",
                 value.render(),
                 data_type.to_string().replace('\'', "''")
             ),
-            Scalar::Unary { op, value } => match *op {
-                "IS NULL" | "IS NOT NULL" => format!("({} {op})", value.render()),
-                _ => format!("({op} {})", value.render()),
-            },
+            Scalar::Unary { op, value } => render_unary(op, value),
             Scalar::Binary { op, left, right } => {
                 format!("({} {op} {})", left.render(), right.render())
             }
@@ -494,73 +513,111 @@ impl ColumnExpr {
             Scalar::Column {
                 lineage: origin,
                 name,
-            } => {
-                if origin != lineage {
-                    return Err(invalid(
-                        &format!("{path}.lineage"),
-                        "schema_mismatch",
-                        "columns must come from the same row lineage",
-                    ));
-                }
-                schema
-                    .field_with_name(name)
-                    .map(|f| f.data_type().clone())
-                    .map_err(|_| {
-                        invalid(
-                            path,
-                            "schema_mismatch",
-                            format!("column '{name}' is not present in relation schema"),
-                        )
-                    })
-            }
-            Scalar::Literal(value) => Ok(match value {
-                LiteralValue::Null => DataType::Null,
-                LiteralValue::Boolean(_) => DataType::Boolean,
-                LiteralValue::Int64(_) => DataType::Int64,
-                LiteralValue::UInt64(_) => DataType::UInt64,
-                LiteralValue::Float64(_) => DataType::Float64,
-                LiteralValue::Utf8(_) => DataType::Utf8,
-            }),
+            } => column_type(origin, name, lineage, schema, path),
+            Scalar::Literal(value) => Ok(literal_type(value)),
             Scalar::Cast { value, data_type } => {
                 value.dtype(lineage, schema, path)?;
                 Ok(data_type.clone())
             }
             Scalar::Unary { op, value } => {
-                let dtype = value.dtype(lineage, schema, path)?;
-                match *op {
-                    "IS NULL" | "IS NOT NULL" => Ok(DataType::Boolean),
-                    "NOT" if dtype == DataType::Boolean => Ok(dtype),
-                    "-" if matches!(
-                        dtype,
-                        DataType::Int8
-                            | DataType::Int16
-                            | DataType::Int32
-                            | DataType::Int64
-                            | DataType::Float32
-                            | DataType::Float64
-                    ) =>
-                    {
-                        Ok(dtype)
-                    }
-                    "-" => Err(invalid(
-                        path,
-                        "unsupported_type",
-                        "negation requires a signed integer or floating operand; cast operands explicitly",
-                    )),
-                    _ => Err(invalid(
-                        path,
-                        "unsupported_type",
-                        "unary operator requires boolean or numeric operands",
-                    )),
-                }
+                unary_type(op, value.dtype(lineage, schema, path)?, path)
             }
             Scalar::Binary { op, left, right } => {
-                let left = left.dtype(lineage, schema, &format!("{path}.left"))?;
-                let right = right.dtype(lineage, schema, &format!("{path}.right"))?;
-                binary_type(op, left, &right, path)
+                binary_dtype(op, left, right, lineage, schema, path)
             }
         }
     }
+}
+fn render_literal(value: &LiteralValue) -> String {
+    match value {
+        LiteralValue::Null => "NULL".into(),
+        LiteralValue::Boolean(v) => v.to_string(),
+        LiteralValue::Int64(v) => format!("CAST('{v}' AS BIGINT)"),
+        LiteralValue::UInt64(v) => format!("CAST('{v}' AS BIGINT UNSIGNED)"),
+        LiteralValue::Float64(v) => format!("CAST('{v}' AS DOUBLE)"),
+        LiteralValue::Utf8(v) => format!("'{}'", v.replace('\'', "''")),
+    }
+}
+fn render_unary(op: &str, value: &ColumnExpr) -> String {
+    match op {
+        "IS NULL" | "IS NOT NULL" => format!("({} {op})", value.render()),
+        _ => format!("({op} {})", value.render()),
+    }
+}
+fn column_type(
+    origin: &str,
+    name: &str,
+    lineage: &str,
+    schema: &SchemaRef,
+    path: &str,
+) -> Result<DataType> {
+    if origin != lineage {
+        return Err(invalid(
+            &format!("{path}.lineage"),
+            "schema_mismatch",
+            "columns must come from the same row lineage",
+        ));
+    }
+    schema
+        .field_with_name(name)
+        .map(|f| f.data_type().clone())
+        .map_err(|_| {
+            invalid(
+                path,
+                "schema_mismatch",
+                format!("column '{name}' is not present in relation schema"),
+            )
+        })
+}
+fn literal_type(value: &LiteralValue) -> DataType {
+    match value {
+        LiteralValue::Null => DataType::Null,
+        LiteralValue::Boolean(_) => DataType::Boolean,
+        LiteralValue::Int64(_) => DataType::Int64,
+        LiteralValue::UInt64(_) => DataType::UInt64,
+        LiteralValue::Float64(_) => DataType::Float64,
+        LiteralValue::Utf8(_) => DataType::Utf8,
+    }
+}
+fn unary_type(op: &str, dtype: DataType, path: &str) -> Result<DataType> {
+    match op {
+        "IS NULL" | "IS NOT NULL" => Ok(DataType::Boolean),
+        "NOT" if dtype == DataType::Boolean => Ok(dtype),
+        "-" if matches!(
+            dtype,
+            DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::Float32
+                | DataType::Float64
+        ) =>
+        {
+            Ok(dtype)
+        }
+        "-" => Err(invalid(
+            path,
+            "unsupported_type",
+            "negation requires a signed integer or floating operand; cast operands explicitly",
+        )),
+        _ => Err(invalid(
+            path,
+            "unsupported_type",
+            "unary operator requires boolean or numeric operands",
+        )),
+    }
+}
+fn binary_dtype(
+    op: &str,
+    left: &ColumnExpr,
+    right: &ColumnExpr,
+    lineage: &str,
+    schema: &SchemaRef,
+    path: &str,
+) -> Result<DataType> {
+    let left = left.dtype(lineage, schema, &format!("{path}.left"))?;
+    let right = right.dtype(lineage, schema, &format!("{path}.right"))?;
+    binary_type(op, left, &right, path)
 }
 fn binary_type(op: &str, left: DataType, right: &DataType, path: &str) -> Result<DataType> {
     if &left != right {
@@ -573,6 +630,11 @@ fn binary_type(op: &str, left: DataType, right: &DataType, path: &str) -> Result
     match op {
         "AND" | "OR" if left == DataType::Boolean => Ok(DataType::Boolean),
         "=" | "!=" | "<" | "<=" | ">" | ">=" => Ok(DataType::Boolean),
+        _ => arithmetic_type(op, left, path),
+    }
+}
+fn arithmetic_type(op: &str, left: DataType, path: &str) -> Result<DataType> {
+    match op {
         "/" if !matches!(left, DataType::Float32 | DataType::Float64) => Err(invalid(
             path,
             "unsupported_type",

@@ -23,7 +23,11 @@ from calc_flow.symbolic.nodes import (
     _text,
     _u64,
 )
-from calc_flow.symbolic.query_analysis import AnalysisOptions, PortabilityRequest
+from calc_flow.symbolic.query_analysis import (
+    AnalysisOptions,
+    PortabilityRequest,
+    _segment,
+)
 from calc_flow.symbolic.types import CompileMode
 
 if TYPE_CHECKING:
@@ -57,12 +61,39 @@ def _engine_selection(engine: object, mode: object) -> Literal["sql", "streaming
         if mode is _OMITTED
         else ("mode", mode, ("batch", "stream"))
     )
+    return _checked_engine_value(field, value, allowed)
+
+
+def _checked_engine_value(
+    field: str, value: object, allowed: tuple[str, str]
+) -> Literal["sql", "streaming"]:
     message = f"Program.{field}: invalid_literal: expected {allowed!r}"
     if type(value) is not str:
         raise TypeError(message)
     if value not in allowed:
         raise ValueError(message)
     return "sql" if value in ("sql", "batch") else "streaming"
+
+
+def _check_schema_output_types(
+    program: Program, runtime: Runtime, mode: CompileMode
+) -> None:
+    from calc_flow.errors import CompileError
+    from calc_flow.symbolic.analyzer import _require_mode
+    from calc_flow.symbolic.lower.program import _check_expression_capability
+    from calc_flow.symbolic.types import check_table_field_type
+
+    analyzer, _ = _check_expression_capability(program, runtime, _require_mode(mode))
+    for name, value in program.outputs:
+        path = _segment("outputs", name)
+        fields = analyzer.table(value._node, path).schema
+        for index, field in enumerate(fields):
+            try:
+                check_table_field_type(
+                    field.data_type, f"{path}.schema[{index}].data_type"
+                )
+            except ValueError as error:
+                raise CompileError(str(error)) from error
 
 
 class _StreamingExecuteOptions(TypedDict, total=False):
@@ -636,7 +667,7 @@ class Program:
         for name, value in self._outputs:
             if not isinstance(value, TableExpr):
                 errors.raise_compile(
-                    f"outputs.{name}.schema",
+                    f"{_segment('outputs', name)}.schema",
                     "unsupported_type",
                     "collect_schema requires table outputs",
                 )
@@ -646,7 +677,9 @@ class Program:
             )
         selected = _selected_runtime(runtime)
         with selected._registration_lock:
-            document = lower_program_document(self, selected, self._analysis_mode(mode))
+            selected_mode = self._analysis_mode(mode)
+            _check_schema_output_types(self, selected, selected_mode)
+            document = lower_program_document(self, selected, selected_mode)
             schemas = infer_document_schemas(document, selected)
             return {name: schemas[name] for name, _ in self._outputs}
 
