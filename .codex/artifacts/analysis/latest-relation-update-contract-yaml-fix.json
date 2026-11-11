@@ -1,0 +1,670 @@
+{
+  "issue": "DAL-513",
+  "pull_request": "https://github.com/wegamekinglc/calc-flow/pull/595",
+  "baseline_sha": "729d7302a4684d9626c8d55cdf8f4acb4baed0a9",
+  "implementation_sha": "d14285a3d78c71f42b78ee1b56c8426b6743ce77",
+  "validation_sha": "51d0488c83e10e837b22194c642726d3b94cb90f",
+  "review": {
+    "path": ".codex/artifacts/reviews/latest-relation-update-contract.md",
+    "sha256": "d5716544214fce7e54643d94d054601371e820b1a235f5ef59df94fcd323e4f9",
+    "unchanged": true,
+    "finding": 1
+  },
+  "changed_files": [
+    "crates/calc-flow/src/project_store.rs",
+    "crates/calc-flow/tests/project_store.rs",
+    "crates/calc-flow/tests/stream_join_validation.rs",
+    "python/tests/test_store.py"
+  ],
+  "native_build": {
+    "source_sha": "d14285a3d78c71f42b78ee1b56c8426b6743ce77",
+    "python": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+    "python_version": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+    "source_trees": {
+      "crates/calc-flow/src": "f5142c563e5ecc6750181ef8ccd4660c5dbd3d12",
+      "crates/calc-flow-python/src": "c2115655d8b102dcf2dbe9f585a203d6e1abce31",
+      "python/calc_flow": "59fe42a9a77a19e788917e332701de9f34440909"
+    },
+    "wheel": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/yaml-fix/wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl",
+    "wheel_sha256": "688977a6a2f986a3c9eccb53e7ad38fc9869593cef962e17d8a4156453f5c05a",
+    "package": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/yaml-fix/python",
+    "native": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/yaml-fix/python/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+    "native_sha256": "c9648f102357c3e55d7871e57e031667f91f71890a84ff037afb869fba11b021",
+    "verified_sources": [
+      {
+        "path": "python/calc_flow/__init__.py",
+        "sha256": "5f0f45e6010fbf2fe2e6057266d262d49b0629b56eff755e1d7111eb47c94075"
+      },
+      {
+        "path": "python/calc_flow/_compat.py",
+        "sha256": "4e17ab0e959c05b9467176379da4f65e3fe16e0c20b544cd10e6e78d99f03421"
+      },
+      {
+        "path": "python/calc_flow/_macd.py",
+        "sha256": "ff73c6b259998fd21d7c7862736f0a62924b36af44c5700a7060d9d4a646ed3b"
+      },
+      {
+        "path": "python/calc_flow/_native.pyi",
+        "sha256": "c02f41eb8bfa1549a24c9679df623e5a1ed57bb4522a551992ae51e4951ca731"
+      },
+      {
+        "path": "python/calc_flow/_native_array.py",
+        "sha256": "a3f4629991e411f8b56f17275c61153e20dc182e7e6ee69041294276f2699891"
+      },
+      {
+        "path": "python/calc_flow/_stream_inputs.py",
+        "sha256": "57ef58bc302565cfaa87148cc02736ec40585129fb8c51fa787dcd6c1de0a0a2"
+      },
+      {
+        "path": "python/calc_flow/array.py",
+        "sha256": "b5a4d4ab4fd0f72922db98b3ca82c4436ed4bb0b5f6af565a9b03a8a7844f76c"
+      },
+      {
+        "path": "python/calc_flow/asof_join_spec.py",
+        "sha256": "4160dd0e541da6e0be5b812f461706240a6b675199106d4029d69adb87c7ac06"
+      },
+      {
+        "path": "python/calc_flow/capabilities.py",
+        "sha256": "9a99d7fac56e5403ee6cd76b70b094957184fc4daa2ab3a0ca55c2cbb419498d"
+      },
+      {
+        "path": "python/calc_flow/compute.py",
+        "sha256": "c7332e31b6acd62a61a33a1a0efa8fc7717ef2d874ee80f321fa5f5af4b46839"
+      },
+      {
+        "path": "python/calc_flow/config.py",
+        "sha256": "9fe9d07c5717e1460f539a89b4e58cf0c8c76647e0a5c41b2e551c4a99727b66"
+      },
+      {
+        "path": "python/calc_flow/errors.py",
+        "sha256": "08823d83a40097e1e4406bacce821de81a6ec016c05836efb34fc87f56101104"
+      },
+      {
+        "path": "python/calc_flow/join_spec.py",
+        "sha256": "9440cabf1ce87f900270b1159246f52f99fcea32e1b9c46987a422dce93efa5d"
+      },
+      {
+        "path": "python/calc_flow/pipeline.py",
+        "sha256": "237c12cbfbee25e4f0822c329596edb410e8287f75146eb1c4ea38c1000ef410"
+      },
+      {
+        "path": "python/calc_flow/runtime.py",
+        "sha256": "4e191e41dc2bfac6ca0e9c15f4f60bdb88de1781ef16184aa52d744c24183464"
+      },
+      {
+        "path": "python/calc_flow/store.py",
+        "sha256": "de6580386c9a72492818684cde7a2cdf14d02e70a76473715e2d52b62dfffa23"
+      },
+      {
+        "path": "python/calc_flow/stream.py",
+        "sha256": "0e61b2a44f6f4c1107a9680a45da01a5a0e0beb879ce4d65736394454cc29515"
+      },
+      {
+        "path": "python/calc_flow/symbolic/__init__.py",
+        "sha256": "22812e8e532c503fcca153708f7e7db76f611fe242f14395114f67df9b34fdda"
+      },
+      {
+        "path": "python/calc_flow/symbolic/_generated_rolling_kernels.py",
+        "sha256": "cdae04a26b254cb3a94c8c0c3ccbc11b6b4f5a6aad86adec2e55116eb4071263"
+      },
+      {
+        "path": "python/calc_flow/symbolic/analyzer.py",
+        "sha256": "1af18e207cf8d59e4e0948d41653bd1b204259bad2b6ba5a4a1bd0e3e072a230"
+      },
+      {
+        "path": "python/calc_flow/symbolic/asof.py",
+        "sha256": "babbdabf4f36f3a1654560f10e7d7e8b35b1e42f182f385ee0ae6fb3a11903bd"
+      },
+      {
+        "path": "python/calc_flow/symbolic/asof_analysis.py",
+        "sha256": "ad615bde0928471286f31a0a63c73654ce3ac8ce7038232f230c7ebb25eea57b"
+      },
+      {
+        "path": "python/calc_flow/symbolic/domains.py",
+        "sha256": "880483d1ca29bb75c92cb47e2cef82e708d553ff6e62ec1132685901f66a7cf8"
+      },
+      {
+        "path": "python/calc_flow/symbolic/errors.py",
+        "sha256": "29b815903acc4e2a15653a025d11bb5d10e40422efca1e3b2b589cd16457320a"
+      },
+      {
+        "path": "python/calc_flow/symbolic/expr.py",
+        "sha256": "0ea1767180598b20d941eb4975e9b506a761d08a5e6ec9baf30d243a1c8c1e8a"
+      },
+      {
+        "path": "python/calc_flow/symbolic/late_output.py",
+        "sha256": "f0122b4c9f9eae46ffbe04d6dd35110041137f871e39ebea68faa04945c1a692"
+      },
+      {
+        "path": "python/calc_flow/symbolic/lower/__init__.py",
+        "sha256": "fae196c03e286c4db475d12ea6803343694d99ea19a5d1f09edd566d7370ed6b"
+      },
+      {
+        "path": "python/calc_flow/symbolic/lower/asof.py",
+        "sha256": "b79b4b52e0ba977f1d51848678a041c602da42332674681a2218164b06b3d774"
+      },
+      {
+        "path": "python/calc_flow/symbolic/lower/bindings.py",
+        "sha256": "df77c3c0c329327c064542dd4e0d8230f7b9bd5cf7b4561d71dc40fdce1f9201"
+      },
+      {
+        "path": "python/calc_flow/symbolic/lower/event_windows.py",
+        "sha256": "d6ae15af4d4153ee12b76cbdff18f71abf33fc90bc9518ce2967e630696a8f40"
+      },
+      {
+        "path": "python/calc_flow/symbolic/lower/late_output.py",
+        "sha256": "0824cea5142c851709e0b915877c50b26c2134646efc1e7f6c90eace7996e587"
+      },
+      {
+        "path": "python/calc_flow/symbolic/lower/macd.py",
+        "sha256": "18071138805cb66988239a255d4e20aa28c71532ad444a3321fb5f5ba1780913"
+      },
+      {
+        "path": "python/calc_flow/symbolic/lower/macd_boundaries.py",
+        "sha256": "e1d53c25098d926b477ab195c86270bc5fb87762c0ce282ee47b3cfdaea205c5"
+      },
+      {
+        "path": "python/calc_flow/symbolic/lower/macd_demand.py",
+        "sha256": "046ddd0a2ce4d4b000d97f4bb16f8e0344e8108999f0688caa0fefa011340189"
+      },
+      {
+        "path": "python/calc_flow/symbolic/lower/macd_forward.py",
+        "sha256": "18c7d3b658f9a1980b9257a11adcf534b0c9e4a1c9051a1ac9548b38d7f2c4b9"
+      },
+      {
+        "path": "python/calc_flow/symbolic/lower/macd_meaning.py",
+        "sha256": "0ab654f8429a182350088719764d02fd0955c85dd0eeee9205524b783c354663"
+      },
+      {
+        "path": "python/calc_flow/symbolic/lower/macd_rewrite.py",
+        "sha256": "f83220654aabb83f346c40d6ab43ba28abb7d6125e322e29eb83884132e005e3"
+      },
+      {
+        "path": "python/calc_flow/symbolic/lower/native_arrays.py",
+        "sha256": "35c1e9bce527823471adede5cf122a2ae0bbc547a313449961d161c8e86c913c"
+      },
+      {
+        "path": "python/calc_flow/symbolic/lower/planners.py",
+        "sha256": "5646312c0500bb3cbda01bf888c8a4d9073cd7701cc804c6f971d3a80bc93a1e"
+      },
+      {
+        "path": "python/calc_flow/symbolic/lower/program.py",
+        "sha256": "060f5851ec67e138a48b0bf7dd7bc0b70eb28d774b9823cb288a5d9eb673f276"
+      },
+      {
+        "path": "python/calc_flow/symbolic/lower/schema.py",
+        "sha256": "3ce02922fe9bd85333267ccc7cfaf0cf4991fc5018db9e80c3a554275181d30b"
+      },
+      {
+        "path": "python/calc_flow/symbolic/lower/segments.py",
+        "sha256": "438f34aab421162428ac2733b74ccc4ba8efb1ca4753d595dcb61e008ba7f29d"
+      },
+      {
+        "path": "python/calc_flow/symbolic/lower/sql.py",
+        "sha256": "1098635b0e8f84ea0f1895ef017ea892438605db8074df51ae105d968ea78807"
+      },
+      {
+        "path": "python/calc_flow/symbolic/lower/strategies.py",
+        "sha256": "7c28ebea23975b45163771fe060a082056652bdaf747988607fc3d9e61fc53f6"
+      },
+      {
+        "path": "python/calc_flow/symbolic/native_arrays.py",
+        "sha256": "6ab4c45e20fd4fee7acc8d6551fb6f928a46108dd0facd9cfb6bba4bde99bda1"
+      },
+      {
+        "path": "python/calc_flow/symbolic/nodes.py",
+        "sha256": "eeba400812d4403207f067cac5be71f5fba9308538ef9ef1e1a66a3227f04611"
+      },
+      {
+        "path": "python/calc_flow/symbolic/ops.py",
+        "sha256": "7a39386e3bd6839310e9edb64e9c3afaa1fa94530330de60d4e8d94cecab8fe8"
+      },
+      {
+        "path": "python/calc_flow/symbolic/optimizer.py",
+        "sha256": "fb299d3fa6ed12f36d66684c6096d11bdf8049f648640bc1a44bd9eb16076a38"
+      },
+      {
+        "path": "python/calc_flow/symbolic/program.py",
+        "sha256": "65a30565281b82a226c78fb1a350c498b2616ef6ef83483ce12c07c2055ee893"
+      },
+      {
+        "path": "python/calc_flow/symbolic/query_analysis.py",
+        "sha256": "2b702dabbef8ed111b09cb3263537d5841bae1cbc86ff55dd0060755da3f23c0"
+      },
+      {
+        "path": "python/calc_flow/symbolic/sql.py",
+        "sha256": "7a47d0fe153897461b4b7cfde9866c3e6ee6e4074f7986d04c088b676b452876"
+      },
+      {
+        "path": "python/calc_flow/symbolic/types.py",
+        "sha256": "8954131dd38007dbb21e328f103748a1266c16bdefe3374f9017225ed2d09c89"
+      },
+      {
+        "path": "python/calc_flow/symbolic/windows.py",
+        "sha256": "cbae86d2276663ca1696e73d92c4b61bc1669da234864ed02892ab34ce74d813"
+      },
+      {
+        "path": "python/calc_flow/udf.py",
+        "sha256": "c3c4e73a5343bf80a415c93c72ca2286b3bbd1b6b9a60f6af0b0fca66307266b"
+      }
+    ],
+    "build_results": {
+      "name": "native-build",
+      "source_sha": "d14285a3d78c71f42b78ee1b56c8426b6743ce77",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "maturin",
+        "build",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256",
+        "--config",
+        "profile.release.package.calc-flow-python.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow-python.codegen-units=256",
+        "--interpreter",
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "--out",
+        "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/yaml-fix/wheels"
+      ],
+      "environment": {
+        "CARGO_TARGET_DIR": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/cargo",
+        "CARGO_BUILD_JOBS": "4",
+        "PYO3_PYTHON": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python"
+      },
+      "exit_code": 0,
+      "seconds": 187.805,
+      "log_sha256": "ff4b3d1ee0e884677335d9e38f04e4f4a10b48382420e327ff8c3ec4044d1a35"
+    },
+    "validation_reuse": {
+      "source_sha": "51d0488c83e10e837b22194c642726d3b94cb90f",
+      "identical_production_trees": {
+        "crates/calc-flow/src": "f5142c563e5ecc6750181ef8ccd4660c5dbd3d12",
+        "crates/calc-flow-python/src": "c2115655d8b102dcf2dbe9f585a203d6e1abce31",
+        "python/calc_flow": "59fe42a9a77a19e788917e332701de9f34440909"
+      },
+      "explanation": "Only a Python test assertion changed after native build; compare pretty JSON exports consistently."
+    }
+  },
+  "red": [
+    {
+      "command": "CARGO_TARGET_DIR=target/latest/cargo CARGO_BUILD_JOBS=4 cargo test -p calc-flow --test project_store update_semantics_import_diagnostics_match_json_and_yaml --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256'",
+      "exit_code": 101,
+      "result": "1 expected failure: YAML Format instead of ProjectValidation",
+      "log": "target/latest/yaml-fix/rust-red.log",
+      "log_sha256": "a2d73ee57848a5ee14e06150e10fdd1472c15b18782248630a96b8a14e8ceb88"
+    },
+    {
+      "command": "PYTHONPATH=target/latest/final-python /home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python -m pytest python/tests/test_store.py -q -k import_diagnostics_agree",
+      "exit_code": 1,
+      "result": "6 expected failures: YAML ConfigError lacks issues",
+      "log": "target/latest/yaml-fix/python-red.log",
+      "log_sha256": "f208f0dac07d788678ce0c15335b7eabd9589d96d39a0f3827addb77a14b192c"
+    }
+  ],
+  "red_native": {
+    "source_sha": "7ef99c99e3931379ec45f43515a8717fe84dfc88",
+    "extension_sha256": "40f584cb052b5b8e45c4788bb7057a86f40e5c0dfbaf222ba04915c55eda3d83",
+    "reused_baseline": true
+  },
+  "green": [
+    {
+      "command": "CARGO_TARGET_DIR=target/latest/cargo CARGO_BUILD_JOBS=4 cargo test -p calc-flow --test project_store --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256'",
+      "exit_code": 0,
+      "result": "18 passed",
+      "log": "target/latest/yaml-fix/rust-green.log",
+      "log_sha256": "21b20b07a31a96fad499cd2afcdb520e0cc9a111778dc996b7f9ebcbc6afbc45"
+    },
+    {
+      "command": "CARGO_TARGET_DIR=target/latest/cargo CARGO_BUILD_JOBS=4 cargo test -p calc-flow --test stream_join_validation yaml_join_import_preserves_raw_validation_diagnostics --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256'",
+      "exit_code": 0,
+      "result": "1 passed; 16 filtered",
+      "log": "target/latest/yaml-fix/rust-join-green.log",
+      "log_sha256": "0db02cd2d01dcabcd5adc262b7682b9d4d1e0b84fb29b1e53c4096a48e60ee46"
+    },
+    {
+      "name": "native-build",
+      "source_sha": "d14285a3d78c71f42b78ee1b56c8426b6743ce77",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "maturin",
+        "build",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256",
+        "--config",
+        "profile.release.package.calc-flow-python.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow-python.codegen-units=256",
+        "--interpreter",
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "--out",
+        "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/yaml-fix/wheels"
+      ],
+      "environment": {
+        "CARGO_TARGET_DIR": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/cargo",
+        "CARGO_BUILD_JOBS": "4",
+        "PYO3_PYTHON": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python"
+      },
+      "exit_code": 0,
+      "seconds": 187.805,
+      "log_sha256": "ff4b3d1ee0e884677335d9e38f04e4f4a10b48382420e327ff8c3ec4044d1a35"
+    },
+    {
+      "name": "python-store-green",
+      "source_sha": "51d0488c83e10e837b22194c642726d3b94cb90f",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "pytest",
+        "python/tests/test_store.py",
+        "-q",
+        "--junitxml=/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/yaml-fix/python-store-green.xml"
+      ],
+      "environment": {
+        "PYTHONPATH": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/yaml-fix/python",
+        "JAX_PLATFORMS": "cpu"
+      },
+      "exit_code": 0,
+      "seconds": 0.556,
+      "log_sha256": "328e8efaf2d8061aedd004133d30d5e8cbbf4e247243ce779d39c4c71fe90bb4"
+    },
+    {
+      "name": "public-diagnostics",
+      "source_sha": "51d0488c83e10e837b22194c642726d3b94cb90f",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/yaml-fix/public_probe.py"
+      ],
+      "environment": {
+        "PYTHONPATH": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/yaml-fix/python",
+        "JAX_PLATFORMS": "cpu"
+      },
+      "exit_code": 0,
+      "seconds": 0.24,
+      "log_sha256": "a7100a632bd5e7514ab1ecca7babce51079a84c13dbf5c545edd0ddc5985769a"
+    },
+    {
+      "command": "CARGO_TARGET_DIR=target/latest/cargo CARGO_BUILD_JOBS=4 cargo clippy -p calc-flow --lib --test project_store --test stream_join_validation --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256' -- -D warnings",
+      "exit_code": 0,
+      "result": "passed",
+      "log": "target/latest/yaml-fix/clippy.log",
+      "log_sha256": "dc2138be5430abc9c62203e362cdaf19d5a10689a05b0a6b38788c8fdaa8ef21"
+    }
+  ],
+  "public_python": {
+    "python": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+    "package": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/yaml-fix/python/calc_flow/__init__.py",
+    "native": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/yaml-fix/python/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+    "diagnostics": [
+      {
+        "value": "future",
+        "json": [
+          {
+            "path": "graph.update_semantics",
+            "code": "invalid_literal",
+            "message": "update_semantics must be legacy_append or latest_relation"
+          }
+        ],
+        "yaml": [
+          {
+            "path": "graph.update_semantics",
+            "code": "invalid_literal",
+            "message": "update_semantics must be legacy_append or latest_relation"
+          }
+        ]
+      },
+      {
+        "value": true,
+        "json": [
+          {
+            "path": "graph.update_semantics",
+            "code": "invalid_literal",
+            "message": "update_semantics must be legacy_append or latest_relation"
+          }
+        ],
+        "yaml": [
+          {
+            "path": "graph.update_semantics",
+            "code": "invalid_literal",
+            "message": "update_semantics must be legacy_append or latest_relation"
+          }
+        ]
+      },
+      {
+        "value": 7,
+        "json": [
+          {
+            "path": "graph.update_semantics",
+            "code": "invalid_literal",
+            "message": "update_semantics must be legacy_append or latest_relation"
+          }
+        ],
+        "yaml": [
+          {
+            "path": "graph.update_semantics",
+            "code": "invalid_literal",
+            "message": "update_semantics must be legacy_append or latest_relation"
+          }
+        ]
+      },
+      {
+        "value": null,
+        "json": [
+          {
+            "path": "graph.update_semantics",
+            "code": "invalid_literal",
+            "message": "update_semantics must be legacy_append or latest_relation"
+          }
+        ],
+        "yaml": [
+          {
+            "path": "graph.update_semantics",
+            "code": "invalid_literal",
+            "message": "update_semantics must be legacy_append or latest_relation"
+          }
+        ]
+      },
+      {
+        "value": [],
+        "json": [
+          {
+            "path": "graph.update_semantics",
+            "code": "invalid_literal",
+            "message": "update_semantics must be legacy_append or latest_relation"
+          }
+        ],
+        "yaml": [
+          {
+            "path": "graph.update_semantics",
+            "code": "invalid_literal",
+            "message": "update_semantics must be legacy_append or latest_relation"
+          }
+        ]
+      },
+      {
+        "value": {},
+        "json": [
+          {
+            "path": "graph.update_semantics",
+            "code": "invalid_literal",
+            "message": "update_semantics must be legacy_append or latest_relation"
+          }
+        ],
+        "yaml": [
+          {
+            "path": "graph.update_semantics",
+            "code": "invalid_literal",
+            "message": "update_semantics must be legacy_append or latest_relation"
+          }
+        ]
+      }
+    ]
+  },
+  "python_junit": {
+    "name": "pytest",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "tests": "15",
+    "time": "0.260",
+    "timestamp": "2026-11-11T19:14:12.368980+08:00",
+    "hostname": "chengli-i9"
+  },
+  "test_assertion_followup": {
+    "commit": "51d0488c83e10e837b22194c642726d3b94cb90f",
+    "initial_results": [
+      {
+        "name": "native-build",
+        "source_sha": "d14285a3d78c71f42b78ee1b56c8426b6743ce77",
+        "command": [
+          "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+          "-m",
+          "maturin",
+          "build",
+          "--release",
+          "--config",
+          "profile.release.package.calc-flow.opt-level=0",
+          "--config",
+          "profile.release.package.calc-flow.codegen-units=256",
+          "--config",
+          "profile.release.package.calc-flow-python.opt-level=0",
+          "--config",
+          "profile.release.package.calc-flow-python.codegen-units=256",
+          "--interpreter",
+          "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+          "--out",
+          "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/yaml-fix/wheels"
+        ],
+        "environment": {
+          "CARGO_TARGET_DIR": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/cargo",
+          "CARGO_BUILD_JOBS": "4",
+          "PYO3_PYTHON": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python"
+        },
+        "exit_code": 0,
+        "seconds": 187.805,
+        "log_sha256": "ff4b3d1ee0e884677335d9e38f04e4f4a10b48382420e327ff8c3ec4044d1a35"
+      },
+      {
+        "name": "python-store-green",
+        "source_sha": "d14285a3d78c71f42b78ee1b56c8426b6743ce77",
+        "command": [
+          "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+          "-m",
+          "pytest",
+          "python/tests/test_store.py",
+          "-q",
+          "--junitxml=/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/yaml-fix/python-store-green.xml"
+        ],
+        "environment": {
+          "CARGO_TARGET_DIR": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/cargo",
+          "CARGO_BUILD_JOBS": "4",
+          "PYO3_PYTHON": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+          "PYTHONPATH": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/yaml-fix/python"
+        },
+        "exit_code": 1,
+        "seconds": 0.747,
+        "log_sha256": "237deedf03f11f365ff4432941cb269f8503ec9a3589d5a8ed1c2a47909caf2c"
+      }
+    ],
+    "initial_log_sha256": "237deedf03f11f365ff4432941cb269f8503ec9a3589d5a8ed1c2a47909caf2c",
+    "explanation": "First native run: 13 passed, 2 new roundtrip assertions failed because compact canonical_json was compared with pretty export_project_json. Corrected both sides to use export_project_json, preserving exact output-byte equality. No production changes or native rebuild required; all production trees verified identical."
+  },
+  "changed_function_complexity": [
+    {
+      "path": "crates/calc-flow/src/project_store.rs",
+      "name": "import_project_yaml_with_limit",
+      "line": 344,
+      "ccn": 8
+    },
+    {
+      "path": "crates/calc-flow/src/project_store.rs",
+      "name": "validate_raw_yaml_project",
+      "line": 364,
+      "ccn": 7
+    },
+    {
+      "path": "crates/calc-flow/tests/project_store.rs",
+      "name": "update_diagnostic",
+      "line": 57,
+      "ccn": 2
+    },
+    {
+      "path": "crates/calc-flow/tests/project_store.rs",
+      "name": "update_semantics_import_diagnostics_match_json_and_yaml",
+      "line": 67,
+      "ccn": 2
+    },
+    {
+      "path": "crates/calc-flow/tests/project_store.rs",
+      "name": "update_semantics_roundtrips_latest_and_normalizes_explicit_legacy",
+      "line": 91,
+      "ccn": 2
+    },
+    {
+      "path": "crates/calc-flow/tests/project_store.rs",
+      "name": "yaml_format_limits_precede_update_semantics_diagnostics",
+      "line": 115,
+      "ccn": 2
+    },
+    {
+      "path": "crates/calc-flow/tests/stream_join_validation.rs",
+      "name": "yaml_join_import_preserves_raw_validation_diagnostics",
+      "line": 87,
+      "ccn": 2
+    },
+    {
+      "path": "python/tests/test_store.py",
+      "name": "test_update_semantics_json_yaml_import_diagnostics_agree",
+      "line": 134,
+      "ccn": 2
+    },
+    {
+      "path": "python/tests/test_store.py",
+      "name": "test_update_semantics_public_formats_roundtrip",
+      "line": 154,
+      "ccn": 1
+    }
+  ],
+  "static_checks": [
+    {
+      "command": "cargo fmt --all --check",
+      "exit_code": 0
+    },
+    {
+      "command": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/ruff check python/tests/test_store.py",
+      "exit_code": 0
+    },
+    {
+      "command": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/ruff format --check python/tests/test_store.py",
+      "exit_code": 0
+    },
+    {
+      "command": "git diff --check",
+      "exit_code": 0
+    },
+    {
+      "command": "git diff --exit-code -- schemas/project-v3.schema.json",
+      "exit_code": 0
+    }
+  ],
+  "tools": {
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "lizard": "1.26.0",
+    "ruff": "ruff 0.16.0"
+  },
+  "reused_evidence": [
+    ".codex/artifacts/analysis/latest-relation-update-contract.md",
+    ".codex/artifacts/analysis/latest-relation-update-contract.json"
+  ],
+  "limitations": [
+    "No repeat of the prior full affected suites, coverage, external-service or cross-platform matrices.",
+    "CI and reviewer Finding 1 recheck remain required before merge; issue stays in_progress."
+  ]
+}
