@@ -17,6 +17,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(super) struct Lowered {
     name: String,
     fingerprint: String,
+    mode: CompileMode,
+    update_semantics: crate::UpdateSemantics,
     pub schemas: BTreeMap<String, SchemaRef>,
     orderings: BTreeMap<String, QueryOrderingFacts>,
     nodes: Vec<NodeSpec>,
@@ -95,6 +97,8 @@ pub(super) async fn lower(program: &Program) -> Result<Lowered> {
     let mut lowered = Lowered {
         name: program.name.clone(),
         fingerprint: program.fingerprint.clone(),
+        mode: program.mode,
+        update_semantics: program.update_semantics,
         schemas: BTreeMap::new(),
         orderings: BTreeMap::new(),
         nodes: vec![],
@@ -366,9 +370,13 @@ impl Lowered {
             edges,
             options: options.clone(),
             diagnostics: self.diagnostics.clone(),
+            update_semantics: self.update_semantics,
         })
     }
     pub fn gate(&self, options: &CompileOptions) -> Result<()> {
+        self.ensure_valid()?;
+        self.analyze(&AnalysisOptions::default())?
+            .check_updates(self.mode)?;
         if let Some(request) = &options.portability {
             self.analyze(&AnalysisOptions {
                 portability: Some(request.clone()),
@@ -387,7 +395,8 @@ impl Lowered {
         Ok(builder)
     }
     fn node_builder(&self) -> Result<PipelineBuilder> {
-        let mut builder = PipelineBuilder::new(&self.name)?;
+        let mut builder =
+            PipelineBuilder::new(&self.name)?.with_update_semantics(self.update_semantics);
         for node in &self.nodes {
             let operator = node_operator(node, &self.port_schemas[&node.id])?;
             builder = builder.add_node(&node.id, operator)?;
@@ -424,6 +433,7 @@ impl Lowered {
                 nodes: self.nodes.clone(),
                 edges: self.edges.clone(),
                 datafusion: crate::DataFusionConfig::default(),
+                update_semantics: self.update_semantics,
             },
             data_sources,
             sources: vec![],

@@ -13,6 +13,7 @@ construction. The patches preserve the repository's selected Arrow dependency
 implementations.
 
 The executable checks pure DataFrame, pure SQL, DF→SQL→DF→SQL and SQL→DF→SQL,
+using the public `UpdateSemantics::LatestRelation` selector, and checks
 named fan-out, native schema/nullability and strict analysis, independently owned
 stream jobs, source open/close counts, NULL/empty/duplicate rows, mode identities,
 and data-only export followed by compilation and execution using the reloaded

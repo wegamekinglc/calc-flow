@@ -36,55 +36,32 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 pub(crate) fn to_py_err(error: calc_flow::CalcFlowError) -> PyErr {
     let message = error.to_string();
     match error {
-        calc_flow::CalcFlowError::InvalidArgument { .. }
-        | calc_flow::CalcFlowError::UnsupportedVersion { .. }
-        | calc_flow::CalcFlowError::Format { .. }
-        | calc_flow::CalcFlowError::Conflict { .. }
-        | calc_flow::CalcFlowError::NotFound { .. } => ConfigError::new_err(message),
         calc_flow::CalcFlowError::ProjectValidation { issues } => {
-            Python::attach(|py| {
-                let translated = ConfigError::new_err(message);
-                let entries = issues
-                    .iter()
-                    .map(|issue| {
-                        let entry = pyo3::types::PyDict::new(py);
-                        entry.set_item("path", &issue.path)?;
-                        entry.set_item("code", &issue.code)?;
-                        entry.set_item("message", &issue.message)?;
-                        Ok(entry.into_any().unbind())
-                    })
-                    .collect::<Result<Vec<_>, PyErr>>()
-                    .unwrap_or_default();
-                if let Ok(tuple) = pyo3::types::PyTuple::new(py, entries) {
-                    // The attribute stays absent when attachment is impossible;
-                    // Python consumers read it through a `getattr` default.
-                    let _ = translated.value(py).setattr("issues", tuple);
-                }
-                translated
-            })
+            project_validation_error(issues, message)
         }
-        calc_flow::CalcFlowError::QueryPortability { report } => Python::attach(|py| {
-            let translated = CompileError::new_err(message);
-            let attach = || -> PyResult<()> {
-                let encoded = serde_json::to_string(&report)
-                    .map_err(|error| ExecutionError::new_err(error.to_string()))?;
-                let value = py.import("json")?.call_method1("loads", (encoded,))?;
-                let projected = py
-                    .import("calc_flow.symbolic.query_analysis")?
-                    .getattr("_from_dict")?
-                    .call1((value,))?;
-                translated.value(py).setattr("query_analysis", projected)
-            };
-            match attach() {
-                Ok(()) => translated,
-                Err(error) => error,
-            }
-        }),
+        calc_flow::CalcFlowError::QueryPortability { report }
+        | calc_flow::CalcFlowError::QueryUpdateSemantics { report, .. } => {
+            query_compile_error(*report, message)
+        }
+        error => basic_py_error(error, message),
+    }
+}
+
+fn configuration_error(error: &calc_flow::CalcFlowError) -> bool {
+    matches!(
+        error,
+        calc_flow::CalcFlowError::InvalidArgument { .. }
+            | calc_flow::CalcFlowError::UnsupportedVersion { .. }
+            | calc_flow::CalcFlowError::Format { .. }
+            | calc_flow::CalcFlowError::Conflict { .. }
+            | calc_flow::CalcFlowError::NotFound { .. }
+    )
+}
+
+fn basic_py_error(error: calc_flow::CalcFlowError, message: String) -> PyErr {
+    match error {
+        error if configuration_error(&error) => ConfigError::new_err(message),
         calc_flow::CalcFlowError::Compile { .. } => CompileError::new_err(message),
-        calc_flow::CalcFlowError::Operator { .. }
-        | calc_flow::CalcFlowError::DataFusion { .. }
-        | calc_flow::CalcFlowError::PlanLeased { .. }
-        | calc_flow::CalcFlowError::Internal { .. } => ExecutionError::new_err(message),
         calc_flow::CalcFlowError::ExternalProvider { .. } => ProviderError::new_err(message),
         calc_flow::CalcFlowError::Cancelled { .. } => CancelledError::new_err(message),
         calc_flow::CalcFlowError::CheckpointMismatch { .. }
@@ -96,11 +73,56 @@ pub(crate) fn to_py_err(error: calc_flow::CalcFlowError) -> PyErr {
             });
             translated
         }
-        // The core error is deliberately non-exhaustive. New categories remain
-        // catchable as execution failures until this mapping gives them a more
-        // precise Python exception.
         _ => future_core_error(message),
     }
+}
+
+fn project_validation_error(issues: Vec<calc_flow::ValidationIssue>, message: String) -> PyErr {
+    Python::attach(|py| {
+        let translated = ConfigError::new_err(message);
+        let entries = issues
+            .iter()
+            .map(|issue| {
+                let entry = pyo3::types::PyDict::new(py);
+                entry.set_item("path", &issue.path)?;
+                entry.set_item("code", &issue.code)?;
+                entry.set_item("message", &issue.message)?;
+                Ok(entry.into_any().unbind())
+            })
+            .collect::<Result<Vec<_>, PyErr>>()
+            .unwrap_or_default();
+        if let Ok(tuple) = pyo3::types::PyTuple::new(py, entries) {
+            // The attribute stays absent when attachment is impossible;
+            // Python consumers read it through a `getattr` default.
+            let _ = translated.value(py).setattr("issues", tuple);
+        }
+        translated
+    })
+}
+
+fn query_compile_error(report: calc_flow::QueryAnalysis, message: String) -> PyErr {
+    Python::attach(|py| {
+        let translated = CompileError::new_err(message);
+        match attach_query_report(py, &translated, &report) {
+            Ok(()) => translated,
+            Err(error) => error,
+        }
+    })
+}
+
+fn attach_query_report(
+    py: Python<'_>,
+    translated: &PyErr,
+    report: &calc_flow::QueryAnalysis,
+) -> PyResult<()> {
+    let encoded = serde_json::to_string(report)
+        .map_err(|error| ExecutionError::new_err(error.to_string()))?;
+    let value = py.import("json")?.call_method1("loads", (encoded,))?;
+    let projected = py
+        .import("calc_flow.symbolic.query_analysis")?
+        .getattr("_from_dict")?
+        .call1((value,))?;
+    translated.value(py).setattr("query_analysis", projected)
 }
 
 fn future_core_error(message: String) -> PyErr {
@@ -344,7 +366,7 @@ mod tests {
                     .unwrap()
                     .extract::<u32>()
                     .unwrap(),
-                1
+                2
             );
             assert_eq!(
                 report

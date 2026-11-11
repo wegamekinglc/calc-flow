@@ -6,9 +6,29 @@ use crate::{
     dataframe::{RelationKind, check_name, digest, invalid},
 };
 use datafusion::arrow::datatypes::SchemaRef;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 mod lower;
+
+/// How consumers interpret complete relation updates, independently of lifecycle.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum UpdateSemantics {
+    /// Preserve the original per-event append interpretation.
+    #[default]
+    LegacyAppend,
+    /// Require complete replacement wherever a producer emits a full snapshot.
+    LatestRelation,
+}
+
+impl UpdateSemantics {
+    pub(crate) fn is_legacy(&self) -> bool {
+        *self == Self::LegacyAppend
+    }
+}
 
 /// The execution lifecycle, independent of `DataFrame` or SQL declaration syntax.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,6 +58,7 @@ pub struct Program {
     outputs: BTreeMap<String, TableExpr>,
     inferred: bool,
     fingerprint: String,
+    update_semantics: UpdateSemantics,
 }
 
 impl Program {
@@ -62,6 +83,7 @@ impl Program {
             outputs,
             inferred: true,
             fingerprint: String::new(),
+            update_semantics: UpdateSemantics::default(),
         };
         program.validate_mode()?;
         program.fingerprint = program.declaration_fingerprint();
@@ -74,6 +96,25 @@ impl Program {
     /// Returns the bound lifecycle.
     pub const fn mode(&self) -> CompileMode {
         self.mode
+    }
+    /// Returns the immutable interpretation of relation updates.
+    pub const fn update_semantics(&self) -> UpdateSemantics {
+        self.update_semantics
+    }
+    /// Copies this declaration with an explicit update interpretation.
+    ///
+    /// ```
+    /// use calc_flow::{Program, UpdateSemantics};
+    /// fn latest(program: &Program) -> Program {
+    ///     program.with_update_semantics(UpdateSemantics::LatestRelation)
+    /// }
+    /// ```
+    #[must_use]
+    pub fn with_update_semantics(&self, semantics: UpdateSemantics) -> Self {
+        let mut candidate = self.clone();
+        candidate.update_semantics = semantics;
+        candidate.fingerprint = candidate.declaration_fingerprint();
+        candidate
     }
     /// Returns a declaration identity that excludes lifecycle and runtime state.
     pub fn fingerprint(&self) -> &str {
@@ -143,7 +184,7 @@ impl Program {
         Ok(candidate)
     }
     fn declaration_fingerprint(&self) -> String {
-        digest(&json!([
+        let legacy = digest(&json!([
             "program-v1",
             self.name,
             self.inputs.iter().map(|t| &t.0.id).collect::<Vec<_>>(),
@@ -151,7 +192,16 @@ impl Program {
                 .iter()
                 .map(|(n, t)| (n, &t.0.id))
                 .collect::<Vec<_>>()
-        ]))
+        ]));
+        if self.update_semantics.is_legacy() {
+            legacy
+        } else {
+            digest(&json!([
+                "program-update-semantics-v1",
+                legacy,
+                self.update_semantics
+            ]))
+        }
     }
     fn validate_mode(&self) -> Result<()> {
         if self.mode == CompileMode::Stream {

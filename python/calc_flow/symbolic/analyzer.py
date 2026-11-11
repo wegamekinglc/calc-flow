@@ -45,7 +45,12 @@ from calc_flow.symbolic.nodes import (
     CValue,
     Node,
 )
-from calc_flow.symbolic.query_analysis import AnalysisOptions, QueryAnalysis, _query
+from calc_flow.symbolic.query_analysis import (
+    AnalysisOptions,
+    QueryAnalysis,
+    _current_mode_issue,
+    _query,
+)
 from calc_flow.symbolic.types import CompileMode, Field
 
 if TYPE_CHECKING:
@@ -3113,13 +3118,21 @@ def analyze_program(
         program_fingerprint=program.fingerprint,
         capability_session_id=capabilities.scope.session_id,
         capability_revision=capabilities.scope.revision,
-        issues=analyzer.issues
-        + tuple(
-            AnalysisIssue(d.path, d.code, d.message)
-            for d in query.diagnostics
-            if options.portability is not None and d.status != "supported"
-        ),
+        issues=analyzer.issues + _query_issues(program, options, query, mode_value),
         query=query,
+    )
+
+
+def _query_issues(program, options, query, mode_value):
+    return tuple(
+        AnalysisIssue(d.path, d.code, d.message)
+        for d in query.diagnostics
+        if d.status != "supported"
+        and (
+            options.portability is not None
+            or program.update_semantics == "latest_relation"
+            and _current_mode_issue(query, d, mode_value)
+        )
     )
 
 

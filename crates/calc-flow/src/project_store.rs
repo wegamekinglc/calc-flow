@@ -270,6 +270,11 @@ pub fn import_project_json_with_limit(document: &[u8], max_bytes: usize) -> Resu
         ));
     }
     reject_project_version(&value)?;
+    validate_update_semantics_value(&value)?;
+    decode_project_value(value)
+}
+
+fn decode_project_value(value: Value) -> Result<ProjectSpec> {
     let join_issues = collect_raw_stream_join_issues(&value)?;
     if !join_issues.is_empty() {
         return Err(CalcFlowError::ProjectValidation {
@@ -280,6 +285,25 @@ pub fn import_project_json_with_limit(document: &[u8], max_bytes: usize) -> Resu
     validate_project_identity(&project)?;
     validate_project_json_values(&project)?;
     Ok(project)
+}
+
+fn validate_update_semantics_value(document: &Value) -> Result<()> {
+    let Some(value) = document
+        .get("graph")
+        .and_then(|graph| graph.get("update_semantics"))
+    else {
+        return Ok(());
+    };
+    if matches!(value.as_str(), Some("legacy_append" | "latest_relation")) {
+        return Ok(());
+    }
+    Err(CalcFlowError::ProjectValidation {
+        issues: vec![raw_issue(
+            "graph.update_semantics".into(),
+            "invalid_literal",
+            "update_semantics must be legacy_append or latest_relation",
+        )],
+    })
 }
 
 /// Serializes a project as data-only YAML after a strict JSON round trip.

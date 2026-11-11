@@ -17,6 +17,7 @@ fn project(id: &str, name: &str) -> ProjectSpec {
         description: "project".into(),
         runtime: RuntimeSpec::default(),
         graph: PipelineSpec {
+            update_semantics: Default::default(),
             name: "graph".into(),
             nodes: Vec::new(),
             edges: Vec::new(),

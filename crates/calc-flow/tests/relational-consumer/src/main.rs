@@ -10,7 +10,7 @@ use calc_flow::{
     JobState, JsonMap, NativeWatermarkCapability, PortabilityRequest, Program, ReplayPositioning,
     Result, SinkBinding, SourceBinding, SourceCapabilities, SourceDeliveryCapability, SourceEvent,
     SourceSchema, StreamRequirements, StreamSink, StreamSource, StreamingRunner, SupportStatus,
-    TableExpr, UdfRegistry, lit, table_input,
+    TableExpr, UdfRegistry, UpdateSemantics, lit, table_input,
 };
 use std::{
     collections::BTreeMap,
@@ -278,6 +278,14 @@ async fn check_case(
 async fn check_export(batch: &Program, input: Batch, mut expected: Vec<Option<i64>>) -> Result<()> {
     let udfs = UdfRegistry::new().snapshot();
     let project = batch.to_project(&udfs).await?;
+    let graph = calc_flow::PipelineSpec {
+        name: project.graph.name.clone(),
+        nodes: project.graph.nodes.clone(),
+        edges: project.graph.edges.clone(),
+        datafusion: project.graph.datafusion,
+        update_semantics: project.graph.update_semantics,
+    };
+    let project = calc_flow::ProjectSpec { graph, ..project };
     assert!(
         project
             .data_sources
@@ -319,7 +327,7 @@ async fn check_shape(shape: &str) -> Result<()> {
         shape,
         CompileMode::Batch,
         BTreeMap::from([("shared".into(), shared), ("result".into(), result)]),
-    )?;
+    )?.with_update_semantics(UpdateSemantics::LatestRelation);
     let stream = batch.for_mode(CompileMode::Stream)?;
     assert_eq!(batch.fingerprint(), stream.fingerprint());
     assert_eq!(batch.inputs().len(), 1);

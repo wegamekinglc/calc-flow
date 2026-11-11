@@ -668,6 +668,41 @@ def lower_program_document(
         )
 
 
+def _document_semantics(program, runtime, document):
+    if program.update_semantics == "latest_relation":
+        _pin_update_semantics(document, runtime)
+    return document
+
+
+def _pin_update_semantics(document, runtime):
+    from calc_flow.symbolic.lower.schema import _fields, infer_document_schemas
+    from calc_flow.symbolic.lower.segments import _table_port
+
+    graph = document["graph"]
+    graph["update_semantics"] = "latest_relation"
+    if not _can_pin_update_graph(graph):
+        return
+    schemas = infer_document_schemas(document, runtime)
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    for name, schema in schemas.items():
+        nodes[name]["output_ports"] = [_table_port(_fields(schema), "output")]
+    for edge in graph["edges"]:
+        target = nodes[edge["target_node"]]
+        ports = {port["name"]: port for port in target.get("input_ports", [])}
+        ports[edge["target_port"]] = _table_port(
+            _fields(schemas[edge["source_node"]]), edge["target_port"]
+        )
+        target["input_ports"] = list(ports.values())
+
+
+def _can_pin_update_graph(graph):
+    return all(
+        node["operator"]["kind"] in {"expression", "sql", "snapshot_sql"}
+        and not node["operator"].get("udfs")
+        for node in graph["nodes"]
+    )
+
+
 def _lower_program_document(
     program: Program,
     selected: Runtime,
@@ -703,26 +738,22 @@ def _lower_program_document(
         _array_options,
     )
     if native is not None:
-        return native
-    from calc_flow.symbolic.lower.sql import _walk_nodes, lower_sql_program
+        return _document_semantics(program, selected, native)
+    from calc_flow.symbolic.lower.sql import lower_sql_program
 
-    if any(
-        node.op.name == "snapshot_sql"
-        for _, value in program.outputs
-        for node in _walk_nodes(value._node)
-    ):
+    if _uses_snapshot_sql(program):
         _check_snapshot_sql_capability(program, capabilities, mode_value)
 
     sql_project = lower_sql_program(
         program, analyzer, allowed_lateness_micros, late_policy
     )
     if sql_project is not None:
-        return sql_project
+        return _document_semantics(program, selected, sql_project)
     window_project = _lower_event_window_program(
         program, analyzer, selected, allowed_lateness_micros, late_policy
     )
     if window_project is not None:
-        return window_project
+        return _document_semantics(program, selected, window_project)
     join_project = _lower_stream_join_program(
         program,
         analyzer,
@@ -731,9 +762,20 @@ def _lower_program_document(
         late_policy,
     )
     if join_project is not None:
-        return join_project
-    return _lower_program(
+        return _document_semantics(program, selected, join_project)
+    document = _lower_program(
         program, mode_value, allowed_lateness_micros, late_policy, bindings=_bindings
+    )
+    return _document_semantics(program, selected, document)
+
+
+def _uses_snapshot_sql(program):
+    from calc_flow.symbolic.lower.sql import _walk_nodes
+
+    return any(
+        node.op.name == "snapshot_sql"
+        for _, value in program.outputs
+        for node in _walk_nodes(value._node)
     )
 
 

@@ -100,6 +100,7 @@ def test_public_surface_is_the_frozen_export_list() -> None:
         "QueryTieOrder",
         "SupportStatus",
         "UpdateKind",
+        "UpdateSemantics",
         "AnalysisIssue",
         "AnalysisResult",
         "ArrayExpr",

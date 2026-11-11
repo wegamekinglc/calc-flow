@@ -83,6 +83,7 @@ fn project(id: String, name: String, description: String, data: Value) -> Projec
         description,
         runtime: RuntimeSpec::default(),
         graph: PipelineSpec {
+            update_semantics: Default::default(),
             name: "property-graph".into(),
             nodes: vec![NodeSpec {
                 id: "calculate".into(),
