@@ -9,7 +9,7 @@ use super::{
     history_event_time, internal_error, kernel::StreamKernelUpdate, operator_error,
     read_buffered_row, state_codec::recurrence_windows,
 };
-use budget::StateCharge;
+use budget::{HistoryCharge, StateCharge};
 
 pub(super) enum PreparedHistoryUpdate {
     Replace(HistoryUpdates),
@@ -18,7 +18,7 @@ pub(super) enum PreparedHistoryUpdate {
 
 impl PreparedHistoryUpdate {
     pub(super) fn changed_charge(
-        &self,
+        &mut self,
         histories: &RollingHistories,
         node: &str,
     ) -> Result<(StateCharge, StateCharge)> {
@@ -32,13 +32,9 @@ impl PreparedHistoryUpdate {
         let mut new = StateCharge::default();
         for tail in tails {
             let previous = histories.by_entity.get(&tail.entity);
-            if let Some(previous) = previous {
-                old = old.checked_add(
-                    budget::history_entity_charge(&tail.entity, previous, node)?,
-                    node,
-                )?;
-            }
-            new = new.checked_add(tail.projected_charge(previous, node)?, node)?;
+            let (previous, projected) = tail.changed_charge(previous, node)?;
+            old = old.checked_add(previous, node)?;
+            new = new.checked_add(projected, node)?;
         }
         Ok((old, new))
     }
@@ -99,6 +95,7 @@ pub(super) fn prepare_scalar_appends(
                 transition_count,
                 discarded_rows,
                 windows,
+                next_charge: None,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -160,6 +157,7 @@ pub(super) struct RetainedHistoryAppend {
     pub(super) transition_count: u64,
     pub(super) discarded_rows: usize,
     pub(super) windows: Vec<WindowState>,
+    pub(super) next_charge: Option<HistoryCharge>,
 }
 
 pub(super) enum RetainedRows {
@@ -279,36 +277,86 @@ impl RollingHistories {
             .map(|state| state.columnar.materialize(compiled, node_id, observer))
             .collect::<Result<Vec<_>>>()?;
         for (state, rows) in self.by_entity.values_mut().zip(prepared) {
+            if !state.columnar.records.is_empty() {
+                state.charge_cache = None;
+            }
             state.rows.extend(rows);
             state.columnar = ColumnarHistory::default();
         }
         Ok(())
     }
+
+    pub(super) fn prepare_charge_cache(
+        &self,
+        node: &str,
+    ) -> Result<(StateCharge, Vec<HistoryCharge>)> {
+        let charges = self
+            .by_entity
+            .iter()
+            .map(|(key, state)| budget::history_entity_charge_snapshot(key, state, node))
+            .collect::<Result<Vec<_>>>()?;
+        let total = charges
+            .iter()
+            .try_fold(StateCharge::default(), |total, charge| {
+                total.checked_add(charge.total(node)?, node)
+            })?;
+        Ok((total, charges))
+    }
+
+    pub(super) fn install_charge_cache(&mut self, charges: Vec<HistoryCharge>) {
+        debug_assert_eq!(charges.len(), self.by_entity.len());
+        for (state, charge) in self.by_entity.values_mut().zip(charges) {
+            state.charge_cache = Some(charge);
+        }
+    }
 }
 
 impl RetainedHistoryAppend {
-    pub(super) fn projected_charge(
-        &self,
+    pub(super) fn changed_charge(
+        &mut self,
         previous: Option<&EntityRollingState>,
         node: &str,
-    ) -> Result<StateCharge> {
-        let mut charge =
-            budget::history_entity_base_charge(&self.entity, self.windows.len(), node)?;
-        if let Some(previous) = previous {
-            let scalar_discard = self.discarded_rows.min(previous.rows.len());
-            for row in previous.rows.iter().skip(scalar_discard) {
-                charge = charge.checked_add(budget::scalar_history_row_charge(row, node)?, node)?;
-            }
-            charge = charge.checked_add(
-                previous.columnar.retained_charge(
-                    self.discarded_rows - scalar_discard,
-                    self.prepared_front.as_ref(),
-                    node,
-                )?,
+    ) -> Result<(StateCharge, StateCharge)> {
+        let prior = previous
+            .map(|state| budget::cached_history_entity_charge(&self.entity, state, node))
+            .transpose()?
+            .unwrap_or_default();
+        let old = prior.total(node)?;
+        let discarded = previous
+            .map(|state| self.discarded_charge(state, node))
+            .transpose()?
+            .unwrap_or_default();
+        let next = HistoryCharge {
+            retained: prior
+                .retained
+                .checked_sub(discarded)?
+                .checked_add(self.appended_charge(node)?, node)?,
+            metadata: budget::history_metadata_charge(
+                &self.entity,
+                &self.windows,
+                previous.map_or(&[], |state| state.indicators.as_slice()),
                 node,
-            )?;
+            )?,
+        };
+        let new = next.total(node)?;
+        self.next_charge = Some(next);
+        Ok((old, new))
+    }
+
+    fn discarded_charge(&self, previous: &EntityRollingState, node: &str) -> Result<StateCharge> {
+        let scalar_discard = self.discarded_rows.min(previous.rows.len());
+        let mut charge = StateCharge::default();
+        for row in previous.rows.iter().take(scalar_discard) {
+            charge = charge.checked_add(budget::scalar_history_row_charge(row, node)?, node)?;
         }
-        charge.checked_add(self.appended_charge(node)?, node)
+        charge.checked_add(
+            previous.columnar.discarded_charge(
+                self.discarded_rows - scalar_discard,
+                self.prepared_front.as_ref(),
+                node,
+            )?,
+            node,
+        )
     }
 
     fn appended_charge(&self, node: &str) -> Result<StateCharge> {
@@ -345,11 +393,12 @@ impl RetainedHistoryAppend {
         }
         state.windows = self.windows;
         state.transition_count = self.transition_count;
+        state.charge_cache = self.next_charge;
     }
 }
 
 impl ColumnarHistory {
-    fn retained_charge(
+    fn discarded_charge(
         &self,
         mut discard: usize,
         prepared_front: Option<&RecordBatch>,
@@ -357,18 +406,20 @@ impl ColumnarHistory {
     ) -> Result<StateCharge> {
         let mut charge = StateCharge::default();
         for record in &self.records {
+            if discard == 0 {
+                break;
+            }
+            let original = budget::ordered_record_charge(record, node)?
+                .ok_or_else(|| internal_error("columnar history has unsupported charge"))?;
             if discard >= record.num_rows() {
+                charge = charge.checked_add(original, node)?;
                 discard -= record.num_rows();
                 continue;
             }
-            let retained = if discard == 0 {
-                record
-            } else {
-                prepared_front.expect("partial discard has a prepared front")
-            };
+            let retained = prepared_front.expect("partial discard has a prepared front");
             let retained_charge = budget::ordered_record_charge(retained, node)?
                 .ok_or_else(|| internal_error("columnar history has unsupported charge"))?;
-            charge = charge.checked_add(retained_charge, node)?;
+            charge = charge.checked_add(original.checked_sub(retained_charge)?, node)?;
             discard = 0;
         }
         Ok(charge)

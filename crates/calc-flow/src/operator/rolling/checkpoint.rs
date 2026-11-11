@@ -41,15 +41,20 @@ impl RollingOperator {
     }
 
     fn recount_legacy_capture(&mut self) -> Result<()> {
-        let charge = budget::full_state_charge(
-            &self.state.buffer,
-            &self.state.ordered,
-            &self.state.histories,
+        let buffered = budget::buffered_charge(self.state.buffer.values(), &self.name)?;
+        let ordered = budget::ordered_buffer_charge(
+            self.state.ordered.records(),
             &self.compiled,
             &self.name,
-        )?;
+        )?
+        .ok_or_else(|| internal_error("rolling ordered state has unsupported state charge"))?;
+        let other = buffered.checked_add(ordered, &self.name)?;
+        let (histories, cache) = self.state.histories.prepare_charge_cache(&self.name)?;
+        let charge = other.checked_add(histories, &self.name)?;
         self.check_state_budget(charge, &self.name)?;
-        self.state.owned_mut()?.charge = charge;
+        let state = self.state.owned_mut()?;
+        state.histories.install_charge_cache(cache);
+        state.charge = charge;
         Ok(())
     }
 

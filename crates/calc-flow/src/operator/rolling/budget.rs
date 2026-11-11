@@ -6,13 +6,36 @@ use datafusion::arrow::datatypes::DataType;
 
 use super::{
     BTreeMap, BufferedRow, CompiledRollingSpec, EntityRollingState, HistoryUpdates, KeyValue,
-    RecordBatch, Result, RollingHistories, RowIdentity, ScalarValue, WindowState, operator_error,
+    RecordBatch, Result, RollingHistories, RowIdentity, ScalarValue, WindowState, indicators,
+    operator_error,
 };
+
+#[cfg(test)]
+std::thread_local! {
+    static HISTORY_CHARGE_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn take_history_charge_visits() -> u64 {
+    HISTORY_CHARGE_VISITS.with(|visits| visits.replace(0))
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct StateCharge {
     pub(super) rows: u64,
     pub(super) bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct HistoryCharge {
+    pub(super) retained: StateCharge,
+    pub(super) metadata: StateCharge,
+}
+
+impl HistoryCharge {
+    pub(super) fn total(self, node: &str) -> Result<StateCharge> {
+        self.metadata.checked_add(self.retained, node)
+    }
 }
 
 impl StateCharge {
@@ -69,6 +92,8 @@ fn scalar_bytes(values: &[ScalarValue], node: &str) -> Result<u64> {
 }
 
 pub(super) fn scalar_history_row_charge(values: &[ScalarValue], node: &str) -> Result<StateCharge> {
+    #[cfg(test)]
+    HISTORY_CHARGE_VISITS.with(|visits| visits.set(visits.get().saturating_add(1)));
     Ok(StateCharge {
         rows: 1,
         bytes: scalar_bytes(values, node)?,
@@ -196,24 +221,33 @@ pub(super) fn ordered_buffer_charge<'a>(
     Ok(Some(charge))
 }
 
-// Moved from rolling.rs; each charge is checked before the next is accumulated.
-// #lizard forgives
 pub(super) fn history_entity_charge(
     key: &[Option<KeyValue>],
     state: &EntityRollingState,
     node: &str,
 ) -> Result<StateCharge> {
-    let mut charge = history_entity_base_charge(key, state.windows.len(), node)?;
-    for indicator in &state.indicators {
-        charge.bytes = charge
-            .bytes
-            .checked_add(indicator.logical_bytes())
-            .ok_or_else(|| {
-                operator_error(node, "rolling indicator state byte charge overflowed")
-            })?;
-    }
+    history_entity_charge_snapshot(key, state, node)?.total(node)
+}
+
+pub(super) fn cached_history_entity_charge(
+    key: &[Option<KeyValue>],
+    state: &EntityRollingState,
+    node: &str,
+) -> Result<HistoryCharge> {
+    state
+        .charge_cache
+        .map_or_else(|| history_entity_charge_snapshot(key, state, node), Ok)
+}
+
+pub(super) fn history_entity_charge_snapshot(
+    key: &[Option<KeyValue>],
+    state: &EntityRollingState,
+    node: &str,
+) -> Result<HistoryCharge> {
+    let metadata = history_metadata_charge(key, &state.windows, &state.indicators, node)?;
+    let mut retained = StateCharge::default();
     for row in &state.rows {
-        charge = charge.checked_add(scalar_history_row_charge(row, node)?, node)?;
+        retained = retained.checked_add(scalar_history_row_charge(row, node)?, node)?;
     }
     for record in &state.columnar.records {
         let Some(next) = ordered_record_charge(record, node)? else {
@@ -221,9 +255,27 @@ pub(super) fn history_entity_charge(
                 "rolling columnar history has unsupported state charge",
             ));
         };
-        charge = charge.checked_add(next, node)?;
+        retained = retained.checked_add(next, node)?;
     }
-    for window in &state.windows {
+    Ok(HistoryCharge { retained, metadata })
+}
+
+pub(super) fn history_metadata_charge(
+    key: &[Option<KeyValue>],
+    windows: &[WindowState],
+    indicators: &[indicators::State],
+    node: &str,
+) -> Result<StateCharge> {
+    let mut charge = history_entity_base_charge(key, windows.len(), node)?;
+    for indicator in indicators {
+        charge.bytes = charge
+            .bytes
+            .checked_add(indicator.logical_bytes())
+            .ok_or_else(|| {
+                operator_error(node, "rolling indicator state byte charge overflowed")
+            })?;
+    }
+    for window in windows {
         if let WindowState::Extrema(extrema) = window {
             for (key, value) in &extrema.queue {
                 let dynamic = key_bytes(key.sequence.iter(), node)?

@@ -293,7 +293,9 @@ mod tests {
         let worker = std::thread::spawn(move || {
             let path = std::fs::read_link("/proc/thread-self").unwrap();
             ready_tx.send(path.file_name().unwrap().to_owned()).unwrap();
-            go_rx.recv().unwrap();
+            if go_rx.recv().is_err() {
+                return Duration::ZERO;
+            }
             let before = super::process_cpu().unwrap();
             let until = std::time::Instant::now() + Duration::from_millis(2);
             while std::time::Instant::now() < until {
@@ -302,17 +304,29 @@ mod tests {
             super::process_cpu().unwrap().checked_sub(before).unwrap()
         });
         let tid = ready_rx.recv().unwrap();
-        let clock = super::PhaseClock::start("handler");
         let worker_tid: u32 = tid.to_str().unwrap().parse().unwrap();
-        let identity = clock
-            .threads
-            .as_ref()
-            .unwrap()
-            .iter()
-            .find(|(_, thread)| thread.tid == worker_tid)
-            .unwrap()
-            .0
-            .clone();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let observed = loop {
+            if std::time::Instant::now() >= deadline {
+                break None;
+            }
+            let clock = super::PhaseClock::start("handler");
+            let identity = clock.threads.as_ref().and_then(|threads| {
+                threads
+                    .iter()
+                    .find(|(_, thread)| thread.tid == worker_tid)
+                    .map(|(identity, _)| identity.clone())
+            });
+            if let Some(identity) = identity {
+                break Some((clock, identity));
+            }
+            std::thread::yield_now();
+        };
+        let Some((clock, identity)) = observed else {
+            drop(go_tx);
+            worker.join().unwrap();
+            panic!("blocked worker missing from thread snapshot for five seconds");
+        };
         go_tx.send(()).unwrap();
         let worker_cpu = worker.join().unwrap();
         // join may return before the kernel removes the task from procfs.

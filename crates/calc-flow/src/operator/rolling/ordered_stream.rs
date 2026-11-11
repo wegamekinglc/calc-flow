@@ -153,7 +153,7 @@ impl RollingOperator {
 
     fn projected_ordered_charge(
         &mut self,
-        prepared: &PreparedOrderedOutput,
+        prepared: &mut PreparedOrderedOutput,
         removed: super::budget::StateCharge,
         was_warm: bool,
         node: &str,
@@ -518,7 +518,7 @@ impl RollingOperator {
             }
         };
         let (current_charge, next_charge) = match self.projected_ordered_charge(
-            &prepared,
+            &mut prepared,
             removed,
             was_warm,
             context.operator_id(),
@@ -566,22 +566,18 @@ struct PreparedOrderedOutput {
 
 impl PreparedOrderedOutput {
     fn projected_charge(
-        &self,
+        &mut self,
         operator: &RollingOperator,
         current: super::budget::StateCharge,
         node: &str,
     ) -> Result<super::budget::StateCharge> {
         let mut old = super::budget::StateCharge::default();
         let mut new = super::budget::StateCharge::default();
-        for tail in &self.touched {
+        for tail in &mut self.touched {
             let previous = operator.state.histories.by_entity.get(&tail.entity);
-            if let Some(previous) = previous {
-                old = old.checked_add(
-                    super::budget::history_entity_charge(&tail.entity, previous, node)?,
-                    node,
-                )?;
-            }
-            new = new.checked_add(tail.projected_charge(previous, node)?, node)?;
+            let (previous, projected) = tail.changed_charge(previous, node)?;
+            old = old.checked_add(previous, node)?;
+            new = new.checked_add(projected, node)?;
         }
         current.checked_sub(old)?.checked_add(new, node)
     }
@@ -757,6 +753,7 @@ impl EntityTail {
             discarded_rows,
             windows: super::state_codec::recurrence_windows(compiled, seeds),
             transition_count,
+            next_charge: None,
         })
     }
 }
