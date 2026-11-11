@@ -234,6 +234,7 @@ pub(crate) fn entity_parallel_test_work(
         .unwrap();
     let scratch = prepared
         .scratch_plan_for_cpu(cpus)
+        .ok()
         .expect("supported CPU work");
     let (seed, requests) = prepared
         .split_lanes(cpus)
@@ -412,6 +413,23 @@ fn entity_parallel_scratch_uses_checked_capacity_including_entity_containers() {
         ScratchPlan::for_dimensions(usize::MAX, 64, 2, 1).accounted_bytes(),
         None
     );
+}
+
+#[test]
+fn test_entity_parallel_scratch_rejects_unrepresentable_capacity_with_its_actual_reason() {
+    let input = input(64_000, 64, false);
+    let plan = lane_plan(false);
+    let state = warm(&plan, &input);
+    let prior = format!("{state:?}");
+    let mut prepared = plan
+        .prepare_ordered_stream_inputs(&state, &input, "r", None)
+        .unwrap();
+    prepared.fill.row_count = usize::MAX;
+    assert_eq!(format!("{state:?}"), prior);
+    assert!(matches!(
+        prepared.scratch_plan_for_cpu(2),
+        Err(RollingWork::ParallelFallbackScratchUnrepresentable)
+    ));
 }
 
 #[test]

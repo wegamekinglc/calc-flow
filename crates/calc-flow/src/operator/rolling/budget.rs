@@ -7,19 +7,9 @@ use datafusion::arrow::datatypes::DataType;
 use super::history::HistoryChunkRef;
 use super::{
     BTreeMap, BufferedRow, CompiledRollingSpec, EntityRollingState, HistoryUpdates, KeyValue,
-    RecordBatch, Result, RollingHistories, RowIdentity, ScalarValue, WindowState, indicators,
-    operator_error,
+    RecordBatch, Result, RollingHistories, RollingMetricsRecorder, RollingWork, RollingWorkBatch,
+    RowIdentity, ScalarValue, WindowState, indicators, operator_error,
 };
-
-#[cfg(test)]
-std::thread_local! {
-    static HISTORY_CHARGE_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(super) fn take_history_charge_visits() -> u64 {
-    HISTORY_CHARGE_VISITS.with(|visits| visits.replace(0))
-}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct StateCharge {
@@ -92,9 +82,12 @@ fn scalar_bytes(values: &[ScalarValue], node: &str) -> Result<u64> {
     })
 }
 
-pub(super) fn scalar_history_row_charge(values: &[ScalarValue], node: &str) -> Result<StateCharge> {
-    #[cfg(test)]
-    HISTORY_CHARGE_VISITS.with(|visits| visits.set(visits.get().saturating_add(1)));
+pub(super) fn scalar_history_row_charge(
+    values: &[ScalarValue],
+    node: &str,
+    work: &mut RollingWorkBatch<'_>,
+) -> Result<StateCharge> {
+    work.add(RollingWork::HistoryChargeScalarRows, 1);
     Ok(StateCharge {
         rows: 1,
         bytes: scalar_bytes(values, node)?,
@@ -183,6 +176,15 @@ pub(super) fn ordered_record_charge(
     Ok(Some(StateCharge { rows, bytes }))
 }
 
+pub(super) fn columnar_history_charge(
+    record: &RecordBatch,
+    node: &str,
+    work: &mut RollingWorkBatch<'_>,
+) -> Result<Option<StateCharge>> {
+    work.add(RollingWork::HistoryChargeColumnarChunks, 1);
+    ordered_record_charge(record, node)
+}
+
 pub(super) fn ordered_buffer_record_charge(
     record: &RecordBatch,
     compiled: &CompiledRollingSpec,
@@ -234,10 +236,12 @@ pub(super) fn cached_history_entity_charge(
     key: &[Option<KeyValue>],
     state: &EntityRollingState,
     node: &str,
+    work: &mut RollingWorkBatch<'_>,
 ) -> Result<HistoryCharge> {
-    state
-        .charge_cache
-        .map_or_else(|| history_entity_charge_snapshot(key, state, node), Ok)
+    state.charge_cache.map_or_else(
+        || history_entity_charge_snapshot_with_work(key, state, node, work),
+        Ok,
+    )
 }
 
 pub(super) fn history_entity_charge_snapshot(
@@ -245,17 +249,27 @@ pub(super) fn history_entity_charge_snapshot(
     state: &EntityRollingState,
     node: &str,
 ) -> Result<HistoryCharge> {
+    history_entity_charge_snapshot_with_work(key, state, node, &mut RollingWorkBatch::new(None))
+}
+
+pub(super) fn history_entity_charge_snapshot_with_work(
+    key: &[Option<KeyValue>],
+    state: &EntityRollingState,
+    node: &str,
+    work: &mut RollingWorkBatch<'_>,
+) -> Result<HistoryCharge> {
     let metadata = history_metadata_charge(key, &state.windows, &state.indicators, node)?;
     let mut retained = StateCharge::default();
     for chunk in state.retained_chunks() {
         match chunk {
             HistoryChunkRef::Scalar(rows) => {
                 for row in rows {
-                    retained = retained.checked_add(scalar_history_row_charge(row, node)?, node)?;
+                    retained =
+                        retained.checked_add(scalar_history_row_charge(row, node, work)?, node)?;
                 }
             }
             HistoryChunkRef::Columnar(record) => {
-                let Some(next) = ordered_record_charge(record, node)? else {
+                let Some(next) = columnar_history_charge(record, node, work)? else {
                     return Err(super::internal_error(
                         "rolling columnar history has unsupported state charge",
                     ));
@@ -307,18 +321,61 @@ pub(super) fn histories_charge(histories: &RollingHistories, node: &str) -> Resu
         })
 }
 
+pub(super) fn histories_charge_observed(
+    histories: &RollingHistories,
+    node: &str,
+    observer: Option<&RollingMetricsRecorder>,
+) -> Result<StateCharge> {
+    if observer.is_none() {
+        return histories_charge(histories, node);
+    }
+    histories_charge_with_work(histories, node, &mut RollingWorkBatch::new(observer))
+}
+
+fn histories_charge_with_work(
+    histories: &RollingHistories,
+    node: &str,
+    work: &mut RollingWorkBatch<'_>,
+) -> Result<StateCharge> {
+    histories
+        .by_entity
+        .iter()
+        .try_fold(StateCharge::default(), |charge, (key, state)| {
+            charge.checked_add(
+                history_entity_charge_snapshot_with_work(key, state, node, work)?.total(node)?,
+                node,
+            )
+        })
+}
+
+#[cfg(test)]
 pub(super) fn changed_histories_charge(
     histories: &RollingHistories,
     touched: &HistoryUpdates,
     node: &str,
 ) -> Result<(StateCharge, StateCharge)> {
+    changed_histories_charge_with_work(histories, touched, node, &mut RollingWorkBatch::new(None))
+}
+
+pub(super) fn changed_histories_charge_with_work(
+    histories: &RollingHistories,
+    touched: &HistoryUpdates,
+    node: &str,
+    work: &mut RollingWorkBatch<'_>,
+) -> Result<(StateCharge, StateCharge)> {
     let mut old = StateCharge::default();
     let mut new = StateCharge::default();
     for (key, state) in touched {
         if let Some(previous) = histories.by_entity.get(key) {
-            old = old.checked_add(history_entity_charge(key, previous, node)?, node)?;
+            old = old.checked_add(
+                history_entity_charge_snapshot_with_work(key, previous, node, work)?.total(node)?,
+                node,
+            )?;
         }
-        new = new.checked_add(history_entity_charge(key, state, node)?, node)?;
+        new = new.checked_add(
+            history_entity_charge_snapshot_with_work(key, state, node, work)?.total(node)?,
+            node,
+        )?;
     }
     Ok((old, new))
 }
@@ -339,4 +396,28 @@ pub(super) fn full_state_charge(
     buffered
         .checked_add(ordered, node)?
         .checked_add(histories_charge(histories, node)?, node)
+}
+
+pub(super) fn full_state_charge_observed(
+    buffer: &BTreeMap<RowIdentity, BufferedRow>,
+    ordered: &super::ordered_stream::OrderedStreamBuffer,
+    histories: &RollingHistories,
+    compiled: &CompiledRollingSpec,
+    node: &str,
+    observer: Option<&RollingMetricsRecorder>,
+) -> Result<StateCharge> {
+    if observer.is_none() {
+        return full_state_charge(buffer, ordered, histories, compiled, node);
+    }
+    let mut work = RollingWorkBatch::new(observer);
+    let buffered = buffered_charge(buffer.values(), node)?;
+    let Some(ordered) = ordered_buffer_charge(ordered.records(), compiled, node)? else {
+        return Err(super::internal_error(
+            "rolling ordered state has unsupported state charge",
+        ));
+    };
+    buffered.checked_add(ordered, node)?.checked_add(
+        histories_charge_with_work(histories, node, &mut work)?,
+        node,
+    )
 }

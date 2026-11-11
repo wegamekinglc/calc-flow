@@ -84,6 +84,50 @@ pub struct RollingCallbackMetrics {
     pub copied_entities: u64,
     /// Rows processed by numeric transitions.
     pub numeric_rows: u64,
+    /// Owned numeric lane tasks successfully spawned and registered.
+    /// Includes tasks cancelled before their first row, settled after CPU drain.
+    /// This is not a count of simultaneously occupied CPU cores.
+    pub numeric_lanes_started: u64,
+    /// Numeric row transitions attempted by owned CPU lanes, including failures.
+    /// A subset of `numeric_rows`, settled once after the owned work drains.
+    pub numeric_parallel_rows: u64,
+    /// Scalar retained-history rows visited by actual charge calculations.
+    /// Repeated visits count again; cached charges add no visits.
+    pub history_charge_scalar_rows: u64,
+    /// Columnar retained-history chunks visited by actual charge calculations.
+    /// Repeated charges of a chunk count again, including partial-prefix work.
+    pub history_charge_columnar_chunks: u64,
+    /// New retained rows prepared for append, including later rejected candidates.
+    pub history_append_rows_prepared: u64,
+    /// Existing retained rows prepared for eviction, including rejected candidates.
+    pub history_evict_rows_prepared: u64,
+    /// Synchronous typed serial row-kernel invocations, including failed attempts.
+    pub numeric_serial_calls: u64,
+    /// Synchronous general row-kernel invocations, including failed attempts.
+    pub numeric_general_calls: u64,
+    /// Owned work groups that registered at least one lane, settled after drain.
+    /// Includes partial launches; this does not measure concurrent CPU occupancy.
+    pub numeric_parallel_calls: u64,
+    /// Serial decisions without a managed CPU-work client.
+    pub parallel_fallback_no_work_client: u64,
+    /// Serial decisions below the finalized-batch row-work threshold.
+    pub parallel_fallback_small_batch: u64,
+    /// Serial decisions for unsupported plans, dimensions or output storage.
+    pub parallel_fallback_unsupported_plan: u64,
+    /// Serial decisions with fewer than two usable CPU lanes.
+    pub parallel_fallback_cpu_limit: u64,
+    /// Prepared input or state cannot form an eligible owned-lane computation.
+    pub parallel_fallback_prepared_ineligible: u64,
+    /// Lane coverage, routing or work balance rejects the prepared partition.
+    pub parallel_fallback_lane_partition_rejected: u64,
+    /// The job's owned CPU-work group is already occupied.
+    pub parallel_fallback_owner_busy: u64,
+    /// The callback has already used its owned CPU-work generation.
+    pub parallel_fallback_owner_already_used: u64,
+    /// The job cannot represent another CPU-work generation.
+    pub parallel_fallback_generation_exhausted: u64,
+    /// The checked CPU scratch declaration cannot be represented.
+    pub parallel_fallback_scratch_unrepresentable: u64,
     /// Actual retained-history row materializations.
     pub history_rows_materialized: u64,
     /// Actual scalar-value conversions.
@@ -135,6 +179,25 @@ pub(crate) enum RollingWork {
     TouchedEntities,
     CopiedEntities,
     NumericRows,
+    NumericLanesStarted,
+    NumericParallelRows,
+    HistoryChargeScalarRows,
+    HistoryChargeColumnarChunks,
+    HistoryAppendRowsPrepared,
+    HistoryEvictRowsPrepared,
+    NumericSerialCalls,
+    NumericGeneralCalls,
+    NumericParallelCalls,
+    ParallelFallbackNoWorkClient,
+    ParallelFallbackSmallBatch,
+    ParallelFallbackUnsupportedPlan,
+    ParallelFallbackCpuLimit,
+    ParallelFallbackPreparedIneligible,
+    ParallelFallbackLanePartitionRejected,
+    ParallelFallbackOwnerBusy,
+    ParallelFallbackOwnerAlreadyUsed,
+    ParallelFallbackGenerationExhausted,
+    ParallelFallbackScratchUnrepresentable,
     HistoryRowsMaterialized,
     ScalarValueConversions,
     OutputRowsPrepared,
@@ -151,6 +214,51 @@ pub(crate) enum RollingWork {
     DecayReferenceScanSamples,
     DecayCacheCopiedSamples,
     DecayReferenceHistorySamples,
+}
+
+const WORK_COUNT: usize = RollingWork::DecayReferenceHistorySamples as usize + 1;
+
+/// Bounded local observations for one synchronous preparation scope.
+///
+/// Flush before any capacity await or callback finalization. Nested preparation
+/// functions share this value; they do not lock a recorder for individual rows.
+pub(crate) struct RollingWorkBatch<'a> {
+    recorder: Option<&'a RollingMetricsRecorder>,
+    counts: [u64; WORK_COUNT],
+    overflowed: bool,
+}
+
+impl<'a> RollingWorkBatch<'a> {
+    pub(crate) fn new(recorder: Option<&'a RollingMetricsRecorder>) -> Self {
+        Self {
+            recorder,
+            counts: [0; WORK_COUNT],
+            overflowed: false,
+        }
+    }
+
+    pub(crate) fn add(&mut self, work: RollingWork, amount: usize) {
+        if self.recorder.is_none() || self.overflowed {
+            return;
+        }
+        let slot = &mut self.counts[work as usize];
+        if let Some(next) = u64::try_from(amount)
+            .ok()
+            .and_then(|amount| slot.checked_add(amount))
+        {
+            *slot = next;
+        } else {
+            self.overflowed = true;
+        }
+    }
+}
+
+impl Drop for RollingWorkBatch<'_> {
+    fn drop(&mut self) {
+        if let Some(recorder) = self.recorder {
+            recorder.add_batch(&self.counts, self.overflowed);
+        }
+    }
 }
 
 const DECAY_WORK_NAMES: [&str; 12] = [
@@ -277,7 +385,7 @@ impl RollingMetricsStore {
                     switched: now,
                     stage: RollingStage::Other,
                     durations: [Duration::ZERO; 10],
-                    work: [0; 22],
+                    work: [0; WORK_COUNT],
                     overflowed: false,
                     finalized: false,
                     outcome: None,
@@ -296,7 +404,7 @@ struct Observation {
     switched: Duration,
     stage: RollingStage,
     durations: [Duration; 10],
-    work: [u64; 22],
+    work: [u64; WORK_COUNT],
     overflowed: bool,
     finalized: bool,
     outcome: Option<CallbackOutcome>,
@@ -376,6 +484,26 @@ impl RollingMetricsRecorder {
         }
     }
 
+    fn add_batch(&self, counts: &[u64; WORK_COUNT], overflowed: bool) {
+        let mut observation = self.0.observation.lock();
+        if observation.outcome.is_some() || observation.overflowed {
+            return;
+        }
+        if overflowed {
+            observation.overflowed = true;
+            return;
+        }
+        let mut next = observation.work;
+        for (slot, amount) in next.iter_mut().zip(counts) {
+            let Some(sum) = slot.checked_add(*amount) else {
+                observation.overflowed = true;
+                return;
+            };
+            *slot = sum;
+        }
+        observation.work = next;
+    }
+
     pub(crate) fn numeric_lease(&self, work_id: u64) -> Option<NumericWorkLease> {
         let mut observation = self.0.observation.lock();
         if observation.outcome.is_some() || observation.outstanding_work.is_some() {
@@ -438,15 +566,28 @@ pub(crate) struct NumericWorkLease {
 }
 
 impl NumericWorkLease {
-    pub(crate) fn settle(self, numeric_rows: u64, overflowed: bool) {
+    pub(crate) fn settle(self, numeric_rows: u64, lanes_started: u64, overflowed: bool) {
         let mut observation = self.recorder.0.observation.lock();
         if observation.outstanding_work != Some(self.work_id) {
             return;
         }
-        let next = observation.work[RollingWork::NumericRows as usize].checked_add(numeric_rows);
-        observation.overflowed |= overflowed || next.is_none();
-        if let Some(next) = next {
-            observation.work[RollingWork::NumericRows as usize] = next;
+        let updates = [
+            (RollingWork::NumericRows, numeric_rows),
+            (RollingWork::NumericParallelRows, numeric_rows),
+            (RollingWork::NumericLanesStarted, lanes_started),
+            (
+                RollingWork::NumericParallelCalls,
+                u64::from(lanes_started > 0),
+            ),
+        ];
+        let next =
+            updates.map(|(work, amount)| observation.work[work as usize].checked_add(amount));
+        observation.overflowed |= overflowed || next.iter().any(Option::is_none);
+        if let [Some(rows), Some(parallel_rows), Some(lanes), Some(calls)] = next {
+            observation.work[RollingWork::NumericRows as usize] = rows;
+            observation.work[RollingWork::NumericParallelRows as usize] = parallel_rows;
+            observation.work[RollingWork::NumericLanesStarted as usize] = lanes;
+            observation.work[RollingWork::NumericParallelCalls as usize] = calls;
         }
         observation.outstanding_work = None;
         self.recorder.publish_ready(&mut observation);
@@ -548,6 +689,25 @@ fn accumulate(
         touched_entities => TouchedEntities,
         copied_entities => CopiedEntities,
         numeric_rows => NumericRows,
+        numeric_lanes_started => NumericLanesStarted,
+        numeric_parallel_rows => NumericParallelRows,
+        history_charge_scalar_rows => HistoryChargeScalarRows,
+        history_charge_columnar_chunks => HistoryChargeColumnarChunks,
+        history_append_rows_prepared => HistoryAppendRowsPrepared,
+        history_evict_rows_prepared => HistoryEvictRowsPrepared,
+        numeric_serial_calls => NumericSerialCalls,
+        numeric_general_calls => NumericGeneralCalls,
+        numeric_parallel_calls => NumericParallelCalls,
+        parallel_fallback_no_work_client => ParallelFallbackNoWorkClient,
+        parallel_fallback_small_batch => ParallelFallbackSmallBatch,
+        parallel_fallback_unsupported_plan => ParallelFallbackUnsupportedPlan,
+        parallel_fallback_cpu_limit => ParallelFallbackCpuLimit,
+        parallel_fallback_prepared_ineligible => ParallelFallbackPreparedIneligible,
+        parallel_fallback_lane_partition_rejected => ParallelFallbackLanePartitionRejected,
+        parallel_fallback_owner_busy => ParallelFallbackOwnerBusy,
+        parallel_fallback_owner_already_used => ParallelFallbackOwnerAlreadyUsed,
+        parallel_fallback_generation_exhausted => ParallelFallbackGenerationExhausted,
+        parallel_fallback_scratch_unrepresentable => ParallelFallbackScratchUnrepresentable,
         history_rows_materialized => HistoryRowsMaterialized,
         scalar_value_conversions => ScalarValueConversions,
         output_rows_prepared => OutputRowsPrepared,
@@ -568,6 +728,7 @@ mod tests {
 
     use super::{
         RollingCallback, RollingMetricsClock, RollingMetricsStore, RollingStage, RollingWork,
+        RollingWorkBatch,
     };
     use crate::{CalcFlowError, CancellationToken};
 
@@ -584,6 +745,83 @@ mod tests {
         fn now(&self) -> Duration {
             *self.0.lock()
         }
+    }
+
+    #[test]
+    fn rolling_metrics_work_batch_flushes_the_actual_error_prefix() {
+        let store = RollingMetricsStore::default();
+        let callback = store.begin(RollingCallback::Watermark, CancellationToken::new());
+        let recorder = callback.recorder();
+        let result: crate::Result<()> = {
+            let mut work = RollingWorkBatch::new(Some(&recorder));
+            work.add(RollingWork::HistoryChargeScalarRows, 2);
+            work.add(RollingWork::HistoryAppendRowsPrepared, 1);
+            assert_eq!(
+                recorder.0.observation.lock().work[RollingWork::HistoryChargeScalarRows as usize],
+                0,
+            );
+            Err(CalcFlowError::Internal {
+                message: "prepared candidate rejected".into(),
+            })
+        };
+        callback.complete(&result);
+        let snapshot = store.snapshot();
+        assert!(!snapshot.overflowed);
+        assert_eq!(snapshot.watermark.failed, 1);
+        assert_eq!(snapshot.watermark.history_charge_scalar_rows, 2);
+        assert_eq!(snapshot.watermark.history_append_rows_prepared, 1);
+        assert_eq!(snapshot.watermark.history_evict_rows_prepared, 0);
+    }
+
+    #[test]
+    fn rolling_metrics_work_batch_overflow_keeps_the_previous_whole_observation() {
+        for local_overflow in [false, true] {
+            let store = RollingMetricsStore::default();
+            let callback = store.begin(RollingCallback::Data, CancellationToken::new());
+            let recorder = callback.recorder();
+            let mut expected = store.snapshot();
+            expected.overflowed = true;
+            {
+                let mut work = RollingWorkBatch::new(Some(&recorder));
+                if local_overflow {
+                    work.counts[RollingWork::HistoryChargeScalarRows as usize] = u64::MAX;
+                } else {
+                    recorder.0.observation.lock().work
+                        [RollingWork::HistoryChargeScalarRows as usize] = u64::MAX;
+                }
+                work.add(RollingWork::HistoryChargeScalarRows, 1);
+                work.add(RollingWork::HistoryAppendRowsPrepared, 1);
+            }
+            assert_eq!(
+                recorder.0.observation.lock().work[RollingWork::HistoryAppendRowsPrepared as usize],
+                0,
+            );
+            callback.complete(&Ok(()));
+            assert_eq!(store.snapshot(), expected);
+        }
+    }
+
+    #[test]
+    fn rolling_metrics_lane_overflow_settles_without_partial_work_publication() {
+        let store = RollingMetricsStore::default();
+        let callback = store.begin(RollingCallback::Watermark, CancellationToken::new());
+        let recorder = callback.recorder();
+        let lease = recorder.numeric_lease(1).unwrap();
+        recorder.0.observation.lock().work[RollingWork::NumericLanesStarted as usize] = u64::MAX;
+        callback.complete(&Ok(()));
+        let mut expected = store.snapshot();
+        assert_eq!(expected.watermark.succeeded, 0);
+        expected.overflowed = true;
+        lease.settle(1, 1, false);
+        assert_eq!(store.snapshot(), expected);
+        let observation = recorder.0.observation.lock();
+        assert!(observation.finalized);
+        assert!(observation.outstanding_work.is_none());
+        assert_eq!(observation.work[RollingWork::NumericRows as usize], 0);
+        assert_eq!(
+            observation.work[RollingWork::NumericParallelRows as usize],
+            0
+        );
     }
 
     #[test]
