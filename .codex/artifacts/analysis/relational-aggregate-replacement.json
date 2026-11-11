@@ -1,27 +1,28 @@
 {
   "issue": "DAL-514",
   "baseline_sha": "c4f1749c0595ed3df0fe7eaf4c6331c6093dcfab",
-  "validated_source_sha": "ddd8bd872ad4d1524cf5f97e8e6112197d71584d",
+  "validated_source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
   "branch": "feature/dal-514-aggregate-replacement",
   "native": {
-    "package": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/final-python/calc_flow/__init__.py",
-    "extension": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/final-python/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+    "package": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/ci-python/calc_flow/__init__.py",
+    "extension": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/ci-python/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
     "python_version": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
     "pyarrow": "24.0.0",
-    "source_sha": "ddd8bd872ad4d1524cf5f97e8e6112197d71584d",
+    "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
     "interpreter": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
-    "wheel": "target/aggregate/final-wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl",
-    "wheel_sha256": "f930a713bff3ca6b3f0947c3a0f96fb2084147cf4c30e61e2573a5e9e06d882b",
-    "extension_sha256": "f36ea47ddeba95d918274493acda92945120bed86449a94a71cc59f3277cacaa",
+    "wheel": "target/aggregate/ci-wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl",
+    "wheel_sha256": "33ba324b056c3c300ec54d620d0b4ad16b0a28c3449318db985f1b55ac757f50",
+    "extension_sha256": "dde797aca5962739faf5c136bbd6383492a733f43e429f439a886a0e302e61e8",
     "python_source_files_verified": 55,
-    "source_manifest_sha256": "9ef8ea50b8d964400a50753847ed5bc96d084a1a4fbc9eafef2aceab69634a68",
-    "python39_syntax_files": 54
+    "source_manifest_sha256": "314b1eae2a3e50e3cd2d0ae829c1c8ccfd8967e691028fcbeb7674ef42740626",
+    "python39_syntax_files": 54,
+    "source_manifest_commit_verified_files": 1154
   },
   "component_trees": {
-    "core": "a1249e6cb31facf704ff5dbe698cbc48749b76bf",
+    "core": "124068c90da0662733f998d6ec34751835be6388",
     "binding": "fd8dd7cc31ccf1d867c5df0f99cc87c5bca5ec9c",
-    "python": "522c347be1ce7bff94ffb0c4ea1fd1ac6486c263",
-    "snapshot_policy": "8b2ca0e0185e8a521366501d93ab96b150230f51"
+    "python": "168d5c6cbde1764f42ade4acb8beab4a2f95d2ca",
+    "snapshot_policy": "48e35d5cab7b5213ab93c841f9e8f80d94c5f00e"
   },
   "changed_files": [
     ".codex/artifacts/api-notes/relational-aggregate-replacement.md",
@@ -453,11 +454,435 @@
       "log": "whitespace-final.log",
       "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "log_tail": ""
+    },
+    {
+      "name": "ci-clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--lib",
+        "--test",
+        "latest_relation",
+        "--example",
+        "32_sql_expression_pipeline",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+      "log": "ci-clippy.log",
+      "log_sha256": "57842c990f5e83bb2ae3cabfa1df51fb8e4d99d2f441b2dbec83ff837fe97732",
+      "log_tail": "    Checking calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/crates/calc-flow)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 15.04s\n",
+      "note": "Rust files checked before the source commit are byte-identical to the committed source.",
+      "phase": "codacy_followup"
+    },
+    {
+      "name": "core-standalone",
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--lib",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256"
+      ],
+      "exit_code": 0,
+      "expected_exit": 0,
+      "seconds": 87.239,
+      "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+      "log": "ci-core-standalone.log",
+      "log_sha256": "be66e74e4ac95e07d448ae3597c30e2e51f1f7258706693d690d8cfd0c5cf391",
+      "log_tail": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/crates/calc-flow)\n    Finished `release` profile [optimized] target(s) in 1m 27s\n",
+      "phase": "codacy_followup"
+    },
+    {
+      "name": "rust-affected",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--test",
+        "latest_relation",
+        "--test",
+        "query_history_portability",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256"
+      ],
+      "exit_code": 0,
+      "expected_exit": 0,
+      "seconds": 181.596,
+      "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+      "log": "ci-rust-affected.log",
+      "log_sha256": "db6b4fc05256fc9103be16b54b1cdc57331244c50bf08425c13f978ded462444",
+      "log_tail": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/crates/calc-flow)\n    Finished `release` profile [optimized] target(s) in 3m 01s\n     Running tests/latest_relation.rs (target/aggregate/cargo/release/deps/latest_relation-52e484bc053fff58)\n\nrunning 11 tests\ntest low_level_latest_rejects_missing_boundary_proof_synchronously ... ok\ntest invalid_project_update_literal_has_stable_path_and_code ... ok\ntest latest_batch_plan_isolates_warm_executions ... ok\ntest one_multirecord_batch_is_one_event_and_empty_data_is_an_event ... ok\ntest legacy_chain_keeps_seven ... ok\ntest terminal_sum_keeps_cumulative_snapshots_in_both_choices ... ok\ntest unsupported_snapshot_consumers_remain_unknown_and_deterministic ... ok\ntest latest_filter_delivers_empty_events ... ok\ntest latest_admission_preserves_logical_consumer_and_exported_selection ... ok\ntest dataframe_sql_replacement_chain_is_six_legacy_is_seven ... ok\ntest managed_recovery_rejects_both_update_identity_mismatches_before_source ... ok\n\ntest result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s\n\n     Running tests/query_history_portability.rs (target/aggregate/cargo/release/deps/query_history_portability-438b41b436d856fe)\n\nrunning 9 tests\ntest requests_validate_and_roundtrip_without_becoming_execution_permits ... ok\ntest known_missing_udf_keeps_the_existing_compilation_error ... ok\ntest stream_only_modes_and_sql_schema_errors_are_reported_without_execution ... ok\ntest snapshot_edges_keep_the_original_stream_mode_rejection ... ok\ntest unordered_dictionary_schema_roundtrips_through_public_analysis ... ok\ntest ordered_dictionary_schema_roundtrips_through_public_analysis ... ok\ntest row_local_checked_compile_keeps_the_original_identity ... ok\ntest aggregate_history_and_snapshot_append_edges_are_distinct ... ok\ntest sql_shapes_separate_per_batch_scope_from_unproved_semantics ... ok\n\ntest result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\n",
+      "phase": "codacy_followup"
+    },
+    {
+      "name": "rust-example",
+      "command": [
+        "cargo",
+        "run",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--example",
+        "32_sql_expression_pipeline",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256"
+      ],
+      "exit_code": 0,
+      "expected_exit": 0,
+      "seconds": 44.25,
+      "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+      "log": "ci-rust-example.log",
+      "log_sha256": "5bb1f6dbda214c7e8fb8109bf5ea95fcd43ef999d66d5025671b30b383ea0902",
+      "log_tail": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/crates/calc-flow)\n    Finished `release` profile [optimized] target(s) in 44.18s\n     Running `target/aggregate/cargo/release/examples/32_sql_expression_pipeline`\nnet = [Some(18.0), Some(27.0)]\n",
+      "phase": "codacy_followup"
+    },
+    {
+      "name": "external-consumer",
+      "command": [
+        "cargo",
+        "run",
+        "--locked",
+        "--manifest-path",
+        "crates/calc-flow/tests/relational-consumer/Cargo.toml",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256"
+      ],
+      "exit_code": 0,
+      "expected_exit": 0,
+      "seconds": 328.403,
+      "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+      "log": "ci-external-consumer.log",
+      "log_sha256": "aa87234ee59e7e93241f1a97df6f1fa1b1a397ddbf43298914a23fd116707bf3",
+      "log_tail": "warning: patch `parquet v59.2.0 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/vendor/parquet)` was not used in the crate graph\nhelp: Check that the patched package version and available features are compatible\n      with the dependency requirements. If the patch has a different version from\n      what is locked in the Cargo.lock file, run `cargo update` to use the new\n      version. This may also occur with an optional dependency that is not enabled.\n   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/crates/calc-flow)\n   Compiling relational-public-consumer v0.0.0 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/crates/calc-flow/tests/relational-consumer)\n    Finished `release` profile [optimized] target(s) in 5m 28s\n     Running `target/aggregate/cargo/release/relational-public-consumer`\naggregate: root exports, exact schema, empty/NULL oracles and latest 1/6 passed\nmetadata: owned stream accepts schema and field metadata without mutating input\ndataframe: schema, analysis, batch, owned stream, export/reload passed\nsql: schema, analysis, batch, owned stream, export/reload passed\ndf_sql_df_sql: schema, analysis, batch, owned stream, export/reload passed\nsql_df_sql: schema, analysis, batch, owned stream, export/reload passed\nstate: same batch plan 1/5; same stream job 1/6; new stream job 5\n",
+      "phase": "codacy_followup"
+    },
+    {
+      "name": "native",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "maturin",
+        "build",
+        "--interpreter",
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "--out",
+        "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/ci-wheels",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256",
+        "--config",
+        "profile.release.package.calc-flow-python.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow-python.codegen-units=256"
+      ],
+      "exit_code": 0,
+      "expected_exit": 0,
+      "seconds": 169.522,
+      "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+      "log": "ci-native.log",
+      "log_sha256": "0b3f0bbd15043bda99504be7cd8abd81f1605a7dc061b2043027acc5f04bd8bf",
+      "log_tail": "🍹 Building a mixed python/rust project\n🐍 Found CPython 3.13 at /home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python\n🔗 Found pyo3 bindings\n   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/crates/calc-flow)\n   Compiling calc-flow-connectors v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/crates/calc-flow-connectors)\n   Compiling calc-flow-python v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/crates/calc-flow-python)\n    Finished `release` profile [optimized] target(s) in 2m 45s\n⚠️  Warning: No compatible platform tag found, using the linux tag instead. You won't be able to upload those wheels to PyPI.\n📦 Built wheel for CPython 3.13 to /home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/ci-wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl\n",
+      "phase": "codacy_followup"
+    },
+    {
+      "name": "python-focused",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "pytest",
+        "python/tests/test_aggregate_replacement.py",
+        "python/tests/test_update_semantics.py",
+        "python/tests/test_query_history_portability.py",
+        "python/tests/test_snapshot_sql.py",
+        "python/tests/test_expression_api.py::test_preferred_declarations_preserve_identity_and_copy_names",
+        "python/tests/test_capabilities.py::test_capability_catalog_reports_every_durable_state_layout",
+        "-q",
+        "--junitxml",
+        "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/ci-python.xml"
+      ],
+      "exit_code": 0,
+      "expected_exit": 0,
+      "seconds": 2.76,
+      "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+      "log": "ci-python-focused.log",
+      "log_sha256": "dd035769df7759946462010f34f66aa5ce3ae59aff56a03c1137dc7d2b571ce3",
+      "log_tail": "........................................................................ [ 60%]\n................................................                         [100%]\n120 passed in 2.49s\n",
+      "phase": "codacy_followup"
+    },
+    {
+      "name": "python-example",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "examples/32_sql_expression_pipeline.py"
+      ],
+      "exit_code": 0,
+      "expected_exit": 0,
+      "seconds": 0.378,
+      "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+      "log": "ci-python-example.log",
+      "log_sha256": "481f7a4bc04ca9d6e139f95989135e230952969f115abbb718f50ca4a9de5f15",
+      "log_tail": "{'order_id': [1, 3], 'net': [18.0, 27.0]}\n",
+      "phase": "codacy_followup"
+    },
+    {
+      "name": "ruff",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/ruff",
+        "check",
+        "python/calc_flow/symbolic/aggregate.py",
+        "python/tests/test_aggregate_replacement.py"
+      ],
+      "exit_code": 0,
+      "expected_exit": 0,
+      "seconds": 0.043,
+      "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+      "log": "ci-ruff.log",
+      "log_sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+      "log_tail": "All checks passed!\n",
+      "phase": "codacy_followup"
+    },
+    {
+      "name": "ruff-format",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/ruff",
+        "format",
+        "--check",
+        "python/calc_flow/symbolic/aggregate.py",
+        "python/tests/test_aggregate_replacement.py"
+      ],
+      "exit_code": 0,
+      "expected_exit": 0,
+      "seconds": 0.022,
+      "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+      "log": "ci-ruff-format.log",
+      "log_sha256": "3bc53bf3e981a98a34a852e175bf9b77af841edea74fca595d9aedcbaf9a4938",
+      "log_tail": "2 files already formatted\n",
+      "phase": "codacy_followup"
+    },
+    {
+      "name": "rust-format",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": 0,
+      "expected_exit": 0,
+      "seconds": 4.324,
+      "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+      "log": "ci-rust-format.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_tail": "",
+      "phase": "codacy_followup"
+    },
+    {
+      "name": "consumer-format",
+      "command": [
+        "cargo",
+        "fmt",
+        "--manifest-path",
+        "crates/calc-flow/tests/relational-consumer/Cargo.toml",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "expected_exit": 0,
+      "seconds": 0.047,
+      "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+      "log": "ci-consumer-format.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_tail": "",
+      "phase": "codacy_followup"
+    },
+    {
+      "name": "complexity",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "scripts/verify_complexity_gates.py"
+      ],
+      "exit_code": 0,
+      "expected_exit": 0,
+      "seconds": 0.226,
+      "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+      "log": "ci-complexity.log",
+      "log_sha256": "28c0f0ab344cc7f838249423ae355d6721a4a977d35165c20462fa028b1a5d7d",
+      "log_tail": "complexity ratchet holds\n",
+      "phase": "codacy_followup"
+    },
+    {
+      "name": "lizard126",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/check_codacy.py"
+      ],
+      "exit_code": 0,
+      "expected_exit": 0,
+      "seconds": 0.107,
+      "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+      "log": "ci-lizard126.log",
+      "log_sha256": "ba0e07b92dac634ce9f537cba020b6b68e4f055cf04321b67abf2dd8946670ce",
+      "log_tail": "crates/calc-flow/examples/32_sql_expression_pipeline.rs replacement_declaration 7\ncrates/calc-flow/examples/32_sql_expression_pipeline.rs verify_replacement_budget 4\ncrates/calc-flow/src/dataframe/aggregate.rs query 3\ncrates/calc-flow/src/dataframe/aggregate.rs validate_groups 5\ncrates/calc-flow/src/dataframe/aggregate.rs selection 2\ncrates/calc-flow/src/dataframe/aggregate.rs operand 6\ncrates/calc-flow/src/dataframe/aggregate.rs group_clause 2\ncrates/calc-flow/src/query_analysis/sql/replacement.rs inspect 3\ncrates/calc-flow/src/query_analysis/sql/replacement.rs statement_supported 6\ncrates/calc-flow/src/query_analysis/sql/replacement.rs group_expressions 3\ncrates/calc-flow/src/query_analysis/sql/replacement.rs normalized_query 2\ncrates/calc-flow/src/query_analysis/sql/replacement.rs function 3\ncrates/calc-flow/src/query_analysis/sql/replacement.rs unmodified_function 4\ncrates/calc-flow/src/query_analysis/sql/replacement.rs function_operand 6\ncrates/calc-flow/src/query_analysis/sql/replacement.rs operand_supported 5\ncrates/calc-flow/src/query_analysis/sql/replacement.rs rejection_reason 4\ncrates/calc-flow/src/query_analysis/sql/replacement.rs query_rejection 3\ncrates/calc-flow/src/query_analysis/sql/replacement.rs relation_rejection 2\ncrates/calc-flow/src/query_analysis/sql/replacement.rs select_modifier_rejection 1\ncrates/calc-flow/src/query_analysis/sql/replacement.rs query_modifier_rejection 2\ncrates/calc-flow/src/query_analysis/sql/replacement.rs item_rejection 3\ncrates/calc-flow/src/query_analysis/sql/replacement.rs function_rejection 6\ncrates/calc-flow/src/query_analysis/sql/replacement.rs direct_argument 1\ncrates/calc-flow/tests/latest_relation.rs open 1\ncrates/calc-flow/tests/latest_relation.rs dataframe_sql_replacement_chain_is_six_legacy_is_seven 5\ncrates/calc-flow/tests/latest_relation.rs replacement_chain 7\ncrates/calc-flow/tests/latest_relation.rs visible_replacement_total 7\ncrates/calc-flow/tests/latest_relation.rs check_replacement_chain_stream 7\ncrates/calc-flow/tests/latest_relation.rs check_replacement_chain_batch 5\ncrates/calc-flow/tests/relational-consumer/src/main.rs open 1\ncrates/calc-flow/tests/relational-consumer/src/main.rs close 1\ncrates/calc-flow/tests/relational-consumer/src/main.rs aggregate_declaration 4\ncrates/calc-flow/tests/relational-consumer/src/main.rs aggregate_reducers 8\ncrates/calc-flow/tests/relational-consumer/src/main.rs check_aggregate 5\ncrates/calc-flow/tests/relational-consumer/src/main.rs check_aggregate_schema 2\ncrates/calc-flow/tests/relational-consumer/src/main.rs check_aggregate_finite 6\ncrates/calc-flow/tests/relational-consumer/src/main.rs check_aggregate_output 2\ncrates/calc-flow/tests/relational-consumer/src/main.rs check_aggregate_replacement 6\ncrates/calc-flow/tests/relational-consumer/src/main.rs check_aggregate_groups 7\ncrates/calc-flow/tests/relational-consumer/src/main.rs aggregate_groups_declaration 4\npython/calc_flow/symbolic/aggregate.py aggregate 5\npython/calc_flow/symbolic/aggregate.py _entries 5\npython/calc_flow/symbolic/aggregate.py _reducer 4\npython/calc_flow/symbolic/aggregate.py _operand 4\npython/calc_flow/symbolic/aggregate.py _query 4\npython/calc_flow/symbolic/aggregate.py validate 2\npython/calc_flow/symbolic/aggregate.py _validate_groups 3\npython/calc_flow/symbolic/aggregate.py _validate_reducers 3\npython/calc_flow/symbolic/aggregate.py _invalid_operand 4\nChanged functions over 8: []\n",
+      "phase": "codacy_followup"
+    },
+    {
+      "name": "bandit-before",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "bandit",
+        "-t",
+        "B608",
+        "-f",
+        "json",
+        "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/bandit-before.py",
+        "-o",
+        "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/bandit-before.json"
+      ],
+      "exit_code": 1,
+      "expected_exit": 1,
+      "seconds": 0.094,
+      "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+      "log": "ci-bandit-before.log",
+      "log_sha256": "0a5bf5d6ce8d35b0ec4d01f9203d91f516687d50102454bae1791cbef06ac2d5",
+      "log_tail": "[main]\tINFO\tprofile include tests: None\n[main]\tINFO\tprofile exclude tests: None\n[main]\tINFO\tcli include tests: B608\n[main]\tINFO\tcli exclude tests: None\n[json]\tINFO\tJSON output written to file: /home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/bandit-before.json\n",
+      "phase": "codacy_followup"
+    },
+    {
+      "name": "bandit-after",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "bandit",
+        "-t",
+        "B608",
+        "-f",
+        "json",
+        "python/calc_flow/symbolic/aggregate.py",
+        "-o",
+        "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/bandit-after.json"
+      ],
+      "exit_code": 0,
+      "expected_exit": 0,
+      "seconds": 0.092,
+      "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+      "log": "ci-bandit-after.log",
+      "log_sha256": "4116f8a866222a50354c493cf0e2851e5f3b74c65b1f7463ee262868032a438e",
+      "log_tail": "[main]\tINFO\tprofile include tests: None\n[main]\tINFO\tprofile exclude tests: None\n[main]\tINFO\tcli include tests: B608\n[main]\tINFO\tcli exclude tests: None\n[json]\tINFO\tJSON output written to file: /home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/bandit-after.json\n",
+      "phase": "codacy_followup"
+    },
+    {
+      "name": "schema-no-drift",
+      "command": [
+        "git",
+        "diff",
+        "--exit-code",
+        "c4f1749c0595ed3df0fe7eaf4c6331c6093dcfab",
+        "HEAD",
+        "--",
+        "schemas/project-v3.schema.json"
+      ],
+      "exit_code": 0,
+      "expected_exit": 0,
+      "seconds": 0.002,
+      "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+      "log": "ci-schema-no-drift.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_tail": "",
+      "phase": "codacy_followup"
+    },
+    {
+      "name": "whitespace",
+      "command": [
+        "git",
+        "diff",
+        "--check",
+        "c4f1749c0595ed3df0fe7eaf4c6331c6093dcfab",
+        "HEAD"
+      ],
+      "exit_code": 0,
+      "expected_exit": 0,
+      "seconds": 0.02,
+      "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+      "log": "ci-whitespace.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log_tail": "",
+      "phase": "codacy_followup"
     }
   ],
   "reuse": {
-    "unit_snapshot_tree_unchanged": true,
-    "explanation": "Snapshot policy/restore/test source is unchanged since its unit run. Later core edits replace wildcard imports, rename the forwarded epoch, and explain rejected shapes; admission/execution is unchanged. Final native build and 119 Python tests validate the final diagnostics. Snapshot policy/test source is byte-identical. Cargo cache is shared, but compilation and wheel contents are from this checkout."
+    "snapshot_production_unchanged_since": "e9ca4ac754d26b4584e6f11a5640e0c1f0107139",
+    "snapshot_production_sha256": {
+      "crates/calc-flow/src/operator/sql.rs": "23978701b39666dee120a7bcb99d95f77f200a63ab8333e93144ee24482b06d5",
+      "crates/calc-flow/src/operator/sql/retention.rs": "3e74de1140c425481cef18591a5bca05ea8e99af4c48462c95d9c42a6652e539",
+      "crates/calc-flow/src/operator/sql/normalize_groups.rs": "668e5f6d57bb51d8299a109eef2c1ed796ee71b3c6a139c337be19592808a72d",
+      "crates/calc-flow/src/operator/sql/checkpoint_test_hooks.rs": "7465b5ed114f7b252ea883498a48882be5fcd086f72d5b784a42152f85b1ef89",
+      "crates/calc-flow/src/operator/sql/metadata.rs": "d5865010aaa8a0b8d5a5fb0ebf059a1d469ed729d8e41679f68b3131c967b291",
+      "crates/calc-flow/src/operator/sql/ordered_last.rs": "5ed4d9d4ee1aed3cadfca31b331a8ede93ae48ed2cc287883de80c00c5143c13",
+      "crates/calc-flow/src/operator/sql/compact_budget.rs": "9a7406f89eee6b256dd4efe42e27714e9b20fabda050bd9de13189a16a43146b",
+      "crates/calc-flow/src/operator/sql/compact.rs": "85000c7f629a8e14cd781732ae374d0510216b9fa1862ca98ec5bf19e7869591",
+      "crates/calc-flow/src/operator/sql/group_key.rs": "3a941a7811fbdb71e10b8576706ff4f0ce242650dd20221da15f8347f2698cc1",
+      "crates/calc-flow/src/operator/sql/dirty.rs": "6064d6445207958899e5e81498a44cd855fa279247ce53bbb36dace178e849b8",
+      "crates/calc-flow/src/operator/sql/compact_state.rs": "a3c0843b13977b62a0f1eb53261c0e06280d699c2d1609420e38dddf33f152c4",
+      "crates/calc-flow/src/operator/sql/restore.rs": "1ae6e474165b13a60ee68d3b41bfc32860bb83cb998c08b23ed1a96f35285a9c",
+      "crates/calc-flow/src/operator/sql/group_aggregates.rs": "6236b065b2d7d3ece4a7d465e5d54b9309ae1b929c3ac25b0c80e9e5b0060d06",
+      "crates/calc-flow/src/operator/sql/input_checks.rs": "b8c69d41ca5a6b92ec4c56614e3875279a12d32a9cc516a4d90ea3358dd60b90",
+      "crates/calc-flow/src/operator/sql/snapshot_keys.rs": "d5e0740e4b765718a57668bbc9128b4db7a3534a060e4caaede504410a2ac38f",
+      "crates/calc-flow/src/operator/sql/ipc.rs": "633abf3a225d53a1cbfba5d2a549721c84c273c1d31cb77a6dc95382e0e18896",
+      "crates/calc-flow/src/operator/sql/grouped_sum.rs": "c3084a9b4406c0a87057d21d35de80ef810e0a12de6f1da974186aad0c16dfba",
+      "crates/calc-flow/src/operator/sql/current_retained.rs": "58bf40c924c6168bc79027cc15dafc0cc6686aad9454fc71d88ffe32ac845aa4",
+      "crates/calc-flow/src/operator/sql/grouped_float.rs": "17bee07513e1fc938ccad4fcc184f7e4ae856e9a958d7531e3871d7b85419d38",
+      "crates/calc-flow/src/operator/sql/incremental.rs": "306a4eefeae9a902db10c1ff7e7d9b8d63eaa4513209d28c96483ecdb322ea6a",
+      "crates/calc-flow/src/operator/sql/recovery_test_hooks.rs": "e858dd84611619cac4e81395ce5e5e679d8cc9ee38ca83e7303dd78aa4d342cb",
+      "crates/calc-flow/src/operator/sql/predicate.rs": "106f8be9ed7f93904d753005cb1fb5977634b6c17fa872bd1e4c3d81b0a9a9f4",
+      "crates/calc-flow/src/operator/sql/variable_extrema.rs": "4fd1efd8e137c963d7c60a2218e49be42e2de67c97710fbd76076b2eae32538e",
+      "crates/calc-flow/src/operator/sql/output_order.rs": "5e378999eed82bf05d18c1b8dfe4a0ac75eae03b740ad43a3ffe7abe470d2941",
+      "crates/calc-flow/src/operator/sql/global_record.rs": "1f695bd83fa50301d139b6bd913e0344625b8747048ac062d6e43156d398fdad",
+      "crates/calc-flow/src/operator/sql/native_expression.rs": "f2a135702f69f9b32646873584f0df1353efe258f3dbd475124f676b05c2066e",
+      "crates/calc-flow/src/operator/sql/compact_state/export.rs": "9577f4fdd46b9da06b480f98ee9c37e12ef8facf4bae244bf9cc8bedd5a6044c",
+      "crates/calc-flow/src/operator/sql/ordered_last_tests/recovery.rs": "3fe691277b514678eeae9ccdab8d58bf44821e9ec822a6936c7eb172e5701cd1",
+      "crates/calc-flow/src/operator/sql/ordered_last_tests/corruption.rs": "3f7cb74ce0e4f04394f8131dde7691bb4a46097422ba3b49e27b92e1fd23806a",
+      "crates/calc-flow/src/operator/sql/ordered_last_tests/faults.rs": "f5d9f12a349cb023353eb489566942d90e6f4301155f2c4df82db844b3032e83",
+      "crates/calc-flow/src/operator/sql/global_record/coalescer.rs": "ef6f1779640f25fd844df78cdcdd6c22db6fc58cbfd49edca2c77bd068344289",
+      "crates/calc-flow/src/operator/sql/compact/identity.rs": "6e1c439eceb463db0abe438ca1b9f19f7597b8a0f2c78708ba1d3c3396225288",
+      "crates/calc-flow/src/operator/sql/compact/restore.rs": "c5501878aac322624b537492f829031dcbbe9e542a7422f55b41144c7c2ee0fd",
+      "crates/calc-flow/src/operator/sql/compact/storage.rs": "58493fd5654019568721972c1cd85639158dc4844c78f39897e6905106427722",
+      "crates/calc-flow/src/operator/sql/compact/control.rs": "db4a8b4ae78c4ea0fdef6c93ed2b71d200d0b92b1a26b7d8d6fcbc62fa416054",
+      "crates/calc-flow/src/operator/sql/compact/global_record_controls.rs": "4008ea158071e36ca287ef1dfc0054cf7928f09765865cbc08621e048aa7ea6d",
+      "crates/calc-flow/src/operator/sql/compact/log.rs": "eb2accdf62ae7ccbd133b03521c54e5d70ad3a41a183b3ee068f54fe874b3ce3",
+      "crates/calc-flow/src/operator/sql/compact/capture.rs": "b5f0c11f030af42872beced295bfed181f28463d9de8ad2aaf33320008f70f26",
+      "crates/calc-flow/src/operator/sql/global_record/coalescer/checkpoint.rs": "8a4716376df4d9b507556c1dd3cc72cd6d6cbbfb37b8f8efb17bfda2e7cd8f1c",
+      "crates/calc-flow/src/operator/sql/ordered_last_tests/corruption/respect_nulls.rs": "84e3b66cb82988daa65f7336ecc6eb1046a1db94b18465fa4f19d07c260e597c",
+      "crates/calc-flow/src/operator/snapshot_sql/checkpoint.rs": "19109fbcdc76bf817f0baf117a550b2bed342bbad752ce9edf37e81108388a32",
+      "crates/calc-flow/src/operator/snapshot_sql/mod.rs": "5f812f02eee3afd3a324d095c2fa9962cfa0230e819a7932f2fc96ddac7edcf5"
+    },
+    "unit_snapshot_tree_unchanged": false,
+    "explanation": "Independent tester added four tests in 016e96fa; operator execution, budget, commit and recovery production files are unchanged. Reuse original 12 snapshot tests and independent 5 existing/4 new passes within their recorded scope. Do not relabel original 119 Python or older integration/example/consumer runs: the changed frontend/proof/example/consumer and matching native are freshly checked below."
   },
   "failure_injection_entries": [
     "operator::snapshot_sql::replacement_tests::replacement_commit_restore_and_failed_candidates",
@@ -475,14 +900,15 @@
     "Initial Rust chain run: 10 passed, 1 failed because row-local SQL was incorrectly selected as a replacement aggregate; selection now requires has_stream_aggregate; final 24 pass.",
     "Initial candidate Python run: 68 passed, 16 new fixture failures from logical binding names and unaliased SQL output names; fixtures now use physical bindings and explicit aliases, retaining value/schema assertions.",
     "Three library lint errors corrected with explicit imports and epoch parameter naming; example float comparison uses tolerance.",
-    "An initial pip-based extraction attempt was invalid because this interpreter has no pip; the built local wheel was extracted with zipfile, and all packaged Python source files and native provenance were verified. Invalid-environment failures are not counted as product evidence."
+    "An initial pip-based extraction attempt was invalid because this interpreter has no pip; the built local wheel was extracted with zipfile, and all packaged Python source files and native provenance were verified. Invalid-environment failures are not counted as product evidence.",
+    "CI follow-up: the first new adversarial identifier test attempted project execution, correctly rejected by existing portable-field validation. The final test targets schema planning and asserts exact escaped group/result names; portable execution domain is unchanged. The transitional overlay used the old native only for iteration and is not final-source evidence."
   ],
   "limits": [
     "Full workspace/coverage, service containers and cross-platform gates remain CI-owned; this report makes no CI-green or merge-ready claim.",
     "Python runtime validation uses CPython 3.13.9 / PyArrow 24.0.0 on Linux. Python 3.9 received syntax validation, not runtime validation.",
     "Replacement allowlist, whole-event budgets and operator-local commit boundary are deliberate limits. No general retractions, multi-input incremental join, batch mid-query recovery or external sink rollback.",
     "Rust full StreamRuntimeConfig literals must add the new field or use Default; Python positional field meanings remain unchanged.",
-    "Independent tester and reviewer remain required; no merge, delegation or subsequent task has been started."
+    "Independent tester completed four additional boundary tests in 016e96fa. Final independent reviewer remains coordinator-owned; no merge, delegation or subsequent task."
   ],
   "main_integration": {
     "observed_main_sha": "e7e771ac0efd0b44af936353a130f316c46a535b",
@@ -497,8 +923,651 @@
     "CARGO_TARGET_DIR": "target/aggregate/cargo",
     "CARGO_BUILD_JOBS": "4",
     "PYO3_PYTHON": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
-    "PYTHONPATH": "target/aggregate/final-python",
+    "PYTHONPATH": "target/aggregate/ci-python",
     "JAX_PLATFORMS": "cpu",
     "standalone_core_and_consumer": "PYO3_PYTHON removed"
+  },
+  "prior_validation": {
+    "validated_source_sha": "ddd8bd872ad4d1524cf5f97e8e6112197d71584d",
+    "native": {
+      "package": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/final-python/calc_flow/__init__.py",
+      "extension": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/final-python/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+      "python_version": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+      "pyarrow": "24.0.0",
+      "source_sha": "ddd8bd872ad4d1524cf5f97e8e6112197d71584d",
+      "interpreter": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+      "wheel": "target/aggregate/final-wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl",
+      "wheel_sha256": "f930a713bff3ca6b3f0947c3a0f96fb2084147cf4c30e61e2573a5e9e06d882b",
+      "extension_sha256": "f36ea47ddeba95d918274493acda92945120bed86449a94a71cc59f3277cacaa",
+      "python_source_files_verified": 55,
+      "source_manifest_sha256": "9ef8ea50b8d964400a50753847ed5bc96d084a1a4fbc9eafef2aceab69634a68",
+      "python39_syntax_files": 54
+    },
+    "component_trees": {
+      "core": "a1249e6cb31facf704ff5dbe698cbc48749b76bf",
+      "binding": "fd8dd7cc31ccf1d867c5df0f99cc87c5bca5ec9c",
+      "python": "522c347be1ce7bff94ffb0c4ea1fd1ac6486c263",
+      "snapshot_policy": "8b2ca0e0185e8a521366501d93ab96b150230f51"
+    },
+    "reuse": {
+      "unit_snapshot_tree_unchanged": true,
+      "explanation": "Snapshot policy/restore/test source is unchanged since its unit run. Later core edits replace wildcard imports, rename the forwarded epoch, and explain rejected shapes; admission/execution is unchanged. Final native build and 119 Python tests validate the final diagnostics. Snapshot policy/test source is byte-identical. Cargo cache is shared, but compilation and wheel contents are from this checkout."
+    },
+    "verification_environment": {
+      "cwd": "shared checkout calc-flow repository root",
+      "CARGO_TARGET_DIR": "target/aggregate/cargo",
+      "CARGO_BUILD_JOBS": "4",
+      "PYO3_PYTHON": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+      "PYTHONPATH": "target/aggregate/ci-python",
+      "JAX_PLATFORMS": "cpu",
+      "standalone_core_and_consumer": "PYO3_PYTHON removed"
+    }
+  },
+  "ci_followup": {
+    "trigger_head": "e9ca4ac754d26b4584e6f11a5640e0c1f0107139",
+    "check_run_id": 130556786333,
+    "check_url": "https://github.com/wegamekinglc/calc-flow/runs/130556786333",
+    "observed_trigger": "Codacy ACTION_REQUIRED: 12 new issues (11 CCN > 8; one B608). Initial snapshot reported 21 checks, 8 passed, 1 failed, 12 pending/running. This is historical, not the new-head result.",
+    "source_sha": "217040d9b91635a410c64b416da4046dbac550bd",
+    "preserved_independent_tester_commit": "016e96fa9c8b3b3f5bc8e2cda75263d6b371a5c2",
+    "annotations": [
+      {
+        "path": "crates/calc-flow/examples/32_sql_expression_pipeline.rs",
+        "blob_href": "https://github.com/wegamekinglc/calc-flow/blob/e9ca4ac754d26b4584e6f11a5640e0c1f0107139/crates/calc-flow/examples/32_sql_expression_pipeline.rs",
+        "start_line": 126,
+        "start_column": null,
+        "end_line": 126,
+        "end_column": null,
+        "annotation_level": "warning",
+        "title": "crates/calc-flow/examples/32_sql_expression_pipeline.rs#L126",
+        "message": "Method verify_replacement_budget has a cyclomatic complexity of 9 (limit is 8)",
+        "raw_details": null
+      },
+      {
+        "path": "crates/calc-flow/src/dataframe/aggregate.rs",
+        "blob_href": "https://github.com/wegamekinglc/calc-flow/blob/e9ca4ac754d26b4584e6f11a5640e0c1f0107139/crates/calc-flow/src/dataframe/aggregate.rs",
+        "start_line": 121,
+        "start_column": null,
+        "end_line": 121,
+        "end_column": null,
+        "annotation_level": "warning",
+        "title": "crates/calc-flow/src/dataframe/aggregate.rs#L121",
+        "message": "Method query has a cyclomatic complexity of 12 (limit is 8)",
+        "raw_details": null
+      },
+      {
+        "path": "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "blob_href": "https://github.com/wegamekinglc/calc-flow/blob/e9ca4ac754d26b4584e6f11a5640e0c1f0107139/crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "start_line": 12,
+        "start_column": null,
+        "end_line": 12,
+        "end_column": null,
+        "annotation_level": "warning",
+        "title": "crates/calc-flow/src/query_analysis/sql/replacement.rs#L12",
+        "message": "Method inspect has a cyclomatic complexity of 10 (limit is 8)",
+        "raw_details": null
+      },
+      {
+        "path": "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "blob_href": "https://github.com/wegamekinglc/calc-flow/blob/e9ca4ac754d26b4584e6f11a5640e0c1f0107139/crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "start_line": 87,
+        "start_column": null,
+        "end_line": 87,
+        "end_column": null,
+        "annotation_level": "warning",
+        "title": "crates/calc-flow/src/query_analysis/sql/replacement.rs#L87",
+        "message": "Method function has a cyclomatic complexity of 14 (limit is 8)",
+        "raw_details": null
+      },
+      {
+        "path": "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "blob_href": "https://github.com/wegamekinglc/calc-flow/blob/e9ca4ac754d26b4584e6f11a5640e0c1f0107139/crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "start_line": 131,
+        "start_column": null,
+        "end_line": 131,
+        "end_column": null,
+        "annotation_level": "warning",
+        "title": "crates/calc-flow/src/query_analysis/sql/replacement.rs#L131",
+        "message": "Method rejection_reason has a cyclomatic complexity of 18 (limit is 8)",
+        "raw_details": null
+      },
+      {
+        "path": "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "blob_href": "https://github.com/wegamekinglc/calc-flow/blob/e9ca4ac754d26b4584e6f11a5640e0c1f0107139/crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "start_line": 178,
+        "start_column": null,
+        "end_line": 178,
+        "end_column": null,
+        "annotation_level": "warning",
+        "title": "crates/calc-flow/src/query_analysis/sql/replacement.rs#L178",
+        "message": "Method function_rejection has a cyclomatic complexity of 10 (limit is 8)",
+        "raw_details": null
+      },
+      {
+        "path": "crates/calc-flow/tests/latest_relation.rs",
+        "blob_href": "https://github.com/wegamekinglc/calc-flow/blob/e9ca4ac754d26b4584e6f11a5640e0c1f0107139/crates/calc-flow/tests/latest_relation.rs",
+        "start_line": 521,
+        "start_column": null,
+        "end_line": 521,
+        "end_column": null,
+        "annotation_level": "warning",
+        "title": "crates/calc-flow/tests/latest_relation.rs#L521",
+        "message": "Method dataframe_sql_replacement_chain_is_six_legacy_is_seven has a cyclomatic complexity of 25 (limit is 8)",
+        "raw_details": null
+      },
+      {
+        "path": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "blob_href": "https://github.com/wegamekinglc/calc-flow/blob/e9ca4ac754d26b4584e6f11a5640e0c1f0107139/crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "start_line": 513,
+        "start_column": null,
+        "end_line": 513,
+        "end_column": null,
+        "annotation_level": "warning",
+        "title": "crates/calc-flow/tests/relational-consumer/src/main.rs#L513",
+        "message": "Method check_aggregate has a cyclomatic complexity of 26 (limit is 8)",
+        "raw_details": null
+      },
+      {
+        "path": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "blob_href": "https://github.com/wegamekinglc/calc-flow/blob/e9ca4ac754d26b4584e6f11a5640e0c1f0107139/crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "start_line": 620,
+        "start_column": null,
+        "end_line": 620,
+        "end_column": null,
+        "annotation_level": "warning",
+        "title": "crates/calc-flow/tests/relational-consumer/src/main.rs#L620",
+        "message": "Method check_aggregate_groups has a cyclomatic complexity of 10 (limit is 8)",
+        "raw_details": null
+      },
+      {
+        "path": "python/calc_flow/symbolic/aggregate.py",
+        "blob_href": "https://github.com/wegamekinglc/calc-flow/blob/e9ca4ac754d26b4584e6f11a5640e0c1f0107139/python/calc_flow/symbolic/aggregate.py",
+        "start_line": 11,
+        "start_column": null,
+        "end_line": 11,
+        "end_column": null,
+        "annotation_level": "warning",
+        "title": "python/calc_flow/symbolic/aggregate.py#L11",
+        "message": "Method aggregate has a cyclomatic complexity of 15 (limit is 8)",
+        "raw_details": null
+      },
+      {
+        "path": "python/calc_flow/symbolic/aggregate.py",
+        "blob_href": "https://github.com/wegamekinglc/calc-flow/blob/e9ca4ac754d26b4584e6f11a5640e0c1f0107139/python/calc_flow/symbolic/aggregate.py",
+        "start_line": 50,
+        "start_column": null,
+        "end_line": 50,
+        "end_column": null,
+        "annotation_level": "warning",
+        "title": "python/calc_flow/symbolic/aggregate.py#L50",
+        "message": "Possible SQL injection vector through string-based query construction.",
+        "raw_details": null
+      },
+      {
+        "path": "python/calc_flow/symbolic/aggregate.py",
+        "blob_href": "https://github.com/wegamekinglc/calc-flow/blob/e9ca4ac754d26b4584e6f11a5640e0c1f0107139/python/calc_flow/symbolic/aggregate.py",
+        "start_line": 67,
+        "start_column": null,
+        "end_line": 67,
+        "end_column": null,
+        "annotation_level": "warning",
+        "title": "python/calc_flow/symbolic/aggregate.py#L67",
+        "message": "Method validate has a cyclomatic complexity of 9 (limit is 8)",
+        "raw_details": null
+      }
+    ],
+    "lizard_version": "1.26.0",
+    "changed_function_ccn": [
+      {
+        "path": "crates/calc-flow/examples/32_sql_expression_pipeline.rs",
+        "name": "replacement_declaration",
+        "line": 126,
+        "ccn": 7,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/examples/32_sql_expression_pipeline.rs",
+        "name": "verify_replacement_budget",
+        "line": 139,
+        "ccn": 4,
+        "before": 9,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/dataframe/aggregate.rs",
+        "name": "query",
+        "line": 121,
+        "ccn": 3,
+        "before": 12,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/dataframe/aggregate.rs",
+        "name": "validate_groups",
+        "line": 142,
+        "ccn": 5,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/dataframe/aggregate.rs",
+        "name": "selection",
+        "line": 162,
+        "ccn": 2,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/dataframe/aggregate.rs",
+        "name": "operand",
+        "line": 177,
+        "ccn": 6,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/dataframe/aggregate.rs",
+        "name": "group_clause",
+        "line": 202,
+        "ccn": 2,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "name": "inspect",
+        "line": 12,
+        "ccn": 3,
+        "before": 10,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "name": "statement_supported",
+        "line": 19,
+        "ccn": 6,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "name": "group_expressions",
+        "line": 33,
+        "ccn": 3,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "name": "normalized_query",
+        "line": 39,
+        "ccn": 2,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "name": "function",
+        "line": 95,
+        "ccn": 3,
+        "before": 14,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "name": "unmodified_function",
+        "line": 105,
+        "ccn": 4,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "name": "function_operand",
+        "line": 111,
+        "ccn": 6,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "name": "operand_supported",
+        "line": 123,
+        "ccn": 5,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "name": "rejection_reason",
+        "line": 150,
+        "ccn": 4,
+        "before": 18,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "name": "query_rejection",
+        "line": 162,
+        "ccn": 3,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "name": "relation_rejection",
+        "line": 177,
+        "ccn": 2,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "name": "select_modifier_rejection",
+        "line": 181,
+        "ccn": 1,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "name": "query_modifier_rejection",
+        "line": 199,
+        "ccn": 2,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "name": "item_rejection",
+        "line": 213,
+        "ccn": 3,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "name": "function_rejection",
+        "line": 220,
+        "ccn": 6,
+        "before": 10,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/src/query_analysis/sql/replacement.rs",
+        "name": "direct_argument",
+        "line": 235,
+        "ccn": 1,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/tests/latest_relation.rs",
+        "name": "open",
+        "line": 154,
+        "ccn": 1,
+        "before": 1,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/tests/latest_relation.rs",
+        "name": "dataframe_sql_replacement_chain_is_six_legacy_is_seven",
+        "line": 521,
+        "ccn": 5,
+        "before": 25,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/tests/latest_relation.rs",
+        "name": "replacement_chain",
+        "line": 533,
+        "ccn": 7,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/tests/latest_relation.rs",
+        "name": "visible_replacement_total",
+        "line": 545,
+        "ccn": 7,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/tests/latest_relation.rs",
+        "name": "check_replacement_chain_stream",
+        "line": 551,
+        "ccn": 7,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/tests/latest_relation.rs",
+        "name": "check_replacement_chain_batch",
+        "line": 585,
+        "ccn": 5,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "name": "open",
+        "line": 124,
+        "ccn": 1,
+        "before": 1,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "name": "close",
+        "line": 145,
+        "ccn": 1,
+        "before": 1,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "name": "aggregate_declaration",
+        "line": 513,
+        "ccn": 4,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "name": "aggregate_reducers",
+        "line": 523,
+        "ccn": 8,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "name": "check_aggregate",
+        "line": 535,
+        "ccn": 5,
+        "before": 26,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "name": "check_aggregate_schema",
+        "line": 544,
+        "ccn": 2,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "name": "check_aggregate_finite",
+        "line": 567,
+        "ccn": 6,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "name": "check_aggregate_output",
+        "line": 588,
+        "ccn": 2,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "name": "check_aggregate_replacement",
+        "line": 617,
+        "ccn": 6,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "name": "check_aggregate_groups",
+        "line": 643,
+        "ccn": 7,
+        "before": 10,
+        "changed": true
+      },
+      {
+        "path": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "name": "aggregate_groups_declaration",
+        "line": 670,
+        "ccn": 4,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "python/calc_flow/symbolic/aggregate.py",
+        "name": "aggregate",
+        "line": 34,
+        "ccn": 5,
+        "before": 15,
+        "changed": true
+      },
+      {
+        "path": "python/calc_flow/symbolic/aggregate.py",
+        "name": "_entries",
+        "line": 54,
+        "ccn": 5,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "python/calc_flow/symbolic/aggregate.py",
+        "name": "_reducer",
+        "line": 72,
+        "ccn": 4,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "python/calc_flow/symbolic/aggregate.py",
+        "name": "_operand",
+        "line": 86,
+        "ccn": 4,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "python/calc_flow/symbolic/aggregate.py",
+        "name": "_query",
+        "line": 98,
+        "ccn": 4,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "python/calc_flow/symbolic/aggregate.py",
+        "name": "validate",
+        "line": 109,
+        "ccn": 2,
+        "before": 9,
+        "changed": true
+      },
+      {
+        "path": "python/calc_flow/symbolic/aggregate.py",
+        "name": "_validate_groups",
+        "line": 116,
+        "ccn": 3,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "python/calc_flow/symbolic/aggregate.py",
+        "name": "_validate_reducers",
+        "line": 128,
+        "ccn": 3,
+        "before": null,
+        "changed": true
+      },
+      {
+        "path": "python/calc_flow/symbolic/aggregate.py",
+        "name": "_invalid_operand",
+        "line": 142,
+        "ccn": 4,
+        "before": null,
+        "changed": true
+      }
+    ],
+    "maximum_changed_function_ccn": 8,
+    "independent_test_ccn": [
+      {
+        "name": "replacement_sql",
+        "ccn": 1
+      },
+      {
+        "name": "test_replacement_legacy_input_budget_limits_each_candidate",
+        "ccn": 4
+      },
+      {
+        "name": "test_replacement_restore_honors_tighter_legacy_input_budget",
+        "ccn": 3
+      },
+      {
+        "name": "test_replacement_cancelled_pending_emit_refunds_candidate_and_output",
+        "ccn": 2
+      },
+      {
+        "name": "test_replacement_successful_emit_commits_when_collector_cancels",
+        "ccn": 3
+      }
+    ],
+    "bandit": {
+      "version": "1.9.4",
+      "test": "B608",
+      "before_count": 1,
+      "after_count": 0,
+      "nosec_count": 0,
+      "before_result": [
+        {
+          "code": "49         )\n50     query = f\"SELECT {', '.join(select)} FROM input\"\n51     if groups:\n",
+          "col_offset": 14,
+          "end_col_offset": 21,
+          "filename": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/bandit-before.py",
+          "issue_confidence": "LOW",
+          "issue_cwe": {
+            "id": 89,
+            "link": "https://cwe.mitre.org/data/definitions/89.html"
+          },
+          "issue_severity": "MEDIUM",
+          "issue_text": "Possible SQL injection vector through string-based query construction.",
+          "line_number": 50,
+          "line_range": [
+            50
+          ],
+          "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b608_hardcoded_sql_expressions.html",
+          "test_id": "B608",
+          "test_name": "hardcoded_sql_expressions"
+        }
+      ],
+      "before_sha256": "31164eed7f72b2d2e1f8eaebdf9f6ad426d37f63dfac9a34c6bf17370b0b56cf",
+      "after_sha256": "f2b7a5c837281821b474403cd7370e7847d65856d0060d4b85f9e4f08d665c5b"
+    },
+    "scope": "Refactor aggregate query/schema validation, strict SQL allowlist and diagnostics, example/test/consumer helpers. Fixed SQL clauses + quoted identifiers + admitted builtin reducers. No threshold/exclusion/coverage configuration changes. New public schema-planning test preserves adversarial identifier text. Execution continues to require portable project field names.",
+    "reused": "Unchanged atomicity/recovery tests, binding-lint/rustdoc and unrelated frontend checks retain original SHA and scope. New source has fresh core build, 20 affected Rust integration tests, external public consumer, both examples, native wheel, 120 focused Python tests and gate checks.",
+    "source_manifest_sha256": "314b1eae2a3e50e3cd2d0ae829c1c8ccfd8967e691028fcbeb7674ef42740626",
+    "source_manifest_commit_verified_files": 1154
   }
 }
