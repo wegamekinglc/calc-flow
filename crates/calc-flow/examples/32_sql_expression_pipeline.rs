@@ -6,7 +6,8 @@ use calc_flow::arrow::{
 };
 use calc_flow::{
     Batch, BatchMetadata, CompileMode, CompileOptions, ExecutionOptions, InputOptions, Program,
-    Result, TableExpr, UdfRegistry, lit, table_input,
+    Result, StateBudget, StreamRequirements, StreamRuntimeConfig, TableExpr, UdfRegistry,
+    UpdateSemantics, lit, table_input,
 };
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -25,6 +26,7 @@ fn discounted(table: &TableExpr) -> Result<TableExpr> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    verify_replacement_budget().await?;
     let (schema, input) = orders()?;
     let batch = declaration(schema)?;
     verify_wrappers(&batch).await?;
@@ -119,4 +121,32 @@ async fn execute(batch: &Program, input: Batch) -> Result<Vec<Option<f64>>> {
         })
         .collect();
     Ok(actual)
+}
+
+async fn verify_replacement_budget() -> Result<()> {
+    let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)]));
+    let source = table_input("events", schema, InputOptions::default())?;
+    let first = source.aggregate(vec![source.column("x")?.sum().alias("total")?], vec![])?;
+    let result = first.sql("SELECT SUM(total) AS total FROM input")?;
+    let latest = Program::new(
+        "replacement-budget",
+        CompileMode::Stream,
+        BTreeMap::from([("result".into(), result)]),
+    )?
+    .with_update_semantics(UpdateSemantics::LatestRelation);
+    let plan = latest
+        .compile_stream(
+            &UdfRegistry::new().snapshot(),
+            &StreamRequirements::default(),
+            &CompileOptions::default(),
+        )
+        .await?;
+    let missing = plan
+        .validate_sql_budgets(&StreamRuntimeConfig::default())
+        .unwrap_err();
+    assert!(missing.to_string().contains("sql_replacement_state_budget"));
+    plan.validate_sql_budgets(&StreamRuntimeConfig {
+        sql_replacement_state_budget: Some(StateBudget::new(100, 8 << 20)?),
+        ..Default::default()
+    })
 }
