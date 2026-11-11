@@ -220,3 +220,36 @@ def test_exported_batch_plan_exposes_physical_names_for_public_reload() -> None:
     assert reloaded.outputs[plan.external_outputs[0]].to_pyarrow().to_pydict() == {
         "z": [2, 4]
     }
+
+
+def test_mode_wrappers_preserve_batch_and_fresh_stream_state_boundaries() -> None:
+    import asyncio
+
+    source = cf.table_input("events", schema=pa.schema([("x", pa.int64())]))
+    batch = cf.Program(
+        "state",
+        mode="batch",
+        outputs={"total": source.sql("SELECT SUM(x) AS n FROM input")},
+    )
+    stream = batch.for_mode("stream")
+    tables = [pa.table({"x": [1]}), pa.table({"x": [2, 3]})]
+    runtime = cf.Runtime()
+    plan = batch.compile_batch(runtime)
+    assert batch.compile_batch(runtime) is plan
+    actual = [
+        plan.execute({plan.external_inputs[0]: cf.Batch.from_pyarrow(table)})
+        .outputs[plan.external_outputs[0]]
+        .to_pyarrow()
+        .column("n")
+        .to_pylist()
+        for table in tables
+    ]
+    assert actual == [[1], [5]]
+
+    async def run(values: list[pa.Table]) -> list[list[int]]:
+        async with stream.stream({"events": values}) as events:
+            return [event.table.column("n").to_pylist() async for event in events]
+
+    assert asyncio.run(run(tables)) == [[1], [6]]
+    assert asyncio.run(run(tables[1:])) == [[5]]
+    assert batch.fingerprint == stream.fingerprint
