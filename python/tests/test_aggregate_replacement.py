@@ -145,11 +145,17 @@ def test_mixed_chain_preserves_updates_and_shared_output(dataframe, semantics, l
         "shared": [{"total": [1]}, {"total": [6]}],
     }
     finite = program.for_mode("batch").compile_batch()
-    for values, expected in [([1], 1), ([2, 3], 5)]:
+    for values, expected in [([1], 1), ([2, 3], 5), ([1, 2, 3], 6)]:
         # The same warmed native plan executes twice without a reset.
-        assert finite.execute(
-            {"events": cf.Batch.from_pyarrow(pa.table({"x": values}))}
-        ).outputs["result"].to_pyarrow().to_pydict() == {"value": [expected]}
+        result = finite.execute(
+            {finite.external_inputs[0]: cf.Batch.from_pyarrow(pa.table({"x": values}))}
+        )
+        tables = [batch.to_pyarrow() for batch in result.outputs.values()]
+        actual = {tuple(table.column_names): table.to_pydict() for table in tables}
+        assert actual == {
+            ("value",): {"value": [expected]},
+            ("total",): {"total": [expected]},
+        }
     assert _observe(program, [], config) == {"result": [], "shared": []}
 
 
@@ -190,16 +196,16 @@ def test_budget_preflight_precedes_iterator_bindings_and_job(monkeypatch, compac
 @pytest.mark.parametrize(
     "query",
     [
-        "SELECT SUM(DISTINCT total) FROM s",
-        "SELECT SUM(total) FROM s HAVING SUM(total)>0",
-        "SELECT SUM(total) FROM s ORDER BY 1",
-        "SELECT SUM(total) FROM s LIMIT 1",
-        "SELECT SUM(total)+1 FROM s",
-        "SELECT SUM(total) FROM s WHERE total>0",
-        "SELECT SUM(ABS(total)) FROM s",
-        "SELECT COUNT(1) FROM s",
-        "WITH c AS (SELECT * FROM s) SELECT SUM(total) FROM c",
-        "SELECT SUM(a.total) FROM s a JOIN s b ON a.total=b.total",
+        "SELECT SUM(DISTINCT total) AS n FROM s",
+        "SELECT SUM(total) AS n FROM s HAVING SUM(total)>0",
+        "SELECT SUM(total) AS n FROM s ORDER BY 1",
+        "SELECT SUM(total) AS n FROM s LIMIT 1",
+        "SELECT SUM(total)+1 AS n FROM s",
+        "SELECT SUM(total) AS n FROM s WHERE total>0",
+        "SELECT SUM(ABS(total)) AS n FROM s",
+        "SELECT COUNT(1) AS n FROM s",
+        "WITH c AS (SELECT * FROM s) SELECT SUM(total) AS n FROM c",
+        "SELECT SUM(a.total) AS n FROM s a JOIN s b ON a.total=b.total",
     ],
 )
 def test_replacement_allowlist_rejects_unsupported_queries(query):

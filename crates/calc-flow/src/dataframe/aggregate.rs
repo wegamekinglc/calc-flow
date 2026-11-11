@@ -1,5 +1,11 @@
 //! Named finite relational reductions, lowered through the SQL planner.
-use super::*;
+use super::{
+    ColumnExpr, DataType, Relation, RelationKind, Scalar, SchemaRef, TableExpr, check_name, digest,
+    invalid, quote, segment,
+};
+use crate::Result;
+use serde_json::json;
+use std::{collections::BTreeSet, sync::Arc};
 
 /// An immutable reduction of a direct column, distinct from row-local expressions.
 #[derive(Clone, Debug)]

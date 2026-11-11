@@ -1475,9 +1475,9 @@ impl StreamOperator for SqlOperator {
         Ok(())
     }
 
-    fn checkpoint(&mut self, _epoch: Epoch) -> Result<OperatorStateSnapshot> {
+    fn checkpoint(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
         if let Some(operator) = &mut self.replacement {
-            return operator.checkpoint(_epoch);
+            return operator.checkpoint(epoch);
         }
         if self.compact.is_some() {
             return self.compact_checkpoint();
