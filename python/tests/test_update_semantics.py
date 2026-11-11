@@ -361,3 +361,24 @@ def test_latest_preserves_existing_snapshot_sql_terminal_consumer():
         {"total": [1]},
         {"total": [6]},
     ]
+
+
+def test_lowering_rewrite_preserves_update_choice(monkeypatch):
+    import importlib
+
+    forwarder = importlib.import_module("calc_flow.symbolic.lower.macd_forward")
+
+    def copied_declarations(program, analyzer):
+        return cf.Program(
+            program.name,
+            mode=program.mode,
+            inputs=program.inputs,
+            outputs=program.outputs,
+        )
+
+    monkeypatch.setattr(forwarder, "_forward_native_macd", copied_declarations)
+    latest = _program().with_update_semantics("latest_relation")
+    assert (
+        latest.to_project().model_dump()["graph"]["update_semantics"]
+        == "latest_relation"
+    )

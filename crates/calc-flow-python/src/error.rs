@@ -37,11 +37,11 @@ pub(crate) fn to_py_err(error: calc_flow::CalcFlowError) -> PyErr {
     let message = error.to_string();
     match error {
         calc_flow::CalcFlowError::ProjectValidation { issues } => {
-            project_validation_error(issues, message)
+            project_validation_error(&issues, message)
         }
         calc_flow::CalcFlowError::QueryPortability { report }
         | calc_flow::CalcFlowError::QueryUpdateSemantics { report, .. } => {
-            query_compile_error(*report, message)
+            query_compile_error(&report, message)
         }
         error => basic_py_error(error, message),
     }
@@ -77,7 +77,7 @@ fn basic_py_error(error: calc_flow::CalcFlowError, message: String) -> PyErr {
     }
 }
 
-fn project_validation_error(issues: Vec<calc_flow::ValidationIssue>, message: String) -> PyErr {
+fn project_validation_error(issues: &[calc_flow::ValidationIssue], message: String) -> PyErr {
     Python::attach(|py| {
         let translated = ConfigError::new_err(message);
         let entries = issues
@@ -100,10 +100,10 @@ fn project_validation_error(issues: Vec<calc_flow::ValidationIssue>, message: St
     })
 }
 
-fn query_compile_error(report: calc_flow::QueryAnalysis, message: String) -> PyErr {
+fn query_compile_error(report: &calc_flow::QueryAnalysis, message: String) -> PyErr {
     Python::attach(|py| {
         let translated = CompileError::new_err(message);
-        match attach_query_report(py, &translated, &report) {
+        match attach_query_report(py, &translated, report) {
             Ok(()) => translated,
             Err(error) => error,
         }

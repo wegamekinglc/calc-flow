@@ -129,8 +129,12 @@ pub struct PipelineSpec {
     #[serde(default)]
     pub datafusion: DataFusionConfig,
     /// Relation update interpretation; omitted legacy graphs keep their original bytes.
-    #[serde(default, skip_serializing_if = "crate::UpdateSemantics::is_legacy")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub update_semantics: crate::UpdateSemantics,
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

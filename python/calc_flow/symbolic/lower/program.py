@@ -720,7 +720,7 @@ def _lower_program_document(
 
     forwarded = _forward_native_macd(program, analyzer)
     if forwarded is not program:
-        program = forwarded
+        program = forwarded.with_update_semantics(program.update_semantics)
         analyzer, capabilities = _check_expression_capability(
             program, selected, mode_value
         )

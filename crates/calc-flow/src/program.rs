@@ -25,8 +25,8 @@ pub enum UpdateSemantics {
 }
 
 impl UpdateSemantics {
-    pub(crate) fn is_legacy(&self) -> bool {
-        *self == Self::LegacyAppend
+    pub(crate) fn is_legacy(self) -> bool {
+        self == Self::LegacyAppend
     }
 }
 
