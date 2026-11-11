@@ -151,14 +151,14 @@
     {
       "target": "core",
       "baseline_sha256": "d506749a896357a4902ce60a3bf3b2a2fdb274ad8b168d1450e231b23f967a64",
-      "candidate_sha256": "94aca8bae6ca3506948cebcc76a7bcadd98eb5291bedf58ab85e9d22e6176f55",
+      "candidate_sha256": "a6211fa6b0c2e765167f9af9f513e52a0c4b164c28227cfaaeb07e3780b80b4f",
       "reason": "Add three exact-oracle native rolling history cases for Duration SUM, mixed Duration MIN plus Rows MAX, and a Rows-only control. Existing core functions, fixtures and timing boundaries are unchanged; new cases are new coverage for the scheduled suite. The phase comparison applies this identical benchmark declaration to both product revisions.",
       "reference": "2026-11-11 streaming rolling state optimization stage 1"
     },
     {
       "target": "core",
       "baseline_sha256": "1977e38423122a9a4be36d56317cd905d64dd2fb95e37005e05669f436d47c98",
-      "candidate_sha256": "94aca8bae6ca3506948cebcc76a7bcadd98eb5291bedf58ab85e9d22e6176f55",
+      "candidate_sha256": "a6211fa6b0c2e765167f9af9f513e52a0c4b164c28227cfaaeb07e3780b80b4f",
       "reason": "Exact composed migration from the retained dependency-upgrade core workload anchor through PR #522 and rolling state optimization stage 1: retire the sub-nanosecond requires_datafusion getter and add three exact-oracle rolling history cases. Every remaining historical core fixture and timing boundary is unchanged. New cases are new coverage; the phase comparison uses identical benchmark declarations on both product revisions.",
       "reference": "PR #522 and 2026-11-11 streaming rolling state optimization stage 1; retained dependency-migration core workload anchor"
     }
