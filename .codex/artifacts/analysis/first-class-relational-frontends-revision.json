@@ -163,6 +163,18 @@
         18,
         27
       ]
+    },
+    {
+      "id": "docs_CI_RED",
+      "command": "git diff --check 775ea9738265597de492b848f8e0763962c7041b HEAD",
+      "result": "expected_failure",
+      "log_sha256": "69c40a42a90d695eb7c09d3d785455afa2a87e44992fefcc263432e92adbc68b"
+    },
+    {
+      "id": "docs_CI_GREEN",
+      "command": "git diff --cached --check 775ea9738265597de492b848f8e0763962c7041b; python scripts/check_spec_references.py",
+      "result": "passed",
+      "log_sha256": "451465601c9c0f0c187f07ad02a49cb0b66dc2a13af19c6b12312249756af1ab"
     }
   ],
   "codacy_complexity": {
@@ -354,5 +366,20 @@
     "cross-platform matrix",
     "performance"
   ],
-  "merge_state": "Independent blocker/direct-impact reviewer recheck and required CI gates remain; no merge."
+  "merge_state": "Independent blocker/direct-impact reviewer recheck and required CI gates remain; no merge.",
+  "review_storage": "Original task-local file remains untracked and byte-identical; existing Multica attachment 01a1c967-d08e-77a2-b329-6a1dcc25a56a retained.",
+  "ci_repair": {
+    "snapshot_head": "77a4c4f8031de1702720e430a89702dbccf4fd29",
+    "snapshot_counts": {
+      "IN_PROGRESS": 15,
+      "SUCCESS": 5,
+      "FAILURE": 1
+    },
+    "failed_job": 130389253020,
+    "diagnostic_command": "gh api repos/wegamekinglc/calc-flow/actions/jobs/130389253020/logs",
+    "cause": "Newly tracked original review report has an existing extra blank line at EOF.",
+    "fix": "Remove only Git tracking introduced by this run; preserve exact original report locally and in the existing issue attachment.",
+    "product_sources_changed": false,
+    "new_head_ci": "Triggered by corrective push; not polled after the single snapshot."
+  }
 }

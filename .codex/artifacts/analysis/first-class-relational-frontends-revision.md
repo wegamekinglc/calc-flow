@@ -2,7 +2,8 @@
 
 Reviewed baseline: `e12fc8ba6f8d45c83cd462628fde46481fc56ced`, PR #591.
 The original isolated checkout/branch is reused. The review report is preserved
-byte for byte (SHA256
+byte for byte in its initial untracked task-local file and existing issue
+attachment (SHA256
 `f2b6751470416825b3bd2fcb1a8347ad11d02a50966e14f32f08ce2fae748776`).
 The frozen note and original analysis/evidence files remain unchanged.
 
@@ -137,3 +138,26 @@ PYTHONPATH=target/relational/revision-wheel-python JAX_PLATFORMS=cpu \
 
 No full regression, coverage, connector service or performance matrix was run.
 The independent recheck should focus on F1–F4 and directly affected paths.
+
+## CI failure diagnosed and repaired
+
+The single nonblocking snapshot on `77a4c4f8031de1702720e430a89702dbccf4fd29`
+showed Documentation checks failure (job `130389253020`). Reading that completed
+job's log identified the original review report's extra EOF blank line. The
+report had been added unchanged with the evidence commit; a full-base whitespace
+check therefore rejected it. The earlier worktree-only whitespace check did not
+cover this newly tracked artifact.
+
+To honor the instruction to preserve the report, its exact original bytes are
+retained in the task-local untracked file and original Multica review attachment
+`01a1c967-d08e-77a2-b329-6a1dcc25a56a`. Only its newly introduced Git tracking is
+removed. No report prose, gate or product source is changed.
+
+The actual CI RED was reproduced with
+`git diff --check 775ea9738265597de492b848f8e0763962c7041b HEAD`.
+The corrected candidate passes the corresponding full-base staged diff and
+`python scripts/check_spec_references.py`, both steps used by this CI job.
+Product source trees still match the native/wheel build commit, so those valid
+results are retained. The fix is pushed to the same PR; new-head CI is left to
+run without another status poll. The attached snapshot is explicitly the
+pre-repair snapshot, not a claim that current CI is green.
