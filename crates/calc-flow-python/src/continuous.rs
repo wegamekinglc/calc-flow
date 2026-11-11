@@ -2082,6 +2082,8 @@ fn rolling_callback_to_py<'py>(
         "touched_entities" => status.touched_entities,
         "copied_entities" => status.copied_entities,
         "numeric_rows" => status.numeric_rows,
+        "numeric_lanes_started" => status.numeric_lanes_started,
+        "numeric_parallel_rows" => status.numeric_parallel_rows,
         "history_rows_materialized" => status.history_rows_materialized,
         "scalar_value_conversions" => status.scalar_value_conversions,
         "output_rows_prepared" => status.output_rows_prepared,
@@ -2740,6 +2742,8 @@ mod tests {
         Python::attach(|py| {
             let mut observation = calc_flow::RollingMetrics::default();
             observation.data.input_rows = u64::MAX;
+            observation.data.numeric_lanes_started = u64::MAX - 1;
+            observation.data.numeric_parallel_rows = u64::MAX - 2;
             observation.data.callback_duration = std::time::Duration::MAX;
             observation.end.callback_duration = std::time::Duration::from_nanos(1);
             observation.overflowed = true;
@@ -2747,13 +2751,16 @@ mod tests {
             let values = super::rolling_metrics_to_py(py, &statuses).unwrap();
             let node = values.get_item("rolling").unwrap().unwrap();
             let data = node.get_item("data").unwrap();
-            assert_eq!(
-                data.get_item("input_rows")
-                    .unwrap()
-                    .extract::<u64>()
-                    .unwrap(),
-                u64::MAX
-            );
+            for (field, expected) in [
+                ("input_rows", u64::MAX),
+                ("numeric_lanes_started", u64::MAX - 1),
+                ("numeric_parallel_rows", u64::MAX - 2),
+            ] {
+                assert_eq!(
+                    data.get_item(field).unwrap().extract::<u64>().unwrap(),
+                    expected
+                );
+            }
             assert_eq!(
                 data.get_item("callback_duration_ns")
                     .unwrap()

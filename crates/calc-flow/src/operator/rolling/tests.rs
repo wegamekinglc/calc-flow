@@ -1,3 +1,5 @@
+mod capability_parallel;
+mod capability_profiles;
 mod decay_tests;
 mod incremental_accounting;
 mod incremental_history;

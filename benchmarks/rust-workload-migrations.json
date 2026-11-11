@@ -161,6 +161,27 @@
       "candidate_sha256": "a6211fa6b0c2e765167f9af9f513e52a0c4b164c28227cfaaeb07e3780b80b4f",
       "reason": "Exact composed migration from the retained dependency-upgrade core workload anchor through PR #522 and rolling state optimization stage 1: retire the sub-nanosecond requires_datafusion getter and add three exact-oracle rolling history cases. Every remaining historical core fixture and timing boundary is unchanged. New cases are new coverage; the phase comparison uses identical benchmark declarations on both product revisions.",
       "reference": "PR #522 and 2026-11-11 streaming rolling state optimization stage 1; retained dependency-migration core workload anchor"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "a6211fa6b0c2e765167f9af9f513e52a0c4b164c28227cfaaeb07e3780b80b4f",
+      "candidate_sha256": "2eb16d32096c12e25e705b7c137593d09641849163c95d28c01f8fbbdc508bd8",
+      "reason": "Add three grouped-lane rolling cases: cold Rows37 mean, timed-seed warm Duration SUM60s and warm Rows20 mean control. The shared declaration uses independent exact dyadic oracles and takes the native metrics snapshot and drops the final owning job handle within each timed run, then serializes and validates counters outside timing. Existing three rolling history cases retain their input formulas, declarations, samples and in-timer job drop; all other core cases are unchanged. Both phase products use the identical entry point and symmetric lane instrumentation; new cases have no historical timing equivalence.",
+      "reference": "2026-11-11 streaming rolling optimization stage 4; paired grouped-lane measurement"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "d506749a896357a4902ce60a3bf3b2a2fdb274ad8b168d1450e231b23f967a64",
+      "candidate_sha256": "2eb16d32096c12e25e705b7c137593d09641849163c95d28c01f8fbbdc508bd8",
+      "reason": "Exact composed core migration through rolling optimization stages 1 and 4: add the three rolling history cases, then three exact-oracle grouped-lane cases with actual per-run lane proof serialized outside timing after the native snapshot and final owning handle drop occur inside timing. Existing historical core cases and the stage-1 workloads preserve fixtures, declarations and timing boundaries. New cases are additional coverage, not historical timing samples; the phase overlay uses the identical benchmark and symmetric instrumentation on both products.",
+      "reference": "2026-11-11 streaming rolling optimization stage 4; paired grouped-lane measurement"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "1977e38423122a9a4be36d56317cd905d64dd2fb95e37005e05669f436d47c98",
+      "candidate_sha256": "2eb16d32096c12e25e705b7c137593d09641849163c95d28c01f8fbbdc508bd8",
+      "reason": "Exact composed migration from the retained dependency-upgrade core workload anchor through PR #522 and rolling stages 1 and 4: retire the sub-nanosecond requires_datafusion getter, add three rolling history cases, then three exact-oracle grouped-lane cases with timed seed and post-timer actual lane validation (native snapshot and final owning handle drop stay inside timing). Every remaining historical core fixture and timing boundary is preserved. New cases have no historical timing equivalence; the phase overlay uses identical benchmark declarations and symmetric instrumentation on both products.",
+      "reference": "2026-11-11 streaming rolling optimization stage 4; paired grouped-lane measurement"
     }
   ]
 }

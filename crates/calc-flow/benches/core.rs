@@ -453,9 +453,9 @@ mod rolling_history {
     use calc_flow::{
         Cursor, DeliveryGuarantee, JobState, LateErrorScope, LatePolicySpec,
         NativeWatermarkCapability, ROLLING_CONFIGURATION_VERSION, ROLLING_STATE_LAYOUT_VERSION,
-        ReplayPositioning, RollingFrameSpec, RollingNumericalProfile, RollingOperator,
-        RollingOutputSpec, RollingSpec, RollingValuePolicy, SinkBinding, SourceBinding,
-        SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema,
+        ReplayPositioning, RollingFrameSpec, RollingMetrics, RollingNumericalProfile,
+        RollingOperator, RollingOutputSpec, RollingSpec, RollingValuePolicy, SinkBinding,
+        SourceBinding, SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema,
         StreamRequirements, StreamRuntimeConfig, StreamSink, StreamSource, StreamingRunner,
         WatermarkPolicy,
     };
@@ -478,6 +478,9 @@ mod rolling_history {
         DurationSum,
         MixedExtrema,
         RowsSum,
+        ColdRowsMean,
+        WarmDurationSum,
+        WarmRowsMean,
     }
 
     impl Case {
@@ -486,30 +489,71 @@ mod rolling_history {
                 Self::DurationSum => "duration_sum_100k_keys1000_batch1000",
                 Self::MixedExtrema => "duration_min_rows_max_10k_keys64_batch1000",
                 Self::RowsSum => "rows_sum20_10k_keys64_batch1000",
+                Self::ColdRowsMean => "cold_rows37_mean_131074_keys1000",
+                Self::WarmDurationSum => "warm_duration_sum60s_132075_keys1000",
+                Self::WarmRowsMean => "warm_rows20_mean_132075_keys1000",
             }
         }
 
         fn rows(self) -> usize {
-            if matches!(self, Self::DurationSum) {
-                100_000
-            } else {
-                10_000
+            match self {
+                Self::DurationSum => 100_000,
+                Self::MixedExtrema | Self::RowsSum => 10_000,
+                Self::ColdRowsMean => 131_074,
+                Self::WarmDurationSum | Self::WarmRowsMean => 132_075,
             }
         }
 
         fn groups(self) -> usize {
-            if matches!(self, Self::DurationSum) {
-                1_000
-            } else {
-                64
+            match self {
+                Self::MixedExtrema | Self::RowsSum => 64,
+                _ => 1_000,
             }
         }
 
         fn step(self) -> i64 {
-            if matches!(self, Self::DurationSum) {
-                1_000
+            match self {
+                Self::MixedExtrema | Self::RowsSum => 10_000,
+                _ => 1_000,
+            }
+        }
+
+        fn observes_lanes(self) -> bool {
+            matches!(
+                self,
+                Self::ColdRowsMean | Self::WarmDurationSum | Self::WarmRowsMean
+            )
+        }
+
+        fn batch_sizes(self) -> Vec<usize> {
+            match self {
+                Self::ColdRowsMean => vec![131_074],
+                Self::WarmDurationSum | Self::WarmRowsMean => vec![1_001, 65_537, 65_537],
+                _ => vec![BATCH_ROWS; self.rows() / BATCH_ROWS],
+            }
+        }
+
+        fn rows_window(self) -> Option<usize> {
+            match self {
+                Self::DurationSum | Self::WarmDurationSum => None,
+                Self::MixedExtrema | Self::ColdRowsMean => Some(37),
+                Self::RowsSum | Self::WarmRowsMean => Some(20),
+            }
+        }
+
+        fn window_micros(self) -> Option<i64> {
+            matches!(
+                self,
+                Self::DurationSum | Self::MixedExtrema | Self::WarmDurationSum
+            )
+            .then_some(WINDOW)
+        }
+
+        fn numerator(self, index: usize) -> i64 {
+            if self.observes_lanes() {
+                i64::try_from(2_048 * (index / self.groups()) + index % self.groups()).unwrap()
             } else {
-                10_000
+                i64::try_from(index).unwrap() * 17 % 8_192 - 4_096
             }
         }
 
@@ -523,8 +567,17 @@ mod rolling_history {
                 min_periods: 1,
             };
             match self {
-                Self::DurationSum => vec![sum(duration, "sum_60s")],
+                Self::DurationSum | Self::WarmDurationSum => vec![sum(duration, "sum_60s")],
                 Self::RowsSum => vec![sum(RollingFrameSpec::Rows { size: 20 }, "sum_20")],
+                Self::ColdRowsMean | Self::WarmRowsMean => vec![RollingOutputSpec::Mean {
+                    primitive_version: 1,
+                    input: "value".into(),
+                    output: self.names()[0].into(),
+                    frame: RollingFrameSpec::Rows {
+                        size: u64::try_from(self.rows_window().unwrap()).unwrap(),
+                    },
+                    min_periods: 1,
+                }],
                 Self::MixedExtrema => vec![
                     RollingOutputSpec::Min {
                         primitive_version: 1,
@@ -546,9 +599,11 @@ mod rolling_history {
 
         fn names(self) -> &'static [&'static str] {
             match self {
-                Self::DurationSum => &["sum_60s"],
+                Self::DurationSum | Self::WarmDurationSum => &["sum_60s"],
                 Self::RowsSum => &["sum_20"],
                 Self::MixedExtrema => &["min_60s", "max_37"],
+                Self::ColdRowsMean => &["mean_37"],
+                Self::WarmRowsMean => &["mean_20"],
             }
         }
 
@@ -556,10 +611,6 @@ mod rolling_history {
             let index = i64::try_from(index).unwrap();
             T0 + index * self.step() + index * 37 % 97
         }
-    }
-
-    fn numerator(index: usize) -> i64 {
-        i64::try_from(index).unwrap() * 17 % 8192 - 4096
     }
 
     fn scaled(value: i64) -> f64 {
@@ -573,6 +624,7 @@ mod rolling_history {
         batches: Arc<[Batch]>,
         keys: Vec<String>,
         expected: Vec<Vec<f64>>,
+        max_rows: usize,
         max_bytes: usize,
         expected_sha256: String,
     }
@@ -601,8 +653,9 @@ mod rolling_history {
             let output_schema = Arc::new(Schema::new(fields));
             let mut batches = Vec::new();
             let mut max_bytes = 0;
-            for start in (0..case.rows()).step_by(BATCH_ROWS) {
-                let end = (start + BATCH_ROWS).min(case.rows());
+            let mut start = 0;
+            for rows in case.batch_sizes() {
+                let end = start + rows;
                 let arrays: Vec<ArrayRef> = vec![
                     Arc::new(StringArray::from_iter_values(
                         (start..end).map(|i| keys[i % case.groups()].as_str()),
@@ -617,13 +670,15 @@ mod rolling_history {
                         (start..end).map(|i| i64::try_from(i).unwrap()),
                     )),
                     Arc::new(Float64Array::from_iter_values(
-                        (start..end).map(|i| scaled(numerator(i))),
+                        (start..end).map(|i| scaled(case.numerator(i))),
                     )),
                 ];
                 let record = RecordBatch::try_new(Arc::clone(&input_schema), arrays).unwrap();
                 max_bytes = max_bytes.max(record.get_array_memory_size());
                 batches.push(Batch::table(vec![record], BatchMetadata::default()).unwrap());
+                start = end;
             }
+            assert_eq!(start, case.rows());
             let expected = reference(case);
             let expected_sha256 = signature(&expected);
             Self {
@@ -633,6 +688,7 @@ mod rolling_history {
                 batches: Arc::from(batches),
                 keys,
                 expected,
+                max_rows: case.batch_sizes().into_iter().max().unwrap(),
                 max_bytes,
                 expected_sha256,
             }
@@ -647,7 +703,7 @@ mod rolling_history {
         for row in 0..case.rows() {
             let key = row % case.groups();
             let at = case.time(row);
-            let value = numerator(row);
+            let value = case.numerator(row);
             let time_queue = &mut timed[key];
             while time_queue
                 .front()
@@ -659,17 +715,19 @@ mod rolling_history {
             totals[key] += value;
             let row_queue = &mut counted[key];
             row_queue.push_back(value);
-            let width = if matches!(case, Case::MixedExtrema) {
-                37
-            } else {
-                20
-            };
+            let width = case.rows_window().unwrap_or(20);
             if row_queue.len() > width {
                 row_queue.pop_front();
             }
             match case {
-                Case::DurationSum => expected[0].push(scaled(totals[key])),
+                Case::DurationSum | Case::WarmDurationSum => expected[0].push(scaled(totals[key])),
                 Case::RowsSum => expected[0].push(scaled(row_queue.iter().sum::<i64>())),
+                Case::ColdRowsMean | Case::WarmRowsMean => {
+                    let ordinal = row / case.groups();
+                    let count = width.min(ordinal + 1);
+                    let mean = (2 * ordinal - (count - 1)) * 1_024 + key;
+                    expected[0].push(scaled(i64::try_from(mean).unwrap()));
+                }
                 Case::MixedExtrema => {
                     expected[0].push(scaled(time_queue.iter().map(|(_, n)| *n).min().unwrap()));
                     expected[1].push(scaled(*row_queue.iter().max().unwrap()));
@@ -700,6 +758,7 @@ mod rolling_history {
     struct Source {
         batches: Arc<[Batch]>,
         schema: SchemaRef,
+        max_rows: usize,
         max_bytes: usize,
         offset: usize,
     }
@@ -710,7 +769,7 @@ mod rolling_history {
             SourceCapabilities {
                 replay_positioning: ReplayPositioning::Unsupported,
                 delivery: SourceDeliveryCapability::Lossy,
-                max_batch_rows: BATCH_ROWS,
+                max_batch_rows: self.max_rows,
                 max_batch_bytes: self.max_bytes,
                 schema: SourceSchema::Exact(Arc::clone(&self.schema)),
                 native_watermarks: NativeWatermarkCapability::NeverEmits,
@@ -752,7 +811,12 @@ mod rolling_history {
         }
     }
 
-    async fn run(fixture: &Fixture) -> Vec<Batch> {
+    struct CompletedRun {
+        batches: Vec<Batch>,
+        metrics: Option<BTreeMap<String, RollingMetrics>>,
+    }
+
+    async fn run(fixture: &Fixture) -> CompletedRun {
         let state = Arc::new(Mutex::new(Vec::new()));
         let spec = RollingSpec {
             configuration_version: ROLLING_CONFIGURATION_VERSION,
@@ -788,6 +852,7 @@ mod rolling_history {
         let source = SourceBinding::new(Source {
             batches: Arc::clone(&fixture.batches),
             schema: Arc::clone(&fixture.input_schema),
+            max_rows: fixture.max_rows,
             max_bytes: fixture.max_bytes,
             offset: 0,
         })
@@ -816,7 +881,108 @@ mod rolling_history {
         .unwrap();
         let outcome = job.wait().await;
         assert_eq!(outcome.state, JobState::Completed, "{outcome:?}");
-        state.lock().await.clone()
+        let batches = state.lock().await.clone();
+        let metrics = fixture.case.observes_lanes().then(|| job.rolling_metrics());
+        drop(job);
+        CompletedRun { batches, metrics }
+    }
+
+    #[derive(Clone, Copy)]
+    struct LaneObservation {
+        started: u64,
+        parallel_rows: u64,
+        numeric_rows: [u64; 3],
+    }
+
+    impl LaneObservation {
+        fn from_run(case: Case, result: &CompletedRun) -> Option<Self> {
+            let snapshot = result.metrics.as_ref()?;
+            let metrics = serde_json::to_value(snapshot).unwrap();
+            let rolling = metrics.get("rolling").expect("rolling node metrics");
+            assert_eq!(
+                rolling
+                    .get("overflowed")
+                    .and_then(serde_json::Value::as_bool),
+                Some(false)
+            );
+            let observation = Self {
+                started: total(counts(rolling, "numeric_lanes_started")),
+                parallel_rows: total(counts(rolling, "numeric_parallel_rows")),
+                numeric_rows: counts(rolling, "numeric_rows"),
+            };
+            assert_eq!(
+                total(observation.numeric_rows),
+                u64::try_from(case.rows()).unwrap()
+            );
+            if observation.started == 0 {
+                assert_eq!(observation.parallel_rows, 0);
+                assert!(
+                    !matches!(case, Case::WarmRowsMean),
+                    "warm Rows control must use real lanes"
+                );
+            } else {
+                assert!(observation.started >= 2);
+                assert!(observation.parallel_rows >= 64_000);
+            }
+            Some(observation)
+        }
+    }
+
+    fn counts(metrics: &serde_json::Value, field: &str) -> [u64; 3] {
+        ["data", "watermark", "end"].map(|callback| {
+            metrics
+                .get(callback)
+                .and_then(|value| value.get(field))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_else(|| panic!("missing actual {callback}.{field}"))
+        })
+    }
+
+    fn total(values: [u64; 3]) -> u64 {
+        values
+            .into_iter()
+            .try_fold(0_u64, u64::checked_add)
+            .unwrap()
+    }
+
+    #[derive(Clone, Copy)]
+    struct LaneBounds {
+        iterations: u64,
+        minimum_started: u64,
+        maximum_started: u64,
+        minimum_parallel_rows: u64,
+        maximum_parallel_rows: u64,
+        minimum_numeric_rows: [u64; 3],
+        maximum_numeric_rows: [u64; 3],
+    }
+
+    impl LaneBounds {
+        fn observe(previous: Option<Self>, actual: LaneObservation) -> Self {
+            let Some(previous) = previous else {
+                return Self {
+                    iterations: 1,
+                    minimum_started: actual.started,
+                    maximum_started: actual.started,
+                    minimum_parallel_rows: actual.parallel_rows,
+                    maximum_parallel_rows: actual.parallel_rows,
+                    minimum_numeric_rows: actual.numeric_rows,
+                    maximum_numeric_rows: actual.numeric_rows,
+                };
+            };
+            Self {
+                iterations: previous.iterations.checked_add(1).unwrap(),
+                minimum_started: previous.minimum_started.min(actual.started),
+                maximum_started: previous.maximum_started.max(actual.started),
+                minimum_parallel_rows: previous.minimum_parallel_rows.min(actual.parallel_rows),
+                maximum_parallel_rows: previous.maximum_parallel_rows.max(actual.parallel_rows),
+                minimum_numeric_rows: std::array::from_fn(|i| {
+                    previous.minimum_numeric_rows[i].min(actual.numeric_rows[i])
+                }),
+                maximum_numeric_rows: std::array::from_fn(|i| {
+                    previous.maximum_numeric_rows[i].max(actual.numeric_rows[i])
+                }),
+            }
+        }
     }
 
     fn validate(fixture: &Fixture, outputs: &[Batch]) {
@@ -861,7 +1027,7 @@ mod rolling_history {
                     assert!(index < seen.len() && !seen[index]);
                     assert_eq!(keys.value(row), fixture.keys[index % fixture.case.groups()]);
                     assert_eq!(times.value(row), fixture.case.time(index));
-                    assert_value(values.value(row), scaled(numerator(index)));
+                    assert_value(values.value(row), scaled(fixture.case.numerator(index)));
                     for (ordinal, column) in derived.iter().enumerate() {
                         let value = column.value(row);
                         assert_value(value, fixture.expected[ordinal][index]);
@@ -906,7 +1072,7 @@ mod rolling_history {
                     );
                     assert_eq!(times.value(row), fixture.case.time(position));
                     assert_eq!(sequences.value(row), i64::try_from(position).unwrap());
-                    assert_value(values.value(row), scaled(numerator(position)));
+                    assert_value(values.value(row), scaled(fixture.case.numerator(position)));
                     position += 1;
                 }
             }
@@ -914,21 +1080,51 @@ mod rolling_history {
         assert_eq!(position, fixture.case.rows());
     }
 
-    fn proof(fixture: &Fixture, iterations: u64) {
+    fn proof(fixture: &Fixture, iterations: u64, lanes: Option<LaneBounds>) {
         let Some(home) = std::env::var_os("CRITERION_HOME") else {
             return;
         };
         let destination = std::path::PathBuf::from(home);
         std::fs::create_dir_all(&destination).unwrap();
-        let report = json!({"schema":"calc-flow.rolling-state-proof.v1", "case":fixture.case.name(),
+        let mut report = json!({"schema":"calc-flow.rolling-state-proof.v1", "case":fixture.case.name(),
             "scope":"whole-runner-plan-startup-to-completion", "input_rows":fixture.case.rows(),
-            "output_rows":fixture.case.rows(), "groups":fixture.case.groups(), "batch_rows":BATCH_ROWS,
+            "output_rows":fixture.case.rows(), "groups":fixture.case.groups(), "batch_rows":fixture.max_rows,
             "event_step_micros":fixture.case.step(),
-            "window_micros":if matches!(fixture.case, Case::RowsSum) {None} else {Some(WINDOW)},
-            "rows_window":match fixture.case {Case::DurationSum => None, Case::MixedExtrema => Some(37), Case::RowsSum => Some(20)},
+            "window_micros":fixture.case.window_micros(),
+            "rows_window":fixture.case.rows_window(),
             "output_columns":fixture.case.names(), "tokio_workers":4,
             "checkpointing":false, "validated_all_columns":true, "validated_input_immutable":true,
             "result_sha256":fixture.expected_sha256, "validated_iterations":iterations});
+        if let Some(lanes) = lanes {
+            assert_eq!(lanes.iterations, iterations);
+            let layout = fixture
+                .batches
+                .iter()
+                .map(|batch| {
+                    let records = batch.table_payload().unwrap().batches();
+                    assert_eq!(records.len(), 1);
+                    records[0].num_rows()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(layout, fixture.case.batch_sizes());
+            report["input_record_batch_rows"] = json!(layout);
+            report["timed_seed_rows"] = json!(if matches!(fixture.case, Case::ColdRowsMean) {
+                0
+            } else {
+                1_001
+            });
+            report["actual_lanes"] = json!({
+                "validated_iterations":lanes.iterations,
+                "minimum_lanes_started":lanes.minimum_started,
+                "maximum_lanes_started":lanes.maximum_started,
+                "minimum_parallel_rows":lanes.minimum_parallel_rows,
+                "maximum_parallel_rows":lanes.maximum_parallel_rows,
+                "callback_order":["data", "watermark", "end"],
+                "minimum_numeric_rows_by_callback":lanes.minimum_numeric_rows,
+                "maximum_numeric_rows_by_callback":lanes.maximum_numeric_rows,
+                "scope":"one fully drained job per iteration; bounds across iterations, never worker totals"
+            });
+        }
         std::fs::write(
             destination.join("rolling-state-proof.json"),
             serde_json::to_vec_pretty(&report).unwrap(),
@@ -936,26 +1132,33 @@ mod rolling_history {
         .unwrap();
     }
 
-    pub(super) fn register(c: &mut Criterion) {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(4)
-            .enable_all()
-            .build()
-            .unwrap();
-        let mut group = c.benchmark_group("rolling_state_history");
+    fn register_group(
+        c: &mut Criterion,
+        runtime: &tokio::runtime::Runtime,
+        name: &str,
+        cases: &[Case],
+    ) {
+        let mut group = c.benchmark_group(name);
         group
             .sample_size(10)
             .warm_up_time(Duration::from_millis(10))
             .measurement_time(Duration::from_millis(20))
             .sampling_mode(SamplingMode::Flat);
-        for case in [Case::DurationSum, Case::MixedExtrema, Case::RowsSum] {
+        for &case in cases {
             let fixture = OnceCell::new();
             let validated = Cell::new(0_u64);
+            let lanes = Cell::new(None);
+            let verify = |fixture: &Fixture, result: &CompletedRun| {
+                validate(fixture, &result.batches);
+                if let Some(observation) = LaneObservation::from_run(case, result) {
+                    lanes.set(Some(LaneBounds::observe(lanes.get(), observation)));
+                }
+            };
             group.bench_function(case.name(), |b| {
                 let fixture = fixture.get_or_init(|| {
                     let fixture = Fixture::new(case);
                     let warm = runtime.block_on(run(&fixture));
-                    validate(&fixture, &warm);
+                    verify(&fixture, &warm);
                     validated.set(1);
                     fixture
                 });
@@ -965,17 +1168,41 @@ mod rolling_history {
                         let start = Instant::now();
                         let result = runtime.block_on(run(fixture));
                         elapsed += start.elapsed();
-                        validate(fixture, &result);
+                        verify(fixture, &result);
                         validated.set(validated.get() + 1);
                     }
                     elapsed
                 });
             });
             if let Some(fixture) = fixture.get() {
-                proof(fixture, validated.get());
+                proof(fixture, validated.get(), lanes.get());
             }
         }
         group.finish();
+    }
+
+    pub(super) fn register(c: &mut Criterion) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+        register_group(
+            c,
+            &runtime,
+            "rolling_state_history",
+            &[Case::DurationSum, Case::MixedExtrema, Case::RowsSum],
+        );
+        register_group(
+            c,
+            &runtime,
+            "rolling_grouped_lanes",
+            &[
+                Case::ColdRowsMean,
+                Case::WarmDurationSum,
+                Case::WarmRowsMean,
+            ],
+        );
     }
 }
 

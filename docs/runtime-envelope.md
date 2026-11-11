@@ -898,18 +898,24 @@ requirements are met. Mixed windows retain the union of the row suffix and
 the duration interval with an open lower bound, using widened timestamp
 arithmetic.
 
-An already initialized, ordered Native Float64 StableV1 mean calculation can
-assign whole entities to owned CPU lanes. The narrow path requires one or
-two numeric groups and one or two derived Float64 mean/difference columns,
-Rows frames of 5 or 20, and validated typed queues no longer than those frames. A finalized
-batch has at least 64,000 rows and 16 touched entities. The lane count is the
-minimum of available CPU capacity, the batch's 16,000-row work units and touched
-entities; fewer than two lanes use the serial path. Entity routing counts are
-reused, one pass builds stable lane schedules, and each lane visits only its
-assigned rows. No lane may own more than 5/8 of the batch. Initial state
-creation, the first reconstruction after restore, unsupported shapes, small
-or skewed batches and unavailable admission use the original serial loop.
-Preparing a serial fallback does not repeat entity resolution or state copying.
+An ordered typed calculation can assign whole entities to owned CPU lanes
+when its groups support independent owned transitions and all readouts fit the
+Float64 merge. This includes Rows, Duration, and mixed frames, multiple groups
+and outputs, and both numerical profiles. The compiled NaN policy and each
+entity's operation order remain unchanged. Plans requiring shared decay
+reference quotas or unsupported output storage remain serial.
+A finalized batch has at least 64,000 rows and two touched entities. The lane
+count is the minimum of available CPU capacity, the batch's 16,000-row work
+units and touched entities; fewer than two lanes use the serial path. Entity
+routing counts are reused, one pass builds stable lane schedules, and each
+lane visits only its assigned rows. Scheduling weights include incoming rows,
+group and output counts, and retained state; empty lanes or a lane with more
+than 5/8 of the estimated work use serial execution. These weights are a
+heuristic, rather than an upper bound on numerical refolding work. Initial
+creation and reconstruction after restore complete before preparing private
+lane state. Unsupported shapes, small or skewed batches and unavailable
+admission use the serial loop. Preparing a serial fallback does not repeat
+entity resolution or state copying.
 
 Each job admits at most one numeric work group. Its checked scratch ledger
 accounts for the additional declared capacities without a private byte ceiling;
@@ -931,6 +937,13 @@ still active, keeping the original logical task identity. After callback Drop,
 the frozen outcome remains; late panics are secondary task diagnostics and do
 not revive the callback. No unfinished CPU work is detached after a timeout,
 and no Tokio executor thread blocks waiting for a join.
+
+Rolling callback metrics report `numeric_lanes_started` for successfully
+registered owned lane tasks and `numeric_parallel_rows` for their attempted
+row transitions. The owner settles both counts after draining the work,
+including partial launches, failures and cancellation. A task cancelled before
+its first row still counts as started. These counters describe actual work;
+they do not measure simultaneous CPU utilization.
 
 Retained history keeps Scalar and Arrow blocks in event order. A shared
 descriptor-cost policy chooses the representation for Rows, Duration, and

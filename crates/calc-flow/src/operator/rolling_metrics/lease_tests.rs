@@ -32,12 +32,14 @@ fn dropped_callback_waits_for_numeric_join_and_freezes_its_first_outcome() {
     drop(recorder.stage(RollingStage::HistoryMaintenance));
     drop(numeric);
     clock.advance(11);
-    lease.settle(9, false);
+    lease.settle(9, 2, false);
     let snapshot = store.snapshot();
     assert!(!snapshot.overflowed);
     assert_eq!(snapshot.watermark.interrupted, 1);
     assert_eq!(snapshot.watermark.cancelled, 0);
     assert_eq!(snapshot.watermark.numeric_rows, 9);
+    assert_eq!(snapshot.watermark.numeric_parallel_rows, 9);
+    assert_eq!(snapshot.watermark.numeric_lanes_started, 2);
     assert_eq!(
         snapshot.watermark.numeric_update_duration,
         Duration::from_nanos(5)
@@ -59,9 +61,11 @@ fn joined_numeric_work_does_not_publish_before_emit_and_commit_complete() {
     let lease = recorder.numeric_lease(1).expect("reserved generation");
     assert!(recorder.numeric_lease(2).is_none());
     clock.advance(2);
-    lease.settle(8, false);
+    lease.settle(8, 2, false);
     assert_eq!(store.snapshot().data.succeeded, 0);
     assert_eq!(store.snapshot().data.numeric_rows, 0);
+    assert_eq!(store.snapshot().data.numeric_parallel_rows, 0);
+    assert_eq!(store.snapshot().data.numeric_lanes_started, 0);
     drop(numeric);
     {
         let _emit = recorder.stage(RollingStage::SendWait);
@@ -73,6 +77,8 @@ fn joined_numeric_work_does_not_publish_before_emit_and_commit_complete() {
     assert_eq!(snapshot.data.succeeded, 1);
     assert_eq!(snapshot.data.interrupted, 0);
     assert_eq!(snapshot.data.numeric_rows, 8);
+    assert_eq!(snapshot.data.numeric_parallel_rows, 8);
+    assert_eq!(snapshot.data.numeric_lanes_started, 2);
     assert_eq!(snapshot.data.output_rows_prepared, 8);
     assert_eq!(
         snapshot.data.numeric_update_duration,
@@ -94,12 +100,14 @@ fn explicit_error_then_guard_drop_and_late_cancel_remain_failed_after_join() {
     }));
     cancellation.cancel();
     assert_eq!(store.snapshot().end.failed, 0);
-    lease.settle(17, false);
+    lease.settle(17, 1, false);
     let snapshot = store.snapshot();
     assert_eq!(snapshot.end.failed, 1);
     assert_eq!(snapshot.end.cancelled, 0);
     assert_eq!(snapshot.end.interrupted, 0);
     assert_eq!(snapshot.end.numeric_rows, 17);
+    assert_eq!(snapshot.end.numeric_parallel_rows, 17);
+    assert_eq!(snapshot.end.numeric_lanes_started, 1);
 }
 
 #[test]
@@ -113,7 +121,7 @@ fn deferred_numeric_overflow_preserves_previous_complete_observation() {
         let lease = callback.recorder().numeric_lease(4).expect("work lease");
         callback.complete(&Ok(()));
         let mut previous = store.snapshot();
-        lease.settle(2, local_overflow);
+        lease.settle(2, 2, local_overflow);
         previous.overflowed = true;
         assert_eq!(store.snapshot(), previous);
     }

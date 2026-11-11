@@ -345,13 +345,8 @@ impl RollingOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedOrderedOutput> {
         let observer = context.rolling_metrics();
-        // Building/reconstructing typed state keeps this callback on the original
-        // serial route, even when the resulting state happens to be eligible.
-        let was_warm = self.state.typed_kernel_state.is_some();
         self.ensure_ordered_kernel_state(input, context.operator_id(), observer)?;
-        let mut update = self
-            .prepare_ordered_update(input, context, was_warm)
-            .await?;
+        let mut update = self.prepare_ordered_update(input, context).await?;
         let touched = {
             let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
             retained_histories(
@@ -376,7 +371,6 @@ impl RollingOperator {
         &self,
         input: &RecordBatch,
         context: &StreamOperatorContext<'_>,
-        was_warm: bool,
     ) -> Result<StreamKernelUpdate> {
         let observer = context.rolling_metrics();
         let plan = &self.compiled.kernel_plan;
@@ -387,7 +381,7 @@ impl RollingOperator {
             .expect("state initialized above");
         let Some(client) = context
             .entity_work()
-            .filter(|_| was_warm && plan.supports_entity_parallel(input))
+            .filter(|_| plan.supports_entity_parallel(input))
         else {
             return plan.prepare_ordered_stream_with_history(
                 prior,

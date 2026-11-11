@@ -1514,6 +1514,23 @@ fn cast_primitive(array: &ArrayRef, target: &DataType, node_id: &str) -> Result<
 
 impl RollingKernelState {
     #[cfg(test)]
+    pub(super) fn canonical_state_for_test(&self) -> String {
+        let entities = self
+            .entities
+            .iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        format!(
+            "{:?}",
+            (
+                &self.kernel_fingerprint,
+                entities,
+                &self.states,
+                &self.last_identity
+            )
+        )
+    }
+
+    #[cfg(test)]
     pub(super) fn shared_rows_count(&self) -> usize {
         self.states
             .iter()

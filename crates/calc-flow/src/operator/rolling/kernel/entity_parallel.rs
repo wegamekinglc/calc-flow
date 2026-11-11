@@ -1,4 +1,4 @@
-//! Owned entity work for the deliberately narrow native ordered route.
+//! Owned entity work for independently executable typed rolling transitions.
 
 use std::{
     any::Any,
@@ -114,6 +114,8 @@ struct PreparedNumericInput {
     columns: Vec<TypedGroupInput>,
     event_times: TimestampMicrosecondArray,
     outputs: Vec<TypedOutputPlan>,
+    numerical_profile: RollingNumericalProfile,
+    nan_as_value: bool,
     node_id: String,
 }
 
@@ -223,17 +225,18 @@ impl ScratchPlan {
         outputs: usize,
         name_bytes: usize,
     ) -> Self {
-        Self::for_lanes(rows, entities, outputs, name_bytes, 2)
+        Self::for_lanes(rows, entities, outputs, 0, name_bytes, 2)
     }
 
     fn for_lanes(
         rows: usize,
         entities: usize,
         outputs: usize,
+        groups: usize,
         name_bytes: usize,
         lanes: usize,
     ) -> Self {
-        let bytes = Self::owned_capacity(rows, entities, outputs, name_bytes, lanes);
+        let bytes = Self::owned_capacity(rows, entities, outputs, groups, name_bytes, lanes);
         Self { bytes, lanes }
     }
 
@@ -241,23 +244,35 @@ impl ScratchPlan {
         rows: usize,
         entities: usize,
         outputs: usize,
+        groups: usize,
         name_bytes: usize,
         lanes: usize,
     ) -> Option<usize> {
         let routing = Self::routing_capacity(rows, entities)?;
         let output = Self::output_capacity(rows, outputs, lanes)?;
-        let fixed_metadata = Self::fixed_capacity(lanes)?;
+        let fixed_metadata = Self::fixed_capacity(lanes, groups, outputs)?;
         routing
             .checked_add(output)?
             .checked_add(fixed_metadata)?
             .checked_add(Self::name_capacity(name_bytes, lanes)?)
     }
 
-    fn fixed_capacity(lanes: usize) -> Option<usize> {
+    fn fixed_capacity(lanes: usize, groups: usize, outputs: usize) -> Option<usize> {
         let controls = lanes.checked_mul(4096 + COMPILED_LANE_READOUT_METADATA_BYTES / 2)?;
+        let descriptors = groups
+            .checked_mul(size_of::<TypedGroupInput>())?
+            .checked_add(outputs.checked_mul(size_of::<TypedOutputPlan>())?)?;
+        let lane_headers = lanes.checked_mul(
+            size_of::<NumericLaneRequest>()
+                + size_of::<NumericLaneResult>()
+                + size_of::<Vec<&mut TypedEntityState>>(),
+        )?;
         controls
+            .checked_add(descriptors)?
+            .checked_add(lane_headers)?
             .checked_add(NULL_FREE_MERGE_METADATA_BYTES)?
             .checked_add(size_of::<NumericResults>())?
+            .checked_add(size_of::<LaneRoutes>())?
             .checked_add(size_of::<PreparedNumericInput>())
     }
 
@@ -270,7 +285,10 @@ impl ScratchPlan {
         // Charge the lane slot and a conservative Arc owner allowance; the
         // prepared entity payload is shared with the serial fallback.
         let moved = entities.checked_mul(
-            size_of::<OwnedLaneEntity>() + size_of::<TypedEntityState>() + 2 * size_of::<usize>(),
+            size_of::<OwnedLaneEntity>()
+                + size_of::<TypedEntityState>()
+                + 3 * size_of::<usize>()
+                + size_of::<&mut TypedEntityState>(),
         )?;
         let assignment = entities.checked_mul(size_of::<EntityAssignment>())?;
         schedules.checked_add(moved)?.checked_add(assignment)
@@ -312,11 +330,10 @@ impl RollingKernelPlan {
         input: &RecordBatch,
     ) -> bool {
         self.parallel_dimensions(input)
-            && self.groups.iter().all(|group| {
-                matches!(group,
-                TypedGroupPlan::Numeric { input_index, frame: TypedFrame::Rows(5 | 20) }
-                if input.column(*input_index).data_type() == &DataType::Float64)
-            })
+            && self
+                .groups
+                .iter()
+                .all(|group| !matches!(group, TypedGroupPlan::Scan { .. }))
             && self
                 .outputs
                 .iter()
@@ -327,23 +344,18 @@ impl RollingKernelPlan {
         input.num_rows() >= 64_000
             && u32::try_from(input.num_rows()).is_ok()
             && self.selection == KernelSelection::OrderedPrimitive
-            && self.numerical_profile == RollingNumericalProfile::StableV1
-            && !self.nan_as_value
-            && (1..=2).contains(&self.groups.len())
-            && (1..=2).contains(&self.outputs.len())
+            && !self.groups.is_empty()
+            && !self.outputs.is_empty()
     }
 
     fn parallel_output(&self, output: &TypedOutputPlan) -> bool {
         output.storage == OutputStorage::Float64
             && match output.kind {
-                TypedOutputKind::Statistic(Statistic::Mean) => output.group < self.groups.len(),
-                TypedOutputKind::Difference { left, right } => {
-                    [left, right].iter().all(|readout| {
-                        readout.kind == TypedFloatReadoutKind::Mean
-                            && readout.group < self.groups.len()
-                    })
-                }
-                _ => false,
+                TypedOutputKind::Difference { left, right } => [left, right]
+                    .iter()
+                    .all(|readout| readout.group < self.groups.len()),
+                TypedOutputKind::Scan(_) => false,
+                _ => output.group < self.groups.len(),
             }
     }
 
@@ -383,15 +395,10 @@ impl PreparedOrderedKernel<'_> {
         let plan = self.plan;
         let states = &self.fill.stream.state.states;
         if !self.parallel_shape
-            || states.len() < 16
+            || states.len() < 2
             || !states
                 .iter()
                 .all(|entity| parallel_entity_state(entity, &plan.groups))
-            || !self
-                .fill
-                .columns
-                .iter()
-                .all(|column| matches!(column, TypedGroupInput::Single(_)))
         {
             return None;
         }
@@ -405,6 +412,7 @@ impl PreparedOrderedKernel<'_> {
             self.fill.row_count,
             states.len(),
             plan.outputs.len(),
+            plan.groups.len(),
             self.node_id.len(),
             lanes,
         );
@@ -446,35 +454,14 @@ impl PreparedOrderedKernel<'_> {
             return Err(self);
         };
         let lanes = scratch.lanes();
-        let mut assignments =
-            vec![EntityAssignment::default(); self.fill.stream.state.states.len()];
-        for (assignment, &count) in assignments
-            .iter_mut()
-            .zip(&self.fill.stream.entity_rows.counts)
-        {
-            #[cfg(test)]
-            ENTITY_COUNT_VISITS.set(ENTITY_COUNT_VISITS.get() + 1);
-            assignment.rows = count;
-        }
-        let mut loads = vec![0_usize; lanes];
-        let mut entities = vec![0_usize; lanes];
-        let mut available = (0..lanes)
-            .map(|lane| Reverse((0_usize, lane)))
-            .collect::<BinaryHeap<_>>();
-        for assignment in &mut assignments {
-            let Reverse((_, lane)) = available.pop().expect("nonempty lane plan");
-            assignment.lane = lane;
-            assignment.local = entities[lane];
-            entities[lane] += 1;
-            let Some(load) = loads[lane].checked_add(assignment.rows) else {
-                return Err(self);
-            };
-            loads[lane] = load;
-            available.push(Reverse((loads[lane], lane)));
-        }
-        if !balanced_lane_loads(&loads, self.fill.row_count) {
+        let Some(LaneRoutes {
+            assignments,
+            loads,
+            entities,
+        }) = lane_routes(&self.fill, self.plan.outputs.len(), lanes)
+        else {
             return Err(self);
-        }
+        };
         let PreparedTypedFill {
             columns,
             event_times,
@@ -505,6 +492,8 @@ impl PreparedOrderedKernel<'_> {
             columns,
             event_times,
             outputs: self.plan.outputs.clone(),
+            numerical_profile: self.plan.numerical_profile,
+            nan_as_value: self.plan.nan_as_value,
             node_id: self.node_id.to_owned(),
         });
         let requests = (0..lanes)
@@ -538,6 +527,56 @@ impl PreparedOrderedKernel<'_> {
     }
 }
 
+struct LaneRoutes {
+    assignments: Vec<EntityAssignment>,
+    loads: Vec<usize>,
+    entities: Vec<usize>,
+}
+
+fn lane_routes(fill: &PreparedTypedFill, outputs: usize, lanes: usize) -> Option<LaneRoutes> {
+    let mut assignments = vec![EntityAssignment::default(); fill.stream.state.states.len()];
+    for (assignment, &count) in assignments.iter_mut().zip(&fill.stream.entity_rows.counts) {
+        #[cfg(test)]
+        ENTITY_COUNT_VISITS.set(ENTITY_COUNT_VISITS.get() + 1);
+        assignment.rows = count;
+    }
+    let weights = entity_work_weights(fill, outputs)?;
+    let total_work = weights
+        .iter()
+        .try_fold(0_usize, |sum, &work| sum.checked_add(work))?;
+    let mut work_loads = vec![0_usize; lanes];
+    let mut loads = vec![0_usize; lanes];
+    let mut entities = vec![0_usize; lanes];
+    let mut available = (0..lanes)
+        .map(|lane| Reverse((0_usize, lane)))
+        .collect::<BinaryHeap<_>>();
+    for (assignment, weight) in assignments.iter_mut().zip(weights) {
+        let Reverse((_, lane)) = available.pop().expect("nonempty lane plan");
+        assignment.lane = lane;
+        assignment.local = entities[lane];
+        entities[lane] += 1;
+        let load = loads[lane].checked_add(assignment.rows)?;
+        loads[lane] = load;
+        let work = work_loads[lane].checked_add(weight)?;
+        work_loads[lane] = work;
+        available.push(Reverse((work, lane)));
+    }
+    if loads.contains(&0)
+        || loads
+            .iter()
+            .try_fold(0_usize, |sum, &rows| sum.checked_add(rows))
+            != Some(fill.row_count)
+        || !balanced_lane_loads(&work_loads, total_work)
+    {
+        return None;
+    }
+    Some(LaneRoutes {
+        assignments,
+        loads,
+        entities,
+    })
+}
+
 fn balanced_lane_loads(loads: &[usize], row_count: usize) -> bool {
     let max_load = row_count / 8 * 5 + row_count % 8 * 5 / 8;
     !loads.iter().any(|&rows| rows == 0 || rows > max_load)
@@ -555,18 +594,80 @@ fn parallel_entity_state(entity: &TypedEntityState, groups: &[TypedGroupPlan]) -
             .iter()
             .zip(groups)
             .all(|(state, group)| match (state, group) {
+                (TypedWindowState::Numeric(state), TypedGroupPlan::Numeric { frame, .. }) => {
+                    parallel_frame(state.samples.frame, *frame, state.samples.len())
+                }
                 (
-                    TypedWindowState::Numeric(state),
-                    TypedGroupPlan::Numeric {
-                        frame: TypedFrame::Rows(window @ (5 | 20)),
-                        ..
+                    TypedWindowState::Exact(state),
+                    TypedGroupPlan::Signed { frame, .. } | TypedGroupPlan::Unsigned { frame, .. },
+                ) => parallel_frame(state.samples.frame, *frame, state.samples.len()),
+                (
+                    TypedWindowState::Extrema(state),
+                    TypedGroupPlan::Extrema {
+                        frame, descending, ..
                     },
                 ) => {
-                    matches!(state.samples.frame, TypedFrame::Rows(actual) if actual == *window)
-                        && state.samples.len() <= *window
+                    state.descending == *descending
+                        && parallel_frame(state.frame, *frame, state.values.len())
                 }
+                (TypedWindowState::Pair(state), TypedGroupPlan::Pair { frame, .. }) => {
+                    parallel_frame(state.samples.frame, *frame, state.samples.len())
+                }
+                (
+                    TypedWindowState::Ewma(state),
+                    TypedGroupPlan::Ewma {
+                        alpha, cumulative, ..
+                    },
+                ) => state.alpha.to_bits() == alpha.to_bits() && state.cumulative == *cumulative,
+                (TypedWindowState::Cumulative(_), TypedGroupPlan::Cumulative { .. }) => true,
                 _ => false,
             })
+}
+
+fn parallel_frame(actual: TypedFrame, expected: TypedFrame, retained: usize) -> bool {
+    match (actual, expected) {
+        (TypedFrame::Rows(actual), TypedFrame::Rows(expected)) => {
+            actual == expected && retained <= expected
+        }
+        (TypedFrame::Duration(actual), TypedFrame::Duration(expected)) => actual == expected,
+        _ => false,
+    }
+}
+
+// Scheduling weight is a work heuristic, not a bound on profile-specific refolds.
+fn entity_work_weights(fill: &PreparedTypedFill, outputs: usize) -> Option<Vec<usize>> {
+    if fill.stream.state.states.len() != fill.stream.entity_rows.counts.len() {
+        return None;
+    }
+    fill.stream
+        .state
+        .states
+        .iter()
+        .zip(&fill.stream.entity_rows.counts)
+        .map(|(entity, &rows)| {
+            let steps = entity.groups.len().checked_add(outputs)?;
+            let retained = entity.groups.iter().try_fold(0_usize, |work, state| {
+                let samples = match state {
+                    TypedWindowState::Numeric(state) => state.samples.len(),
+                    TypedWindowState::Exact(state) => state.samples.len(),
+                    TypedWindowState::Extrema(state) => {
+                        state.values.len().checked_add(state.candidates.len())?
+                    }
+                    TypedWindowState::Pair(state) => state.samples.len().checked_mul(2)?,
+                    TypedWindowState::Ewma(_) | TypedWindowState::Cumulative(_) => 1,
+                    TypedWindowState::Decay(_) | TypedWindowState::Scan(_) => return None,
+                };
+                work.checked_add(samples)
+            })?;
+            let shared = entity
+                .shared_rows
+                .as_ref()
+                .map_or(0, |tape| tape.bytes().div_ceil(size_of::<Option<f64>>()));
+            rows.checked_mul(steps)?
+                .checked_add(retained)?
+                .checked_add(shared)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -933,7 +1034,11 @@ impl<'a, const GROUPS: usize> NumericLaneContext<'a, GROUPS> {
             let TypedGroupInput::Single(values) = self.column(0) else {
                 unreachable!("shared lane rows have Single inputs");
             };
-            entity.push_shared_row(valid_float64(values, row.original_row as usize, false));
+            entity.push_shared_row(valid_float64(
+                values,
+                row.original_row as usize,
+                self.input.nan_as_value,
+            ));
         }
         for ordinal in 0..self.group_count.min(entity.groups.len()) {
             let column = self.column(ordinal);
@@ -970,20 +1075,24 @@ impl<'a, const GROUPS: usize> NumericLaneContext<'a, GROUPS> {
             };
             return entity.update_shared_group(
                 site.ordinal,
-                valid_float64(values, site.row as usize, false),
-                RollingNumericalProfile::StableV1,
+                valid_float64(values, site.row as usize, self.input.nan_as_value),
+                self.input.numerical_profile,
                 &self.input.node_id,
             );
         }
         let transition_count = entity.transition_count;
         let state = &mut entity.groups[site.ordinal];
-        // Eligibility proved the Rows5/20 queue bound. Expiration precedes repair.
+        // Expiration and numerical repair use the serial transition unchanged.
         let event_time = self.input.event_times.value(site.row as usize);
         match state {
             TypedWindowState::Numeric(state) if GROUPS != 0 => state.update(
                 event_time,
-                valid_float64(self.fixed_columns[site.ordinal].0, site.row as usize, false),
-                RollingNumericalProfile::StableV1,
+                valid_float64(
+                    self.fixed_columns[site.ordinal].0,
+                    site.row as usize,
+                    self.input.nan_as_value,
+                ),
+                self.input.numerical_profile,
                 transition_count,
                 &self.input.node_id,
             ),
@@ -991,8 +1100,8 @@ impl<'a, const GROUPS: usize> NumericLaneContext<'a, GROUPS> {
                 event_time,
                 column,
                 site.row as usize,
-                RollingNumericalProfile::StableV1,
-                false,
+                self.input.numerical_profile,
+                self.input.nan_as_value,
                 transition_count,
                 &self.input.node_id,
             ),

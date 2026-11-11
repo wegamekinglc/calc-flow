@@ -84,6 +84,13 @@ pub struct RollingCallbackMetrics {
     pub copied_entities: u64,
     /// Rows processed by numeric transitions.
     pub numeric_rows: u64,
+    /// Owned numeric lane tasks successfully spawned and registered.
+    /// Includes tasks cancelled before their first row, settled after CPU drain.
+    /// This is not a count of simultaneously occupied CPU cores.
+    pub numeric_lanes_started: u64,
+    /// Numeric row transitions attempted by owned CPU lanes, including failures.
+    /// A subset of `numeric_rows`, settled once after the owned work drains.
+    pub numeric_parallel_rows: u64,
     /// Actual retained-history row materializations.
     pub history_rows_materialized: u64,
     /// Actual scalar-value conversions.
@@ -135,6 +142,8 @@ pub(crate) enum RollingWork {
     TouchedEntities,
     CopiedEntities,
     NumericRows,
+    NumericLanesStarted,
+    NumericParallelRows,
     HistoryRowsMaterialized,
     ScalarValueConversions,
     OutputRowsPrepared,
@@ -152,6 +161,8 @@ pub(crate) enum RollingWork {
     DecayCacheCopiedSamples,
     DecayReferenceHistorySamples,
 }
+
+const WORK_COUNT: usize = RollingWork::DecayReferenceHistorySamples as usize + 1;
 
 const DECAY_WORK_NAMES: [&str; 12] = [
     "transitions",
@@ -277,7 +288,7 @@ impl RollingMetricsStore {
                     switched: now,
                     stage: RollingStage::Other,
                     durations: [Duration::ZERO; 10],
-                    work: [0; 22],
+                    work: [0; WORK_COUNT],
                     overflowed: false,
                     finalized: false,
                     outcome: None,
@@ -296,7 +307,7 @@ struct Observation {
     switched: Duration,
     stage: RollingStage,
     durations: [Duration; 10],
-    work: [u64; 22],
+    work: [u64; WORK_COUNT],
     overflowed: bool,
     finalized: bool,
     outcome: Option<CallbackOutcome>,
@@ -438,15 +449,23 @@ pub(crate) struct NumericWorkLease {
 }
 
 impl NumericWorkLease {
-    pub(crate) fn settle(self, numeric_rows: u64, overflowed: bool) {
+    pub(crate) fn settle(self, numeric_rows: u64, lanes_started: u64, overflowed: bool) {
         let mut observation = self.recorder.0.observation.lock();
         if observation.outstanding_work != Some(self.work_id) {
             return;
         }
-        let next = observation.work[RollingWork::NumericRows as usize].checked_add(numeric_rows);
-        observation.overflowed |= overflowed || next.is_none();
-        if let Some(next) = next {
-            observation.work[RollingWork::NumericRows as usize] = next;
+        let updates = [
+            (RollingWork::NumericRows, numeric_rows),
+            (RollingWork::NumericParallelRows, numeric_rows),
+            (RollingWork::NumericLanesStarted, lanes_started),
+        ];
+        let next =
+            updates.map(|(work, amount)| observation.work[work as usize].checked_add(amount));
+        observation.overflowed |= overflowed || next.iter().any(Option::is_none);
+        if let [Some(rows), Some(parallel_rows), Some(lanes)] = next {
+            observation.work[RollingWork::NumericRows as usize] = rows;
+            observation.work[RollingWork::NumericParallelRows as usize] = parallel_rows;
+            observation.work[RollingWork::NumericLanesStarted as usize] = lanes;
         }
         observation.outstanding_work = None;
         self.recorder.publish_ready(&mut observation);
@@ -548,6 +567,8 @@ fn accumulate(
         touched_entities => TouchedEntities,
         copied_entities => CopiedEntities,
         numeric_rows => NumericRows,
+        numeric_lanes_started => NumericLanesStarted,
+        numeric_parallel_rows => NumericParallelRows,
         history_rows_materialized => HistoryRowsMaterialized,
         scalar_value_conversions => ScalarValueConversions,
         output_rows_prepared => OutputRowsPrepared,
@@ -584,6 +605,29 @@ mod tests {
         fn now(&self) -> Duration {
             *self.0.lock()
         }
+    }
+
+    #[test]
+    fn rolling_metrics_lane_overflow_settles_without_partial_work_publication() {
+        let store = RollingMetricsStore::default();
+        let callback = store.begin(RollingCallback::Watermark, CancellationToken::new());
+        let recorder = callback.recorder();
+        let lease = recorder.numeric_lease(1).unwrap();
+        recorder.0.observation.lock().work[RollingWork::NumericLanesStarted as usize] = u64::MAX;
+        callback.complete(&Ok(()));
+        let mut expected = store.snapshot();
+        assert_eq!(expected.watermark.succeeded, 0);
+        expected.overflowed = true;
+        lease.settle(1, 1, false);
+        assert_eq!(store.snapshot(), expected);
+        let observation = recorder.0.observation.lock();
+        assert!(observation.finalized);
+        assert!(observation.outstanding_work.is_none());
+        assert_eq!(observation.work[RollingWork::NumericRows as usize], 0);
+        assert_eq!(
+            observation.work[RollingWork::NumericParallelRows as usize],
+            0
+        );
     }
 
     #[test]

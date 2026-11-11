@@ -804,6 +804,8 @@ class RollingCallbackMetrics(TypedDict):
     touched_entities: int
     copied_entities: int
     numeric_rows: int
+    numeric_lanes_started: int
+    numeric_parallel_rows: int
     history_rows_materialized: int
     scalar_value_conversions: int
     output_rows_prepared: int

@@ -14,6 +14,7 @@ use datafusion::arrow::{
 use super::{entity_parallel::*, *};
 use crate::CalcFlowError;
 
+mod capabilities;
 mod cpu_scaling;
 
 const HISTORICAL_SCRATCH_THRESHOLD: usize = 16 << 20;
@@ -295,20 +296,10 @@ fn entity_parallel_preserves_rows_values_and_complete_touched_state() {
 fn entity_parallel_qualification_checks_frame_profile_columns_and_actual_queues() {
     let input = input(64_000, 64, false);
     let original = lane_plan(false);
-    for change in [
-        "stable_v2",
-        "nan_as_value",
-        "w21",
-        "duration",
-        "three_aliases",
-        "wrong_state",
-        "queue_w_plus_one",
-    ] {
+    for change in ["w21", "duration", "wrong_state", "queue_w_plus_one"] {
         let mut plan = original.clone();
         let mut state = warm(&plan, &input);
         match change {
-            "stable_v2" => plan.numerical_profile = RollingNumericalProfile::StableV2Preview,
-            "nan_as_value" => plan.nan_as_value = true,
             "w21" => {
                 plan.groups[0] = TypedGroupPlan::Numeric {
                     input_index: 3,
@@ -321,7 +312,6 @@ fn entity_parallel_qualification_checks_frame_profile_columns_and_actual_queues(
                     frame: TypedFrame::Duration(20),
                 }
             }
-            "three_aliases" => plan.outputs = vec![plan.outputs[0]; 3],
             "wrong_state" => {
                 Arc::make_mut(&mut state.states[0]).groups[0] = TypedWindowState::Exact(
                     ExactNumericState::new(TypedFrame::Rows(20), SumClass::Signed, 20),
@@ -362,7 +352,7 @@ fn entity_parallel_new_entity_full_window_uses_local_validity_and_bounded_queues
 
 #[test]
 fn entity_parallel_small_sparse_and_skewed_inputs_keep_prepared_serial_state() {
-    for (rows, entities) in [(1_280, 64), (64_000, 1), (64_000, 8)] {
+    for (rows, entities) in [(1_280, 64), (64_000, 1)] {
         let input = input(rows, entities, false);
         let plan = lane_plan(false);
         let state = warm(&plan, &input);
@@ -502,7 +492,8 @@ fn allocation_lane_buffer_bytes(columns: &[Float64Array], rows: usize, late_null
 }
 
 fn check_lane_builder_allocation(loads: [usize; 2], count: usize, late_null: bool) {
-    let plan = two_output_plan();
+    let mut plan = two_output_plan();
+    plan.outputs.resize(count, plan.outputs[0]);
     // Builders and typed Vecs remain in the current-thread scope through drop.
     let mut typed_array_capacity_bytes = 0;
     let mut retained_buffer_bytes = 0;
