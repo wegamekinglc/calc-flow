@@ -28,6 +28,7 @@ const ROWS_PER_LANE: usize = 16_000;
 thread_local! {
     pub(super) static SCHEDULE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static ENTITY_COUNT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static MERGE_VALIDATION_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -111,6 +112,8 @@ pub(super) struct OwnedLaneEntity {
 struct PreparedNumericInput {
     entity_ids: Vec<usize>,
     assignments: Vec<EntityAssignment>,
+    // Anchor validated routes so worker copy-on-write changes their identity.
+    schedules: Vec<Arc<Vec<LaneRow>>>,
     columns: Vec<TypedGroupInput>,
     event_times: TimestampMicrosecondArray,
     outputs: Vec<TypedOutputPlan>,
@@ -122,7 +125,7 @@ struct PreparedNumericInput {
 pub(crate) struct NumericLaneRequest {
     input: Arc<PreparedNumericInput>,
     row_count: usize,
-    pub(super) rows: Vec<LaneRow>,
+    pub(super) rows: Arc<Vec<LaneRow>>,
     pub(super) entities: Vec<OwnedLaneEntity>,
     #[cfg(test)]
     pub(super) test_hook: Option<Arc<dyn Fn(NumericTestPoint) + Send + Sync>>,
@@ -158,7 +161,7 @@ impl NumericLaneRequest {
 pub(crate) struct NumericLaneResult {
     input: Option<Arc<PreparedNumericInput>>,
     pub(super) entities: Vec<OwnedLaneEntity>,
-    pub(super) rows: Vec<LaneRow>,
+    pub(super) rows: Arc<Vec<LaneRow>>,
     columns: Vec<Float64Array>,
 }
 
@@ -267,9 +270,14 @@ impl ScratchPlan {
                 + size_of::<NumericLaneResult>()
                 + size_of::<Vec<&mut TypedEntityState>>(),
         )?;
+        // Fund conversion staging, shared owners and Arc allocation headers.
+        let schedule_owners = lanes.checked_mul(
+            2 * size_of::<Vec<LaneRow>>() + size_of::<Arc<Vec<LaneRow>>>() + 2 * size_of::<usize>(),
+        )?;
         controls
             .checked_add(descriptors)?
             .checked_add(lane_headers)?
+            .checked_add(schedule_owners)?
             .checked_add(NULL_FREE_MERGE_METADATA_BYTES)?
             .checked_add(size_of::<NumericResults>())?
             .checked_add(size_of::<LaneRoutes>())?
@@ -486,9 +494,14 @@ impl PreparedOrderedKernel<'_> {
                 lane_entity: u32::try_from(assignment.local).expect("qualified entities fit u32"),
             });
         }
+        let mut shared_schedules = Vec::with_capacity(lanes);
+        for schedule in schedules {
+            shared_schedules.push(Arc::new(schedule));
+        }
         let shared = Arc::new(PreparedNumericInput {
             entity_ids: stream.entity_ids,
             assignments,
+            schedules: shared_schedules,
             columns,
             event_times,
             outputs: self.plan.outputs.clone(),
@@ -500,7 +513,7 @@ impl PreparedOrderedKernel<'_> {
             .map(|lane| NumericLaneRequest {
                 input: Arc::clone(&shared),
                 row_count: loads[lane],
-                rows: mem::take(&mut schedules[lane]),
+                rows: Arc::clone(&shared.schedules[lane]),
                 entities: mem::take(&mut lane_entities[lane]),
                 #[cfg(test)]
                 test_hook: None,
@@ -1222,31 +1235,25 @@ pub(super) const NULL_FREE_MERGE_METADATA_BYTES: usize =
 
 impl NumericOutputBuffers {
     fn gather(
-        entity_ids: &[usize],
-        assignments: &[EntityAssignment],
+        input: &PreparedNumericInput,
         results: &[NumericLaneResult],
         count: usize,
     ) -> Result<Self> {
+        let entity_ids = &input.entity_ids;
+        let assignments = &input.assignments;
         let rows = entity_ids.len();
         let null_free = matches!(count, 1 | 2)
             && results
                 .iter()
                 .all(|result| result.columns.iter().all(|column| column.null_count() == 0));
+        let trusted = null_free && trusted_numeric_routes(input, results);
         match count {
-            1 if null_free => gather_null_free_numeric_columns_impl(
-                entity_ids,
-                assignments,
-                results,
-                [Vec::with_capacity(rows)],
-            )
-            .map(Self::One),
-            2 if null_free => gather_null_free_numeric_columns_impl(
-                entity_ids,
-                assignments,
-                results,
-                std::array::from_fn(|_| Vec::with_capacity(rows)),
-            )
-            .map(Self::Two),
+            1 if null_free => {
+                gather_prepared_numeric_columns(input, results, trusted).map(Self::One)
+            }
+            2 if null_free => {
+                gather_prepared_numeric_columns(input, results, trusted).map(Self::Two)
+            }
             _ => {
                 let mut builders = (0..count)
                     .map(|_| Float64Builder::with_capacity(rows))
@@ -1275,6 +1282,58 @@ impl NumericOutputBuffers {
                 .collect(),
         }
     }
+}
+
+fn trusted_numeric_routes(input: &PreparedNumericInput, results: &[NumericLaneResult]) -> bool {
+    input.schedules.len() == results.len()
+        && input
+            .schedules
+            .iter()
+            .zip(results)
+            .all(|(schedule, result)| Arc::ptr_eq(schedule, &result.rows))
+        && results
+            .iter()
+            .try_fold((0_usize, 0_usize), |(rows, entities), result| {
+                Some((
+                    rows.checked_add(result.rows.len())?,
+                    entities.checked_add(result.entities.len())?,
+                ))
+            })
+            == Some((input.entity_ids.len(), input.assignments.len()))
+        && input
+            .assignments
+            .iter()
+            .enumerate()
+            .all(|(local_id, assignment)| {
+                results
+                    .get(assignment.lane)
+                    .and_then(|result| result.entities.get(assignment.local))
+                    .is_some_and(|entity| entity.local_id == local_id)
+            })
+}
+
+fn gather_prepared_numeric_columns<const COLUMNS: usize>(
+    input: &PreparedNumericInput,
+    results: &[NumericLaneResult],
+    trusted: bool,
+) -> Result<[Vec<f64>; COLUMNS]> {
+    if !trusted {
+        return gather_null_free_numeric_columns_impl(
+            &input.entity_ids,
+            &input.assignments,
+            results,
+            std::array::from_fn(|_| Vec::with_capacity(input.entity_ids.len())),
+        );
+    }
+    let mut values = std::array::from_fn(|_| vec![0.0; input.entity_ids.len()]);
+    for result in results {
+        for (values, column) in values.iter_mut().zip(&result.columns) {
+            for (row, &value) in result.rows.iter().zip(column.values().iter()) {
+                values[row.original_row as usize] = value;
+            }
+        }
+    }
+    Ok(values)
 }
 
 #[cfg(test)]
@@ -1320,6 +1379,8 @@ fn merge_numeric_rows(
         dynamic.as_mut_slice()
     };
     for (global, expected_entity) in entity_ids.iter().enumerate() {
+        #[cfg(test)]
+        MERGE_VALIDATION_VISITS.set(MERGE_VALIDATION_VISITS.get() + 1);
         let lane = assignments
             .get(*expected_entity)
             .map(|assignment| assignment.lane)
@@ -1460,8 +1521,7 @@ pub(crate) fn merge_numeric_results(
     let input = take_numeric_input(results)?;
     let count = seed.output_count;
     validate_numeric_shape(results, count)?;
-    let buffers =
-        NumericOutputBuffers::gather(&input.entity_ids, &input.assignments, results, count)?;
+    let buffers = NumericOutputBuffers::gather(&input, results, count)?;
     merge_numeric_entities(&mut seed.execution.state, &input.assignments, results)?;
     seed.execution.entity_ids = input.entity_ids;
     #[cfg(test)]

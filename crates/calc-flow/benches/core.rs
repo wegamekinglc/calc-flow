@@ -441,7 +441,7 @@ criterion_main!(core_benchmarks);
 
 mod rolling_history {
     use std::{
-        cell::{Cell, OnceCell},
+        cell::{Cell, OnceCell, RefCell},
         collections::VecDeque,
         time::{Duration, Instant},
     };
@@ -895,7 +895,7 @@ mod rolling_history {
     }
 
     impl LaneObservation {
-        fn from_run(case: Case, result: &CompletedRun) -> Option<Self> {
+        fn from_run(case: Case, result: &CompletedRun) -> Option<(Self, serde_json::Value)> {
             let snapshot = result.metrics.as_ref()?;
             let metrics = serde_json::to_value(snapshot).unwrap();
             let rolling = metrics.get("rolling").expect("rolling node metrics");
@@ -924,7 +924,7 @@ mod rolling_history {
                 assert!(observation.started >= 2);
                 assert!(observation.parallel_rows >= 64_000);
             }
-            Some(observation)
+            Some((observation, metrics))
         }
     }
 
@@ -1080,7 +1080,13 @@ mod rolling_history {
         assert_eq!(position, fixture.case.rows());
     }
 
-    fn proof(fixture: &Fixture, iterations: u64, lanes: Option<LaneBounds>) {
+    fn proof(
+        fixture: &Fixture,
+        iterations: u64,
+        lanes: Option<LaneBounds>,
+        snapshot: Option<&serde_json::Value>,
+        last_primary_elapsed: Option<Duration>,
+    ) {
         let Some(home) = std::env::var_os("CRITERION_HOME") else {
             return;
         };
@@ -1097,6 +1103,10 @@ mod rolling_history {
             "result_sha256":fixture.expected_sha256, "validated_iterations":iterations});
         if let Some(lanes) = lanes {
             assert_eq!(lanes.iterations, iterations);
+            report["native_metrics_last_validated_job"] = snapshot.unwrap().clone();
+            report["native_metrics_validated_iteration"] = json!(iterations);
+            report["last_primary_elapsed"] =
+                serde_json::to_value(last_primary_elapsed.unwrap()).unwrap();
             let layout = fixture
                 .batches
                 .iter()
@@ -1148,10 +1158,13 @@ mod rolling_history {
             let fixture = OnceCell::new();
             let validated = Cell::new(0_u64);
             let lanes = Cell::new(None);
+            let last_metrics = RefCell::new(None);
+            let last_primary_elapsed = Cell::new(None);
             let verify = |fixture: &Fixture, result: &CompletedRun| {
                 validate(fixture, &result.batches);
-                if let Some(observation) = LaneObservation::from_run(case, result) {
+                if let Some((observation, snapshot)) = LaneObservation::from_run(case, result) {
                     lanes.set(Some(LaneBounds::observe(lanes.get(), observation)));
+                    drop(last_metrics.replace(Some(snapshot)));
                 }
             };
             group.bench_function(case.name(), |b| {
@@ -1167,7 +1180,9 @@ mod rolling_history {
                     for _ in 0..iterations {
                         let start = Instant::now();
                         let result = runtime.block_on(run(fixture));
-                        elapsed += start.elapsed();
+                        let duration = start.elapsed();
+                        elapsed += duration;
+                        last_primary_elapsed.set(Some(duration));
                         verify(fixture, &result);
                         validated.set(validated.get() + 1);
                     }
@@ -1175,7 +1190,13 @@ mod rolling_history {
                 });
             });
             if let Some(fixture) = fixture.get() {
-                proof(fixture, validated.get(), lanes.get());
+                proof(
+                    fixture,
+                    validated.get(),
+                    lanes.get(),
+                    last_metrics.borrow().as_ref(),
+                    last_primary_elapsed.get(),
+                );
             }
         }
         group.finish();

@@ -182,6 +182,34 @@
       "candidate_sha256": "2eb16d32096c12e25e705b7c137593d09641849163c95d28c01f8fbbdc508bd8",
       "reason": "Exact composed migration from the retained dependency-upgrade core workload anchor through PR #522 and rolling stages 1 and 4: retire the sub-nanosecond requires_datafusion getter, add three rolling history cases, then three exact-oracle grouped-lane cases with timed seed and post-timer actual lane validation (native snapshot and final owning handle drop stay inside timing). Every remaining historical core fixture and timing boundary is preserved. New cases have no historical timing equivalence; the phase overlay uses identical benchmark declarations and symmetric instrumentation on both products.",
       "reference": "2026-11-11 streaming rolling optimization stage 4; paired grouped-lane measurement"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "2eb16d32096c12e25e705b7c137593d09641849163c95d28c01f8fbbdc508bd8",
+      "candidate_sha256": "58bcbbb21ea091d6c21f28a364059b2ee473c68b7fd36e1f3acbadef8ee8411d",
+      "reason": "Retain the final validated job native rolling snapshot and primary elapsed duration in the existing payload-free proof. Native metrics capture and owning-handle drop remain inside the unchanged primary timer; snapshot retention/serialization and duration Cell update remain outside it. The exact composed endpoint preserves all prior declared core retirements and rolling case additions. Fixtures, formulas, lane/full-output/input-immutability checks, Criterion samples and input/output schemas are unchanged. Diagnostic --test retains the existing one preflight plus one timed job; no historical timing equivalence or speed verdict is declared.",
+      "reference": "P4 bounded regression diagnosis after PR #594 measurement; original126-worker results remain unchanged"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "a6211fa6b0c2e765167f9af9f513e52a0c4b164c28227cfaaeb07e3780b80b4f",
+      "candidate_sha256": "58bcbbb21ea091d6c21f28a364059b2ee473c68b7fd36e1f3acbadef8ee8411d",
+      "reason": "Retain the final validated job native rolling snapshot and primary elapsed duration in the existing payload-free proof. Native metrics capture and owning-handle drop remain inside the unchanged primary timer; snapshot retention/serialization and duration Cell update remain outside it. The exact composed endpoint preserves all prior declared core retirements and rolling case additions. Fixtures, formulas, lane/full-output/input-immutability checks, Criterion samples and input/output schemas are unchanged. Diagnostic --test retains the existing one preflight plus one timed job; no historical timing equivalence or speed verdict is declared.",
+      "reference": "P4 bounded regression diagnosis after PR #594 measurement; original126-worker results remain unchanged"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "d506749a896357a4902ce60a3bf3b2a2fdb274ad8b168d1450e231b23f967a64",
+      "candidate_sha256": "58bcbbb21ea091d6c21f28a364059b2ee473c68b7fd36e1f3acbadef8ee8411d",
+      "reason": "Retain the final validated job native rolling snapshot and primary elapsed duration in the existing payload-free proof. Native metrics capture and owning-handle drop remain inside the unchanged primary timer; snapshot retention/serialization and duration Cell update remain outside it. The exact composed endpoint preserves all prior declared core retirements and rolling case additions. Fixtures, formulas, lane/full-output/input-immutability checks, Criterion samples and input/output schemas are unchanged. Diagnostic --test retains the existing one preflight plus one timed job; no historical timing equivalence or speed verdict is declared.",
+      "reference": "P4 bounded regression diagnosis after PR #594 measurement; original126-worker results remain unchanged"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "1977e38423122a9a4be36d56317cd905d64dd2fb95e37005e05669f436d47c98",
+      "candidate_sha256": "58bcbbb21ea091d6c21f28a364059b2ee473c68b7fd36e1f3acbadef8ee8411d",
+      "reason": "Retain the final validated job native rolling snapshot and primary elapsed duration in the existing payload-free proof. Native metrics capture and owning-handle drop remain inside the unchanged primary timer; snapshot retention/serialization and duration Cell update remain outside it. The exact composed endpoint preserves all prior declared core retirements and rolling case additions. Fixtures, formulas, lane/full-output/input-immutability checks, Criterion samples and input/output schemas are unchanged. Diagnostic --test retains the existing one preflight plus one timed job; no historical timing equivalence or speed verdict is declared.",
+      "reference": "P4 bounded regression diagnosis after PR #594 measurement; original126-worker results remain unchanged"
     }
   ]
 }

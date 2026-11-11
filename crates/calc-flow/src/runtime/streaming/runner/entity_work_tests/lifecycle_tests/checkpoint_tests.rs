@@ -194,7 +194,7 @@ fn assert_continuation(records: &Arc<Mutex<Vec<RecordBatch>>>, input: &RecordBat
 }
 
 #[tokio::test]
-async fn real_checkpoint_drains_lanes_and_restores_serial_before_the_next_warm_pair() {
+async fn real_checkpoint_drains_lanes_and_restores_owned_lanes_for_both_continuation_batches() {
     let directory = tempfile::tempdir().unwrap();
     checkpoint_a_real_pair(directory.path()).await;
     let input = continuation_input();
@@ -211,7 +211,7 @@ async fn real_checkpoint_drains_lanes_and_restores_serial_before_the_next_warm_p
     job.core.entity_work.set_worker_limit_for_test(2);
     f.start.notify_one();
     wait_until(|| rows(&f.records) == ROWS).await;
-    assert_eq!(job.core.owned_lane_launches.load(Ordering::SeqCst), 0);
+    assert_eq!(job.core.owned_lane_launches.load(Ordering::SeqCst), 2);
     second_batch.notify_one();
     let outcome = tokio::time::timeout(Duration::from_secs(10), job.wait())
         .await
@@ -223,7 +223,7 @@ async fn real_checkpoint_drains_lanes_and_restores_serial_before_the_next_warm_p
         outcome.errors
     );
     assert!(outcome.errors.is_empty());
-    assert_eq!(job.core.owned_lane_launches.load(Ordering::SeqCst), 2);
+    assert_eq!(job.core.owned_lane_launches.load(Ordering::SeqCst), 4);
     assert_continuation(&f.records, &input);
     assert!(job.core.runtime_status.lock().tasks.snapshot().is_empty());
     assert_eq!(job.core.entity_work.active_bytes(), 0);

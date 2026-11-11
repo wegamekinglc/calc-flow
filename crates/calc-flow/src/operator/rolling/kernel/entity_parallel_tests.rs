@@ -877,7 +877,7 @@ fn entity_parallel_merge_checks_global_row_coverage_before_returning_state() {
     let NumericLaneOutcome::Complete(second) = &mut results[1].outcome else {
         unreachable!()
     };
-    second.rows[0].original_row = 0;
+    Arc::make_mut(&mut second.rows)[0].original_row = 0;
     assert!(
         merge_numeric_results(seed, &mut results, "job")
             .err()
@@ -1200,6 +1200,28 @@ fn merge_fixture(count: usize, null_case: usize) -> (NumericJoinSeed, [NumericLa
 }
 
 #[test]
+fn test_entity_parallel_trusted_merge_preserves_bits_without_revalidating_rows() {
+    let (seed, mut exits) = merge_fixture(2, 1);
+    MERGE_VALIDATION_VISITS.set(0);
+    let actual = merge_numeric_results(seed, &mut exits, "job").unwrap();
+    let visits = MERGE_VALIDATION_VISITS.replace(0);
+    assert_eq!(actual.execution.columns.len(), 2);
+    for (column, array) in actual.execution.columns.iter().enumerate() {
+        let array = array.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(array.data_type(), &DataType::Float64);
+        assert_eq!(array.len(), 64_000);
+        assert_eq!(array.null_count(), 0);
+        for (row, value) in array.values().iter().enumerate() {
+            assert_eq!(value.to_bits(), merge_value_bits(row, column));
+        }
+    }
+    assert_eq!(
+        visits, 0,
+        "immutable producer-validated routing must avoid a second per-row coverage scan"
+    );
+}
+
+#[test]
 fn entity_parallel_merge_compatibility_preserves_slices_bits_and_nullable_slots() {
     for count in [0, 1, 2, 3] {
         for null_case in 0..=4 {
@@ -1265,7 +1287,7 @@ fn corrupt_merge(
     match case {
         0 => {
             complete_result(&mut exits[0]).columns_for_test().clear();
-            complete_result(&mut exits[0]).rows[0].original_row = 9;
+            Arc::make_mut(&mut complete_result(&mut exits[0]).rows)[0].original_row = 9;
             seed.execution.state.entities.insert(vec![255], 64);
             "numeric lane output shape changed"
         }
@@ -1276,32 +1298,32 @@ fn corrupt_merge(
             "numeric lane output shape changed"
         }
         2 => {
-            complete_result(&mut exits[1]).rows[0].original_row = 0;
+            Arc::make_mut(&mut complete_result(&mut exits[1]).rows)[0].original_row = 0;
             "numeric lane row coverage or entity identity changed"
         }
         3 => {
-            complete_result(&mut exits[0]).rows.swap(0, 1);
+            Arc::make_mut(&mut complete_result(&mut exits[0]).rows).swap(0, 1);
             "numeric lane row coverage or entity identity changed"
         }
         4 => {
             let result = complete_result(&mut exits[1]);
-            result.rows.pop();
+            Arc::make_mut(&mut result.rows).pop();
             for column in result.columns_for_test() {
                 *column = column.slice(0, column.len() - 1);
             }
             "numeric lane row coverage is incomplete"
         }
         5 => {
-            complete_result(&mut exits[0]).rows[0].lane_entity = u32::MAX;
+            Arc::make_mut(&mut complete_result(&mut exits[0]).rows)[0].lane_entity = u32::MAX;
             "numeric lane row coverage or entity identity changed"
         }
         6 => {
-            complete_result(&mut exits[0]).rows[0].lane_entity = 1;
+            Arc::make_mut(&mut complete_result(&mut exits[0]).rows)[0].lane_entity = 1;
             "numeric lane row coverage or entity identity changed"
         }
         7 => {
             let result = complete_result(&mut exits[0]);
-            result.rows.push(LaneRow {
+            Arc::make_mut(&mut result.rows).push(LaneRow {
                 original_row: 64_000,
                 lane_entity: 0,
             });
@@ -1325,7 +1347,7 @@ fn corrupt_merge(
         }
         10 => {
             let result = complete_result(&mut exits[0]);
-            result.rows.remove(10);
+            Arc::make_mut(&mut result.rows).remove(10);
             for column in result.columns_for_test() {
                 *column = column
                     .iter()
