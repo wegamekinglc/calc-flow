@@ -246,7 +246,7 @@ def _node_from_dict(node):
 
 def _wire_semantics(value: dict) -> UpdateSemantics:
     version = (value["schema_version"], value["analysis_revision"])
-    if version not in ((1, 1), (2, 2)):
+    if version not in ((1, 1), (2, 2), (2, 3)):
         raise ValueError("query_analysis: unsupported revision")
     semantics = (
         value.get("update_semantics", "legacy_append")
@@ -372,6 +372,8 @@ def _named_roles(node):
     from calc_flow.symbolic.analyzer import _cstr_seq
 
     name = node.op.name
+    if name == "aggregate":
+        return (".aggregate.value",)
     if name in ("sql", "snapshot_sql"):
         return tuple(
             _segment(f".{name}.tables", alias)
@@ -521,15 +523,25 @@ def _declaration(node, path, facts, statuses):
     )
 
 
+def _input_alias(node, index):
+    from calc_flow.symbolic.analyzer import _cstr_seq
+
+    if node.op.name not in ("sql", "snapshot_sql", "aggregate"):
+        return None
+    aliases = _cstr_seq(node.attr("aliases"))
+    return aliases[index] if index < len(aliases) else None
+
+
 def _query_edges(nodes, paths):
     return [
         dict(
             path=paths[key] + role,
             source_path=paths[child.digest],
             target_path=paths[key],
+            input_alias=_input_alias(node, index),
         )
         for key, node in nodes.items()
-        for child, role in zip(node.args, _roles(node))
+        for index, (child, role) in enumerate(zip(node.args, _roles(node)))
     ]
 
 
@@ -574,7 +586,7 @@ def _gate_latest(program, runtime):
     report = program.analyze(runtime).query
     if (report.schema_version, report.analysis_revision, report.update_semantics) != (
         2,
-        2,
+        3,
         "latest_relation",
     ):
         error = CompileError(

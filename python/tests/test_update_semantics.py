@@ -8,12 +8,14 @@ import pytest
 import calc_flow as cf
 
 
-def _program(*, chain=False, transform=False):
+def _program(
+    *, chain=False, transform=False, query="SELECT SUM(total) AS total FROM input"
+):
     source = cf.table_input("events", schema=pa.schema([("x", pa.int64())]))
     total = source.sql("SELECT SUM(x) AS total FROM input")
     if transform:
         total = total.filter(total["total"] >= cf.lit(0)).select("total")
-    output = total.sql("SELECT SUM(total) AS total FROM input") if chain else total
+    output = total.sql(query) if chain else total
     return cf.Program("updates", mode="stream", outputs={"result": output})
 
 
@@ -61,26 +63,23 @@ def test_latest_gate_reports_consumer_before_source_or_job(monkeypatch, transfor
     monkeypatch.setattr(cf.StreamingRunner, "start_async", forbid_job)
     report = latest.analyze(runtime).query
     assert report.update_semantics == "latest_relation"
-    assert report.schema_version == report.analysis_revision == 2
+    assert (report.schema_version, report.analysis_revision) == (2, 3)
     edge = next(
         edge for edge in report.edges if edge.path == "outputs.result.sql.tables.input"
     )
     assert edge.stream.producer_update == "complete_snapshot"
-    assert edge.stream.consumer_interpretation == "append"
-    assert edge.stream.support == "unsupported"
+    assert edge.stream.consumer_interpretation == "complete_replacement"
+    assert edge.stream.support == "supported"
 
     async def run():
         async with latest.stream({"events": Unread()}, runtime=runtime):
             raise AssertionError("stream started")
 
     for _ in range(2):
+        latest.compile_stream(runtime)
         with pytest.raises(
-            cf.CompileError, match="update_interpretation_mismatch"
-        ) as caught:
-            latest.compile_stream(runtime)
-        assert caught.value.query_analysis.request is None
-        assert str(caught.value).startswith("outputs.result.sql.tables.input:")
-        with pytest.raises(cf.CompileError, match="update_interpretation_mismatch"):
+            (ValueError, cf.ConfigError), match="sql_replacement_state_budget"
+        ):
             asyncio.run(run())
     assert calls == []
     latest.for_mode("batch").compile_batch(runtime)
@@ -264,7 +263,9 @@ def test_latest_rejects_unproved_snapshot_transform(query):
 
 
 def test_exported_latest_gate_preserves_native_error_report():
-    latest = _program(chain=True).with_update_semantics("latest_relation")
+    latest = _program(
+        chain=True, query="SELECT SUM(DISTINCT total) AS total FROM input"
+    ).with_update_semantics("latest_relation")
     runtime = cf.Runtime()
     project = latest.to_project(runtime)
     with pytest.raises(
@@ -325,7 +326,7 @@ def test_latest_rejects_stale_report_before_preparation_cache(monkeypatch):
 def test_shared_snapshot_keeps_each_offending_consumption_edge():
     source = cf.table_input("events", schema=pa.schema([("x", pa.int64())]))
     total = source.sql("SELECT SUM(x) AS total FROM input")
-    query = "SELECT SUM(total) AS total FROM input"
+    query = "SELECT SUM(DISTINCT total) AS total FROM input"
     program = cf.Program(
         "shared",
         mode="stream",

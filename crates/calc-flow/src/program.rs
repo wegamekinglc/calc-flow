@@ -12,6 +12,9 @@ use serde_json::json;
 use std::collections::BTreeMap;
 mod lower;
 
+#[cfg(test)]
+mod admission_tests;
+
 /// How consumers interpret complete relation updates, independently of lifecycle.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -372,7 +375,9 @@ fn discover_table(table: &TableExpr, inputs: &mut BTreeMap<String, TableExpr>) -
             }
             inputs.insert(name.clone(), table.clone());
         }
-        RelationKind::Project { input, .. } | RelationKind::Filter { input, .. } => {
+        RelationKind::Aggregate { input, .. }
+        | RelationKind::Project { input, .. }
+        | RelationKind::Filter { input, .. } => {
             discover_table(input, inputs)?;
         }
         RelationKind::Sql { tables, .. } => {
@@ -386,6 +391,9 @@ fn discover_table(table: &TableExpr, inputs: &mut BTreeMap<String, TableExpr>) -
 fn validate_stream(table: &TableExpr, path: &str) -> Result<()> {
     match &table.0.kind {
         RelationKind::Input { .. } => {}
+        RelationKind::Aggregate { input, .. } => {
+            validate_stream(input, &format!("{path}.aggregate.value"))?;
+        }
         RelationKind::Project { input, .. } | RelationKind::Filter { input, .. } => {
             validate_stream(input, &format!("{path}.project.value"))?;
         }

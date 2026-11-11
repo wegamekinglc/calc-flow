@@ -43,7 +43,11 @@ async def run() -> None:
     batch = cf.Program(
         "sql-expression-pipeline",
         mode="batch",
-        outputs={"gross": add_gross(source), "result": result_expr},
+        outputs={
+            "gross": add_gross(source),
+            "result": result_expr,
+            "summary": result_expr.aggregate({"net_total": result_expr["net"].sum()}),
+        },
     )
     stream = batch.for_mode("stream")
     require(stream.fingerprint == batch.fingerprint, "mode changed the declaration")
@@ -59,7 +63,28 @@ async def run() -> None:
             if event.name == "result":
                 streamed.extend(event.table.to_pylist())
     require(streamed == result.to_pylist(), "stream and batch results differ")
+    await replacement_chain()
     print(result.to_pydict())
+
+
+async def replacement_chain() -> None:
+    source = cf.table_input("events", schema=pa.schema([("x", pa.int64())]))
+    total = source.aggregate({"total": source["x"].sum()})
+    result = total.sql("SELECT SUM(total) AS value FROM input")
+    program = cf.Program(
+        "latest", mode="stream", outputs={"result": result}
+    ).with_update_semantics("latest_relation")
+    config = cf.StreamRuntimeConfig(
+        sql_replacement_state_budget=cf.StateBudget(100, 8 << 20)
+    )
+
+    async def feed():
+        yield pa.table({"x": [1]})
+        yield pa.table({"x": [2, 3]})
+
+    async with program.stream({"events": feed()}, config=config) as events:
+        seen = [event.table.to_pydict() async for event in events]
+    require(seen == [{"value": [1]}, {"value": [6]}], "unexpected latest aggregate")
 
 
 def main() -> None:

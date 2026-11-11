@@ -1,0 +1,619 @@
+{
+  "issue": "DAL-514",
+  "role": "independent tester",
+  "recorded_at": "2026-11-11T13:48:41.208967+00:00",
+  "pr": "https://github.com/wegamekinglc/calc-flow/pull/597",
+  "branch": "feature/dal-514-aggregate-replacement",
+  "verification_head": "e9ca4ac754d26b4584e6f11a5640e0c1f0107139",
+  "validated_product_sha": "ddd8bd872ad4d1524cf5f97e8e6112197d71584d",
+  "component_trees_at_start": {
+    "core": "a1249e6cb31facf704ff5dbe698cbc48749b76bf",
+    "binding": "fd8dd7cc31ccf1d867c5df0f99cc87c5bca5ec9c",
+    "python": "522c347be1ce7bff94ffb0c4ea1fd1ac6486c263",
+    "snapshot_policy": "8b2ca0e0185e8a521366501d93ab96b150230f51"
+  },
+  "native_provenance_verified_before_parallel_edits": {
+    "package": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/final-python/calc_flow/__init__.py",
+    "extension": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/final-python/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+    "python_version": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+    "pyarrow": "24.0.0",
+    "source_sha": "ddd8bd872ad4d1524cf5f97e8e6112197d71584d",
+    "interpreter": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+    "wheel": "target/aggregate/final-wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl",
+    "wheel_sha256": "f930a713bff3ca6b3f0947c3a0f96fb2084147cf4c30e61e2573a5e9e06d882b",
+    "extension_sha256": "f36ea47ddeba95d918274493acda92945120bed86449a94a71cc59f3277cacaa",
+    "python_source_files_verified": 55,
+    "source_manifest_sha256": "9ef8ea50b8d964400a50753847ed5bc96d084a1a4fbc9eafef2aceab69634a68",
+    "python39_syntax_files": 54
+  },
+  "native_import_probe": {
+    "package": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/final-python/calc_flow/__init__.py",
+    "extension": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/final-python/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+    "python_version": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+    "pyarrow": "24.0.0"
+  },
+  "source_manifest_sha256": "9ef8ea50b8d964400a50753847ed5bc96d084a1a4fbc9eafef2aceab69634a68",
+  "manifest_files": 1154,
+  "packaged_python_files_verified": 55,
+  "retained_evidence_logs_verified": 21,
+  "reused_verification": [
+    {
+      "name": "RED exact baseline",
+      "source_sha": "c4f1749c0595ed3df0fe7eaf4c6331c6093dcfab",
+      "result": "Expected failure: 3 AttributeError, aggregate absent before native execution",
+      "command": "PYTHONPATH=target/aggregate/baseline python -m pytest python/tests/test_aggregate_replacement.py -k dataframe_aggregate_nulls -q",
+      "log": "target/aggregate/red-baseline-exact.log",
+      "log_sha256": "02c290126f45c0e79a6ed586db5cf57e30ea4424092fd96eb46e34ca3aa6eac2"
+    },
+    {
+      "name": "Rust replacement/adjacent snapshots",
+      "source_sha": "456a64c033826a419fb64493598123fa7cf04321",
+      "result": "12 passed, including 5 new replacement tests",
+      "command": "target/aggregate/cargo/release/deps/calc_flow-70207ccc03de92aa operator::snapshot_sql:: --nocapture",
+      "log": "target/aggregate/rust-snapshot.log",
+      "log_sha256": "6a7469c4da25cb855bfce057617870dbbace2f6d33b5ab3eb7af91d98fda91cb"
+    },
+    {
+      "name": "Rust frontend/update/history",
+      "source_sha": "b2cd59077ad417e1b80cb8c5312862f26b79e7a0",
+      "result": "24 passed (11 + 4 + 9)",
+      "command": "cargo test --locked -p calc-flow --release --config profile.release.package.calc-flow.opt-level=0 --config profile.release.package.calc-flow.codegen-units=256 --test latest_relation --test relational_frontend --test query_history_portability",
+      "log": "target/aggregate/rust-final.log",
+      "log_sha256": "5c2f0bcf8ae34b91df96d0f2ff7845c55f643c039e4fd7dd622fa622a9f11fe1"
+    },
+    {
+      "name": "Library/binding lint",
+      "source_sha": "b2cd59077ad417e1b80cb8c5312862f26b79e7a0",
+      "result": "passed",
+      "command": "cargo clippy --locked -p calc-flow -p calc-flow-python --lib -- -D warnings",
+      "log": "target/aggregate/clippy-libs-green.log",
+      "log_sha256": "c748e9a62488ed708f902c0b01d6a17647df172a31dde79eaa2a13b7d419894f"
+    },
+    {
+      "name": "Affected target lint",
+      "source_sha": "9076d87fe3ad0b89b1f7ae8efe1402f9e764b951",
+      "result": "passed",
+      "command": "cargo clippy --locked -p calc-flow --test latest_relation --example 32_sql_expression_pipeline -- -D warnings",
+      "log": "target/aggregate/clippy-targets-green.log",
+      "log_sha256": "f24a923b288af4a3d40ead37f863a6d4105a08c2902595fdf4415a0d87e84ffa"
+    },
+    {
+      "name": "core-standalone",
+      "source_sha": "09894b54fe2c7ae68e3fd7deab9190baac5df329",
+      "result": 0,
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--lib",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256"
+      ],
+      "log": "target/aggregate/core-standalone.log",
+      "log_sha256": "be66e74e4ac95e07d448ae3597c30e2e51f1f7258706693d690d8cfd0c5cf391"
+    },
+    {
+      "name": "rust-example",
+      "source_sha": "09894b54fe2c7ae68e3fd7deab9190baac5df329",
+      "result": 0,
+      "command": [
+        "cargo",
+        "run",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--example",
+        "32_sql_expression_pipeline",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256"
+      ],
+      "log": "target/aggregate/rust-example.log",
+      "log_sha256": "0d37da894f7b78d85d694a8ad9a38e46d5dc5a7b6786e54cc746bcd639f1b9a4"
+    },
+    {
+      "name": "consumer",
+      "source_sha": "6350c536dbe052dca6711c94a4f045ebc1c99dd8",
+      "result": 0,
+      "command": [
+        "cargo",
+        "run",
+        "--locked",
+        "--manifest-path",
+        "crates/calc-flow/tests/relational-consumer/Cargo.toml",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256"
+      ],
+      "log": "target/aggregate/consumer.log",
+      "log_sha256": "3c9e1f02b5e1fd3ed68030af24d2a5d311c4d45d748acf962030941cc4ab192b"
+    },
+    {
+      "name": "rustdoc",
+      "source_sha": "6350c536dbe052dca6711c94a4f045ebc1c99dd8",
+      "result": 0,
+      "command": [
+        "cargo",
+        "doc",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--no-deps",
+        "--lib",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256"
+      ],
+      "log": "target/aggregate/rustdoc.log",
+      "log_sha256": "0d91863f68803331eaedf5477519a63f309c01a2ba508008412e5ef24da117aa"
+    },
+    {
+      "name": "clippy-final",
+      "source_sha": "ddd8bd872ad4d1524cf5f97e8e6112197d71584d",
+      "result": 0,
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--lib",
+        "--test",
+        "latest_relation",
+        "--example",
+        "32_sql_expression_pipeline",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "log": "target/aggregate/clippy-final.log",
+      "log_sha256": "2e37733c857c6b0911b869ae7dededd04fd5190aaa06fdc4733a959fdf338e16"
+    },
+    {
+      "name": "rust-example-final",
+      "source_sha": "ddd8bd872ad4d1524cf5f97e8e6112197d71584d",
+      "result": 0,
+      "command": [
+        "cargo",
+        "run",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--example",
+        "32_sql_expression_pipeline",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256"
+      ],
+      "log": "target/aggregate/rust-example-final.log",
+      "log_sha256": "0cb2b77e7edaed703dd10b4fe7e0bd97f4e8fa5dd66a4bb409158f6212c07ebc"
+    },
+    {
+      "name": "native-final",
+      "source_sha": "ddd8bd872ad4d1524cf5f97e8e6112197d71584d",
+      "result": 0,
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "maturin",
+        "build",
+        "--interpreter",
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "--out",
+        "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/final-wheels",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256",
+        "--config",
+        "profile.release.package.calc-flow-python.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow-python.codegen-units=256"
+      ],
+      "log": "target/aggregate/native-final.log",
+      "log_sha256": "0959be5a9f7d8ba48ad16ff0cc125f6bfcab53437e56628636a94e7ef037fe08"
+    },
+    {
+      "name": "python-complete",
+      "source_sha": "ddd8bd872ad4d1524cf5f97e8e6112197d71584d",
+      "result": 0,
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "pytest",
+        "python/tests/test_aggregate_replacement.py",
+        "python/tests/test_update_semantics.py",
+        "python/tests/test_query_history_portability.py",
+        "python/tests/test_snapshot_sql.py",
+        "python/tests/test_expression_api.py::test_preferred_declarations_preserve_identity_and_copy_names",
+        "python/tests/test_capabilities.py::test_capability_catalog_reports_every_durable_state_layout",
+        "-q",
+        "--junitxml",
+        "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/target/aggregate/python-complete.xml"
+      ],
+      "log": "target/aggregate/python-complete.log",
+      "log_sha256": "9a835176487a2d5ca755592589a12abafc7131d8dd9cee8bec7fbea21d166a1a"
+    },
+    {
+      "name": "python-example-final",
+      "source_sha": "ddd8bd872ad4d1524cf5f97e8e6112197d71584d",
+      "result": 0,
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "examples/32_sql_expression_pipeline.py"
+      ],
+      "log": "target/aggregate/python-example-final.log",
+      "log_sha256": "481f7a4bc04ca9d6e139f95989135e230952969f115abbb718f50ca4a9de5f15"
+    },
+    {
+      "name": "ruff-final",
+      "source_sha": "ddd8bd872ad4d1524cf5f97e8e6112197d71584d",
+      "result": 0,
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/ruff",
+        "check",
+        "examples/32_sql_expression_pipeline.py",
+        "python/calc_flow/__init__.py",
+        "python/calc_flow/_native.pyi",
+        "python/calc_flow/capabilities.py",
+        "python/calc_flow/runtime.py",
+        "python/calc_flow/stream.py",
+        "python/calc_flow/symbolic/__init__.py",
+        "python/calc_flow/symbolic/aggregate.py",
+        "python/calc_flow/symbolic/analyzer.py",
+        "python/calc_flow/symbolic/expr.py",
+        "python/calc_flow/symbolic/lower/sql.py",
+        "python/calc_flow/symbolic/nodes.py",
+        "python/calc_flow/symbolic/program.py",
+        "python/calc_flow/symbolic/query_analysis.py",
+        "python/tests/test_aggregate_replacement.py",
+        "python/tests/test_capabilities.py",
+        "python/tests/test_query_history_portability.py",
+        "python/tests/test_update_semantics.py"
+      ],
+      "log": "target/aggregate/ruff-final.log",
+      "log_sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+    },
+    {
+      "name": "ruff-format-final",
+      "source_sha": "ddd8bd872ad4d1524cf5f97e8e6112197d71584d",
+      "result": 0,
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/ruff",
+        "format",
+        "--check",
+        "examples/32_sql_expression_pipeline.py",
+        "python/calc_flow/__init__.py",
+        "python/calc_flow/_native.pyi",
+        "python/calc_flow/capabilities.py",
+        "python/calc_flow/runtime.py",
+        "python/calc_flow/stream.py",
+        "python/calc_flow/symbolic/__init__.py",
+        "python/calc_flow/symbolic/aggregate.py",
+        "python/calc_flow/symbolic/analyzer.py",
+        "python/calc_flow/symbolic/expr.py",
+        "python/calc_flow/symbolic/lower/sql.py",
+        "python/calc_flow/symbolic/nodes.py",
+        "python/calc_flow/symbolic/program.py",
+        "python/calc_flow/symbolic/query_analysis.py",
+        "python/tests/test_aggregate_replacement.py",
+        "python/tests/test_capabilities.py",
+        "python/tests/test_query_history_portability.py",
+        "python/tests/test_update_semantics.py"
+      ],
+      "log": "target/aggregate/ruff-format-final.log",
+      "log_sha256": "c4fd3f494556e5e7cf4355131a1080dbdcf0bbf09664638af9984db197ad88c0"
+    },
+    {
+      "name": "rust-format-final",
+      "source_sha": "ddd8bd872ad4d1524cf5f97e8e6112197d71584d",
+      "result": 0,
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "log": "target/aggregate/rust-format-final.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "consumer-format-final",
+      "source_sha": "ddd8bd872ad4d1524cf5f97e8e6112197d71584d",
+      "result": 0,
+      "command": [
+        "cargo",
+        "fmt",
+        "--manifest-path",
+        "crates/calc-flow/tests/relational-consumer/Cargo.toml",
+        "--",
+        "--check"
+      ],
+      "log": "target/aggregate/consumer-format-final.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "complexity-final",
+      "source_sha": "ddd8bd872ad4d1524cf5f97e8e6112197d71584d",
+      "result": 0,
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "scripts/verify_complexity_gates.py"
+      ],
+      "log": "target/aggregate/complexity-final.log",
+      "log_sha256": "28c0f0ab344cc7f838249423ae355d6721a4a977d35165c20462fa028b1a5d7d"
+    },
+    {
+      "name": "schema-no-drift",
+      "source_sha": "ddd8bd872ad4d1524cf5f97e8e6112197d71584d",
+      "result": 0,
+      "command": [
+        "git",
+        "diff",
+        "--exit-code",
+        "c4f1749c0595ed3df0fe7eaf4c6331c6093dcfab",
+        "HEAD",
+        "--",
+        "schemas/project-v3.schema.json"
+      ],
+      "log": "target/aggregate/schema-no-drift.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "whitespace-final",
+      "source_sha": "ddd8bd872ad4d1524cf5f97e8e6112197d71584d",
+      "result": 0,
+      "command": [
+        "git",
+        "diff",
+        "--check",
+        "c4f1749c0595ed3df0fe7eaf4c6331c6093dcfab",
+        "HEAD"
+      ],
+      "log": "target/aggregate/whitespace-final.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "fresh_checks": [
+    {
+      "name": "existing focused tests",
+      "command": "target/aggregate/cargo/release/deps/calc_flow-70207ccc03de92aa operator::snapshot_sql::replacement_tests:: --nocapture",
+      "exit_code": 0,
+      "passed": 5,
+      "log": "target/aggregate/independent-existing.log",
+      "log_sha256": "cd533b009289c965a97f518d1b1c38973686c6128d8428b74aada314fff9ed9e",
+      "output": "\nrunning 5 tests\ntest operator::snapshot_sql::replacement_tests::replacement_byte_ledger_is_inclusive_and_pays_old_candidate_output ... ok\ntest operator::snapshot_sql::replacement_tests::replacement_grouped_empty_and_whole_output_edge_limits ... ok\ntest operator::snapshot_sql::replacement_tests::replacement_initialization_and_query_failure_are_atomic ... ok\ntest operator::snapshot_sql::replacement_tests::replacement_commit_restore_and_failed_candidates ... ok\ntest operator::snapshot_sql::replacement_tests::replacement_restore_rejects_legacy_unknown_and_insufficient_budget ... ok\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 3143 filtered out; finished in 0.03s\n\n"
+    },
+    {
+      "name": "new focused tests",
+      "command": "CARGO_TARGET_DIR=target/aggregate/cargo CARGO_BUILD_JOBS=4 cargo test --locked -p calc-flow --lib --release --config profile.release.package.calc-flow.opt-level=0 --config profile.release.package.calc-flow.codegen-units=256 operator::snapshot_sql::replacement_tests::test_replacement_ -- --nocapture",
+      "exit_code": 0,
+      "passed": 4,
+      "log": "target/aggregate/independent-new-tests.log",
+      "log_sha256": "e374fc9989bd33bc8cd76f9ae25ad52323af4ab90b900b2da98856f86a72a332",
+      "output": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-514-27a25600495f/workdir/calc-flow/crates/calc-flow)\n    Finished `release` profile [optimized] target(s) in 4m 28s\n     Running unittests src/lib.rs (target/aggregate/cargo/release/deps/calc_flow-70207ccc03de92aa)\n\nrunning 4 tests\ntest operator::snapshot_sql::replacement_tests::test_replacement_legacy_input_budget_limits_each_candidate ... ok\ntest operator::snapshot_sql::replacement_tests::test_replacement_cancelled_pending_emit_refunds_candidate_and_output ... ok\ntest operator::snapshot_sql::replacement_tests::test_replacement_restore_honors_tighter_legacy_input_budget ... ok\ntest operator::snapshot_sql::replacement_tests::test_replacement_successful_emit_commits_when_collector_cancels ... ok\n\ntest result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 3148 filtered out; finished in 0.01s\n\n"
+    }
+  ],
+  "test_file": "crates/calc-flow/src/operator/snapshot_sql/replacement_tests.rs",
+  "test_file_sha256": "3a6682a0333359e27fc1397af4f27987cbad6b35a1559c185464c115cbef0c15",
+  "compiled_test_binary": {
+    "path": "target/aggregate/cargo/release/deps/calc_flow-70207ccc03de92aa",
+    "sha256": "e2406a19561887bcf323483695b5dd4bfdc9e0fa843a4e53712c409c9585fcd0",
+    "build_seconds": 268,
+    "flags": "--release --config profile.release.package.calc-flow.opt-level=0 --config profile.release.package.calc-flow.codegen-units=256",
+    "environment": {
+      "CARGO_TARGET_DIR": "target/aggregate/cargo",
+      "CARGO_BUILD_JOBS": "4"
+    },
+    "provenance_limit": "Parallel unrelated source edits occurred during compilation. Tested operator/restore/pool/forwarding sources match the initial product manifest; no claim that this binary represents the final whole dirty tree."
+  },
+  "tested_production_source_sha256": {
+    "crates/calc-flow/src/operator/sql/retention.rs": "3e74de1140c425481cef18591a5bca05ea8e99af4c48462c95d9c42a6652e539",
+    "crates/calc-flow/src/operator/sql/normalize_groups.rs": "668e5f6d57bb51d8299a109eef2c1ed796ee71b3c6a139c337be19592808a72d",
+    "crates/calc-flow/src/operator/sql/checkpoint_test_hooks.rs": "7465b5ed114f7b252ea883498a48882be5fcd086f72d5b784a42152f85b1ef89",
+    "crates/calc-flow/src/operator/sql/metadata.rs": "d5865010aaa8a0b8d5a5fb0ebf059a1d469ed729d8e41679f68b3131c967b291",
+    "crates/calc-flow/src/operator/sql/grouped_inline_semantic_tests.rs": "b4119a2ae8ffdf8e81eb4b772bb30c49b9dcded05a819090a9521efcc70e2d05",
+    "crates/calc-flow/src/operator/sql/grouped_integer_tests.rs": "3ba0520e7a8d502f79971a9c2055afb0b9a5f33c86de5ae996969a203bd338ef",
+    "crates/calc-flow/src/operator/sql/current_checkpoint_tests.rs": "8b21a98a80d505cb61ddc7b3e055c2a16c18858886f7da0f5ebe22852caf8d7c",
+    "crates/calc-flow/src/operator/sql/compact_state_tests.rs": "8afc0429c7d30d49cba90e879c1950dcd58ca64e17aabfee1be13b50b6cf85a1",
+    "crates/calc-flow/src/operator/sql/grouped_inline_tests.rs": "4967abb1bd767e2f5c33b6544b77e08b4dad3edca387f882e2799675507e7ef9",
+    "crates/calc-flow/src/operator/sql/grouped_inline_storage_tests.rs": "cae3781808541ce95e66bab382b575557d5e7ed11bf5d11e42b09e9fae4c2d96",
+    "crates/calc-flow/src/operator/sql/ordered_last.rs": "5ed4d9d4ee1aed3cadfca31b331a8ede93ae48ed2cc287883de80c00c5143c13",
+    "crates/calc-flow/src/operator/sql/compact_budget.rs": "9a7406f89eee6b256dd4efe42e27714e9b20fabda050bd9de13189a16a43146b",
+    "crates/calc-flow/src/operator/sql/retained_planning_tests.rs": "ade71f68a51d6100dc25b39c4f6c5778d6158ae7d7575a11dcb71a2036dcbd73",
+    "crates/calc-flow/src/operator/sql/decimal_avg_tests.rs": "fb7da690fc92476187eb7ff701bfd260b8918ec135b7acf8f1b3fde08d0a48e5",
+    "crates/calc-flow/src/operator/sql/compact.rs": "85000c7f629a8e14cd781732ae374d0510216b9fa1862ca98ec5bf19e7869591",
+    "crates/calc-flow/src/operator/sql/group_key.rs": "3a941a7811fbdb71e10b8576706ff4f0ce242650dd20221da15f8347f2698cc1",
+    "crates/calc-flow/src/operator/sql/dirty.rs": "6064d6445207958899e5e81498a44cd855fa279247ce53bbb36dace178e849b8",
+    "crates/calc-flow/src/operator/sql/retained_contract_tests.rs": "3a1e9802df9358cc7765a49e6bef3eb332fcf8840d981d2b413ac0043ef14aa0",
+    "crates/calc-flow/src/operator/sql/decimal_tests.rs": "f6957ff3ac8ea78be2247858391c2fd2a325e7fb99ea8e52da1305386a536608",
+    "crates/calc-flow/src/operator/sql/compact_state.rs": "a3c0843b13977b62a0f1eb53261c0e06280d699c2d1609420e38dddf33f152c4",
+    "crates/calc-flow/src/operator/sql/restore.rs": "1ae6e474165b13a60ee68d3b41bfc32860bb83cb998c08b23ed1a96f35285a9c",
+    "crates/calc-flow/src/operator/sql/group_aggregates.rs": "6236b065b2d7d3ece4a7d465e5d54b9309ae1b929c3ac25b0c80e9e5b0060d06",
+    "crates/calc-flow/src/operator/sql/restore_tests.rs": "267108ff568fede681f66740cab6c287cf9d6bbbb7c26634362161f1be86dae7",
+    "crates/calc-flow/src/operator/sql/input_checks.rs": "b8c69d41ca5a6b92ec4c56614e3875279a12d32a9cc516a4d90ea3358dd60b90",
+    "crates/calc-flow/src/operator/sql/incremental_tests.rs": "770b18c3f5b71aae41eed8d4154384bf897069cae3f708457ce324985a20df1a",
+    "crates/calc-flow/src/operator/sql/snapshot_keys.rs": "d5e0740e4b765718a57668bbc9128b4db7a3534a060e4caaede504410a2ac38f",
+    "crates/calc-flow/src/operator/sql/ipc.rs": "633abf3a225d53a1cbfba5d2a549721c84c273c1d31cb77a6dc95382e0e18896",
+    "crates/calc-flow/src/operator/sql/row_local_compiled_tests.rs": "3a22b729aada2553d598d56f9e5ce2b14ccaa248e2dceaf8f508f5d239879b7e",
+    "crates/calc-flow/src/operator/sql/compact_budget_tests.rs": "ed7b8118298ec758a51f9ab7edff51ede77fb990a5f765494bc5438dbba8d97f",
+    "crates/calc-flow/src/operator/sql/snapshot_key_cache_tests.rs": "657be3865b382dd24c38ea979c7ecd0b01abf82396c75e5e85ad110e1d2de7ba",
+    "crates/calc-flow/src/operator/sql/grouped_sum.rs": "c3084a9b4406c0a87057d21d35de80ef810e0a12de6f1da974186aad0c16dfba",
+    "crates/calc-flow/src/operator/sql/current_retained.rs": "58bf40c924c6168bc79027cc15dafc0cc6686aad9454fc71d88ffe32ac845aa4",
+    "crates/calc-flow/src/operator/sql/compact_plan_tests.rs": "c8b7adfd3ec24228e314e9da0787781c91016e299b997174029a849804635479",
+    "crates/calc-flow/src/operator/sql/grouped_seed_tests.rs": "9725feba8eb47fdb776613c91693c4fc6f27a7ada8de68cbd0baa94d44951ef8",
+    "crates/calc-flow/src/operator/sql/grouped_float_proof_tests.rs": "928bb5a3e1d4ef89a96c6c46ccf0d2d9e27d647b79d9bbe91e614ca1c41320ea",
+    "crates/calc-flow/src/operator/sql/grouped_float.rs": "17bee07513e1fc938ccad4fcc184f7e4ae856e9a958d7531e3871d7b85419d38",
+    "crates/calc-flow/src/operator/sql/incremental.rs": "306a4eefeae9a902db10c1ff7e7d9b8d63eaa4513209d28c96483ecdb322ea6a",
+    "crates/calc-flow/src/operator/sql/retained_tests.rs": "7b913bc8d14807252bc2a5f4c345b7e3ecd2770102e6e9587abb60fea8de7ea4",
+    "crates/calc-flow/src/operator/sql/ordered_last_tests.rs": "a8a67d7b04f397b08f564e442497056436fb414004b6bf2d3268f6c5d3b161c1",
+    "crates/calc-flow/src/operator/sql/recovery_test_hooks.rs": "e858dd84611619cac4e81395ce5e5e679d8cc9ee38ca83e7303dd78aa4d342cb",
+    "crates/calc-flow/src/operator/sql/predicate.rs": "106f8be9ed7f93904d753005cb1fb5977634b6c17fa872bd1e4c3d81b0a9a9f4",
+    "crates/calc-flow/src/operator/sql/compact_checkpoint_tests.rs": "96e36045b98b20945f1f5b3099647d30a0d87e67329c60144af391d6b256d6f8",
+    "crates/calc-flow/src/operator/sql/variable_extrema.rs": "4fd1efd8e137c963d7c60a2218e49be42e2de67c97710fbd76076b2eae32538e",
+    "crates/calc-flow/src/operator/sql/output_order.rs": "5e378999eed82bf05d18c1b8dfe4a0ac75eae03b740ad43a3ffe7abe470d2941",
+    "crates/calc-flow/src/operator/sql/global_record.rs": "1f695bd83fa50301d139b6bd913e0344625b8747048ac062d6e43156d398fdad",
+    "crates/calc-flow/src/operator/sql/native_expression.rs": "f2a135702f69f9b32646873584f0df1353efe258f3dbd475124f676b05c2066e",
+    "crates/calc-flow/src/operator/snapshot_sql/tests.rs": "d0dab81c12e318ba62ef4ad06df0b33162b8aff3660ef7d2f4f7e08d2c0605af",
+    "crates/calc-flow/src/operator/snapshot_sql/checkpoint.rs": "19109fbcdc76bf817f0baf117a550b2bed342bbad752ce9edf37e81108388a32",
+    "crates/calc-flow/src/operator/snapshot_sql/mod.rs": "5f812f02eee3afd3a324d095c2fa9962cfa0230e819a7932f2fc96ddac7edcf5",
+    "crates/calc-flow/src/operator/sql/compact_state/export.rs": "9577f4fdd46b9da06b480f98ee9c37e12ef8facf4bae244bf9cc8bedd5a6044c",
+    "crates/calc-flow/src/operator/sql/ordered_last_tests/recovery.rs": "3fe691277b514678eeae9ccdab8d58bf44821e9ec822a6936c7eb172e5701cd1",
+    "crates/calc-flow/src/operator/sql/ordered_last_tests/corruption.rs": "3f7cb74ce0e4f04394f8131dde7691bb4a46097422ba3b49e27b92e1fd23806a",
+    "crates/calc-flow/src/operator/sql/ordered_last_tests/faults.rs": "f5d9f12a349cb023353eb489566942d90e6f4301155f2c4df82db844b3032e83",
+    "crates/calc-flow/src/operator/sql/global_record/coalescer.rs": "ef6f1779640f25fd844df78cdcdd6c22db6fc58cbfd49edca2c77bd068344289",
+    "crates/calc-flow/src/operator/sql/compact/grouped_composite_tests.rs": "0ce4ee46ca505efe5c17bfdf92f59de04367ce03111d6604fe5a3d0d450cb640",
+    "crates/calc-flow/src/operator/sql/compact/post_projection_tests.rs": "c5f75e1ab8aa41ea4ac0289e66a419dc9af81116d916ea12c188cf9e13657fb0",
+    "crates/calc-flow/src/operator/sql/compact/grouped_float_sum_avg_tests.rs": "6d2c550f35e9b7101a4ee633ad37299b003a225d618b4b302e53a57479cffc4c",
+    "crates/calc-flow/src/operator/sql/compact/float_extrema_tests.rs": "2c58c7d2ba33752919875c7b030baedc5188dfa8fdfc713c37548cbdb1fbd343",
+    "crates/calc-flow/src/operator/sql/compact/global_float_sum_avg_tests.rs": "f64ceb5866e67401ab7e37ec8db7b6f0628039ced085004afe7535452d8105fa",
+    "crates/calc-flow/src/operator/sql/compact/identity.rs": "6e1c439eceb463db0abe438ca1b9f19f7597b8a0f2c78708ba1d3c3396225288",
+    "crates/calc-flow/src/operator/sql/compact/cte_tests.rs": "453b7658380e3422921b5bd0ee30a2791e7d96b5e758971c2c4ff8a0a38b3fbf",
+    "crates/calc-flow/src/operator/sql/compact/global_float_where_tests.rs": "229983d0a52ec80e65a02b4e33f605acb839f225f934297d91134c09f0489a37",
+    "crates/calc-flow/src/operator/sql/compact/constant_group_tests.rs": "b105da345a709078258a99cd5e88d89d500e9cee0cf67a1ede26a99cc0bfab5a",
+    "crates/calc-flow/src/operator/sql/compact/grouped_checkpoint_reuse_tests.rs": "42eccb844c8babf02c453cc6a821f68a4bac616cc4df4762d64ca1a67ed220d3",
+    "crates/calc-flow/src/operator/sql/compact/float_count_tests.rs": "be5a7ff3b4b14c2bab4c19477c4683797948d83864642166b862e2bfa5c74b65",
+    "crates/calc-flow/src/operator/sql/compact/grouped_where_tests.rs": "dd7bf7f229cb20cd6616842dde95234b4743a31673f60e93a94eb647c3817da4",
+    "crates/calc-flow/src/operator/sql/compact/grouped_composite_safety_tests.rs": "9a5fc00ec985e4629540bc750b586f0fd7bf16a123af1b6603d4dc18464c1a9a",
+    "crates/calc-flow/src/operator/sql/compact/delta_tests.rs": "1c44a4e62ec12f3d5d2ddf49e962beb728daf147c403cb1a8c1efe576885f0c6",
+    "crates/calc-flow/src/operator/sql/compact/input_float_cast_tests.rs": "da2d11a4bb2411fda95bcfcb6bc1b3818e420de4c487aa93fd233309da8e4286",
+    "crates/calc-flow/src/operator/sql/compact/grouped_string_tests.rs": "7309e4c9a9317ecca4617455d51196436f3a4e64fef96e057b54230205880a7b",
+    "crates/calc-flow/src/operator/sql/compact/cte_input_tests.rs": "3000a6aa89deafe233d63dfa0db79ef25dd503cf0373cb2563d77a37e0786387",
+    "crates/calc-flow/src/operator/sql/compact/grouped_filter_tests.rs": "1f8f80fa3e068246dbff3aa0446532e13998b8cbda423d60bb03d5e424caec31",
+    "crates/calc-flow/src/operator/sql/compact/grouped_sum_tests.rs": "3dde924b49df5f385d5b370d81b72c79aa1a767d7274c83d7e2dc4dace58e120",
+    "crates/calc-flow/src/operator/sql/compact/global_predicate_tests.rs": "be0bde40a47bbabe9dda9956def51b444bed5d0c2a6740afcbc07162e79890ba",
+    "crates/calc-flow/src/operator/sql/compact/global_integer_avg_tests.rs": "840648e849fefb027749be92694d39e62c51387d27fb5697a3c76128836fbebf",
+    "crates/calc-flow/src/operator/sql/compact/group_key_tests.rs": "4cbfb4f6e9eb39055e10440651ae02a92c524a179e85a4266086b37919744747",
+    "crates/calc-flow/src/operator/sql/compact/restore.rs": "c5501878aac322624b537492f829031dcbbe9e542a7422f55b41144c7c2ee0fd",
+    "crates/calc-flow/src/operator/sql/compact/input_arithmetic_tests.rs": "d466f689a86e08e4391b1f55e4e8dd0806f6a8f5b8d49918af2401434ab31767",
+    "crates/calc-flow/src/operator/sql/compact/post_arithmetic_tests.rs": "a1307b839cd768c5575a3fe1289b98251b23d275272e4dfd5ad5d05488f415a6",
+    "crates/calc-flow/src/operator/sql/compact/direct_async_tests.rs": "3d2fd851a5992a6a2a08475fe65ddcbcd63f76070cd07397792c5312c20467bb",
+    "crates/calc-flow/src/operator/sql/compact/post_having_tests.rs": "c8dd756c305d4619160ddffa7aa6ac18bbf647af70028a7961230dbc39c22959",
+    "crates/calc-flow/src/operator/sql/compact/storage.rs": "58493fd5654019568721972c1cd85639158dc4844c78f39897e6905106427722",
+    "crates/calc-flow/src/operator/sql/compact/control.rs": "db4a8b4ae78c4ea0fdef6c93ed2b71d200d0b92b1a26b7d8d6fcbc62fa416054",
+    "crates/calc-flow/src/operator/sql/compact/global_record_controls.rs": "4008ea158071e36ca287ef1dfc0054cf7928f09765865cbc08621e048aa7ea6d",
+    "crates/calc-flow/src/operator/sql/compact/log.rs": "eb2accdf62ae7ccbd133b03521c54e5d70ad3a41a183b3ee068f54fe874b3ce3",
+    "crates/calc-flow/src/operator/sql/compact/grouped_float_safety_tests.rs": "4447fa00b06f22789439a95fe0fe8771929aca2c32b231ad799a2ec15411025d",
+    "crates/calc-flow/src/operator/sql/compact/delta_float_tests.rs": "db2480e0098acc4d5670431d14826e4bce297ebc07445c1d9e78b48aabf8bff4",
+    "crates/calc-flow/src/operator/sql/compact/grouped_string_safety_tests.rs": "74e17cfec1ee0d7343367ad409709549d6f1afcfc0d653f4fba66a33344f68cd",
+    "crates/calc-flow/src/operator/sql/compact/grouped_float_tests.rs": "ba37a85bd6f1600890d8fdbc8ce6a3d3a4b1d815b46f68e8653140637fea9120",
+    "crates/calc-flow/src/operator/sql/compact/storage_tests.rs": "ba1b3e9b0e8e2643a02b7def0be5ee02209e7032504be5f22c6e74fb5cd940d5",
+    "crates/calc-flow/src/operator/sql/compact/computed_filter_tests.rs": "4053623822874fc63fb7a27c2e5d75e369939acba3b05ffbb183736c467aa6ed",
+    "crates/calc-flow/src/operator/sql/compact/empty_prefix_tests.rs": "5717912d9c4a395aa51a470cfbbc1a654a2114b780a12d91299a9fc5021685df",
+    "crates/calc-flow/src/operator/sql/compact/state_fixture_tests.rs": "4fd67d097408aa39fd10ce467adcb22ef73d776aa902d5454c942c8594615b77",
+    "crates/calc-flow/src/operator/sql/compact/capture.rs": "b5f0c11f030af42872beced295bfed181f28463d9de8ad2aaf33320008f70f26",
+    "crates/calc-flow/src/operator/sql/compact/control_tests.rs": "b96f7966b54a06abeb49daf16ccdfceb36a1403963375e38c7626968a0544b29",
+    "crates/calc-flow/src/operator/sql/compact/cte_eager_tests.rs": "8d8da1115bbe27e2ce9f02d4d34748629cb69840240b82f5ed192be750813d6f",
+    "crates/calc-flow/src/operator/sql/compact/grouped_integer_avg_tests.rs": "9f08fd9bdff962b41d983f45685f6975308c214593ab7c5f786a7f5b765a4fc7",
+    "crates/calc-flow/src/operator/sql/compact/string_extrema_tests.rs": "dcffc159d357d85dbafaf49e814aa54f9a01664bd4ac50adbb55672c1e21ed97",
+    "crates/calc-flow/src/operator/sql/compact/global_float_filter_tests.rs": "a9558a077b649f861be0f91c4233df44caf4f4f66862d85b5b36222076fcfe02",
+    "crates/calc-flow/src/operator/sql/compact/post_order_tests.rs": "e49ef32a6b6276366d495889ed6906a899504d75cbec0f07ababf6a631b999b4",
+    "crates/calc-flow/src/operator/sql/compact/post_case_tests.rs": "1ad12ab30ee89ecf826c2e87b0a4343f3d1b9b25d39b34c4d18805cd8aafd478",
+    "crates/calc-flow/src/operator/sql/compact/capture/current_safety_tests.rs": "2830b14f0982e48229bed0570a9fd7bb60262a66a730b1f2234c6c88e1b38fed",
+    "crates/calc-flow/src/operator/sql/global_record/coalescer/checkpoint.rs": "8a4716376df4d9b507556c1dd3cc72cd6d6cbbfb37b8f8efb17bfda2e7cd8f1c",
+    "crates/calc-flow/src/operator/sql/ordered_last_tests/corruption/respect_nulls.rs": "84e3b66cb82988daa65f7336ecc6eb1046a1db94b18465fa4f19d07c260e597c",
+    "crates/calc-flow/src/operator/sql.rs": "23978701b39666dee120a7bcb99d95f77f200a63ab8333e93144ee24482b06d5",
+    "crates/calc-flow/src/state_memory_pool.rs": "218e2a54e3a58f473eaf8913422926a00fa7bd82bbde18b7f215c4d71b21b5f2",
+    "crates/calc-flow/src/pipeline/stream.rs": "9b9b01b3134530ea450accec11f1677719386c2501e01179038b3cc27a4226f6",
+    "crates/calc-flow/src/datafusion.rs": "615857960b8b3c1f330ec224b23a4700492ea874f87d83a4730f64e0d19ccd2f"
+  },
+  "parallel_changes_preserved": {
+    "crates/calc-flow/examples/32_sql_expression_pipeline.rs": "2d4fca86a9caefb5aa3c19a7dae1a3a489970d7e63b18de99701f4c6415feb12",
+    "crates/calc-flow/src/dataframe/aggregate.rs": "348ddc689f8f39313e31382a965a5ee428ff151c8768274009bf488bf5f303a6",
+    "crates/calc-flow/src/query_analysis/sql/replacement.rs": "ade54e11978d62a2cbf1d28bd2744ea8db39f22b6110f06de76a2705f965fb9f",
+    "crates/calc-flow/tests/latest_relation.rs": "d3026288363861c4b414bd9897da2f283da2d7ee9c52d5582fda1e3aae648449",
+    "crates/calc-flow/tests/relational-consumer/src/main.rs": "57aa8f97695b91ec819837d565aa036d97d442e2f1de0a9e1d12d72b550d212c",
+    "python/calc_flow/symbolic/aggregate.py": "44db1d3fbb19c6b5bb232109fd3bc1b594d8b4ebde331dc0ec52343433c38e74"
+  },
+  "independent_oracles": [
+    {
+      "test": "test_replacement_legacy_input_budget_limits_each_candidate",
+      "mapping": [
+        "C13",
+        "O01"
+      ],
+      "expected": "R1=[1] => 1. Reject [2,3] at rows=1 or bytes=15; preserve exact checkpoint signature and emit nothing. rows=2/bytes=16 accepts [2,3] => 5 then [4,5] => 9, never accumulating versions. Errors identify replacement.p and sql_state_budget field."
+    },
+    {
+      "test": "test_replacement_restore_honors_tighter_legacy_input_budget",
+      "mapping": [
+        "C13",
+        "C14",
+        "A06",
+        "O01"
+      ],
+      "expected": "Save R=[2,3], target R=[9]. Restore under rows=1 or bytes=15 rejects and keeps target checkpoint; exact rows=2/bytes=16 restores with no emit and exact saved signature. Next whole event has RecordBatches [4] and [5]: one output 9 in original and restored owners."
+    },
+    {
+      "test": "test_replacement_cancelled_pending_emit_refunds_candidate_and_output",
+      "mapping": [
+        "C13",
+        "O01"
+      ],
+      "expected": "At deterministic pending-emit boundary, pool charge = old relation/capture + backing(candidate)+backing(output)+8192 metadata. Cancel and drop the process future: exact old charge and checkpoint restored, zero output. New active context on same owner accepts [2,3] => 5."
+    },
+    {
+      "test": "test_replacement_successful_emit_commits_when_collector_cancels",
+      "mapping": [
+        "C13",
+        "C14",
+        "O01"
+      ],
+      "expected": "After R1=[1], collector receives one R2 sum=5, cancels job, yields, and returns Ok. Process succeeds and checkpoint contains two-row R2. Restore it; original and restored next [4] both yield exactly one 4."
+    }
+  ],
+  "failure_repair": "No product failure, no production repair. Four new tests passed on first execution. Initial rustfmt check found one multiline assertion; concurrent formatter normalized it before the passing final check. No behavior change, so no fabricated pre-implementation RED.",
+  "final_static_checks": [
+    {
+      "command": "rustfmt --edition 2024 --check crates/calc-flow/src/operator/snapshot_sql/replacement_tests.rs",
+      "exit_code": 0
+    },
+    {
+      "command": "git diff --check -- crates/calc-flow/src/operator/snapshot_sql/replacement_tests.rs",
+      "exit_code": 0
+    }
+  ],
+  "constraints": {
+    "shared_checkout_reused": true,
+    "new_environment": false,
+    "new_pr": false,
+    "production_edits_by_tester": false,
+    "ci": "unconfirmed; inherited checks_finished wakeup; no CI polling performed",
+    "issue_status": "in_progress",
+    "main_integration": {
+      "observed_main_sha": "e7e771ac0efd0b44af936353a130f316c46a535b",
+      "merge_preview_tree_sha": "42c44fe60dc482442797df3c6befddc78bf32788",
+      "merge_preview_exit_code": 0,
+      "executed_merged_tree": false,
+      "note": "Read-only merge-tree preview is clean. Main advanced with unrelated rolling diagnostics; no merge/rebase or claim of merged-tree runtime validation.",
+      "preview_head_sha": "a45c6d60da9ff876ec2719bc991de79216dccd28"
+    }
+  },
+  "limits": [
+    "119 Python, 24 Rust integration, 12 adjacent snapshot tests, core/consumer checks are explicitly reused prior evidence at their recorded SHAs, not rerun or relabelled as fresh.",
+    "Wheel/extension, 55 packaged files and 1154-file manifest matched before parallel edits except the newly authored test. Concurrent product and fixture/example edits are listed in parallel_changes_preserved, excluded from tester commits, and need their owner to reverify final source/native provenance.",
+    "New tests bypass public Program graph admission deliberately to inject deterministic operator-local failures. Public preflight and end-to-end behavior use retained evidence.",
+    "Pending-emit cancellation explicitly drops the future; this is not new evidence for automatic managed-runner cancellation convergence, general concurrent schedules, or external sink rollback.",
+    "The original 12 snapshot tests ran at 456a64c; snapshot policy tree at e9ca4ac is identical. Core/consumer were recorded at earlier SHAs; later changes include diagnostic explanations. Full current-tree and merged-tree validation is not claimed.",
+    "main was previously observed at e7e771ac0efd0b44af936353a130f316c46a535b; clean merge preview was not executed. Full coverage/cross-platform/CI status remain outside this local run.",
+    "DAL-specific .codex/references/{write-tests,unit-test-style,component-boundaries,run-tests}.md are absent in calc-flow. Repository AGENTS.md, cf-tester.toml and .claude/rules/code-style.md supply the applicable local rules. Explicit checkout/branch reuse overrides the role template requirement for a new worktree."
+  ],
+  "blockers": {
+    "product_atomicity_found": [],
+    "handoff": "Parallel product edits need their owner/coordinator to verify current source/native provenance; independent reviewer still required. This does not invalidate the scoped operator tests."
+  }
+}

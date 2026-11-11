@@ -89,6 +89,7 @@ from calc_flow.runtime import (
 from calc_flow.store import FileProjectStore
 from calc_flow.stream import StreamInput, StreamOutput, StreamResults
 from calc_flow.symbolic import (
+    AggregateExpr,
     AnalysisIssue,
     AnalysisResult,
     ArrayExpr,
@@ -107,6 +108,7 @@ from calc_flow.symbolic import (
     TableExpr,
     WindowAggregate,
     array_input,
+    count_rows,
     cs,
     duration,
     event_time_bucket,
@@ -192,6 +194,8 @@ __all__ = [
     "Expr",
     "ColumnExpr",
     "TableExpr",
+    "AggregateExpr",
+    "count_rows",
     "ArrayExpr",
     "LateOutputs",
     "MacdOutputs",

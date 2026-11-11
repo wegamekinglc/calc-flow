@@ -55,6 +55,7 @@ impl PipelineBuilder {
                 ),
                 source_path: node_path(&edge.source.node_id),
                 target_path: node_path(&edge.target.node_id),
+                input_alias: Some(edge.target.port.clone()),
             })
             .collect();
         analyze_graph(DeclarationGraph {
@@ -144,6 +145,36 @@ pub(super) fn gate_updates(builder: &PipelineBuilder, execution_mode: &str) -> R
     if builder.update_semantics.is_legacy() {
         return Ok(());
     }
+    update_report(builder)?.check_updates(if execution_mode == "stream" {
+        crate::CompileMode::Stream
+    } else {
+        crate::CompileMode::Batch
+    })
+}
+
+pub(super) fn replacement_nodes(builder: &PipelineBuilder) -> Result<Vec<String>> {
+    if builder.update_semantics.is_legacy() {
+        return Ok(vec![]);
+    }
+    let report = update_report(builder)?;
+    let selected = builder
+        .nodes
+        .iter()
+        .filter(|(id, node)| {
+            matches!(&node.operator, NodeOperator::Sql(sql) if sql.has_stream_aggregate())
+                && report.edges.iter().any(|edge| {
+                    edge.target_path == node_path(id)
+                        && edge.stream.producer_update == crate::UpdateKind::CompleteSnapshot
+                        && edge.stream.consumer_interpretation
+                            == crate::InputInterpretation::CompleteReplacement
+                })
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    report.check_updates(crate::CompileMode::Stream)?;
+    Ok(selected)
+}
+fn update_report(builder: &PipelineBuilder) -> Result<QueryAnalysis> {
     let nodes = builder
         .nodes
         .iter()
@@ -179,6 +210,7 @@ pub(super) fn gate_updates(builder: &PipelineBuilder, execution_mode: &str) -> R
             ),
             source_path: node_path(&edge.source.node_id),
             target_path: node_path(&edge.target.node_id),
+            input_alias: Some(edge.target.port.clone()),
         })
         .collect();
     analyze_graph(DeclarationGraph {
@@ -187,11 +219,6 @@ pub(super) fn gate_updates(builder: &PipelineBuilder, execution_mode: &str) -> R
         options: AnalysisOptions::default(),
         diagnostics: vec![],
         update_semantics: builder.update_semantics,
-    })?
-    .check_updates(if execution_mode == "stream" {
-        crate::CompileMode::Stream
-    } else {
-        crate::CompileMode::Batch
     })
 }
 

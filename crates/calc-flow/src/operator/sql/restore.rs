@@ -9,6 +9,7 @@ use super::{
 };
 
 pub(crate) struct PreparedSqlRestore {
+    replacement: Option<crate::operator::PreparedSnapshotRestore>,
     retained: Option<RetainedSqlInput>,
     compact: Option<super::compact::RestoredCompact>,
     retained_capture: Option<std::sync::Arc<super::current_retained::RetainedCapture>>,
@@ -19,6 +20,9 @@ impl SqlOperator {
         &mut self,
         snapshot: &OperatorStateSnapshot,
     ) -> Result<MemoryReservation> {
+        if let Some(operator) = &mut self.replacement {
+            return operator.reserve_recovery_envelope(snapshot);
+        }
         let bound = recovery_envelope_bytes(snapshot, &self.name)?;
         self.stream_state.runtime()?;
         let reservation = self
@@ -32,6 +36,9 @@ impl SqlOperator {
         &mut self,
         node_id_bytes: usize,
     ) -> Result<MemoryReservation> {
+        if let Some(operator) = &mut self.replacement {
+            return operator.reserve_checkpoint_envelope(node_id_bytes);
+        }
         let reservation = self.reserve_recovery_envelope(&OperatorStateSnapshot::default())?;
         let bound = incremental::checked_bytes(
             reservation.size(),
@@ -47,9 +54,18 @@ impl SqlOperator {
         snapshot: &OperatorStateSnapshot,
         check_cancelled: &dyn Fn() -> Result<()>,
     ) -> Result<PreparedSqlRestore> {
+        if let Some(operator) = &mut self.replacement {
+            return Ok(PreparedSqlRestore {
+                replacement: Some(operator.prepare_restore(snapshot, check_cancelled)?),
+                retained: None,
+                compact: None,
+                retained_capture: None,
+            });
+        }
         check_cancelled()?;
         if snapshot.inline_metadata.is_empty() && snapshot.segments.is_empty() {
             return Ok(PreparedSqlRestore {
+                replacement: None,
                 retained: None,
                 compact: None,
                 retained_capture: None,
@@ -73,6 +89,7 @@ impl SqlOperator {
             #[cfg(test)]
             recovery_test_hooks::prepared_compact(self, &compact.state, &compact.native)?;
             Ok(PreparedSqlRestore {
+                replacement: None,
                 retained: None,
                 compact: Some(compact),
                 retained_capture: None,
@@ -97,6 +114,7 @@ impl SqlOperator {
         #[cfg(test)]
         recovery_test_hooks::prepared(self, &retained)?;
         Ok(PreparedSqlRestore {
+            replacement: None,
             retained: Some(retained),
             compact: None,
             retained_capture: Some(capture),
@@ -104,6 +122,13 @@ impl SqlOperator {
     }
 
     pub(crate) fn install_restore(&mut self, prepared: PreparedSqlRestore) {
+        if let Some(state) = prepared.replacement {
+            self.replacement
+                .as_mut()
+                .expect("replacement restore")
+                .install_restore(state);
+            return;
+        }
         #[cfg(test)]
         if let Some(retained) = &prepared.retained {
             recovery_test_hooks::installing(self, retained);
