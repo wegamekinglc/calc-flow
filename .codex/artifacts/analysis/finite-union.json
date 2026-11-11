@@ -1838,5 +1838,205 @@
   ],
   "identity_note": "The inherited checkout had no Git author configured. Used the on-behalf-of user identity per command; no global/shared configuration was modified.",
   "frozen_note_note": "Preserved the frozen contract text; removed only its extra trailing blank line to pass staged diff whitespace checking.",
-  "staged_whitespace_check": "git diff --cached --check: exit 0 after trimming inherited trailing blank line."
+  "staged_whitespace_check": "git diff --cached --check: exit 0 after trimming inherited trailing blank line.",
+  "codacy_follow_up": {
+    "reviewed_head": "2e9a6a51318eb19bbe95b745bb09babbff5cfce9",
+    "pr": "https://github.com/wegamekinglc/calc-flow/pull/599",
+    "scope": [
+      "examples/finite_union.py",
+      "AGENTS.md",
+      ".codex/artifacts/analysis/finite-union.md",
+      ".codex/artifacts/analysis/finite-union.json"
+    ],
+    "commit_subject": "fix: keep finite union example validation active",
+    "red": {
+      "argv": [
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "bandit==1.9.4",
+        "bandit",
+        "-q",
+        "-t",
+        "B101",
+        "-f",
+        "json",
+        "examples/finite_union.py"
+      ],
+      "exit_code": 1,
+      "findings": [
+        {
+          "code": "28     for result in (await batch.collect_async({\"a\": av, \"b\": bv})).values():\n29         assert Counter(result[\"x\"].to_pylist()) == expected\n30     observed = {\"df\": [], \"sql\": []}\n",
+          "col_offset": 8,
+          "end_col_offset": 59,
+          "filename": "./examples/finite_union.py",
+          "issue_confidence": "HIGH",
+          "issue_cwe": {
+            "id": 703,
+            "link": "https://cwe.mitre.org/data/definitions/703.html"
+          },
+          "issue_severity": "LOW",
+          "issue_text": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
+          "line_number": 29,
+          "line_range": [
+            29
+          ],
+          "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html",
+          "test_id": "B101",
+          "test_name": "assert_used"
+        },
+        {
+          "code": "33             observed[event.name].extend(event.table[\"x\"].to_pylist())\n34     assert all(Counter(values) == expected for values in observed.values())\n35     print(\"DataFrame and SQL: five rows in batch and completed stream\")\n",
+          "col_offset": 4,
+          "end_col_offset": 75,
+          "filename": "./examples/finite_union.py",
+          "issue_confidence": "HIGH",
+          "issue_cwe": {
+            "id": 703,
+            "link": "https://cwe.mitre.org/data/definitions/703.html"
+          },
+          "issue_severity": "LOW",
+          "issue_text": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
+          "line_number": 34,
+          "line_range": [
+            34
+          ],
+          "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html",
+          "test_id": "B101",
+          "test_name": "assert_used"
+        }
+      ],
+      "log_sha256": "6135e919890a91730daffd698e6aeaa5907c139f643193a79624a1a164b59f31"
+    },
+    "checks": [
+      {
+        "name": "bandit",
+        "argv": [
+          "uv",
+          "run",
+          "--no-project",
+          "--with",
+          "bandit==1.9.4",
+          "bandit",
+          "-q",
+          "-t",
+          "B101",
+          "-f",
+          "json",
+          "examples/finite_union.py"
+        ],
+        "exit_code": 0,
+        "log": "target/finite-union/codacy-fix-bandit.log",
+        "log_sha256": "a35272328a55708c474fab37b0be7847f164a744bdc4794358a5b87931384c3b",
+        "output": "{\n  \"errors\": [],\n  \"generated_at\": \"2026-11-11T22:16:13Z\",\n  \"metrics\": {\n    \"./examples/finite_union.py\": {\n      \"CONFIDENCE.HIGH\": 0,\n      \"CONFIDENCE.LOW\": 0,\n      \"CONFIDENCE.MEDIUM\": 0,\n      \"CONFIDENCE.UNDEFINED\": 0,\n      \"SEVERITY.HIGH\": 0,\n      \"SEVERITY.LOW\": 0,\n      \"SEVERITY.MEDIUM\": 0,\n      \"SEVERITY.UNDEFINED\": 0,\n      \"loc\": 33,\n      \"nosec\": 0,\n      \"skipped_tests\": 0\n    },\n    \"_totals\": {\n      \"CONFIDENCE.HIGH\": 0,\n      \"CONFIDENCE.LOW\": 0,\n      \"CONFIDENCE.MEDIUM\": 0,\n      \"CONFIDENCE.UNDEFINED\": 0,\n      \"SEVERITY.HIGH\": 0,\n      \"SEVERITY.LOW\": 0,\n      \"SEVERITY.MEDIUM\": 0,\n      \"SEVERITY.UNDEFINED\": 0,\n      \"loc\": 33,\n      \"nosec\": 0,\n      \"skipped_tests\": 0\n    }\n  },\n  \"results\": []\n}"
+      },
+      {
+        "name": "ruff",
+        "argv": [
+          "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+          "-m",
+          "ruff",
+          "check",
+          "examples/finite_union.py"
+        ],
+        "exit_code": 0,
+        "log": "target/finite-union/codacy-fix-ruff.log",
+        "log_sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+        "output": "All checks passed!\n"
+      },
+      {
+        "name": "ruff-format",
+        "argv": [
+          "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+          "-m",
+          "ruff",
+          "format",
+          "--check",
+          "examples/finite_union.py"
+        ],
+        "exit_code": 0,
+        "log": "target/finite-union/codacy-fix-ruff-format.log",
+        "log_sha256": "fd2299c9f1c6dc869070883e281051bfe93aacf66c1a3b0069f45b4aa410ca50",
+        "output": "1 file already formatted\n"
+      },
+      {
+        "name": "example",
+        "argv": [
+          "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+          "examples/finite_union.py"
+        ],
+        "exit_code": 0,
+        "log": "target/finite-union/codacy-fix-example.log",
+        "log_sha256": "a75174f740c1628e65fe0ccf96a52b9665fc253fcefb1537df7279d9e9a518f5",
+        "output": "DataFrame and SQL: five rows in batch and completed stream\n"
+      },
+      {
+        "name": "optimized-example",
+        "argv": [
+          "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+          "-O",
+          "examples/finite_union.py"
+        ],
+        "exit_code": 0,
+        "log": "target/finite-union/codacy-fix-optimized-example.log",
+        "log_sha256": "a75174f740c1628e65fe0ccf96a52b9665fc253fcefb1537df7279d9e9a518f5",
+        "output": "DataFrame and SQL: five rows in batch and completed stream\n"
+      },
+      {
+        "name": "lizard",
+        "argv": [
+          "uv",
+          "run",
+          "--no-project",
+          "--with",
+          "lizard==1.26.0",
+          "lizard",
+          "-C",
+          "8",
+          "examples/finite_union.py"
+        ],
+        "exit_code": 0,
+        "log": "target/finite-union/codacy-fix-lizard.log",
+        "log_sha256": "3930ac885af125ccb8fa01ed9348f05abae29f0c20de2365efd2f81804596067",
+        "output": "================================================\n  NLOC    CCN   token  PARAM  length  location  \n------------------------------------------------\n      25      6    324      0      25 main@13-37@examples/finite_union.py\n1 file analyzed.\n==============================================================\nNLOC    Avg.NLOC  AvgCCN  Avg.token  function_cnt    file\n--------------------------------------------------------------\n     32      25.0     6.0      324.0         1     examples/finite_union.py\n\n==============================================================================================================\nNo thresholds exceeded (cyclomatic_complexity > 8 or length > 1000 or nloc > 1000000 or parameter_count > 100)\n==========================================================================================\nTotal nloc   Avg.NLOC  AvgCCN  Avg.token   Fun Cnt  Warning cnt   Fun Rt   nloc Rt\n------------------------------------------------------------------------------------------\n        32      25.0     6.0      324.0        1            0      0.00    0.00\n"
+      },
+      {
+        "name": "whitespace",
+        "argv": [
+          "git",
+          "diff",
+          "--check"
+        ],
+        "exit_code": 0,
+        "log": "target/finite-union/codacy-fix-whitespace.log",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "output": ""
+      }
+    ],
+    "unchanged": {
+      "source_manifest_files": 1667,
+      "packaged_python_files": 56,
+      "wheel_sha256": "70e4e50745f66b6f45f0b41710a04d6bc77e225d2fa1d73b07df274194c7e418",
+      "native_sha256": "c04dd4911d60da5eaf4cfc5f0d65b063a7f73e439b6d3f642d98b69912a61169",
+      "reviewer_report_sha256": "b01c0c07a341bd00f6df6b62625c9357e48df8a0d46fc77a132640b39e1ca44c",
+      "reviewer_report_untracked": true
+    },
+    "reused_results": {
+      "rust_tests_passed": 32,
+      "python_tests_passed": 189,
+      "standalone_core": "previously passed, not rerun",
+      "external_public_consumer": "previously passed, not rerun"
+    },
+    "not_run": [
+      "native rebuild",
+      "Cargo checks",
+      "product test matrix",
+      "new formal example tests",
+      "full regression"
+    ],
+    "head_and_ci_snapshot": "Actual new SHA and one post-push snapshot are reported in the final issue reply.",
+    "merged": false,
+    "issue_status": "in_progress"
+  }
 }

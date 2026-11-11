@@ -169,8 +169,9 @@ dashes span the full column width, including cell spaces.
 - `OperatorMetadata` owns shared graph metadata. `BatchOperator` and
   `StreamOperator` split finite processing from continuous processing and
   checkpoint lifecycle. `ExpressionOperator`, `SqlOperator`,
-  `RollingOperator`, and `CrossSectionOperator` implement both lifecycles;
-  `SnapshotSqlOperator`, `UnionOperator`, `WindowAggregateOperator`,
+  `RollingOperator`, `CrossSectionOperator`, and `UnionOperator` implement both
+  lifecycles. Finite union requires table ports with explicit exact schemas and
+  `required=true`. `SnapshotSqlOperator`, `WindowAggregateOperator`,
   `StreamJoinOperator`, and `StreamAsofJoinOperator` are stream-only. External
   operators resolve through lifecycle-specific factories in `ProviderRegistry`.
 - `OperatorMetadata: Send + Sync + Any` requires concrete operator types to
@@ -214,8 +215,9 @@ selectors.
   and SQL stages lower through one immutable expression graph to project-v3.
 - SQL result schemas come from private native planning without reading rows.
   SQL output has a new row lineage and no inherited temporal ordering.
-  Batch SQL supports multiple aliases; append stream SQL accepts one. Ordinary and
-  grouped SQL aggregates emit a full cumulative snapshot after each batch.
+  Batch SQL supports multiple aliases; append stream SQL accepts one alias or
+  the exact-schema multi-alias UNION ALL subset. Ordinary and grouped SQL
+  aggregates emit a full cumulative snapshot after each batch.
   Eligible queries, including admitted grouped ordered LAST_VALUE, use compact
   state; unsupported aggregate shapes retain input and rerun over history.
   Other SQL runs per batch. SQL state has no fixed default cap;

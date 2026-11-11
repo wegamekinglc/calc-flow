@@ -222,3 +222,61 @@ and Closes DAL-515. Only one nonblocking post-push CI snapshot is permitted; its
 actual result belongs to the final issue comment, after this evidence commit.
 DAL-515 remains in_progress by the explicit orchestrator instruction. Independent
 review and required checks are pending handoff responsibilities; no merge is run.
+
+## Codacy correction after independent review
+
+Continue from reviewed HEAD 2e9a6a51318eb19bbe95b745bb09babbff5cfce9 in the
+same checkout/branch and PR #599. The reviewer identified two B101/assert-used
+findings in examples/finite_union.py (Codacy run 130818655592,
+action_required); no other functional blocker was reported. This follow-up
+changes only the example's two validation statements, the two stale AGENTS.md
+capability summaries, and this issue's evidence. The original Counter oracle,
+inputs, output names and both execution paths are retained. Explicit RuntimeError
+checks remain active with Python optimization. No lint exclusion, gate, team
+definition, native/core code, API or product test is changed.
+
+The AGENTS.md summaries now place UnionOperator among the operators implementing
+both lifecycles, constrain finite union to required table ports with explicit
+exact schemas, and describe the admitted multi-alias UNION ALL stream subset.
+
+RED command (Bandit 1.9.4):
+
+```sh
+UV_CACHE_DIR=target/finite-union/uv-cache uv run --no-project --with bandit==1.9.4 bandit -q -t B101 -f json examples/finite_union.py
+```
+
+Observed exit 1 with exactly two B101 findings at lines 29 and 34. After the
+minimal correction, the identical command exited 0 with zero findings. This is
+the local reproduction of the reported rule, not a claim that hosted Codacy
+has finished on the new head.
+
+Additional scoped GREEN commands, all exit 0:
+
+```sh
+<recorded-python> -m ruff check examples/finite_union.py
+<recorded-python> -m ruff format --check examples/finite_union.py
+PYTHONPATH=target/finite-union/delivery-site JAX_PLATFORMS=cpu <recorded-python> examples/finite_union.py
+PYTHONPATH=target/finite-union/delivery-site JAX_PLATFORMS=cpu <recorded-python> -O examples/finite_union.py
+UV_CACHE_DIR=target/finite-union/uv-cache uv run --no-project --with lizard==1.26.0 lizard -C 8 examples/finite_union.py
+git diff --check
+```
+
+Both example runs print DataFrame and SQL: five rows in batch and completed
+stream. Lizard reports main CCN 6, no threshold exceeded. AGENTS.md diff contains
+only the two approved capability summaries, with no link/anchor changes.
+
+Revalidated all 1,667 previously recorded source/build input hashes, the existing
+wheel/extension hashes and all 56 packaged Python/stub files; they are unchanged.
+Reused the prior matching native, standalone core and external consumer evidence
+and Rust 32/Python 189 passing results. No native rebuild, Cargo invocation,
+product matrix, full regression or new formal example test was performed.
+Environment and interpreter are the same as recorded above. Exact argv, output
+and log hashes are appended to finite-union.json under codacy_follow_up.
+
+The reviewer report remains untracked and untouched (SHA-256
+b01c0c07a341bd00f6df6b62625c9357e48df8a0d46fc77a132640b39e1ca44c).
+Commit this correction as fix: keep finite union example validation active and
+push the existing PR branch. Its actual SHA and one post-push Codacy/required
+checks snapshot are delivered in the issue reply, without polling or treating
+pending/unknown checks as passing. Independent focused re-review stays with the
+orchestrator; DAL-515 remains in_progress and no merge is performed.

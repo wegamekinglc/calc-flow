@@ -26,12 +26,14 @@ async def main() -> None:
     bv = pa.Table.from_arrays([pa.array([1, 2], type=pa.int64())], schema=schema)
     expected = Counter([1, None, 1, 1, 2])
     for result in (await batch.collect_async({"a": av, "b": bv})).values():
-        assert Counter(result["x"].to_pylist()) == expected
+        if Counter(result["x"].to_pylist()) != expected:
+            raise RuntimeError("Batch union result does not match the expected rows")
     observed = {"df": [], "sql": []}
     async with batch.for_mode("stream").stream({"a": [av], "b": [bv]}) as events:
         async for event in events:
             observed[event.name].extend(event.table["x"].to_pylist())
-    assert all(Counter(values) == expected for values in observed.values())
+    if not all(Counter(values) == expected for values in observed.values()):
+        raise RuntimeError("Stream union result does not match the expected rows")
     print("DataFrame and SQL: five rows in batch and completed stream")
 
 
