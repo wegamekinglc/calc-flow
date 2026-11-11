@@ -197,11 +197,9 @@ class _IsolatedItemsView(_IsolatedMappingView, ItemsView[str, Any]):
         if not isinstance(item, tuple) or tuple.__len__(item) != 2:
             return False
         key, value = tuple.__iter__(item)
-        try:
-            stored = self._mapping[key]
-        except KeyError:
-            return False
-        return stored is value or stored == value
+        missing = object()
+        stored = self._mapping.get(key, missing)
+        return stored is not missing and (stored is value or stored == value)
 
     def __reversed__(self) -> Iterator[tuple[str, Any]]:
         for key in reversed(self._mapping):
@@ -226,6 +224,11 @@ class _IsolatedJsonMapping(Mapping[str, Any]):
 
     def __getitem__(self, key: str) -> Any:
         return deepcopy(self._data[key])
+
+    def get(self, key: str, default: Any = None) -> Any:
+        missing = object()
+        value = self._data.get(key, missing)
+        return default if value is missing else deepcopy(value)
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._data)

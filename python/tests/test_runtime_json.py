@@ -164,6 +164,33 @@ def test_json_items_membership_preserves_unhashable_key_errors(owner_factory) ->
     assert str(actual.value) == str(expected.value)
 
 
+@pytest.mark.parametrize("callback", ("hash", "eq"))
+def test_json_items_membership_propagates_key_callback_errors(
+    owner_factory, callback: str
+) -> None:
+    class HashFailure(str):
+        def __hash__(self):
+            raise KeyError("hash failed")
+
+    class EqualityFailure(str):
+        def __hash__(self):
+            return hash("offset")
+
+        def __eq__(self, other):
+            raise KeyError("key equality failed")
+
+    payload = {"offset": 1}
+    view = _mapping(owner_factory(payload)).items()
+    key_type = {"hash": HashFailure, "eq": EqualityFailure}[callback]
+    item = (key_type("offset"), 1)
+    with pytest.raises(KeyError) as expected:
+        assert item in payload.items()
+    with pytest.raises(KeyError) as actual:
+        assert item in view
+    assert type(actual.value) is type(expected.value)
+    assert actual.value.args == expected.value.args
+
+
 @pytest.mark.parametrize(
     "items",
     (
