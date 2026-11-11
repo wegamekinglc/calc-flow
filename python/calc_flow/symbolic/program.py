@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Awaitable, Mapping, Sequence
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, TypedDict, cast
+
+from typing_extensions import Unpack
 
 from calc_flow._compat import dataclass
 from calc_flow.symbolic.domains import type_name
@@ -37,6 +39,23 @@ if TYPE_CHECKING:
     from calc_flow.symbolic.types import LatePolicy
 
 _PROGRAM_TAG = 0x21
+
+
+class _StreamingExecuteOptions(TypedDict, total=False):
+    config: StreamRuntimeConfig | None
+    watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None
+
+
+def _stream_controls(
+    *,
+    config: StreamRuntimeConfig | None = None,
+    watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+) -> tuple[
+    StreamRuntimeConfig | None, WatermarkPolicy | Mapping[str, WatermarkPolicy] | None
+]:
+    return config, watermarks
+
+
 _STREAM_ONLY_OPS = frozenset(
     {
         "snapshot_sql",
@@ -455,16 +474,17 @@ class Program:
         *,
         runtime: Runtime | None = None,
         options: ExecutionOptions | None = None,
-        config: StreamRuntimeConfig | None = None,
-        watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
         portability: PortabilityRequest | None = None,
+        **streaming: Unpack[_StreamingExecuteOptions],
     ) -> dict[str, pa.Table] | StreamResults[StreamOutput]:
         """Execute through the selected engine.
 
         SQL returns named Arrow tables immediately. Streaming returns owned
         named events; consume it with ``async with`` and ``async for``.
+        Streaming accepts ``config`` and ``watermarks`` keyword controls.
         """
 
+        config, watermarks = _stream_controls(**streaming)
         if self._engine == "sql":
             if config is not None:
                 raise ValueError("execute.config is available for the streaming engine")
@@ -507,9 +527,11 @@ class Program:
         iterable-provided watermarks without changing SourceBinding policies.
         """
         self._require_engine("streaming")
-        from calc_flow.stream import _stream_program
+        from calc_flow.stream import _stream_program, _StreamRequest
 
-        return _stream_program(self, inputs, runtime, config, watermarks, portability)
+        return _stream_program(
+            _StreamRequest(self, inputs, runtime, config, watermarks, portability)
+        )
 
     def output(self, name: str, value: TableExpr | ArrayExpr, /) -> Program:
         """Return a new program with one declared output appended."""
@@ -582,9 +604,14 @@ class Program:
         self._require_engine("sql")
 
         from calc_flow.symbolic.lower import compile_program_batch
+        from calc_flow.symbolic.lower.program import _require_runtime
         from calc_flow.symbolic.query_analysis import _gate
 
-        selected = _selected_runtime(runtime)
+        selected = (
+            _require_runtime(runtime, "compile_batch")
+            if runtime is not None
+            else _selected_runtime(None)
+        )
         with selected._registration_lock:
             _gate(self, selected, portability)
             return compile_program_batch(self, selected)
@@ -608,9 +635,14 @@ class Program:
         self._require_engine("streaming")
 
         from calc_flow.symbolic.lower import compile_program_stream
+        from calc_flow.symbolic.lower.program import _require_runtime
         from calc_flow.symbolic.query_analysis import _gate
 
-        selected = _selected_runtime(runtime)
+        selected = (
+            _require_runtime(runtime, "compile_stream")
+            if runtime is not None
+            else _selected_runtime(None)
+        )
         with selected._registration_lock:
             _gate(self, selected, portability)
             return compile_program_stream(

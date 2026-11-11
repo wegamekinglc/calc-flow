@@ -314,13 +314,6 @@ pub(crate) fn schema_fields(schema: &SchemaRef) -> Vec<ArrowFieldSpec> {
 
 fn type_name(dtype: &DataType) -> String {
     match dtype {
-        DataType::Boolean => "bool".into(),
-        DataType::Utf8 => "string".into(),
-        DataType::LargeUtf8 => "large_string".into(),
-        DataType::Date32 => "date32".into(),
-        DataType::Date64 => "date64".into(),
-        DataType::Time32(TimeUnit::Second) => "time32[s]".into(),
-        DataType::Time64(TimeUnit::Microsecond) => "time64[us]".into(),
         DataType::Timestamp(unit, zone) => {
             let unit = match unit {
                 TimeUnit::Second => "s",
@@ -502,6 +495,39 @@ fn analyze_nodes(
     Ok(AnalyzedNodes { by_path, proofs })
 }
 
+fn has_unsupported_diagnostic(path: &str, mode: &str, diagnostics: &[QueryDiagnostic]) -> bool {
+    diagnostics.iter().any(|issue| {
+        issue.status == SupportStatus::Unsupported
+            && issue.path.starts_with(&format!("{path}.{mode}."))
+    })
+}
+
+fn propagate_mode(local: &mut QueryModeFacts, proof: sql::Proof, inputs: &[&QueryModeFacts]) {
+    if proof == sql::Proof::RowLocal || proof.per_batch() {
+        if inputs
+            .iter()
+            .any(|facts| facts.update == UpdateKind::Unknown)
+        {
+            local.update = UpdateKind::Unknown;
+            local.finality = QueryFinality::Unknown;
+            local.reason = "upstream update/finality semantics are unproved".into();
+        } else if inputs
+            .iter()
+            .any(|facts| facts.update == UpdateKind::CompleteSnapshot)
+        {
+            local.update = UpdateKind::CompleteSnapshot;
+            local.finality = QueryFinality::RevisableSnapshot;
+            local.reason = "batch transform of complete snapshot events".into();
+        }
+    }
+    if inputs
+        .iter()
+        .any(|facts| facts.support == SupportStatus::Unsupported)
+    {
+        local.support = SupportStatus::Unsupported;
+    }
+}
+
 fn propagate_inputs(
     node: &Declaration,
     facts: &mut QueryNodeFacts,
@@ -516,10 +542,7 @@ fn propagate_inputs(
         } else {
             &mut facts.stream
         };
-        if diagnostics.iter().any(|issue| {
-            issue.status == SupportStatus::Unsupported
-                && issue.path.starts_with(&format!("{}.{mode}.", node.path))
-        }) {
+        if has_unsupported_diagnostic(&node.path, mode, diagnostics) {
             local.support = SupportStatus::Unsupported;
         }
         let inputs = declared_edges
@@ -533,29 +556,7 @@ fn propagate_inputs(
                 }
             })
             .collect::<Vec<_>>();
-        if (proof == sql::Proof::RowLocal || proof.per_batch())
-            && inputs
-                .iter()
-                .any(|facts| facts.update == UpdateKind::Unknown)
-        {
-            local.update = UpdateKind::Unknown;
-            local.finality = QueryFinality::Unknown;
-            local.reason = "upstream update/finality semantics are unproved".into();
-        } else if (proof == sql::Proof::RowLocal || proof.per_batch())
-            && inputs
-                .iter()
-                .any(|facts| facts.update == UpdateKind::CompleteSnapshot)
-        {
-            local.update = UpdateKind::CompleteSnapshot;
-            local.finality = QueryFinality::RevisableSnapshot;
-            local.reason = "batch transform of complete snapshot events".into();
-        }
-        if inputs
-            .iter()
-            .any(|facts| facts.support == SupportStatus::Unsupported)
-        {
-            local.support = SupportStatus::Unsupported;
-        }
+        propagate_mode(local, proof, &inputs);
     }
 }
 
@@ -604,11 +605,7 @@ fn analyze_edges(
                 "snapshot_sql outputs must connect directly to sinks",
             );
         }
-        if request.is_some_and(|request| request.comparison == Comparison::FinalRelation)
-            && stream.producer_update == UpdateKind::CompleteSnapshot
-            && consumption == InputInterpretation::Append
-            && proofs[&edge.target_path].1
-        {
+        if snapshot_append_mismatch(request, &stream, consumption, proofs[&edge.target_path].1) {
             stream.support = SupportStatus::Unsupported;
             diagnostic(
                 diagnostics,
@@ -627,6 +624,18 @@ fn analyze_edges(
         });
     }
     edges
+}
+
+fn snapshot_append_mismatch(
+    request: Option<&PortabilityRequest>,
+    stream: &QueryEdgeModeFacts,
+    consumption: InputInterpretation,
+    aggregate: bool,
+) -> bool {
+    request.is_some_and(|request| request.comparison == Comparison::FinalRelation)
+        && stream.producer_update == UpdateKind::CompleteSnapshot
+        && consumption == InputInterpretation::Append
+        && aggregate
 }
 
 fn check_ordering(
@@ -714,19 +723,8 @@ fn node_facts(
     let proof = class.proof;
     let aggregate = class.aggregate;
     let support = class.support;
-    let stream_only = stream_only_kind(&node.kind);
     let stream = stream_facts(node, class);
-    let mut batch = stream.clone();
-    batch.support = node.batch_support.unwrap_or(if stream_only {
-        SupportStatus::Unsupported
-    } else {
-        support
-    });
-    if aggregate && node.kind != "snapshot_sql" {
-        batch.history = HistoryScope::CurrentBatch;
-        batch.finality = QueryFinality::PerBatch;
-        batch.reason = "each batch execute consumes one independent complete input".into();
-    }
+    let batch = batch_facts(node, &stream, aggregate, support);
     for (mode, facts) in [("batch", &batch), ("stream", &stream)] {
         if facts.support == SupportStatus::Unsupported
             && !diagnostics.iter().any(|issue| {
@@ -753,6 +751,27 @@ fn node_facts(
         proof,
         aggregate,
     ))
+}
+
+fn batch_facts(
+    node: &Declaration,
+    stream: &QueryModeFacts,
+    aggregate: bool,
+    support: SupportStatus,
+) -> QueryModeFacts {
+    let stream_only = stream_only_kind(&node.kind);
+    let mut batch = stream.clone();
+    batch.support = node.batch_support.unwrap_or(if stream_only {
+        SupportStatus::Unsupported
+    } else {
+        support
+    });
+    if aggregate && node.kind != "snapshot_sql" {
+        batch.history = HistoryScope::CurrentBatch;
+        batch.finality = QueryFinality::PerBatch;
+        batch.reason = "each batch execute consumes one independent complete input".into();
+    }
+    batch
 }
 
 struct Classification {
@@ -825,28 +844,8 @@ fn classify(
             } else {
                 SupportStatus::Unknown
             };
-            history = if aggregate {
-                HistoryScope::AcceptedHistory
-            } else if proof == sql::Proof::Unknown {
-                HistoryScope::Unknown
-            } else {
-                HistoryScope::CurrentBatch
-            };
-            if crate::expression::validate_no_volatile_functions(
-                &node.path,
-                query,
-                crate::expression::default_function_registry(),
-            )
-            .is_err()
-            {
-                diagnostic(
-                    diagnostics,
-                    &format!("{}.stream.support", node.path),
-                    "unsupported_mode",
-                    SupportStatus::Unsupported,
-                    "volatile or wall-clock SQL cannot satisfy deterministic stream replay",
-                );
-            }
+            history = sql_history(aggregate, proof);
+            record_volatile_sql(node, query, diagnostics);
         } else {
             support = SupportStatus::Unsupported;
             for mode in ["batch", "stream"] {
@@ -866,6 +865,34 @@ fn classify(
         history,
         ordering,
         support,
+    }
+}
+
+fn sql_history(aggregate: bool, proof: sql::Proof) -> HistoryScope {
+    if aggregate {
+        HistoryScope::AcceptedHistory
+    } else if proof == sql::Proof::Unknown {
+        HistoryScope::Unknown
+    } else {
+        HistoryScope::CurrentBatch
+    }
+}
+
+fn record_volatile_sql(node: &Declaration, query: &str, diagnostics: &mut Vec<QueryDiagnostic>) {
+    if crate::expression::validate_no_volatile_functions(
+        &node.path,
+        query,
+        crate::expression::default_function_registry(),
+    )
+    .is_err()
+    {
+        diagnostic(
+            diagnostics,
+            &format!("{}.stream.support", node.path),
+            "unsupported_mode",
+            SupportStatus::Unsupported,
+            "volatile or wall-clock SQL cannot satisfy deterministic stream replay",
+        );
     }
 }
 
@@ -891,22 +918,7 @@ fn stream_facts(node: &Declaration, class: Classification) -> QueryModeFacts {
         ordering,
         mut support,
     } = class;
-    let mut update = if aggregate {
-        UpdateKind::CompleteSnapshot
-    } else if proof != sql::Proof::Unknown {
-        UpdateKind::Append
-    } else {
-        UpdateKind::Unknown
-    };
-    let mut finality = if aggregate {
-        QueryFinality::RevisableSnapshot
-    } else if proof == sql::Proof::RowLocal {
-        QueryFinality::PerRowFinal
-    } else if proof.per_batch() {
-        QueryFinality::PerBatch
-    } else {
-        QueryFinality::Unknown
-    };
+    let (mut update, mut finality) = ordinary_lifecycle(aggregate, proof);
     let stream_only = stream_only_kind(&node.kind);
     if stream_only {
         support = SupportStatus::Supported;
@@ -938,16 +950,51 @@ fn stream_facts(node: &Declaration, class: Classification) -> QueryModeFacts {
             ),
         };
     }
-    QueryModeFacts { support: node.stream_support.unwrap_or(support), history, update, finality, ordering,
-        reason: match history { HistoryScope::AcceptedHistory => "ordinary aggregates consume accepted input events and emit revisable cumulative snapshots", HistoryScope::CurrentBatch => "this declaration reads the current batch", HistoryScope::EventWindow => "groups finalize only on declared event-window closure", HistoryScope::LatestRelation => "queries latest initialized replacement relations", HistoryScope::Unknown => "no rule proves this declaration's history" }.into() }
+    QueryModeFacts {
+        support: node.stream_support.unwrap_or(support),
+        history,
+        update,
+        finality,
+        ordering,
+        reason: history_reason(history).into(),
+    }
 }
 
-fn obligations(
+fn ordinary_lifecycle(aggregate: bool, proof: sql::Proof) -> (UpdateKind, QueryFinality) {
+    let update = if aggregate {
+        UpdateKind::CompleteSnapshot
+    } else if proof != sql::Proof::Unknown {
+        UpdateKind::Append
+    } else {
+        UpdateKind::Unknown
+    };
+    let finality = if aggregate {
+        QueryFinality::RevisableSnapshot
+    } else if proof == sql::Proof::RowLocal {
+        QueryFinality::PerRowFinal
+    } else if proof.per_batch() {
+        QueryFinality::PerBatch
+    } else {
+        QueryFinality::Unknown
+    };
+    (update, finality)
+}
+
+fn history_reason(history: HistoryScope) -> &'static str {
+    match history {
+        HistoryScope::AcceptedHistory => {
+            "ordinary aggregates consume accepted input events and emit revisable cumulative snapshots"
+        }
+        HistoryScope::CurrentBatch => "this declaration reads the current batch",
+        HistoryScope::EventWindow => "groups finalize only on declared event-window closure",
+        HistoryScope::LatestRelation => "queries latest initialized replacement relations",
+        HistoryScope::Unknown => "no rule proves this declaration's history",
+    }
+}
+
+fn record_unknown_support(
     node: &Declaration,
     facts: &QueryNodeFacts,
-    proof: sql::Proof,
-    aggregate: bool,
-    request: &PortabilityRequest,
     diagnostics: &mut Vec<QueryDiagnostic>,
 ) {
     for (mode, local) in [("batch", &facts.batch), ("stream", &facts.stream)] {
@@ -961,13 +1008,44 @@ fn obligations(
             );
         }
     }
-    if (request.comparison == Comparison::PerBatch && aggregate)
+}
+
+fn history_mismatch(
+    request: &PortabilityRequest,
+    facts: &QueryNodeFacts,
+    proof: sql::Proof,
+    aggregate: bool,
+) -> bool {
+    (request.comparison == Comparison::PerBatch && aggregate)
         || (request.comparison == Comparison::FinalRelation
             && proof.counterexample()
             && facts.stream.update == UpdateKind::Append)
         || (request.history == HistoryScope::EventWindow
             && facts.stream.history != HistoryScope::EventWindow)
-    {
+}
+
+fn semantics_unproven(
+    request: &PortabilityRequest,
+    facts: &QueryNodeFacts,
+    proof: sql::Proof,
+) -> bool {
+    matches!(proof, sql::Proof::Unknown | sql::Proof::PerBatchUnproven)
+        || (request.comparison == Comparison::PerBatch && proof == sql::Proof::Selection)
+        || (request.comparison == Comparison::FinalRelation
+            && proof.per_batch()
+            && facts.stream.update != UpdateKind::Append)
+}
+
+fn obligations(
+    node: &Declaration,
+    facts: &QueryNodeFacts,
+    proof: sql::Proof,
+    aggregate: bool,
+    request: &PortabilityRequest,
+    diagnostics: &mut Vec<QueryDiagnostic>,
+) {
+    record_unknown_support(node, facts, diagnostics);
+    if history_mismatch(request, facts, proof, aggregate) {
         diagnostic(
             diagnostics,
             &format!("{}.stream.history", node.path),
@@ -976,12 +1054,7 @@ fn obligations(
             "the observed query history cannot satisfy the requested comparison",
         );
     }
-    if matches!(proof, sql::Proof::Unknown | sql::Proof::PerBatchUnproven)
-        || (request.comparison == Comparison::PerBatch && proof == sql::Proof::Selection)
-        || (request.comparison == Comparison::FinalRelation
-            && proof.per_batch()
-            && facts.stream.update != UpdateKind::Append)
-    {
+    if semantics_unproven(request, facts, proof) {
         diagnostic(
             diagnostics,
             &format!("{}.stream", node.path),

@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use datafusion::arrow::datatypes::SchemaRef;
+
 use crate::{
     AnalysisOptions, BatchExecutionPlan, CalcFlowError, NodeOperator, PipelineBuilder,
     PortabilityRequest, QueryAnalysis, QueryDiagnostic, QueryOrderingFacts, Result,
@@ -33,17 +35,7 @@ impl PipelineBuilder {
         let mut diagnostics = vec![];
         for id in order {
             let op = &self.nodes[&id].operator;
-            let mut inputs = BTreeMap::new();
-            for port in op.input_ports() {
-                let upstream = self
-                    .edges
-                    .iter()
-                    .find(|edge| edge.target.node_id == id && edge.target.port == port.name())
-                    .and_then(|edge| schemas.get(&edge.source.node_id));
-                if let Some(schema) = upstream.or_else(|| port.schema()) {
-                    inputs.insert(port.name().to_owned(), schema.clone());
-                }
-            }
+            let inputs = input_schemas(self, &id, &schemas);
             let (node, schema) = describe_operator(&id, op, &inputs, &mut diagnostics).await?;
             if let Some(schema) = schema {
                 schemas.insert(id, schema);
@@ -129,6 +121,28 @@ impl PipelineBuilder {
     }
 }
 
+fn input_schemas(
+    builder: &PipelineBuilder,
+    id: &str,
+    schemas: &BTreeMap<String, SchemaRef>,
+) -> BTreeMap<String, SchemaRef> {
+    builder.nodes[id]
+        .operator
+        .input_ports()
+        .iter()
+        .filter_map(|port| {
+            let upstream = builder
+                .edges
+                .iter()
+                .find(|edge| edge.target.node_id == id && edge.target.port == port.name())
+                .and_then(|edge| schemas.get(&edge.source.node_id));
+            upstream
+                .or_else(|| port.schema())
+                .map(|schema| (port.name().to_owned(), schema.clone()))
+        })
+        .collect()
+}
+
 fn quoted(value: &str) -> String {
     serde_json::to_string(value).expect("strings serialize")
 }
@@ -139,9 +153,9 @@ fn node_path(id: &str) -> String {
 async fn describe_operator(
     id: &str,
     op: &NodeOperator,
-    inputs: &BTreeMap<String, datafusion::arrow::datatypes::SchemaRef>,
+    inputs: &BTreeMap<String, SchemaRef>,
     diagnostics: &mut Vec<QueryDiagnostic>,
-) -> Result<(Declaration, Option<datafusion::arrow::datatypes::SchemaRef>)> {
+) -> Result<(Declaration, Option<SchemaRef>)> {
     let (kind, query) = operator_declaration(op);
     let schema = match plan_schema(op, inputs).await {
         Ok(schema) => schema,
@@ -189,21 +203,27 @@ fn operator_declaration(op: &NodeOperator) -> (&'static str, Option<String>) {
             ("expression", Some(expression.query_text().to_owned()))
         }
         NodeOperator::SnapshotSql(sql) => ("snapshot_sql", Some(sql.query_text().to_owned())),
-        NodeOperator::Union(_) => ("union", None),
-        NodeOperator::Window(_) => ("window", None),
-        NodeOperator::StreamJoin(_) => ("stream_join", None),
-        NodeOperator::StreamAsofJoin(_) => ("stream_asof_join", None),
-        NodeOperator::Rolling(_) => ("rolling", None),
-        NodeOperator::CrossSection(_) => ("cross_section", None),
         NodeOperator::Batch(_) => ("batch_only", None),
-        NodeOperator::Stream(_) => ("stream_only", None),
+        _ => (stream_operator_kind(op), None),
+    }
+}
+
+fn stream_operator_kind(op: &NodeOperator) -> &'static str {
+    match op {
+        NodeOperator::Union(_) => "union",
+        NodeOperator::Window(_) => "window",
+        NodeOperator::StreamJoin(_) => "stream_join",
+        NodeOperator::StreamAsofJoin(_) => "stream_asof_join",
+        NodeOperator::Rolling(_) => "rolling",
+        NodeOperator::CrossSection(_) => "cross_section",
+        _ => "stream_only",
     }
 }
 
 async fn plan_schema(
     op: &NodeOperator,
-    inputs: &BTreeMap<String, datafusion::arrow::datatypes::SchemaRef>,
-) -> Result<Option<datafusion::arrow::datatypes::SchemaRef>> {
+    inputs: &BTreeMap<String, SchemaRef>,
+) -> Result<Option<SchemaRef>> {
     match op {
         NodeOperator::Sql(sql)
             if inputs.len() == op.input_ports().len() && op.udf_references().is_empty() =>

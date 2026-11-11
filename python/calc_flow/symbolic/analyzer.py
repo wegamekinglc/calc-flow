@@ -3165,7 +3165,12 @@ def explain_program(
             f"    {issue.path}: {issue.code}: {issue.message}" for issue in issues
         )
     result = analyze_program(program, runtime_value, mode_value, options)
-    query = result.query
+    lines.extend(_explain_query(result.query))
+    return "\n".join(lines)
+
+
+def _explain_query(query):
+    lines = []
     lines.append(
         f"  query schema_version {query.schema_version}"
         f" analysis_revision {query.analysis_revision}"
@@ -3193,7 +3198,7 @@ def explain_program(
         f"    {issue.path}: {issue.code}: {issue.status}: {issue.message}"
         for issue in query.diagnostics
     )
-    return "\n".join(lines)
+    return lines
 
 
 def _explain_header(

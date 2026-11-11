@@ -311,6 +311,27 @@ mod tests {
         };
         Python::initialize();
         Python::attach(|py| {
+            let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../python")
+                .canonicalize()
+                .unwrap();
+            let sys = py.import("sys").unwrap();
+            sys.getattr("path")
+                .unwrap()
+                .call_method1("insert", (0, source.to_str().unwrap()))
+                .unwrap();
+            let native = PyModule::new(py, "calc_flow._native").unwrap();
+            crate::calc_flow_python(&native).unwrap();
+            sys.getattr("modules")
+                .unwrap()
+                .set_item("calc_flow._native", native)
+                .unwrap();
+            let projection = py.import("calc_flow.symbolic.query_analysis").unwrap();
+            let loaded: String = projection.getattr("__file__").unwrap().extract().unwrap();
+            assert_eq!(
+                std::fs::canonicalize(loaded).unwrap(),
+                source.join("calc_flow/symbolic/query_analysis.py")
+            );
             let translated = to_py_err(error);
             assert!(
                 translated.is_instance_of::<CompileError>(py),
@@ -325,7 +346,36 @@ mod tests {
                     .unwrap(),
                 1
             );
-            assert!(report.setattr("analysis_revision", 0).is_err());
+            assert_eq!(
+                report
+                    .getattr("portability")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "unsupported"
+            );
+            assert_eq!(
+                report
+                    .getattr("nodes")
+                    .unwrap()
+                    .get_item(0)
+                    .unwrap()
+                    .getattr("path")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "graph.nodes[\"distinct\"]"
+            );
+            let mutation = report.setattr("analysis_revision", 0).unwrap_err();
+            assert!(mutation.is_instance_of::<pyo3::exceptions::PyAttributeError>(py));
+            assert_eq!(
+                report
+                    .getattr("analysis_revision")
+                    .unwrap()
+                    .extract::<u32>()
+                    .unwrap(),
+                1
+            );
         });
     }
 

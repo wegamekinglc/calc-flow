@@ -49,9 +49,9 @@ def main() -> None:
         program = make_program(engine)
         analysis = program.analyze().query
         total = next(node for node in analysis.nodes if node.path == "outputs.totals")
-        assert total.batch.history == "current_batch"
-        assert total.stream.history == "accepted_history"
-        assert total.stream.update == "complete_snapshot"
+        scopes = (total.batch.history, total.stream.history, total.stream.update)
+        if scopes != ("current_batch", "accepted_history", "complete_snapshot"):
+            raise RuntimeError(f"unexpected query history facts: {scopes}")
         if engine == "sql":
             table = program.execute({"events": pa.concat_tables(batches)})["totals"]
             actual = [table.to_pydict()]

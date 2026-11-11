@@ -222,6 +222,17 @@ def _mode(value: dict) -> QueryModeFacts:
     )
 
 
+def _node_from_dict(node):
+    return QueryNodeFacts(
+        node["path"],
+        None
+        if node["schema"] is None
+        else tuple(Field(**field) for field in node["schema"]),
+        _mode(node["batch"]),
+        _mode(node["stream"]),
+    )
+
+
 def _from_dict(value: dict) -> QueryAnalysis:
     if value["schema_version"] != 1 or value["analysis_revision"] != 1:
         raise ValueError("query_analysis: unsupported revision")
@@ -230,17 +241,7 @@ def _from_dict(value: dict) -> QueryAnalysis:
         value["analysis_revision"],
         None if value["request"] is None else PortabilityRequest(**value["request"]),
         value["portability"],
-        tuple(
-            QueryNodeFacts(
-                node["path"],
-                None
-                if node["schema"] is None
-                else tuple(Field(**field) for field in node["schema"]),
-                _mode(node["batch"]),
-                _mode(node["stream"]),
-            )
-            for node in value["nodes"]
-        ),
+        tuple(_node_from_dict(node) for node in value["nodes"]),
         tuple(
             QueryEdgeFacts(
                 edge["path"],
@@ -274,57 +275,31 @@ def _segment(root: str, name: str) -> str:
     )
 
 
-def _roles(node):
-    from calc_flow.symbolic.analyzer import _cstr_seq
-
-    name = node.op.name
-    roles = [f".{name}.args[{index}]" for index in range(len(node.args))]
-    if name in ("sql", "snapshot_sql"):
-        for index, alias in enumerate(_cstr_seq(node.attr("aliases"))[: len(roles)]):
-            roles[index] = _segment(f".{name}.tables", alias)
-    elif name in ("project", "filter", "with_columns", "attach_columns"):
-        if roles:
-            roles[0] = f".{name}.value"
-        if name == "filter" and len(roles) > 1:
-            roles[1] = ".filter.predicate"
-        elif name == "attach_columns" and len(roles) > 1:
-            roles[1] = ".attach_columns.array"
-        elif name == "with_columns":
-            for index, field in enumerate(
-                _cstr_seq(node.attr("names"))[: len(roles) - 1], 1
-            ):
-                roles[index] = _segment("", field)
-    elif name in (
-        "add",
-        "sub",
-        "mul",
-        "truediv",
-        "power",
-        "gt",
-        "ge",
-        "lt",
-        "le",
-        "eq",
-        "ne",
-        "and",
-        "or",
-        "stream_join",
-        "stream_asof_join",
-        "covariance",
-        "correlation",
-    ):
-        for index, role in enumerate(("left", "right")[: len(roles)]):
-            roles[index] = f".{name}.{role}"
-    elif name == "coalesce":
-        roles = [f".coalesce.values[{index}]" for index in range(len(roles))]
-    elif name == "where":
-        for index, role in enumerate(
-            ("predicate", "when_true", "when_false")[: len(roles)]
-        ):
-            roles[index] = f".where.{role}"
-    elif (
-        name
-        in (
+_DIRECT_ROLES = {
+    **dict.fromkeys(
+        (
+            "add",
+            "sub",
+            "mul",
+            "truediv",
+            "power",
+            "gt",
+            "ge",
+            "lt",
+            "le",
+            "eq",
+            "ne",
+            "and",
+            "or",
+            "stream_join",
+            "stream_asof_join",
+            "covariance",
+            "correlation",
+        ),
+        ("left", "right"),
+    ),
+    **dict.fromkeys(
+        (
             "column_ref",
             "neg",
             "not",
@@ -338,11 +313,41 @@ def _roles(node):
             "clip",
             "window_tumbling",
             "window_hopping",
+            "project",
+        ),
+        ("value",),
+    ),
+    "filter": ("value", "predicate"),
+    "attach_columns": ("value", "array"),
+    "where": ("predicate", "when_true", "when_false"),
+}
+
+
+def _named_roles(node):
+    from calc_flow.symbolic.analyzer import _cstr_seq
+
+    name = node.op.name
+    if name in ("sql", "snapshot_sql"):
+        return tuple(
+            _segment(f".{name}.tables", alias)
+            for alias in _cstr_seq(node.attr("aliases"))
         )
-        and roles
-    ):
-        roles[0] = f".{name}.value"
-    return tuple(roles)
+    if name == "with_columns":
+        return (
+            f".{name}.value",
+            *(_segment("", field) for field in _cstr_seq(node.attr("names"))),
+        )
+    if name == "coalesce":
+        return tuple(f".coalesce.values[{index}]" for index in range(len(node.args)))
+    return tuple(f".{name}.{role}" for role in _DIRECT_ROLES.get(name, ()))
+
+
+def _roles(node):
+    named = _named_roles(node)
+    return tuple(
+        named[index] if index < len(named) else f".{node.op.name}.args[{index}]"
+        for index in range(len(node.args))
+    )
 
 
 def _legacy_role(role):
@@ -351,9 +356,8 @@ def _legacy_role(role):
     return role
 
 
-def _query(program, runtime, options, analyzers) -> QueryAnalysis:
+def _declaration_paths(program):
     from calc_flow.symbolic.analyzer import _cstr_or_none
-    from calc_flow.symbolic.nodes import CStr
 
     paths, nodes, legacy_paths = {}, {}, {}
 
@@ -372,93 +376,129 @@ def _query(program, runtime, options, analyzers) -> QueryAnalysis:
 
     for name, value in sorted(program.outputs, key=lambda item: item[0].encode()):
         visit(value._node, _segment("outputs", name), f"outputs.{name}")
+    return paths, nodes, legacy_paths
+
+
+def _contains_issue(path, owner):
+    return path == owner or path.startswith((owner + ".", owner + "["))
+
+
+def _issue_diagnostic(issue, mode, paths, legacy_paths):
+    owner = max(
+        (path for path in legacy_paths if _contains_issue(issue.path, path)),
+        key=len,
+        default=None,
+    )
+    status = "unknown" if issue.code == "capability_mismatch" else "unsupported"
+    key = None
+    if owner is None:
+        path = f"{issue.path}.{mode}.support"
+    else:
+        key = legacy_paths[owner]
+        path = f"{paths[key]}.{mode}{issue.path[len(owner) :] or '.support'}"
+    return key, dict(
+        path=path,
+        code=issue.code,
+        status=status,
+        message=f"declaration analysis reported {issue.code}; "
+        "see existing analysis issues for field/type details",
+    )
+
+
+def _query_diagnostics(analyzers, paths, legacy_paths):
     diagnostics, statuses = [], {}
     for analyzer in analyzers:
         for issue in analyzer.issues:
-            candidates = [
-                path
-                for path in legacy_paths
-                if issue.path == path
-                or issue.path.startswith(path + ".")
-                or issue.path.startswith(path + "[")
-            ]
-            owner = max(candidates, key=len) if candidates else None
-            status = "unknown" if issue.code == "capability_mismatch" else "unsupported"
-            mode = analyzer._mode
-            if owner is None:
-                path = f"{issue.path}.{mode}.support"
-            else:
-                key = legacy_paths[owner]
-                path = f"{paths[key]}.{mode}{issue.path[len(owner) :] or '.support'}"
-                previous = statuses.get((key, mode))
-                statuses[(key, mode)] = (
+            key, diagnostic = _issue_diagnostic(
+                issue, analyzer._mode, paths, legacy_paths
+            )
+            if key is not None:
+                owner = (key, analyzer._mode)
+                status = diagnostic["status"]
+                previous = statuses.get(owner)
+                statuses[owner] = (
                     "unsupported" if "unsupported" in (status, previous) else status
                 )
-            diagnostics.append(
-                dict(
-                    path=path,
-                    code=issue.code,
-                    status=status,
-                    message=f"declaration analysis reported {issue.code}; "
-                    "see existing analysis issues for field/type details",
-                )
-            )
-    declarations, edges = [], []
-    for key, node in nodes.items():
-        facts = next(
-            (
-                analyzer._table_cache[key]
-                for analyzer in analyzers
-                if key in analyzer._table_cache
-                and statuses.get((key, analyzer._mode)) != "unsupported"
-            ),
-            None,
+            diagnostics.append(diagnostic)
+    return diagnostics, statuses
+
+
+def _table_facts(key, analyzers, statuses):
+    return next(
+        (
+            analyzer._table_cache[key]
+            for analyzer in analyzers
+            if key in analyzer._table_cache
+            and statuses.get((key, analyzer._mode)) != "unsupported"
+        ),
+        None,
+    )
+
+
+def _query_schema(facts):
+    return (
+        None
+        if facts is None
+        else [
+            dict(name=f.name, data_type=f.data_type, nullable=f.nullable)
+            for f in facts.schema
+        ]
+    )
+
+
+def _query_identity(facts):
+    if facts is None or facts.event_time is None:
+        return None
+    return dict(
+        entity_by=list(facts.entity_by),
+        event_time=facts.event_time,
+        sequence_by=list(facts.sequence_by),
+    )
+
+
+def _declaration(node, path, facts, statuses):
+    from calc_flow.symbolic.nodes import CStr
+
+    query = node.attr("query")
+    return dict(
+        path=path,
+        kind=node.op.name,
+        query=query.value if isinstance(query, CStr) else None,
+        schema=_query_schema(facts),
+        ordering=dict(
+            kind="unspecified",
+            keys=[],
+            ties="unspecified",
+            temporal_identity=_query_identity(facts),
+        ),
+        batch_support=statuses.get((node.digest, "batch")),
+        stream_support=statuses.get((node.digest, "stream")),
+    )
+
+
+def _query_edges(nodes, paths):
+    return [
+        dict(
+            path=paths[key] + role,
+            source_path=paths[child.digest],
+            target_path=paths[key],
         )
-        schema = (
-            None
-            if facts is None
-            else [
-                dict(name=f.name, data_type=f.data_type, nullable=f.nullable)
-                for f in facts.schema
-            ]
-        )
-        identity = (
-            None
-            if facts is None or facts.event_time is None
-            else dict(
-                entity_by=list(facts.entity_by),
-                event_time=facts.event_time,
-                sequence_by=list(facts.sequence_by),
-            )
-        )
-        query = node.attr("query")
-        declarations.append(
-            dict(
-                path=paths[key],
-                kind=node.op.name,
-                query=query.value if isinstance(query, CStr) else None,
-                schema=schema,
-                ordering=dict(
-                    kind="unspecified",
-                    keys=[],
-                    ties="unspecified",
-                    temporal_identity=identity,
-                ),
-                batch_support=statuses.get((key, "batch")),
-                stream_support=statuses.get((key, "stream")),
-            )
-        )
-        for child, role in zip(node.args, _roles(node)):
-            edges.append(
-                dict(
-                    path=paths[key] + role,
-                    source_path=paths[child.digest],
-                    target_path=paths[key],
-                )
-            )
+        for key, node in nodes.items()
+        for child, role in zip(node.args, _roles(node))
+    ]
+
+
+def _query(program, runtime, options, analyzers) -> QueryAnalysis:
+    paths, nodes, legacy_paths = _declaration_paths(program)
+    diagnostics, statuses = _query_diagnostics(analyzers, paths, legacy_paths)
     graph = dict(
-        nodes=declarations,
-        edges=edges,
+        nodes=[
+            _declaration(
+                node, paths[key], _table_facts(key, analyzers, statuses), statuses
+            )
+            for key, node in nodes.items()
+        ],
+        edges=_query_edges(nodes, paths),
         options=dict(portability=_request_dict(options.portability)),
         diagnostics=diagnostics,
     )

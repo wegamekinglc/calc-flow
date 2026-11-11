@@ -37,17 +37,15 @@ def test_row_local_report_and_checked_compile_preserve_identity():
 
 
 @pytest.mark.parametrize("engine", ["sql", "streaming"])
-def test_snapshot_append_edge_rejects_even_after_warming_compile_cache(engine):
+@pytest.mark.parametrize("history", ["accepted_history", "latest_relation"])
+def test_snapshot_append_edge_rejects_even_after_warming_compile_cache(engine, history):
     source = cf.table_input("values", schema=pa.schema([("x", pa.int64())]))
     first = source.sql("SELECT SUM(x) AS total FROM input")
     output = first.select("total").sql("SELECT SUM(total) AS total FROM input")
     program = cf.Program("sum_chain", engine=engine, outputs={"total": output})
     runtime = cf.Runtime()
-    ordinary = (
-        program.compile_batch(runtime)
-        if engine == "sql"
-        else program.compile_stream(runtime)
-    )
+    compile_plan = program.compile_batch if engine == "sql" else program.compile_stream
+    ordinary = compile_plan(runtime)
     report = program.analyze(runtime).query
     assert report.portability is None
     first_facts = next(
@@ -60,30 +58,18 @@ def test_snapshot_append_edge_rejects_even_after_warming_compile_cache(engine):
     )
     assert edge.stream.producer_update == "complete_snapshot"
     assert edge.stream.consumer_interpretation == "append"
-    for history in ("accepted_history", "latest_relation"):
-        with pytest.raises(
-            cf.CompileError, match="update_interpretation_mismatch"
-        ) as caught:
-            (
-                program.compile_batch(runtime, portability=_request(history))
-                if engine == "sql"
-                else program.compile_stream(runtime, portability=_request(history))
-            )
-        assert caught.value.query_analysis.portability == "unsupported"
-        assert any(
-            d.path == edge.path and d.code == "update_interpretation_mismatch"
-            for d in caught.value.query_analysis.diagnostics
-        )
-    cached = (
-        program.compile_batch(runtime)
-        if engine == "sql"
-        else program.compile_stream(runtime)
+    with pytest.raises(
+        cf.CompileError, match="update_interpretation_mismatch"
+    ) as caught:
+        compile_plan(runtime, portability=_request(history))
+    assert caught.value.query_analysis.portability == "unsupported"
+    assert any(
+        d.path == edge.path and d.code == "update_interpretation_mismatch"
+        for d in caught.value.query_analysis.diagnostics
     )
-    if engine == "sql":
-        assert cached is ordinary
-    else:
-        assert cached is not ordinary
-        assert cached.fingerprint == ordinary.fingerprint
+    cached = compile_plan(runtime)
+    assert (cached is ordinary) == (engine == "sql")
+    assert cached.fingerprint == ordinary.fingerprint
 
 
 def test_public_facts_copy_caller_sequences():

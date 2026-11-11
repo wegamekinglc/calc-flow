@@ -3,7 +3,8 @@
 use datafusion::sql::{
     parser::Statement as DFStatement,
     sqlparser::ast::{
-        Expr, GroupByExpr, Ident, LimitClause, OrderByKind, SelectItem, SetExpr, Statement, Value,
+        Expr, Function, GroupByExpr, Ident, LimitClause, OrderByExpr, OrderByKind, Query, Select,
+        SelectItem, SetExpr, Statement, Value,
     },
 };
 
@@ -57,11 +58,22 @@ pub(super) fn inspect(text: &str, fields: &[crate::ArrowFieldSpec]) -> crate::Re
     let SetExpr::Select(select) = query.body.as_ref() else {
         return Ok(result);
     };
+    if !has_simple_shape(query) {
+        return Ok(result);
+    }
+    result.proof = query_proof(&statement, query, select, aggregate);
+    if let Some(order) = &query.order_by {
+        result.ordering = order_keys(order, fields);
+    }
+    Ok(result)
+}
+
+fn has_simple_shape(query: &Query) -> bool {
     let mut normalized = query.clone();
     normalized.order_by = None;
     normalized.limit_clause = None;
     let SetExpr::Select(normal_select) = normalized.body.as_mut() else {
-        return Ok(result);
+        return false;
     };
     normal_select.selection = None;
     normal_select.distinct = None;
@@ -75,58 +87,63 @@ pub(super) fn inspect(text: &str, fields: &[crate::ArrowFieldSpec]) -> crate::Re
             *item = SelectItem::UnnamedExpr(Expr::Identifier(Ident::new("__query_field")));
         }
     }
-    if !simple_query(&normalized) {
-        return Ok(result);
-    }
-    let row_local = row_local_statement(&statement);
-    let row_number = !aggregate
-        && select.projection.iter().all(|item| match expression(item) {
-            Some(Expr::Identifier(_) | Expr::CompoundIdentifier(_)) => true,
-            Some(Expr::Function(function)) => {
-                function.over.is_some()
-                    && function.name.to_string().eq_ignore_ascii_case("row_number")
-            }
-            _ => false,
-        });
-    result.proof = if aggregate {
-        if simple_aggregate(select)
-            && query.order_by.is_none()
-            && query.limit_clause.is_none()
-            && select.having.is_none()
-        {
-            Proof::Aggregate
-        } else {
-            Proof::Unknown
-        }
-    } else if row_local {
-        if let Some(limit) = &query.limit_clause {
-            if positive_limit(limit) && select.selection.is_none() {
-                Proof::Selection
-            } else {
-                Proof::PerBatchUnproven
-            }
-        } else if select.distinct.is_some() {
-            if select.selection.is_none() {
-                Proof::PerBatch
-            } else {
-                Proof::PerBatchUnproven
-            }
-        } else {
-            Proof::RowLocal
-        }
-    } else if row_number {
-        if select.selection.is_none() {
-            Proof::Selection
-        } else {
-            Proof::PerBatchUnproven
-        }
+    simple_query(&normalized)
+}
+
+fn query_proof(statement: &Statement, query: &Query, select: &Select, aggregate: bool) -> Proof {
+    if aggregate {
+        aggregate_proof(query, select)
+    } else if row_local_statement(statement) {
+        row_local_proof(query, select)
+    } else if select.projection.iter().all(row_number_item) {
+        selection_proof(select.selection.is_none())
     } else {
         Proof::Unknown
-    };
-    if let Some(order) = &query.order_by {
-        result.ordering = order_keys(order, fields);
     }
-    Ok(result)
+}
+
+fn aggregate_proof(query: &Query, select: &Select) -> Proof {
+    if simple_aggregate(select)
+        && query.order_by.is_none()
+        && query.limit_clause.is_none()
+        && select.having.is_none()
+    {
+        Proof::Aggregate
+    } else {
+        Proof::Unknown
+    }
+}
+
+fn row_local_proof(query: &Query, select: &Select) -> Proof {
+    if let Some(limit) = &query.limit_clause {
+        return selection_proof(positive_limit(limit) && select.selection.is_none());
+    }
+    if select.distinct.is_some() {
+        return if select.selection.is_none() {
+            Proof::PerBatch
+        } else {
+            Proof::PerBatchUnproven
+        };
+    }
+    Proof::RowLocal
+}
+
+fn selection_proof(proved: bool) -> Proof {
+    if proved {
+        Proof::Selection
+    } else {
+        Proof::PerBatchUnproven
+    }
+}
+
+fn row_number_item(item: &SelectItem) -> bool {
+    match expression(item) {
+        Some(Expr::Identifier(_) | Expr::CompoundIdentifier(_)) => true,
+        Some(Expr::Function(function)) => {
+            function.over.is_some() && function.name.to_string().eq_ignore_ascii_case("row_number")
+        }
+        _ => false,
+    }
 }
 
 fn positive_limit(limit: &LimitClause) -> bool {
@@ -149,7 +166,7 @@ fn expression(item: &SelectItem) -> Option<&Expr> {
     }
 }
 
-fn simple_aggregate(select: &datafusion::sql::sqlparser::ast::Select) -> bool {
+fn simple_aggregate(select: &Select) -> bool {
     let GroupByExpr::Expressions(groups, modifiers) = &select.group_by else {
         return false;
     };
@@ -157,19 +174,25 @@ fn simple_aggregate(select: &datafusion::sql::sqlparser::ast::Select) -> bool {
         && groups
             .iter()
             .all(|expr| matches!(expr, Expr::Identifier(_) | Expr::CompoundIdentifier(_)))
-        && select.projection.iter().all(|item| match expression(item) {
-            Some(Expr::Identifier(_) | Expr::CompoundIdentifier(_)) => true,
-            Some(Expr::Function(function)) => {
-                function.over.is_none()
-                    && function.filter.is_none()
-                    && function.within_group.is_empty()
-                    && matches!(
-                        function.name.to_string().to_ascii_lowercase().as_str(),
-                        "sum" | "count" | "min" | "max" | "avg"
-                    )
-            }
-            _ => false,
-        })
+        && select.projection.iter().all(simple_aggregate_item)
+}
+
+fn simple_aggregate_item(item: &SelectItem) -> bool {
+    match expression(item) {
+        Some(Expr::Identifier(_) | Expr::CompoundIdentifier(_)) => true,
+        Some(Expr::Function(function)) => simple_aggregate_function(function),
+        _ => false,
+    }
+}
+
+fn simple_aggregate_function(function: &Function) -> bool {
+    function.over.is_none()
+        && function.filter.is_none()
+        && function.within_group.is_empty()
+        && matches!(
+            function.name.to_string().to_ascii_lowercase().as_str(),
+            "sum" | "count" | "min" | "max" | "avg"
+        )
 }
 
 fn order_keys(
@@ -190,33 +213,35 @@ fn order_keys(
     }
     let keys = keys
         .iter()
-        .map(|key| {
-            let Expr::Identifier(name) = &key.expr else {
-                return None;
-            };
-            if key.with_fill.is_some() || !fields.iter().any(|field| field.name == name.value) {
-                return None;
-            }
-            let ascending = key.options.asc.unwrap_or(true);
-            Some(QuerySortKey {
-                field: name.value.clone(),
-                direction: if ascending {
-                    SortDirection::Ascending
-                } else {
-                    SortDirection::Descending
-                },
-                nulls: if key.options.nulls_first.unwrap_or(!ascending) {
-                    NullPlacement::First
-                } else {
-                    NullPlacement::Last
-                },
-            })
-        })
+        .map(|key| order_key(key, fields))
         .collect::<Option<Vec<_>>>();
     keys.map_or_else(unknown, |keys| QueryOrderingFacts {
         kind: QueryRowOrder::Ordered,
         keys,
         ties: QueryTieOrder::Unknown,
         temporal_identity: None,
+    })
+}
+
+fn order_key(key: &OrderByExpr, fields: &[crate::ArrowFieldSpec]) -> Option<QuerySortKey> {
+    let Expr::Identifier(name) = &key.expr else {
+        return None;
+    };
+    if key.with_fill.is_some() || !fields.iter().any(|field| field.name == name.value) {
+        return None;
+    }
+    let ascending = key.options.asc.unwrap_or(true);
+    Some(QuerySortKey {
+        field: name.value.clone(),
+        direction: if ascending {
+            SortDirection::Ascending
+        } else {
+            SortDirection::Descending
+        },
+        nulls: if key.options.nulls_first.unwrap_or(!ascending) {
+            NullPlacement::First
+        } else {
+            NullPlacement::Last
+        },
     })
 }

@@ -69,7 +69,7 @@ class StreamOutput:
 @dataclass(frozen=True, slots=True)
 class _StreamRequest:
     program: Program
-    inputs: dict[str, StreamInput | TableData | NativeArray]
+    inputs: Mapping[str, StreamInput | TableData | NativeArray]
     runtime: Runtime | None
     config: StreamRuntimeConfig | None
     watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None
@@ -480,29 +480,19 @@ class StreamResults(Generic[T]):
                             queue.get_nowait()
 
 
-def _stream_program(
-    program: Program,
-    inputs: Mapping[str, StreamInput | TableData | NativeArray],
-    runtime: Runtime | None,
-    config: StreamRuntimeConfig | None,
-    watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None,
-    portability: PortabilityRequest | None = None,
-) -> StreamResults[StreamOutput]:
-    if not isinstance(inputs, Mapping):
+def _stream_program(request: _StreamRequest) -> StreamResults[StreamOutput]:
+    if not isinstance(request.inputs, Mapping):
         raise TypeError("stream.inputs: expected a mapping by declared input name")
     return StreamResults(
-        _StreamRequest(
-            program,
-            _capture_stream_inputs(inputs)
-            if portability is None
+        replace(
+            request,
+            inputs=_capture_stream_inputs(request.inputs)
+            if request.portability is None
             else {
                 name: tuple(value) if type(value) is list else value
-                for name, value in inputs.items()
+                for name, value in request.inputs.items()
             },
-            runtime,
-            config,
-            _capture_watermarks(watermarks),
-            portability,
+            watermarks=_capture_watermarks(request.watermarks),
         ),
         table_output=False,
     )
