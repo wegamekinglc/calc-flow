@@ -286,7 +286,7 @@ def test_named_input_materialization_and_late_sql_preserve_boundary() -> None:
 
 
 @pytest.mark.parametrize("transformed", [False, True])
-@pytest.mark.parametrize("successor", ["rolling", "array", "merge"])
+@pytest.mark.parametrize("successor", ["rolling", "array", "merge", "df_union"])
 def test_late_successors_reject_even_after_allowed_transform(
     transformed: bool, successor: str
 ) -> None:
@@ -297,8 +297,10 @@ def test_late_successors_reject_even_after_allowed_transform(
         rejected = rolling(late)
     elif successor == "array":
         rejected = cf.linalg.from_columns(late, columns=["x"], backend="numpy")
-    else:
+    elif successor == "merge":
         rejected = cf.sql("SELECT * FROM a UNION ALL SELECT * FROM b", a=late, b=late)
+    else:
+        rejected = late.union_all(late)
     if successor == "merge":
         with pytest.raises(ValueError, match=r"outputs.rejected.*unsupported_mode"):
             cf.Program(

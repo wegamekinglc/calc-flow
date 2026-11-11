@@ -15,6 +15,7 @@ use crate::{
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Proof {
+    AppendUnion,
     RowLocal,
     Aggregate,
     Replacement,

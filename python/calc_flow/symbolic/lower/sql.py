@@ -77,6 +77,7 @@ _TABLE_BOUNDARIES = frozenset(
     {
         *_EVENT_WINDOW_OPS,
         "aggregate",
+        "union_all",
         "sql",
         "snapshot_sql",
         "late_output",
@@ -187,12 +188,42 @@ class _SQLGraph:
         if node.op.name == "table_input":
             self.schemas[node.digest] = self.analyzer.table(node, "sql.input").schema
             return self.graph.source(node)
+        if node.op.name == "union_all":
+            output_id = self.graph.allocate(f"cf_union_{node.digest[:24]}")
+            parents = [self.table(child) for child in node.args]
+            schema = self.analyzer.table(node, "union.output").schema
+            self.schemas[node.digest] = schema
+            self._append_union_node(output_id, parents, schema)
+            self._remember(node, output_id)
+            return output_id
         if node.op.name not in {"aggregate", "sql", "snapshot_sql"}:
             return self._append_expression(node)
         output_id = self.graph.allocate(f"cf_sql_{node.digest[:24]}")
         self._append_sql(node, output_id)
         self._remember(node, output_id)
         return output_id
+
+    def _append_union_node(self, output_id, parents, schema):
+        self.graph.nodes.append(
+            {
+                "id": output_id,
+                "input_ports": [
+                    _table_port(schema, f"input_{index}")
+                    for index in range(len(parents))
+                ],
+                "operator": {"kind": "union"},
+                "output_ports": [_table_port(schema, "output")],
+            }
+        )
+        self.graph.edges.extend(
+            {
+                "source_node": parent,
+                "source_port": "output",
+                "target_node": output_id,
+                "target_port": f"input_{index}",
+            }
+            for index, parent in enumerate(parents)
+        )
 
     def _remember(self, node: Node, output_id: str) -> None:
         facts = self.analyzer.table(node, f"{self.graph.program.name}.sql")
@@ -208,6 +239,10 @@ class _SQLGraph:
         self.materialized[node.digest] = output_id
 
     def _append_sql(self, node: Node, output_id: str) -> None:
+        plan = self.analyzer._union_plans.get(node.digest)
+        if plan is not None:
+            self._append_sql_union(node, output_id, plan)
+            return
         aliases = _cstr_seq(node.attr("aliases"))
         parents = [self.table(child) for child in node.args]
         schemas = [self.schemas[child.digest] for child in node.args]
@@ -239,6 +274,43 @@ class _SQLGraph:
             for alias, parent in zip(aliases, parents, strict=True)
         )
 
+    def _append_sql_union(self, node, output_id, plan):
+        aliases = _cstr_seq(node.attr("aliases"))
+        children = dict(zip(aliases, node.args))
+        parents = []
+        for index, arm in enumerate(plan["arms"]):
+            child = children[arm["alias"]]
+            parent = self.table(child)
+            arm_id = self.graph.allocate(f"{output_id}_arm_{index}")
+            fields = tuple(Field(**field) for field in arm["schema"])
+            self.graph.nodes.append(
+                {
+                    "id": arm_id,
+                    "input_ports": [
+                        _table_port(self.schemas[child.digest], arm["alias"])
+                    ],
+                    "operator": {
+                        "kind": "sql",
+                        "query": arm["query"],
+                        "aliases": [arm["alias"]],
+                        "udfs": [],
+                    },
+                    "output_ports": [_table_port(fields, "output")],
+                }
+            )
+            self.graph.edges.append(
+                {
+                    "source_node": parent,
+                    "source_port": "output",
+                    "target_node": arm_id,
+                    "target_port": arm["alias"],
+                }
+            )
+            parents.append(arm_id)
+        schema = self.analyzer.table(node, "sql.output").schema
+        self.schemas[node.digest] = schema
+        self._append_union_node(output_id, parents, schema)
+
     def _append_expression(self, node: Node) -> str:
         self._prepare_expression_inputs(node)
         self._append_expressions((node,))
@@ -254,6 +326,7 @@ class _SQLGraph:
                 boundary.op.name
                 in {
                     "aggregate",
+                    "union_all",
                     "sql",
                     "snapshot_sql",
                     "attach_columns",
@@ -466,7 +539,8 @@ def lower_sql_program(
     late_policy: str,
 ) -> dict[str, object] | None:
     if not _macd_input_boundaries(program) and not any(
-        node.op.name in {"aggregate", "sql", "snapshot_sql", "late_output", "late_rows"}
+        node.op.name
+        in {"aggregate", "union_all", "sql", "snapshot_sql", "late_output", "late_rows"}
         for _, value in program.outputs
         for node in _walk_nodes(value._node)
     ):

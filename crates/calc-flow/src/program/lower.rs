@@ -14,6 +14,8 @@ use datafusion::arrow::datatypes::SchemaRef;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod union;
+
 pub(super) struct Lowered {
     name: String,
     fingerprint: String,
@@ -40,8 +42,19 @@ fn endpoint(table: &TableExpr, port: &str) -> PortEndpoint {
         port: port.into(),
     }
 }
-fn children(table: &TableExpr, path: &str) -> Vec<(String, TableExpr, String)> {
+pub(super) fn children(table: &TableExpr, path: &str) -> Vec<(String, TableExpr, String)> {
     match &table.0.kind {
+        RelationKind::Union { inputs } => inputs
+            .iter()
+            .enumerate()
+            .map(|(index, child)| {
+                (
+                    format!("input_{index}"),
+                    child.clone(),
+                    format!("{path}.union_all.inputs[{index}]"),
+                )
+            })
+            .collect(),
         RelationKind::Input { .. } => vec![],
         RelationKind::Aggregate { input, .. } => vec![(
             "input".into(),
@@ -162,7 +175,17 @@ pub(super) async fn lower(program: &Program) -> Result<Lowered> {
 }
 impl Lowered {
     pub fn ensure_valid(&self) -> Result<()> {
-        if let Some(issue) = self.diagnostics.first() {
+        let other = if self.mode == CompileMode::Batch {
+            "stream"
+        } else {
+            "batch"
+        };
+        if let Some(issue) = self.diagnostics.iter().find(|issue| {
+            !self
+                .declarations
+                .iter()
+                .any(|node| issue.path.starts_with(&format!("{}.{other}.", node.path)))
+        }) {
             return Err(crate::CalcFlowError::Compile {
                 message: format!("{}: {}: {}", issue.path, issue.code, issue.message),
             });
@@ -202,6 +225,9 @@ impl Lowered {
         path: &str,
         paths: &BTreeMap<String, String>,
     ) -> Result<()> {
+        if self.add_sql_union(table, path, paths).await? {
+            return Ok(());
+        }
         let Prepared {
             node,
             schema,
@@ -258,6 +284,12 @@ impl Lowered {
     }
     async fn prepare(&self, table: &TableExpr, path: &str) -> Result<Prepared> {
         match &table.0.kind {
+            RelationKind::Union { inputs } => prepare_union(
+                table,
+                path,
+                &self.schemas[&inputs[0].0.id],
+                &self.schemas[&inputs[1].0.id],
+            ),
             RelationKind::Input {
                 schema, options, ..
             } => Ok(prepare_input(&node_id(table), schema, options)),
@@ -489,6 +521,7 @@ fn native_edge(edge: &EdgeSpec) -> Result<Edge> {
 }
 fn relation_kind(table: &TableExpr) -> (&'static str, Option<String>) {
     match &table.0.kind {
+        RelationKind::Union { .. } => ("union", None),
         RelationKind::Input { .. } => ("table_input", None),
         RelationKind::Aggregate { .. } => ("aggregate", None),
         RelationKind::Project { append, .. } => {
@@ -615,6 +648,9 @@ fn node_operator(node: &NodeSpec, schemas: &PlannedPorts) -> Result<NodeOperator
     let inputs = schemas.inputs()?;
     let output = exact_port("output", &schemas.output)?;
     match &node.operator {
+        OperatorSpec::Union => Ok(NodeOperator::Union(crate::UnionOperator::new_frontend(
+            &node.id, inputs,
+        )?)),
         OperatorSpec::Expression { select, filter, .. } => {
             expression_operator(&node.id, select, filter.as_deref(), &inputs[0], output)
         }
@@ -697,6 +733,29 @@ fn identity_select(schema: &SchemaRef) -> Vec<String> {
             .collect()
     }
 }
+fn prepare_union(
+    table: &TableExpr,
+    path: &str,
+    first: &SchemaRef,
+    second: &SchemaRef,
+) -> Result<Prepared> {
+    crate::dataframe::union_schema(first, second, &format!("{path}.union_all.inputs[1]"))?;
+    let schema = crate::operator::normalized_union_schema(first);
+    Ok(Prepared {
+        node: NodeSpec {
+            id: node_id(table),
+            operator: OperatorSpec::Union,
+            input_ports: vec![port_spec("input_0", first), port_spec("input_1", second)],
+            output_ports: vec![port_spec("output", &schema)],
+            position: None,
+        },
+        schema,
+        kind: "union",
+        query: None,
+        ordering: QueryOrderingFacts::default(),
+    })
+}
+
 fn prepare_input(id: &str, schema: &SchemaRef, options: &crate::InputOptions) -> Prepared {
     let ordering = QueryOrderingFacts {
         temporal_identity: options

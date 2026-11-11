@@ -1409,12 +1409,10 @@ fn union_node(
     outputs: &[Port],
     mode: CompileMode,
 ) -> Result<NodeOperator> {
-    if mode != CompileMode::Stream {
-        return Err(CalcFlowError::Compile {
-            message: format!("node {:?} uses stream-only union", node.id),
-        });
-    }
     let operator = UnionOperator::new(&node.id, inputs)?;
+    if mode == CompileMode::Batch {
+        operator.validate_batch()?;
+    }
     validate_derived_outputs(outputs, crate::OperatorMetadata::output_ports(&operator))?;
     Ok(NodeOperator::Union(operator))
 }
@@ -2287,23 +2285,30 @@ fn validate_union_operator(
     base: &str,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    if mode != CompileMode::Stream {
-        issues.push(issue(
-            base,
-            "incompatible_runtime",
-            "union is available only in stream runtime mode",
-        ));
-    }
     if node.input_ports.len() < 2 {
         issues.push(issue(
             format!("graph.nodes[{index}].input_ports"),
             "invalid_ports",
             "union requires at least two explicit input ports",
         ));
-    } else if let Ok(inputs) = configured_ports(node, true)
-        && let Err(error) = UnionOperator::new(&node.id, inputs)
+    } else if let Ok(inputs) = configured_ports(node, true) {
+        match UnionOperator::new(&node.id, inputs) {
+            Err(error) => issues.push(issue(base, "invalid_operator", error.to_string())),
+            Ok(operator) => validate_union_mode(&operator, mode, base, issues),
+        }
+    }
+}
+
+fn validate_union_mode(
+    operator: &UnionOperator,
+    mode: CompileMode,
+    base: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if mode == CompileMode::Batch
+        && let Err(error) = operator.validate_batch()
     {
-        issues.push(issue(base, "invalid_operator", error.to_string()));
+        issues.push(issue(base, "unsupported_mode", error.to_string()));
     }
 }
 

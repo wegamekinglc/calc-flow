@@ -511,6 +511,18 @@ def _reflected_array(
 class TableExpr(Expr[object]):
     """An Arrow-backed table expression."""
 
+    def union_all(self, other: TableExpr, /) -> TableExpr:
+        """Append rows with an exact matching schema, preserving duplicates.
+
+        Each input keeps its FIFO order; cross-input order is unspecified.
+        Complete snapshots cannot feed this append-only union under latest_relation.
+        """
+        if not isinstance(other, TableExpr):
+            raise TypeError(
+                f"union_all.other requires TableExpr, got {type_name(other)}"
+            )
+        return TableExpr(build("union_all", (self._node, other._node), {}))
+
     def aggregate(
         self,
         aggregates: Mapping[str, AggregateExpr],

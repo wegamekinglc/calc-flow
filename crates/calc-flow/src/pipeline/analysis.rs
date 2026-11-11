@@ -283,18 +283,42 @@ async fn describe_operator(
             message: "selected UDF history and comparison semantics are not proved".into(),
         });
     }
+    let union_batch = union_batch_support(id, op, diagnostics);
     let declaration = Declaration {
         path: node_path(id),
         kind: kind.into(),
         query,
         schema: schema.as_ref().map(schema_fields),
         ordering: QueryOrderingFacts::default(),
-        batch_support: matches!(op, NodeOperator::Batch(_)).then_some(SupportStatus::Supported),
+        batch_support: union_batch
+            .or_else(|| matches!(op, NodeOperator::Batch(_)).then_some(SupportStatus::Supported)),
         stream_support: (matches!(op, NodeOperator::Batch(_))
             || matches!(op, NodeOperator::Sql(_)) && op.input_ports().len() != 1)
             .then_some(SupportStatus::Unsupported),
     };
     Ok((declaration, schema))
+}
+
+fn union_batch_support(
+    id: &str,
+    op: &NodeOperator,
+    diagnostics: &mut Vec<QueryDiagnostic>,
+) -> Option<SupportStatus> {
+    if let NodeOperator::Union(union) = op {
+        if let Err(error) = union.validate_batch() {
+            diagnostics.push(QueryDiagnostic {
+                path: format!("{}.batch.support", node_path(id)),
+                code: "unsupported_mode".into(),
+                status: SupportStatus::Unsupported,
+                message: error.to_string(),
+            });
+            Some(SupportStatus::Unsupported)
+        } else {
+            Some(SupportStatus::Supported)
+        }
+    } else {
+        None
+    }
 }
 
 fn operator_declaration(op: &NodeOperator) -> (&'static str, Option<String>) {

@@ -697,7 +697,7 @@ def _pin_update_semantics(document, runtime):
 
 def _can_pin_update_graph(graph):
     return all(
-        node["operator"]["kind"] in {"expression", "sql", "snapshot_sql"}
+        node["operator"]["kind"] in {"expression", "sql", "snapshot_sql", "union"}
         and not node["operator"].get("udfs")
         for node in graph["nodes"]
     )
@@ -822,7 +822,12 @@ def _preparation_key(
 def compile_program_batch(program: Program, runtime: object, /) -> BatchExecutionPlan:
     """Lower one program to a strict project-v3 batch plan."""
     selected = _require_runtime(runtime, "compile_batch")
-    key = _preparation_key(program, "batch", 0, "error")
+    from calc_flow.symbolic.union import cache_policy
+
+    key = (
+        *_preparation_key(program, "batch", 0, "error"),
+        *cache_policy(program, selected),
+    )
     return selected._cached_symbolic_compile(
         key,
         lambda: selected.compile_batch_project(
@@ -841,7 +846,12 @@ def compile_program_stream(
     """Cache stream declarations while giving every call an owning native plan."""
     selected = _require_runtime(runtime, "compile_stream")
     _validate_lateness(allowed_lateness_micros, late_policy)
-    key = _preparation_key(program, "stream", allowed_lateness_micros, late_policy)
+    from calc_flow.symbolic.union import cache_policy
+
+    key = (
+        *_preparation_key(program, "stream", allowed_lateness_micros, late_policy),
+        *cache_policy(program, selected),
+    )
     return selected._compile_symbolic_stream(
         key,
         lambda: _canonical(

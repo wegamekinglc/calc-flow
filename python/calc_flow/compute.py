@@ -225,11 +225,14 @@ def _lower_collect(
 
 
 def _lowered_collect(program: Program, selected: Runtime) -> _LoweredCollect:
+    from calc_flow.symbolic.union import cache_policy
+
     # Registrations clear the runtime cache, so the key needs only the program.
     key = (
         "collect",
         program.fingerprint,
         tuple(value._node.node_bytes for value in program.inputs),
+        *cache_policy(program, selected),
     )
     return cast(
         _LoweredCollect,

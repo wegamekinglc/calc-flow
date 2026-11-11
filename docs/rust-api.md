@@ -764,9 +764,9 @@ asynchronous and accepts only `Batch` values.
 ### Engine boundary
 
 `ExpressionOperator`, `SqlOperator`, `RollingOperator`, and
-`CrossSectionOperator` are built-in
+`CrossSectionOperator` and exact-schema table `UnionOperator` are built-in
 operators that implement both `BatchOperator` and `StreamOperator`;
-`UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator`, and
+`WindowAggregateOperator`, `StreamJoinOperator`, and
 `StreamAsofJoinOperator` are stream-only. Add them through `PipelineBuilder::add_node`, which accepts a
 `NodeOperator` conversion from a boxed built-in, custom batch operator, or
 custom stream operator.

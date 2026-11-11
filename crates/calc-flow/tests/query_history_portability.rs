@@ -307,7 +307,7 @@ async fn sql_shapes_separate_per_batch_scope_from_unproved_semantics() {
 }
 
 #[tokio::test]
-async fn stream_only_modes_and_sql_schema_errors_are_reported_without_execution() {
+async fn union_modes_and_sql_schema_errors_are_reported_without_execution() {
     let union = calc_flow::UnionOperator::new(
         "union",
         vec![
@@ -337,14 +337,9 @@ async fn stream_only_modes_and_sql_schema_errors_are_reported_without_execution(
         .await
         .unwrap();
     assert_eq!(report.nodes[0].path, "graph.nodes[\"u\\\".x\"]");
-    assert_eq!(report.nodes[0].batch.support, SupportStatus::Unsupported);
+    assert_eq!(report.nodes[0].batch.support, SupportStatus::Supported);
     assert_eq!(report.nodes[0].stream.support, SupportStatus::Supported);
-    assert!(
-        report
-            .diagnostics
-            .iter()
-            .any(|issue| issue.code == "unsupported_mode")
-    );
+    assert!(report.diagnostics.is_empty());
 
     let sql = SqlOperator::new(
         "bad",

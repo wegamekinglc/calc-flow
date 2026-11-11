@@ -9,6 +9,13 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-12: Add Rust/Python `TableExpr.union_all` and shared lowering for the
+  exact-schema multi-alias SQL UNION ALL subset. The existing native union now
+  supports stateless finite execution, preserving duplicates, NULLs, empty inputs and
+  per-source FIFO. Query analysis revision 4 proves unordered EOF reduction and
+  rejects latest snapshots at union before source startup. SQL declarations keep
+  their digests; admitted SQL exports a new union topology and native fingerprint.
+
 - 2026-11-10: Extend the benchmark suite with sixteen native Array API cases
   and five direct Rust microcases, numerical/null-mask oracles and fixed
   sample collection. Restore scheduled preparation by accounting for verifier

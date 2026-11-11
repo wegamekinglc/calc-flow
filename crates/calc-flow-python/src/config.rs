@@ -5,7 +5,7 @@ use pyo3::{
     Borrowed, PyTraverseError, PyVisit,
     exceptions::{PyRuntimeError, PyTypeError},
     prelude::*,
-    types::{PyAny, PyBool, PyMapping},
+    types::{PyAny, PyBool, PyList, PyMapping},
 };
 
 use crate::pipeline::{PyExecutionPlan, PyStreamExecutionPlan};
@@ -759,6 +759,29 @@ impl PyRuntime {
             .map_err(crate::error::to_py_err)
     }
 
+    fn _plan_union_all(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        schemas: &Bound<'_, PyMapping>,
+    ) -> PyResult<String> {
+        let runtime = self.snapshot()?;
+        let schemas = schemas
+            .items()?
+            .extract::<Vec<(String, pyo3_arrow::PySchema)>>()?
+            .into_iter()
+            .map(|(alias, schema)| (alias, schema.into_inner()))
+            .collect();
+        let plan = py
+            .detach(|| {
+                runtime
+                    .tokio
+                    .block_on(calc_flow::sql::plan_union_all(query, &schemas))
+            })
+            .map_err(crate::error::to_py_err)?;
+        serde_json::to_string(&plan).map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+
     fn _infer_sql_schema<'py>(
         &self,
         py: Python<'py>,
@@ -873,10 +896,29 @@ fn _native_array_capabilities(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
     json_to_python(py, &encoded)
 }
 
+#[pyfunction]
+pub(crate) fn _union_all_queries(query: &str, aliases: &Bound<'_, PyList>) -> PyResult<String> {
+    let aliases = aliases.extract::<Vec<String>>()?;
+    let arms =
+        calc_flow::sql::union_all_queries(query, &aliases).map_err(crate::error::to_py_err)?;
+    serde_json::to_string(&arms).map_err(|error| PyRuntimeError::new_err(error.to_string()))
+}
+
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyRuntime>()?;
+    register_query_planners(module)?;
+    register_array_queries(module)?;
+    Ok(())
+}
+
+fn register_query_planners(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(_union_all_queries, module)?)?;
     module.add_function(wrap_pyfunction!(project_json_schema, module)?)?;
     module.add_function(wrap_pyfunction!(validate_project_json, module)?)?;
+    Ok(())
+}
+
+fn register_array_queries(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_native_array_capability, module)?)?;
     module.add_function(wrap_pyfunction!(_infer_native_array_program, module)?)?;
     module.add_function(wrap_pyfunction!(_native_array_capabilities, module)?)?;
