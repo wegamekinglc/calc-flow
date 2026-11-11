@@ -1,0 +1,132 @@
+{
+  "python_files": {
+    "python/calc_flow/__init__.py": "439a3ce9f612e0ee5170d6883557517e574366f26d787d5d2430e2ac0f62524a",
+    "python/calc_flow/_compat.py": "4e17ab0e959c05b9467176379da4f65e3fe16e0c20b544cd10e6e78d99f03421",
+    "python/calc_flow/_macd.py": "ff73c6b259998fd21d7c7862736f0a62924b36af44c5700a7060d9d4a646ed3b",
+    "python/calc_flow/_native.pyi": "bddf7da3509cf8114dcca54a7569c1adb08dda6c76106f05f49483ddb32e9943",
+    "python/calc_flow/_native_array.py": "a3f4629991e411f8b56f17275c61153e20dc182e7e6ee69041294276f2699891",
+    "python/calc_flow/_stream_inputs.py": "57ef58bc302565cfaa87148cc02736ec40585129fb8c51fa787dcd6c1de0a0a2",
+    "python/calc_flow/array.py": "b5a4d4ab4fd0f72922db98b3ca82c4436ed4bb0b5f6af565a9b03a8a7844f76c",
+    "python/calc_flow/asof_join_spec.py": "4160dd0e541da6e0be5b812f461706240a6b675199106d4029d69adb87c7ac06",
+    "python/calc_flow/capabilities.py": "9a99d7fac56e5403ee6cd76b70b094957184fc4daa2ab3a0ca55c2cbb419498d",
+    "python/calc_flow/compute.py": "917208dab1995760993768505fea4e20f0a1ad18ad72409c12ea958d4ebd6749",
+    "python/calc_flow/config.py": "9fe9d07c5717e1460f539a89b4e58cf0c8c76647e0a5c41b2e551c4a99727b66",
+    "python/calc_flow/errors.py": "08823d83a40097e1e4406bacce821de81a6ec016c05836efb34fc87f56101104",
+    "python/calc_flow/join_spec.py": "9440cabf1ce87f900270b1159246f52f99fcea32e1b9c46987a422dce93efa5d",
+    "python/calc_flow/pipeline.py": "237c12cbfbee25e4f0822c329596edb410e8287f75146eb1c4ea38c1000ef410",
+    "python/calc_flow/py.typed": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "python/calc_flow/runtime.py": "4e191e41dc2bfac6ca0e9c15f4f60bdb88de1781ef16184aa52d744c24183464",
+    "python/calc_flow/store.py": "de6580386c9a72492818684cde7a2cdf14d02e70a76473715e2d52b62dfffa23",
+    "python/calc_flow/stream.py": "9e652da82f3cb636a16cda04f311b1f7241a8a031a686b016bcfb4f28a1b9a7d",
+    "python/calc_flow/symbolic/__init__.py": "f5c76a05d3cf6ef999d72a88873f1c8ce12bc44c36d66eea42198a1bcb85f107",
+    "python/calc_flow/symbolic/_generated_rolling_kernels.py": "cdae04a26b254cb3a94c8c0c3ccbc11b6b4f5a6aad86adec2e55116eb4071263",
+    "python/calc_flow/symbolic/analyzer.py": "3df29513d26099862e341c82601bebdbb0bb263eb802c158e6ffd5eaf510cb3d",
+    "python/calc_flow/symbolic/asof.py": "babbdabf4f36f3a1654560f10e7d7e8b35b1e42f182f385ee0ae6fb3a11903bd",
+    "python/calc_flow/symbolic/asof_analysis.py": "ad615bde0928471286f31a0a63c73654ce3ac8ce7038232f230c7ebb25eea57b",
+    "python/calc_flow/symbolic/domains.py": "880483d1ca29bb75c92cb47e2cef82e708d553ff6e62ec1132685901f66a7cf8",
+    "python/calc_flow/symbolic/errors.py": "2c2b64440f56f30743aeb6f120ed2914524f47fc65122cf745c71562fbbf1052",
+    "python/calc_flow/symbolic/expr.py": "0ea1767180598b20d941eb4975e9b506a761d08a5e6ec9baf30d243a1c8c1e8a",
+    "python/calc_flow/symbolic/late_output.py": "f0122b4c9f9eae46ffbe04d6dd35110041137f871e39ebea68faa04945c1a692",
+    "python/calc_flow/symbolic/lower/__init__.py": "fae196c03e286c4db475d12ea6803343694d99ea19a5d1f09edd566d7370ed6b",
+    "python/calc_flow/symbolic/lower/asof.py": "b79b4b52e0ba977f1d51848678a041c602da42332674681a2218164b06b3d774",
+    "python/calc_flow/symbolic/lower/bindings.py": "df77c3c0c329327c064542dd4e0d8230f7b9bd5cf7b4561d71dc40fdce1f9201",
+    "python/calc_flow/symbolic/lower/event_windows.py": "d6ae15af4d4153ee12b76cbdff18f71abf33fc90bc9518ce2967e630696a8f40",
+    "python/calc_flow/symbolic/lower/late_output.py": "0824cea5142c851709e0b915877c50b26c2134646efc1e7f6c90eace7996e587",
+    "python/calc_flow/symbolic/lower/macd.py": "18071138805cb66988239a255d4e20aa28c71532ad444a3321fb5f5ba1780913",
+    "python/calc_flow/symbolic/lower/macd_boundaries.py": "e1d53c25098d926b477ab195c86270bc5fb87762c0ce282ee47b3cfdaea205c5",
+    "python/calc_flow/symbolic/lower/macd_demand.py": "046ddd0a2ce4d4b000d97f4bb16f8e0344e8108999f0688caa0fefa011340189",
+    "python/calc_flow/symbolic/lower/macd_forward.py": "18c7d3b658f9a1980b9257a11adcf534b0c9e4a1c9051a1ac9548b38d7f2c4b9",
+    "python/calc_flow/symbolic/lower/macd_meaning.py": "0ab654f8429a182350088719764d02fd0955c85dd0eeee9205524b783c354663",
+    "python/calc_flow/symbolic/lower/macd_rewrite.py": "f83220654aabb83f346c40d6ab43ba28abb7d6125e322e29eb83884132e005e3",
+    "python/calc_flow/symbolic/lower/native_arrays.py": "35c1e9bce527823471adede5cf122a2ae0bbc547a313449961d161c8e86c913c",
+    "python/calc_flow/symbolic/lower/planners.py": "5646312c0500bb3cbda01bf888c8a4d9073cd7701cc804c6f971d3a80bc93a1e",
+    "python/calc_flow/symbolic/lower/program.py": "c237003f6a6907dd567a106f8b0c9df6e8a16171ec55880beedcb8ef2fac2f58",
+    "python/calc_flow/symbolic/lower/schema.py": "3ce02922fe9bd85333267ccc7cfaf0cf4991fc5018db9e80c3a554275181d30b",
+    "python/calc_flow/symbolic/lower/segments.py": "438f34aab421162428ac2733b74ccc4ba8efb1ca4753d595dcb61e008ba7f29d",
+    "python/calc_flow/symbolic/lower/sql.py": "1098635b0e8f84ea0f1895ef017ea892438605db8074df51ae105d968ea78807",
+    "python/calc_flow/symbolic/lower/strategies.py": "7c28ebea23975b45163771fe060a082056652bdaf747988607fc3d9e61fc53f6",
+    "python/calc_flow/symbolic/native_arrays.py": "6ab4c45e20fd4fee7acc8d6551fb6f928a46108dd0facd9cfb6bba4bde99bda1",
+    "python/calc_flow/symbolic/nodes.py": "eeba400812d4403207f067cac5be71f5fba9308538ef9ef1e1a66a3227f04611",
+    "python/calc_flow/symbolic/ops.py": "7a39386e3bd6839310e9edb64e9c3afaa1fa94530330de60d4e8d94cecab8fe8",
+    "python/calc_flow/symbolic/optimizer.py": "fb299d3fa6ed12f36d66684c6096d11bdf8049f648640bc1a44bd9eb16076a38",
+    "python/calc_flow/symbolic/program.py": "62432052fbead3737e2c6835e7a4a60bc73ad41cd7a31b704918139d5c7e9847",
+    "python/calc_flow/symbolic/query_analysis.py": "b4ff6362a0bed798aa123c889b0f5ef77dc2e9da99fc842952eaca1cb683c3d9",
+    "python/calc_flow/symbolic/sql.py": "7a47d0fe153897461b4b7cfde9866c3e6ee6e4074f7986d04c088b676b452876",
+    "python/calc_flow/symbolic/types.py": "8954131dd38007dbb21e328f103748a1266c16bdefe3374f9017225ed2d09c89",
+    "python/calc_flow/symbolic/windows.py": "cbae86d2276663ca1696e73d92c4b61bc1669da234864ed02892ab34ce74d813",
+    "python/calc_flow/udf.py": "c3c4e73a5343bf80a415c93c72ca2286b3bbd1b6b9a60f6af0b0fca66307266b"
+  },
+  "matched_python_files": 55,
+  "native_source_commit": "1fda9d3b7087c59f740ba67914c4201a16adfe65",
+  "native_sha256": "2a436ee1eee9d78deeaa32f8e462d6f02f37d60eefca3e9f5311f8dc4c0c2ba8",
+  "native_rebuilt": false,
+  "test_package": "target/relational/f3-python",
+  "review_sha256": {
+    ".codex/artifacts/reviews/first-class-relational-frontends-revision.md": "062e712f1d6544c6c90ff82d262a64f02ea8335cc87107f4517b5720d4bfa9ef",
+    ".codex/artifacts/reviews/first-class-relational-frontends.md": "f2b6751470416825b3bd2fcb1a8347ad11d02a50966e14f32f08ce2fae748776"
+  },
+  "schema_version": 1,
+  "issue": "DAL-512",
+  "baseline": "745160b79d4438014c0a186f11b78d505e4e6371",
+  "python_source_commit": "9789320107155be744be42765fc80f9a5ef006a5",
+  "source_trees": {
+    "crates/calc-flow": "b85b012571586fa2e5fee070a3879ee76068ab25",
+    "crates/calc-flow-python": "0598f7aaefb029408ada38d02dd6d51bf6c78289",
+    "python/calc_flow": "40b9a33ef2baefa88d408b16f96bc0988784f578"
+  },
+  "package_preparation_command": "python target/relational/prepare-f3-package.py",
+  "package_preparation_script": "from pathlib import Path\nimport subprocess,shutil,hashlib,json\nroot=Path('target/relational/f3-python')\nfiles=subprocess.check_output(['git','ls-files','python/calc_flow'],text=True).splitlines()\nmanifest={}\nfor name in files:\n p=Path(name)\n dest=root/p.relative_to('python')\n dest.parent.mkdir(parents=True,exist_ok=True)\n shutil.copy2(p,dest)\n assert dest.read_bytes()==p.read_bytes(),name\n manifest[name]=hashlib.sha256(dest.read_bytes()).hexdigest()\noriginal=Path('target/relational/revision-wheel-python/calc_flow/_native.cpython-313-x86_64-linux-gnu.so')\nnative=root/'calc_flow'/original.name\nshutil.copy2(original,native)\nexpected='2a436ee1eee9d78deeaa32f8e462d6f02f37d60eefca3e9f5311f8dc4c0c2ba8'\nassert hashlib.sha256(native.read_bytes()).hexdigest()==expected\nfor path in ['crates/calc-flow','crates/calc-flow-python','Cargo.toml','Cargo.lock','pyproject.toml']:\n assert subprocess.check_output(['git','diff','1fda9d3b','--',path])==b'',path\nrecord={'python_files':manifest,'matched_python_files':len(files),'native_source_commit':'1fda9d3b7087c59f740ba67914c4201a16adfe65','native_sha256':expected,'native_rebuilt':False,'test_package':str(root)}\nrecord['review_sha256']={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(Path('.codex/artifacts/reviews').glob('first-class-relational-frontends*.md'))}\nPath('target/relational/f3-package-provenance.json').write_text(json.dumps(record,indent=2)+'\\n')\nprint('Matched source files:',len(files),'unchanged native:',expected)\n",
+  "checks": [
+    {
+      "id": "RED",
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=target/relational/revision-wheel-python python -m pytest python/tests/test_relational_frontend.py -q -k intermediate_sql_schema",
+      "result": "expected_failure",
+      "counts": {
+        "failed": 6
+      },
+      "log_sha256": "a45ec225c5bd410a4af88620dfbe0adec78eb296d6e8a963007694d574c01a24"
+    },
+    {
+      "id": "initial_GREEN",
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=target/relational/f3-python python -m pytest python/tests/test_relational_frontend.py -q -k intermediate_sql_schema",
+      "result": "passed",
+      "counts": {
+        "passed": 6
+      },
+      "log_sha256": "64e4187b24457d0bc1205d58b4527df6441a88a29f6c2bdd9bcc25d5e24f80d6"
+    },
+    {
+      "id": "final_GREEN",
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=target/relational/f3-python python -m pytest python/tests/test_relational_frontend.py -q -k schema --junitxml=target/relational/f3-schema-final.xml",
+      "result": "passed",
+      "counts": {
+        "passed": 25,
+        "deselected": 25
+      },
+      "log_sha256": "f3919438d16b1a477837d89fe38f8ff987c7b7bf57c5df8508d358bb6f33f90a"
+    }
+  ],
+  "static_checks": {
+    "Ruff check and format, two changed Python files": "passed",
+    "Python 3.9 grammar": "passed; no runtime-matrix claim",
+    "Lizard 1.26.0": "changed check functions CCN 4/3, new tests 2/1, threshold 8",
+    "complexity ratchet": "passed; unchanged baseline",
+    "spec references": "passed"
+  },
+  "scope": "Only Python schema error validation and its direct regressions; no Decimal domain expansion, execution lowering or native interface change.",
+  "reuse_boundary": "Rust/PyO3 trees, dependencies, native schema planner and lifecycle code unchanged from native build 1fda9d3b. Reuse verified native and prior unchanged-path evidence; the prior wheel is not represented as matching the new Python sources.",
+  "not_run": [
+    "native/wheel rebuild",
+    "Rust tests",
+    "full Python suite",
+    "coverage",
+    "services",
+    "performance"
+  ],
+  "known_baseline_CI": "Reviewer snapshot: 9 SUCCESS, 12 IN_PROGRESS on baseline 745160b7; documentation and Codacy SUCCESS. Old failed-head results are not current failures.",
+  "verified_import_paths": [
+    "target/relational/f3-python/calc_flow/__init__.py",
+    "target/relational/f3-python/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+    "target/relational/f3-python/calc_flow/symbolic/program.py"
+  ]
+}
