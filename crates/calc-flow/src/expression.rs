@@ -113,7 +113,7 @@ impl ValidatedQuery {
     }
 }
 
-fn simple_query(query: &Query) -> bool {
+pub(crate) fn simple_query(query: &Query) -> bool {
     if ![
         query.with.is_none(),
         query.order_by.is_none(),
@@ -233,7 +233,7 @@ fn non_row_local_function(function: &datafusion::sql::sqlparser::ast::Function) 
         .is_some_and(|name| matches!(name.as_str(), "unnest" | "unnest_outer"))
 }
 
-fn row_local_statement(statement: &SqlStatement) -> bool {
+pub(crate) fn row_local_statement(statement: &SqlStatement) -> bool {
     !matches!(
         statement.visit(&mut RowLocalVisitor),
         ControlFlow::Break(())

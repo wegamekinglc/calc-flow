@@ -45,6 +45,7 @@ from calc_flow.symbolic.nodes import (
     CValue,
     Node,
 )
+from calc_flow.symbolic.query_analysis import AnalysisOptions, QueryAnalysis, _query
 from calc_flow.symbolic.types import CompileMode, Field
 
 if TYPE_CHECKING:
@@ -238,6 +239,7 @@ class AnalysisResult:
     capability_session_id: str
     capability_revision: int
     issues: tuple[AnalysisIssue, ...]
+    query: QueryAnalysis | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -3022,9 +3024,14 @@ def _require_mode(mode: object, /) -> CompileMode:
 
 
 def _run(
-    program: object, runtime: Runtime, mode: CompileMode, /
+    program: object,
+    runtime: Runtime,
+    mode: CompileMode,
+    /,
+    capabilities: RuntimeCapabilities | None = None,
 ) -> tuple[_Analyzer, RuntimeCapabilities]:
-    capabilities = runtime.capabilities()
+    if capabilities is None:
+        capabilities = runtime.capabilities()
     declared = frozenset(value._node.digest for value in program.inputs)
     portable = frozenset((*capabilities.portable_arrow_types, _EVENT_TIME_TYPE))
     analyzer = _Analyzer(
@@ -3079,23 +3086,50 @@ def _check_stream_ordering_for_inputs(program: object, analyzer: _Analyzer, /) -
 
 
 def analyze_program(
-    program: object, runtime: object, mode: object, /
+    program: object,
+    runtime: object,
+    mode: object,
+    /,
+    options: AnalysisOptions | None = None,
 ) -> AnalysisResult:
     """Analyze one program against one immutable capability snapshot."""
 
     runtime_value = _require_runtime(runtime)
     mode_value = _require_mode(mode)
     analyzer, capabilities = _run(program, runtime_value, mode_value)
+    if options is None:
+        options = AnalysisOptions()
+    if type(options) is not AnalysisOptions:
+        raise TypeError("options: expected AnalysisOptions or None")
+    other, _ = _run(
+        program,
+        runtime_value,
+        "stream" if mode_value == "batch" else "batch",
+        capabilities,
+    )
+    query = _query(program, runtime_value, options, (analyzer, other))
     return AnalysisResult(
         mode=mode_value,
         program_fingerprint=program.fingerprint,
         capability_session_id=capabilities.scope.session_id,
         capability_revision=capabilities.scope.revision,
-        issues=analyzer.issues,
+        issues=analyzer.issues
+        + tuple(
+            AnalysisIssue(d.path, d.code, d.message)
+            for d in query.diagnostics
+            if options.portability is not None and d.status != "supported"
+        ),
+        query=query,
     )
 
 
-def explain_program(program: object, runtime: object, mode: object, /) -> str:
+def explain_program(
+    program: object,
+    runtime: object,
+    mode: object,
+    /,
+    options: AnalysisOptions | None = None,
+) -> str:
     """Render deterministic analysis facts for one program."""
 
     runtime_value = _require_runtime(runtime)
@@ -3130,7 +3164,41 @@ def explain_program(program: object, runtime: object, mode: object, /) -> str:
         lines.extend(
             f"    {issue.path}: {issue.code}: {issue.message}" for issue in issues
         )
+    result = analyze_program(program, runtime_value, mode_value, options)
+    lines.extend(_explain_query(result.query))
     return "\n".join(lines)
+
+
+def _explain_query(query):
+    lines = []
+    lines.append(
+        f"  query schema_version {query.schema_version}"
+        f" analysis_revision {query.analysis_revision}"
+    )
+    lines.append(
+        "    comparison assumes the same accepted inputs and legal order; "
+        "batch receives H or the same batch; actual EOF/closed-window cutoff; "
+        "execution budgets and overflow still apply"
+    )
+    lines.append(f"    portability {query.portability}")
+    for node in query.nodes:
+        for name in ("batch", "stream"):
+            facts = getattr(node, name)
+            lines.append(
+                f"    {node.path}.{name}: {facts.support} {facts.history}"
+                f" {facts.update} {facts.finality}"
+            )
+    for edge in query.edges:
+        lines.append(
+            f"    {edge.path}: {edge.source_path} -> {edge.target_path}; "
+            f"stream {edge.stream.producer_update}/"
+            f"{edge.stream.consumer_interpretation}"
+        )
+    lines.extend(
+        f"    {issue.path}: {issue.code}: {issue.status}: {issue.message}"
+        for issue in query.diagnostics
+    )
+    return lines
 
 
 def _explain_header(

@@ -55,6 +55,7 @@ from calc_flow.runtime import (
 from calc_flow.symbolic.expr import Parameter, TableExpr
 from calc_flow.symbolic.lower.bindings import _BatchBindings
 from calc_flow.symbolic.program import Program, _node_name, _selected_runtime
+from calc_flow.symbolic.query_analysis import PortabilityRequest, _gate
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,10 +69,11 @@ class StreamOutput:
 @dataclass(frozen=True, slots=True)
 class _StreamRequest:
     program: Program
-    inputs: dict[str, StreamInput | TableData | NativeArray]
+    inputs: Mapping[str, StreamInput | TableData | NativeArray]
     runtime: Runtime | None
     config: StreamRuntimeConfig | None
     watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None
+    portability: PortabilityRequest | None = None
 
 
 class _QueueSink:
@@ -120,25 +122,27 @@ def _compile_stream(
     from calc_flow.symbolic.lower.program import lower_program_document
 
     selected = _selected_runtime(request.runtime)
-    bindings = _BatchBindings()
-    document = lower_program_document(
-        request.program, selected, "stream", _bindings=bindings
-    )
-    names, outputs = bindings.names()
-    reserved = {node["id"] for node in document["graph"]["nodes"]}
-    sinks = {}
-    for index, (logical, physical) in enumerate(outputs.items()):
-        sink_id = f"stream_sink_{index}"
-        while sink_id in reserved:
-            sink_id += "_"
-        reserved.add(sink_id)
-        sinks[logical] = (physical, sink_id)
-    return (
-        selected._compile_stream_graph_project(_canonical(document)),
-        names,
-        sinks,
-        _snapshot_inputs(document, bindings),
-    )
+    with selected._registration_lock:
+        _gate(request.program, selected, request.portability)
+        bindings = _BatchBindings()
+        document = lower_program_document(
+            request.program, selected, "stream", _bindings=bindings
+        )
+        names, outputs = bindings.names()
+        reserved = {node["id"] for node in document["graph"]["nodes"]}
+        sinks = {}
+        for index, (logical, physical) in enumerate(outputs.items()):
+            sink_id = f"stream_sink_{index}"
+            while sink_id in reserved:
+                sink_id += "_"
+            reserved.add(sink_id)
+            sinks[logical] = (physical, sink_id)
+        return (
+            selected._compile_stream_graph_project(_canonical(document)),
+            names,
+            sinks,
+            _snapshot_inputs(document, bindings),
+        )
 
 
 def _snapshot_inputs(
@@ -476,22 +480,19 @@ class StreamResults(Generic[T]):
                             queue.get_nowait()
 
 
-def _stream_program(
-    program: Program,
-    inputs: Mapping[str, StreamInput | TableData | NativeArray],
-    runtime: Runtime | None,
-    config: StreamRuntimeConfig | None,
-    watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None,
-) -> StreamResults[StreamOutput]:
-    if not isinstance(inputs, Mapping):
+def _stream_program(request: _StreamRequest) -> StreamResults[StreamOutput]:
+    if not isinstance(request.inputs, Mapping):
         raise TypeError("stream.inputs: expected a mapping by declared input name")
     return StreamResults(
-        _StreamRequest(
-            program,
-            _capture_stream_inputs(inputs),
-            runtime,
-            config,
-            _capture_watermarks(watermarks),
+        replace(
+            request,
+            inputs=_capture_stream_inputs(request.inputs)
+            if request.portability is None
+            else {
+                name: tuple(value) if type(value) is list else value
+                for name, value in request.inputs.items()
+            },
+            watermarks=_capture_watermarks(request.watermarks),
         ),
         table_output=False,
     )

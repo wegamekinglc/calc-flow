@@ -7,6 +7,7 @@
 //! [`StreamExecutionPlan`]. Both entry points share every graph-validation
 //! pass in `compile` so the two paths cannot drift (plan task M1.1).
 
+mod analysis;
 mod batch;
 mod compile;
 mod stream;

@@ -88,12 +88,17 @@ def test_batch_source_fallback_collision_keeps_distinct_values(
     assert outputs["other"].to_pydict() == {right_column: [10, 20]}
 
 
-def test_compile_batch_requires_a_runtime() -> None:
+@pytest.mark.parametrize(
+    "engine,entry", [("sql", "compile_batch"), ("streaming", "compile_stream")]
+)
+def test_compile_batch_requires_a_runtime(engine, entry) -> None:
     quotes = _quotes()
-    program = Program("p", engine="sql", inputs=[quotes], outputs=[("signals", quotes)])
+    program = Program(
+        "p", engine=engine, inputs=[quotes], outputs=[("signals", quotes)]
+    )
 
     with pytest.raises(TypeError, match="explicit calc_flow Runtime"):
-        program.compile_batch(object())
+        getattr(program, entry)(object())
 
 
 def test_compile_batch_raises_compile_error_from_analysis_issues() -> None:

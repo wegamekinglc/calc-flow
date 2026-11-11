@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Awaitable, Mapping, Sequence
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, TypedDict, cast
+
+from typing_extensions import Unpack
 
 from calc_flow._compat import dataclass
 from calc_flow.symbolic.domains import type_name
@@ -21,6 +23,7 @@ from calc_flow.symbolic.nodes import (
     _text,
     _u64,
 )
+from calc_flow.symbolic.query_analysis import AnalysisOptions, PortabilityRequest
 from calc_flow.symbolic.types import CompileMode
 
 if TYPE_CHECKING:
@@ -36,6 +39,23 @@ if TYPE_CHECKING:
     from calc_flow.symbolic.types import LatePolicy
 
 _PROGRAM_TAG = 0x21
+
+
+class _StreamingExecuteOptions(TypedDict, total=False):
+    config: StreamRuntimeConfig | None
+    watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None
+
+
+def _stream_controls(
+    *,
+    config: StreamRuntimeConfig | None = None,
+    watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+) -> tuple[
+    StreamRuntimeConfig | None, WatermarkPolicy | Mapping[str, WatermarkPolicy] | None
+]:
+    return config, watermarks
+
+
 _STREAM_ONLY_OPS = frozenset(
     {
         "snapshot_sql",
@@ -454,15 +474,17 @@ class Program:
         *,
         runtime: Runtime | None = None,
         options: ExecutionOptions | None = None,
-        config: StreamRuntimeConfig | None = None,
-        watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+        portability: PortabilityRequest | None = None,
+        **streaming: Unpack[_StreamingExecuteOptions],
     ) -> dict[str, pa.Table] | StreamResults[StreamOutput]:
         """Execute through the selected engine.
 
         SQL returns named Arrow tables immediately. Streaming returns owned
         named events; consume it with ``async with`` and ``async for``.
+        Streaming accepts ``config`` and ``watermarks`` keyword controls.
         """
 
+        config, watermarks = _stream_controls(**streaming)
         if self._engine == "sql":
             if config is not None:
                 raise ValueError("execute.config is available for the streaming engine")
@@ -474,12 +496,17 @@ class Program:
                 cast("Mapping[str, TableData | NativeArray]", inputs),
                 runtime=runtime,
                 options=options,
+                portability=portability,
             )
         if self._engine == "streaming":
             if options is not None:
                 raise ValueError("execute.options is available for the sql engine")
             return self.stream(
-                inputs, runtime=runtime, config=config, watermarks=watermarks
+                inputs,
+                runtime=runtime,
+                config=config,
+                watermarks=watermarks,
+                portability=portability,
             )
         raise RuntimeError(f"Program has unsupported engine {self._engine!r}")
 
@@ -491,6 +518,7 @@ class Program:
         runtime: Runtime | None = None,
         config: StreamRuntimeConfig | None = None,
         watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+        portability: PortabilityRequest | None = None,
     ) -> StreamResults[StreamOutput]:
         """Yield named output events from one owned native streaming job.
 
@@ -499,9 +527,11 @@ class Program:
         iterable-provided watermarks without changing SourceBinding policies.
         """
         self._require_engine("streaming")
-        from calc_flow.stream import _stream_program
+        from calc_flow.stream import _stream_program, _StreamRequest
 
-        return _stream_program(self, inputs, runtime, config, watermarks)
+        return _stream_program(
+            _StreamRequest(self, inputs, runtime, config, watermarks, portability)
+        )
 
     def output(self, name: str, value: TableExpr | ArrayExpr, /) -> Program:
         """Return a new program with one declared output appended."""
@@ -514,26 +544,35 @@ class Program:
         )
 
     def analyze(
-        self, runtime: Runtime | None = None, /, *, mode: CompileMode | None = None
+        self,
+        runtime: Runtime | None = None,
+        /,
+        *,
+        mode: CompileMode | None = None,
+        options: AnalysisOptions | None = None,
     ) -> AnalysisResult:
         """Analyze using the selected mode or an explicit diagnostic mode."""
 
         from calc_flow.symbolic.analyzer import analyze_program
 
-        return analyze_program(
-            self, _selected_runtime(runtime), self._analysis_mode(mode)
-        )
+        selected = _selected_runtime(runtime)
+        with selected._registration_lock:
+            return analyze_program(self, selected, self._analysis_mode(mode), options)
 
     def explain(
-        self, runtime: Runtime | None = None, /, *, mode: CompileMode | None = None
+        self,
+        runtime: Runtime | None = None,
+        /,
+        *,
+        mode: CompileMode | None = None,
+        options: AnalysisOptions | None = None,
     ) -> str:
-        """Render deterministic facts; an explicit mode is diagnostic only."""
-
+        """Render deterministic query facts and comparison premises."""
         from calc_flow.symbolic.analyzer import explain_program
 
-        return explain_program(
-            self, _selected_runtime(runtime), self._analysis_mode(mode)
-        )
+        selected = _selected_runtime(runtime)
+        with selected._registration_lock:
+            return explain_program(self, selected, self._analysis_mode(mode), options)
 
     def _analysis_mode(self, mode: CompileMode | None, /) -> CompileMode:
         return (
@@ -548,7 +587,13 @@ class Program:
             )
         return selected
 
-    def compile_batch(self, runtime: Runtime | None = None, /) -> BatchExecutionPlan:
+    def compile_batch(
+        self,
+        runtime: Runtime | None = None,
+        /,
+        *,
+        portability: PortabilityRequest | None = None,
+    ) -> BatchExecutionPlan:
         """Lower this program to a strict project-v3 batch execution plan.
 
         Compilation is declaration processing only: it captures one immutable
@@ -559,8 +604,17 @@ class Program:
         self._require_engine("sql")
 
         from calc_flow.symbolic.lower import compile_program_batch
+        from calc_flow.symbolic.lower.program import _require_runtime
+        from calc_flow.symbolic.query_analysis import _gate
 
-        return compile_program_batch(self, _selected_runtime(runtime))
+        selected = (
+            _require_runtime(runtime, "compile_batch")
+            if runtime is not None
+            else _selected_runtime(None)
+        )
+        with selected._registration_lock:
+            _gate(self, selected, portability)
+            return compile_program_batch(self, selected)
 
     def compile_stream(
         self,
@@ -569,6 +623,7 @@ class Program:
         *,
         allowed_lateness_micros: int = 0,
         late_policy: LatePolicy = "error",
+        portability: PortabilityRequest | None = None,
     ) -> StreamExecutionPlan:
         """Lower this program to a strict project-v3 continuous plan.
 
@@ -580,10 +635,19 @@ class Program:
         self._require_engine("streaming")
 
         from calc_flow.symbolic.lower import compile_program_stream
+        from calc_flow.symbolic.lower.program import _require_runtime
+        from calc_flow.symbolic.query_analysis import _gate
 
-        return compile_program_stream(
-            self, _selected_runtime(runtime), allowed_lateness_micros, late_policy
+        selected = (
+            _require_runtime(runtime, "compile_stream")
+            if runtime is not None
+            else _selected_runtime(None)
         )
+        with selected._registration_lock:
+            _gate(self, selected, portability)
+            return compile_program_stream(
+                self, selected, allowed_lateness_micros, late_policy
+            )
 
     def collect(
         self,
@@ -592,12 +656,13 @@ class Program:
         *,
         runtime: Runtime | None = None,
         options: ExecutionOptions | None = None,
+        portability: PortabilityRequest | None = None,
     ) -> dict[str, pa.Table]:
         """Execute a fresh plan and return Arrow tables by declaration name."""
         self._require_engine("sql")
         from calc_flow.compute import _collect
 
-        return _collect(self, inputs, runtime, options)
+        return _collect(self, inputs, runtime, options, portability)
 
     def collect_async(
         self,
@@ -606,6 +671,7 @@ class Program:
         *,
         runtime: Runtime | None = None,
         options: ExecutionOptions | None = None,
+        portability: PortabilityRequest | None = None,
     ) -> Awaitable[dict[str, pa.Table]]:
         """Copy input mappings, capture Batch references and await execution.
 
@@ -615,7 +681,7 @@ class Program:
         self._require_engine("sql")
         from calc_flow.compute import _collect_async
 
-        return _collect_async(self, inputs, runtime, options)
+        return _collect_async(self, inputs, runtime, options, portability)
 
     def to_project(
         self,
@@ -644,4 +710,6 @@ class Program:
 def _selected_runtime(runtime: Runtime | None, /) -> Runtime:
     from calc_flow.pipeline import Runtime
 
+    if runtime is not None and not isinstance(runtime, Runtime):
+        raise TypeError("expected a calc_flow Runtime or None")
     return Runtime() if runtime is None else runtime
