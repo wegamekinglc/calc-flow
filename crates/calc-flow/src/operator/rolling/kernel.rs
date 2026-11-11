@@ -1643,6 +1643,21 @@ fn fill_typed_rows(
     node_id: &str,
     observer: Option<&RollingMetricsRecorder>,
 ) -> Result<()> {
+    if plan.decay_pool.is_some() {
+        fill_typed_rows_impl::<true>(plan, inputs, states, builders, node_id, observer)
+    } else {
+        fill_typed_rows_impl::<false>(plan, inputs, states, builders, node_id, observer)
+    }
+}
+
+fn fill_typed_rows_impl<const HAS_DECAY: bool>(
+    plan: &RollingKernelPlan,
+    inputs: TypedRowInputs<'_>,
+    states: &mut [Arc<TypedEntityState>],
+    builders: &mut [DerivedBuilder],
+    node_id: &str,
+    observer: Option<&RollingMetricsRecorder>,
+) -> Result<()> {
     numeric_rows::prepare_typed_entities(plan.shared_rows, states, inputs.entity_ids, observer);
     let mut processed = 0;
     let result = (|| {
@@ -1661,7 +1676,7 @@ fn fill_typed_rows(
                 plan.nan_as_value,
                 node_id,
             )?;
-            append_typed_outputs(
+            append_typed_outputs::<HAS_DECAY>(
                 &plan.outputs,
                 builders,
                 entity,
@@ -1724,7 +1739,7 @@ fn update_typed_groups(
     Ok(())
 }
 
-fn append_typed_outputs(
+fn append_typed_outputs<const HAS_DECAY: bool>(
     outputs: &[TypedOutputPlan],
     builders: &mut [DerivedBuilder],
     entity: &TypedEntityState,
@@ -1733,7 +1748,8 @@ fn append_typed_outputs(
     node_id: &str,
 ) -> Result<()> {
     for (builder, output) in builders.iter_mut().zip(outputs) {
-        if output.kind == TypedOutputKind::Scan(ScanKind::Decay)
+        if HAS_DECAY
+            && output.kind == TypedOutputKind::Scan(ScanKind::Decay)
             && matches!(
                 entity.groups.get(output.group),
                 Some(TypedWindowState::Decay(None))
