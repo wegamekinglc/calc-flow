@@ -518,6 +518,13 @@ def test_checkpoint_restart_restores_owned_source_cursor(tmp_path: Path) -> None
 
         async def open(self, cursor: Cursor | None) -> None:
             self.offset = 0 if cursor is None else int(cursor.payload["offset"])
+            if cursor is not None:
+                assert cursor.source_id == "input"
+                assert cursor.order == self.offset.to_bytes(1)
+                position = cursor.payload["position"]
+                assert position == {"offsets": [self.offset]}
+                position["offsets"].append(99)
+                assert cursor.payload["position"] == {"offsets": [self.offset]}
             opened.append(self.offset)
 
         async def next(self) -> Data | Idle | None:
@@ -530,7 +537,10 @@ def test_checkpoint_restart_restores_owned_source_cursor(tmp_path: Path) -> None
             self.offset += 1
             return Data(
                 Batch.from_pyarrow(pa.table({"a": [value]})),
-                Cursor(self.offset.to_bytes(1), {"offset": self.offset}),
+                Cursor(
+                    self.offset.to_bytes(1),
+                    {"offset": self.offset, "position": {"offsets": [self.offset]}},
+                ),
             )
 
         async def close(self) -> None:
@@ -995,9 +1005,16 @@ def test_shared_restart_vector_is_exactly_once_across_checkpoint_recovery(
             self.changed.set()
 
         async def pre_commit(self, epoch: int) -> dict[str, object]:
-            return {"values": list(self.pending)}
+            return {
+                "values": list(self.pending),
+                "position": {"epochs": [epoch]},
+            }
 
         async def commit(self, epoch: int, pre_commit: Mapping[str, object]) -> None:
+            position = pre_commit["position"]
+            assert position == {"epochs": [epoch]}
+            position["epochs"].append(99)
+            assert pre_commit["position"] == {"epochs": [epoch]}
             raw_values = pre_commit["values"]
             assert isinstance(raw_values, list)
             values = [int(value) for value in raw_values]
@@ -1009,6 +1026,10 @@ def test_shared_restart_vector_is_exactly_once_across_checkpoint_recovery(
             self.pending.clear()
 
         async def recover(self, recovery: SinkRecovery) -> None:
+            position = recovery.pre_commit["position"]
+            assert position == {"epochs": [recovery.epoch]}
+            position["epochs"].append(99)
+            assert recovery.pre_commit["position"] == {"epochs": [recovery.epoch]}
             raw_values = recovery.pre_commit["values"]
             assert isinstance(raw_values, list)
             await asyncio.to_thread(

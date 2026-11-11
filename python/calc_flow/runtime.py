@@ -6,7 +6,17 @@ import inspect
 import os
 import sys
 import threading
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import (
+    Awaitable,
+    Callable,
+    ItemsView,
+    Iterator,
+    KeysView,
+    Mapping,
+    Sequence,
+    ValuesView,
+)
+from copy import deepcopy
 from dataclasses import field
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
@@ -162,9 +172,88 @@ SinkDelivery = TypeAliasType(
 )
 
 
+class _IsolatedMappingView:
+    __slots__ = ()
+    _mapping: Mapping[str, Any]
+
+    if sys.version_info >= (3, 10):
+
+        @property
+        def mapping(self) -> Mapping[str, Any]:
+            return self._mapping
+
+
+class _IsolatedKeysView(_IsolatedMappingView, KeysView[str]):
+    __slots__ = ()
+
+    def __reversed__(self) -> Iterator[str]:
+        return reversed(self._mapping)
+
+
+class _IsolatedItemsView(_IsolatedMappingView, ItemsView[str, Any]):
+    __slots__ = ()
+
+    def __reversed__(self) -> Iterator[tuple[str, Any]]:
+        for key in reversed(self._mapping):
+            yield key, self._mapping[key]
+
+
+class _IsolatedValuesView(_IsolatedMappingView, ValuesView[Any]):
+    __slots__ = ()
+
+    def __reversed__(self) -> Iterator[Any]:
+        for key in reversed(self._mapping):
+            yield self._mapping[key]
+
+
+class _IsolatedJsonMapping(Mapping[str, Any]):
+    """Own a normalized JSON tree and isolate every value read."""
+
+    __slots__ = ("_data",)
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._data = data
+
+    def __getitem__(self, key: str) -> Any:
+        return deepcopy(self._data[key])
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._data
+
+    def __reversed__(self) -> Iterator[str]:
+        return reversed(self._data)
+
+    def __repr__(self) -> str:
+        return repr(self._data)
+
+    def keys(self) -> _IsolatedKeysView:
+        return _IsolatedKeysView(MappingProxyType(self))
+
+    def items(self) -> _IsolatedItemsView:
+        return _IsolatedItemsView(MappingProxyType(self))
+
+    def values(self) -> _IsolatedValuesView:
+        return _IsolatedValuesView(MappingProxyType(self))
+
+    def copy(self) -> dict[str, Any]:
+        return dict(self)
+
+    def __or__(self, other: Any) -> Any:
+        return self.copy() | other
+
+    def __ror__(self, other: Any) -> Any:
+        return other | self.copy()
+
+
 def _frozen_json_mapping(value: Mapping[str, object], label: str) -> Mapping[str, Any]:
     copied = _copy_json_value(dict(value), root_mapping=True, label=label)
-    return MappingProxyType(copied)
+    return MappingProxyType(_IsolatedJsonMapping(copied))
 
 
 @dataclass(frozen=True, slots=True)

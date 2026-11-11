@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-12: Isolate nested JSON reads from Python `Cursor.payload` and
+  `SinkRecovery.pre_commit`, including mapping views and snapshots, so reader
+  mutations cannot change owned replay positions or sink recovery evidence.
+  Preserve ordinary nested dict/list values and the existing checkpoint format.
+
 - 2026-11-10: Extend the benchmark suite with sixteen native Array API cases
   and five direct Rust microcases, numerical/null-mask oracles and fixed
   sample collection. Restore scheduled preparation by accounting for verifier
