@@ -152,22 +152,11 @@ impl RollingOperator {
     }
 
     fn projected_ordered_charge(
-        &mut self,
+        &self,
         prepared: &mut PreparedOrderedOutput,
         removed: super::budget::StateCharge,
-        was_warm: bool,
         node: &str,
     ) -> Result<(super::budget::StateCharge, super::budget::StateCharge)> {
-        if !was_warm {
-            self.state.owned_mut()?.charge = super::budget::full_state_charge(
-                &self.state.buffer,
-                &self.state.ordered,
-                &self.state.histories,
-                &self.compiled,
-                node,
-            )?
-            .checked_add(removed, node)?;
-        }
         let current = self.state.charge.checked_sub(removed)?;
         let next = prepared.projected_charge(self, current, node)?;
         self.check_state_budget(next, node)?;
@@ -295,11 +284,7 @@ impl RollingOperator {
     ) -> Result<()> {
         if self.state.typed_kernel_state.is_none() {
             let _stage = observer.map(|recorder| recorder.stage(RollingStage::StatePreparation));
-            self.state.owned_mut()?.histories.materialize_columnar(
-                &self.compiled,
-                node_id,
-                observer,
-            )?;
+            self.materialize_histories_with_charge(node_id, observer)?;
             let restored = reconstruct_typed_state(
                 &self.state.histories,
                 &self.compiled,
@@ -502,7 +487,6 @@ impl RollingOperator {
                 );
             }
         };
-        let was_warm = self.state.typed_kernel_state.is_some();
         let prepared = self.prepare_ordered_output(&input, context).await;
         let mut prepared = match prepared {
             Ok(prepared) => prepared,
@@ -515,22 +499,18 @@ impl RollingOperator {
                 );
             }
         };
-        let (current_charge, next_charge) = match self.projected_ordered_charge(
-            &mut prepared,
-            removed,
-            was_warm,
-            context.operator_id(),
-        ) {
-            Ok(charge) => charge,
-            Err(error) => {
-                return self.restore_ordered_failure(
-                    records,
-                    last_identity,
-                    error,
-                    context.operator_id(),
-                );
-            }
-        };
+        let (current_charge, next_charge) =
+            match self.projected_ordered_charge(&mut prepared, removed, context.operator_id()) {
+                Ok(charge) => charge,
+                Err(error) => {
+                    return self.restore_ordered_failure(
+                        records,
+                        last_identity,
+                        error,
+                        context.operator_id(),
+                    );
+                }
+            };
         let state = self.state.owned_mut()?;
         state.charge = current_charge;
         for batch in std::mem::take(&mut prepared.batches) {
