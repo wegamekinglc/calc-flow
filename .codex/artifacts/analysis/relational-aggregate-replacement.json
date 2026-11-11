@@ -489,6 +489,16 @@
     "merge_preview_tree_sha": "42c44fe60dc482442797df3c6befddc78bf32788",
     "merge_preview_exit_code": 0,
     "executed_merged_tree": false,
-    "note": "Read-only merge-tree preview is clean. Main advanced with unrelated rolling diagnostics; no merge/rebase or claim of merged-tree runtime validation."
+    "note": "Read-only merge-tree preview is clean. Main advanced with unrelated rolling diagnostics; no merge/rebase or claim of merged-tree runtime validation.",
+    "preview_head_sha": "a45c6d60da9ff876ec2719bc991de79216dccd28"
+  },
+  "verification_environment": {
+    "cwd": "shared checkout calc-flow repository root",
+    "CARGO_TARGET_DIR": "target/aggregate/cargo",
+    "CARGO_BUILD_JOBS": "4",
+    "PYO3_PYTHON": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+    "PYTHONPATH": "target/aggregate/final-python",
+    "JAX_PLATFORMS": "cpu",
+    "standalone_core_and_consumer": "PYO3_PYTHON removed"
   }
 }

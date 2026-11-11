@@ -83,3 +83,5 @@ RED 使用 git 导出的精确 c4f1749c Python 源码；native 仅供 import，�
 独立 tester → reviewer 仍待协调器接续；本轮没有合并、扩派或启动后续任务，DAL-514 保持 in_progress。
 
 最终 fetch 观察 main 已到 `e7e771ac0efd0b44af936353a130f316c46a535b`。只读 `git merge-tree --write-tree --messages HEAD origin/main` 退出0，预览 tree=`42c44fe60dc482442797df3c6befddc78bf32788`，无冲突；未实际合并或对该 merged tree 运行验证，集成结果留给 CI。
+
+Python 验证显式使用 `PYTHONPATH=target/aggregate/final-python JAX_PLATFORMS=cpu` 和上列 interpreter；不得直接使用环境默认的 calc_flow import。独立 core/consumer 命令移除 `PYO3_PYTHON`。完整环境键在 JSON 的 verification_environment。merge preview 当时的 head 为 `a45c6d60da9ff876ec2719bc991de79216dccd28`；后续仅证据文本改变。
