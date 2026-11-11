@@ -19,16 +19,21 @@ import pyarrow as pa
 import calc_flow as cf
 
 source = cf.table_input("events", schema=pa.schema([("x", pa.int64())]))
-program = cf.Program("positive", engine="sql", outputs={
-    "result": source.filter(source["x"] > cf.lit(0)).select("x"),
-})
+program = cf.Program(
+    "positive",
+    engine="sql",
+    outputs={
+        "result": source.filter(source["x"] > cf.lit(0)).select("x"),
+    },
+)
 request = cf.PortabilityRequest(
-    comparison="per_batch", history="current_batch", cutoff="batch_boundary",
+    comparison="per_batch",
+    history="current_batch",
+    cutoff="batch_boundary",
 )
 report = program.analyze(options=cf.AnalysisOptions(portability=request))
 assert report.query.portability == "supported"
-result = program.collect({"events": pa.table({"x": [-1, 2]})},
-                         portability=request)
+result = program.collect({"events": pa.table({"x": [-1, 2]})}, portability=request)
 assert result["result"].to_pydict() == {"x": [2]}
 ```
 

@@ -1353,8 +1353,20 @@ import calc_flow.array as cfa
 close = cfa.from_arrow(pa.array([10.0, 11.0, 12.0, 11.0, 11.0]))
 high = cfa.from_arrow(pa.array([11.0, 12.0, 13.0, 12.0, 12.0]))
 low = cfa.from_arrow(pa.array([9.0, 10.0, 11.0, 10.0, 10.0]))
-assert cfa.rsi(close, period=2).to_arrow().to_pylist() == [None, None, 100.0, 50.0, 50.0]
-assert cfa.atr(high, low, close, period=2).to_arrow().to_pylist() == [None, None, 2.0, 2.0, 2.0]
+assert cfa.rsi(close, period=2).to_arrow().to_pylist() == [
+    None,
+    None,
+    100.0,
+    50.0,
+    50.0,
+]
+assert cfa.atr(high, low, close, period=2).to_arrow().to_pylist() == [
+    None,
+    None,
+    2.0,
+    2.0,
+    2.0,
+]
 ```
 
 The first complete row establishes the previous price/close. The first valid
