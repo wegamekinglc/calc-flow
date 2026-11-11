@@ -431,3 +431,98 @@ The coverage failure was a test prerequisite failure, not evidence that the
 Cross-platform/full coverage jobs remain CI responsibilities. No benchmark or
 merge is claimed; DAL-511 remains in_progress pending incremental review and
 required gates.
+
+## Isolated model dependency preparation
+
+Incremental base: approved head `469a07bd269af94363fe3a05899fae109d553e24`.
+Runtime, Python package, PyO3 source, report assertions and harness code are
+unchanged. The existing native and standalone test executable are reused;
+there is no native rebuild or new interpreter/environment.
+
+The Linux parity job `130283234040` reached 3151 passing core tests, then failed
+one of 145 PyO3 tests at `error.rs:329`. Its actual import chain was this
+checkout's `calc_flow/__init__.py` → `symbolic/analyzer.py` → `pipeline.py` →
+`typing_extensions.TypeAlias`. Direct raw logs for Windows Rust job
+`130283227135` and coverage job `130283319987` independently confirm the same
+`ModuleNotFoundError: No module named 'typing_extensions'`, each with 144
+passing PyO3 tests and one failure. Coverage again stopped at test execution;
+there is no observed 90% measurement failure to fix or waive.
+
+The harness supplies native-library search paths to the standalone executable;
+it does not install Python packages. All three affected CI jobs installed only
+NumPy and PyArrow. Importing the real Python report model also requires the
+declared project runtime dependency `typing-extensions>=4.12`.
+
+The minimum correction is a shared
+`scripts/requirements-rust-tests.txt` containing the existing
+`numpy>=2.0.0`, existing `pyarrow==24.0.0`, and missing
+`typing-extensions>=4.12`. The Linux `rust-core` / `rust-coverage` and Windows
+`rust-tests` installation steps all use:
+
+```bash
+python -m pip install -r scripts/requirements-rust-tests.txt
+```
+
+No package install/build is added to the Rust unit test or harness, and no
+model stub, skip, assertion removal or product import change is involved.
+
+### Dependency-isolated RED/GREEN
+
+Verification uses the existing Anaconda CPython 3.13.9 interpreter and its real
+installed packages, exposed through symlinks in a target-only import fixture.
+A standard `sitecustomize` removes global/user package directories from this
+test process's search path. Only requirement-listed packages and their real
+distribution metadata are exposed alongside the standard library. This creates
+no venv, alters no installed package and leaves the model/native test unchanged.
+The linked test still locates and asserts this checkout's real model source.
+
+```bash
+/home/wegamekinglc/anaconda3/bin/python \
+  target/query-history-portability/check-isolated-dependencies.py \
+  'numpy>=2.0.0' 'pyarrow==24.0.0'
+/home/wegamekinglc/anaconda3/bin/python \
+  target/query-history-portability/check-isolated-dependencies.py \
+  --requirements scripts/requirements-rust-tests.txt
+```
+
+Both commands invoke the same compiled PyO3 executable with
+`error::tests --test-threads=1`, no recompilation. RED: NumPy/PyArrow visible,
+typing_extensions absent; **4 passed / 1 failed / 129 filtered**, exit 101,
+with exactly the CI missing-module error and import chain. GREEN: the shared
+requirements expose the real backport; **5 passed / 129 filtered**, exit 0.
+All report source-path, node/status and frozen revision assertions remain.
+
+Actual package versions and sources:
+
+- Interpreter: `/home/wegamekinglc/anaconda3/bin/python`, CPython 3.13.9.
+- NumPy 2.4.6: existing Anaconda `lib/python3.13/site-packages/numpy`.
+- PyArrow 24.0.0: existing Anaconda `lib/python3.13/site-packages/pyarrow`.
+- typing-extensions 4.15.0: existing Anaconda
+  `lib/python3.13/site-packages/typing_extensions.py`.
+
+This verifies CI's restricted dependency set and constraints with the existing
+local distributions, not Windows execution or identical platform wheel builds.
+The default-feature local PyO3 executable is
+`target/query-history-portability/cargo/release/deps/calc_flow_python-6126da88d1f1b086`,
+SHA-256 `3768995b1a2c80837876aeec5aaf7094851a0b46f80bb17e807ad882ec6dac4d`.
+The CI all-feature matrix remains CI-owned. RED/GREEN interpreter, package
+visibility and version/source traces are preserved in `dependency-{red,green}.log`
+under the existing target directory and summarized in the provenance JSON.
+
+Additional scoped checks: both workflow YAML files parse; the three affected
+jobs reference the shared existing file, and every active project runtime
+dependency for CPython 3.13 is covered with compatible installed versions.
+
+```bash
+/home/wegamekinglc/anaconda3/bin/python -m unittest \
+  scripts.test_run_rust_tests scripts.test_run_rust_coverage
+git diff --check
+```
+
+The existing harness/coverage script unit suite ran **31 tests, OK, one existing
+Windows-only skip** on Linux; it is not a real coverage or connector matrix run.
+Whitespace and evidence structure checks pass. Source/native digests and the
+runtime/package diff from native build commit `e185be26` remain unchanged, so
+the previously approved native, product and codec verification is reused.
+Codacy, Ruff/unit, Windows Python, Python 3.9–3.14 and package-consumer successes
+reported by the coordinator are reused rather than rerun locally.

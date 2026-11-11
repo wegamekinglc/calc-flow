@@ -63,5 +63,73 @@
       "source_native_files": [],
       "runtime_sources_differ_from_build_commit": false
     }
+  },
+  "dependency_preparation": {
+    "incremental_base_commit": "469a07bd269af94363fe3a05899fae109d553e24",
+    "requirements_file": "scripts/requirements-rust-tests.txt",
+    "affected_jobs": {
+      "ci-linux.yml": [
+        "rust-core",
+        "rust-coverage"
+      ],
+      "ci-windows.yml": [
+        "rust-tests"
+      ]
+    },
+    "interpreter": "/home/wegamekinglc/anaconda3/bin/python",
+    "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+    "packages": [
+      {
+        "requirement": "numpy>=2.0.0",
+        "version": "2.4.6",
+        "source": "/home/wegamekinglc/anaconda3/lib/python3.13/site-packages/numpy"
+      },
+      {
+        "requirement": "pyarrow==24.0.0",
+        "version": "24.0.0",
+        "source": "/home/wegamekinglc/anaconda3/lib/python3.13/site-packages/pyarrow"
+      },
+      {
+        "requirement": "typing-extensions>=4.12",
+        "version": "4.15.0",
+        "source": "/home/wegamekinglc/anaconda3/lib/python3.13/site-packages/typing_extensions.py"
+      }
+    ],
+    "test_binary": "target/query-history-portability/cargo/release/deps/calc_flow_python-6126da88d1f1b086",
+    "test_binary_sha256": "3768995b1a2c80837876aeec5aaf7094851a0b46f80bb17e807ad882ec6dac4d",
+    "red_visibility": {
+      "visible": {
+        "numpy": true,
+        "pyarrow": true,
+        "typing_extensions": false
+      },
+      "exit_code": 101
+    },
+    "green_visibility": {
+      "visible": {
+        "numpy": true,
+        "pyarrow": true,
+        "typing_extensions": true
+      },
+      "exit_code": 0
+    },
+    "error_group_red": {
+      "passed": 4,
+      "failed": 1,
+      "filtered": 129
+    },
+    "error_group_green": {
+      "passed": 5,
+      "failed": 0,
+      "filtered": 129
+    },
+    "harness_unit_tests": {
+      "ran": 31,
+      "skipped_existing_windows_only": 1,
+      "result": "OK"
+    },
+    "isolation": "Existing interpreter; target-only symlinks expose only requirement modules/metadata; sitecustomize removes global/user package paths; real model and linked test unchanged",
+    "native_rebuilt": false,
+    "runtime_package_sources_changed": false
   }
 }

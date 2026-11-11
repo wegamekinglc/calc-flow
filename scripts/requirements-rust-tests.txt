@@ -1,0 +1,4 @@
+# CPython 3.13 dependencies for isolated Rust/PyO3 tests, without a wheel build.
+numpy>=2.0.0
+pyarrow==24.0.0
+typing-extensions>=4.12
