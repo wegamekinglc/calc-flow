@@ -113,6 +113,77 @@ def test_json_views_preserve_forward_and_reverse_order(
     assert list(reversed(view)) == list(reversed(expected))
 
 
+@pytest.mark.parametrize(
+    "item",
+    (
+        None,
+        1,
+        "missing",
+        ["offset", 1],
+        {"offset": 1},
+        (),
+        ("offset",),
+        ("offset", 1, 2),
+        ("offset", 1),
+        ("offset", 2),
+        ("missing", 1),
+        ("position", {"offsets": [1]}),
+    ),
+)
+def test_json_items_membership_matches_dict_items(owner_factory, item: object) -> None:
+    payload = {"offset": 1, "position": {"offsets": [1]}}
+    view = _mapping(owner_factory(payload)).items()
+    assert (item in view) == (item in payload.items())
+
+
+def test_json_items_membership_uses_tuple_contents(owner_factory) -> None:
+    class Item(tuple):
+        def __len__(self):
+            raise AssertionError("membership must use the tuple contents")
+
+        def __iter__(self):
+            raise AssertionError("membership must use the tuple contents")
+
+        def __getitem__(self, key):
+            raise AssertionError("membership must use the tuple contents")
+
+    payload = {"offset": 1}
+    view = _mapping(owner_factory(payload)).items()
+    item = Item(("offset", 1))
+    assert (item in view) == (item in payload.items())
+
+
+def test_json_items_membership_preserves_unhashable_key_errors(owner_factory) -> None:
+    payload = {"offset": 1}
+    view = _mapping(owner_factory(payload)).items()
+    item = ([], 1)
+    with pytest.raises(TypeError) as expected:
+        assert item in payload.items()
+    with pytest.raises(TypeError) as actual:
+        assert item in view
+    assert str(actual.value) == str(expected.value)
+
+
+@pytest.mark.parametrize(
+    "items",
+    (
+        {"missing"},
+        {("offset", 1)},
+        {"missing", ("offset", 1)},
+        {("offset", 2)},
+        {("offset",)},
+        {None},
+    ),
+)
+def test_json_items_set_operations_match_dict_items(owner_factory, items) -> None:
+    payload = {"offset": 1}
+    view = _mapping(owner_factory(payload)).items()
+    expected = payload.items()
+    assert view.isdisjoint(items) == expected.isdisjoint(items)
+    assert view & items == expected & items
+    assert items & view == items & expected
+
+
 @pytest.mark.parametrize("view_name", ("items", "values"))
 @pytest.mark.parametrize(
     "directions", ((iter, iter), (reversed, reversed), (iter, reversed))

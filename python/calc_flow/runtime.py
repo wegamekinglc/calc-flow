@@ -193,6 +193,16 @@ class _IsolatedKeysView(_IsolatedMappingView, KeysView[str]):
 class _IsolatedItemsView(_IsolatedMappingView, ItemsView[str, Any]):
     __slots__ = ()
 
+    def __contains__(self, item: object) -> bool:
+        if not isinstance(item, tuple) or tuple.__len__(item) != 2:
+            return False
+        key, value = tuple.__iter__(item)
+        try:
+            stored = self._mapping[key]
+        except KeyError:
+            return False
+        return stored is value or stored == value
+
     def __reversed__(self) -> Iterator[tuple[str, Any]]:
         for key in reversed(self._mapping):
             yield key, self._mapping[key]
