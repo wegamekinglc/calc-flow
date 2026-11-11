@@ -92,13 +92,18 @@ pub(super) fn edge(
             "one complete Batch, including an empty relation, replaces this input".into();
     } else if append_only(target) {
         stream.support = SupportStatus::Unsupported;
+        let reason = if target.1 {
+            reason
+        } else {
+            "this consumer is append-only"
+        };
         diagnostic(
             issues,
             &edge.path,
             "update_interpretation_mismatch",
             SupportStatus::Unsupported,
             &format!(
-                "latest_relation requires complete replacement at this input; producer emits complete_snapshot but consumer appends; {reason}; replacement allowlist requires direct SUM/COUNT/MIN/MAX/AVG, supported key types, no DISTINCT, WHERE/HAVING/ORDER/LIMIT, CTE/JOIN or function modifiers"
+                "latest_relation requires complete replacement at this input; producer emits complete_snapshot but consumer appends; {reason}"
             ),
         );
     } else {
