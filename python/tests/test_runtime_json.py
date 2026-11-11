@@ -272,7 +272,8 @@ def test_source_adapter_isolates_nested_cursor_json() -> None:
     asyncio.run(exercise())
 
 
-def test_sink_adapter_isolates_nested_evidence_at_each_lifecycle_boundary() -> None:
+@pytest.fixture
+def sink_lifecycle_state():
     original = {"position": {"offsets": [1]}}
     received: list[Mapping[str, Any] | None] = []
     recoveries: list[SinkRecovery] = []
@@ -302,8 +303,16 @@ def test_sink_adapter_isolates_nested_evidence_at_each_lifecycle_boundary() -> N
         async def close(self) -> None:
             pass
 
+    return Sink(), original, received, recoveries
+
+
+def test_sink_adapter_isolates_nested_evidence_at_each_lifecycle_boundary(
+    sink_lifecycle_state,
+) -> None:
+    sink, original, received, recoveries = sink_lifecycle_state
+
     async def exercise() -> None:
-        binding = SinkBinding.transactional("archive", Sink())
+        binding = SinkBinding.transactional("archive", sink)
         output = await binding._native_pre_commit(1)
         assert type(output) is dict
         assert type(output["position"]["offsets"]) is list
