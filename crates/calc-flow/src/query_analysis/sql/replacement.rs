@@ -7,7 +7,8 @@ use crate::ArrowFieldSpec;
 use datafusion::{
     common::TableReference,
     sql::sqlparser::ast::{
-        FunctionArg, FunctionArgExpr, FunctionArguments, Query, TableFactor, Visit, Visitor,
+        FunctionArg, FunctionArgExpr, FunctionArguments, Query, TableAlias, TableFactor, Visit,
+        Visitor,
     },
 };
 use std::ops::ControlFlow;
@@ -51,30 +52,38 @@ fn normalized_ident(ident: &Ident) -> String {
 }
 
 fn binding_supported(select: &Select, input_alias: &str) -> bool {
-    let [from] = select.from.as_slice() else {
+    let Some((name, alias)) = bare_relation(select) else {
         return false;
     };
-    let TableFactor::Table { name, alias, .. } = &from.relation else {
-        return false;
-    };
-    let [part] = name.0.as_slice() else {
-        return false;
-    };
-    let Some(name) = part.as_ident() else {
-        return false;
-    };
-    let TableReference::Bare { table } = TableReference::from(input_alias) else {
-        return false;
-    };
-    if table.is_empty() || normalized_ident(name) != table.as_ref() {
+    let registered = TableReference::from(input_alias);
+    if registered.table().is_empty() || registered != TableReference::bare(normalized_ident(name)) {
         return false;
     }
-    let qualifier = match alias {
-        Some(alias) if alias.columns.is_empty() => normalized_ident(&alias.name),
-        Some(_) => return false,
-        None => normalized_ident(name),
+    let Some(qualifier) = relation_qualifier(name, alias) else {
+        return false;
     };
     select.visit(&mut BoundQualifier(&qualifier)).is_continue()
+}
+
+fn bare_relation(select: &Select) -> Option<(&Ident, Option<&TableAlias>)> {
+    let [from] = select.from.as_slice() else {
+        return None;
+    };
+    let TableFactor::Table { name, alias, .. } = &from.relation else {
+        return None;
+    };
+    let [part] = name.0.as_slice() else {
+        return None;
+    };
+    Some((part.as_ident()?, alias.as_ref()))
+}
+
+fn relation_qualifier(name: &Ident, alias: Option<&TableAlias>) -> Option<String> {
+    match alias {
+        Some(alias) if alias.columns.is_empty() => Some(normalized_ident(&alias.name)),
+        Some(_) => None,
+        None => Some(normalized_ident(name)),
+    }
 }
 
 struct BoundQualifier<'a>(&'a str);
