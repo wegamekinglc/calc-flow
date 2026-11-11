@@ -1,4 +1,5 @@
 mod decay_tests;
+mod incremental_history;
 mod indicators;
 mod late;
 mod shared_rows;
@@ -3612,7 +3613,7 @@ fn typed_exponential_means_resume_from_columnar_checkpoints() {
         .unwrap()
         .unwrap();
         let mut histories = RollingHistories::default();
-        histories.apply(touched);
+        touched.commit(&mut histories);
         let bytes = encode_state_segment(
             &histories,
             &BTreeMap::new(),
