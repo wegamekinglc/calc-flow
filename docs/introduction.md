@@ -34,6 +34,7 @@ owns table execution, state, and recovery.
 ## The basic vocabulary
 
 A `TableExpr` declares a table calculation; `t["price"]` selects a `ColumnExpr`.
+Both Python and Rust have [typed DataFrame and SQL relation interfaces](relational-frontends.md).
 Python arithmetic, comparisons, and `&`, `|`, `~` compose expressions.
 `with_columns`, `select`, and `filter` return new declarations without changing
 inputs. `sql` adds a read-only query to that same graph. `pipe` applies a
@@ -99,8 +100,9 @@ static parameters. See [batch calculations](batch-guide.md) and
 [native arrays](python-api.md#native-arrayexpr-declarations-and-collection).
 
 Use `TableExpr.stream(inputs)` or `Program.stream(inputs)` when data arrives
-over time. A Program requires `engine="streaming"` for streams and selects
-that engine at construction; `engine="sql"` uses finite collection. Enter
+over time. A Program selects `mode="stream"` for streams and `mode="batch"`
+for finite collection. Legacy `engine="streaming"|"sql"` remains an exclusive
+alias for that construction choice. Enter
 streams with `async with` and consume with `async for`. Declare schemas and
 temporal ordering once; one native job retains state across batches.
 The table form yields Arrow tables; a Program yields named `StreamOutput`

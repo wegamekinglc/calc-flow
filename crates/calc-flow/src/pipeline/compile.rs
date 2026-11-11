@@ -74,6 +74,24 @@ pub(crate) fn compile_graph(
         .map(|(reference, _)| reference.clone())
         .collect();
     let (external_inputs, external_outputs) = external_ports(&builder.nodes, &builder.edges)?;
+    let (external_inputs, external_outputs) = if let Some(bindings) = &builder.frontend_bindings {
+        for (logical, physical) in [
+            (&bindings.inputs, &external_inputs),
+            (&bindings.outputs, &external_outputs),
+        ] {
+            if logical.values().collect::<BTreeSet<_>>()
+                != physical.values().collect::<BTreeSet<_>>()
+            {
+                return Err(CalcFlowError::Compile {
+                    message: "frontend bindings must cover the exact external graph endpoints"
+                        .into(),
+                });
+            }
+        }
+        (bindings.inputs.clone(), bindings.outputs.clone())
+    } else {
+        (external_inputs, external_outputs)
+    };
     let fingerprint = graph_fingerprint(
         execution_mode,
         &builder.name,

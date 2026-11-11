@@ -41,6 +41,7 @@ from calc_flow.symbolic.nodes import (
 from calc_flow.symbolic.types import (
     TABLE_FIELD_TYPES,
     BatchKind,
+    CompileMode,
     Field,
     ScalarLiteral,
     check_array_dtype,
@@ -455,6 +456,16 @@ def _reflected_array(
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
 class TableExpr(Expr[object]):
     """An Arrow-backed table expression."""
+
+    def collect_schema(
+        self, *, runtime: Runtime | None = None, mode: CompileMode = "batch"
+    ) -> pa.Schema:
+        """Plan the exact Arrow schema without executing input data."""
+        from calc_flow.symbolic.program import Program
+
+        return Program(
+            "table-schema", mode=mode, outputs={"result": self}
+        ).collect_schema(runtime)["result"]
 
     def __eq__(self, other: object, /) -> bool:
         raise table_operator_error("==")

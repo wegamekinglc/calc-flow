@@ -10,6 +10,7 @@ available for native integration. Native execution needs no Python process.
 
 On this page:
 
+- [Typed DataFrame and SQL relations](relational-frontends.md#rust)
 - [Build and document](#build-and-document)
 - [Native array storage](#native-array-storage)
 - [Native array reductions](#native-array-reductions)
