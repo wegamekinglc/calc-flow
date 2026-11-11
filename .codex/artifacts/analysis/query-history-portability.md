@@ -5,9 +5,9 @@ initial runtime implementation and native build commit
 `93f06e2784aa8eeccaf6c74aff7cbcceddbe0e9f`. The original evidence commit
 `b8d541d2a86658f28e8614e934840b4ccc7702f5` added this record, the provenance
 JSON, and a stronger nullable input fixture. The original checks below describe
-that source boundary. The dictionary codec follow-up at the end records the
-incremental verification; the provenance JSON identifies the latest native and
-retains the original build under `previous_build`.
+that source boundary. The follow-up sections below record incremental
+verification; the provenance JSON identifies the latest native and retains
+earlier builds under `previous_build`.
 
 The controlling [API note](../api-notes/query-history-portability.md) is preserved
 unchanged. The existing dedicated checkout and branch were reused; the branch
@@ -263,9 +263,9 @@ that source match intact. Current hashes:
 - Wheel: `661d74cc4d2f25bfc51d5195501aaaad1cc810d0fdeacca38c166df1839e2a44`.
 - Python package remains `fa14fa66a64fbb063354bbae5b4cd87638cd8523b90c01bf324da6b75cb7e463`.
 
-The current JSON records the new source/native/wheel hashes and exact paths;
-`previous_build` preserves the original verification metadata (load paths there
-are historical). The same existing interpreter, target directory and local
+That codec build's hashes and paths are retained under `previous_build` in the
+latest JSON, together with the original verification metadata (earlier load
+paths are historical). The same existing interpreter, target directory and local
 opt-level=0 package overrides were reused. No environment was created, no
 optimized-release or performance result is claimed, and no new public API or
 proof-rule revision was introduced by this field codec repair.
@@ -274,3 +274,160 @@ The original review-verified lifecycle, cache, zero-execution, recovery and
 independent core example evidence is reused at its recorded source boundary.
 Those suites and examples were not rerun for this codec-only fix. Full matrices
 and coverage remain CI responsibilities; no performance claim is added.
+
+## CI isolation and complexity repair
+
+Incremental base: codec-approved head
+`091a86a454e02858edf0300977a8052f79b8993e`. Repair/native source commit:
+`e185be269d904e10c3ec34ea52a0c4e22a926055`.
+
+The coordinator's completed snapshot was 33 checks: 25 passed, 8 failed,
+none running (Linux run `42892250346`, Windows run `42892250335`). The repair
+uses those failures, not a blind rerun or an assumption that empty
+`gh run view --log-failed` output means no logs.
+
+### Root causes and corrections
+
+- Linux parity/coverage failed before coverage measurement in the PyO3 report
+  test because the standalone Rust test process could not import `calc_flow`.
+  The raw Windows Rust job `130096253933` confirms the same error at `error.rs:315`
+  (144 passed, one failed). The test now registers the linked crate's native
+  module in memory, inserts this checkout's Python source path derived from
+  `CARGO_MANIFEST_DIR`, and asserts the imported projection's exact source path.
+  It checks the real report's status and node address, a frozen-assignment
+  `AttributeError`, and that revision remains 1. No installed native extension
+  or other checkout is required for that unit test.
+- The real repository complexity ratchet grew five counters: PLR0913 in
+  `stream.py` and `symbolic/program.py`, C901 twice and PLR0912 once in
+  `symbolic/query_analysis.py`. The existing frozen `_StreamRequest` now carries
+  internal stream arguments; `execute` retains explicit `portability=` and
+  accepts the existing `config`/`watermarks` keywords through a typed options
+  group, following the repository's existing `Unpack` convention. Unknown
+  keywords still raise `TypeError`. Logical addressing, issue projection,
+  schema projection and graph assembly are separate small functions.
+- Codacy on the reviewed head was genuinely `action_required`: 20 new issues,
+  with a configured maximum of zero. Its actual annotations were 17 complexity
+  findings and three example assert findings (check `130096564600`). They were
+  not waived. The new analysis methods are split into schema gathering,
+  lifecycle/edge predicates, SQL-shape/projection/order helpers and rendering.
+  Predicates, diagnostics, ordering and proof rules remain unchanged; the codec
+  fallback no longer repeats primitive cases already handled by the canonical
+  codec. The example uses an explicit exception for incorrect facts, retained
+  under optimized Python. The cache regression separates request histories
+  into parameter cases and retains all cache ownership/fingerprint assertions.
+- The frozen export test omitted the 21 approved diagnostic names. Its explicit
+  expected list now includes exactly those names; the export implementation is
+  unchanged. Invalid runtime values were rejected by the new generic selector
+  before the original compiler validator. Batch and stream compilation now
+  reuse the original `_require_runtime` and its `explicit calc_flow Runtime`
+  error. The invalid-runtime regression covers both entry points without
+  changing its original expectation; omitted runtime behavior is retained.
+
+No complexity baseline, Codacy exclusion, check configuration, threshold or
+suppression marker changed. No new environment or PR was created. Existing
+codec approval and unaffected execution/recovery evidence remain valid.
+
+### RED and scoped GREEN
+
+The setup, `FLAGS`, existing interpreter and target directory are the same as
+above. Local reproductions before production edits:
+
+```bash
+env -u PYTHONPATH LD_LIBRARY_PATH=/home/wegamekinglc/anaconda3/lib \
+  cargo test -p calc-flow-python --lib "${FLAGS[@]}" \
+  query_portability_errors_keep_the_immutable_report
+"$DEV_PY" scripts/verify_complexity_gates.py
+PYTHONPATH="$PWD/target/query-history-portability/python" JAX_PLATFORMS=cpu \
+  "$DEV_PY" -m pytest python/tests/test_symbolic_expr.py \
+  python/tests/test_symbolic_lowering.py -q \
+  -k 'test_public_surface_is_the_frozen_export_list or test_compile_batch_requires_a_runtime' \
+  --basetemp=target/query-history-portability/pytest-ci-red
+```
+
+RED: the isolated PyO3 case failed with `ModuleNotFoundError` (the local base
+interpreter found an older installed package without the new report module;
+CI had no package). The complexity command reproduced all five counter growths;
+the two Python cases failed exactly as CI reported. Extending the runtime case
+to stream compilation reproduced the same wrong error there before correction.
+Logs: `ci-import-red.log`, `ci-python-red.log`, and the reported gate output under
+`target/query-history-portability/`.
+
+```bash
+cargo test -p calc-flow --test query_history_portability "${FLAGS[@]}"
+env -u PYTHONPATH PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1 \
+  LD_LIBRARY_PATH=/home/wegamekinglc/anaconda3/lib \
+  cargo test -p calc-flow-python --lib "${FLAGS[@]}" error::tests -- --test-threads=1
+cargo clippy -p calc-flow --lib --test query_history_portability "${FLAGS[@]}" -- -D warnings
+cargo clippy -p calc-flow-python --lib --tests "${FLAGS[@]}" -- -D warnings
+"$DEV_PY" scripts/verify_complexity_gates.py
+```
+
+GREEN at the repair source commit: core **9 passed**, including both dictionary
+identities and checked compilers. Isolated PyO3 error mapping group **5 passed /
+129 filtered**, with user site and implicit current-directory imports disabled
+and no PYTHONPATH; the report test checks this checkout's model and the linked
+native crate. Both clippy commands, cargo fmt, changed-file Ruff lint/format,
+example S101 check, Python 3.9 syntax and `git diff --check` passed. The actual
+repository complexity gate reports `complexity ratchet holds`.
+
+The Codacy annotation endpoint is not exposed by the GitHub plugin, so its 20
+raw annotations were read through `gh api .../check-runs/130096564600/annotations`.
+For a local complexity measurement, Lizard 1.26.0 was installed only under
+`target/query-history-portability/tools` with `pip --target`; the interpreter
+environment was not changed. Its scan covers the three new Rust analysis
+files, the Python query adapter and directly affected rendering/cache-test
+functions: **95 functions, maximum CCN 8, no findings above 8**. The real Codacy
+annotations were reproduced before repair (including their 17 named functions);
+unchanged pre-existing analyzer methods are outside this incremental scan.
+This local measurement is evidence of the simplification, not a substitute for
+the provider's result on the new head. JSON measurements are in
+`ci-lizard-{before,after}.json`; original provider findings are in
+`ci-codacy-before.jsonl` under the same target directory. An additional scan of
+all 12 changed source/test files finds no new or grown methods above CCN 8
+relative to the incremental base; unchanged pre-existing methods are retained.
+
+```bash
+/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/maturin \
+  build "${FLAGS[@]}" --interpreter "$PYO3_PYTHON" \
+  --out target/query-history-portability/wheels/ci
+# Extract only this wheel's native member to the existing target overlay.
+PYTHONPATH="$PWD/target/query-history-portability/python" JAX_PLATFORMS=cpu \
+  "$DEV_PY" target/query-history-portability/record-ci-provenance.py
+PYTHONPATH="$PWD/target/query-history-portability/python" JAX_PLATFORMS=cpu \
+  "$DEV_PY" -m pytest python/tests/test_query_history_portability.py \
+  python/tests/test_program_engine.py python/tests/test_symbolic_analysis.py \
+  python/tests/test_symbolic_compile_cache.py python/tests/test_symbolic_expr.py \
+  python/tests/test_symbolic_lowering.py -q \
+  --basetemp=target/query-history-portability/pytest-ci-final
+PYTHONPATH="$PWD/target/query-history-portability/python" JAX_PLATFORMS=cpu \
+  "$DEV_PY" -O examples/29_sql_stream_switch.py --engine both
+```
+
+The wheel built in 1m20s. Final matching-native Python verification: **160 passed
+in 1.64s**, including stable addresses, old fingerprints/results, warmed cache
+gates, zero execution, frozen exports and both invalid-runtime entry points.
+The example passed under `-O`: SQL **6**, streaming **1/6**. Logs are
+`ci-native-build.log`, `ci-import-final.log`, `ci-rust-green.log`,
+`ci-python-final.log` and `ci-example-optimized.log` in the target directory.
+
+The extension is extracted from this repair commit's wheel; its loaded bytes
+equal the wheel member, Python modules resolve to this checkout, and source
+contains no generated native extension. Current provenance hashes:
+
+- Native source: `5cacf16ca45295918d818897e5f8bdfb9dcff9d39f0ea9b1d2d3ed050643d92a`.
+- Native extension: `2f5710528ecf0706aa41649f56e390f602adaad4c4d6dea8e88ebb0519d995d5`.
+- Wheel: `8fa70075e2cd0807a90f1390fbc88d8e070320c182795d4480ec7908ce9a2cef`.
+- Python package: `226f0844aa44b6ab5403833f33ca50c83846032acd7372b4612aafc7e0dd7008`.
+
+The provenance JSON preserves the preceding codec and initial builds under
+`previous_build`. Runtime/package source diff from `e185be26` is empty; the
+following evidence commit changes only this record and provenance JSON. The
+existing interpreter, Cargo target and local opt-level=0 package overrides
+are reused. The initial codec approval remains relevant, and these direct
+regressions cover this repair's schema/proof projection changes.
+
+The coverage failure was a test prerequisite failure, not evidence that the
+90% floor was missed. No coverage gate was lowered or locally claimed passed.
+Cross-platform/full coverage jobs remain CI responsibilities. No benchmark or
+merge is claimed; DAL-511 remains in_progress pending incremental review and
+required gates.
