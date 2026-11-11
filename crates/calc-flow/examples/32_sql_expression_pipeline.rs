@@ -98,15 +98,13 @@ async fn execute(batch: &Program, input: Batch) -> Result<Vec<Option<f64>>> {
             ExecutionOptions::default(),
         )
         .await?;
-    assert_eq!(
-        output.outputs["summary"].table_payload()?.batches()[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap()
-            .value(0),
-        45.0
-    );
+    let net_total = output.outputs["summary"].table_payload()?.batches()[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap()
+        .value(0);
+    assert!((net_total - 45.0).abs() < 1e-12);
     let records = output.outputs["result"].table_payload()?.batches();
     let actual: Vec<_> = records
         .iter()
