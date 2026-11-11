@@ -483,5 +483,12 @@
     "Replacement allowlist, whole-event budgets and operator-local commit boundary are deliberate limits. No general retractions, multi-input incremental join, batch mid-query recovery or external sink rollback.",
     "Rust full StreamRuntimeConfig literals must add the new field or use Default; Python positional field meanings remain unchanged.",
     "Independent tester and reviewer remain required; no merge, delegation or subsequent task has been started."
-  ]
+  ],
+  "main_integration": {
+    "observed_main_sha": "e7e771ac0efd0b44af936353a130f316c46a535b",
+    "merge_preview_tree_sha": "42c44fe60dc482442797df3c6befddc78bf32788",
+    "merge_preview_exit_code": 0,
+    "executed_merged_tree": false,
+    "note": "Read-only merge-tree preview is clean. Main advanced with unrelated rolling diagnostics; no merge/rebase or claim of merged-tree runtime validation."
+  }
 }

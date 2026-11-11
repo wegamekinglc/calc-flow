@@ -81,3 +81,5 @@ RED 使用 git 导出的精确 c4f1749c Python 源码；native 仅供 import，�
 全量、coverage、服务容器和跨平台由 CI 承担；Python 3.9 只有语法证据。未宣称 CI 已绿或可合并。
 外部 sink 副作用不属于本次 operator 候选事务。未扩一般 delta/retraction、增量多输入 JOIN 或 batch 中途恢复。
 独立 tester → reviewer 仍待协调器接续；本轮没有合并、扩派或启动后续任务，DAL-514 保持 in_progress。
+
+最终 fetch 观察 main 已到 `e7e771ac0efd0b44af936353a130f316c46a535b`。只读 `git merge-tree --write-tree --messages HEAD origin/main` 退出0，预览 tree=`42c44fe60dc482442797df3c6befddc78bf32788`，无冲突；未实际合并或对该 merged tree 运行验证，集成结果留给 CI。
