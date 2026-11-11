@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from calc_flow.runtime import StreamRuntimeConfig, WatermarkPolicy
     from calc_flow.stream import StreamInput, StreamOutput, StreamResults
     from calc_flow.symbolic.analyzer import AnalysisResult
-    from calc_flow.symbolic.types import LatePolicy
+    from calc_flow.symbolic.types import Field, LatePolicy
 
 _PROGRAM_TAG = 0x21
 _OMITTED = object()
@@ -78,22 +78,32 @@ def _checked_engine_value(
 def _check_schema_output_types(
     program: Program, runtime: Runtime, mode: CompileMode
 ) -> None:
-    from calc_flow.errors import CompileError
     from calc_flow.symbolic.analyzer import _require_mode
     from calc_flow.symbolic.lower.program import _check_expression_capability
-    from calc_flow.symbolic.types import check_table_field_type
+    from calc_flow.symbolic.query_analysis import _declaration_paths
 
     analyzer, _ = _check_expression_capability(program, runtime, _require_mode(mode))
     for name, value in program.outputs:
         path = _segment("outputs", name)
         fields = analyzer.table(value._node, path).schema
-        for index, field in enumerate(fields):
-            try:
-                check_table_field_type(
-                    field.data_type, f"{path}.schema[{index}].data_type"
-                )
-            except ValueError as error:
-                raise CompileError(str(error)) from error
+        _check_schema_fields(fields, path)
+    paths, nodes, _ = _declaration_paths(program)
+    for digest, node in nodes.items():
+        if node.op.name in {"sql", "snapshot_sql"}:
+            _check_schema_fields(
+                analyzer.table(node, paths[digest]).schema, paths[digest]
+            )
+
+
+def _check_schema_fields(fields: Sequence[Field], path: str) -> None:
+    from calc_flow.errors import CompileError
+    from calc_flow.symbolic.types import check_table_field_type
+
+    for index, field in enumerate(fields):
+        try:
+            check_table_field_type(field.data_type, f"{path}.schema[{index}].data_type")
+        except ValueError as error:
+            raise CompileError(str(error)) from error
 
 
 class _StreamingExecuteOptions(TypedDict, total=False):

@@ -39,6 +39,34 @@ def test_unsupported_sql_schema_uses_escaped_logical_output(
     assert "cf_sql_" not in str(caught.value)
 
 
+@pytest.mark.parametrize("mode", ["batch", "stream"])
+@pytest.mark.parametrize("name", ["result", "a.b", 'a"b\n'])
+def test_intermediate_sql_schema_is_rejected_before_dataframe_cast(
+    mode: str, name: str
+) -> None:
+    import json
+
+    source = cf.table_input("events", schema=pa.schema([("x", pa.int64())]))
+    stage = source.sql("SELECT CAST(x AS DECIMAL(20,2)) AS n FROM input")
+    result = stage.select(z=cf.row.cast(stage["n"], "int64"))
+    program = cf.Program("intermediate", mode=mode, outputs={name: result})
+    with pytest.raises(cf.CompileError) as caught:
+        program.collect_schema()
+    root = f"outputs.{name}" if name.isidentifier() else f"outputs[{json.dumps(name)}]"
+    role = f"{root}.project.value.with_columns.value.schema[0].data_type"
+    assert str(caught.value).startswith(f"{role}: unsupported_type:")
+    assert "cf_sql_" not in str(caught.value)
+
+
+@pytest.mark.parametrize("mode", ["batch", "stream"])
+def test_supported_intermediate_sql_schema_keeps_dataframe_cast(mode: str) -> None:
+    source = cf.table_input("events", schema=pa.schema([("x", pa.int64())]))
+    stage = source.sql("SELECT CAST(x AS DOUBLE) AS n FROM input")
+    result = stage.select(z=cf.row.cast(stage["n"], "int64"))
+    program = cf.Program("supported", mode=mode, outputs={"a.b": result})
+    assert program.collect_schema() == {"a.b": pa.schema([("z", pa.int64())])}
+
+
 def test_mode_alias_copies_only_declarations() -> None:
     batch = cf.Program("values", mode="batch")
     stream = batch.for_mode("stream")
