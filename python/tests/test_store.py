@@ -157,9 +157,10 @@ def test_update_semantics_public_formats_roundtrip(semantics) -> None:
     project = ProjectDocument.model_validate(raw)
     canonical = export_project_json(project)
     assert (
-        import_project_yaml(export_project_yaml(project)).canonical_json() == canonical
+        export_project_json(import_project_yaml(export_project_yaml(project)))
+        == canonical
     )
-    assert import_project_json(json.dumps(raw)).canonical_json() == canonical
+    assert export_project_json(import_project_json(json.dumps(raw))) == canonical
     assert ("update_semantics" in project.model_dump()["graph"]) == (
         semantics == "latest_relation"
     )
