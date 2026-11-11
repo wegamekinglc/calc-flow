@@ -78,6 +78,11 @@ pub(crate) enum RelationKind {
         schema: SchemaRef,
         options: InputOptions,
     },
+    Aggregate {
+        input: TableExpr,
+        aggregates: Vec<NamedAggregate>,
+        group_by: Vec<String>,
+    },
     Filter {
         input: TableExpr,
         predicate: ColumnExpr,
@@ -269,7 +274,9 @@ impl TableExpr {
             RelationKind::Project { input, .. } | RelationKind::Filter { input, .. } => {
                 input.lineage()
             }
-            RelationKind::Input { .. } | RelationKind::Sql { .. } => &self.0.id,
+            RelationKind::Input { .. }
+            | RelationKind::Sql { .. }
+            | RelationKind::Aggregate { .. } => &self.0.id,
         }
     }
     fn known_names(&self) -> Option<BTreeSet<String>> {
@@ -295,6 +302,17 @@ impl TableExpr {
                 Some(names)
             }
             RelationKind::Filter { input, .. } => input.known_names(),
+            RelationKind::Aggregate {
+                aggregates,
+                group_by,
+                ..
+            } => Some(
+                group_by
+                    .iter()
+                    .cloned()
+                    .chain(aggregates.iter().map(|a| a.name.clone()))
+                    .collect(),
+            ),
             RelationKind::Sql { .. } => None,
         }
     }
@@ -767,3 +785,6 @@ pub(crate) fn portable_type(dtype: &DataType, path: &str) -> Result<()> {
         "type is outside the row-local public domain",
     ))
 }
+
+pub(crate) mod aggregate;
+pub use aggregate::{AggregateExpr, NamedAggregate, count_rows};

@@ -6,7 +6,8 @@ use calc_flow::arrow::{
 };
 use calc_flow::{
     Batch, BatchMetadata, CompileMode, CompileOptions, ExecutionOptions, InputOptions, Program,
-    Result, TableExpr, UdfRegistry, lit, table_input,
+    Result, StateBudget, StreamRequirements, StreamRuntimeConfig, TableExpr, UdfRegistry,
+    UpdateSemantics, lit, table_input,
 };
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -25,6 +26,7 @@ fn discounted(table: &TableExpr) -> Result<TableExpr> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    verify_replacement_budget().await?;
     let (schema, input) = orders()?;
     let batch = declaration(schema)?;
     verify_wrappers(&batch).await?;
@@ -62,10 +64,18 @@ fn declaration(schema: Arc<Schema>) -> Result<Program> {
     let selected =
         gross.sql("SELECT order_id, gross FROM input WHERE gross >= 20 ORDER BY order_id")?;
     let result = discounted(&selected)?.sql("SELECT order_id, net FROM input")?;
+    let summary = result.aggregate(
+        vec![result.column("net")?.sum().alias("net_total")?],
+        vec![],
+    )?;
     let batch = Program::new(
         "sql-expression-pipeline",
         CompileMode::Batch,
-        BTreeMap::from([("gross".into(), gross), ("result".into(), result)]),
+        BTreeMap::from([
+            ("gross".into(), gross),
+            ("result".into(), result),
+            ("summary".into(), summary),
+        ]),
     )?;
     Ok(batch)
 }
@@ -90,6 +100,13 @@ async fn execute(batch: &Program, input: Batch) -> Result<Vec<Option<f64>>> {
             ExecutionOptions::default(),
         )
         .await?;
+    let net_total = output.outputs["summary"].table_payload()?.batches()[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap()
+        .value(0);
+    assert!((net_total - 45.0).abs() < 1e-12);
     let records = output.outputs["result"].table_payload()?.batches();
     let actual: Vec<_> = records
         .iter()
@@ -104,4 +121,35 @@ async fn execute(batch: &Program, input: Batch) -> Result<Vec<Option<f64>>> {
         })
         .collect();
     Ok(actual)
+}
+
+fn replacement_declaration() -> Result<Program> {
+    let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)]));
+    let source = table_input("events", schema, InputOptions::default())?;
+    let first = source.aggregate(vec![source.column("x")?.sum().alias("total")?], vec![])?;
+    let result = first.sql("SELECT SUM(total) AS total FROM input")?;
+    Ok(Program::new(
+        "replacement-budget",
+        CompileMode::Stream,
+        BTreeMap::from([("result".into(), result)]),
+    )?
+    .with_update_semantics(UpdateSemantics::LatestRelation))
+}
+
+async fn verify_replacement_budget() -> Result<()> {
+    let plan = replacement_declaration()?
+        .compile_stream(
+            &UdfRegistry::new().snapshot(),
+            &StreamRequirements::default(),
+            &CompileOptions::default(),
+        )
+        .await?;
+    let missing = plan
+        .validate_sql_budgets(&StreamRuntimeConfig::default())
+        .unwrap_err();
+    assert!(missing.to_string().contains("sql_replacement_state_budget"));
+    plan.validate_sql_budgets(&StreamRuntimeConfig {
+        sql_replacement_state_budget: Some(StateBudget::new(100, 8 << 20)?),
+        ..Default::default()
+    })
 }

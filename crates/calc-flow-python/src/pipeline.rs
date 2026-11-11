@@ -104,6 +104,11 @@ impl PyStreamExecutionPlan {
 
 #[pymethods]
 impl PyStreamExecutionPlan {
+    fn validate_runtime_config(&self, config: &Bound<'_, PyDict>) -> PyResult<()> {
+        let config = crate::continuous::runtime_config(config)?;
+        self.with_plan(|p| p.validate_sql_budgets(&config))?
+            .map_err(crate::error::to_py_err)
+    }
     #[getter]
     fn name(&self) -> PyResult<String> {
         self.with_plan(|plan| plan.name().to_owned())

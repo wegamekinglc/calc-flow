@@ -76,6 +76,7 @@ def _shared_tables(program: Program, analyzer: _Analyzer) -> frozenset[str]:
 _TABLE_BOUNDARIES = frozenset(
     {
         *_EVENT_WINDOW_OPS,
+        "aggregate",
         "sql",
         "snapshot_sql",
         "late_output",
@@ -186,7 +187,7 @@ class _SQLGraph:
         if node.op.name == "table_input":
             self.schemas[node.digest] = self.analyzer.table(node, "sql.input").schema
             return self.graph.source(node)
-        if node.op.name not in {"sql", "snapshot_sql"}:
+        if node.op.name not in {"aggregate", "sql", "snapshot_sql"}:
             return self._append_expression(node)
         output_id = self.graph.allocate(f"cf_sql_{node.digest[:24]}")
         self._append_sql(node, output_id)
@@ -220,7 +221,7 @@ class _SQLGraph:
                     for alias, fields in zip(aliases, schemas, strict=True)
                 ],
                 "operator": {
-                    "kind": node.op.name,
+                    "kind": "sql" if node.op.name == "aggregate" else node.op.name,
                     "query": _cstr(node.attr("query")),
                     "aliases": list(aliases),
                     "udfs": [],
@@ -252,6 +253,7 @@ class _SQLGraph:
             if (
                 boundary.op.name
                 in {
+                    "aggregate",
                     "sql",
                     "snapshot_sql",
                     "attach_columns",
@@ -464,7 +466,7 @@ def lower_sql_program(
     late_policy: str,
 ) -> dict[str, object] | None:
     if not _macd_input_boundaries(program) and not any(
-        node.op.name in {"sql", "snapshot_sql", "late_output", "late_rows"}
+        node.op.name in {"aggregate", "sql", "snapshot_sql", "late_output", "late_rows"}
         for _, value in program.outputs
         for node in _walk_nodes(value._node)
     ):

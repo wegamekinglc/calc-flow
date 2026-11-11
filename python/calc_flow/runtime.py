@@ -745,7 +745,10 @@ class StreamRuntimeConfig:
     and cached checkpoints. It requires compact execution; input/output and
     serialization scratch use separate reservations. ``sql_snapshot_state_budget``
     limits latest-relation rows and owned state bytes per snapshot SQL node,
-    including candidate replacements and cached segments. These are not RSS limits.
+    including candidate replacements and cached segments.
+    ``sql_replacement_state_budget`` is required for ordinary aggregates that
+    consume complete snapshots under latest_relation. It also charges prepared
+    output and is incompatible with compact-only state. These are not RSS limits.
     """
 
     checkpoint_interval: timedelta = timedelta(seconds=60)
@@ -756,6 +759,7 @@ class StreamRuntimeConfig:
     checkpointing: bool = True
     sql_compact_state_budget: StateBudget | None = None
     sql_snapshot_state_budget: StateBudget | None = None
+    sql_replacement_state_budget: StateBudget | None = None
 
     def _native(self) -> dict[str, int | bool]:
         if type(self.checkpointing) is not bool:
@@ -764,22 +768,17 @@ class StreamRuntimeConfig:
             raise TypeError("edge_budget must be a calc_flow.EdgeBudget")
         if type(self.retained_epochs) is not int or self.retained_epochs <= 0:
             raise ValueError("retained_epochs must be a positive integer")
-        if self.sql_state_budget is not None and not isinstance(
-            self.sql_state_budget, StateBudget
-        ):
-            raise TypeError("sql_state_budget must be a calc_flow.StateBudget or None")
-        if self.sql_compact_state_budget is not None and not isinstance(
-            self.sql_compact_state_budget, StateBudget
-        ):
-            raise TypeError(
-                "sql_compact_state_budget must be a calc_flow.StateBudget or None"
-            )
-        if self.sql_snapshot_state_budget is not None and not isinstance(
-            self.sql_snapshot_state_budget, StateBudget
-        ):
-            raise TypeError(
-                "sql_snapshot_state_budget must be a calc_flow.StateBudget or None"
-            )
+        budgets = (
+            ("sql_state", self.sql_state_budget, "max_rows"),
+            ("sql_compact_state", self.sql_compact_state_budget, "max_groups"),
+            ("sql_snapshot_state", self.sql_snapshot_state_budget, "max_rows"),
+            ("sql_replacement_state", self.sql_replacement_state_budget, "max_rows"),
+        )
+        for name, budget, _ in budgets:
+            if budget is not None and not isinstance(budget, StateBudget):
+                raise TypeError(
+                    f"{name}_budget must be a calc_flow.StateBudget or None"
+                )
         values = {
             "checkpointing": self.checkpointing,
             "checkpoint_interval_micros": _duration_micros(
@@ -792,23 +791,10 @@ class StreamRuntimeConfig:
             "edge_max_bytes": self.edge_budget.max_bytes,
             "retained_epochs": self.retained_epochs,
         }
-        if self.sql_state_budget is not None:
-            values["sql_state_max_rows"] = self.sql_state_budget.max_rows
-            values["sql_state_max_bytes"] = self.sql_state_budget.max_bytes
-        if self.sql_compact_state_budget is not None:
-            values["sql_compact_state_max_groups"] = (
-                self.sql_compact_state_budget.max_rows
-            )
-            values["sql_compact_state_max_bytes"] = (
-                self.sql_compact_state_budget.max_bytes
-            )
-        if self.sql_snapshot_state_budget is not None:
-            values["sql_snapshot_state_max_rows"] = (
-                self.sql_snapshot_state_budget.max_rows
-            )
-            values["sql_snapshot_state_max_bytes"] = (
-                self.sql_snapshot_state_budget.max_bytes
-            )
+        for name, budget, rows_key in budgets:
+            if budget is not None:
+                values[f"{name}_{rows_key}"] = budget.max_rows
+                values[f"{name}_max_bytes"] = budget.max_bytes
         return values
 
 

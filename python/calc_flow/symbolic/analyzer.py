@@ -805,6 +805,7 @@ class _Analyzer:
 
         if self._runtime is None or node.op.name in {
             "table_input",
+            "aggregate",
             "sql",
             "snapshot_sql",
             "attach_columns",
@@ -847,6 +848,7 @@ class _Analyzer:
                 boundaries[current.digest] = _schema_fields(current.attr("schema"))
             elif current.op.name in {
                 *_EVENT_WINDOW_OPS,
+                "aggregate",
                 "sql",
                 "snapshot_sql",
                 "late_output",
@@ -877,6 +879,7 @@ class _Analyzer:
             "stream_asof_join": self._stream_asof_join_table,
             "window_tumbling": self._window_table,
             "window_hopping": self._window_table,
+            "aggregate": self._aggregate_table,
             "sql": self._sql_table,
             "snapshot_sql": self._sql_table,
         }.get(name)
@@ -888,6 +891,12 @@ class _Analyzer:
             f"primitive {name!r} does not produce a table value",
         )
         return TableFacts((), None, frozenset(), None, (), ())
+
+    def _aggregate_table(self, node: Node, path: str, /) -> TableFacts:
+        from calc_flow.symbolic.aggregate import validate
+
+        validate(self, node, path)
+        return self._sql_table(node, path)
 
     def _sql_table(self, node: Node, path: str, /) -> TableFacts:
         kind = node.op.name

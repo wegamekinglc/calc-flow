@@ -110,9 +110,11 @@ physical names as immutable `external_inputs` / `external_outputs` tuples; strea
 plans retain `source_binding_ids` / `sink_binding_ids`. Export is not a checkpoint;
 batch query continuation is outside this contract.
 
-This slice covers row-local DataFrame expressions and the existing SQL relation
-surface. It does not add DataFrame aggregation, aggregate replacement consumption, general
-joins, wider portable Arrow types, or comprehensive Polars compatibility.
+The relational frontends cover row-local expressions, named DataFrame aggregates,
+and the existing SQL relation surface. Eligible single-alias aggregates consume
+complete replacements with an explicit state budget, as described below. General
+joins, wider portable Arrow types, and comprehensive Polars compatibility remain
+outside this scope.
 
 ## Explicit relation updates
 
@@ -138,10 +140,11 @@ fn choose(program: &Program) -> Program {
 ```
 
 The default is `legacy_append`. With input batches [1] and [2, 3], the first
-stream SUM emits snapshots 1 and 6. A second ordinary SUM appends those events
-and emits 1 and 7. Explicit latest rejects that second consumption edge before
-opening a Source, without requiring a portability request. This release provides
-safe admission; it does not compute replacement aggregation.
+stream SUM emits snapshots 1 and 6. Under legacy semantics, a second ordinary SUM
+appends those events and emits 1 and 7. Explicit latest admits an eligible second
+aggregate with `sql_replacement_state_budget` and emits 1 and 6. Queries outside
+the replacement allowlist reject before opening a Source, without requiring a
+portability request; a missing replacement budget also rejects before startup.
 
 Latest admits complete snapshots through proved deterministic single-input
 projections, filters and row-local SQL/CTEs. These edges report
@@ -161,8 +164,9 @@ remain separate obligations.
 `for_mode`, `with_input` and `output` preserve the choice. Latest changes
 declaration, plan, cache and checkpoint identities; switching back to legacy
 recomputes the original identity. Batch still consumes one independent finite
-input per execution and has no cross-execution replacement state. Thus a batch
-SUM chain can compile while the same stream declaration rejects.
+input per execution and has no cross-execution replacement state. Batch SUM
+chains therefore need no replacement state budget. Queries outside the stream
+replacement allowlist may still compile for finite batch execution.
 
 Project-v3 persists `graph.update_semantics="latest_relation"`. Missing or explicit
 legacy normalizes to the old omitted-field bytes and identities. The Rust public
@@ -173,3 +177,51 @@ exact declared table ports to prove event boundaries. They never block on schema
 planning. Legacy checkpoints retain their existing layouts; an actual restore
 across update choices rejects before Source acquisition. Existing snapshot SQL
 initialization, slicing, output-route and delivery restrictions still apply.
+
+## Named aggregates
+
+`TableExpr.aggregate` builds a new relation through the same native SQL planner.
+Python accepts an ordered mapping and optional `group_by` sequence. Rust accepts
+`Vec<NamedAggregate>` and `Vec<String>`. Column `sum`, `count`, `min`, `max`, and
+`mean` create aggregate declarations; `count_rows()` counts every row, including
+NULL rows. Aggregate declarations are separate from row-local columns.
+
+```python
+summary = source.aggregate(
+    {"total": source["x"].sum(), "non_null": source["x"].count(),
+     "rows": cf.count_rows()},
+    group_by=(),
+)
+```
+
+```rust
+# use calc_flow::{TableExpr, Result, count_rows};
+fn summary(source: &TableExpr) -> Result<TableExpr> {
+    source.aggregate(
+        vec![source.column("x")?.sum().alias("total")?,
+             count_rows().alias("rows")?], vec![],
+    )
+}
+```
+
+Operands must be direct columns of the input relation. Use `with_columns` first
+for computed operands. Names must be unique across keys and results. Keys precede
+reducers in output column order; grouped row order is unspecified. Aggregation
+starts a new row lineage and clears temporal ordering. Planning derives exact
+schema without reading rows.
+
+SUM widens signed integers to Int64, unsigned integers to UInt64, and floats to
+Float64. COUNT is non-null Int64. MIN/MAX preserve numeric input dtype; AVG is
+Float64. Numeric reducers are nullable and ignore NULL. Empty global input emits
+one row with typed NULL reducers and zero counts. Empty grouped input emits zero
+rows. All-NULL keys form one group. Reducers support the ten ordinary integer and
+float types; keys support Boolean, integers, Utf8 and LargeUtf8. COUNT(column)
+also supports the existing portable scalar types.
+
+Streaming append inputs produce cumulative snapshots. With explicit
+`latest_relation`, a supported single-alias aggregate can consume another
+complete snapshot, including through projection/filter nodes. It requires
+`StreamRuntimeConfig(sql_replacement_state_budget=StateBudget(rows, bytes))`.
+For source events `[1]`, `[2,3]`, SUM→SUM emits `1,6`; the default
+`legacy_append` emits `1,7`. Batch executions each process only their own input.
+See the streaming guide for replacement admission, budgeting and recovery.

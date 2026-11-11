@@ -402,6 +402,8 @@ pub(crate) struct DeclarationEdge {
     pub path: String,
     pub source_path: String,
     pub target_path: String,
+    #[serde(default)]
+    pub input_alias: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -475,7 +477,7 @@ pub(crate) fn analyze_graph(graph: DeclarationGraph) -> Result<QueryAnalysis> {
         .map(|_| conjunction(diagnostics.iter().map(|issue| issue.status)));
     Ok(QueryAnalysis {
         schema_version: 2,
-        analysis_revision: 2,
+        analysis_revision: 3,
         update_semantics,
         request: options.portability,
         portability,
@@ -520,7 +522,38 @@ fn analyze_nodes(
                 message: "unresolved input or cycle".into(),
             })?;
         let node = pending.remove(&ready).expect("ready declaration exists");
-        let (mut facts, proof, aggregate) = node_facts(&node, diagnostics, update_semantics)?;
+        let (mut facts, mut proof, aggregate) = node_facts(&node, diagnostics, update_semantics)?;
+        let inputs = declared_edges
+            .iter()
+            .filter(|e| e.target_path == node.path)
+            .collect::<Vec<_>>();
+        if !update_semantics.is_legacy() && aggregate && inputs.len() == 1 {
+            let source = &by_path[&inputs[0].source_path];
+            if source.stream.update == UpdateKind::CompleteSnapshot
+                && let Some(query) = &node.query
+            {
+                facts.stream.reason =
+                    sql::replacement_rejection(query, inputs[0].input_alias.as_deref()).into();
+            }
+            if node.schema.is_some()
+                && source.schema.is_some()
+                && inputs[0].input_alias.as_ref().is_some_and(|alias| {
+                    node.query.as_ref().is_some_and(|q| {
+                        sql::replacement(
+                            q,
+                            &schema_fields(source.schema.as_ref().expect("proved schema")),
+                            alias,
+                        )
+                    })
+                })
+            {
+                proof = sql::Proof::Replacement;
+                if source.stream.update == UpdateKind::CompleteSnapshot {
+                    facts.stream.history = HistoryScope::LatestRelation;
+                    facts.stream.reason = "single alias replacement aggregate; runtime requires sql_replacement_state_budget".into();
+                }
+            }
+        }
         propagate_inputs(
             &node,
             &mut facts,
@@ -616,11 +649,16 @@ fn analyze_edges(
             path: edge.path.clone(),
             source_path: edge.source_path.clone(),
             target_path: edge.target_path.clone(),
+            input_alias: edge.input_alias.clone(),
         };
         let source = &by_path[&edge.source_path];
         let target = &by_path[&edge.target_path];
         let target_kind = &proofs[&edge.target_path].2;
-        let consumption = if target_kind == "snapshot_sql" {
+        let consumption = if target_kind == "snapshot_sql"
+            || (!update_semantics.is_legacy()
+                && proofs[&edge.target_path].0 == sql::Proof::Replacement
+                && source.stream.update == UpdateKind::CompleteSnapshot)
+        {
             InputInterpretation::CompleteReplacement
         } else {
             InputInterpretation::Append
@@ -639,7 +677,13 @@ fn analyze_edges(
         let batch = edge_mode(&source.batch, &target.batch);
         let mut stream = edge_mode(&source.stream, &target.stream);
         if !update_semantics.is_legacy() {
-            updates::edge(&edge, &mut stream, &proofs[&edge.target_path], diagnostics);
+            updates::edge(
+                &edge,
+                &mut stream,
+                &proofs[&edge.target_path],
+                &target.stream.reason,
+                diagnostics,
+            );
         }
         if proofs[&edge.source_path].2 == "snapshot_sql" {
             stream.support = SupportStatus::Unsupported;

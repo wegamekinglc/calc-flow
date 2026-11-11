@@ -23,3 +23,8 @@ It also checks one warm batch plan with SUM inputs producing 1 and 5, a stream j
 producing 1 and 6, and a new job starting at 5. These are independent runs, not
 checkpoint recovery. Managed recovery and wider relation operations keep their
 existing contracts.
+
+Named DataFrame aggregates additionally check exact COUNT/SUM schema and empty/NULL
+values against independent expectations. A DataFrame→SQL aggregate chain executes
+with explicit replacement budget and latest outputs 1/6. The fixture uses the
+crate-root exports without depending on the Python binding.

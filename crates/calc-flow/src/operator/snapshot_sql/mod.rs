@@ -19,6 +19,8 @@ use super::{
 
 mod checkpoint;
 #[cfg(test)]
+mod replacement_tests;
+#[cfg(test)]
 mod tests;
 pub(crate) use checkpoint::{PreparedSnapshotCapture, PreparedSnapshotRestore};
 
@@ -51,11 +53,13 @@ struct Relation {
 /// # Ok::<(), calc_flow::CalcFlowError>(())
 /// ```
 pub struct SnapshotSqlOperator {
+    single_alias_replacement: bool,
     declaration: Box<SqlOperator>,
     validated: ValidatedQuery,
     runtime: StreamRuntimeState,
     pool: Option<Arc<OwnedStatePool>>,
     budget: Option<StateBudget>,
+    latest_input_budget: Option<StateBudget>,
     relations: Vec<Option<Arc<Relation>>>,
     capture: Option<PreparedSnapshotCapture>,
 }
@@ -69,6 +73,76 @@ impl std::fmt::Debug for SnapshotSqlOperator {
 }
 
 impl SnapshotSqlOperator {
+    pub(crate) fn for_single_alias(declaration: SqlOperator) -> Result<Self> {
+        if declaration.input_ports().len() != 1
+            || declaration
+                .input_ports()
+                .iter()
+                .chain(declaration.output_ports())
+                .any(|p| p.schema().is_none())
+        {
+            return Err(state_error(
+                "update_event_boundary_unproved: replacement requires exact single input and output schemas",
+            ));
+        }
+        Ok(Self {
+            validated: parse_select_query(declaration.query_text())?,
+            declaration: Box::new(declaration),
+            single_alias_replacement: true,
+            runtime: StreamRuntimeState::new(),
+            pool: None,
+            budget: None,
+            latest_input_budget: None,
+            relations: vec![None],
+            capture: None,
+        })
+    }
+    pub(crate) fn fresh(&self) -> Self {
+        Self {
+            declaration: self.declaration.clone(),
+            validated: self.validated.clone(),
+            single_alias_replacement: self.single_alias_replacement,
+            runtime: self.runtime.clone(),
+            pool: None,
+            budget: self.budget,
+            latest_input_budget: self.latest_input_budget,
+            relations: vec![None; self.relations.len()],
+            capture: None,
+        }
+    }
+    pub(crate) fn set_latest_input_budget(&mut self, budget: Option<StateBudget>) -> Result<()> {
+        for relation in self.relations.iter().flatten() {
+            self.check_latest_input(&relation.batch, budget)?;
+        }
+        self.latest_input_budget = budget;
+        Ok(())
+    }
+    fn check_latest_input(&self, batch: &Batch, budget: Option<StateBudget>) -> Result<()> {
+        if let Some(budget) = budget {
+            let bytes = batch.estimated_bytes()? as u64;
+            for (field, required, limit) in [
+                ("max_rows", batch.num_rows() as u64, budget.max_rows()),
+                ("max_bytes", bytes, budget.max_bytes()),
+            ] {
+                if required > limit {
+                    return Err(state_error(&format!(
+                        "{}.{}: sql_state_budget.{field} required={required} limit={limit}",
+                        self.name(),
+                        self.input_ports()[0].name()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+    fn state_format(&self) -> (&'static str, u32) {
+        if self.single_alias_replacement {
+            ("sql_replacement", 6)
+        } else {
+            ("snapshot_sql", 1)
+        }
+    }
+
     /// Declares a read-only query over one or more complete replacement inputs.
     ///
     /// # Errors
@@ -100,11 +174,13 @@ impl SnapshotSqlOperator {
         }
         let relations = (0..aliases.len()).map(|_| None).collect();
         Ok(Self {
+            single_alias_replacement: false,
             declaration: Box::new(SqlOperator::new(name, query, aliases, udfs)?),
             validated: parse_select_query(query)?,
             runtime: StreamRuntimeState::new(),
             pool: None,
             budget: None,
+            latest_input_budget: None,
             relations,
             capture: None,
         })
@@ -185,7 +261,12 @@ impl SnapshotSqlOperator {
 
     fn ensure_pool(&mut self) -> Result<()> {
         if self.pool.is_none() {
-            let pool = self.runtime.runtime()?.snapshot_state_pool();
+            let runtime = self.runtime.runtime()?;
+            let pool = if self.single_alias_replacement {
+                runtime.replacement_state_pool()
+            } else {
+                runtime.snapshot_state_pool()
+            };
             pool.set_limit(self.budget.map(StateBudget::max_bytes))
                 .map_err(engine_error)?;
             self.pool = Some(pool);
@@ -207,20 +288,31 @@ impl SnapshotSqlOperator {
 
     fn relation(&self, batch: Batch, check: &dyn Fn() -> Result<()>) -> Result<Arc<Relation>> {
         check()?;
-        if let Some(owned) = self.relations.iter().flatten().find(|owned| {
-            std::ptr::eq(
-                owned.batch.table_payload().expect("table").batches(),
-                batch.table_payload().expect("validated table").batches(),
-            ) && owned.batch.metadata() == batch.metadata()
-        }) {
+        if let Some(owned) = self
+            .relations
+            .iter()
+            .flatten()
+            .filter(|_| !self.single_alias_replacement)
+            .find(|owned| {
+                std::ptr::eq(
+                    owned.batch.table_payload().expect("table").batches(),
+                    batch.table_payload().expect("validated table").batches(),
+                ) && owned.batch.metadata() == batch.metadata()
+            })
+        {
             return Ok(owned.clone());
         }
-        let backing = if let Some(owned) = self.relations.iter().flatten().find(|owned| {
-            std::ptr::eq(
-                owned.batch.table_payload().expect("table").batches(),
-                batch.table_payload().expect("table").batches(),
-            )
-        }) {
+        let backing = if let Some(owned) = self
+            .relations
+            .iter()
+            .flatten()
+            .filter(|_| !self.single_alias_replacement)
+            .find(|owned| {
+                std::ptr::eq(
+                    owned.batch.table_payload().expect("table").batches(),
+                    batch.table_payload().expect("table").batches(),
+                )
+            }) {
             owned.backing.clone()
         } else {
             let reservation = self.reservation();
@@ -256,7 +348,11 @@ impl OperatorMetadata for SnapshotSqlOperator {
     }
     fn configuration(&self) -> JsonMap {
         let mut configuration = self.declaration.configuration();
-        configuration.insert("snapshot_policy".into(), "replace_snapshot_v1".into());
+        if self.single_alias_replacement {
+            configuration.insert("replacement_policy".into(), "single_alias_v1".into());
+        } else {
+            configuration.insert("snapshot_policy".into(), "replace_snapshot_v1".into());
+        }
         configuration
     }
 }
@@ -277,6 +373,7 @@ impl StreamOperator for SnapshotSqlOperator {
             .position(|p| p.name() == ingress)
             .ok_or_else(|| state_error("unknown snapshot_sql ingress"))?;
         self.input_ports()[index].validate(&batch, ingress)?;
+        self.check_latest_input(&batch, self.latest_input_budget)?;
         self.ensure_pool()?;
         let mut next = self.relations.clone();
         // Check rows before retaining or allocating the candidate.
@@ -292,7 +389,15 @@ impl StreamOperator for SnapshotSqlOperator {
                     }
                 })?;
         if self.budget.is_some_and(|b| rows as u64 > b.max_rows()) {
-            return Err(state_error("snapshot_sql latest relations exceed max_rows"));
+            if !self.single_alias_replacement {
+                return Err(state_error("snapshot_sql latest relations exceed max_rows"));
+            }
+            return Err(state_error(&format!(
+                "{}.{}: sql_replacement_state_budget.max_rows required={rows} limit={}",
+                self.name(),
+                ingress,
+                self.budget.unwrap().max_rows()
+            )));
         }
         next[index] = Some(self.relation(batch, &|| context.check_cancelled())?);
         if next.iter().all(Option::is_some) {
@@ -315,6 +420,23 @@ impl StreamOperator for SnapshotSqlOperator {
                 .await?;
             context.check_cancelled()?;
             self.output_ports()[0].validate(&produced, "snapshot_sql.output")?;
+            let _paid_output = if self.single_alias_replacement {
+                if self
+                    .budget
+                    .is_some_and(|b| produced.num_rows() as u64 > b.max_rows())
+                {
+                    return Err(state_error(&format!(
+                        "{}: sql_replacement_state_budget.max_rows required={} limit={}",
+                        self.name(),
+                        produced.num_rows(),
+                        self.budget.unwrap().max_rows()
+                    )));
+                }
+                Some(self.relation(produced.clone(), &|| context.check_cancelled())?)
+            } else {
+                None
+            };
+            context.check_cancelled()?;
             output.emit("output", produced).await?;
         }
         self.relations = next;

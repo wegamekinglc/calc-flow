@@ -103,6 +103,8 @@ def test_public_surface_is_the_frozen_export_list() -> None:
         "UpdateSemantics",
         "AnalysisIssue",
         "AnalysisResult",
+        "AggregateExpr",
+        "count_rows",
         "ArrayExpr",
         "ColumnExpr",
         "CrossSectionGroup",

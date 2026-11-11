@@ -124,6 +124,8 @@ pub struct StreamRuntimeConfig {
     /// Per-node latest-relation rows and owned bytes for snapshot SQL.
     /// Includes candidates, metadata and cached segments; scratch is separate.
     pub sql_snapshot_state_budget: Option<crate::StateBudget>,
+    /// Required owned-state limit for each complete replacement SQL aggregate.
+    pub sql_replacement_state_budget: Option<crate::StateBudget>,
 }
 
 impl Default for StreamRuntimeConfig {
@@ -137,6 +139,7 @@ impl Default for StreamRuntimeConfig {
             retained_epochs: 2,
             sql_compact_state_budget: None,
             sql_snapshot_state_budget: None,
+            sql_replacement_state_budget: None,
         }
     }
 }
@@ -718,7 +721,7 @@ impl CompiledStreamOperator {
         }
     }
 
-    pub(crate) const fn datafusion_runtime_initialized(&self) -> bool {
+    pub(crate) fn datafusion_runtime_initialized(&self) -> bool {
         match self {
             Self::Expression(operator) => operator.stream_runtime_initialized(),
             Self::Sql(operator) => operator.stream_runtime_initialized(),
@@ -794,6 +797,14 @@ impl PipelineBuilder {
         udfs: &UdfRegistrySnapshot,
         requirements: &StreamRequirements,
     ) -> Result<StreamExecutionPlan> {
+        for id in super::analysis::replacement_nodes(&self)? {
+            let node = self.nodes.get_mut(&id).expect("proved node");
+            if let NodeOperator::Sql(operator) = &mut node.operator {
+                operator.enable_replacement()?;
+                node.checkpoint_capability =
+                    OperatorCheckpointCapability::CheckpointedStateful { state_version: 3 };
+            }
+        }
         for (node_id, node) in &self.nodes {
             validate_stream_node(node_id, &node.operator)?;
             validate_stream_query(
@@ -1300,7 +1311,43 @@ impl StreamExecutionPlan {
         &self.requirements
     }
 
+    /// Validates runtime requirements before sources or binding factories are opened.
+    ///
+    /// # Errors
+    /// Replacement aggregates require an explicit budget and reject compact-only state.
+    pub fn validate_sql_budgets(&self, config: &StreamRuntimeConfig) -> Result<()> {
+        config.validate()?;
+        for node in &self.nodes {
+            if matches!(&node.operator, CompiledStreamOperator::Sql(o) if o.is_replacement()) {
+                let field = if config.sql_replacement_state_budget.is_none() {
+                    Some("sql_replacement_state_budget")
+                } else if config.sql_compact_state_budget.is_some() {
+                    Some("sql_compact_state_budget")
+                } else {
+                    None
+                };
+                if let Some(field) = field {
+                    return Err(CalcFlowError::InvalidArgument {
+                        field: field.into(),
+                        message: format!(
+                            "node {}: complete replacement requires explicit replacement budget and is incompatible with compact state",
+                            node.node_id
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
     pub(crate) fn set_sql_budgets(&mut self, config: &StreamRuntimeConfig) -> Result<()> {
+        self.validate_sql_budgets(config)?;
+        if let Some(budget) = config.sql_replacement_state_budget {
+            for node in &mut self.nodes {
+                if let CompiledStreamOperator::Sql(operator) = &mut node.operator {
+                    operator.set_replacement_budget(budget)?;
+                }
+            }
+        }
         if let Some(budget) = config.sql_snapshot_state_budget {
             for node in &mut self.nodes {
                 if let CompiledStreamOperator::SnapshotSql(operator) = &mut node.operator {
@@ -2250,6 +2297,9 @@ fn insert_sql_budget_fields(
     fields: &mut serde_json::Map<String, serde_json::Value>,
     config: &StreamRuntimeConfig,
 ) {
+    if let Some(budget) = config.sql_replacement_state_budget {
+        fields.insert("sql_replacement_state_budget".into(), json!(budget));
+    }
     if let Some(budget) = config.sql_state_budget {
         fields.insert("sql_state_budget".into(), json!(budget));
     }
