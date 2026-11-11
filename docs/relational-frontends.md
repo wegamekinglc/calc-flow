@@ -129,11 +129,12 @@ assert latest.update_semantics == "latest_relation"
 
 Rust exports `UpdateSemantics` at the crate root and through `program`:
 
-```rust,no_run
-# use calc_flow::{Program, UpdateSemantics};
-# fn choose(program: &Program) -> Program {
-program.with_update_semantics(UpdateSemantics::LatestRelation)
-# }
+```rust
+use calc_flow::{Program, UpdateSemantics};
+
+fn choose(program: &Program) -> Program {
+    program.with_update_semantics(UpdateSemantics::LatestRelation)
+}
 ```
 
 The default is `legacy_append`. With input batches [1] and [2, 3], the first

@@ -335,7 +335,7 @@ fn typed_join_project(
         description: String::new(),
         runtime: RuntimeSpec::Stream(StreamRunOptions::default()),
         graph: calc_flow::PipelineSpec {
-            update_semantics: Default::default(),
+            update_semantics: calc_flow::UpdateSemantics::LegacyAppend,
             name: "payments".into(),
             nodes: vec![NodeSpec {
                 id: "match".into(),
