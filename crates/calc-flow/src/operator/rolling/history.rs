@@ -1,6 +1,9 @@
 //! Failure-atomic retained history appends shared by rolling stream paths.
 
-use datafusion::arrow::{array::UInt64Array, compute::take_record_batch};
+use datafusion::arrow::{
+    array::{TimestampMicrosecondArray, UInt64Array},
+    compute::take_record_batch,
+};
 
 use super::{
     BufferedRow, CompiledRollingSpec, CompiledWindowGroup, EntityRollingState, HistoryUpdates,
@@ -110,42 +113,78 @@ fn retained_prefix(
     compiled: &CompiledRollingSpec,
     node: &str,
 ) -> Result<(usize, usize)> {
-    let previous_rows = previous.map_or(0, |state| state.rows.len());
     debug_assert!(previous.is_none_or(|state| state.columnar.records.is_empty()));
-    let total = previous_rows
-        .checked_add(indices.len())
-        .ok_or_else(|| operator_error(node, "rolling retained history count overflowed"))?;
-    let retention = usize::try_from(compiled.max_row_retention).unwrap_or(usize::MAX);
-    let row_prefix = total.saturating_sub(retention);
-    let time_prefix = compiled.max_duration_micros.map_or(total, |micros| {
-        let last = rows[*indices.last().expect("an entity has at least one row")]
-            .identity
-            .event_time;
-        let bound = i128::from(last) - i128::from(micros);
-        let expired =
-            |values: &Vec<ScalarValue>| i128::from(history_event_time(values, compiled)) <= bound;
-        let old_prefix = previous.map_or(0, |state| {
-            let (front, back) = state.rows.as_slices();
-            let first = front.partition_point(expired);
-            if first == front.len() {
-                first + back.partition_point(expired)
-            } else {
-                first
-            }
-        });
-        if old_prefix < previous_rows {
-            old_prefix
-        } else {
-            previous_rows
-                + indices
-                    .partition_point(|&index| i128::from(rows[index].identity.event_time) <= bound)
-        }
+    let policy = RetentionPolicy::new(compiled);
+    let last = rows[*indices.last().expect("an entity has at least one row")]
+        .identity
+        .event_time;
+    let discarded = policy.discarded_history(previous, indices.len(), last, compiled, node)?;
+    let row_prefix = indices.len().saturating_sub(policy.rows);
+    let time_prefix = policy.bound(last).map_or(indices.len(), |bound| {
+        indices.partition_point(|&index| i128::from(rows[index].identity.event_time) <= bound)
     });
-    let discard = row_prefix.min(time_prefix);
-    Ok((
-        discard.min(previous_rows),
-        discard.saturating_sub(previous_rows),
-    ))
+    Ok((discarded, row_prefix.min(time_prefix)))
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct RetentionPolicy {
+    pub(super) rows: usize,
+    pub(super) duration: Option<u64>,
+}
+
+impl RetentionPolicy {
+    pub(super) fn new(compiled: &CompiledRollingSpec) -> Self {
+        Self {
+            rows: usize::try_from(compiled.max_row_retention).unwrap_or(usize::MAX),
+            duration: compiled.max_duration_micros,
+        }
+    }
+
+    pub(super) fn bound(self, last: i64) -> Option<i128> {
+        self.duration
+            .map(|micros| i128::from(last) - i128::from(micros))
+    }
+
+    pub(super) fn keeps_new(self, newer: usize, time: i64, last: i64) -> bool {
+        newer < self.rows
+            || self
+                .bound(last)
+                .is_some_and(|bound| i128::from(time) > bound)
+    }
+
+    pub(super) fn discarded_history(
+        self,
+        previous: Option<&EntityRollingState>,
+        incoming: usize,
+        last: i64,
+        compiled: &CompiledRollingSpec,
+        node: &str,
+    ) -> Result<usize> {
+        let Some(previous) = previous else {
+            return Ok(0);
+        };
+        let old = previous
+            .rows
+            .len()
+            .checked_add(previous.columnar.rows)
+            .ok_or_else(|| operator_error(node, "rolling retained history count overflowed"))?;
+        let total = old
+            .checked_add(incoming)
+            .ok_or_else(|| operator_error(node, "rolling retained history count overflowed"))?;
+        let by_rows = total.saturating_sub(self.rows).min(old);
+        let Some(bound) = self.bound(last) else {
+            return Ok(by_rows);
+        };
+        let mut by_time = 0_usize;
+        for chunk in previous.retained_chunks() {
+            let expired = chunk.expired_prefix(bound, compiled)?;
+            by_time += expired;
+            if expired < chunk.len() {
+                break;
+            }
+        }
+        Ok(by_rows.min(by_time))
+    }
 }
 
 /// Stage only newly retained rows. Existing tails remain owned and untouched
@@ -160,9 +199,12 @@ pub(super) struct RetainedHistoryAppend {
     pub(super) next_charge: Option<HistoryCharge>,
 }
 
+type ScalarRows = VecDeque<Vec<ScalarValue>>;
+
+#[derive(Clone, Debug)]
 pub(super) enum RetainedRows {
     Columnar(RecordBatch),
-    Scalar(VecDeque<Vec<ScalarValue>>),
+    Scalar(ScalarRows),
 }
 
 impl RetainedRows {
@@ -172,12 +214,76 @@ impl RetainedRows {
             Self::Scalar(rows) => rows.len(),
         }
     }
+
+    pub(super) fn as_ref(&self) -> HistoryChunkRef<'_> {
+        match self {
+            Self::Columnar(record) => HistoryChunkRef::Columnar(record),
+            Self::Scalar(rows) => HistoryChunkRef::Scalar(rows),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn columnar_record(&self) -> &RecordBatch {
+        let Self::Columnar(record) = self else {
+            panic!("expected a columnar retained block")
+        };
+        record
+    }
 }
 
-/// Every chunk owns a gathered entity tail, never a slice of the input batch.
+#[derive(Clone, Copy)]
+pub(super) enum HistoryChunkRef<'a> {
+    Scalar(&'a ScalarRows),
+    Columnar(&'a RecordBatch),
+}
+
+impl HistoryChunkRef<'_> {
+    pub(super) fn len(self) -> usize {
+        match self {
+            Self::Scalar(rows) => rows.len(),
+            Self::Columnar(record) => record.num_rows(),
+        }
+    }
+
+    fn expired_prefix(self, bound: i128, compiled: &CompiledRollingSpec) -> Result<usize> {
+        match self {
+            Self::Scalar(rows) => {
+                let expired = |values: &Vec<ScalarValue>| {
+                    i128::from(history_event_time(values, compiled)) <= bound
+                };
+                let (front, back) = rows.as_slices();
+                let first = front.partition_point(expired);
+                Ok(if first == front.len() {
+                    first + back.partition_point(expired)
+                } else {
+                    first
+                })
+            }
+            Self::Columnar(record) => {
+                let times = record
+                    .column(compiled.event_time_index)
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .ok_or_else(|| internal_error("retained rolling timestamp type changed"))?;
+                Ok(times
+                    .values()
+                    .partition_point(|&time| i128::from(time) <= bound))
+            }
+        }
+    }
+}
+
+impl EntityRollingState {
+    pub(super) fn retained_chunks(&self) -> impl Iterator<Item = HistoryChunkRef<'_>> {
+        std::iter::once(HistoryChunkRef::Scalar(&self.rows))
+            .chain(self.columnar.records.iter().map(RetainedRows::as_ref))
+    }
+}
+
+/// Columnar chunks own gathered values; scalar chunks own their retained payloads.
 #[derive(Clone, Debug, Default)]
 pub(super) struct ColumnarHistory {
-    pub(super) records: VecDeque<RecordBatch>,
+    pub(super) records: VecDeque<RetainedRows>,
     pub(super) rows: usize,
 }
 
@@ -190,14 +296,17 @@ impl ColumnarHistory {
         if count == 0 {
             return Ok(None);
         }
-        for record in &self.records {
-            if count >= record.num_rows() {
-                count -= record.num_rows();
+        for chunk in &self.records {
+            if count >= chunk.len() {
+                count -= chunk.len();
                 if count == 0 {
                     return Ok(None);
                 }
                 continue;
             }
+            let RetainedRows::Columnar(record) = chunk else {
+                return Ok(None);
+            };
             let retained = record.slice(count, record.num_rows() - count);
             let Some(logical_bytes) = crate::operator::row_cost::RowCosts::try_total(&retained)?
             else {
@@ -228,38 +337,83 @@ impl ColumnarHistory {
     fn discard_front(&mut self, mut count: usize, prepared_front: Option<RecordBatch>) {
         self.rows -= count;
         while count > 0 {
-            let record = self.records.pop_front().expect("retained rows are present");
-            if count < record.num_rows() {
-                let retained = prepared_front.expect("partial history discard was prepared");
+            let chunk = self.records.pop_front().expect("retained rows are present");
+            let rows = chunk.len();
+            if count < rows {
+                let retained = match chunk {
+                    RetainedRows::Columnar(_) => RetainedRows::Columnar(
+                        prepared_front.expect("partial history discard was prepared"),
+                    ),
+                    RetainedRows::Scalar(mut values) => {
+                        for _ in 0..count {
+                            values.pop_front();
+                        }
+                        compact_scalar_capacity(&mut values);
+                        RetainedRows::Scalar(values)
+                    }
+                };
                 self.records.push_front(retained);
                 break;
             }
-            count -= record.num_rows();
+            count -= rows;
         }
     }
 
-    fn push(&mut self, record: RecordBatch) {
-        self.rows += record.num_rows();
-        self.records.push_back(record);
+    fn push(&mut self, chunk: RetainedRows) {
+        self.rows += chunk.len();
+        if let RetainedRows::Scalar(rows) = chunk {
+            if let Some(RetainedRows::Scalar(previous)) = self.records.back_mut() {
+                previous.extend(rows);
+            } else if !rows.is_empty() {
+                self.records.push_back(RetainedRows::Scalar(rows));
+            }
+        } else if chunk.len() != 0 {
+            self.records.push_back(chunk);
+        }
     }
 
-    fn materialize(
+    pub(super) fn has_columnar(&self) -> bool {
+        self.records
+            .iter()
+            .any(|chunk| matches!(chunk, RetainedRows::Columnar(_)))
+    }
+
+    fn prepare_materialize(
         &self,
         compiled: &CompiledRollingSpec,
         node_id: &str,
         observer: Option<&RollingMetricsRecorder>,
-    ) -> Result<VecDeque<Vec<ScalarValue>>> {
-        let mut rows = VecDeque::with_capacity(self.rows);
-        for record in &self.records {
-            for index in 0..record.num_rows() {
-                rows.push_back(read_buffered_row(record, index, compiled, node_id)?.values);
-                if let Some(recorder) = observer {
-                    recorder.add(RollingWork::HistoryRowsMaterialized, 1);
-                    recorder.add(RollingWork::ScalarValueConversions, record.num_columns());
+    ) -> Result<Vec<Option<ScalarRows>>> {
+        self.records
+            .iter()
+            .map(|chunk| {
+                let RetainedRows::Columnar(record) = chunk else {
+                    return Ok(None);
+                };
+                let mut rows = VecDeque::with_capacity(record.num_rows());
+                for index in 0..record.num_rows() {
+                    rows.push_back(read_buffered_row(record, index, compiled, node_id)?.values);
+                    if let Some(recorder) = observer {
+                        recorder.add(RollingWork::HistoryRowsMaterialized, 1);
+                        recorder.add(RollingWork::ScalarValueConversions, record.num_columns());
+                    }
+                }
+                Ok(Some(rows))
+            })
+            .collect()
+    }
+
+    fn materialize_into(&mut self, target: &mut ScalarRows, prepared: Vec<Option<ScalarRows>>) {
+        debug_assert_eq!(self.records.len(), prepared.len());
+        for (chunk, prepared) in std::mem::take(&mut self.records).into_iter().zip(prepared) {
+            match chunk {
+                RetainedRows::Scalar(rows) => target.extend(rows),
+                RetainedRows::Columnar(_) => {
+                    target.extend(prepared.expect("columnar conversion was prepared"));
                 }
             }
         }
-        Ok(rows)
+        self.rows = 0;
     }
 }
 
@@ -274,14 +428,17 @@ impl RollingHistories {
         let prepared = self
             .by_entity
             .values()
-            .map(|state| state.columnar.materialize(compiled, node_id, observer))
+            .map(|state| {
+                state
+                    .columnar
+                    .prepare_materialize(compiled, node_id, observer)
+            })
             .collect::<Result<Vec<_>>>()?;
         for (state, rows) in self.by_entity.values_mut().zip(prepared) {
-            if !state.columnar.records.is_empty() {
+            if state.columnar.has_columnar() {
                 state.charge_cache = None;
             }
-            state.rows.extend(rows);
-            state.columnar = ColumnarHistory::default();
+            state.columnar.materialize_into(&mut state.rows, rows);
         }
         Ok(())
     }
@@ -384,9 +541,10 @@ impl RetainedHistoryAppend {
             .columnar
             .discard_front(self.discarded_rows - scalar_discard, self.prepared_front);
         match self.rows {
-            RetainedRows::Columnar(record) if record.num_rows() != 0 => state.columnar.push(record),
-            RetainedRows::Columnar(_) => {}
-            RetainedRows::Scalar(rows) => state.rows.extend(rows),
+            RetainedRows::Scalar(rows) if state.columnar.records.is_empty() => {
+                state.rows.extend(rows);
+            }
+            rows => state.columnar.push(rows),
         }
         if self.discarded_rows != 0 {
             compact_scalar_capacity(&mut state.rows);
@@ -405,15 +563,27 @@ impl ColumnarHistory {
         node: &str,
     ) -> Result<StateCharge> {
         let mut charge = StateCharge::default();
-        for record in &self.records {
+        for chunk in &self.records {
             if discard == 0 {
                 break;
             }
+            let rows = chunk.len();
+            if let RetainedRows::Scalar(values) = chunk {
+                for row in values.iter().take(discard) {
+                    charge =
+                        charge.checked_add(budget::scalar_history_row_charge(row, node)?, node)?;
+                }
+                discard = discard.saturating_sub(rows);
+                continue;
+            }
+            let RetainedRows::Columnar(record) = chunk else {
+                unreachable!()
+            };
             let original = budget::ordered_record_charge(record, node)?
                 .ok_or_else(|| internal_error("columnar history has unsupported charge"))?;
-            if discard >= record.num_rows() {
+            if discard >= rows {
                 charge = charge.checked_add(original, node)?;
-                discard -= record.num_rows();
+                discard -= rows;
                 continue;
             }
             let retained = prepared_front.expect("partial discard has a prepared front");

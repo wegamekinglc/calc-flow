@@ -1965,7 +1965,7 @@ impl RollingOperator {
             .histories
             .by_entity
             .values()
-            .any(|state| !state.columnar.records.is_empty());
+            .any(|state| state.columnar.has_columnar());
         let old = has_columnar
             .then(|| budget::histories_charge(&self.state.histories, node))
             .transpose()?;

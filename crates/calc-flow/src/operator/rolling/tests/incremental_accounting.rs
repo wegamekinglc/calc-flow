@@ -123,7 +123,7 @@ fn assert_live_charge(operator: &RollingOperator) {
     assert_cached_rolling_charge(operator);
 }
 
-fn assert_exact_byte_boundary(operator: &mut RollingOperator) {
+pub(super) fn assert_exact_byte_boundary(operator: &mut RollingOperator) {
     let charge = budget::full_state_charge(
         &operator.state.buffer,
         &operator.state.ordered,

@@ -3,6 +3,7 @@ mod incremental_accounting;
 mod incremental_history;
 mod indicators;
 mod late;
+mod ordered_duration;
 mod shared_rows;
 
 #[tokio::test]
@@ -1592,7 +1593,11 @@ fn single_entity_retained_prices(operator: &RollingOperator) -> &Float64Array {
         .unwrap()
         .columnar
         .records
-        .front()
+        .iter()
+        .find_map(|chunk| match chunk {
+            history::RetainedRows::Columnar(record) => Some(record),
+            history::RetainedRows::Scalar(_) => None,
+        })
         .unwrap()
         .column(3)
         .as_any()
@@ -1654,7 +1659,7 @@ async fn ordered_stream_finalization_reuses_input_columns_and_keeps_incremental_
         &[1.0, 2.0],
     );
     let second = float64_fast_record(&[(3, "a", 3, Some(5.0))]);
-    let retained_row = single_entity_retained_prices(&operator).values()[1..].as_ptr();
+    let retained_row = retained_price_address(&operator, 1);
     let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(2)));
     operator
         .process_data(
@@ -1687,7 +1692,7 @@ async fn ordered_stream_finalization_reuses_input_columns_and_keeps_incremental_
         &[4.0]
     );
     assert_eq!(
-        single_entity_retained_prices(&operator).values().as_ptr(),
+        retained_price_address(&operator, 0),
         retained_row,
         "an unchanged retained row must not be cloned on append"
     );
@@ -1883,8 +1888,9 @@ fn sparse_fixed_width_appends_amortize_retained_buffer_copies() {
             .columnar
             .records
             .iter()
-            .map(RecordBatch::num_rows)
-            .sum::<usize>(),
+            .map(history::RetainedRows::len)
+            .sum::<usize>()
+            + history.rows.len(),
         1024
     );
     assert_eq!(history.transition_count, 1792);
@@ -1924,7 +1930,7 @@ fn fixed_width_history_record(first: u32, rows: u32) -> RecordBatch {
 }
 
 #[tokio::test]
-async fn native_rolling_observations_report_work_without_materializing_histories() {
+async fn native_rolling_observations_report_tiny_payload_work_without_scalar_input_bridge() {
     use crate::operator::rolling_metrics::{RollingCallback, RollingMetricsStore};
     use crate::{CancellationToken, StreamJobContext};
 
@@ -1975,8 +1981,9 @@ async fn native_rolling_observations_report_work_without_materializing_histories
     assert_eq!(observations.watermark.touched_entities, 4);
     assert_eq!(observations.watermark.copied_entities, 2);
     assert_eq!(observations.watermark.numeric_rows, 4);
-    assert_eq!(observations.watermark.history_rows_materialized, 0);
-    assert_eq!(observations.watermark.scalar_value_conversions, 4);
+    assert_eq!(observations.data.scalar_value_conversions, 0);
+    assert_eq!(observations.watermark.history_rows_materialized, 4);
+    assert_eq!(observations.watermark.scalar_value_conversions, 28);
     assert_eq!(observations.watermark.output_rows_prepared, 4);
     assert_eq!(observations.watermark.output_chunks_prepared, 2);
 }
@@ -2399,16 +2406,8 @@ async fn assert_rejected_compaction_preserves_state(cancelled: bool) {
     assert_eq!(retained_buffer_addresses(&operator), prior_buffers);
     let history = operator.state.histories.by_entity.values().next().unwrap();
     assert_eq!(history.transition_count, 2);
-    assert!(
-        history.columnar.records[0]
-            .column(5)
-            .get_buffer_memory_size()
-            >= 8 * 1024 * 1024
-    );
-    assert_eq!(
-        single_entity_retained_prices(&operator).values().as_ref(),
-        &[1.0, 3.0]
-    );
+    assert!(retained_column_bytes(history, 5) >= 8 * 1024 * 1024);
+    assert_eq!(retained_prices(&operator), [1.0, 3.0]);
     let metrics = store.snapshot().watermark;
     assert_eq!(metrics.failed, u64::from(!cancelled));
     assert_eq!(metrics.cancelled, u64::from(cancelled));
@@ -2464,17 +2463,97 @@ fn retained_buffer_addresses(operator: &RollingOperator) -> Vec<usize> {
         .histories
         .by_entity
         .values()
-        .flat_map(|history| &history.columnar.records)
-        .flat_map(RecordBatch::columns)
-        .flat_map(|column| {
-            let data = column.to_data();
-            data.buffers()
+        .flat_map(EntityRollingState::retained_chunks)
+        .flat_map(|chunk| match chunk {
+            history::HistoryChunkRef::Scalar(rows) => rows
                 .iter()
-                .map(|buffer| buffer.as_ptr() as usize)
-                .chain(data.nulls().map(|nulls| nulls.buffer().as_ptr() as usize))
-                .collect::<Vec<_>>()
+                .map(|row| row.as_ptr() as usize)
+                .collect::<Vec<_>>(),
+            history::HistoryChunkRef::Columnar(record) => record
+                .columns()
+                .iter()
+                .flat_map(|column| {
+                    let data = column.to_data();
+                    data.buffers()
+                        .iter()
+                        .map(|buffer| buffer.as_ptr() as usize)
+                        .chain(data.nulls().map(|nulls| nulls.buffer().as_ptr() as usize))
+                        .collect::<Vec<_>>()
+                })
+                .collect(),
         })
         .collect()
+}
+
+fn retained_prices(operator: &RollingOperator) -> Vec<f64> {
+    operator
+        .state
+        .histories
+        .by_entity
+        .values()
+        .next()
+        .unwrap()
+        .retained_chunks()
+        .flat_map(|chunk| match chunk {
+            history::HistoryChunkRef::Scalar(rows) => rows
+                .iter()
+                .map(|row| {
+                    let ScalarValue::Float64(Some(value)) = row[3] else {
+                        panic!("missing price")
+                    };
+                    value
+                })
+                .collect::<Vec<_>>(),
+            history::HistoryChunkRef::Columnar(record) => record
+                .column(3)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .values()
+                .to_vec(),
+        })
+        .collect()
+}
+
+fn retained_price_address(operator: &RollingOperator, mut index: usize) -> usize {
+    let history = operator.state.histories.by_entity.values().next().unwrap();
+    for chunk in history.retained_chunks() {
+        if index < chunk.len() {
+            return match chunk {
+                history::HistoryChunkRef::Scalar(rows) => {
+                    std::ptr::from_ref(&rows[index][3]) as usize
+                }
+                history::HistoryChunkRef::Columnar(record) => record
+                    .column(3)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .values()[index..]
+                    .as_ptr()
+                    as usize,
+            };
+        }
+        index -= chunk.len();
+    }
+    panic!("missing retained row")
+}
+
+fn retained_column_bytes(history: &EntityRollingState, column: usize) -> usize {
+    history
+        .retained_chunks()
+        .map(|chunk| match chunk {
+            history::HistoryChunkRef::Scalar(rows) => rows
+                .iter()
+                .map(|row| match &row[column] {
+                    ScalarValue::Utf8(Some(value)) => value.capacity(),
+                    _ => 0,
+                })
+                .sum::<usize>(),
+            history::HistoryChunkRef::Columnar(record) => {
+                record.column(column).get_buffer_memory_size()
+            }
+        })
+        .sum()
 }
 
 async fn assert_retry_releases_evicted_label(
@@ -2506,31 +2585,8 @@ async fn assert_retry_releases_evicted_label(
     assert_eq!(operator.state.next_output_sequence, sequence + 1);
     let history = operator.state.histories.by_entity.values().next().unwrap();
     assert_eq!(history.transition_count, 3);
-    let retained = history
-        .columnar
-        .records
-        .iter()
-        .flat_map(|record| {
-            record
-                .column(3)
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap()
-                .values()
-                .iter()
-                .copied()
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(retained, [3.0, 5.0]);
-    assert!(
-        history
-            .columnar
-            .records
-            .iter()
-            .map(|record| record.column(5).get_buffer_memory_size())
-            .sum::<usize>()
-            < 1024
-    );
+    assert_eq!(retained_prices(operator), [3.0, 5.0]);
+    assert!(retained_column_bytes(history, 5) < 1024);
 }
 
 #[tokio::test]
@@ -2936,7 +2992,7 @@ async fn columnar_history_compacts_input_and_survives_checkpoint_or_fallback() {
         for history in operator.state.histories.by_entity.values() {
             assert!(history.rows.is_empty());
             assert_eq!(history.transition_count, 64);
-            let retained = history.columnar.records.front().unwrap();
+            let retained = history.columnar.records.front().unwrap().columnar_record();
             assert_eq!(retained.num_rows(), 5);
             assert!(
                 retained.column(3).get_buffer_memory_size()
@@ -3149,19 +3205,9 @@ async fn assert_releases_evicted_large_label(window: u32) {
     collector.drain("output");
     assert_cached_rolling_charge(&operator);
     let history = operator.state.histories.by_entity.values().next().unwrap();
-    let retained_label_bytes: usize = history
-        .columnar
-        .records
-        .iter()
-        .map(|record| record.column(5).get_buffer_memory_size())
-        .sum();
+    let retained_label_bytes = retained_column_bytes(history, 5);
     assert_eq!(
-        history
-            .columnar
-            .records
-            .iter()
-            .map(RecordBatch::num_rows)
-            .sum::<usize>(),
+        history.rows.len() + history.columnar.rows,
         usize::try_from(window).unwrap()
     );
     assert!(

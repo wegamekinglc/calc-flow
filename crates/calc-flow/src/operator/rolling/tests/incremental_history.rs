@@ -5,9 +5,10 @@ async fn incremental_history_reclaims_deque_capacity_after_time_jump() {
     let spec = kernel_spec(json!([duration_output("mean", "price", "mean", 1_024)]));
     let mut operator = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
     let (job, mut output) = job_output(&operator);
-    let initial = (1..=128_u32)
+    let mut initial = (1..=128_u32)
         .map(|n| (i64::from(n), "a", u64::from(n), Some(f64::from(n))))
         .collect::<Vec<_>>();
+    initial.swap(0, 1);
     for (record, watermark) in [
         (float64_fast_record(&initial), 128),
         (
@@ -58,8 +59,8 @@ async fn incremental_history_reuses_retained_payload_across_mixed_frames() {
     let (job, mut output) = job_output(&operator);
     let context = StreamOperatorContext::new(&job, "rolling", None);
     let first = float64_fast_record(&[
-        (1, "a", 1, Some(1.0)),
         (2, "a", 2, Some(3.0)),
+        (1, "a", 1, Some(1.0)),
         (3, "a", 3, Some(5.0)),
     ]);
     let mut columns = first.columns().to_vec();
@@ -207,8 +208,8 @@ async fn incremental_history_budget_rejection_preserves_history_and_retries() {
         &job,
         &mut output,
         float64_fast_record(&[
-            (1, "a", 1, Some(1.0)),
             (2, "a", 2, Some(3.0)),
+            (1, "a", 1, Some(1.0)),
             (3, "a", 3, Some(5.0)),
         ]),
         3,
@@ -241,7 +242,7 @@ async fn incremental_history_budget_rejection_preserves_history_and_retries() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("state budget"), "{error}");
-    assert_eq!(operator.state.buffer.len(), 2);
+    assert_eq!(pending_rows(&operator), 2);
     assert_eq!(
         operator.state.last_input_watermark,
         Some(EventTime::from_micros(3))
@@ -265,7 +266,7 @@ async fn incremental_history_budget_rejection_preserves_history_and_retries() {
         .unwrap();
     assert_eq!(operator.state.histories.by_entity.len(), 2);
     assert_eq!(first_history(&operator).transition_count, 4);
-    assert!(operator.state.buffer.is_empty());
+    assert_eq!(pending_rows(&operator), 0);
     let emitted = output.drain("output");
     let record = &emitted[0]
         .as_data()
@@ -308,8 +309,8 @@ async fn incremental_history_rejected_emission_keeps_history_for_manual_retry() 
             &job,
             &mut output,
             float64_fast_record(&[
-                (1, "a", 1, Some(1.0)),
                 (2, "a", 2, Some(3.0)),
+                (1, "a", 1, Some(1.0)),
                 (3, "a", 3, Some(5.0)),
             ]),
             3,
@@ -408,7 +409,7 @@ async fn incremental_history_matches_batch_and_checkpoint_across_mixed_boundarie
             emitted.extend(
                 finalize_record(&mut restored, &job, &mut output, input.slice(4, 4), 8).await,
             );
-            assert_live_charge(&restored);
+            checkpoint_for_comparison(&mut restored);
             let actual = concat_batches(&expected_record.schema(), &emitted).unwrap();
             assert_eq!(actual, expected_record);
             let history = restored
@@ -465,6 +466,12 @@ async fn incremental_history_matches_batch_and_checkpoint_across_mixed_boundarie
             );
         }
     }
+}
+
+fn checkpoint_for_comparison(operator: &mut RollingOperator) {
+    assert_live_charge(operator);
+    operator.checkpoint(Epoch::new(2).unwrap()).unwrap();
+    assert_live_charge(operator);
 }
 
 fn batch_reference(
@@ -549,7 +556,7 @@ async fn incremental_history_retention_handles_negative_time_bounds() {
             &[2.0]
         );
         let history = first_history(&operator);
-        assert_eq!(history.rows.len(), 2);
+        assert_eq!(history.rows.len() + history.columnar.rows, 2);
         assert_eq!(history.transition_count, 2);
         assert_live_charge(&operator);
     }
@@ -577,8 +584,16 @@ async fn incremental_history_expires_exact_lower_bound_after_deque_wrap() {
     let spec = kernel_spec(json!([duration_output("mean", "price", "mean", 5)]));
     let mut operator = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
     let (job, mut output) = job_output(&operator);
+    finalize_record(
+        &mut operator,
+        &job,
+        &mut output,
+        float64_fast_record(&[(2, "a", 2, Some(2.0)), (1, "a", 1, Some(1.0))]),
+        2,
+    )
+    .await;
     let mut wrapped = false;
-    for n in 1..=12_u32 {
+    for n in 3..=12_u32 {
         finalize_record(
             &mut operator,
             &job,
@@ -627,4 +642,14 @@ async fn incremental_history_expires_exact_lower_bound_after_deque_wrap() {
         &[11.0]
     );
     assert_live_charge(&operator);
+}
+
+fn pending_rows(operator: &RollingOperator) -> usize {
+    operator.state.buffer.len()
+        + operator
+            .state
+            .ordered
+            .records()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>()
 }
