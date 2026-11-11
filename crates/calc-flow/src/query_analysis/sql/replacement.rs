@@ -126,3 +126,77 @@ fn portable(dtype: &str) -> bool {
                 | "timestamp[us, UTC]"
         )
 }
+
+/// Explains the first structural restriction; schema planning still owns type errors.
+pub(crate) fn rejection_reason(text: &str) -> &'static str {
+    let Ok(parsed) = parse_select_query(text) else {
+        return "SQL semantics are unproved";
+    };
+    let DFStatement::Statement(statement) = parsed.statement() else {
+        return "one SELECT is required";
+    };
+    let Statement::Query(query) = statement.as_ref() else {
+        return "one SELECT is required";
+    };
+    if query.with.is_some() {
+        return "CTE is outside the replacement allowlist";
+    }
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return "set operations are outside the replacement allowlist";
+    };
+    if select.from.len() != 1 || select.from.iter().any(|from| !from.joins.is_empty()) {
+        return "JOIN or multiple relations are outside the replacement allowlist";
+    }
+    if select.distinct.is_some() {
+        return "SELECT DISTINCT is outside the replacement allowlist";
+    }
+    if select.selection.is_some() {
+        return "WHERE must be a separate row-local node";
+    }
+    if select.having.is_some() {
+        return "HAVING is outside the replacement allowlist";
+    }
+    if query.order_by.is_some() {
+        return "ORDER BY is outside the replacement allowlist";
+    }
+    if query.limit_clause.is_some() || query.fetch.is_some() {
+        return "LIMIT/OFFSET/FETCH is outside the replacement allowlist";
+    }
+    for item in &select.projection {
+        match expression(item) {
+            Some(Expr::Function(function)) => {
+                if let Some(reason) = function_rejection(function) {
+                    return reason;
+                }
+            }
+            Some(Expr::Identifier(_) | Expr::CompoundIdentifier(_)) => {}
+            _ => return "projection requires direct group keys or named reducers",
+        }
+    }
+    "operand/group key type or query modifiers are outside the replacement allowlist"
+}
+fn function_rejection(function: &Function) -> Option<&'static str> {
+    if !simple_aggregate_function(function)
+        || function.null_treatment.is_some()
+        || function.uses_odbc_syntax
+        || !matches!(function.parameters, FunctionArguments::None)
+    {
+        return Some("only unmodified SUM/COUNT/MIN/MAX/AVG reducers are admitted");
+    }
+    let FunctionArguments::List(args) = &function.args else {
+        return Some("one direct column operand is required");
+    };
+    if args.duplicate_treatment.is_some() {
+        return Some("DISTINCT/ALL is outside the replacement allowlist");
+    }
+    if args.args.len() != 1 || !args.clauses.is_empty() {
+        return Some("one direct column without function clauses is required");
+    }
+    match &args.args[0] {
+        FunctionArg::Unnamed(
+            FunctionArgExpr::Expr(Expr::Identifier(_) | Expr::CompoundIdentifier(_))
+            | FunctionArgExpr::Wildcard,
+        ) => None,
+        _ => Some("one direct column operand is required"),
+    }
+}

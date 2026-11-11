@@ -290,4 +290,4 @@ fn order_key(key: &OrderByExpr, fields: &[crate::ArrowFieldSpec]) -> Option<Quer
 }
 
 mod replacement;
-pub(crate) use replacement::supported as replacement;
+pub(crate) use replacement::{rejection_reason as replacement_rejection, supported as replacement};

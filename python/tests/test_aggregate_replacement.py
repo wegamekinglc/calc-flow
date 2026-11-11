@@ -217,8 +217,30 @@ def test_replacement_allowlist_rejects_unsupported_queries(query):
     with pytest.raises(
         cf.CompileError,
         match="update_interpretation_mismatch|update_semantics_unproved",
-    ):
+    ) as caught:
         program.compile_stream()
+    expected = next(
+        reason
+        for marker, reason in [
+            ("DISTINCT", "DISTINCT/ALL"),
+            ("HAVING", "HAVING"),
+            ("ORDER BY", "ORDER BY"),
+            ("LIMIT", "LIMIT/OFFSET/FETCH"),
+            ("+1", "projection"),
+            ("WHERE", "WHERE"),
+            ("ABS", "direct column"),
+            ("COUNT(1)", "direct column"),
+            ("WITH c", "CTE"),
+            ("JOIN", "JOIN"),
+        ]
+        if marker in query
+    )
+    root = next(
+        node
+        for node in caught.value.query_analysis.nodes
+        if node.path == "outputs.result"
+    )
+    assert expected in root.stream.reason
     program.for_mode("batch").compile_batch()
 
 

@@ -527,6 +527,11 @@ fn analyze_nodes(
             .collect::<Vec<_>>();
         if !update_semantics.is_legacy() && aggregate && inputs.len() == 1 {
             let source = &by_path[&inputs[0].source_path];
+            if source.stream.update == UpdateKind::CompleteSnapshot
+                && let Some(query) = &node.query
+            {
+                facts.stream.reason = sql::replacement_rejection(query).into();
+            }
             if node.schema.is_some()
                 && source.schema.is_some()
                 && node.query.as_ref().is_some_and(|q| {
