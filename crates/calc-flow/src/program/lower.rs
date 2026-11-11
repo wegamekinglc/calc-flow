@@ -43,6 +43,11 @@ fn endpoint(table: &TableExpr, port: &str) -> PortEndpoint {
 fn children(table: &TableExpr, path: &str) -> Vec<(String, TableExpr, String)> {
     match &table.0.kind {
         RelationKind::Input { .. } => vec![],
+        RelationKind::Aggregate { input, .. } => vec![(
+            "input".into(),
+            input.clone(),
+            format!("{path}.aggregate.value"),
+        )],
         RelationKind::Filter { input, .. } => vec![(
             "input".into(),
             input.clone(),
@@ -256,6 +261,28 @@ impl Lowered {
             } => Ok(prepare_input(&node_id(table), schema, options)),
             RelationKind::Project { .. } => self.prepare_projection(table, path).await,
             RelationKind::Filter { .. } => self.prepare_filter(table, path).await,
+            RelationKind::Aggregate {
+                input,
+                aggregates,
+                group_by,
+            } => {
+                let query = crate::dataframe::aggregate::query(
+                    input,
+                    &self.schemas[&input.0.id],
+                    aggregates,
+                    group_by,
+                    path,
+                )?;
+                let mut prepared = self
+                    .prepare_sql_parts(
+                        table,
+                        &query,
+                        &BTreeMap::from([("input".into(), input.clone())]),
+                    )
+                    .await?;
+                prepared.kind = "aggregate";
+                Ok(prepared)
+            }
             RelationKind::Sql { .. } => self.prepare_sql(table).await,
         }
     }
@@ -315,6 +342,14 @@ impl Lowered {
         let RelationKind::Sql { query, tables } = &table.0.kind else {
             unreachable!("dispatched SQL")
         };
+        self.prepare_sql_parts(table, query, tables).await
+    }
+    async fn prepare_sql_parts(
+        &self,
+        table: &TableExpr,
+        query: &str,
+        tables: &BTreeMap<String, TableExpr>,
+    ) -> Result<Prepared> {
         let id = node_id(table);
         let inputs: BTreeMap<_, _> = tables
             .iter()
@@ -325,7 +360,7 @@ impl Lowered {
         let node = NodeSpec {
             id,
             operator: OperatorSpec::Sql {
-                query: query.clone(),
+                query: query.to_owned(),
                 aliases: inputs.keys().cloned().collect(),
                 udfs: vec![],
             },
@@ -337,7 +372,7 @@ impl Lowered {
             node,
             schema,
             kind: "sql",
-            query: Some(query.clone()),
+            query: Some(query.to_owned()),
             ordering: QueryOrderingFacts::default(),
         })
     }
@@ -452,6 +487,7 @@ fn native_edge(edge: &EdgeSpec) -> Result<Edge> {
 fn relation_kind(table: &TableExpr) -> (&'static str, Option<String>) {
     match &table.0.kind {
         RelationKind::Input { .. } => ("table_input", None),
+        RelationKind::Aggregate { .. } => ("aggregate", None),
         RelationKind::Project { append, .. } => {
             (if *append { "with_columns" } else { "project" }, None)
         }

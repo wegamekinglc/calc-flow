@@ -194,6 +194,26 @@ def _array_binary(
 class ColumnExpr(Expr[object]):
     """A row-local column expression over one table lineage."""
 
+    def sum(self) -> AggregateExpr:
+        """Sum a direct numeric column, ignoring NULL values."""
+        return AggregateExpr._column("SUM", self)
+
+    def count(self) -> AggregateExpr:
+        """Count non-NULL values of a direct column."""
+        return AggregateExpr._column("COUNT", self)
+
+    def min(self) -> AggregateExpr:
+        """Minimum of a direct numeric column."""
+        return AggregateExpr._column("MIN", self)
+
+    def max(self) -> AggregateExpr:
+        """Maximum of a direct numeric column."""
+        return AggregateExpr._column("MAX", self)
+
+    def mean(self) -> AggregateExpr:
+        """Mean of a direct numeric column as Float64."""
+        return AggregateExpr._column("AVG", self)
+
     def __eq__(self, other: ColumnOperand, /) -> ColumnExpr:
         return _column_binary(self, other, "eq", "==")
 
@@ -270,6 +290,40 @@ def _reflected_column(
             {},
         )
     )
+
+
+@dataclass(frozen=True, slots=True, eq=False, init=False)
+class AggregateExpr:
+    """Immutable aggregate declaration; obtain it from a column or count_rows."""
+
+    _function: str
+    _value: ColumnExpr | None
+
+    def __init__(self) -> None:
+        raise TypeError("AggregateExpr: use column reducers or count_rows()")
+
+    @classmethod
+    def _create(cls, function: str, value: ColumnExpr | None) -> AggregateExpr:
+        aggregate = object.__new__(cls)
+        object.__setattr__(aggregate, "_function", function)
+        object.__setattr__(aggregate, "_value", value)
+        return aggregate
+
+    @classmethod
+    def _column(cls, function: str, value: ColumnExpr) -> AggregateExpr:
+        if value._node.op.name != "column_ref":
+            raise ValueError(
+                "aggregate.value: requires a direct column; use with_columns first"
+            )
+        return cls._create(function, value)
+
+    def __bool__(self) -> bool:
+        raise bool_error()
+
+
+def count_rows() -> AggregateExpr:
+    """Count every row, including rows containing NULL."""
+    return AggregateExpr._create("COUNT", None)
 
 
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
@@ -456,6 +510,23 @@ def _reflected_array(
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
 class TableExpr(Expr[object]):
     """An Arrow-backed table expression."""
+
+    def aggregate(
+        self,
+        aggregates: Mapping[str, AggregateExpr],
+        /,
+        *,
+        group_by: Sequence[str] = (),
+    ) -> TableExpr:
+        """Declare named reductions; keys precede reductions in output order.
+
+        Empty global input has one row: COUNT is zero and numeric reducers are
+        typed NULL. Grouped empty input has zero rows. Streaming append inputs
+        accumulate; latest complete snapshots require an explicit runtime budget.
+        """
+        from calc_flow.symbolic.aggregate import aggregate
+
+        return aggregate(self, aggregates, group_by)
 
     def collect_schema(
         self, *, runtime: Runtime | None = None, mode: CompileMode = "batch"

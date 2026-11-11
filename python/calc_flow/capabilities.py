@@ -1098,7 +1098,7 @@ def runtime_capabilities(
                 requires_watermark=False,
                 checkpoint_support="checkpointed_stateful",
                 state_version=2,
-                state_layouts=(3, 4, 5),
+                state_layouts=(3, 4, 5, 6),
                 deterministic=True,
                 replay_safe=True,
             ),

@@ -17,6 +17,7 @@ use crate::{
 pub(super) enum Proof {
     RowLocal,
     Aggregate,
+    Replacement,
     PerBatch,
     Selection,
     PerBatchUnproven,
@@ -287,3 +288,6 @@ fn order_key(key: &OrderByExpr, fields: &[crate::ArrowFieldSpec]) -> Option<Quer
         },
     })
 }
+
+mod replacement;
+pub(crate) use replacement::supported as replacement;

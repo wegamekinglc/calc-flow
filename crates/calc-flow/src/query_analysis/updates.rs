@@ -78,12 +78,15 @@ pub(super) fn edge(
     edge: &DeclarationEdge,
     stream: &mut QueryEdgeModeFacts,
     target: &(sql::Proof, bool, String),
+    reason: &str,
     issues: &mut Vec<QueryDiagnostic>,
 ) {
     if stream.producer_update != UpdateKind::CompleteSnapshot {
         return;
     }
-    if target.0 == sql::Proof::RowLocal || target.2 == "snapshot_sql" {
+    if matches!(target.0, sql::Proof::RowLocal | sql::Proof::Replacement)
+        || target.2 == "snapshot_sql"
+    {
         stream.consumer_interpretation = InputInterpretation::CompleteReplacement;
         stream.reason =
             "one complete Batch, including an empty relation, replaces this input".into();
@@ -94,7 +97,9 @@ pub(super) fn edge(
             &edge.path,
             "update_interpretation_mismatch",
             SupportStatus::Unsupported,
-            "latest_relation requires complete replacement at this input; producer emits complete_snapshot but consumer appends",
+            &format!(
+                "latest_relation requires complete replacement at this input; producer emits complete_snapshot but consumer appends; {reason}; replacement allowlist requires direct SUM/COUNT/MIN/MAX/AVG, supported key types, no DISTINCT, WHERE/HAVING/ORDER/LIMIT, CTE/JOIN or function modifiers"
+            ),
         );
     } else {
         stream.support = conjunction([stream.support, SupportStatus::Unknown]);

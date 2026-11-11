@@ -372,7 +372,9 @@ fn discover_table(table: &TableExpr, inputs: &mut BTreeMap<String, TableExpr>) -
             }
             inputs.insert(name.clone(), table.clone());
         }
-        RelationKind::Project { input, .. } | RelationKind::Filter { input, .. } => {
+        RelationKind::Aggregate { input, .. }
+        | RelationKind::Project { input, .. }
+        | RelationKind::Filter { input, .. } => {
             discover_table(input, inputs)?;
         }
         RelationKind::Sql { tables, .. } => {
@@ -386,7 +388,9 @@ fn discover_table(table: &TableExpr, inputs: &mut BTreeMap<String, TableExpr>) -
 fn validate_stream(table: &TableExpr, path: &str) -> Result<()> {
     match &table.0.kind {
         RelationKind::Input { .. } => {}
-        RelationKind::Project { input, .. } | RelationKind::Filter { input, .. } => {
+        RelationKind::Aggregate { input, .. }
+        | RelationKind::Project { input, .. }
+        | RelationKind::Filter { input, .. } => {
             validate_stream(input, &format!("{path}.project.value"))?;
         }
         RelationKind::Sql { tables, .. } => {

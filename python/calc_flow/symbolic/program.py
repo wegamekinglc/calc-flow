@@ -90,7 +90,7 @@ def _check_schema_output_types(
         _check_schema_fields(fields, path)
     paths, nodes, _ = _declaration_paths(program)
     for digest, node in nodes.items():
-        if node.op.name in {"sql", "snapshot_sql"}:
+        if node.op.name in {"aggregate", "sql", "snapshot_sql"}:
             _check_schema_fields(
                 analyzer.table(node, paths[digest]).schema, paths[digest]
             )

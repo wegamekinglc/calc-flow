@@ -92,7 +92,8 @@ pub use continuous::{
     TerminalCause, TransactionalStreamSink, WatermarkPolicy,
 };
 pub use dataframe::{
-    ColumnExpr, InputOptions, LiteralValue, NamedExpr, TableExpr, lit, table_input,
+    AggregateExpr, ColumnExpr, InputOptions, LiteralValue, NamedAggregate, NamedExpr, TableExpr,
+    count_rows, lit, table_input,
 };
 pub use datafusion::{
     DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY, DataFusionConfig, DataFusionParallelismMode,

@@ -260,6 +260,7 @@ class StreamResults(Generic[T]):
         plan, names, outputs, snapshots = await _run_blocking_compile(
             _compile_stream, self._request
         )
+        plan._inner.validate_runtime_config(config._native())
         sources, static = self._bindings(
             expected, names, config.edge_budget, policies, snapshots
         )

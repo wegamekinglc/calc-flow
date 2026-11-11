@@ -85,6 +85,7 @@ impl SqlOperator {
         let capture = capture::prepare_async(self, state, native, context).await?;
         context.check_cancelled()?;
         self.install_checkpoint_work(super::PreparedSqlCheckpoint {
+            replacement: None,
             compact: Some(capture),
             retained: None,
         });

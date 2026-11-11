@@ -206,6 +206,11 @@ async fn run_stream(
         )]),
         sinks,
     )?
+    .with_runtime_config(calc_flow::StreamRuntimeConfig {
+        checkpointing: false,
+        sql_replacement_state_budget: Some(calc_flow::StateBudget::new(100, 8 << 20)?),
+        ..Default::default()
+    })?
     .start()
     .await?
     .wait()
@@ -327,7 +332,8 @@ async fn check_shape(shape: &str) -> Result<()> {
         shape,
         CompileMode::Batch,
         BTreeMap::from([("shared".into(), shared), ("result".into(), result)]),
-    )?.with_update_semantics(UpdateSemantics::LatestRelation);
+    )?
+    .with_update_semantics(UpdateSemantics::LatestRelation);
     let stream = batch.for_mode(CompileMode::Stream)?;
     assert_eq!(batch.fingerprint(), stream.fingerprint());
     assert_eq!(batch.inputs().len(), 1);
@@ -424,6 +430,7 @@ async fn check_stream_state(stream: &Program) -> Result<()> {
 }
 #[tokio::main]
 async fn main() -> Result<()> {
+    check_aggregate().await?;
     check_unsigned_negation().await?;
     check_metadata_stream().await?;
     for shape in ["dataframe", "sql", "df_sql_df_sql", "sql_df_sql"] {
@@ -499,5 +506,74 @@ async fn check_metadata_stream() -> Result<()> {
     assert_eq!(values(&actual["result"][0], "x"), vec![Some(1)]);
     assert_eq!(batch.table_payload()?.schema(), &schema);
     println!("metadata: owned stream accepts schema and field metadata without mutating input");
+    Ok(())
+}
+
+async fn check_aggregate() -> Result<()> {
+    let source = source_input()?;
+    let aggregate = source.aggregate(
+        vec![
+            source.column("x")?.sum().alias("total")?,
+            source.column("x")?.count().alias("non_null")?,
+            calc_flow::count_rows().alias("rows")?,
+        ],
+        vec![],
+    )?;
+    let program = Program::new(
+        "public-aggregate",
+        CompileMode::Batch,
+        BTreeMap::from([("result".into(), aggregate)]),
+    )?;
+    let udfs = UdfRegistry::new().snapshot();
+    let schema = &program.collect_schema(&udfs).await?["result"];
+    assert_eq!(schema.field(0), &Field::new("total", DataType::Int64, true));
+    assert_eq!(
+        schema.field(1),
+        &Field::new("non_null", DataType::Int64, false)
+    );
+    let plan = program
+        .compile_batch(&udfs, &CompileOptions::default())
+        .await?;
+    for (input, sum, non_null, rows) in [
+        (vec![], None, 0, 0),
+        (vec![None, None], None, 0, 2),
+        (vec![Some(1), None, Some(3)], Some(4), 2, 3),
+    ] {
+        let out = plan
+            .execute(
+                BTreeMap::from([("events".into(), data(input)?)]),
+                ExecutionOptions::default(),
+            )
+            .await?;
+        assert_eq!(values(&out.outputs["result"], "total"), vec![sum]);
+        assert_eq!(
+            values(&out.outputs["result"], "non_null"),
+            vec![Some(non_null)]
+        );
+        assert_eq!(values(&out.outputs["result"], "rows"), vec![Some(rows)]);
+    }
+    let latest = Program::new(
+        "external-replacement",
+        CompileMode::Stream,
+        BTreeMap::from([(
+            "result".into(),
+            program.outputs()["result"].sql("SELECT SUM(total) AS total FROM input")?,
+        )]),
+    )?
+    .with_update_semantics(UpdateSemantics::LatestRelation);
+    let actual = run_stream(
+        &latest,
+        vec![data(vec![Some(1)])?, data(vec![Some(2), Some(3)])?],
+        &CompileOptions::default(),
+    )
+    .await?;
+    assert_eq!(
+        actual["result"]
+            .iter()
+            .flat_map(|b| values(b, "total"))
+            .collect::<Vec<_>>(),
+        vec![Some(1), Some(6)]
+    );
+    println!("aggregate: root exports, exact schema, empty/NULL oracles and latest 1/6 passed");
     Ok(())
 }

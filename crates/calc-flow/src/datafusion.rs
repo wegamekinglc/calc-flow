@@ -635,6 +635,13 @@ impl DataFusionRuntime {
             .await
     }
 
+    pub(crate) fn replacement_state_pool(&self) -> Arc<crate::state_memory_pool::OwnedStatePool> {
+        Arc::new(crate::state_memory_pool::OwnedStatePool::new(
+            self.runtime_env.memory_pool.clone(),
+            "sql_replacement_state_budget.max_bytes",
+            "SQL replacement state exceeds max_bytes",
+        ))
+    }
     pub(crate) fn snapshot_state_pool(&self) -> Arc<crate::state_memory_pool::OwnedStatePool> {
         Arc::new(crate::state_memory_pool::OwnedStatePool::new(
             self.runtime_env.memory_pool.clone(),

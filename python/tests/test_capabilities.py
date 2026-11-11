@@ -1013,7 +1013,7 @@ def test_capability_catalog_reports_every_durable_state_layout() -> None:
     assert operators["window"].state_layouts == (1,)
     assert operators["expression"].state_layouts == ()
     assert operators["sql"].state_version == 2
-    assert operators["sql"].state_layouts == (3, 4, 5)
+    assert operators["sql"].state_layouts == (3, 4, 5, 6)
 
 
 def test_provider_capability_rejects_unprovable_lifecycle_combinations() -> None:

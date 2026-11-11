@@ -1899,3 +1899,46 @@ exceptions that might contain credentials or data.
 For the underlying message, progress, and checkpoint invariants, continue with
 the [stream message envelope](runtime-envelope.md). For component ownership,
 read the [design and architecture guide](design.md).
+
+## Restricted replacement aggregates
+
+A `latest_relation` graph may feed complete snapshots into ordinary single-alias
+SQL or DataFrame aggregates. The admitted SQL is one SELECT over one occurrence
+of one input, projecting direct group keys and SUM/COUNT/MIN/MAX/AVG of direct
+columns (COUNT also accepts `*`). Keys support Boolean, integers and strings;
+numeric reducers support ordinary integers/floats. DISTINCT, aggregate modifiers,
+computed operands/finalizers, WHERE/HAVING, ORDER/LIMIT, CTEs, joins, UDFs and
+other unproved shapes are rejected before sources open. Put supported row-local
+filters/projections in separate nodes. Append sources remain append events.
+
+Each replacement consumer requires an explicit `sql_replacement_state_budget`;
+missing budgets and `sql_compact_state_budget` conflicts fail before input binding
+or iterator acquisition. Rust full `StreamRuntimeConfig` literals must add the
+new field or use `..Default::default()`. The default None leaves legacy runtime
+hashes unchanged. Exported graphs persist the update choice; provide the budget
+again to the runner after reload.
+
+Row limits are inclusive and independently bound the latest input, candidate and
+prepared output. Byte limits cover committed input, new candidate, prepared
+output, metadata and live checkpoint segments simultaneously. Accounting version
+1 charges each role conservatively, including reachable Arrow backing for slices:
+`512 + schema IPC bytes + Σ(256 + Σarray.get_array_memory_size())`, plus prepaid
+metadata and segment capacity/descriptor leases. It does not measure RSS or
+replace DataFusion scratch reservations or whole-event edge limits.
+`sql_state_budget`, when also supplied, limits each latest input rather than
+accumulating replaced versions. `sql_snapshot_state_budget` remains separate.
+
+All RecordBatches in one Batch form one update and one emission. Empty Data
+initializes/clears a relation; no Data emits nothing. EOF/control events do not
+repeat results. Candidates commit only after successful output emission, with no
+subsequent fallible await. Query failure, budget failure, cancellation and rejected
+emission preserve the prior state. This is one operator's transaction boundary;
+it adds no external sink rollback or exactly-once guarantee.
+
+Replacement state uses `replacement_policy=single_alias_v1`, state version 3,
+layout 6, `state_kind=sql_replacement` and accounting version 1. Checkpoints
+explicitly distinguish uninitialized from initialized empty input. Restore
+validates identity/schema/checksums/budget before installation, does not re-emit,
+and the next event replaces the restored relation. Append SQL keeps state version
+2 and layouts 3/4/5. Cross-policy restores fail. The capability inventory lists
+layout 6 conditionally; its default SQL state version remains 2.

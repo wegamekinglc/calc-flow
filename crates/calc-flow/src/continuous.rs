@@ -1055,7 +1055,9 @@ impl StreamingRunner {
     /// mode differs from the storage mode selected at construction.
     #[must_use = "the validated runner contains the supplied runtime configuration"]
     pub fn with_runtime_config(mut self, config: StreamRuntimeConfig) -> Result<Self> {
-        config.validate().map_err(safe_error)?;
+        self.plan
+            .validate_sql_budgets(&config)
+            .map_err(safe_error)?;
         if config.checkpointing != self.checkpoints.is_some() {
             return Err(safe_error(CalcFlowError::InvalidArgument {
                 field: "checkpointing".into(),
@@ -1127,6 +1129,7 @@ impl StreamingRunner {
             config,
             static_inputs,
         } = runner_inputs;
+        plan.validate_sql_budgets(&config).map_err(safe_error)?;
         let job_id = allocate_job_id()?;
         let context = StreamJobContext::new(
             job_id,

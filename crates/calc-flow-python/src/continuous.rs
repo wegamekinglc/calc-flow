@@ -1209,7 +1209,9 @@ fn build_static_inputs(
     Ok(converted)
 }
 
-fn runtime_config(config: &Bound<'_, PyDict>) -> PyResult<calc_flow::StreamRuntimeConfig> {
+pub(crate) fn runtime_config(
+    config: &Bound<'_, PyDict>,
+) -> PyResult<calc_flow::StreamRuntimeConfig> {
     let checkpointing = match config.get_item("checkpointing")? {
         Some(value) if value.is_instance_of::<PyBool>() => value.extract()?,
         Some(_) => return Err(PyTypeError::new_err("checkpointing must be a bool")),
@@ -1225,6 +1227,7 @@ fn runtime_config(config: &Bound<'_, PyDict>) -> PyResult<calc_flow::StreamRunti
         sql_state_budget,
         sql_compact_state_budget,
         sql_snapshot_state_budget: snapshot_state_budget_config(config)?,
+        sql_replacement_state_budget: replacement_state_budget_config(config)?,
         retained_epochs: required_item(config, "retained_epochs")?.extract()?,
     })
 }
@@ -1274,6 +1277,29 @@ fn snapshot_state_budget_config(
         }
         _ => Err(PyValueError::new_err(
             "sql_snapshot_state_max_rows and sql_snapshot_state_max_bytes must be supplied together",
+        )),
+    }
+}
+fn replacement_state_budget_config(
+    config: &Bound<'_, PyDict>,
+) -> PyResult<Option<calc_flow::StateBudget>> {
+    match (
+        config.get_item("sql_replacement_state_max_rows")?,
+        config.get_item("sql_replacement_state_max_bytes")?,
+    ) {
+        (None, None) => Ok(None),
+        (Some(rows), Some(bytes)) => {
+            if rows.is_instance_of::<PyBool>() || bytes.is_instance_of::<PyBool>() {
+                return Err(PyTypeError::new_err(
+                    "sql_replacement_state limits must be integers",
+                ));
+            }
+            calc_flow::StateBudget::new(rows.extract()?, bytes.extract()?)
+                .map(Some)
+                .map_err(crate::error::to_py_err)
+        }
+        _ => Err(PyValueError::new_err(
+            "sql_replacement_state_max_rows and sql_replacement_state_max_bytes must be supplied together",
         )),
     }
 }
@@ -1332,6 +1358,8 @@ impl PyContinuousStreamingRunner {
                 "checkpointing must match the presence of managed checkpoint storage",
             ));
         }
+        plan.with_plan(|p| p.validate_sql_budgets(&config))?
+            .map_err(crate::error::to_py_err)?;
         let awaits = Arc::new(PythonAwaitRegistry::new());
         let context = Arc::new(Mutex::new(None));
         let ownership = Arc::new(ConnectorOwnership::new());

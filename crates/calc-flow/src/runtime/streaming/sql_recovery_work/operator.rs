@@ -51,7 +51,7 @@ impl CheckpointWorkOperator {
 
     pub(crate) fn needs_checkpoint(operator: &CompiledStreamOperator) -> bool {
         matches!(operator, CompiledStreamOperator::Sql(operator)
-            if operator.has_stream_aggregate() && operator.stream_runtime_initialized())
+            if operator.is_replacement() || operator.has_stream_aggregate() && operator.stream_runtime_initialized())
             || matches!(operator, CompiledStreamOperator::SnapshotSql(_))
     }
 

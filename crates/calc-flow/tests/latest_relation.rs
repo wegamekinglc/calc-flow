@@ -91,7 +91,7 @@ async fn latest_admission_preserves_logical_consumer_and_exported_selection() ->
             legacy.fingerprint()
         );
         let report = latest.analyze(&udfs, &AnalysisOptions::default()).await?;
-        assert_eq!((report.schema_version, report.analysis_revision), (2, 2));
+        assert_eq!((report.schema_version, report.analysis_revision), (2, 3));
         assert!(report.request.is_none());
         let edge = report
             .edges
@@ -101,22 +101,10 @@ async fn latest_admission_preserves_logical_consumer_and_exported_selection() ->
         assert_eq!(edge.stream.producer_update, UpdateKind::CompleteSnapshot);
         assert_eq!(
             edge.stream.consumer_interpretation,
-            InputInterpretation::Append
+            InputInterpretation::CompleteReplacement
         );
-        assert_eq!(edge.stream.support, SupportStatus::Unsupported);
-        let error = plan(&latest).await.err().unwrap();
-        assert!(matches!(
-            error,
-            CalcFlowError::QueryUpdateSemantics {
-                mode: CompileMode::Stream,
-                ..
-            }
-        ));
-        assert!(
-            error
-                .to_string()
-                .starts_with("outputs.result.sql.tables.input: update_interpretation_mismatch:")
-        );
+        assert_eq!(edge.stream.support, SupportStatus::Supported);
+        plan(&latest).await?;
         latest
             .for_mode(CompileMode::Batch)?
             .compile_batch(&udfs, &CompileOptions::default())
@@ -137,18 +125,12 @@ async fn assert_exported_selection(
         reloaded.graph.update_semantics,
         UpdateSemantics::LatestRelation
     );
-    let error = calc_flow::compile_stream_project_graph(
+    calc_flow::compile_stream_project_graph(
         &reloaded,
         &calc_flow::ProviderRegistry::default(),
         udfs,
         &StreamRequirements::default(),
-    )
-    .err()
-    .unwrap();
-    assert!(
-        error.to_string().contains("update_interpretation_mismatch"),
-        "{error}"
-    );
+    )?;
     Ok(())
 }
 
@@ -531,6 +513,73 @@ async fn invalid_project_update_literal_has_stable_path_and_code() -> Result<()>
         };
         assert_eq!(issues[0].path, "graph.update_semantics");
         assert_eq!(issues[0].code, "invalid_literal");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn dataframe_sql_replacement_chain_is_six_legacy_is_seven() -> Result<()> {
+    for semantics in [
+        UpdateSemantics::LatestRelation,
+        UpdateSemantics::LegacyAppend,
+    ] {
+        let source = table_input("events", schema(), InputOptions::default())?;
+        let source = source.sql("SELECT x FROM input")?;
+        let first = source.aggregate(vec![source.column("x")?.sum().alias("total")?], vec![])?;
+        let visible = first.select(vec![first.column("total")?.alias("total")?])?;
+        let visible = visible.filter(visible.column("total")?.ge(lit(0_i64)?))?;
+        let result = visible.sql("SELECT SUM(total) AS total FROM input")?;
+        let program = Program::new(
+            "aggregate",
+            CompileMode::Stream,
+            BTreeMap::from([("result".into(), result)]),
+        )?
+        .with_update_semantics(semantics);
+        let output = Arc::new(Mutex::new(vec![]));
+        let runner = make_runner(
+            plan(&program).await?,
+            vec![data(&[&[1]]), data(&[&[2], &[3]])],
+            None,
+            &Arc::new(AtomicUsize::new(0)),
+            &output,
+        )?
+        .with_runtime_config(calc_flow::StreamRuntimeConfig {
+            checkpointing: false,
+            sql_replacement_state_budget: Some(calc_flow::StateBudget::new(100, 1 << 24)?),
+            ..Default::default()
+        })?;
+        let job = runner.start().await?;
+        assert_eq!(job.wait().await.state, JobState::Completed);
+        let actual = output
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(values)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            vec![
+                1,
+                if semantics == UpdateSemantics::LatestRelation {
+                    6
+                } else {
+                    7
+                }
+            ]
+        );
+        let plan = program
+            .for_mode(CompileMode::Batch)?
+            .compile_batch(&UdfRegistry::new().snapshot(), &CompileOptions::default())
+            .await?;
+        for (parts, expected) in [(vec![1], 1), (vec![2, 3], 5)] {
+            let result = plan
+                .execute(
+                    BTreeMap::from([("events".into(), data(&[&parts]))]),
+                    ExecutionOptions::default(),
+                )
+                .await?;
+            assert_eq!(values(&result.outputs["result"]), vec![expected]);
+        }
     }
     Ok(())
 }

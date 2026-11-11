@@ -58,6 +58,7 @@ mod row_local_compiled_tests;
 /// after their first execution, with fresh filter state for each input batch.
 /// Use [`Self::set_state_budget`] to enforce an application-chosen state limit.
 pub struct SqlOperator {
+    replacement: Option<Box<super::SnapshotSqlOperator>>,
     name: String,
     query: String,
     validated: ValidatedQuery,
@@ -128,6 +129,7 @@ struct PreparedRetention {
 }
 
 pub(crate) struct PreparedSqlCheckpoint {
+    replacement: Option<super::PreparedSnapshotCapture>,
     compact: Option<std::sync::Arc<compact::CompactCapture>>,
     retained: Option<std::sync::Arc<current_retained::RetainedCapture>>,
 }
@@ -148,6 +150,9 @@ impl MaterializedSqlInput {
 
 impl PreparedSqlCheckpoint {
     pub(crate) fn snapshot(&self) -> Result<OperatorStateSnapshot> {
+        if let Some(capture) = &self.replacement {
+            return Ok(capture.snapshot.clone());
+        }
         match (&self.compact, &self.retained) {
             (Some(_), Some(_)) => Err(sql_state_error("SQL checkpoint contains both state shapes")),
             (Some(capture), None) => Ok(capture.snapshot.clone()),
@@ -341,6 +346,7 @@ impl Clone for SqlOperator {
     /// operator-scoped session is rebuilt on first use.
     fn clone(&self) -> Self {
         Self {
+            replacement: self.replacement.as_ref().map(|o| Box::new(o.fresh())),
             name: self.name.clone(),
             query: self.query.clone(),
             validated: self.validated.clone(),
@@ -382,6 +388,22 @@ impl fmt::Debug for SqlOperator {
 }
 
 impl SqlOperator {
+    pub(crate) fn enable_replacement(&mut self) -> Result<()> {
+        self.replacement = Some(Box::new(super::SnapshotSqlOperator::for_single_alias(
+            self.clone(),
+        )?));
+        Ok(())
+    }
+    pub(crate) fn is_replacement(&self) -> bool {
+        self.replacement.is_some()
+    }
+    pub(crate) fn set_replacement_budget(&mut self, budget: StateBudget) -> Result<()> {
+        if let Some(operator) = &mut self.replacement {
+            operator.set_budget(Some(budget))?;
+        }
+        Ok(())
+    }
+
     /// Creates a multi-input `DataFusion` SQL operator.
     ///
     /// # Errors
@@ -416,6 +438,7 @@ impl SqlOperator {
         let validated = parse_select_query(query)?;
         let stream_aggregate = validated.has_stream_aggregate();
         Ok(Self {
+            replacement: None,
             name: name.into(),
             query: query.into(),
             validated,
@@ -520,11 +543,17 @@ impl SqlOperator {
         udfs: UdfRegistrySnapshot,
         selected_udfs: Vec<UdfReference>,
     ) {
+        if let Some(operator) = &mut self.replacement {
+            operator.set_stream_resources(config, udfs.clone(), selected_udfs.clone());
+        }
         self.stream_state.set_resources(config, udfs, selected_udfs);
     }
 
-    pub(crate) const fn stream_runtime_initialized(&self) -> bool {
-        self.stream_state.is_initialized()
+    pub(crate) fn stream_runtime_initialized(&self) -> bool {
+        self.replacement
+            .as_ref()
+            .is_some_and(|o| o.stream_runtime_initialized())
+            || self.stream_state.is_initialized()
     }
 
     pub(crate) const fn has_stream_aggregate(&self) -> bool {
@@ -565,6 +594,9 @@ impl SqlOperator {
                 field: "sql.state_budget".into(),
                 message: "existing SQL aggregate state exceeds the requested budget".into(),
             });
+        }
+        if let Some(operator) = &mut self.replacement {
+            operator.set_latest_input_budget(budget)?;
         }
         self.state_budget = budget;
         Ok(())
@@ -784,9 +816,16 @@ impl SqlOperator {
     }
 
     pub(crate) fn prepare_checkpoint_work(
-        &self,
+        &mut self,
         check_cancelled: &dyn Fn() -> Result<()>,
     ) -> Result<PreparedSqlCheckpoint> {
+        if let Some(operator) = &mut self.replacement {
+            return Ok(PreparedSqlCheckpoint {
+                replacement: Some(operator.prepare_checkpoint_work(check_cancelled)?),
+                compact: None,
+                retained: None,
+            });
+        }
         #[cfg(test)]
         let _test_exit = checkpoint_test_hooks::WorkExit::new(self);
         check_cancelled()?;
@@ -817,10 +856,21 @@ impl SqlOperator {
             checkpoint_test_hooks::prepared(self, capture)?;
         }
         check_cancelled()?;
-        Ok(PreparedSqlCheckpoint { compact, retained })
+        Ok(PreparedSqlCheckpoint {
+            replacement: None,
+            compact,
+            retained,
+        })
     }
 
     pub(crate) fn install_checkpoint_work(&mut self, prepared: PreparedSqlCheckpoint) {
+        if let Some(capture) = prepared.replacement {
+            self.replacement
+                .as_mut()
+                .expect("replacement capture")
+                .install_checkpoint_work(capture);
+            return;
+        }
         #[cfg(test)]
         let observed_compact = prepared.compact.is_some();
         if let Some(capture) = prepared.compact {
@@ -1303,7 +1353,7 @@ impl OperatorMetadata for SqlOperator {
     }
 
     fn configuration(&self) -> JsonMap {
-        BTreeMap::from([
+        let mut config = BTreeMap::from([
             ("query".into(), Value::String(self.query.clone())),
             (
                 "inputs".into(),
@@ -1313,7 +1363,11 @@ impl OperatorMetadata for SqlOperator {
                 "udfs".into(),
                 Value::Array(self.udfs.iter().map(udf_configuration).collect()),
             ),
-        ])
+        ]);
+        if self.is_replacement() {
+            config.insert("replacement_policy".into(), "single_alias_v1".into());
+        }
+        config
     }
 
     fn udf_references(&self) -> Vec<UdfReference> {
@@ -1349,6 +1403,9 @@ impl StreamOperator for SqlOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        if let Some(operator) = &mut self.replacement {
+            return operator.process_data(ingress, batch, context, output).await;
+        }
         let alias = self.stream_alias(ingress, &batch, context)?;
         let mut prepared = self
             .prepare_stream_retention(batch, &alias, context)
@@ -1388,6 +1445,9 @@ impl StreamOperator for SqlOperator {
         &mut self,
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
+        if let Some(operator) = &mut self.replacement {
+            return operator.prepare_checkpoint_async(context).await;
+        }
         context.check_cancelled()?;
         if self.compact.is_some() {
             return self.prepare_compact_capture_async(context).await;
@@ -1416,6 +1476,9 @@ impl StreamOperator for SqlOperator {
     }
 
     fn checkpoint(&mut self, _epoch: Epoch) -> Result<OperatorStateSnapshot> {
+        if let Some(operator) = &mut self.replacement {
+            return operator.checkpoint(_epoch);
+        }
         if self.compact.is_some() {
             return self.compact_checkpoint();
         }
@@ -1436,6 +1499,9 @@ impl StreamOperator for SqlOperator {
     }
 
     fn reset(&mut self) -> Result<()> {
+        if let Some(operator) = &mut self.replacement {
+            operator.reset()?;
+        }
         self.compact = None;
         self.retained = None;
         self.retained_capture = None;

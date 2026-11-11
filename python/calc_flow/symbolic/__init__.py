@@ -8,12 +8,14 @@ from __future__ import annotations
 
 from calc_flow.symbolic.analyzer import AnalysisIssue, AnalysisResult
 from calc_flow.symbolic.expr import (
+    AggregateExpr,
     ArrayExpr,
     ColumnExpr,
     Expr,
     Parameter,
     TableExpr,
     array_input,
+    count_rows,
     lit,
     parameter,
     table_input,
@@ -85,6 +87,8 @@ __all__ = [
     "UpdateSemantics",
     "AnalysisIssue",
     "AnalysisResult",
+    "AggregateExpr",
+    "count_rows",
     "ArrayExpr",
     "ColumnExpr",
     "CrossSectionGroup",

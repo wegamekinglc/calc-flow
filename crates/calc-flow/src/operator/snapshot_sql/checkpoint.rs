@@ -57,6 +57,8 @@ impl RelationDescriptor {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Control {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    initialized: Option<bool>,
     state_kind: String,
     state_layout: u32,
     state_accounting: u32,
@@ -67,15 +69,28 @@ struct Control {
 }
 
 impl Control {
-    fn has_compatible_format(&self) -> bool {
-        self.state_kind == "snapshot_sql"
-            && self.state_layout == 1
+    fn has_compatible_format(&self, kind: &str, layout: u32) -> bool {
+        self.state_kind == kind
+            && self.state_layout == layout
             && self.state_accounting == 1
             && self.datafusion_version == datafusion::DATAFUSION_VERSION
     }
 }
 
 impl SnapshotSqlOperator {
+    fn checkpoint_inline(&self, control: &StateSegment) -> JsonMap {
+        if self.single_alias_replacement {
+            BTreeMap::from([
+                ("state_kind".into(), json!("sql_replacement")),
+                ("state_layout".into(), json!(6)),
+                ("state_accounting".into(), json!(1)),
+                ("control_sha256".into(), json!(control.sha256())),
+            ])
+        } else {
+            inline(control)
+        }
+    }
+
     fn descriptor_bound(&self) -> Result<usize> {
         let bound = add(
             8192,
@@ -188,8 +203,11 @@ impl SnapshotSqlOperator {
         let (aliases, owners) = relation_owners(&self.relations);
         let (mut segments, relations) = self.encode_relations(&owners, check)?;
         let control = Control {
-            state_kind: "snapshot_sql".into(),
-            state_layout: 1,
+            initialized: self
+                .single_alias_replacement
+                .then(|| self.relations[0].is_some()),
+            state_kind: self.state_format().0.into(),
+            state_layout: self.state_format().1,
             state_accounting: 1,
             datafusion_version: datafusion::DATAFUSION_VERSION.into(),
             identity,
@@ -201,7 +219,7 @@ impl SnapshotSqlOperator {
             self.pool.as_ref().expect("pool"),
             None,
         );
-        let inline_metadata = inline(&segment);
+        let inline_metadata = self.checkpoint_inline(&segment);
         segments.insert("control".into(), segment);
         check()?;
         Ok(PreparedSnapshotCapture {
@@ -398,6 +416,7 @@ impl SnapshotSqlOperator {
         for (port, relation) in self.input_ports().iter().zip(relations) {
             if let Some(r) = relation {
                 port.validate(&r.batch, "snapshot_sql restore")?;
+                self.check_latest_input(&r.batch, self.latest_input_budget)?;
             }
         }
         check_rows(relations, self.budget)
@@ -418,10 +437,13 @@ impl SnapshotSqlOperator {
         snapshot: &OperatorStateSnapshot,
         control: &Control,
     ) -> Result<()> {
-        if !control.has_compatible_format()
+        if (!self.single_alias_replacement && control.initialized.is_some())
+            || !control.has_compatible_format(self.state_format().0, self.state_format().1)
+            || (self.single_alias_replacement
+                && control.initialized != control.aliases.first().map(Option::is_some))
             || control.identity != self.identity()?
             || control.aliases.len() != self.relations.len()
-            || snapshot.inline_metadata != inline(&snapshot.segments["control"])
+            || snapshot.inline_metadata != self.checkpoint_inline(&snapshot.segments["control"])
         {
             return Err(state_error(
                 "snapshot_sql identity/layout/accounting mismatch",

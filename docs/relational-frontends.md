@@ -173,3 +173,51 @@ exact declared table ports to prove event boundaries. They never block on schema
 planning. Legacy checkpoints retain their existing layouts; an actual restore
 across update choices rejects before Source acquisition. Existing snapshot SQL
 initialization, slicing, output-route and delivery restrictions still apply.
+
+## Named aggregates
+
+`TableExpr.aggregate` builds a new relation through the same native SQL planner.
+Python accepts an ordered mapping and optional `group_by` sequence. Rust accepts
+`Vec<NamedAggregate>` and `Vec<String>`. Column `sum`, `count`, `min`, `max`, and
+`mean` create aggregate declarations; `count_rows()` counts every row, including
+NULL rows. Aggregate declarations are separate from row-local columns.
+
+```python
+summary = source.aggregate(
+    {"total": source["x"].sum(), "non_null": source["x"].count(),
+     "rows": cf.count_rows()},
+    group_by=(),
+)
+```
+
+```rust
+# use calc_flow::{TableExpr, Result, count_rows};
+fn summary(source: &TableExpr) -> Result<TableExpr> {
+    source.aggregate(
+        vec![source.column("x")?.sum().alias("total")?,
+             count_rows().alias("rows")?], vec![],
+    )
+}
+```
+
+Operands must be direct columns of the input relation. Use `with_columns` first
+for computed operands. Names must be unique across keys and results. Keys precede
+reducers in output column order; grouped row order is unspecified. Aggregation
+starts a new row lineage and clears temporal ordering. Planning derives exact
+schema without reading rows.
+
+SUM widens signed integers to Int64, unsigned integers to UInt64, and floats to
+Float64. COUNT is non-null Int64. MIN/MAX preserve numeric input dtype; AVG is
+Float64. Numeric reducers are nullable and ignore NULL. Empty global input emits
+one row with typed NULL reducers and zero counts. Empty grouped input emits zero
+rows. All-NULL keys form one group. Reducers support the ten ordinary integer and
+float types; keys support Boolean, integers, Utf8 and LargeUtf8. COUNT(column)
+also supports the existing portable scalar types.
+
+Streaming append inputs produce cumulative snapshots. With explicit
+`latest_relation`, a supported single-alias aggregate can consume another
+complete snapshot, including through projection/filter nodes. It requires
+`StreamRuntimeConfig(sql_replacement_state_budget=StateBudget(rows, bytes))`.
+For source events `[1]`, `[2,3]`, SUM→SUM emits `1,6`; the default
+`legacy_append` emits `1,7`. Batch executions each process only their own input.
+See the streaming guide for replacement admission, budgeting and recovery.
