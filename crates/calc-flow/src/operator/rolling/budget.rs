@@ -4,6 +4,7 @@ use std::mem::size_of;
 
 use datafusion::arrow::datatypes::DataType;
 
+use super::history::HistoryChunkRef;
 use super::{
     BTreeMap, BufferedRow, CompiledRollingSpec, EntityRollingState, HistoryUpdates, KeyValue,
     RecordBatch, Result, RollingHistories, RowIdentity, ScalarValue, WindowState, indicators,
@@ -246,16 +247,22 @@ pub(super) fn history_entity_charge_snapshot(
 ) -> Result<HistoryCharge> {
     let metadata = history_metadata_charge(key, &state.windows, &state.indicators, node)?;
     let mut retained = StateCharge::default();
-    for row in &state.rows {
-        retained = retained.checked_add(scalar_history_row_charge(row, node)?, node)?;
-    }
-    for record in &state.columnar.records {
-        let Some(next) = ordered_record_charge(record, node)? else {
-            return Err(super::internal_error(
-                "rolling columnar history has unsupported state charge",
-            ));
-        };
-        retained = retained.checked_add(next, node)?;
+    for chunk in state.retained_chunks() {
+        match chunk {
+            HistoryChunkRef::Scalar(rows) => {
+                for row in rows {
+                    retained = retained.checked_add(scalar_history_row_charge(row, node)?, node)?;
+                }
+            }
+            HistoryChunkRef::Columnar(record) => {
+                let Some(next) = ordered_record_charge(record, node)? else {
+                    return Err(super::internal_error(
+                        "rolling columnar history has unsupported state charge",
+                    ));
+                };
+                retained = retained.checked_add(next, node)?;
+            }
+        }
     }
     Ok(HistoryCharge { retained, metadata })
 }

@@ -1,4 +1,4 @@
-//! Columnar buffering for proven ordered, bounded row-window streams.
+//! Arrow buffering and bounded retained payloads for proven ordered streams.
 //!
 //! Finality remains watermark driven. Unsupported shapes, late envelopes, and
 //! overlapping or unordered arrivals enter the existing general row path.
@@ -10,7 +10,7 @@ use datafusion::arrow::{
 };
 
 pub(super) use super::history::ColumnarHistory;
-use super::history::{RetainedHistoryAppend, RetainedRows};
+use super::history::{RetainedHistoryAppend, RetainedRows, RetentionPolicy};
 use super::kernel::{EntityRows, RecurrenceSeed, StreamKernelUpdate};
 use crate::operator::rolling_metrics::{RollingMetricsRecorder, RollingStage, RollingWork};
 use crate::runtime::streaming::entity_work::ReservePair;
@@ -175,9 +175,7 @@ impl RollingOperator {
     }
 
     fn supports_ordered_buffer(&self) -> bool {
-        self.compiled.kernel_plan.supports_typed_transition()
-            && self.compiled.max_duration_micros.is_none()
-            && self.state.buffer.is_empty()
+        self.compiled.kernel_plan.supports_typed_transition() && self.state.buffer.is_empty()
     }
 
     fn wholly_on_time(&self, record: &RecordBatch, watermark: Option<EventTime>) -> Result<bool> {
@@ -598,7 +596,57 @@ impl PreparedOrderedOutput {
 
 struct RetainedInput<'a> {
     record: &'a RecordBatch,
-    columnar: bool,
+    costs: PayloadCosts,
+    retention: RetentionPolicy,
+    times: &'a [i64],
+}
+
+struct PayloadCosts {
+    columnar: Option<usize>,
+    scalar_per_row: usize,
+}
+
+impl PayloadCosts {
+    fn new(input: &RecordBatch) -> Self {
+        let supported = input.columns().iter().all(|column| {
+            column.data_type().primitive_width().is_some()
+                || matches!(
+                    column.data_type(),
+                    DataType::Null
+                        | DataType::Boolean
+                        | DataType::Utf8
+                        | DataType::LargeUtf8
+                        | DataType::Binary
+                        | DataType::LargeBinary
+                )
+        });
+        let columnar = supported.then(|| {
+            input.columns().iter().fold(
+                size_of::<RecordBatch>().saturating_add(
+                    input
+                        .num_columns()
+                        .saturating_mul(size_of::<super::ArrayRef>()),
+                ),
+                |cost, column| {
+                    cost.saturating_add(
+                        column
+                            .get_array_memory_size()
+                            .saturating_sub(column.get_buffer_memory_size()),
+                    )
+                },
+            )
+        });
+        Self {
+            columnar,
+            scalar_per_row: size_of::<Vec<ScalarValue>>()
+                .saturating_add(input.num_columns().saturating_mul(size_of::<ScalarValue>())),
+        }
+    }
+
+    fn columnar(&self, rows: usize) -> bool {
+        self.columnar
+            .is_some_and(|cost| cost <= self.scalar_per_row.saturating_mul(rows))
+    }
 }
 
 struct EntityTail {
@@ -608,6 +656,10 @@ struct EntityTail {
     /// Rows this batch contributes to the retained history.
     retained: usize,
     rows: VecDeque<usize>,
+    last: usize,
+    input_count: usize,
+    seen: usize,
+    finished: bool,
 }
 
 /// Builds each touched entity's retained tail from its routed row count,
@@ -615,10 +667,14 @@ struct EntityTail {
 fn entity_tails(
     entity_ids: &[usize],
     rows: &EntityRows,
-    retention: usize,
+    retention: RetentionPolicy,
+    times: &[i64],
     node_id: &str,
-) -> Result<impl Iterator<Item = EntityTail>> {
+) -> Result<std::vec::IntoIter<EntityTail>> {
     if rows.counts.iter().sum::<usize>() != entity_ids.len() {
+        return Err(inconsistent_entity_rows());
+    }
+    if retention.duration.is_some() && times.len() != entity_ids.len() {
         return Err(inconsistent_entity_rows());
     }
     let mut tails = rows
@@ -630,13 +686,18 @@ fn entity_tails(
             EntityTail::new(entity_id, first, count, retention, node_id)
         })
         .collect::<Result<Vec<_>>>()?;
-    collect_tail_rows(&mut tails, entity_ids)?;
+    collect_tail_rows(&mut tails, entity_ids, times, retention)?;
     Ok(tails.into_iter())
 }
 
 /// Fills every tail's newest retained rows in ascending row order.
-fn collect_tail_rows(tails: &mut [EntityTail], entity_ids: &[usize]) -> Result<()> {
-    let mut pending = tails.iter().map(|tail| tail.retained).sum::<usize>();
+fn collect_tail_rows(
+    tails: &mut [EntityTail],
+    entity_ids: &[usize],
+    times: &[i64],
+    retention: RetentionPolicy,
+) -> Result<()> {
+    let mut pending = tails.iter().filter(|tail| !tail.finished).count();
     for (row, &entity_id) in entity_ids.iter().enumerate().rev() {
         if pending == 0 {
             return Ok(());
@@ -644,8 +705,24 @@ fn collect_tail_rows(tails: &mut [EntityTail], entity_ids: &[usize]) -> Result<(
         let tail = tails
             .get_mut(entity_id)
             .ok_or_else(|| internal_error("prepared rolling entity IDs are not dense"))?;
-        if tail.rows.len() < tail.retained {
+        if tail.finished {
+            continue;
+        }
+        if tail.seen == 0 {
+            tail.last = row;
+        }
+        let time = times.get(row).copied().unwrap_or_default();
+        let last = times.get(tail.last).copied().unwrap_or_default();
+        let keep = retention.keeps_new(tail.rows.len(), time, last);
+        tail.seen += 1;
+        if keep {
             tail.rows.push_front(row);
+        }
+        if !keep
+            || tail.seen == tail.input_count
+            || (retention.duration.is_none() && tail.rows.len() == tail.retained)
+        {
+            tail.finished = true;
             pending -= 1;
         }
     }
@@ -665,18 +742,26 @@ impl EntityTail {
         entity_id: usize,
         first: usize,
         count: usize,
-        retention: usize,
+        retention: RetentionPolicy,
         node_id: &str,
     ) -> Result<Self> {
         let transitions = u64::try_from(count)
             .map_err(|_| operator_error(node_id, "rolling entity transition count overflowed"))?;
-        let retained = count.min(retention);
+        let retained = count.min(retention.rows);
         Ok(Self {
             entity_id,
             first,
             transitions,
             retained,
-            rows: VecDeque::with_capacity(retained),
+            rows: VecDeque::with_capacity(if retention.duration.is_some() {
+                count.min(retained.max(1))
+            } else {
+                retained
+            }),
+            last: first,
+            input_count: count,
+            seen: 0,
+            finished: count == 0 || (retention.duration.is_none() && retained == 0),
         })
     }
 
@@ -689,7 +774,8 @@ impl EntityTail {
         node_id: &str,
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<RetainedHistoryAppend> {
-        let (input, columnar) = (input.record, input.columnar);
+        let source = input;
+        let input = source.record;
         let entity = compiled
             .partition_columns
             .iter()
@@ -709,7 +795,7 @@ impl EntityTail {
             .ok_or_else(|| operator_error(node_id, "rolling entity transition count overflowed"))?;
         let rows = if self.rows.is_empty() {
             RetainedRows::Scalar(VecDeque::new())
-        } else if columnar {
+        } else if source.costs.columnar(self.rows.len()) {
             let indices = UInt64Array::from_iter_values(
                 self.rows
                     .into_iter()
@@ -723,21 +809,30 @@ impl EntityTail {
                 .rows
                 .into_iter()
                 .map(|index| {
-                    let row = read_buffered_row(input, index, compiled, node_id)?;
+                    let values = input
+                        .columns()
+                        .iter()
+                        .map(|column| {
+                            ScalarValue::try_from_array(column, index)
+                                .map_err(|error| operator_error(node_id, &error.to_string()))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
                     if let Some(recorder) = observer {
                         recorder.add(RollingWork::HistoryRowsMaterialized, 1);
                         recorder.add(RollingWork::ScalarValueConversions, input.num_columns());
                     }
-                    Ok(row.values)
+                    Ok(values)
                 })
                 .collect::<Result<VecDeque<_>>>()?;
             RetainedRows::Scalar(rows)
         };
-        let retention = usize::try_from(compiled.max_row_retention).unwrap_or(usize::MAX);
-        let keep = retention.saturating_sub(rows.len());
-        let discarded_rows = prior.map_or(0, |state| {
-            (state.rows.len() + state.columnar.rows).saturating_sub(keep)
-        });
+        let discarded_rows = source.retention.discarded_history(
+            prior,
+            self.input_count,
+            source.times[self.last],
+            compiled,
+            node_id,
+        )?;
         let prepared_front = prior
             .map(|state| {
                 state
@@ -766,28 +861,20 @@ fn retained_histories(
     node_id: &str,
     observer: Option<&RollingMetricsRecorder>,
 ) -> Result<Vec<RetainedHistoryAppend>> {
-    let retention = usize::try_from(compiled.max_row_retention).unwrap_or(usize::MAX);
-    let columnar = input.columns().iter().all(|column| {
-        column.data_type().primitive_width().is_some()
-            || matches!(
-                column.data_type(),
-                DataType::Null
-                    | DataType::Boolean
-                    | DataType::Utf8
-                    | DataType::LargeUtf8
-                    | DataType::Binary
-                    | DataType::LargeBinary
-            )
-    });
+    let retention = RetentionPolicy::new(compiled);
+    let times = timestamps(input, compiled)?;
     let input = RetainedInput {
         record: input,
-        columnar,
+        costs: PayloadCosts::new(input),
+        retention,
+        times: times.values(),
     };
     let seeds = update.recurrence_seeds();
     entity_tails(
         update.entity_ids(),
         update.entity_rows(),
         retention,
+        input.times,
         node_id,
     )?
     .map(|tail| {
@@ -801,7 +888,7 @@ fn retained_histories(
 mod tests {
     use std::collections::VecDeque;
 
-    use super::{EntityRows, entity_tails};
+    use super::{EntityRows, RetentionPolicy, entity_tails};
 
     /// Entity ID, first row, transitions, and retained rows of one tail.
     type Tail = (usize, usize, u64, Vec<usize>);
@@ -862,7 +949,7 @@ mod tests {
             retention in 0_usize..8,
         ) {
             let (entity_ids, rows) = dense(&keys);
-            let tails = entity_tails(&entity_ids, &rows, retention, "r")
+            let tails = entity_tails(&entity_ids, &rows, RetentionPolicy { rows: retention, duration: None }, &[], "r")
                 .unwrap()
                 .map(|tail| (tail.entity_id, tail.first, tail.transitions, tail.rows.into()))
                 .collect::<Vec<Tail>>();
@@ -871,17 +958,76 @@ mod tests {
     }
 
     #[test]
+    fn test_duration_tail_counts_every_transition_before_the_retained_suffix() {
+        let times = (1..=136).collect::<Vec<i64>>();
+        let routing = EntityRows {
+            counts: vec![136],
+            first_rows: vec![0],
+        };
+        let policy = RetentionPolicy {
+            rows: 2,
+            duration: Some(100),
+        };
+        let tail = entity_tails(&vec![0; 136], &routing, policy, &times, "r")
+            .unwrap()
+            .next()
+            .unwrap();
+        assert_eq!(tail.transitions, 136);
+        assert_eq!(tail.first, 0);
+        assert_eq!(
+            tail.rows.into_iter().collect::<Vec<_>>(),
+            (36..136).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn routed_entity_tails_reject_inconsistent_routing() {
         let rows = EntityRows {
             counts: vec![1],
             first_rows: vec![0],
         };
-        assert!(entity_tails(&[0, 1], &rows, 2, "r").is_err());
-        assert!(entity_tails(&[0, 0], &rows, 2, "r").is_err());
+        assert!(
+            entity_tails(
+                &[0, 1],
+                &rows,
+                RetentionPolicy {
+                    rows: 2,
+                    duration: None
+                },
+                &[],
+                "r"
+            )
+            .is_err()
+        );
+        assert!(
+            entity_tails(
+                &[0, 0],
+                &rows,
+                RetentionPolicy {
+                    rows: 2,
+                    duration: None
+                },
+                &[],
+                "r"
+            )
+            .is_err()
+        );
         let split = EntityRows {
             counts: vec![1, 1],
             first_rows: vec![0, 1],
         };
-        assert!(entity_tails(&[0, 0], &split, 2, "r").is_err());
+        assert!(
+            entity_tails(
+                &[0, 0],
+                &split,
+                RetentionPolicy {
+                    rows: 2,
+                    duration: None
+                },
+                &[],
+                "r"
+            )
+            .is_err()
+        );
     }
 }

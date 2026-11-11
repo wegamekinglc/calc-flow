@@ -602,8 +602,7 @@ impl DecayInputPreparation<'_> {
         let Some(history) = histories.by_entity.get(&key) else {
             return Ok(values);
         };
-        append_scalar_history(&mut values, history, input_index, window, &mut self.work)?;
-        append_columnar_history(&mut values, history, input_index, window, &mut self.work)?;
+        append_history(&mut values, history, input_index, window, &mut self.work)?;
         Ok(values)
     }
 
@@ -722,39 +721,35 @@ fn history_entity_key(
         .collect()
 }
 
-fn append_scalar_history(
+fn append_history(
     values: &mut VecDeque<Option<f64>>,
     history: &super::super::EntityRollingState,
     input_index: usize,
     window: usize,
     work: &mut DecayWork,
 ) -> Result<()> {
-    for row in &history.rows {
-        let ScalarValue::Float64(value) = &row[input_index] else {
-            return Err(internal_error("decay history is not Float64"));
-        };
-        work.add(RollingWork::DecayReferenceHistorySamples, 1);
-        push_history(values, value.filter(|value| !value.is_nan()), window);
-    }
-    Ok(())
-}
-
-fn append_columnar_history(
-    values: &mut VecDeque<Option<f64>>,
-    history: &super::super::EntityRollingState,
-    input_index: usize,
-    window: usize,
-    work: &mut DecayWork,
-) -> Result<()> {
-    for record in &history.columnar.records {
-        let source = record
-            .column(input_index)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .ok_or_else(|| internal_error("columnar decay history is not Float64"))?;
-        for value in source {
-            work.add(RollingWork::DecayReferenceHistorySamples, 1);
-            push_history(values, value.filter(|value| !value.is_nan()), window);
+    for chunk in history.retained_chunks() {
+        match chunk {
+            super::super::history::HistoryChunkRef::Scalar(rows) => {
+                for row in rows {
+                    let ScalarValue::Float64(value) = &row[input_index] else {
+                        return Err(internal_error("decay history is not Float64"));
+                    };
+                    work.add(RollingWork::DecayReferenceHistorySamples, 1);
+                    push_history(values, value.filter(|value| !value.is_nan()), window);
+                }
+            }
+            super::super::history::HistoryChunkRef::Columnar(record) => {
+                let source = record
+                    .column(input_index)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .ok_or_else(|| internal_error("columnar decay history is not Float64"))?;
+                for value in source {
+                    work.add(RollingWork::DecayReferenceHistorySamples, 1);
+                    push_history(values, value.filter(|value| !value.is_nan()), window);
+                }
+            }
         }
     }
     Ok(())
