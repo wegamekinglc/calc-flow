@@ -117,11 +117,10 @@ fn cpu_rolling_million_rows_remain_eligible_and_account_actual_scratch() {
     let prepared = plan
         .prepare_ordered_stream_inputs(&state, &batch, "r", None)
         .unwrap();
-    let bytes = prepared
-        .scratch_plan_for_cpu(16)
-        .expect("large supported input")
-        .accounted_bytes()
-        .unwrap();
+    let Ok(scratch) = prepared.scratch_plan_for_cpu(16) else {
+        panic!("large supported input");
+    };
+    let bytes = scratch.accounted_bytes().unwrap();
     assert!(bytes >= batch.num_rows() * plan.outputs.len() * size_of::<f64>());
     let (_, requests) =
         split_for_cpu(prepared, 16).expect("representable large input stays eligible");
