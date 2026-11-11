@@ -11,12 +11,12 @@ use super::{
     ROLLING_COLUMNAR_STATE_LAYOUT_VERSION, ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION,
     ROLLING_EWMA_STATE_LAYOUT_VERSION, ROLLING_INDICATOR_STATE_LAYOUT_VERSION,
     ROLLING_MACD_STATE_LAYOUT_VERSION, RecordBatch, Result, RollingHistories, RollingKernelState,
-    RollingMetricsRecorder, RollingSnapshotMetadata, RollingStage, RowIdentity, ScalarValue,
-    Schema, SchemaRef, SegmentDescriptor, Sha256, StateInventory, StateRowOrderKey, SumClass,
-    TableBatch, UInt8Array, UInt64Array, Value, WindowState, checkpoint_mismatch, concat_batches,
-    ewma_entity_values, float_sample, format_error, fresh_windows, history_event_time,
-    internal_error, is_valid_sample, kernel, new_null_array, operator_error, spec_uses_stable_v2,
-    state_format, state_v3,
+    RollingMetricsRecorder, RollingSnapshotMetadata, RollingStage, RollingWork, RollingWorkBatch,
+    RowIdentity, ScalarValue, Schema, SchemaRef, SegmentDescriptor, Sha256, StateInventory,
+    StateRowOrderKey, SumClass, TableBatch, UInt8Array, UInt64Array, Value, WindowState,
+    checkpoint_mismatch, concat_batches, ewma_entity_values, float_sample, format_error,
+    fresh_windows, history_event_time, internal_error, is_valid_sample, kernel, new_null_array,
+    operator_error, spec_uses_stable_v2, state_format, state_v3,
 };
 use kernel::{StreamKernelUpdate, TypedStreamTransition};
 
@@ -1111,7 +1111,7 @@ pub(super) fn build_typed_stream_output(
     };
     let touched = {
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
-        prepare_scalar_appends(rows, histories, compiled, &update, node_id)?
+        prepare_scalar_appends(rows, histories, compiled, &update, node_id, observer)?
     };
     Ok(Some((
         record,
@@ -1128,6 +1128,9 @@ fn prepare_typed_stream(
     node_id: &str,
     observer: Option<&RollingMetricsRecorder>,
 ) -> Result<StreamKernelUpdate> {
+    let mut work = RollingWorkBatch::new(observer);
+    work.add(RollingWork::NumericSerialCalls, 1);
+    work.add(RollingWork::ParallelFallbackPreparedIneligible, 1);
     compiled
         .kernel_plan
         .prepare_stream_with_history(prior, input, Some(histories), node_id, observer)?

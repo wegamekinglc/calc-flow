@@ -14,6 +14,7 @@ impl Work {
             &self.compiled,
             &self.node,
             None,
+            None,
             check,
         )?;
         let mut state = RollingStreamState::default();

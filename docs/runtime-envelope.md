@@ -932,6 +932,29 @@ the frozen outcome remains; late panics are secondary task diagnostics and do
 not revive the callback. No unfinished CPU work is detached after a timeout,
 and no Tokio executor thread blocks waiting for a join.
 
+Rolling callback metrics report `numeric_lanes_started` for successfully
+registered owned lane tasks and `numeric_parallel_rows` for their attempted
+row transitions. The owner settles both counts after draining the work,
+including partial launches, failures and cancellation. A task cancelled before
+its first row still counts as started. These counters describe actual work;
+they do not measure simultaneous CPU utilization.
+
+The same callback observations count actual scalar history-charge row visits,
+columnar history-charge chunk visits, and history rows prepared for append or
+eviction. Charge visits include repeated checks and exclude cache hits and
+input-buffer accounting. Prepared rows include candidates later rejected by a
+budget or output failure; they are not committed-row totals. Fixed counters
+also identify actual typed serial, general, and owned parallel invocations,
+with the parallel count settled after drain whenever at least one lane started.
+Serial fallback reasons distinguish small batches, unsupported plans, CPU
+capacity, preparation and partition eligibility, and owned-work admission.
+These are job-lifetime attempted-work observations; a restored job starts with
+fresh counters. Synchronous preparation accumulates counters locally and
+publishes them in a batch before an await or callback finalization.
+The call counters cover synchronous row kernels and owned entity lanes;
+dedicated indicator workers retain their existing work observations. Fallback
+counters describe actual entity-lane decisions and synchronous bridge fallback.
+
 Retained history keeps Scalar and Arrow blocks in event order. A shared
 descriptor-cost policy chooses the representation for Rows, Duration, and
 mixed windows; small tails can retain Scalar values without allocating a

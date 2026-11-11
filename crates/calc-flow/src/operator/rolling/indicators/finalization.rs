@@ -193,6 +193,7 @@ impl Work {
             &self.compiled,
             &self.node,
             self.observer.as_ref(),
+            None,
             check,
         )?;
         state.histories.apply(computed.touched);

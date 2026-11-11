@@ -14,10 +14,10 @@ use std::{
 use super::{
     Array, ArrayRef, DataType, DerivedBuilder, Float64Array, Float64Builder, KernelSelection,
     OutputStorage, PreparedTypedFill, RecordBatch, RollingKernelExecution, RollingKernelPlan,
-    RollingKernelState, RollingMetricsRecorder, RollingNumericalProfile, Statistic,
-    StreamKernelUpdate, TimestampMicrosecondArray, TypedEntityState, TypedFloatReadout,
-    TypedFloatReadoutKind, TypedFrame, TypedGroupInput, TypedGroupPlan, TypedOutputKind,
-    TypedOutputPlan, TypedWindowState, float_mean, internal_error, operator_error,
+    RollingKernelState, RollingMetricsRecorder, RollingNumericalProfile, RollingWork,
+    RollingWorkBatch, Statistic, StreamKernelUpdate, TimestampMicrosecondArray, TypedEntityState,
+    TypedFloatReadout, TypedFloatReadoutKind, TypedFrame, TypedGroupInput, TypedGroupPlan,
+    TypedOutputKind, TypedOutputPlan, TypedWindowState, float_mean, internal_error, operator_error,
     read_typed_float, typed_output_mismatch, valid_float64,
 };
 use crate::{CalcFlowError, Result};
@@ -311,7 +311,17 @@ impl RollingKernelPlan {
         &self,
         input: &RecordBatch,
     ) -> bool {
-        self.parallel_dimensions(input)
+        self.entity_parallel_fallback(input).is_none()
+    }
+
+    pub(in crate::operator::rolling) fn entity_parallel_fallback(
+        &self,
+        input: &RecordBatch,
+    ) -> Option<RollingWork> {
+        if input.num_rows() < 64_000 {
+            return Some(RollingWork::ParallelFallbackSmallBatch);
+        }
+        let supported = self.parallel_dimensions(input)
             && self.groups.iter().all(|group| {
                 matches!(group,
                 TypedGroupPlan::Numeric { input_index, frame: TypedFrame::Rows(5 | 20) }
@@ -320,12 +330,12 @@ impl RollingKernelPlan {
             && self
                 .outputs
                 .iter()
-                .all(|output| self.parallel_output(output))
+                .all(|output| self.parallel_output(output));
+        (!supported).then_some(RollingWork::ParallelFallbackUnsupportedPlan)
     }
 
     fn parallel_dimensions(&self, input: &RecordBatch) -> bool {
-        input.num_rows() >= 64_000
-            && u32::try_from(input.num_rows()).is_ok()
+        u32::try_from(input.num_rows()).is_ok()
             && self.selection == KernelSelection::OrderedPrimitive
             && self.numerical_profile == RollingNumericalProfile::StableV1
             && !self.nan_as_value
@@ -373,13 +383,13 @@ impl RollingKernelPlan {
 impl PreparedOrderedKernel<'_> {
     #[cfg(test)]
     pub(in crate::operator::rolling) fn scratch_plan(&self) -> Option<ScratchPlan> {
-        self.scratch_plan_for_cpu(2)
+        self.scratch_plan_for_cpu(2).ok()
     }
 
     pub(in crate::operator::rolling) fn scratch_plan_for_cpu(
         &self,
         cpus: usize,
-    ) -> Option<ScratchPlan> {
+    ) -> std::result::Result<ScratchPlan, RollingWork> {
         let plan = self.plan;
         let states = &self.fill.stream.state.states;
         if !self.parallel_shape
@@ -393,13 +403,13 @@ impl PreparedOrderedKernel<'_> {
                 .iter()
                 .all(|column| matches!(column, TypedGroupInput::Single(_)))
         {
-            return None;
+            return Err(RollingWork::ParallelFallbackPreparedIneligible);
         }
         let lanes = cpus
             .min(self.fill.row_count / ROWS_PER_LANE)
             .min(states.len());
         if lanes < 2 {
-            return None;
+            return Err(RollingWork::ParallelFallbackPreparedIneligible);
         }
         let scratch = ScratchPlan::for_lanes(
             self.fill.row_count,
@@ -408,13 +418,18 @@ impl PreparedOrderedKernel<'_> {
             self.node_id.len(),
             lanes,
         );
-        scratch.accounted_bytes().map(|_| scratch)
+        scratch
+            .accounted_bytes()
+            .map(|_| scratch)
+            .ok_or(RollingWork::ParallelFallbackScratchUnrepresentable)
     }
 
     pub(in crate::operator::rolling) fn finish_serial(
         self,
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<StreamKernelUpdate> {
+        let mut work = RollingWorkBatch::new(observer);
+        work.add(RollingWork::NumericSerialCalls, 1);
         self.plan
             .finish_typed_fill(self.fill, self.node_id, observer)
             .map(|execution| StreamKernelUpdate { execution })
@@ -442,7 +457,7 @@ impl PreparedOrderedKernel<'_> {
         self,
         cpus: usize,
     ) -> std::result::Result<(NumericJoinSeed, Vec<NumericLaneRequest>), Self> {
-        let Some(scratch) = self.scratch_plan_for_cpu(cpus) else {
+        let Ok(scratch) = self.scratch_plan_for_cpu(cpus) else {
             return Err(self);
         };
         let lanes = scratch.lanes();

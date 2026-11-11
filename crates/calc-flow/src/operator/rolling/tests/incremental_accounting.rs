@@ -1,3 +1,4 @@
+use crate::operator::rolling_metrics::RollingMetricsStore;
 use datafusion::arrow::array::StringArray;
 
 use super::*;
@@ -12,8 +13,16 @@ async fn test_incremental_accounting_warm_append_charges_only_new_history_rows()
         let mut operator = RollingOperator::new("rolling", input.schema(), spec.clone()).unwrap();
         let expected = reference_output(&operator, &all);
         let (job, mut output) = job_output(&operator);
-        let mut emitted =
-            finalize(&mut operator, &job, &mut output, input.slice(0, 512), 512).await;
+        let store = RollingMetricsStore::default();
+        let mut emitted = finalize(
+            &mut operator,
+            &job,
+            &store,
+            &mut output,
+            input.slice(0, 512),
+            512,
+        )
+        .await;
         if resume {
             let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
             let mut restored = RollingOperator::new("rolling", input.schema(), spec).unwrap();
@@ -28,14 +37,25 @@ async fn test_incremental_accounting_warm_append_charges_only_new_history_rows()
             );
             operator = restored;
         }
-        budget::take_history_charge_visits();
-        emitted.extend(finalize(&mut operator, &job, &mut output, input.slice(512, 1), 513).await);
-        let append_visits = budget::take_history_charge_visits();
+        let before_append = store.snapshot().watermark.history_charge_scalar_rows;
+        emitted.extend(
+            finalize(
+                &mut operator,
+                &job,
+                &store,
+                &mut output,
+                input.slice(512, 1),
+                513,
+            )
+            .await,
+        );
+        let append_visits = store.snapshot().watermark.history_charge_scalar_rows - before_append;
         assert_live_charge(&operator);
         assert_exact_byte_boundary(&mut operator);
-        budget::take_history_charge_visits();
-        emitted.extend(finalize(&mut operator, &job, &mut output, gap.clone(), 1_028).await);
-        let expiry_visits = budget::take_history_charge_visits();
+        let before_expiry = store.snapshot().watermark.history_charge_scalar_rows;
+        emitted
+            .extend(finalize(&mut operator, &job, &store, &mut output, gap.clone(), 1_028).await);
+        let expiry_visits = store.snapshot().watermark.history_charge_scalar_rows - before_expiry;
         assert_live_charge(&operator);
         assert_eq!(
             concat_batches(&expected.schema(), &emitted).unwrap(),
@@ -207,24 +227,12 @@ fn reference_output(operator: &RollingOperator, input: &RecordBatch) -> RecordBa
 async fn finalize(
     operator: &mut RollingOperator,
     job: &crate::StreamJobContext,
+    store: &RollingMetricsStore,
     output: &mut crate::EdgeCollector,
     record: RecordBatch,
     watermark: i64,
 ) -> Vec<RecordBatch> {
-    let context = StreamOperatorContext::new(job, "rolling", operator.state.last_input_watermark);
-    operator
-        .process_data(
-            "input",
-            Batch::table(vec![record], BatchMetadata::default()).unwrap(),
-            &context,
-            output,
-        )
-        .await
-        .unwrap();
-    operator
-        .on_watermark(EventTime::from_micros(watermark), &context, output)
-        .await
-        .unwrap();
+    execution_diagnostics::observe(operator, job, store, output, record, watermark).await;
     output
         .drain("output")
         .into_iter()
