@@ -126,7 +126,7 @@ pub use pipeline::{
     PipelineBuilder, PortEndpoint, RunMetadata, RunResult, StreamExecutionPlan, StreamRequirements,
     StreamRuntimeConfig,
 };
-pub use program::{CompileMode, CompileOptions, Program};
+pub use program::{CompileMode, CompileOptions, Program, UpdateSemantics};
 pub use project_store::{
     FileProjectStore, MAX_PROJECT_DOCUMENT_BYTES, ProjectStore, export_project_json,
     export_project_yaml, import_project_json, import_project_json_with_limit, import_project_yaml,

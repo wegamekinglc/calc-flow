@@ -146,6 +146,7 @@ from calc_flow.symbolic.query_analysis import (
     QueryTieOrder,
     SupportStatus,
     UpdateKind,
+    UpdateSemantics,
 )
 
 __version__ = "2026.11.2"
@@ -177,6 +178,7 @@ __all__ = [
     "QueryTieOrder",
     "SupportStatus",
     "UpdateKind",
+    "UpdateSemantics",
     "AsofJoinSide",
     "AsofJoinSpec",
     "AsofStateLimits",

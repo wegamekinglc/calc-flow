@@ -74,7 +74,44 @@ pub(crate) fn compile_graph(
         .map(|(reference, _)| reference.clone())
         .collect();
     let (external_inputs, external_outputs) = external_ports(&builder.nodes, &builder.edges)?;
-    let (external_inputs, external_outputs) = if let Some(bindings) = &builder.frontend_bindings {
+    super::analysis::gate_updates(builder, execution_mode)?;
+    let (external_inputs, external_outputs) =
+        frontend_ports(builder, external_inputs, external_outputs)?;
+    let fingerprint = graph_fingerprint(
+        execution_mode,
+        &builder.name,
+        requires_datafusion.then_some(builder.datafusion_config),
+        &builder.nodes,
+        &builder.edges,
+        &selected_catalog,
+        builder.update_semantics,
+    )?;
+    let table = requires_datafusion.then(|| TablePlanResources {
+        config: builder.datafusion_config,
+        udfs: udfs.clone(),
+        selected_udfs,
+    });
+    Ok(CompiledGraph {
+        order,
+        external_inputs,
+        external_outputs,
+        fingerprint,
+        late_outputs,
+        table,
+    })
+}
+
+type ExternalPorts = (
+    BTreeMap<String, PortEndpoint>,
+    BTreeMap<String, PortEndpoint>,
+);
+
+fn frontend_ports(
+    builder: &PipelineBuilder,
+    external_inputs: BTreeMap<String, PortEndpoint>,
+    external_outputs: BTreeMap<String, PortEndpoint>,
+) -> Result<ExternalPorts> {
+    Ok(if let Some(bindings) = &builder.frontend_bindings {
         for (logical, physical) in [
             (&bindings.inputs, &external_inputs),
             (&bindings.outputs, &external_outputs),
@@ -91,27 +128,6 @@ pub(crate) fn compile_graph(
         (bindings.inputs.clone(), bindings.outputs.clone())
     } else {
         (external_inputs, external_outputs)
-    };
-    let fingerprint = graph_fingerprint(
-        execution_mode,
-        &builder.name,
-        requires_datafusion.then_some(builder.datafusion_config),
-        &builder.nodes,
-        &builder.edges,
-        &selected_catalog,
-    )?;
-    let table = requires_datafusion.then(|| TablePlanResources {
-        config: builder.datafusion_config,
-        udfs: udfs.clone(),
-        selected_udfs,
-    });
-    Ok(CompiledGraph {
-        order,
-        external_inputs,
-        external_outputs,
-        fingerprint,
-        late_outputs,
-        table,
     })
 }
 
@@ -516,6 +532,7 @@ pub(crate) fn graph_fingerprint(
     nodes: &BTreeMap<String, NodeDefinition>,
     edges: &[Edge],
     selected_catalog: &[(UdfReference, UdfCatalogEntry)],
+    update_semantics: crate::UpdateSemantics,
 ) -> Result<String> {
     let node_values = nodes
         .iter()
@@ -564,6 +581,12 @@ pub(crate) fn graph_fingerprint(
             .as_object_mut()
             .expect("fingerprint root is an object")
             .insert("datafusion".into(), json!(datafusion_config));
+    }
+    if !update_semantics.is_legacy() {
+        value
+            .as_object_mut()
+            .expect("fingerprint root is an object")
+            .insert("update_semantics".into(), json!(update_semantics));
     }
     let canonical = canonical_json(&value)?;
     Ok(hex::encode(Sha256::digest(canonical.as_bytes())))

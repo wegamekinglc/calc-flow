@@ -4,7 +4,7 @@ use calc_flow::{
     ArrowFieldSpec, Batch, BatchKind, BatchMetadata, CalcFlowError, DataFusionConfig,
     JoinStateLimits, JoinTimeBounds, NodeSpec, OperatorSpec, PortSpec, ProjectSpec,
     ProviderRegistry, RuntimeSpec, StateConfig, StreamJoinOperator, StreamJoinSpec,
-    StreamRunOptions, UdfRegistry, import_project_json, validate_project,
+    StreamRunOptions, UdfRegistry, import_project_json, import_project_yaml, validate_project,
 };
 use datafusion::arrow::{
     array::{StringArray, TimestampMicrosecondArray},
@@ -81,6 +81,24 @@ fn raw_issues(spec: &Value) -> Vec<(String, String, String)> {
         Err(other) => panic!("expected ProjectValidation, got {other:?}"),
         Ok(project) => panic!("expected rejection, imported {project:?}"),
     }
+}
+
+#[test]
+fn yaml_join_import_preserves_raw_validation_diagnostics() {
+    let mut spec = valid_spec();
+    spec["join_type"] = json!("future");
+    let expected = raw_issues(&spec);
+    let yaml = serde_saphyr::to_string(&join_document(&spec)).unwrap();
+    let CalcFlowError::ProjectValidation { issues } =
+        import_project_yaml(yaml.as_bytes()).unwrap_err()
+    else {
+        panic!("expected structured YAML join diagnostics");
+    };
+    let actual: Vec<_> = issues
+        .into_iter()
+        .map(|issue| (issue.path, issue.code, issue.message))
+        .collect();
+    assert_eq!(actual, expected);
 }
 
 #[test]
@@ -335,6 +353,7 @@ fn typed_join_project(
         description: String::new(),
         runtime: RuntimeSpec::Stream(StreamRunOptions::default()),
         graph: calc_flow::PipelineSpec {
+            update_semantics: calc_flow::UpdateSemantics::LegacyAppend,
             name: "payments".into(),
             nodes: vec![NodeSpec {
                 id: "match".into(),

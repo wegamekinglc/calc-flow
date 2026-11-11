@@ -128,6 +128,13 @@ pub struct PipelineSpec {
     pub edges: Vec<EdgeSpec>,
     #[serde(default)]
     pub datafusion: DataFusionConfig,
+    /// Relation update interpretation; omitted legacy graphs keep their original bytes.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub update_semantics: crate::UpdateSemantics,
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1299,8 +1306,9 @@ fn build_project_builder(
     providers: &ProviderRegistry,
     mode: CompileMode,
 ) -> Result<PipelineBuilder> {
-    let builder =
-        PipelineBuilder::new(&project.graph.name)?.with_datafusion_config(project.graph.datafusion);
+    let builder = PipelineBuilder::new(&project.graph.name)?
+        .with_datafusion_config(project.graph.datafusion)
+        .with_update_semantics(project.graph.update_semantics);
     let builder = add_project_nodes(builder, project, providers, mode)?;
     add_project_edges(builder, project)
 }

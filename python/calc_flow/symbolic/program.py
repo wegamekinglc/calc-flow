@@ -26,6 +26,7 @@ from calc_flow.symbolic.nodes import (
 from calc_flow.symbolic.query_analysis import (
     AnalysisOptions,
     PortabilityRequest,
+    UpdateSemantics,
     _segment,
 )
 from calc_flow.symbolic.types import CompileMode
@@ -445,6 +446,7 @@ class Program:
     _fingerprint: str
     _engine: Literal["sql", "streaming"]
     _inputs_inferred: bool
+    _update_semantics: UpdateSemantics
 
     @overload
     def __init__(
@@ -500,6 +502,7 @@ class Program:
         object.__setattr__(self, "_outputs", copied_outputs)
         object.__setattr__(self, "_engine", engine)
         object.__setattr__(self, "_inputs_inferred", inputs is None)
+        object.__setattr__(self, "_update_semantics", "legacy_append")
         object.__setattr__(
             self,
             "_fingerprint",
@@ -541,6 +544,33 @@ class Program:
         """The immutable execution lifecycle, independent of frontend syntax."""
         return "batch" if self._engine == "sql" else "stream"
 
+    @property
+    def update_semantics(self) -> UpdateSemantics:
+        """How complete relation events are interpreted by this declaration."""
+        return self._update_semantics
+
+    def with_update_semantics(self, semantics: UpdateSemantics, /) -> Program:
+        """Copy the update interpretation without planning or reading data."""
+        if type(semantics) is not str:
+            raise TypeError("Program.update_semantics: expected a string")
+        if semantics not in ("legacy_append", "latest_relation"):
+            raise ValueError("Program.update_semantics: invalid_literal: unknown value")
+        candidate = Program(
+            self._name,
+            engine=self._engine,
+            inputs=None if self._inputs_inferred else self._inputs,
+            outputs=self._outputs,
+        )
+        object.__setattr__(candidate, "_update_semantics", semantics)
+        if semantics == "latest_relation":
+            identity = b"program-update-semantics-v1\0" + bytes.fromhex(
+                candidate.fingerprint
+            )
+            object.__setattr__(
+                candidate, "_fingerprint", hashlib.sha256(identity).hexdigest()
+            )
+        return candidate
+
     def for_mode(self, mode: CompileMode, /) -> Program:
         """Copy declarations into a fresh wrapper and validate the target mode."""
         return Program(
@@ -548,7 +578,7 @@ class Program:
             mode=mode,
             inputs=None if self._inputs_inferred else self._inputs,
             outputs=self._outputs,
-        )
+        ).with_update_semantics(self._update_semantics)
 
     def with_input(
         self, value: TableExpr | ArrayExpr | Parameter[object], /
@@ -560,7 +590,7 @@ class Program:
             engine=self._engine,
             inputs=(*self._inputs, value),
             outputs=self._outputs,
-        )
+        ).with_update_semantics(self._update_semantics)
 
     def _require_engine(self, engine: Literal["sql", "streaming"], /) -> None:
         if self._engine != engine:
@@ -642,7 +672,7 @@ class Program:
             engine=self._engine,
             inputs=None if self._inputs_inferred else self._inputs,
             outputs=(*self._outputs, (name, value)),
-        )
+        ).with_update_semantics(self._update_semantics)
 
     def analyze(
         self,

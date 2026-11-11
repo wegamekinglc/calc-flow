@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
-from typing import Literal
+from typing import Literal, get_args
 
 from calc_flow._compat import dataclass
 from calc_flow.symbolic.types import Field
 
 SupportStatus = Literal["supported", "unsupported", "unknown"]
+UpdateSemantics = Literal["legacy_append", "latest_relation"]
 HistoryScope = Literal[
     "current_batch", "accepted_history", "event_window", "latest_relation", "unknown"
 ]
@@ -192,6 +193,7 @@ class QueryAnalysis:
     nodes: tuple[QueryNodeFacts, ...]
     edges: tuple[QueryEdgeFacts, ...]
     diagnostics: tuple[QueryDiagnostic, ...]
+    update_semantics: UpdateSemantics = "legacy_append"
 
     def __post_init__(self) -> None:
         for name in ("nodes", "edges", "diagnostics"):
@@ -199,6 +201,15 @@ class QueryAnalysis:
 
 
 def _mode(value: dict) -> QueryModeFacts:
+    _check_wire_literals(
+        value,
+        {
+            "support": SupportStatus,
+            "history": HistoryScope,
+            "update": UpdateKind,
+            "finality": QueryFinality,
+        },
+    )
     ordering = value["ordering"]
     identity = ordering["temporal_identity"]
     return QueryModeFacts(
@@ -233,9 +244,24 @@ def _node_from_dict(node):
     )
 
 
-def _from_dict(value: dict) -> QueryAnalysis:
-    if value["schema_version"] != 1 or value["analysis_revision"] != 1:
+def _wire_semantics(value: dict) -> UpdateSemantics:
+    version = (value["schema_version"], value["analysis_revision"])
+    if version not in ((1, 1), (2, 2)):
         raise ValueError("query_analysis: unsupported revision")
+    semantics = (
+        value.get("update_semantics", "legacy_append")
+        if version == (1, 1)
+        else value["update_semantics"]
+    )
+    if semantics not in ("legacy_append", "latest_relation") or (
+        version == (1, 1) and semantics != "legacy_append"
+    ):
+        raise ValueError("query_analysis.update_semantics: invalid_literal")
+    return semantics
+
+
+def _from_dict(value: dict) -> QueryAnalysis:
+    semantics = _wire_semantics(value)
     return QueryAnalysis(
         value["schema_version"],
         value["analysis_revision"],
@@ -247,13 +273,32 @@ def _from_dict(value: dict) -> QueryAnalysis:
                 edge["path"],
                 edge["source_path"],
                 edge["target_path"],
-                QueryEdgeModeFacts(**edge["batch"]),
-                QueryEdgeModeFacts(**edge["stream"]),
+                _edge_mode(edge["batch"]),
+                _edge_mode(edge["stream"]),
             )
             for edge in value["edges"]
         ),
         tuple(QueryDiagnostic(**issue) for issue in value["diagnostics"]),
+        semantics,
     )
+
+
+def _check_wire_literals(value, fields):
+    for field, vocabulary in fields.items():
+        if value[field] not in get_args(vocabulary):
+            raise ValueError(f"query_analysis.{field}: invalid_literal")
+
+
+def _edge_mode(value):
+    _check_wire_literals(
+        value,
+        {
+            "support": SupportStatus,
+            "producer_update": UpdateKind,
+            "consumer_interpretation": InputInterpretation,
+        },
+    )
+    return QueryEdgeModeFacts(**value)
 
 
 def _request_dict(request: PortabilityRequest | None) -> dict | None:
@@ -501,6 +546,7 @@ def _query(program, runtime, options, analyzers) -> QueryAnalysis:
         edges=_query_edges(nodes, paths),
         options=dict(portability=_request_dict(options.portability)),
         diagnostics=diagnostics,
+        update_semantics=program.update_semantics,
     )
     return _from_dict(
         json.loads(runtime._inner._analyze_query_graph(json.dumps(graph)))
@@ -508,10 +554,10 @@ def _query(program, runtime, options, analyzers) -> QueryAnalysis:
 
 
 def _gate(program, runtime, request):
+    if program.update_semantics == "latest_relation":
+        _gate_latest(program, runtime)
     if request is None:
         return
-    from calc_flow.errors import CompileError
-
     report = program.analyze(
         runtime, options=AnalysisOptions(portability=request)
     ).query
@@ -519,6 +565,52 @@ def _gate(program, runtime, request):
         issue = next(
             issue for issue in report.diagnostics if issue.status != "supported"
         )
-        error = CompileError(f"{issue.path}: {issue.code}: {issue.message}")
+        _raise_query_issue(report, issue)
+
+
+def _gate_latest(program, runtime):
+    from calc_flow.errors import CompileError
+
+    report = program.analyze(runtime).query
+    if (report.schema_version, report.analysis_revision, report.update_semantics) != (
+        2,
+        2,
+        "latest_relation",
+    ):
+        error = CompileError(
+            "Program.update_semantics: update_semantics_unproved: "
+            "latest_relation requires a matching v2 analysis"
+        )
         error.query_analysis = report
         raise error
+    issue = _update_failure(report, program.mode)
+    if issue is not None:
+        _raise_query_issue(report, issue)
+
+
+def _raise_query_issue(report, issue):
+    from calc_flow.errors import CompileError
+
+    error = CompileError(f"{issue.path}: {issue.code}: {issue.message}")
+    error.query_analysis = report
+    raise error
+
+
+def _current_mode_issue(report, issue, mode):
+    paths = tuple(node.path for node in report.nodes) + tuple(
+        edge.path for edge in report.edges
+    )
+    return any(issue.path.startswith(f"{path}.{mode}.") for path in paths) or (
+        mode == "stream" and any(issue.path == edge.path for edge in report.edges)
+    )
+
+
+def _update_failure(report, mode):
+    return next(
+        (
+            issue
+            for issue in report.diagnostics
+            if issue.status != "supported" and _current_mode_issue(report, issue, mode)
+        ),
+        None,
+    )

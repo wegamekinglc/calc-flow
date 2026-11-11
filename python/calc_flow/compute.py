@@ -186,7 +186,7 @@ def _prepare_collect(
     runtime: Runtime | None,
     portability: PortabilityRequest | None = None,
 ) -> tuple[BatchExecutionPlan, dict[str, Batch], dict[str, str]]:
-    if portability is None:
+    if portability is None and program.update_semantics == "legacy_append":
         batches = _collect_batches(program, inputs)
         return _prepare_collect_batches(program, batches, _selected_runtime(runtime))
     selected = _selected_runtime(runtime)
@@ -402,7 +402,7 @@ def _collect_async(
     portability: PortabilityRequest | None = None,
 ) -> Awaitable[dict[str, pa.Table]]:
     _require_table_outputs(program)
-    if portability is not None:
+    if portability is not None or program.update_semantics == "latest_relation":
         selected = _selected_runtime(runtime)
         _validate_options(options)
         captured = dict(inputs)

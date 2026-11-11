@@ -111,5 +111,65 @@ plans retain `source_binding_ids` / `sink_binding_ids`. Export is not a checkpoi
 batch query continuation is outside this contract.
 
 This slice covers row-local DataFrame expressions and the existing SQL relation
-surface. It does not add DataFrame aggregation, replacement consumption, general
+surface. It does not add DataFrame aggregation, aggregate replacement consumption, general
 joins, wider portable Arrow types, or comprehensive Polars compatibility.
+
+## Explicit relation updates
+
+Both DataFrame and SQL declarations use the same immutable Program choice:
+
+```python
+total = source.sql("SELECT SUM(x) AS total FROM input")
+visible = total.filter(total["total"] >= cf.lit(0))
+latest = cf.Program(
+    "latest", mode="stream", outputs={"result": visible}
+).with_update_semantics("latest_relation")
+assert latest.update_semantics == "latest_relation"
+```
+
+Rust exports `UpdateSemantics` at the crate root and through `program`:
+
+```rust
+use calc_flow::{Program, UpdateSemantics};
+
+fn choose(program: &Program) -> Program {
+    program.with_update_semantics(UpdateSemantics::LatestRelation)
+}
+```
+
+The default is `legacy_append`. With input batches [1] and [2, 3], the first
+stream SUM emits snapshots 1 and 6. A second ordinary SUM appends those events
+and emits 1 and 7. Explicit latest rejects that second consumption edge before
+opening a Source, without requiring a portability request. This release provides
+safe admission; it does not compute replacement aggregation.
+
+Latest admits complete snapshots through proved deterministic single-input
+projections, filters and row-local SQL/CTEs. These edges report
+`complete_replacement`; their output remains `complete_snapshot` with
+`latest_relation` history. A filter dropping every row still emits an exact-schema
+empty relation event. No input event produces no update. All RecordBatches within
+one Batch form one event; an oversized complete event fails its edge budget whole.
+
+Known append-only consumers reject with `update_interpretation_mismatch`.
+Unproved consumers, opaque providers and missing event-boundary evidence reject
+with `update_semantics_unproved` or `update_event_boundary_unproved`.
+`CompileError.query_analysis` in Python and Rust's `QueryUpdateSemantics`
+contain the immutable report and logical consumer path. Analysis and export
+remain available for unsupported declarations. Additional comparison requests
+remain separate obligations.
+
+`for_mode`, `with_input` and `output` preserve the choice. Latest changes
+declaration, plan, cache and checkpoint identities; switching back to legacy
+recomputes the original identity. Batch still consumes one independent finite
+input per execution and has no cross-execution replacement state. Thus a batch
+SUM chain can compile while the same stream declaration rejects.
+
+Project-v3 persists `graph.update_semantics="latest_relation"`. Missing or explicit
+legacy normalizes to the old omitted-field bytes and identities. The Rust public
+`PipelineSpec` has a new field: full struct literals must add
+`update_semantics: UpdateSemantics::LegacyAppend` (or `Default::default()`).
+Low-level synchronous builders use the same selector and AST rules and require
+exact declared table ports to prove event boundaries. They never block on schema
+planning. Legacy checkpoints retain their existing layouts; an actual restore
+across update choices rejects before Source acquisition. Existing snapshot SQL
+initialization, slicing, output-route and delivery restrictions still apply.

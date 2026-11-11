@@ -488,6 +488,7 @@ def _stream_program(request: _StreamRequest) -> StreamResults[StreamOutput]:
             request,
             inputs=_capture_stream_inputs(request.inputs)
             if request.portability is None
+            and request.program.update_semantics == "legacy_append"
             else {
                 name: tuple(value) if type(value) is list else value
                 for name, value in request.inputs.items()

@@ -43,6 +43,7 @@ from calc_flow.symbolic.query_analysis import (
     QueryTieOrder,
     SupportStatus,
     UpdateKind,
+    UpdateSemantics,
 )
 from calc_flow.symbolic.sql import snapshot_sql, sql
 from calc_flow.symbolic.types import CompileMode, Field
@@ -81,6 +82,7 @@ __all__ = [
     "QueryTieOrder",
     "SupportStatus",
     "UpdateKind",
+    "UpdateSemantics",
     "AnalysisIssue",
     "AnalysisResult",
     "ArrayExpr",
