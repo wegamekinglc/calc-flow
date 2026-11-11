@@ -1573,9 +1573,6 @@ pub(super) const NULL_FREE_MERGE_METADATA_BYTES: usize =
 impl NumericOutputBuffers {
     fn gather(input: &PreparedNumericInput, shape: NumericOutputShape<'_>) -> Result<Self> {
         let NumericOutputShape { results, count } = shape;
-        let entity_ids = &input.entity_ids;
-        let assignments = &input.assignments;
-        let rows = entity_ids.len();
         let null_free = count > 0
             && results
                 .iter()
@@ -1587,6 +1584,18 @@ impl NumericOutputBuffers {
                 _ => Self::Many(gather_trusted_numeric_columns_many(&proof)),
             });
         }
+        Self::gather_validated(input, results, count, null_free)
+    }
+
+    fn gather_validated(
+        input: &PreparedNumericInput,
+        results: &[NumericLaneResult],
+        count: usize,
+        null_free: bool,
+    ) -> Result<Self> {
+        let entity_ids = &input.entity_ids;
+        let assignments = &input.assignments;
+        let rows = entity_ids.len();
         match count {
             1 if null_free => gather_null_free_numeric_columns_impl(
                 entity_ids,
