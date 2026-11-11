@@ -6,6 +6,25 @@ import pytest
 import calc_flow as cf
 
 
+def test_replacement_analysis_edges_preserve_declared_input_aliases():
+    from calc_flow.symbolic.query_analysis import _query_edges
+
+    source = cf.table_input("events", schema=pa.schema([("x", pa.int64())]))
+    for value, alias in [
+        (source.aggregate({"total": source["x"].sum()}), "input"),
+        (cf.sql("SELECT SUM(x) AS total FROM incoming", incoming=source), "incoming"),
+    ]:
+        node = value._node
+        edges = _query_edges(
+            {node.digest: node},
+            {node.digest: "outputs.result", source._node.digest: "inputs.events"},
+        )
+        assert len(edges) == 1
+        assert edges[0].get("input_alias") == alias
+        assert edges[0]["source_path"] == "inputs.events"
+        assert edges[0]["target_path"] == "outputs.result"
+
+
 def test_aggregate_schema_quotes_sql_syntax_inside_identifiers():
     column = 'x"), COUNT(*) AS injected FROM input --'
     key = 'g" GROUP BY injected --'

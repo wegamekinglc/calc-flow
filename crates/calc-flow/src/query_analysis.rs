@@ -402,6 +402,8 @@ pub(crate) struct DeclarationEdge {
     pub path: String,
     pub source_path: String,
     pub target_path: String,
+    #[serde(default)]
+    pub input_alias: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -530,15 +532,19 @@ fn analyze_nodes(
             if source.stream.update == UpdateKind::CompleteSnapshot
                 && let Some(query) = &node.query
             {
-                facts.stream.reason = sql::replacement_rejection(query).into();
+                facts.stream.reason =
+                    sql::replacement_rejection(query, inputs[0].input_alias.as_deref()).into();
             }
             if node.schema.is_some()
                 && source.schema.is_some()
-                && node.query.as_ref().is_some_and(|q| {
-                    sql::replacement(
-                        q,
-                        &schema_fields(source.schema.as_ref().expect("proved schema")),
-                    )
+                && inputs[0].input_alias.as_ref().is_some_and(|alias| {
+                    node.query.as_ref().is_some_and(|q| {
+                        sql::replacement(
+                            q,
+                            &schema_fields(source.schema.as_ref().expect("proved schema")),
+                            alias,
+                        )
+                    })
                 })
             {
                 proof = sql::Proof::Replacement;
@@ -643,6 +649,7 @@ fn analyze_edges(
             path: edge.path.clone(),
             source_path: edge.source_path.clone(),
             target_path: edge.target_path.clone(),
+            input_alias: edge.input_alias.clone(),
         };
         let source = &by_path[&edge.source_path];
         let target = &by_path[&edge.target_path];

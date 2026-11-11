@@ -1905,7 +1905,10 @@ read the [design and architecture guide](design.md).
 A `latest_relation` graph may feed complete snapshots into ordinary single-alias
 SQL or DataFrame aggregates. The admitted SQL is one SELECT over one occurrence
 of one input, projecting direct group keys and SUM/COUNT/MIN/MAX/AVG of direct
-columns (COUNT also accepts `*`). Keys support Boolean, integers and strings;
+columns (COUNT also accepts `*`). FROM must use the declared bare input alias;
+schema/catalog-qualified relations and table-alias column renaming are outside
+this replacement allowlist. Column qualifiers must match that input alias or
+its explicit SQL table alias. Keys support Boolean, integers and strings;
 numeric reducers support ordinary integers/floats. DISTINCT, aggregate modifiers,
 computed operands/finalizers, WHERE/HAVING, ORDER/LIMIT, CTEs, joins, UDFs and
 other unproved shapes are rejected before sources open. Put supported row-local

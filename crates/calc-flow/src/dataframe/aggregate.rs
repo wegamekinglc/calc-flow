@@ -125,7 +125,7 @@ pub(crate) fn query(
     groups: &[String],
     path: &str,
 ) -> Result<String> {
-    validate_groups(input, schema, groups, path)?;
+    validate_groups(schema, groups, path)?;
     let mut select = groups.iter().map(|key| quote(key)).collect::<Vec<_>>();
     let reductions = aggregates
         .iter()
@@ -139,16 +139,13 @@ pub(crate) fn query(
     ))
 }
 
-fn validate_groups(
-    input: &TableExpr,
-    schema: &SchemaRef,
-    groups: &[String],
-    path: &str,
-) -> Result<()> {
+fn validate_groups(schema: &SchemaRef, groups: &[String], path: &str) -> Result<()> {
     for (i, key) in groups.iter().enumerate() {
         let role = format!("{path}.aggregate.group_by[{i}]");
-        let dtype = input.column(key)?.dtype(input.lineage(), schema, &role)?;
-        if !group_type(&dtype) {
+        let field = schema
+            .field_with_name(key)
+            .map_err(|error| invalid(&role, "schema_mismatch", error))?;
+        if !group_type(field.data_type()) {
             return Err(invalid(
                 &role,
                 "unsupported_type",

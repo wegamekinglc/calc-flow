@@ -523,15 +523,25 @@ def _declaration(node, path, facts, statuses):
     )
 
 
+def _input_alias(node, index):
+    from calc_flow.symbolic.analyzer import _cstr_seq
+
+    if node.op.name not in ("sql", "snapshot_sql", "aggregate"):
+        return None
+    aliases = _cstr_seq(node.attr("aliases"))
+    return aliases[index] if index < len(aliases) else None
+
+
 def _query_edges(nodes, paths):
     return [
         dict(
             path=paths[key] + role,
             source_path=paths[child.digest],
             target_path=paths[key],
+            input_alias=_input_alias(node, index),
         )
         for key, node in nodes.items()
-        for child, role in zip(node.args, _roles(node))
+        for index, (child, role) in enumerate(zip(node.args, _roles(node)))
     ]
 
 

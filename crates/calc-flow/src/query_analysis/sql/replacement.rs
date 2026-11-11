@@ -4,19 +4,29 @@ use super::{
     expression, parse_select_query, simple_aggregate_function, simple_query,
 };
 use crate::ArrowFieldSpec;
-use datafusion::sql::sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArguments, Query};
+use datafusion::{
+    common::TableReference,
+    sql::sqlparser::ast::{
+        FunctionArg, FunctionArgExpr, FunctionArguments, Query, TableFactor, Visit, Visitor,
+    },
+};
+use std::ops::ControlFlow;
 
-pub(crate) fn supported(text: &str, fields: &[ArrowFieldSpec]) -> bool {
-    inspect(text, fields).unwrap_or(false)
+pub(crate) fn supported(text: &str, fields: &[ArrowFieldSpec], input_alias: &str) -> bool {
+    inspect(text, fields, input_alias).unwrap_or(false)
 }
-fn inspect(text: &str, fields: &[ArrowFieldSpec]) -> crate::Result<bool> {
+fn inspect(text: &str, fields: &[ArrowFieldSpec], input_alias: &str) -> crate::Result<bool> {
     let parsed = parse_select_query(text)?;
     let DFStatement::Statement(statement) = parsed.statement() else {
         return Ok(false);
     };
-    Ok(statement_supported(&statement, fields))
+    Ok(statement_supported(&statement, fields, input_alias))
 }
-fn statement_supported(statement: &Statement, fields: &[ArrowFieldSpec]) -> bool {
+fn statement_supported(
+    statement: &Statement,
+    fields: &[ArrowFieldSpec],
+    input_alias: &str,
+) -> bool {
     let Statement::Query(query) = statement else {
         return false;
     };
@@ -26,9 +36,60 @@ fn statement_supported(statement: &Statement, fields: &[ArrowFieldSpec]) -> bool
     let Some(groups) = group_expressions(&select.group_by) else {
         return false;
     };
-    groups.iter().all(|g| group(g, fields))
+    binding_supported(select, input_alias)
+        && groups.iter().all(|g| group(g, fields))
         && projection(select, groups, fields)
         && normalized_query(query)
+}
+
+fn normalized_ident(ident: &Ident) -> String {
+    if ident.quote_style.is_some() {
+        ident.value.clone()
+    } else {
+        ident.value.to_ascii_lowercase()
+    }
+}
+
+fn binding_supported(select: &Select, input_alias: &str) -> bool {
+    let [from] = select.from.as_slice() else {
+        return false;
+    };
+    let TableFactor::Table { name, alias, .. } = &from.relation else {
+        return false;
+    };
+    let [part] = name.0.as_slice() else {
+        return false;
+    };
+    let Some(name) = part.as_ident() else {
+        return false;
+    };
+    let TableReference::Bare { table } = TableReference::from(input_alias) else {
+        return false;
+    };
+    if table.is_empty() || normalized_ident(name) != table.as_ref() {
+        return false;
+    }
+    let qualifier = match alias {
+        Some(alias) if alias.columns.is_empty() => normalized_ident(&alias.name),
+        Some(_) => return false,
+        None => normalized_ident(name),
+    };
+    select.visit(&mut BoundQualifier(&qualifier)).is_continue()
+}
+
+struct BoundQualifier<'a>(&'a str);
+
+impl Visitor for BoundQualifier<'_> {
+    type Break = ();
+
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        if let Expr::CompoundIdentifier(parts) = expr
+            && (parts.len() != 2 || normalized_ident(&parts[0]) != self.0)
+        {
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    }
 }
 fn group_expressions(group_by: &GroupByExpr) -> Option<&[Expr]> {
     match group_by {
@@ -53,11 +114,7 @@ fn field<'a>(expr: &Expr, fields: &'a [ArrowFieldSpec]) -> Option<&'a ArrowField
         Expr::CompoundIdentifier(parts) if parts.len() == 2 => &parts[1],
         _ => return None,
     };
-    let normalized = if name.quote_style.is_some() {
-        name.value.clone()
-    } else {
-        name.value.to_ascii_lowercase()
-    };
+    let normalized = normalized_ident(name);
     fields.iter().find(|f| f.name == normalized)
 }
 fn numeric(dtype: &str) -> bool {
@@ -147,7 +204,7 @@ fn portable(dtype: &str) -> bool {
 }
 
 /// Explains the first structural restriction; schema planning still owns type errors.
-pub(crate) fn rejection_reason(text: &str) -> &'static str {
+pub(crate) fn rejection_reason(text: &str, input_alias: Option<&str>) -> &'static str {
     let Ok(parsed) = parse_select_query(text) else {
         return "SQL semantics are unproved";
     };
@@ -157,9 +214,9 @@ pub(crate) fn rejection_reason(text: &str) -> &'static str {
     let Statement::Query(query) = statement.as_ref() else {
         return "one SELECT is required";
     };
-    query_rejection(query)
+    query_rejection(query, input_alias)
 }
-fn query_rejection(query: &Query) -> &'static str {
+fn query_rejection(query: &Query, input_alias: Option<&str>) -> &'static str {
     if query.with.is_some() {
         return "CTE is outside the replacement allowlist";
     }
@@ -170,6 +227,11 @@ fn query_rejection(query: &Query) -> &'static str {
         .or_else(|| select_modifier_rejection(select))
         .or_else(|| query_modifier_rejection(query))
         .or_else(|| select.projection.iter().find_map(item_rejection))
+        .or_else(|| {
+            (!input_alias.is_some_and(|alias| binding_supported(select, alias))).then_some(
+                "input relation and column qualifiers must bind the declared bare input alias",
+            )
+        })
         .unwrap_or(
             "operand/group key type or query modifiers are outside the replacement allowlist",
         )

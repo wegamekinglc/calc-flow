@@ -55,6 +55,7 @@ impl PipelineBuilder {
                 ),
                 source_path: node_path(&edge.source.node_id),
                 target_path: node_path(&edge.target.node_id),
+                input_alias: Some(edge.target.port.clone()),
             })
             .collect();
         analyze_graph(DeclarationGraph {
@@ -209,6 +210,7 @@ fn update_report(builder: &PipelineBuilder) -> Result<QueryAnalysis> {
             ),
             source_path: node_path(&edge.source.node_id),
             target_path: node_path(&edge.target.node_id),
+            input_alias: Some(edge.target.port.clone()),
         })
         .collect();
     analyze_graph(DeclarationGraph {

@@ -187,11 +187,12 @@ impl Lowered {
             batch_support: Some(crate::SupportStatus::Unsupported),
             stream_support: Some(crate::SupportStatus::Unsupported),
         });
-        for (_, child, role) in children(table, path) {
+        for (port, child, role) in children(table, path) {
             self.declaration_edges.push(DeclarationEdge {
                 path: role,
                 source_path: paths[&child.0.id].clone(),
                 target_path: path.into(),
+                input_alias: Some(port),
             });
         }
     }
@@ -236,6 +237,7 @@ impl Lowered {
                 path: role,
                 source_path: paths[&child.0.id].clone(),
                 target_path: path.into(),
+                input_alias: Some(port),
             });
         }
         self.nodes.push(node);
@@ -398,6 +400,7 @@ impl Lowered {
                 path: edge.path.clone(),
                 source_path: edge.source_path.clone(),
                 target_path: edge.target_path.clone(),
+                input_alias: edge.input_alias.clone(),
             })
             .collect();
         analyze_graph(DeclarationGraph {
