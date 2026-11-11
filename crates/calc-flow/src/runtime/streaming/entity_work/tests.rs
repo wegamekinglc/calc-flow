@@ -6,6 +6,38 @@ use std::sync::{
 };
 
 #[tokio::test]
+async fn cpu_rolling_observation_counts_actual_lanes_after_drain() {
+    use crate::operator::rolling_metrics::{RollingCallback, RollingMetricsStore};
+
+    let owner = owner();
+    let task = owner.client(TaskId::new(3), "operator:rolling".into());
+    let scope = task.callback_scope();
+    let store = RollingMetricsStore::default();
+    let callback = store.begin(RollingCallback::Watermark, crate::CancellationToken::new());
+    let (seed, requests, scratch) = entity_parallel_test_pair();
+    let mut ticket = reserved(&scope, scratch).start(requests, Some(callback.recorder()));
+    callback.complete(&Ok(()));
+    assert_eq!(store.snapshot().watermark.succeeded, 0);
+    let joined = ticket.join().await;
+    drop(joined.merge(seed).unwrap());
+    drop(scope);
+    owner.close_admission();
+    assert!(owner.drain().await.is_empty());
+    assert_eq!(owner.active_bytes(), 0);
+    let metrics = store.snapshot();
+    assert!(!metrics.overflowed);
+    assert_eq!(metrics.watermark.succeeded, 1);
+    assert!(metrics.watermark.numeric_rows > 0);
+    let observed = serde_json::to_value(&metrics.watermark).unwrap();
+    assert_eq!(observed["numeric_lanes_started"], serde_json::json!(2));
+    assert_eq!(observed["numeric_parallel_calls"], serde_json::json!(1));
+    assert_eq!(
+        observed["numeric_parallel_rows"],
+        serde_json::json!(metrics.watermark.numeric_rows),
+    );
+}
+
+#[tokio::test]
 async fn cpu_rolling_owner_dispatches_eight_concurrent_lanes() {
     let owner = owner();
     let gate = Arc::new(Gate::default());
@@ -278,8 +310,16 @@ async fn partial_launch_panic_keeps_the_first_handle_until_scope_settlement() {
     assert_eq!(store.snapshot().watermark.interrupted, 1);
     assert_eq!(store.snapshot().watermark.failed, 0);
     assert_eq!(store.snapshot().watermark.numeric_rows, 0);
+    let observed = serde_json::to_value(&store.snapshot().watermark).unwrap();
+    assert_eq!(observed["numeric_lanes_started"], serde_json::json!(1));
+    assert_eq!(observed["numeric_parallel_calls"], serde_json::json!(1));
+    assert_eq!(observed["numeric_parallel_rows"], serde_json::json!(0));
     scope.settle_abandoned().await;
     assert_eq!(store.snapshot().watermark.interrupted, 1);
+    assert_eq!(
+        serde_json::to_value(&store.snapshot().watermark).unwrap(),
+        observed
+    );
 }
 
 #[tokio::test]

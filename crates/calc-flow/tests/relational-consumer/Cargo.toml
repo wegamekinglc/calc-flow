@@ -1,0 +1,20 @@
+[package]
+name = "relational-public-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+calc-flow = { path = "../.." }
+async-trait = "0.1.89"
+tokio = { version = "1.52.0", features = ["macros", "rt-multi-thread", "test-util"] }
+
+[patch.crates-io]
+arrow-ipc = { path = "../../../../vendor/arrow-ipc" }
+parquet = { path = "../../../../vendor/parquet" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

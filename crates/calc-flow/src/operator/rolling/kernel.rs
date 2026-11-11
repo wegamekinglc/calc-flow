@@ -40,7 +40,9 @@ use crate::array::rolling_mean_math::{
 };
 use crate::{
     Result,
-    operator::rolling_metrics::{RollingMetricsRecorder, RollingStage, RollingWork},
+    operator::rolling_metrics::{
+        RollingMetricsRecorder, RollingStage, RollingWork, RollingWorkBatch,
+    },
 };
 
 mod cumulative;

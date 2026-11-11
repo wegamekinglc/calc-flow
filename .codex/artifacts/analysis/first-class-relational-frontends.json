@@ -1,0 +1,190 @@
+{
+  "source_commit": "e5ef248b9853e095be651b5bf06c2286dbadbf86",
+  "source_trees": {
+    "crates/calc-flow": "75d312dd6ebc376a424bdecc45dee726d4fa1065",
+    "crates/calc-flow-python": "0598f7aaefb029408ada38d02dd6d51bf6c78289",
+    "python/calc_flow": "1bcebca776b58b2f70bf285addb477510e9dfc35"
+  },
+  "baseline": "775ea9738265597de492b848f8e0763962c7041b",
+  "branch": "feature/dal-512-relational-frontends",
+  "interpreter": "Python 3.13.9",
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+  "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+  "wheel": {
+    "path": "target/relational/wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl",
+    "sha256": "c3f6dc948dadc5380147a96bd33b16ef89faeb4f00be565e7501dfe31f8c2fe8"
+  },
+  "native": {
+    "path": "target/relational/wheel-python/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+    "sha256": "8faf47d39df917ead9aa837b57890fef89597894323eaee673cc111b9721a543"
+  },
+  "matched_python_files": 55,
+  "schema_version": 1,
+  "issue": "DAL-512",
+  "checks": [
+    {
+      "id": "rust_frontend_program_validation",
+      "command": "CARGO_TARGET_DIR=target/relational/cargo CARGO_BUILD_JOBS=4 cargo test -p calc-flow --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256' --test relational_frontend --test relational_program --test relational_validation",
+      "result": "passed",
+      "log_sha256": "f52b9241460cc4dfbb4662070ea7b2cdc96a16b49a7bc1d391f0ec4c0c89814c",
+      "tests": 18,
+      "counts": [
+        4,
+        1,
+        13
+      ]
+    },
+    {
+      "id": "rust_low_level_query_history",
+      "command": "CARGO_TARGET_DIR=target/relational/cargo CARGO_BUILD_JOBS=4 cargo test -p calc-flow --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256' --test relational_frontend --test relational_program --test relational_validation --test query_history_portability",
+      "result": "passed",
+      "log_sha256": "94da877b46f4e67f32a1b95f1d4071272d946b0221211a4eabd7b640ee077438",
+      "tests_reused": 9,
+      "reuse_reason": "Only typed dataframe.rs and program/lower.rs changed after this run; those were rerun through 18 focused tests and the independent consumer."
+    },
+    {
+      "id": "independent_public_consumer",
+      "command": "CARGO_TARGET_DIR=target/relational/cargo CARGO_BUILD_JOBS=4 cargo run --manifest-path crates/calc-flow/tests/relational-consumer/Cargo.toml --locked --offline --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256' --config 'profile.release.package.relational-public-consumer.opt-level=0' --config 'profile.release.package.relational-public-consumer.codegen-units=256'",
+      "result": "passed",
+      "log_sha256": "babada24409462ab5b663eab573ddd9a6fff9a1dba053233eca29b716a84a03a",
+      "forms": [
+        "dataframe",
+        "sql",
+        "df_sql_df_sql",
+        "sql_df_sql"
+      ],
+      "verified": [
+        "schema",
+        "analysis",
+        "explain",
+        "named shared outputs",
+        "batch",
+        "owned stream",
+        "nullable/empty/duplicate rows",
+        "data-only export/reload compile/execute"
+      ],
+      "state": {
+        "same_batch_plan": [
+          1,
+          5
+        ],
+        "same_stream_job": [
+          1,
+          6
+        ],
+        "new_stream_job": [
+          5
+        ]
+      }
+    },
+    {
+      "id": "core_clippy",
+      "command": "CARGO_TARGET_DIR=target/relational/cargo CARGO_BUILD_JOBS=4 cargo clippy -p calc-flow --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256' --lib --test relational_frontend --test relational_program --test relational_validation --example 32_sql_expression_pipeline -- -D warnings",
+      "result": "passed",
+      "log_sha256": "7488eaddd2d9cdad09a663cea24f0039c10ad7153e968a8d80562485dea9a901"
+    },
+    {
+      "id": "rust_example",
+      "command": "CARGO_TARGET_DIR=target/relational/cargo CARGO_BUILD_JOBS=4 cargo run -p calc-flow --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256' --example 32_sql_expression_pipeline",
+      "result": "passed",
+      "log_sha256": "2f086d36dd7e8dfe06f32db753bd1cb01cbee77962f0e20f7fca1b9d78e5ea22",
+      "net": [
+        18.0,
+        27.0
+      ]
+    },
+    {
+      "id": "rustdoc_example",
+      "command": "CARGO_TARGET_DIR=target/relational/cargo CARGO_BUILD_JOBS=4 cargo test -p calc-flow --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256' --doc dataframe",
+      "result": "passed",
+      "log_sha256": "5056b75d279a9794b9727256d3ba97c8f40519946581583c5f4b43d50884b13e",
+      "tests": 1
+    },
+    {
+      "id": "rustdoc",
+      "command": "RUSTDOCFLAGS='-D warnings' CARGO_TARGET_DIR=target/relational/cargo CARGO_BUILD_JOBS=4 cargo doc -p calc-flow --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256' --no-deps",
+      "result": "passed",
+      "log_sha256": "39ecc508adecb3c113dd6934f5f4b44848556f2f2dcf0490f63e71cd1c0eaad6"
+    },
+    {
+      "id": "native_build",
+      "command": "PYO3_PYTHON=/home/wegamekinglc/anaconda3/bin/python CARGO_TARGET_DIR=target/relational/cargo CARGO_BUILD_JOBS=4 /home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python -m maturin build --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256' --config 'profile.release.package.calc-flow-python.opt-level=0' --config 'profile.release.package.calc-flow-python.codegen-units=256' --interpreter /home/wegamekinglc/anaconda3/bin/python --out target/relational/wheels",
+      "result": "passed",
+      "log_sha256": "bb8903e4e4216d22237386e24024e58ea195c5182c69fb317172efc3dc50f054",
+      "note": "Local linux_x86_64 wheel; not a release/PyPI platform certification."
+    },
+    {
+      "id": "python-final",
+      "command": "PYTHONPATH=target/relational/wheel-python JAX_PLATFORMS=cpu python -m pytest python/tests/test_relational_frontend.py python/tests/test_program_engine.py python/tests/test_symbolic_program.py python/tests/test_symbolic_compile_cache.py python/tests/test_query_history_portability.py python/tests/test_sql_pipeline.py -q --junitxml=target/relational/python-final.xml",
+      "result": "passed",
+      "log_sha256": "a7c944989b1f93f61c403d0dff7e06da80301b37d402b292ac4ba91658c636f4",
+      "tests": 135,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "id": "python-owned-final",
+      "command": "PYTHONPATH=target/relational/wheel-python JAX_PLATFORMS=cpu python -m pytest python/tests/test_stream_results.py -q -k 'close_waits_for_compile_worker or releases_source_at_eof or cancels_idle_source or concurrent_consumers or named_branches_consume_source_once or start_failure_closes_only_acquired or cancellation_at_native_start_result or close_before_entry or multi_alias_sql_before_iterator_acquisition' --junitxml=target/relational/python-owned-final.xml",
+      "result": "passed",
+      "log_sha256": "02406cdfcb700b51f79d92b43fa02df1700a59ca1c05f93bb465ea127d187cd8",
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "id": "python-async-final",
+      "command": "PYTHONPATH=target/relational/wheel-python JAX_PLATFORMS=cpu python -m pytest python/tests/test_compute.py -q -k 'async_collection_snapshots_mapping_and_forwards_options or async_compute_cancellation_waits_for_compile_worker or async_cancellation_before_start_does_not_leak_coroutines or async_cancellation_drains_native_bridge' --junitxml=target/relational/python-async-final.xml",
+      "result": "passed",
+      "log_sha256": "42778efcebef6b73133c5e01f54d699cafc1d8f306dc61c8f18ea244c6f93bc5",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "id": "python_example",
+      "command": "PYTHONPATH=target/relational/wheel-python JAX_PLATFORMS=cpu python examples/32_sql_expression_pipeline.py",
+      "result": "passed",
+      "log_sha256": "481f7a4bc04ca9d6e139f95989135e230952969f115abbb718f50ca4a9de5f15",
+      "net": [
+        18.0,
+        27.0
+      ]
+    },
+    {
+      "id": "pyo3_clippy",
+      "command": "PYO3_PYTHON=/home/wegamekinglc/anaconda3/bin/python CARGO_TARGET_DIR=target/relational/cargo CARGO_BUILD_JOBS=4 cargo clippy -p calc-flow-python --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256' --config 'profile.release.package.calc-flow-python.opt-level=0' --config 'profile.release.package.calc-flow-python.codegen-units=256' --lib -- -D warnings",
+      "result": "passed",
+      "log_sha256": "d9457f7295d35e8b5354ff342d13f9a81e231ba049af46f4bbfc61b76aed78e8"
+    },
+    {
+      "id": "standalone_core_build",
+      "command": "CARGO_TARGET_DIR=target/relational/cargo CARGO_BUILD_JOBS=4 cargo build -p calc-flow --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256' --lib",
+      "result": "passed",
+      "log_sha256": "ef8151022cd00a2df610b150b1eba8f3e471706d9d7c8b63ef0b8eceac04ddc5",
+      "note": "Core only, default features; independent consumer lock contains no Python or PyO3 crate."
+    }
+  ],
+  "static_verification": {
+    "cargo fmt --all --check": "passed",
+    "rustfmt --edition 2024 --check crates/calc-flow/tests/relational-consumer/src/main.rs": "passed",
+    "python scripts/verify_complexity_gates.py": "passed",
+    "Ruff lint and format, nine changed Python files; final additional test lint/formatted": "passed",
+    "Python 3.9 grammar for changed API and native stub": "passed; no Python 3.9 runtime claim",
+    "git diff --check": "passed",
+    "project-v3 schema / agent definitions against baseline": "unchanged"
+  },
+  "frozen_note_sha256": "f3185b9217233a10f2fc584ecceb383cafbef8345bc92a3a8ea3e979b7084e71",
+  "product_sources_unchanged_since_build_commit": true,
+  "preservation_test_added_after_build": "Python mode-wrapper plan/job state boundary test; no product source changes.",
+  "not_run": [
+    "full workspace regression",
+    "connector services",
+    "coverage",
+    "cross-platform matrix",
+    "benchmarks/performance"
+  ],
+  "merge_state": "Requires independent dal-reviewer review and required CI gates; no merge authorized."
+}

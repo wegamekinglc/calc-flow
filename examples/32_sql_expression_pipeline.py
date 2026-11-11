@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pyarrow as pa
 
 import calc_flow as cf
@@ -23,7 +25,12 @@ def pipeline(t: cf.TableExpr) -> cf.TableExpr:
     )
 
 
-def main() -> None:
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise RuntimeError(message)
+
+
+async def run() -> None:
     orders = pa.table(
         {
             "order_id": [1, 2, 3],
@@ -31,11 +38,32 @@ def main() -> None:
             "price": [10.0, 5.0, 10.0],
         }
     )
-    result = cf.compute(orders, pipeline)
+    source = cf.table_input("orders", schema=orders.schema)
+    result_expr = pipeline(source).sql("SELECT order_id, net FROM input")
+    batch = cf.Program(
+        "sql-expression-pipeline",
+        mode="batch",
+        outputs={"gross": add_gross(source), "result": result_expr},
+    )
+    stream = batch.for_mode("stream")
+    require(stream.fingerprint == batch.fingerprint, "mode changed the declaration")
+    schemas = await asyncio.to_thread(batch.collect_schema)
+    require(schemas["result"].names == ["order_id", "net"], "unexpected result schema")
+    result = (await batch.collect_async({"orders": orders}))["result"]
     expected = {"order_id": [1, 3], "net": [18.0, 27.0]}
     if result.to_pydict() != expected:
         raise RuntimeError(result.to_pydict())
+    streamed = []
+    async with stream.stream({"orders": [orders]}) as events:
+        async for event in events:
+            if event.name == "result":
+                streamed.extend(event.table.to_pylist())
+    require(streamed == result.to_pylist(), "stream and batch results differ")
     print(result.to_pydict())
+
+
+def main() -> None:
+    asyncio.run(run())
 
 
 if __name__ == "__main__":

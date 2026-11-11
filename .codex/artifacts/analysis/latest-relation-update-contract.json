@@ -1,0 +1,854 @@
+{
+  "issue": "DAL-513",
+  "baseline_sha": "f524493cb80546f35b65db0ecb9d2c86f1a2ea2e",
+  "validation_sha": "8f76053f5d517a33c95449834646c8de7141b56b",
+  "native_build": {
+    "source_sha": "7ef99c99e3931379ec45f43515a8717fe84dfc88",
+    "core_tree": "e0f12de0e7f05f81439db2f1ced3a241ee7f651e",
+    "binding_tree": "0ececf4eb3fe67a7b599466855640142bd5a798b",
+    "python_tree": "59fe42a9a77a19e788917e332701de9f34440909",
+    "wheel": "target/latest/final-wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl",
+    "wheel_sha256": "625c36fc71b1ba64d8cbd3bc23fa0268e58550e960bf4d93a5ae07d13b9887e8",
+    "extension": "target/latest/final-python/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+    "extension_sha256": "40f584cb052b5b8e45c4788bb7057a86f40e5c0dfbaf222ba04915c55eda3d83",
+    "interpreter": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+    "package": "target/latest/final-python",
+    "test_only_reuse": {
+      "production_error_mapping_equal": true,
+      "changed_path": "crates/calc-flow-python/src/error.rs",
+      "explanation": "Only the cfg(test) analysis_revision immutability assertion changed from 1 to 2; production Rust and all packaged Python remain identical."
+    }
+  },
+  "python": {
+    "version": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+    "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+    "pyarrow": "24.0.0",
+    "package": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/final-python/calc_flow/__init__.py",
+    "extension": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/final-python/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+    "source_files": [
+      {
+        "path": "calc_flow/pipeline.py",
+        "sha256": "237c12cbfbee25e4f0822c329596edb410e8287f75146eb1c4ea38c1000ef410"
+      },
+      {
+        "path": "calc_flow/store.py",
+        "sha256": "de6580386c9a72492818684cde7a2cdf14d02e70a76473715e2d52b62dfffa23"
+      },
+      {
+        "path": "calc_flow/join_spec.py",
+        "sha256": "9440cabf1ce87f900270b1159246f52f99fcea32e1b9c46987a422dce93efa5d"
+      },
+      {
+        "path": "calc_flow/_stream_inputs.py",
+        "sha256": "57ef58bc302565cfaa87148cc02736ec40585129fb8c51fa787dcd6c1de0a0a2"
+      },
+      {
+        "path": "calc_flow/errors.py",
+        "sha256": "08823d83a40097e1e4406bacce821de81a6ec016c05836efb34fc87f56101104"
+      },
+      {
+        "path": "calc_flow/asof_join_spec.py",
+        "sha256": "4160dd0e541da6e0be5b812f461706240a6b675199106d4029d69adb87c7ac06"
+      },
+      {
+        "path": "calc_flow/compute.py",
+        "sha256": "c7332e31b6acd62a61a33a1a0efa8fc7717ef2d874ee80f321fa5f5af4b46839"
+      },
+      {
+        "path": "calc_flow/_native_array.py",
+        "sha256": "a3f4629991e411f8b56f17275c61153e20dc182e7e6ee69041294276f2699891"
+      },
+      {
+        "path": "calc_flow/_native.pyi",
+        "sha256": "c02f41eb8bfa1549a24c9679df623e5a1ed57bb4522a551992ae51e4951ca731"
+      },
+      {
+        "path": "calc_flow/capabilities.py",
+        "sha256": "9a99d7fac56e5403ee6cd76b70b094957184fc4daa2ab3a0ca55c2cbb419498d"
+      },
+      {
+        "path": "calc_flow/stream.py",
+        "sha256": "0e61b2a44f6f4c1107a9680a45da01a5a0e0beb879ce4d65736394454cc29515"
+      },
+      {
+        "path": "calc_flow/config.py",
+        "sha256": "9fe9d07c5717e1460f539a89b4e58cf0c8c76647e0a5c41b2e551c4a99727b66"
+      },
+      {
+        "path": "calc_flow/__init__.py",
+        "sha256": "5f0f45e6010fbf2fe2e6057266d262d49b0629b56eff755e1d7111eb47c94075"
+      },
+      {
+        "path": "calc_flow/array.py",
+        "sha256": "b5a4d4ab4fd0f72922db98b3ca82c4436ed4bb0b5f6af565a9b03a8a7844f76c"
+      },
+      {
+        "path": "calc_flow/udf.py",
+        "sha256": "c3c4e73a5343bf80a415c93c72ca2286b3bbd1b6b9a60f6af0b0fca66307266b"
+      },
+      {
+        "path": "calc_flow/_compat.py",
+        "sha256": "4e17ab0e959c05b9467176379da4f65e3fe16e0c20b544cd10e6e78d99f03421"
+      },
+      {
+        "path": "calc_flow/_macd.py",
+        "sha256": "ff73c6b259998fd21d7c7862736f0a62924b36af44c5700a7060d9d4a646ed3b"
+      },
+      {
+        "path": "calc_flow/runtime.py",
+        "sha256": "4e191e41dc2bfac6ca0e9c15f4f60bdb88de1781ef16184aa52d744c24183464"
+      },
+      {
+        "path": "calc_flow/symbolic/program.py",
+        "sha256": "65a30565281b82a226c78fb1a350c498b2616ef6ef83483ce12c07c2055ee893"
+      },
+      {
+        "path": "calc_flow/symbolic/sql.py",
+        "sha256": "7a47d0fe153897461b4b7cfde9866c3e6ee6e4074f7986d04c088b676b452876"
+      },
+      {
+        "path": "calc_flow/symbolic/errors.py",
+        "sha256": "29b815903acc4e2a15653a025d11bb5d10e40422efca1e3b2b589cd16457320a"
+      },
+      {
+        "path": "calc_flow/symbolic/native_arrays.py",
+        "sha256": "6ab4c45e20fd4fee7acc8d6551fb6f928a46108dd0facd9cfb6bba4bde99bda1"
+      },
+      {
+        "path": "calc_flow/symbolic/analyzer.py",
+        "sha256": "1af18e207cf8d59e4e0948d41653bd1b204259bad2b6ba5a4a1bd0e3e072a230"
+      },
+      {
+        "path": "calc_flow/symbolic/expr.py",
+        "sha256": "0ea1767180598b20d941eb4975e9b506a761d08a5e6ec9baf30d243a1c8c1e8a"
+      },
+      {
+        "path": "calc_flow/symbolic/domains.py",
+        "sha256": "880483d1ca29bb75c92cb47e2cef82e708d553ff6e62ec1132685901f66a7cf8"
+      },
+      {
+        "path": "calc_flow/symbolic/asof.py",
+        "sha256": "babbdabf4f36f3a1654560f10e7d7e8b35b1e42f182f385ee0ae6fb3a11903bd"
+      },
+      {
+        "path": "calc_flow/symbolic/nodes.py",
+        "sha256": "eeba400812d4403207f067cac5be71f5fba9308538ef9ef1e1a66a3227f04611"
+      },
+      {
+        "path": "calc_flow/symbolic/_generated_rolling_kernels.py",
+        "sha256": "cdae04a26b254cb3a94c8c0c3ccbc11b6b4f5a6aad86adec2e55116eb4071263"
+      },
+      {
+        "path": "calc_flow/symbolic/late_output.py",
+        "sha256": "f0122b4c9f9eae46ffbe04d6dd35110041137f871e39ebea68faa04945c1a692"
+      },
+      {
+        "path": "calc_flow/symbolic/__init__.py",
+        "sha256": "22812e8e532c503fcca153708f7e7db76f611fe242f14395114f67df9b34fdda"
+      },
+      {
+        "path": "calc_flow/symbolic/ops.py",
+        "sha256": "7a39386e3bd6839310e9edb64e9c3afaa1fa94530330de60d4e8d94cecab8fe8"
+      },
+      {
+        "path": "calc_flow/symbolic/query_analysis.py",
+        "sha256": "2b702dabbef8ed111b09cb3263537d5841bae1cbc86ff55dd0060755da3f23c0"
+      },
+      {
+        "path": "calc_flow/symbolic/optimizer.py",
+        "sha256": "fb299d3fa6ed12f36d66684c6096d11bdf8049f648640bc1a44bd9eb16076a38"
+      },
+      {
+        "path": "calc_flow/symbolic/windows.py",
+        "sha256": "cbae86d2276663ca1696e73d92c4b61bc1669da234864ed02892ab34ce74d813"
+      },
+      {
+        "path": "calc_flow/symbolic/types.py",
+        "sha256": "8954131dd38007dbb21e328f103748a1266c16bdefe3374f9017225ed2d09c89"
+      },
+      {
+        "path": "calc_flow/symbolic/asof_analysis.py",
+        "sha256": "ad615bde0928471286f31a0a63c73654ce3ac8ce7038232f230c7ebb25eea57b"
+      },
+      {
+        "path": "calc_flow/symbolic/lower/strategies.py",
+        "sha256": "7c28ebea23975b45163771fe060a082056652bdaf747988607fc3d9e61fc53f6"
+      },
+      {
+        "path": "calc_flow/symbolic/lower/program.py",
+        "sha256": "060f5851ec67e138a48b0bf7dd7bc0b70eb28d774b9823cb288a5d9eb673f276"
+      },
+      {
+        "path": "calc_flow/symbolic/lower/macd_demand.py",
+        "sha256": "046ddd0a2ce4d4b000d97f4bb16f8e0344e8108999f0688caa0fefa011340189"
+      },
+      {
+        "path": "calc_flow/symbolic/lower/sql.py",
+        "sha256": "1098635b0e8f84ea0f1895ef017ea892438605db8074df51ae105d968ea78807"
+      },
+      {
+        "path": "calc_flow/symbolic/lower/native_arrays.py",
+        "sha256": "35c1e9bce527823471adede5cf122a2ae0bbc547a313449961d161c8e86c913c"
+      },
+      {
+        "path": "calc_flow/symbolic/lower/schema.py",
+        "sha256": "3ce02922fe9bd85333267ccc7cfaf0cf4991fc5018db9e80c3a554275181d30b"
+      },
+      {
+        "path": "calc_flow/symbolic/lower/planners.py",
+        "sha256": "5646312c0500bb3cbda01bf888c8a4d9073cd7701cc804c6f971d3a80bc93a1e"
+      },
+      {
+        "path": "calc_flow/symbolic/lower/event_windows.py",
+        "sha256": "d6ae15af4d4153ee12b76cbdff18f71abf33fc90bc9518ce2967e630696a8f40"
+      },
+      {
+        "path": "calc_flow/symbolic/lower/asof.py",
+        "sha256": "b79b4b52e0ba977f1d51848678a041c602da42332674681a2218164b06b3d774"
+      },
+      {
+        "path": "calc_flow/symbolic/lower/macd_meaning.py",
+        "sha256": "0ab654f8429a182350088719764d02fd0955c85dd0eeee9205524b783c354663"
+      },
+      {
+        "path": "calc_flow/symbolic/lower/late_output.py",
+        "sha256": "0824cea5142c851709e0b915877c50b26c2134646efc1e7f6c90eace7996e587"
+      },
+      {
+        "path": "calc_flow/symbolic/lower/segments.py",
+        "sha256": "438f34aab421162428ac2733b74ccc4ba8efb1ca4753d595dcb61e008ba7f29d"
+      },
+      {
+        "path": "calc_flow/symbolic/lower/__init__.py",
+        "sha256": "fae196c03e286c4db475d12ea6803343694d99ea19a5d1f09edd566d7370ed6b"
+      },
+      {
+        "path": "calc_flow/symbolic/lower/macd_rewrite.py",
+        "sha256": "f83220654aabb83f346c40d6ab43ba28abb7d6125e322e29eb83884132e005e3"
+      },
+      {
+        "path": "calc_flow/symbolic/lower/macd_boundaries.py",
+        "sha256": "e1d53c25098d926b477ab195c86270bc5fb87762c0ce282ee47b3cfdaea205c5"
+      },
+      {
+        "path": "calc_flow/symbolic/lower/bindings.py",
+        "sha256": "df77c3c0c329327c064542dd4e0d8230f7b9bd5cf7b4561d71dc40fdce1f9201"
+      },
+      {
+        "path": "calc_flow/symbolic/lower/macd.py",
+        "sha256": "18071138805cb66988239a255d4e20aa28c71532ad444a3321fb5f5ba1780913"
+      },
+      {
+        "path": "calc_flow/symbolic/lower/macd_forward.py",
+        "sha256": "18c7d3b658f9a1980b9257a11adcf534b0c9e4a1c9051a1ac9548b38d7f2c4b9"
+      }
+    ]
+  },
+  "legacy_baseline": {
+    "source_sha": "f524493cb80546f35b65db0ecb9d2c86f1a2ea2e",
+    "program": "3e89831e1d00f2b6ff0e5e6a7a6d65b026890c607dd276e686172245788f5c97",
+    "stream": "166028f91f81a8db11da25fc289fa26d4f53c689bf92f47a44042d3097bc9f54",
+    "batch": "f8fbe74fb7c56e39e5c0d8bd2c28b249f50ec3d80e201afde3e6a449084d9398",
+    "project": {
+      "data_sources": [],
+      "description": "",
+      "format_version": 3,
+      "graph": {
+        "datafusion": {
+          "batch_size": 8192,
+          "collect_diagnostics": true,
+          "enable_rolling_rewrite": true,
+          "max_partitions": 32,
+          "min_rows_per_partition": 65536,
+          "parallelism_mode": "fixed",
+          "small_rows_threshold": 10001,
+          "target_partitions": 1
+        },
+        "edges": [
+          {
+            "source_node": "events",
+            "source_port": "output",
+            "target_node": "cf_sql_bb78275d8857357f6aefdcef",
+            "target_port": "input"
+          },
+          {
+            "source_node": "cf_sql_bb78275d8857357f6aefdcef",
+            "source_port": "output",
+            "target_node": "result",
+            "target_port": "input"
+          }
+        ],
+        "name": "updates",
+        "nodes": [
+          {
+            "id": "events",
+            "input_ports": [
+              {
+                "kind": "table",
+                "name": "input",
+                "required": true,
+                "schema": [
+                  {
+                    "data_type": "int64",
+                    "name": "x",
+                    "nullable": true
+                  }
+                ]
+              }
+            ],
+            "operator": {
+              "expression": "",
+              "filter": null,
+              "kind": "expression",
+              "select": [
+                "\"x\""
+              ],
+              "udfs": []
+            },
+            "output_ports": [
+              {
+                "kind": "table",
+                "name": "output",
+                "required": true,
+                "schema": [
+                  {
+                    "data_type": "int64",
+                    "name": "x",
+                    "nullable": true
+                  }
+                ]
+              }
+            ],
+            "position": null
+          },
+          {
+            "id": "cf_sql_bb78275d8857357f6aefdcef",
+            "input_ports": [
+              {
+                "kind": "table",
+                "name": "input",
+                "required": true,
+                "schema": [
+                  {
+                    "data_type": "int64",
+                    "name": "x",
+                    "nullable": true
+                  }
+                ]
+              }
+            ],
+            "operator": {
+              "aliases": [
+                "input"
+              ],
+              "kind": "sql",
+              "query": "SELECT SUM(x) AS total FROM input",
+              "udfs": []
+            },
+            "output_ports": [
+              {
+                "kind": "table",
+                "name": "output",
+                "required": true,
+                "schema": [
+                  {
+                    "data_type": "int64",
+                    "name": "total",
+                    "nullable": true
+                  }
+                ]
+              }
+            ],
+            "position": null
+          },
+          {
+            "id": "result",
+            "input_ports": [
+              {
+                "kind": "table",
+                "name": "input",
+                "required": true,
+                "schema": [
+                  {
+                    "data_type": "int64",
+                    "name": "total",
+                    "nullable": true
+                  }
+                ]
+              }
+            ],
+            "operator": {
+              "expression": "",
+              "filter": null,
+              "kind": "expression",
+              "select": [
+                "\"total\""
+              ],
+              "udfs": []
+            },
+            "output_ports": [],
+            "position": null
+          }
+        ]
+      },
+      "id": "updates",
+      "name": "updates",
+      "runtime": {
+        "mode": "stream",
+        "options": {
+          "checkpoint_interval_ms": 30000,
+          "max_batch_bytes": 67108864,
+          "max_batch_rows": 10000
+        }
+      },
+      "sinks": [],
+      "sources": [],
+      "state": {
+        "retention": 3,
+        "root": ".calc-flow-state"
+      }
+    },
+    "canonical_sha256": "03786a8ab7a8797274fc50b19f69ffa57c3600961ef7a35a7bbf670050277bf8"
+  },
+  "legacy_current": {
+    "program": "3e89831e1d00f2b6ff0e5e6a7a6d65b026890c607dd276e686172245788f5c97",
+    "stream": "166028f91f81a8db11da25fc289fa26d4f53c689bf92f47a44042d3097bc9f54",
+    "batch": "f8fbe74fb7c56e39e5c0d8bd2c28b249f50ec3d80e201afde3e6a449084d9398",
+    "canonical_sha256": "03786a8ab7a8797274fc50b19f69ffa57c3600961ef7a35a7bbf670050277bf8"
+  },
+  "schema": {
+    "native_equals_checked_in": true,
+    "sha256": "954b7375fbc43691ed501fafe02c0c3b5270bb80716a2408a88759bba1311aca"
+  },
+  "verification": [
+    {
+      "name": "clippy-libs",
+      "command": [
+        "cargo",
+        "clippy",
+        "-p",
+        "calc-flow",
+        "-p",
+        "calc-flow-python",
+        "--lib",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256",
+        "--config",
+        "profile.release.package.calc-flow-python.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow-python.codegen-units=256",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "reused": true,
+      "source_sha": "7ef99c99e3931379ec45f43515a8717fe84dfc88",
+      "note": "same source contents, checked immediately before committing",
+      "log_sha256": "e182a8752786e7bb6243198a14401503986fec30ebe55d4cadbc52a9b60e2f8f",
+      "log_tail": "   Compiling calc-flow-python v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/crates/calc-flow-python)\n    Finished `release` profile [optimized] target(s) in 1.86s"
+    },
+    {
+      "name": "native-final",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "maturin",
+        "build",
+        "--interpreter",
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "--out",
+        "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/final-wheels",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256",
+        "--config",
+        "profile.release.package.calc-flow-python.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow-python.codegen-units=256"
+      ],
+      "seconds": 169.783,
+      "exit_code": 0,
+      "log_sha256": "7f51702e79f1096d3b08d9b6aa7d9413718300279e24b5eede08d84281cdaf5e",
+      "source_sha": "7ef99c99e3931379ec45f43515a8717fe84dfc88",
+      "reused": true,
+      "log_tail": "🍹 Building a mixed python/rust project\n🐍 Found CPython 3.13 at /home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python\n🔗 Found pyo3 bindings\n   Compiling pyo3-build-config v0.28.3\n   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/crates/calc-flow)\n   Compiling pyo3-ffi v0.28.3\n   Compiling pyo3-macros-backend v0.28.3\n   Compiling pyo3 v0.28.3\n   Compiling numpy v0.28.0\n   Compiling calc-flow-python v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/crates/calc-flow-python)\n   Compiling pyo3-macros v0.28.3\n   Compiling pyo3-async-runtimes v0.28.0\n   Compiling pyo3-arrow v0.18.0\n   Compiling calc-flow-connectors v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/crates/calc-flow-connectors)\n    Finished `release` profile [optimized] target(s) in 2m 45s\n⚠️  Warning: No compatible platform tag found, using the linux tag instead. You won't be able to upload those wheels to PyPI.\n📦 Built wheel for CPython 3.13 to /home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/final-wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl"
+    },
+    {
+      "name": "schema-generation",
+      "command": [
+        "cargo",
+        "run",
+        "-p",
+        "calc-flow",
+        "--example",
+        "gen_v3_schema",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256"
+      ],
+      "seconds": 100.78,
+      "exit_code": 0,
+      "log_sha256": "046bd8242244a92914431194663d426c47eecb3126988d1360babc85d8703842",
+      "source_sha": "7ef99c99e3931379ec45f43515a8717fe84dfc88",
+      "reused": true,
+      "log_tail": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/crates/calc-flow)\n    Finished `release` profile [optimized] target(s) in 1m 40s\n     Running `target/latest/cargo/release/examples/gen_v3_schema`\nschema written to /home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/crates/calc-flow/../../schemas/project-v3.schema.json"
+    },
+    {
+      "name": "core-standalone",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "calc-flow",
+        "--lib",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256"
+      ],
+      "seconds": 89.822,
+      "exit_code": 0,
+      "log_sha256": "d4cb16a1370f41ce8f55b5a01b94522f00d251727f7dc5c8798a102acaf2ae0e",
+      "source_sha": "7ef99c99e3931379ec45f43515a8717fe84dfc88",
+      "reused": true,
+      "log_tail": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/crates/calc-flow)\n    Finished `release` profile [optimized] target(s) in 1m 29s"
+    },
+    {
+      "name": "core-followup",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "calc-flow",
+        "--test",
+        "latest_relation",
+        "--test",
+        "project_store",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256"
+      ],
+      "seconds": 79.453,
+      "exit_code": 0,
+      "log_sha256": "79ed6d34a59c97e8f7517a5d04c4ddcf053da7e7f6d74b444846969edb64f33a",
+      "source_sha": "7ef99c99e3931379ec45f43515a8717fe84dfc88",
+      "reused": true,
+      "log_tail": "\ntest result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s\n\n     Running tests/project_store.rs (target/latest/cargo/release/deps/project_store-89634c19626cf487)\n\nrunning 15 tests\ntest project_json_import_rejects_duplicate_keys_at_every_extensible_depth ... ok\ntest canonical_project_json_is_recursive_pretty_sorted_and_exact ... ok\ntest project_json_import_enforces_the_full_document_depth_limit ... ok\ntest project_export_preflights_external_json_values_and_wire_document_depth ... ok\ntest project_store_hashes_hostile_windows_style_ids_and_leaks_no_temps ... ok\ntest project_import_caps_bytes_before_parsing_with_inclusive_boundary ... ok\ntest project_json_and_yaml_round_trip_through_strict_project_spec ... ok\ntest file_project_store_conversion_helpers_match_free_functions ... ok\ntest yaml_import_rejects_duplicate_keys_and_merge_keys ... ok\ntest project_list_reads_only_canonical_json_names_and_surfaces_corruption ... ok\ntest project_store_rejects_outside_symlink_and_put_replaces_entry ... ok\ntest project_store_crud_conflicts_missing_and_sorted_listing ... ok\ntest yaml_import_rejects_v1_unknown_alias_tag_include_bomb_and_multiple_documents ... ok\ntest project_store_rejects_corrupt_non_object_v1_unknown_oversize_and_key_mismatch ... ok\ntest concurrent_project_create_is_race_safe_and_puts_remain_parseable ... ok\n\ntest result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s\n"
+    },
+    {
+      "name": "clippy-targets",
+      "command": [
+        "cargo",
+        "clippy",
+        "-p",
+        "calc-flow",
+        "--test",
+        "latest_relation",
+        "--test",
+        "query_history_portability",
+        "--test",
+        "relational_program",
+        "--test",
+        "config",
+        "--test",
+        "project_store",
+        "--test",
+        "properties",
+        "--test",
+        "stream_join_validation",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "seconds": 0.532,
+      "exit_code": 0,
+      "log_sha256": "747d65bfa36db73fd6833731956ed1d2a3ec15d029c583c2f192cf557ac749ea",
+      "source_sha": "279b10396fcffd9d82009000bd88c576f502ce70",
+      "reused": true,
+      "log_tail": "    Checking calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/crates/calc-flow)\n    Finished `release` profile [optimized] target(s) in 0.47s"
+    },
+    {
+      "name": "snapshot-compatibility",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "calc-flow",
+        "--test",
+        "snapshot_sql_checkpoint_contract",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256"
+      ],
+      "seconds": 61.823,
+      "exit_code": 0,
+      "log_sha256": "a68aa3a9764ac81265deada49c6bd4dc33e9d387b5f09e758f26cb1c1cbfe9b6",
+      "source_sha": "279b10396fcffd9d82009000bd88c576f502ce70",
+      "reused": true,
+      "log_tail": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/crates/calc-flow)\n    Finished `release` profile [optimized] target(s) in 1m 01s\n     Running tests/snapshot_sql_checkpoint_contract.rs (target/latest/cargo/release/deps/snapshot_sql_checkpoint_contract-cda9116a6404d507)\n\nrunning 16 tests\ntest test_independent_output_keeps_its_exactly_once_compilation_contract ... ok\ntest test_snapshot_ingress_traces_expressions_and_stops_at_append_sql ... ok\ntest test_snapshot_output_cannot_feed_an_append_sql_successor ... ok\ntest test_valid_digest_with_invalid_ipc_or_schema_still_fails_atomically ... ok\ntest runner::test_native_oversized_input_fails_without_partial_snapshot_output ... ok\ntest test_shared_relation_owner_is_encoded_once_and_rows_count_per_alias ... ok\ntest test_graph_rejects_batch_successors_and_exactly_once ... ok\ntest test_unknown_corrupt_and_incompatible_state_fail_atomically ... ok\ntest test_metadata_checkpoint_remains_restorable_after_restore ... ok\ntest test_restore_rechecks_current_row_and_byte_budgets ... ok\ntest account_recovery::test_full_aggregate_snapshot_exceeding_edge_is_rejected_whole ... ok\ntest test_uninitialized_partial_and_initialized_roundtrips ... ok\ntest runner::test_managed_eof_updates_repeated_checkpoints_live_and_terminal_restore ... ok\ntest account_recovery::test_slow_valuation_sink_backpressures_quote_source_and_cancels_cleanly ... ok\ntest account_recovery::test_aggregate_topology_failed_or_cancelled_sink_replays_from_durable_cut ... ok\ntest account_recovery::test_aggregate_topology_restores_uninitialized_and_ended_inputs ... ok\n\ntest result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s\n"
+    },
+    {
+      "name": "consumer",
+      "command": [
+        "cargo",
+        "run",
+        "--manifest-path",
+        "crates/calc-flow/tests/relational-consumer/Cargo.toml",
+        "--locked",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256"
+      ],
+      "seconds": 518.315,
+      "exit_code": 0,
+      "log_sha256": "118d755821c9aa787d063b2e3f37f6d521dcd59c1e21dad27377195199646c93",
+      "source_sha": "279b10396fcffd9d82009000bd88c576f502ce70",
+      "reused": true,
+      "log_tail": "   Compiling datafusion-datasource v55.0.0\n   Compiling datafusion-functions-nested v55.0.0\n   Compiling datafusion-catalog v55.0.0\n   Compiling datafusion-pruning v55.0.0\n   Compiling datafusion-physical-optimizer v55.0.0\n   Compiling datafusion-sql v55.0.0\n   Compiling datafusion-datasource-json v55.0.0\n   Compiling datafusion-datasource-arrow v55.0.0\n   Compiling datafusion-datasource-csv v55.0.0\n   Compiling datafusion-functions-window v55.0.0\n   Compiling datafusion-optimizer v55.0.0\n   Compiling datafusion-functions-table v55.0.0\n   Compiling datafusion-catalog-listing v55.0.0\n   Compiling datafusion v55.0.0\n   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/crates/calc-flow)\n   Compiling relational-public-consumer v0.0.0 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/crates/calc-flow/tests/relational-consumer)\n    Finished `release` profile [optimized] target(s) in 8m 37s\n     Running `target/latest/cargo/release/relational-public-consumer`\nmetadata: owned stream accepts schema and field metadata without mutating input\ndataframe: schema, analysis, batch, owned stream, export/reload passed\nsql: schema, analysis, batch, owned stream, export/reload passed\ndf_sql_df_sql: schema, analysis, batch, owned stream, export/reload passed\nsql_df_sql: schema, analysis, batch, owned stream, export/reload passed\nstate: same batch plan 1/5; same stream job 1/6; new stream job 5"
+    },
+    {
+      "name": "new-doctests",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "calc-flow",
+        "--doc",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256",
+        "with_update_semantics"
+      ],
+      "seconds": 24.412,
+      "exit_code": 0,
+      "log_sha256": "caec22a6a3abc6af8642a4944dd3f7f2fd1264ed6eb852b3fa3c719ae821b8b5",
+      "source_sha": "279b10396fcffd9d82009000bd88c576f502ce70",
+      "reused": true,
+      "log_tail": "    Finished `release` profile [optimized] target(s) in 0.31s\n   Doc-tests calc_flow\n\nrunning 2 tests\ntest crates/calc-flow/src/program.rs - program::Program::with_update_semantics (line 106) ... ok\ntest crates/calc-flow/src/pipeline/mod.rs - pipeline::PipelineBuilder::with_update_semantics (line 179) ... ok\n\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 35 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s\n\nall doctests ran in 21.16s; merged doctests compilation took 21.13s"
+    },
+    {
+      "name": "rustdoc",
+      "command": [
+        "cargo",
+        "doc",
+        "-p",
+        "calc-flow",
+        "--no-deps",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256"
+      ],
+      "seconds": 14.678,
+      "exit_code": 0,
+      "log_sha256": "a42ff1d867018dac93fbcc74a77ed19cab4af6d302d8e8285615b4643736df34",
+      "source_sha": "279b10396fcffd9d82009000bd88c576f502ce70",
+      "reused": true,
+      "log_tail": " Documenting calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/crates/calc-flow)\n    Finished `release` profile [optimized] target(s) in 14.63s\n   Generated /home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/target/latest/cargo/doc/calc_flow/index.html"
+    },
+    {
+      "name": "python-final",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "pytest",
+        "python/tests/test_update_semantics.py",
+        "python/tests/test_query_history_portability.py",
+        "python/tests/test_relational_frontend.py",
+        "python/tests/test_symbolic_compile_cache.py",
+        "python/tests/test_program_engine.py",
+        "python/tests/test_symbolic_program.py",
+        "-q",
+        "--junitxml=target/latest/python-final.xml"
+      ],
+      "seconds": 6.912,
+      "exit_code": 0,
+      "log_sha256": "3289dbe80af931660a255fa224d418e00b45f097c39f1e094940ecfe87b55999",
+      "source_sha": "279b10396fcffd9d82009000bd88c576f502ce70",
+      "reused": true,
+      "log_tail": "........................................................................ [ 43%]\n........................................................................ [ 87%]\n....................                                                     [100%]\n164 passed in 6.09s"
+    },
+    {
+      "name": "public-exports",
+      "command": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "pytest",
+        "python/tests/test_symbolic_expr.py",
+        "-q",
+        "-k",
+        "public_surface",
+        "--junitxml=target/latest/public-exports.xml"
+      ],
+      "seconds": 0.62,
+      "exit_code": 0,
+      "log_sha256": "3841d257cec78851123f90f8d86e58755aaa99496de3a711f1391cfefeca9a6c",
+      "source_sha": "279b10396fcffd9d82009000bd88c576f502ce70",
+      "reused": true,
+      "log_tail": ".                                                                        [100%]\n1 passed, 24 deselected in 0.34s"
+    },
+    {
+      "name": "binding-errors",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "calc-flow-python",
+        "--lib",
+        "--release",
+        "--config",
+        "profile.release.package.calc-flow.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow.codegen-units=256",
+        "--config",
+        "profile.release.package.calc-flow-python.opt-level=0",
+        "--config",
+        "profile.release.package.calc-flow-python.codegen-units=256",
+        "error::tests",
+        "--",
+        "--test-threads=1"
+      ],
+      "seconds": 76.251,
+      "exit_code": 0,
+      "log_sha256": "e525115044636b9a82e89fd270691acd112a635036f6144a864eac47d68c81b2",
+      "log_tail": "   Compiling calc-flow-python v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/crates/calc-flow-python)\n    Finished `release` profile [optimized] target(s) in 1m 16s\n     Running unittests src/lib.rs (target/latest/cargo/release/deps/calc_flow_python-6126da88d1f1b086)\n\nrunning 5 tests\ntest error::tests::maps_configuration_and_compilation_error_categories ... ok\ntest error::tests::maps_execution_and_checkpoint_error_categories ... ok\ntest error::tests::preserves_io_error_as_python_cause ... ok\ntest error::tests::query_portability_errors_keep_the_immutable_report ... ok\ntest error::tests::task_panicked_uses_the_wildcard_execution_error_mapping ... ok\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 129 filtered out; finished in 0.19s\n"
+    }
+  ],
+  "counts": {
+    "python": {
+      "tests": 164,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "exports": {
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "rust_initial": 65,
+    "rust_followup": 25,
+    "snapshot": 16,
+    "binding": 5,
+    "doctests": 2
+  },
+  "initial_core": {
+    "source_sha": "f16f73143b9df94da21ec02f3bce1bab14f793c3",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "calc-flow",
+      "--test",
+      "latest_relation",
+      "--test",
+      "query_history_portability",
+      "--test",
+      "relational_program",
+      "--test",
+      "config",
+      "--test",
+      "project_store",
+      "--release",
+      "--config",
+      "profile.release.package.calc-flow.opt-level=0",
+      "--config",
+      "profile.release.package.calc-flow.codegen-units=256"
+    ],
+    "result": {
+      "path": "target/latest/core-regressions-final.log",
+      "sha256": "a70f810b9e5b5c1ff092000e2b5b4738902a5346b59d50215a0a1460c7209d44",
+      "text": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-513-1946ef7bb730/workdir/calc-flow/crates/calc-flow)\n    Finished `release` profile [optimized] target(s) in 5m 34s\n     Running tests/config.rs (target/latest/cargo/release/deps/config-94aca4d211e98349)\n\nrunning 30 tests\ntest datafusion_config_accepts_opt_in_auto_parallelism ... ok\ntest datafusion_config_accepts_opt_in_auto_rows_parallelism ... ok\ntest constructed_operator_modes_are_validated_without_deserialization ... ok\ntest datafusion_config_accepts_strict_partial_defaults ... ok\ntest defaults_round_trip_canonically ... ok\ntest edge_spec_maps_to_public_builder_endpoints ... ok\ntest semantic_validation_does_not_create_external_operators ... ok\ntest external_nodes_require_exact_provider_and_receive_configured_ports ... ok\ntest external_only_projects_ignore_unused_datafusion_configuration ... ok\ntest serde_rejects_non_finite_position_and_unknown_udf_fields ... ok\ntest invalid_query_syntax_has_stable_operator_issue_paths ... ok\ntest project_rejects_v1_and_unknown_fields_at_every_nested_level ... ok\ntest builtin_config_inputs_must_be_required ... ok\ntest direct_graph_compile_validates_core_datafusion_config ... ok\ntest missing_and_conflicting_udfs_have_stable_paths ... ok\ntest validate_rejects_unsupported_arrow_types_and_array_schemas ... ok\ntest duplicate_edges_and_writers_report_the_later_edge_index ... ok\ntest validate_rejects_invalid_constructed_identity_positions_and_limits ... ok\ntest validate_reports_stream_join_runtime_port_and_operator_issues ... ok\ntest compile_sql_honors_alias_ports_and_reports_graph_errors ... ok\ntest validate_rejects_duplicate_nodes_ports_fields_and_sources ... ok\ntest utc_event_time_spelling_compiles_to_microsecond_utc ... ok\ntest compile_expression_uses_exact_configured_ports_and_schemas ... ok\ntest datafusion_config_is_preserved_and_changes_the_fingerprint ... ok\ntest validate_requires_exact_supported_data_source_coverage ... ok\ntest compile_stream_requires_exact_connector_source_coverage ... ok\ntest compile_rejects_stream_join_outside_stream_mode_and_with_invalid_ports ... ok\ntest supported_v1_arrow_aliases_compile_exactly ... ok\ntest project_schema_artifact_matches_generator ... ok\ntest generated_schema_is_v3_stable_closed_and_contains_no_executable_fields ... ok\n\ntest result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s\n\n     Running tests/latest_relation.rs (target/latest/cargo/release/deps/latest_relation-52e484bc053fff58)\n\nrunning 10 tests\ntest low_level_latest_rejects_missing_boundary_proof_synchronously ... ok\ntest invalid_project_update_literal_has_stable_path_and_code ... ok\ntest latest_batch_plan_isolates_warm_executions ... ok\ntest one_multirecord_batch_is_one_event_and_empty_data_is_an_event ... ok\ntest legacy_chain_keeps_seven ... ok\ntest terminal_sum_keeps_cumulative_snapshots_in_both_choices ... ok\ntest unsupported_snapshot_consumers_remain_unknown_and_deterministic ... ok\ntest latest_filter_delivers_empty_events ... ok\ntest latest_admission_preserves_logical_consumer_and_exported_selection ... ok\ntest managed_recovery_rejects_both_update_identity_mismatches_before_source ... ok\n\ntest result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s\n\n     Running tests/project_store.rs (target/latest/cargo/release/deps/project_store-89634c19626cf487)\n\nrunning 15 tests\ntest canonical_project_json_is_recursive_pretty_sorted_and_exact ... ok\ntest project_json_import_rejects_duplicate_keys_at_every_extensible_depth ... ok\ntest project_export_preflights_external_json_values_and_wire_document_depth ... ok\ntest project_json_import_enforces_the_full_document_depth_limit ... ok\ntest yaml_import_rejects_duplicate_keys_and_merge_keys ... ok\ntest project_json_and_yaml_round_trip_through_strict_project_spec ... ok\ntest project_import_caps_bytes_before_parsing_with_inclusive_boundary ... ok\ntest file_project_store_conversion_helpers_match_free_functions ... ok\ntest project_store_hashes_hostile_windows_style_ids_and_leaks_no_temps ... ok\ntest project_list_reads_only_canonical_json_names_and_surfaces_corruption ... ok\ntest yaml_import_rejects_v1_unknown_alias_tag_include_bomb_and_multiple_documents ... ok\ntest project_store_rejects_outside_symlink_and_put_replaces_entry ... ok\ntest project_store_crud_conflicts_missing_and_sorted_listing ... ok\ntest project_store_rejects_corrupt_non_object_v1_unknown_oversize_and_key_mismatch ... ok\ntest concurrent_project_create_is_race_safe_and_puts_remain_parseable ... ok\n\ntest result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s\n\n     Running tests/query_history_portability.rs (target/latest/cargo/release/deps/query_history_portability-438b41b436d856fe)\n\nrunning 9 tests\ntest requests_validate_and_roundtrip_without_becoming_execution_permits ... ok\ntest known_missing_udf_keeps_the_existing_compilation_error ... ok\ntest stream_only_modes_and_sql_schema_errors_are_reported_without_execution ... ok\ntest snapshot_edges_keep_the_original_stream_mode_rejection ... ok\ntest unordered_dictionary_schema_roundtrips_through_public_analysis ... ok\ntest row_local_checked_compile_keeps_the_original_identity ... ok\ntest aggregate_history_and_snapshot_append_edges_are_distinct ... ok\ntest ordered_dictionary_schema_roundtrips_through_public_analysis ... ok\ntest sql_shapes_separate_per_batch_scope_from_unproved_semantics ... ok\n\ntest result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s\n\n     Running tests/relational_program.rs (target/latest/cargo/release/deps/relational_program-6b5adcd18cec85b6)\n\nrunning 1 test\ntest named_mixed_dag_reuses_declarations_and_isolates_executions ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s\n\n"
+    }
+  },
+  "red": {
+    "missing_api": {
+      "path": "target/latest/red-python.log",
+      "sha256": "1f2fa3c6a133887a53a4cd80ed03b94b8bfa39b1dd7d8d79d7fc6924c0544749",
+      "text": "F                                                                        [100%]\n=================================== FAILURES ===================================\n___________ test_update_choice_is_immutable_and_preserved_by_copies ____________\n\n    def test_update_choice_is_immutable_and_preserved_by_copies():\n        program = _program()\n>       latest = program.with_update_semantics(\"latest_relation\")\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       AttributeError: 'Program' object has no attribute 'with_update_semantics'\n\npython/tests/test_update_semantics.py:22: AttributeError\n=========================== short test summary info ============================\nFAILED python/tests/test_update_semantics.py::test_update_choice_is_immutable_and_preserved_by_copies\n1 failed, 4 deselected in 0.69s\n"
+    },
+    "rewrite": {
+      "path": "target/latest/rewrite-red.log",
+      "sha256": "c3e32bc7c16da03ca0c94828d81a4148d37557dbd8c6bf20c2a6079fdc6d2579",
+      "text": "F                                                                        [100%]\n=================================== FAILURES ===================================\n________________ test_lowering_rewrite_preserves_update_choice _________________\n\nmonkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fc707801940>\n\n    def test_lowering_rewrite_preserves_update_choice(monkeypatch):\n        import importlib\n    \n        forwarder = importlib.import_module(\"calc_flow.symbolic.lower.macd_forward\")\n    \n        def copied_declarations(program, analyzer):\n            return cf.Program(\n                program.name, mode=program.mode, inputs=program.inputs,\n                outputs=program.outputs,\n            )\n    \n        monkeypatch.setattr(forwarder, \"_forward_native_macd\", copied_declarations)\n        latest = _program().with_update_semantics(\"latest_relation\")\n>       assert latest.to_project().model_dump()[\"graph\"][\"update_semantics\"] == \"latest_relation\"\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       KeyError: 'update_semantics'\n\npython/tests/test_update_semantics.py:379: KeyError\n=========================== short test summary info ============================\nFAILED python/tests/test_update_semantics.py::test_lowering_rewrite_preserves_update_choice\n1 failed, 24 deselected in 0.31s\n"
+    }
+  },
+  "rewrite_green": {
+    "path": "target/latest/rewrite-green.log",
+    "sha256": "0455ec8bd6afe993477b94361e8dad0dcb21468ef901517b4c4ec34838a2fdd3",
+    "text": ".                                                                        [100%]\n1 passed, 24 deselected in 0.37s\n"
+  },
+  "unrun": [
+    "full workspace tests",
+    "full Python suite",
+    "container services",
+    "coverage",
+    "performance measurements"
+  ],
+  "changed_files": [
+    ".codex/artifacts/analysis/latest-relation-update-contract.json",
+    ".codex/artifacts/analysis/latest-relation-update-contract.md",
+    ".codex/artifacts/api-notes/latest-relation-update-contract.md",
+    "crates/calc-flow-python/src/error.rs",
+    "crates/calc-flow/src/config.rs",
+    "crates/calc-flow/src/error.rs",
+    "crates/calc-flow/src/lib.rs",
+    "crates/calc-flow/src/pipeline/analysis.rs",
+    "crates/calc-flow/src/pipeline/compile.rs",
+    "crates/calc-flow/src/pipeline/mod.rs",
+    "crates/calc-flow/src/program.rs",
+    "crates/calc-flow/src/program/lower.rs",
+    "crates/calc-flow/src/project_store.rs",
+    "crates/calc-flow/src/query_analysis.rs",
+    "crates/calc-flow/src/query_analysis/sql.rs",
+    "crates/calc-flow/src/query_analysis/updates.rs",
+    "crates/calc-flow/tests/config.rs",
+    "crates/calc-flow/tests/latest_relation.rs",
+    "crates/calc-flow/tests/project_store.rs",
+    "crates/calc-flow/tests/properties.rs",
+    "crates/calc-flow/tests/relational-consumer/README.md",
+    "crates/calc-flow/tests/relational-consumer/src/main.rs",
+    "crates/calc-flow/tests/stream_join_validation.rs",
+    "docs/query-history-portability.md",
+    "docs/relational-frontends.md",
+    "docs/streaming-guide.md",
+    "python/calc_flow/__init__.py",
+    "python/calc_flow/_native.pyi",
+    "python/calc_flow/compute.py",
+    "python/calc_flow/stream.py",
+    "python/calc_flow/symbolic/__init__.py",
+    "python/calc_flow/symbolic/analyzer.py",
+    "python/calc_flow/symbolic/errors.py",
+    "python/calc_flow/symbolic/lower/program.py",
+    "python/calc_flow/symbolic/program.py",
+    "python/calc_flow/symbolic/query_analysis.py",
+    "python/tests/test_query_history_portability.py",
+    "python/tests/test_symbolic_expr.py",
+    "python/tests/test_update_semantics.py",
+    "schemas/project-v3.schema.json"
+  ]
+}

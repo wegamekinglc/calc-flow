@@ -877,9 +877,10 @@ observations without a project configuration switch.
 
 ## Execution paths
 
-For canonical ordered input and supported bounded typed row windows, rolling
-buffers immutable Arrow batches until finality and computes directly from
-their columns. When the order key is a non-null microsecond event time, one
+For canonical ordered input and supported bounded typed Rows, Duration, and
+mixed windows, rolling buffers immutable Arrow batches until finality and
+computes directly from their columns. When the order key is a non-null
+microsecond event time, one
 non-null Utf8 entity, and one non-null `UInt64` sequence, the ordering proof
 compares those Arrow values in place and row-encodes only each batch's first
 and last identities. Whenever the only entity column is a non-null Utf8
@@ -892,8 +893,10 @@ behavior is retained even for mean-only outputs. Plans whose one or two
 row-window numeric groups feed only one or two Float64 mean or
 mean-difference outputs run a fixed-arity loop over that same state; other
 shapes use the generic typed kernel. Retained-history tails reuse each
-entity's routed row count and walk back from the batch end only until every
-tail is full.
+entity's routed rows and walk back from the batch end only until its retention
+requirements are met. Mixed windows retain the union of the row suffix and
+the duration interval with an open lower bound, using widened timestamp
+arithmetic.
 
 An already initialized, ordered Native Float64 StableV1 mean calculation can
 assign whole entities to owned CPU lanes. The narrow path requires one or
@@ -929,7 +932,35 @@ the frozen outcome remains; late panics are secondary task diagnostics and do
 not revive the callback. No unfinished CPU work is detached after a timeout,
 and no Tokio executor thread blocks waiting for a join.
 
-Retained history uses compact Arrow tails. A partial slice is copied when its
+Rolling callback metrics report `numeric_lanes_started` for successfully
+registered owned lane tasks and `numeric_parallel_rows` for their attempted
+row transitions. The owner settles both counts after draining the work,
+including partial launches, failures and cancellation. A task cancelled before
+its first row still counts as started. These counters describe actual work;
+they do not measure simultaneous CPU utilization.
+
+The same callback observations count actual scalar history-charge row visits,
+columnar history-charge chunk visits, and history rows prepared for append or
+eviction. Charge visits include repeated checks and exclude cache hits and
+input-buffer accounting. Prepared rows include candidates later rejected by a
+budget or output failure; they are not committed-row totals. Fixed counters
+also identify actual typed serial, general, and owned parallel invocations,
+with the parallel count settled after drain whenever at least one lane started.
+Serial fallback reasons distinguish small batches, unsupported plans, CPU
+capacity, preparation and partition eligibility, and owned-work admission.
+These are job-lifetime attempted-work observations; a restored job starts with
+fresh counters. Synchronous preparation accumulates counters locally and
+publishes them in a batch before an await or callback finalization.
+The call counters cover synchronous row kernels and owned entity lanes;
+dedicated indicator workers retain their existing work observations. Fallback
+counters describe actual entity-lane decisions and synchronous bridge fallback.
+
+Retained history keeps Scalar and Arrow blocks in event order. A shared
+descriptor-cost policy chooses the representation for Rows, Duration, and
+mixed windows; small tails can retain Scalar values without allocating a
+separate Arrow table for each entity. Adjacent Scalar blocks merge by moving
+their owned values, and fallback or checkpoint materialization preserves the
+order of all blocks. A partial Arrow slice is copied when its
 backing buffers exceed both a small byte floor and twice its logical retained
 size, preventing an evicted large variable-width value from pinning the old
 allocation indefinitely. This preparation and any fallible allocation happen
@@ -937,6 +968,10 @@ before output emission. Successful emission commits the prepared state and
 history; failed or cancelled emission preserves the prior committed state.
 Exact column-wise byte charging avoids a per-row cost vector when the complete
 output fits the edge budget. Oversized output still uses exact chunk limits.
+Retained-state bytes use the existing charge rules for each representation.
+Representation selection and materialization can therefore change the logical
+byte charge for the same retained values; caches must agree with the full
+charge of the current representation before budget admission.
 
 Overlapping, unordered, or late envelopes and
 unsupported window/type shapes use the general path. Checkpointing

@@ -1,4 +1,4 @@
-//! Columnar buffering for proven ordered, bounded row-window streams.
+//! Arrow buffering and bounded retained payloads for proven ordered streams.
 //!
 //! Finality remains watermark driven. Unsupported shapes, late envelopes, and
 //! overlapping or unordered arrivals enter the existing general row path.
@@ -9,16 +9,20 @@ use datafusion::arrow::{
     datatypes::DataType,
 };
 
-use super::kernel::{EntityRows, StreamKernelUpdate};
-use crate::operator::rolling_metrics::{RollingMetricsRecorder, RollingStage, RollingWork};
-use crate::runtime::streaming::entity_work::ReservePair;
+pub(super) use super::history::ColumnarHistory;
+use super::history::{RetainedHistoryAppend, RetainedRows, RetentionPolicy};
+use super::kernel::{EntityRows, RecurrenceSeed, StreamKernelUpdate};
+use crate::operator::rolling_metrics::{
+    RollingMetricsRecorder, RollingStage, RollingWork, RollingWorkBatch,
+};
+use crate::runtime::streaming::entity_work::{ReservePair, SerialReason};
 
 use super::{
-    Arc, Array, BTreeMap, Batch, BufferedRow, CompiledRollingSpec, EntityRollingState, EventTime,
-    KeyValue, RecordBatch, Result, RollingHistories, RollingOperator, RollingStreamState,
-    RowIdentity, ScalarValue, StreamCollector, StreamOperatorContext, TableBatch, VecDeque,
-    chunk_output_record, closing_coordinate, concat_batches, internal_error, operator_error,
-    read_buffered_row, reconstruct_typed_state,
+    Arc, Array, BTreeMap, Batch, BufferedRow, CompiledRollingSpec, EventTime, KeyValue,
+    RecordBatch, Result, RollingHistories, RollingOperator, RollingStreamState, RowIdentity,
+    ScalarValue, StreamCollector, StreamOperatorContext, TableBatch, VecDeque, chunk_output_record,
+    closing_coordinate, concat_batches, internal_error, operator_error, read_buffered_row,
+    reconstruct_typed_state,
 };
 
 #[derive(Clone, Default)]
@@ -132,17 +136,19 @@ impl RollingOperator {
         last_identity: Option<Vec<u8>>,
         error: super::CalcFlowError,
         node: &str,
+        observer: Option<&RollingMetricsRecorder>,
     ) -> Result<()> {
         self.state
             .owned_mut()?
             .ordered
             .restore_front(records, last_identity);
-        if let Ok(charge) = super::budget::full_state_charge(
+        if let Ok(charge) = super::budget::full_state_charge_observed(
             &self.state.buffer,
             &self.state.ordered,
             &self.state.histories,
             &self.compiled,
             node,
+            observer,
         ) {
             self.state.owned_mut()?.charge = charge;
         }
@@ -150,32 +156,20 @@ impl RollingOperator {
     }
 
     fn projected_ordered_charge(
-        &mut self,
-        prepared: &PreparedOrderedOutput,
+        &self,
+        prepared: &mut PreparedOrderedOutput,
         removed: super::budget::StateCharge,
-        was_warm: bool,
         node: &str,
+        observer: Option<&RollingMetricsRecorder>,
     ) -> Result<(super::budget::StateCharge, super::budget::StateCharge)> {
-        if !was_warm {
-            self.state.owned_mut()?.charge = super::budget::full_state_charge(
-                &self.state.buffer,
-                &self.state.ordered,
-                &self.state.histories,
-                &self.compiled,
-                node,
-            )?
-            .checked_add(removed, node)?;
-        }
         let current = self.state.charge.checked_sub(removed)?;
-        let next = prepared.projected_charge(self, current, node)?;
+        let next = prepared.projected_charge(self, current, node, observer)?;
         self.check_state_budget(next, node)?;
         Ok((current, next))
     }
 
     fn supports_ordered_buffer(&self) -> bool {
-        self.compiled.kernel_plan.supports_typed_transition()
-            && self.compiled.max_duration_micros.is_none()
-            && self.state.buffer.is_empty()
+        self.compiled.kernel_plan.supports_typed_transition() && self.state.buffer.is_empty()
     }
 
     fn wholly_on_time(&self, record: &RecordBatch, watermark: Option<EventTime>) -> Result<bool> {
@@ -274,13 +268,12 @@ impl RollingOperator {
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<BTreeMap<RowIdentity, BufferedRow>> {
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::InputValidation));
+        let mut work = RollingWorkBatch::new(observer);
         let mut materialized = BTreeMap::new();
         for record in &self.state.ordered.records {
             for index in 0..record.num_rows() {
                 let row = read_buffered_row(record, index, &self.compiled, &self.name)?;
-                if let Some(recorder) = observer {
-                    recorder.add(RollingWork::ScalarValueConversions, record.num_columns());
-                }
+                work.add(RollingWork::ScalarValueConversions, record.num_columns());
                 materialized.insert(row.identity.clone(), row);
             }
         }
@@ -295,11 +288,7 @@ impl RollingOperator {
     ) -> Result<()> {
         if self.state.typed_kernel_state.is_none() {
             let _stage = observer.map(|recorder| recorder.stage(RollingStage::StatePreparation));
-            self.state.owned_mut()?.histories.materialize_columnar(
-                &self.compiled,
-                node_id,
-                observer,
-            )?;
+            self.materialize_histories_with_charge(node_id, observer)?;
             let restored = reconstruct_typed_state(
                 &self.state.histories,
                 &self.compiled,
@@ -371,20 +360,17 @@ impl RollingOperator {
             let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
             retained_histories(
                 input,
-                update.entity_ids(),
-                update.entity_rows(),
+                &update,
                 &self.state.histories,
                 &self.compiled,
                 context.operator_id(),
                 observer,
             )?
         };
-        let recurrence_seeds = update.recurrence_seeds();
         let (batches, next_sequence) = self.ordered_output_chunks(input, &mut update, context)?;
         Ok(PreparedOrderedOutput {
             update,
             touched,
-            recurrence_seeds,
             batches,
             next_sequence,
         })
@@ -403,34 +389,43 @@ impl RollingOperator {
             .typed_kernel_state
             .as_deref()
             .expect("state initialized above");
-        let Some(client) = context
-            .entity_work()
-            .filter(|_| was_warm && plan.supports_entity_parallel(input))
-        else {
-            return plan.prepare_ordered_stream_with_history(
-                prior,
+        let Some(client) = context.entity_work() else {
+            return self.serial_ordered_update(
                 input,
-                Some(&self.state.histories),
-                context.operator_id(),
-                observer,
+                context,
+                RollingWork::ParallelFallbackNoWorkClient,
             );
         };
+        if !was_warm {
+            return self.serial_ordered_update(
+                input,
+                context,
+                RollingWork::ParallelFallbackPreparedIneligible,
+            );
+        }
+        if let Some(reason) = plan.entity_parallel_fallback(input) {
+            return self.serial_ordered_update(input, context, reason);
+        }
         let cpus = context.job().gather_owner().parallelism();
         #[cfg(test)]
         let cpus = client.parallelism(cpus);
         if cpus < 2 {
-            return plan.prepare_ordered_stream_with_history(
-                prior,
+            return self.serial_ordered_update(
                 input,
-                Some(&self.state.histories),
-                context.operator_id(),
-                observer,
+                context,
+                RollingWork::ParallelFallbackCpuLimit,
             );
         }
         let prepared =
             plan.prepare_ordered_stream_inputs(prior, input, context.operator_id(), observer)?;
-        let Some(scratch) = prepared.scratch_plan_for_cpu(cpus) else {
-            return prepared.finish_serial(observer);
+        let scratch = match prepared.scratch_plan_for_cpu(cpus) {
+            Ok(scratch) => scratch,
+            Err(reason) => {
+                if let Some(recorder) = observer {
+                    recorder.add(reason, 1);
+                }
+                return prepared.finish_serial(observer);
+            }
         };
         match client.try_reserve(scratch) {
             ReservePair::Reserved(launch) => match prepared.split_lanes(cpus) {
@@ -445,10 +440,28 @@ impl RollingOperator {
                 }
                 Err(prepared) => {
                     drop(launch);
+                    if let Some(recorder) = observer {
+                        recorder.add(RollingWork::ParallelFallbackLanePartitionRejected, 1);
+                    }
                     prepared.finish_serial(observer)
                 }
             },
-            ReservePair::Serial(_reason) => prepared.finish_serial(observer),
+            ReservePair::Serial(reason) => {
+                let work = match reason {
+                    SerialReason::Busy => RollingWork::ParallelFallbackOwnerBusy,
+                    SerialReason::AlreadyUsed => RollingWork::ParallelFallbackOwnerAlreadyUsed,
+                    SerialReason::GenerationExhausted => {
+                        RollingWork::ParallelFallbackGenerationExhausted
+                    }
+                    SerialReason::Unrepresentable => {
+                        RollingWork::ParallelFallbackScratchUnrepresentable
+                    }
+                };
+                if let Some(recorder) = observer {
+                    recorder.add(work, 1);
+                }
+                prepared.finish_serial(observer)
+            }
             ReservePair::Stopped => {
                 context.check_cancelled()?;
                 Err(crate::CalcFlowError::Cancelled {
@@ -456,6 +469,30 @@ impl RollingOperator {
                 })
             }
         }
+    }
+
+    fn serial_ordered_update(
+        &self,
+        input: &RecordBatch,
+        context: &StreamOperatorContext<'_>,
+        reason: RollingWork,
+    ) -> Result<StreamKernelUpdate> {
+        let observer = context.rolling_metrics();
+        let mut work = RollingWorkBatch::new(observer);
+        work.add(reason, 1);
+        work.add(RollingWork::NumericSerialCalls, 1);
+        self.compiled
+            .kernel_plan
+            .prepare_ordered_stream_with_history(
+                self.state
+                    .typed_kernel_state
+                    .as_deref()
+                    .expect("state initialized above"),
+                input,
+                Some(&self.state.histories),
+                context.operator_id(),
+                observer,
+            )
     }
 
     pub(super) async fn emit_ordered(
@@ -478,6 +515,7 @@ impl RollingOperator {
                     last_identity,
                     internal_error("ordered rolling state has unsupported state charge"),
                     context.operator_id(),
+                    observer,
                 );
             }
             Err(error) => {
@@ -486,6 +524,7 @@ impl RollingOperator {
                     last_identity,
                     error,
                     context.operator_id(),
+                    observer,
                 );
             }
         };
@@ -502,10 +541,10 @@ impl RollingOperator {
                     last_identity,
                     error,
                     context.operator_id(),
+                    observer,
                 );
             }
         };
-        let was_warm = self.state.typed_kernel_state.is_some();
         let prepared = self.prepare_ordered_output(&input, context).await;
         let mut prepared = match prepared {
             Ok(prepared) => prepared,
@@ -515,14 +554,15 @@ impl RollingOperator {
                     last_identity,
                     error,
                     context.operator_id(),
+                    observer,
                 );
             }
         };
         let (current_charge, next_charge) = match self.projected_ordered_charge(
-            &prepared,
+            &mut prepared,
             removed,
-            was_warm,
             context.operator_id(),
+            observer,
         ) {
             Ok(charge) => charge,
             Err(error) => {
@@ -531,6 +571,7 @@ impl RollingOperator {
                     last_identity,
                     error,
                     context.operator_id(),
+                    observer,
                 );
             }
         };
@@ -540,7 +581,7 @@ impl RollingOperator {
             output.emit("output", batch).await?;
         }
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
-        prepared.commit(state, &self.compiled);
+        prepared.commit(state);
         state.charge = next_charge;
         Ok(())
     }
@@ -561,49 +602,33 @@ fn combine_ordered_records(records: &[RecordBatch], node_id: &str) -> Result<Opt
 struct PreparedOrderedOutput {
     update: StreamKernelUpdate,
     touched: Vec<RetainedHistoryAppend>,
-    recurrence_seeds: Vec<Vec<Option<super::kernel::RecurrenceSeed>>>,
     batches: Vec<Batch>,
     next_sequence: u64,
 }
 
 impl PreparedOrderedOutput {
     fn projected_charge(
-        &self,
+        &mut self,
         operator: &RollingOperator,
         current: super::budget::StateCharge,
         node: &str,
+        observer: Option<&RollingMetricsRecorder>,
     ) -> Result<super::budget::StateCharge> {
-        let retention = usize::try_from(operator.compiled.max_row_retention).unwrap_or(usize::MAX);
+        let mut work = RollingWorkBatch::new(observer);
         let mut old = super::budget::StateCharge::default();
         let mut new = super::budget::StateCharge::default();
-        for tail in &self.touched {
+        for tail in &mut self.touched {
             let previous = operator.state.histories.by_entity.get(&tail.entity);
-            if let Some(previous) = previous {
-                old = old.checked_add(
-                    super::budget::history_entity_charge(&tail.entity, previous, node)?,
-                    node,
-                )?;
-            }
-            let seeds = self
-                .recurrence_seeds
-                .get(tail.entity_id)
-                .expect("every touched entity has a prepared recurrence seed");
-            new = new.checked_add(
-                tail.projected_charge(previous, retention, &operator.compiled, seeds, node)?,
-                node,
-            )?;
+            let (previous, projected) = tail.changed_charge(previous, node, &mut work)?;
+            old = old.checked_add(previous, node)?;
+            new = new.checked_add(projected, node)?;
         }
         current.checked_sub(old)?.checked_add(new, node)
     }
 
-    fn commit(self, state: &mut RollingStreamState, compiled: &CompiledRollingSpec) {
-        let retention = usize::try_from(compiled.max_row_retention).unwrap_or(usize::MAX);
+    fn commit(self, state: &mut RollingStreamState) {
         for tail in self.touched {
-            let seeds = self
-                .recurrence_seeds
-                .get(tail.entity_id)
-                .expect("every touched entity has a prepared recurrence seed");
-            tail.commit(&mut state.histories, retention, compiled, seeds);
+            tail.commit(&mut state.histories);
         }
         self.update.commit(
             state
@@ -615,6 +640,61 @@ impl PreparedOrderedOutput {
     }
 }
 
+struct RetainedInput<'a> {
+    record: &'a RecordBatch,
+    costs: PayloadCosts,
+    retention: RetentionPolicy,
+    times: &'a [i64],
+}
+
+struct PayloadCosts {
+    columnar: Option<usize>,
+    scalar_per_row: usize,
+}
+
+impl PayloadCosts {
+    fn new(input: &RecordBatch) -> Self {
+        let supported = input.columns().iter().all(|column| {
+            column.data_type().primitive_width().is_some()
+                || matches!(
+                    column.data_type(),
+                    DataType::Null
+                        | DataType::Boolean
+                        | DataType::Utf8
+                        | DataType::LargeUtf8
+                        | DataType::Binary
+                        | DataType::LargeBinary
+                )
+        });
+        let columnar = supported.then(|| {
+            input.columns().iter().fold(
+                size_of::<RecordBatch>().saturating_add(
+                    input
+                        .num_columns()
+                        .saturating_mul(size_of::<super::ArrayRef>()),
+                ),
+                |cost, column| {
+                    cost.saturating_add(
+                        column
+                            .get_array_memory_size()
+                            .saturating_sub(column.get_buffer_memory_size()),
+                    )
+                },
+            )
+        });
+        Self {
+            columnar,
+            scalar_per_row: size_of::<Vec<ScalarValue>>()
+                .saturating_add(input.num_columns().saturating_mul(size_of::<ScalarValue>())),
+        }
+    }
+
+    fn columnar(&self, rows: usize) -> bool {
+        self.columnar
+            .is_some_and(|cost| cost <= self.scalar_per_row.saturating_mul(rows))
+    }
+}
+
 struct EntityTail {
     entity_id: usize,
     first: usize,
@@ -622,228 +702,10 @@ struct EntityTail {
     /// Rows this batch contributes to the retained history.
     retained: usize,
     rows: VecDeque<usize>,
-}
-
-/// Stage only newly retained rows. Existing tails remain owned and untouched
-/// until all output chunks have been emitted successfully.
-struct RetainedHistoryAppend {
-    entity_id: usize,
-    entity: Vec<Option<KeyValue>>,
-    rows: RetainedRows,
-    prepared_front: Option<RecordBatch>,
-    transition_count: u64,
-}
-
-enum RetainedRows {
-    Columnar(RecordBatch),
-    Scalar(VecDeque<Vec<ScalarValue>>),
-}
-
-impl RetainedRows {
-    fn len(&self) -> usize {
-        match self {
-            Self::Columnar(record) => record.num_rows(),
-            Self::Scalar(rows) => rows.len(),
-        }
-    }
-}
-
-/// Every chunk owns a gathered entity tail, never a slice of the input batch.
-#[derive(Clone, Debug, Default)]
-pub(super) struct ColumnarHistory {
-    pub(super) records: VecDeque<RecordBatch>,
-    rows: usize,
-}
-
-impl ColumnarHistory {
-    fn prepare_discard_front(
-        &self,
-        mut count: usize,
-        node_id: &str,
-    ) -> Result<Option<RecordBatch>> {
-        if count == 0 {
-            return Ok(None);
-        }
-        for record in &self.records {
-            if count >= record.num_rows() {
-                count -= record.num_rows();
-                if count == 0 {
-                    return Ok(None);
-                }
-                continue;
-            }
-            let retained = record.slice(count, record.num_rows() - count);
-            let Some(logical_bytes) = crate::operator::row_cost::RowCosts::try_total(&retained)?
-            else {
-                return Err(internal_error(
-                    "columnar history has unsupported row charges",
-                ));
-            };
-            let backing_bytes = retained.columns().iter().fold(0_usize, |bytes, column| {
-                bytes.saturating_add(column.get_buffer_memory_size())
-            });
-            // Compact geometrically by bytes, not rows: one evicted string can
-            // own almost the whole buffer. The small-buffer floor avoids a
-            // fresh allocation for every single-row append to a short window.
-            if backing_bytes <= logical_bytes.saturating_mul(2).max(4_096) {
-                return Ok(Some(retained));
-            }
-            let indices = UInt64Array::from_iter_values(
-                (0..retained.num_rows())
-                    .map(|index| u64::try_from(index).expect("Arrow row index fits u64")),
-            );
-            return take_record_batch(&retained, &indices)
-                .map(Some)
-                .map_err(|error| operator_error(node_id, &error.to_string()));
-        }
-        Ok(None)
-    }
-
-    fn discard_front(&mut self, mut count: usize, prepared_front: Option<RecordBatch>) {
-        self.rows -= count;
-        while count > 0 {
-            let record = self.records.pop_front().expect("retained rows are present");
-            if count < record.num_rows() {
-                let retained = prepared_front.expect("partial history discard was prepared");
-                self.records.push_front(retained);
-                break;
-            }
-            count -= record.num_rows();
-        }
-    }
-
-    fn push(&mut self, record: RecordBatch) {
-        self.rows += record.num_rows();
-        self.records.push_back(record);
-    }
-
-    fn materialize(
-        &self,
-        compiled: &CompiledRollingSpec,
-        node_id: &str,
-        observer: Option<&RollingMetricsRecorder>,
-    ) -> Result<VecDeque<Vec<ScalarValue>>> {
-        let mut rows = VecDeque::with_capacity(self.rows);
-        for record in &self.records {
-            for index in 0..record.num_rows() {
-                rows.push_back(read_buffered_row(record, index, compiled, node_id)?.values);
-                if let Some(recorder) = observer {
-                    recorder.add(RollingWork::HistoryRowsMaterialized, 1);
-                    recorder.add(RollingWork::ScalarValueConversions, record.num_columns());
-                }
-            }
-        }
-        Ok(rows)
-    }
-}
-
-impl RollingHistories {
-    pub(super) fn materialize_columnar(
-        &mut self,
-        compiled: &CompiledRollingSpec,
-        node_id: &str,
-        observer: Option<&RollingMetricsRecorder>,
-    ) -> Result<()> {
-        let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
-        let prepared = self
-            .by_entity
-            .values()
-            .map(|state| state.columnar.materialize(compiled, node_id, observer))
-            .collect::<Result<Vec<_>>>()?;
-        for (state, rows) in self.by_entity.values_mut().zip(prepared) {
-            state.rows.extend(rows);
-            state.columnar = ColumnarHistory::default();
-        }
-        Ok(())
-    }
-}
-
-impl RetainedHistoryAppend {
-    // Historical accounting logic is tracked by the local complexity ratchet.
-    // #lizard forgives
-    fn projected_charge(
-        &self,
-        previous: Option<&EntityRollingState>,
-        retention: usize,
-        compiled: &CompiledRollingSpec,
-        seeds: &[Option<super::kernel::RecurrenceSeed>],
-        node: &str,
-    ) -> Result<super::budget::StateCharge> {
-        let windows = if seeds.iter().any(Option::is_some) {
-            compiled.window_groups.len()
-        } else {
-            0
-        };
-        let mut charge = super::budget::history_entity_base_charge(&self.entity, windows, node)?;
-        if let Some(previous) = previous {
-            let keep = retention.saturating_sub(self.rows.len());
-            let discard = (previous.rows.len() + previous.columnar.rows).saturating_sub(keep);
-            let scalar_discard = discard.min(previous.rows.len());
-            for row in previous.rows.iter().skip(scalar_discard) {
-                charge = charge
-                    .checked_add(super::budget::scalar_history_row_charge(row, node)?, node)?;
-            }
-            let mut columnar_discard = discard - scalar_discard;
-            for record in &previous.columnar.records {
-                if columnar_discard >= record.num_rows() {
-                    columnar_discard -= record.num_rows();
-                    continue;
-                }
-                let retained = if columnar_discard == 0 {
-                    record
-                } else {
-                    self.prepared_front
-                        .as_ref()
-                        .expect("partial discard has a prepared front")
-                };
-                let retained_charge = super::budget::ordered_record_charge(retained, node)?
-                    .ok_or_else(|| internal_error("columnar history has unsupported charge"))?;
-                charge = charge.checked_add(retained_charge, node)?;
-                columnar_discard = 0;
-            }
-        }
-        match &self.rows {
-            RetainedRows::Columnar(record) if record.num_rows() != 0 => {
-                let appended = super::budget::ordered_record_charge(record, node)?
-                    .ok_or_else(|| internal_error("columnar tail has unsupported charge"))?;
-                charge = charge.checked_add(appended, node)?;
-            }
-            RetainedRows::Columnar(_) => {}
-            RetainedRows::Scalar(rows) => {
-                for row in rows {
-                    charge = charge
-                        .checked_add(super::budget::scalar_history_row_charge(row, node)?, node)?;
-                }
-            }
-        }
-        Ok(charge)
-    }
-
-    fn commit(
-        self,
-        histories: &mut RollingHistories,
-        retention: usize,
-        compiled: &CompiledRollingSpec,
-        seeds: &[Option<super::kernel::RecurrenceSeed>],
-    ) {
-        let state = histories.by_entity.entry(self.entity).or_default();
-        let keep = retention.saturating_sub(self.rows.len());
-        let discard = (state.rows.len() + state.columnar.rows).saturating_sub(keep);
-        let scalar_discard = discard.min(state.rows.len());
-        for _ in 0..scalar_discard {
-            state.rows.pop_front();
-        }
-        state
-            .columnar
-            .discard_front(discard - scalar_discard, self.prepared_front);
-        match self.rows {
-            RetainedRows::Columnar(record) if record.num_rows() != 0 => state.columnar.push(record),
-            RetainedRows::Columnar(_) => {}
-            RetainedRows::Scalar(rows) => state.rows.extend(rows),
-        }
-        state.windows = super::state_codec::recurrence_windows(compiled, seeds);
-        state.transition_count = self.transition_count;
-    }
+    last: usize,
+    input_count: usize,
+    seen: usize,
+    finished: bool,
 }
 
 /// Builds each touched entity's retained tail from its routed row count,
@@ -851,10 +713,14 @@ impl RetainedHistoryAppend {
 fn entity_tails(
     entity_ids: &[usize],
     rows: &EntityRows,
-    retention: usize,
+    retention: RetentionPolicy,
+    times: &[i64],
     node_id: &str,
-) -> Result<impl Iterator<Item = EntityTail>> {
+) -> Result<std::vec::IntoIter<EntityTail>> {
     if rows.counts.iter().sum::<usize>() != entity_ids.len() {
+        return Err(inconsistent_entity_rows());
+    }
+    if retention.duration.is_some() && times.len() != entity_ids.len() {
         return Err(inconsistent_entity_rows());
     }
     let mut tails = rows
@@ -866,13 +732,18 @@ fn entity_tails(
             EntityTail::new(entity_id, first, count, retention, node_id)
         })
         .collect::<Result<Vec<_>>>()?;
-    collect_tail_rows(&mut tails, entity_ids)?;
+    collect_tail_rows(&mut tails, entity_ids, times, retention)?;
     Ok(tails.into_iter())
 }
 
 /// Fills every tail's newest retained rows in ascending row order.
-fn collect_tail_rows(tails: &mut [EntityTail], entity_ids: &[usize]) -> Result<()> {
-    let mut pending = tails.iter().map(|tail| tail.retained).sum::<usize>();
+fn collect_tail_rows(
+    tails: &mut [EntityTail],
+    entity_ids: &[usize],
+    times: &[i64],
+    retention: RetentionPolicy,
+) -> Result<()> {
+    let mut pending = tails.iter().filter(|tail| !tail.finished).count();
     for (row, &entity_id) in entity_ids.iter().enumerate().rev() {
         if pending == 0 {
             return Ok(());
@@ -880,8 +751,24 @@ fn collect_tail_rows(tails: &mut [EntityTail], entity_ids: &[usize]) -> Result<(
         let tail = tails
             .get_mut(entity_id)
             .ok_or_else(|| internal_error("prepared rolling entity IDs are not dense"))?;
-        if tail.rows.len() < tail.retained {
+        if tail.finished {
+            continue;
+        }
+        if tail.seen == 0 {
+            tail.last = row;
+        }
+        let time = times.get(row).copied().unwrap_or_default();
+        let last = times.get(tail.last).copied().unwrap_or_default();
+        let keep = retention.keeps_new(tail.rows.len(), time, last);
+        tail.seen += 1;
+        if keep {
             tail.rows.push_front(row);
+        }
+        if !keep
+            || tail.seen == tail.input_count
+            || (retention.duration.is_none() && tail.rows.len() == tail.retained)
+        {
+            tail.finished = true;
             pending -= 1;
         }
     }
@@ -901,39 +788,47 @@ impl EntityTail {
         entity_id: usize,
         first: usize,
         count: usize,
-        retention: usize,
+        retention: RetentionPolicy,
         node_id: &str,
     ) -> Result<Self> {
         let transitions = u64::try_from(count)
             .map_err(|_| operator_error(node_id, "rolling entity transition count overflowed"))?;
-        let retained = count.min(retention);
+        let retained = count.min(retention.rows);
         Ok(Self {
             entity_id,
             first,
             transitions,
             retained,
-            rows: VecDeque::with_capacity(retained),
+            rows: VecDeque::with_capacity(if retention.duration.is_some() {
+                count.min(retained.max(1))
+            } else {
+                retained
+            }),
+            last: first,
+            input_count: count,
+            seen: 0,
+            finished: count == 0 || (retention.duration.is_none() && retained == 0),
         })
     }
 
     fn prepare(
         self,
-        input: &RecordBatch,
+        input: &RetainedInput<'_>,
         histories: &RollingHistories,
         compiled: &CompiledRollingSpec,
-        columnar: bool,
+        seeds: &[Option<RecurrenceSeed>],
         node_id: &str,
-        observer: Option<&RollingMetricsRecorder>,
+        work: &mut RollingWorkBatch<'_>,
     ) -> Result<RetainedHistoryAppend> {
+        let source = input;
+        let input = source.record;
         let entity = compiled
             .partition_columns
             .iter()
             .map(|column| {
                 let value = ScalarValue::try_from_array(input.column(column.index), self.first)
                     .map_err(|error| operator_error(node_id, &error.to_string()))?;
-                if let Some(recorder) = observer {
-                    recorder.add(RollingWork::ScalarValueConversions, 1);
-                }
+                work.add(RollingWork::ScalarValueConversions, 1);
                 KeyValue::from_nullable_scalar(&value, node_id)
             })
             .collect::<Result<Vec<_>>>()?;
@@ -944,7 +839,7 @@ impl EntityTail {
             .ok_or_else(|| operator_error(node_id, "rolling entity transition count overflowed"))?;
         let rows = if self.rows.is_empty() {
             RetainedRows::Scalar(VecDeque::new())
-        } else if columnar {
+        } else if source.costs.columnar(self.rows.len()) {
             let indices = UInt64Array::from_iter_values(
                 self.rows
                     .into_iter()
@@ -958,69 +853,87 @@ impl EntityTail {
                 .rows
                 .into_iter()
                 .map(|index| {
-                    let row = read_buffered_row(input, index, compiled, node_id)?;
-                    if let Some(recorder) = observer {
-                        recorder.add(RollingWork::HistoryRowsMaterialized, 1);
-                        recorder.add(RollingWork::ScalarValueConversions, input.num_columns());
-                    }
-                    Ok(row.values)
+                    let values = input
+                        .columns()
+                        .iter()
+                        .map(|column| {
+                            ScalarValue::try_from_array(column, index)
+                                .map_err(|error| operator_error(node_id, &error.to_string()))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    work.add(RollingWork::HistoryRowsMaterialized, 1);
+                    work.add(RollingWork::ScalarValueConversions, input.num_columns());
+                    Ok(values)
                 })
                 .collect::<Result<VecDeque<_>>>()?;
             RetainedRows::Scalar(rows)
         };
-        let retention = usize::try_from(compiled.max_row_retention).unwrap_or(usize::MAX);
-        let keep = retention.saturating_sub(rows.len());
+        let discarded_rows = source.retention.discarded_history(
+            prior,
+            self.input_count,
+            source.times[self.last],
+            compiled,
+            node_id,
+        )?;
         let prepared_front = prior
             .map(|state| {
-                let discard = (state.rows.len() + state.columnar.rows).saturating_sub(keep);
                 state
                     .columnar
-                    .prepare_discard_front(discard.saturating_sub(state.rows.len()), node_id)
+                    .prepare_discard_front(discarded_rows.saturating_sub(state.rows.len()), node_id)
             })
             .transpose()?
             .flatten();
+        work.add(RollingWork::HistoryAppendRowsPrepared, rows.len());
+        work.add(RollingWork::HistoryEvictRowsPrepared, discarded_rows);
         Ok(RetainedHistoryAppend {
-            entity_id: self.entity_id,
             entity,
             rows,
             prepared_front,
+            discarded_rows,
+            windows: super::state_codec::recurrence_windows(compiled, seeds),
             transition_count,
+            next_charge: None,
         })
     }
 }
 
 fn retained_histories(
     input: &RecordBatch,
-    entity_ids: &[usize],
-    entity_rows: &EntityRows,
+    update: &StreamKernelUpdate,
     histories: &RollingHistories,
     compiled: &CompiledRollingSpec,
     node_id: &str,
     observer: Option<&RollingMetricsRecorder>,
 ) -> Result<Vec<RetainedHistoryAppend>> {
-    let retention = usize::try_from(compiled.max_row_retention).unwrap_or(usize::MAX);
-    let columnar = input.columns().iter().all(|column| {
-        column.data_type().primitive_width().is_some()
-            || matches!(
-                column.data_type(),
-                DataType::Null
-                    | DataType::Boolean
-                    | DataType::Utf8
-                    | DataType::LargeUtf8
-                    | DataType::Binary
-                    | DataType::LargeBinary
-            )
-    });
-    entity_tails(entity_ids, entity_rows, retention, node_id)?
-        .map(|tail| tail.prepare(input, histories, compiled, columnar, node_id, observer))
-        .collect()
+    let mut work = RollingWorkBatch::new(observer);
+    let retention = RetentionPolicy::new(compiled);
+    let times = timestamps(input, compiled)?;
+    let input = RetainedInput {
+        record: input,
+        costs: PayloadCosts::new(input),
+        retention,
+        times: times.values(),
+    };
+    let seeds = update.recurrence_seeds();
+    entity_tails(
+        update.entity_ids(),
+        update.entity_rows(),
+        retention,
+        input.times,
+        node_id,
+    )?
+    .map(|tail| {
+        let seeds = &seeds[tail.entity_id];
+        tail.prepare(&input, histories, compiled, seeds, node_id, &mut work)
+    })
+    .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
 
-    use super::{EntityRows, entity_tails};
+    use super::{EntityRows, RetentionPolicy, entity_tails};
 
     /// Entity ID, first row, transitions, and retained rows of one tail.
     type Tail = (usize, usize, u64, Vec<usize>);
@@ -1081,7 +994,7 @@ mod tests {
             retention in 0_usize..8,
         ) {
             let (entity_ids, rows) = dense(&keys);
-            let tails = entity_tails(&entity_ids, &rows, retention, "r")
+            let tails = entity_tails(&entity_ids, &rows, RetentionPolicy { rows: retention, duration: None }, &[], "r")
                 .unwrap()
                 .map(|tail| (tail.entity_id, tail.first, tail.transitions, tail.rows.into()))
                 .collect::<Vec<Tail>>();
@@ -1090,17 +1003,76 @@ mod tests {
     }
 
     #[test]
+    fn test_duration_tail_counts_every_transition_before_the_retained_suffix() {
+        let times = (1..=136).collect::<Vec<i64>>();
+        let routing = EntityRows {
+            counts: vec![136],
+            first_rows: vec![0],
+        };
+        let policy = RetentionPolicy {
+            rows: 2,
+            duration: Some(100),
+        };
+        let tail = entity_tails(&vec![0; 136], &routing, policy, &times, "r")
+            .unwrap()
+            .next()
+            .unwrap();
+        assert_eq!(tail.transitions, 136);
+        assert_eq!(tail.first, 0);
+        assert_eq!(
+            tail.rows.into_iter().collect::<Vec<_>>(),
+            (36..136).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn routed_entity_tails_reject_inconsistent_routing() {
         let rows = EntityRows {
             counts: vec![1],
             first_rows: vec![0],
         };
-        assert!(entity_tails(&[0, 1], &rows, 2, "r").is_err());
-        assert!(entity_tails(&[0, 0], &rows, 2, "r").is_err());
+        assert!(
+            entity_tails(
+                &[0, 1],
+                &rows,
+                RetentionPolicy {
+                    rows: 2,
+                    duration: None
+                },
+                &[],
+                "r"
+            )
+            .is_err()
+        );
+        assert!(
+            entity_tails(
+                &[0, 0],
+                &rows,
+                RetentionPolicy {
+                    rows: 2,
+                    duration: None
+                },
+                &[],
+                "r"
+            )
+            .is_err()
+        );
         let split = EntityRows {
             counts: vec![1, 1],
             first_rows: vec![0, 1],
         };
-        assert!(entity_tails(&[0, 0], &split, 2, "r").is_err());
+        assert!(
+            entity_tails(
+                &[0, 0],
+                &split,
+                RetentionPolicy {
+                    rows: 2,
+                    duration: None
+                },
+                &[],
+                "r"
+            )
+            .is_err()
+        );
     }
 }

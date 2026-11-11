@@ -116,9 +116,10 @@ def _expression_schema(
 ) -> pa.Schema:
     if operator["kind"] != "expression" or operator["udfs"]:
         raise RuntimeError("row schema planning requires native expressions")
-    return runtime._infer_symbolic_expression_schema(
-        operator["select"], operator["filter"], schema
-    )
+    select = operator["select"]
+    if not select and schema is not None and len(schema) == 0:
+        select = ["*"]
+    return runtime._infer_symbolic_expression_schema(select, operator["filter"], schema)
 
 
 def infer_table_schema(

@@ -37,7 +37,7 @@ use crate::{
     state::{SegmentDescriptor, SegmentKind, StateInventory},
 };
 
-use super::rolling_metrics::{RollingMetricsRecorder, RollingStage, RollingWork};
+use super::rolling_metrics::{RollingMetricsRecorder, RollingStage, RollingWork, RollingWorkBatch};
 use super::{
     BatchOperator, BatchOperatorContext, LateMetricDelta, OperatorMetadata, StateBudget,
     StreamCollector, StreamOperator, StreamOperatorContext, accumulate_late_metrics,
@@ -52,6 +52,8 @@ mod compile;
 mod cumulative;
 use cumulative::CumulativeAccumulator;
 mod generated_kernel_manifest;
+mod history;
+use history::PreparedHistoryUpdate;
 mod indicators;
 pub(crate) use indicators::{IndicatorRollingRecord, RollingIoReservation};
 mod kernel;
@@ -1938,15 +1940,16 @@ impl RollingOperator {
     fn projected_rows_charge(
         &self,
         rows: &[BufferedRow],
-        touched: &HistoryUpdates,
+        touched: &mut PreparedHistoryUpdate,
         node: &str,
+        observer: Option<&RollingMetricsRecorder>,
     ) -> Result<(StateCharge, StateCharge)> {
         let current = self
             .state
             .charge
             .checked_sub(budget::buffered_charge(rows.iter(), node)?)?;
         let (old_histories, new_histories) =
-            budget::changed_histories_charge(&self.state.histories, touched, node)?;
+            touched.changed_charge_observed(&self.state.histories, node, observer)?;
         let next = current
             .checked_sub(old_histories)?
             .checked_add(new_histories, node)?;
@@ -1964,16 +1967,16 @@ impl RollingOperator {
             .histories
             .by_entity
             .values()
-            .any(|state| !state.columnar.records.is_empty());
+            .any(|state| state.columnar.has_columnar());
         let old = has_columnar
-            .then(|| budget::histories_charge(&self.state.histories, node))
+            .then(|| budget::histories_charge_observed(&self.state.histories, node, observer))
             .transpose()?;
         self.state
             .owned_mut()?
             .histories
             .materialize_columnar(&self.compiled, node, observer)?;
         if let Some(old) = old {
-            let new = budget::histories_charge(&self.state.histories, node)?;
+            let new = budget::histories_charge_observed(&self.state.histories, node, observer)?;
             self.state.owned_mut()?.charge =
                 self.state.charge.checked_sub(old)?.checked_add(new, node)?;
         }
@@ -2032,6 +2035,7 @@ impl RollingOperator {
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<(BTreeMap<RowIdentity, BufferedRow>, LateMetricDelta)> {
         let _validation = observer.map(|recorder| recorder.stage(RollingStage::InputValidation));
+        let mut work = RollingWorkBatch::new(observer);
         let mut accepted = BTreeMap::new();
         let mut metrics = LateRowTally::default();
         for (row_index, row) in rows.into_iter().enumerate() {
@@ -2046,9 +2050,7 @@ impl RollingOperator {
                 indicators::Coordinate::InputRow(row_index),
             )?;
             let _ordering = observer.map(|recorder| recorder.stage(RollingStage::OrderingProof));
-            if let Some(recorder) = observer {
-                recorder.add(RollingWork::OrderProofRows, 1);
-            }
+            work.add(RollingWork::OrderProofRows, 1);
             if self.state.buffer.contains_key(&row.identity) || accepted.contains_key(&row.identity)
             {
                 return Err(operator_error(
@@ -2110,6 +2112,31 @@ impl RollingOperator {
             .collect())
     }
 
+    fn restore_rows_after_charge_failure(
+        &mut self,
+        rows: Vec<BufferedRow>,
+        node: &str,
+        observer: Option<&RollingMetricsRecorder>,
+    ) -> Result<()> {
+        for row in rows {
+            self.state
+                .owned_mut()?
+                .buffer
+                .insert(row.identity.clone(), row);
+        }
+        if let Ok(charge) = budget::full_state_charge_observed(
+            &self.state.buffer,
+            &self.state.ordered,
+            &self.state.histories,
+            &self.compiled,
+            node,
+            observer,
+        ) {
+            self.state.owned_mut()?.charge = charge;
+        }
+        Ok(())
+    }
+
     // Final emission keeps compute, record building, chunking, sequence
     // accounting, and history application in one ordered pass so a partial
     // failure leaves consistent in-memory state.
@@ -2137,7 +2164,7 @@ impl RollingOperator {
             context.operator_id(),
             observer,
         )?;
-        let (record, next_kernel_state, touched) = if let Some(typed) = typed {
+        let (record, next_kernel_state, mut touched) = if let Some(typed) = typed {
             typed
         } else {
             let computed = compute_output_columns_observed(
@@ -2156,31 +2183,21 @@ impl RollingOperator {
                     context.operator_id(),
                 )?,
                 None,
-                computed.touched,
+                PreparedHistoryUpdate::Replace(computed.touched),
             )
         };
-        let (current_charge, next_charge) =
-            match self.projected_rows_charge(&rows, &touched, context.operator_id()) {
-                Ok(charge) => charge,
-                Err(error) => {
-                    for row in rows {
-                        self.state
-                            .owned_mut()?
-                            .buffer
-                            .insert(row.identity.clone(), row);
-                    }
-                    if let Ok(charge) = budget::full_state_charge(
-                        &self.state.buffer,
-                        &self.state.ordered,
-                        &self.state.histories,
-                        &self.compiled,
-                        context.operator_id(),
-                    ) {
-                        self.state.owned_mut()?.charge = charge;
-                    }
-                    return Err(error);
-                }
-            };
+        let (current_charge, next_charge) = match self.projected_rows_charge(
+            &rows,
+            &mut touched,
+            context.operator_id(),
+            observer,
+        ) {
+            Ok(charge) => charge,
+            Err(error) => {
+                self.restore_rows_after_charge_failure(rows, context.operator_id(), observer)?;
+                return Err(error);
+            }
+        };
         self.state.owned_mut()?.charge = current_charge;
         if let Some(recorder) = observer {
             recorder.add(RollingWork::OutputRowsPrepared, record.num_rows());
@@ -2211,7 +2228,7 @@ impl RollingOperator {
             .checked_add(chunk_count)
             .ok_or_else(|| operator_error(context.operator_id(), "output sequence overflowed"))?;
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
-        state.histories.apply(touched);
+        touched.commit(&mut state.histories);
         TypedStreamTransition::replace(next_kernel_state, &mut state.typed_kernel_state);
         state.charge = next_charge;
         Ok(())
@@ -2739,6 +2756,7 @@ struct EntityRollingState {
     windows: Vec<WindowState>,
     transition_count: u64,
     indicators: Vec<indicators::State>,
+    charge_cache: Option<budget::HistoryCharge>,
 }
 
 impl EntityRollingState {
@@ -2753,6 +2771,7 @@ impl EntityRollingState {
                 .iter()
                 .map(indicators::Group::fresh)
                 .collect(),
+            charge_cache: None,
         }
     }
 }
@@ -2799,7 +2818,8 @@ type HistoryUpdates = Vec<(Vec<Option<KeyValue>>, EntityRollingState)>;
 
 impl RollingHistories {
     fn apply(&mut self, touched: HistoryUpdates) {
-        for (entity, state) in touched {
+        for (entity, mut state) in touched {
+            state.charge_cache = None;
             self.by_entity.insert(entity, state);
         }
     }
@@ -3451,8 +3471,17 @@ fn compute_output_columns_observed(
             touched: Vec::new(),
         });
     }
-    let cells =
-        compute_output_cells_checked(rows, histories, compiled, node_id, observer, &mut || Ok(()))?;
+    let mut work = RollingWorkBatch::new(observer);
+    work.add(RollingWork::NumericGeneralCalls, 1);
+    let cells = compute_output_cells_checked(
+        rows,
+        histories,
+        compiled,
+        node_id,
+        observer,
+        Some(&mut work),
+        &mut || Ok(()),
+    )?;
     let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
     let columns = encode_derived_columns(cells.columns, compiled, node_id)?;
     Ok(ComputedOutputs {
@@ -3467,9 +3496,18 @@ fn compute_output_cells_checked(
     compiled: &CompiledRollingSpec,
     node: &str,
     observer: Option<&RollingMetricsRecorder>,
+    preparations: Option<&mut RollingWorkBatch<'_>>,
     check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<indicators::ComputedCells> {
-    indicators::compute_cells(rows, histories, compiled, node, observer, check)
+    indicators::compute_cells(
+        rows,
+        histories,
+        compiled,
+        node,
+        observer,
+        preparations,
+        check,
+    )
 }
 
 /// Evicts rows that no declared output can ever observe again (SCE-08): a

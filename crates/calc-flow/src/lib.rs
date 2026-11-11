@@ -37,6 +37,7 @@ mod config;
 mod connector;
 mod context;
 mod continuous;
+pub mod dataframe;
 mod datafusion;
 mod datafusion_interval;
 mod datafusion_predicate;
@@ -47,14 +48,18 @@ mod expression;
 mod json;
 mod operator;
 mod pipeline;
+pub mod program;
 mod project_store;
+mod query_analysis;
 mod runtime;
+pub mod sql;
 mod state;
 mod state_memory_pool;
 mod static_input;
 mod time;
 mod udf;
 
+pub use ::datafusion::arrow;
 pub use batch::{
     Batch, BatchKind, BatchMetadata, ExternalPayload, StaticArraySnapshot, StaticArrayValues,
     TableBatch,
@@ -85,6 +90,9 @@ pub use continuous::{
     SourceHistoryReplayFactory, SourceSchema, SourceStatus, StreamSink, StreamSource,
     StreamingError, StreamingErrorCategory, StreamingFailureReason, StreamingJob, StreamingRunner,
     TerminalCause, TransactionalStreamSink, WatermarkPolicy,
+};
+pub use dataframe::{
+    ColumnExpr, InputOptions, LiteralValue, NamedExpr, TableExpr, lit, table_input,
 };
 pub use datafusion::{
     DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY, DataFusionConfig, DataFusionParallelismMode,
@@ -118,10 +126,17 @@ pub use pipeline::{
     PipelineBuilder, PortEndpoint, RunMetadata, RunResult, StreamExecutionPlan, StreamRequirements,
     StreamRuntimeConfig,
 };
+pub use program::{CompileMode, CompileOptions, Program, UpdateSemantics};
 pub use project_store::{
     FileProjectStore, MAX_PROJECT_DOCUMENT_BYTES, ProjectStore, export_project_json,
     export_project_yaml, import_project_json, import_project_json_with_limit, import_project_yaml,
     import_project_yaml_with_limit,
+};
+pub use query_analysis::{
+    AnalysisOptions, Comparison, ComparisonCutoff, ComparisonOrdering, HistoryScope,
+    InputInterpretation, PortabilityRequest, QueryAnalysis, QueryDiagnostic, QueryEdgeFacts,
+    QueryEdgeModeFacts, QueryFinality, QueryModeFacts, QueryNodeFacts, QueryOrderingFacts,
+    QueryRowOrder, QuerySortKey, QueryTemporalIdentity, QueryTieOrder, SupportStatus, UpdateKind,
 };
 pub use runtime::{
     ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, StreamJobContext, StreamMessage,
@@ -150,3 +165,6 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg(feature = "benchmark-internals")]
 #[doc(hidden)]
 pub mod benchmark_internals;
+
+#[doc(hidden)]
+pub use query_analysis::analyze_query_graph_json;

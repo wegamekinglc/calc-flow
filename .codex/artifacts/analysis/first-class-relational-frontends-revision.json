@@ -1,0 +1,385 @@
+{
+  "source_commit": "1fda9d3b7087c59f740ba67914c4201a16adfe65",
+  "source_trees": {
+    "crates/calc-flow": "b85b012571586fa2e5fee070a3879ee76068ab25",
+    "crates/calc-flow-python": "0598f7aaefb029408ada38d02dd6d51bf6c78289",
+    "python/calc_flow": "5918604c86082bb11d3b9990b979d6e28089a003"
+  },
+  "baseline": "e12fc8ba6f8d45c83cd462628fde46481fc56ced",
+  "branch": "feature/dal-512-relational-frontends",
+  "interpreter": "Python 3.13.9",
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+  "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+  "wheel": {
+    "path": "target/relational/revision-wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl",
+    "sha256": "b5dea1ab10578c0e6d2d89f280a59efb03e4c4101a3805ba841bb90c237b7796"
+  },
+  "native": {
+    "path": "target/relational/revision-wheel-python/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+    "sha256": "2a436ee1eee9d78deeaa32f8e462d6f02f37d60eefca3e9f5311f8dc4c0c2ba8"
+  },
+  "matched_python_files": 55,
+  "schema_version": 1,
+  "issue": "DAL-512",
+  "checks": [
+    {
+      "id": "F1_RED",
+      "command": "CARGO_TARGET_DIR=target/relational/cargo CARGO_BUILD_JOBS=4 cargo test -p calc-flow --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256' --test relational_metadata",
+      "result": "expected_failure",
+      "log_sha256": "a6d50843c97d7e8e3f421fc8f7f2d24b8cf661ebedca4e25225a4beace4258e6",
+      "tests_failed": 1,
+      "error": "graph input events schema mismatch"
+    },
+    {
+      "id": "F1_initial_GREEN",
+      "command": "CARGO_TARGET_DIR=target/relational/cargo CARGO_BUILD_JOBS=4 cargo test -p calc-flow --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256' --test relational_metadata",
+      "result": "passed",
+      "log_sha256": "eac3395ed2feaaa4fba61c5bcc424bf19f8e0cb049775336958ab79f409973df",
+      "tests": 1,
+      "scenarios": [
+        "plain",
+        "schema metadata",
+        "field metadata"
+      ],
+      "note": "Superseded by final Rust targets after complexity refactor."
+    },
+    {
+      "id": "F2_RED",
+      "command": "PYTHONPATH=target/relational/python python -m pytest python/tests/test_relational_frontend.py -q -k distinguishes_known_empty",
+      "result": "expected_failure",
+      "log_sha256": "3406fe600f66746036149a34b226d6f5be0922f2cc7df1750136d4521848b23d",
+      "tests_failed": 2
+    },
+    {
+      "id": "F3_RED",
+      "command": "PYTHONPATH=target/relational/python python -m pytest python/tests/test_relational_frontend.py -q -k unsupported_sql_schema",
+      "result": "expected_failure",
+      "log_sha256": "5756a8dc5f973d8158eab73235c5cc6ff3f79f386e9e1fb00413b53567a03dbb",
+      "tests_failed": 6,
+      "error": "generated cf_sql_input path and ValueError"
+    },
+    {
+      "id": "F4_RED",
+      "command": "PYTHONPATH=target/relational/python python -m pytest python/tests/test_symbolic_expr.py::test_public_surface_is_the_frozen_export_list -q",
+      "result": "expected_failure",
+      "log_sha256": "5953559eddc33dee3598bb7473b5c25bf4c14e4a3df884c43071964f24346e27",
+      "tests_failed": 1
+    },
+    {
+      "id": "F2_F3_F4_initial_GREEN",
+      "command": "PYTHONPATH=target/relational/python python -m pytest python/tests/test_relational_frontend.py python/tests/test_symbolic_expr.py::test_public_surface_is_the_frozen_export_list -q -k 'schema or frozen_export'",
+      "result": "passed",
+      "log_sha256": "c91cf157c14b5ce642d7d9e7193a55a7f9b43a059604e44c1a531c12e5980671",
+      "tests": 18,
+      "note": "Adapter iteration against pre-existing native; final matched-wheel checks below supersede it."
+    },
+    {
+      "id": "final_rust_targets",
+      "command": "CARGO_TARGET_DIR=target/relational/cargo CARGO_BUILD_JOBS=4 cargo test -p calc-flow --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256' --test relational_frontend --test relational_program --test relational_validation --test relational_metadata",
+      "result": "passed",
+      "log_sha256": "3402ffbc065156374d2ea2ae7e485b69fe0a1a86279c3f35f2633329fcdd2b75",
+      "tests": 19,
+      "counts": [
+        4,
+        1,
+        13,
+        1
+      ]
+    },
+    {
+      "id": "public_consumer",
+      "command": "CARGO_TARGET_DIR=target/relational/cargo CARGO_BUILD_JOBS=4 cargo run --manifest-path crates/calc-flow/tests/relational-consumer/Cargo.toml --locked --offline --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256' --config 'profile.release.package.relational-public-consumer.opt-level=0' --config 'profile.release.package.relational-public-consumer.codegen-units=256'",
+      "result": "passed",
+      "log_sha256": "85b76cf4dfd9bbdc3205a1d8d857bed2f05ca80ab6b1cbacac174c4337d170a1",
+      "forms": [
+        "dataframe",
+        "sql",
+        "df_sql_df_sql",
+        "sql_df_sql"
+      ],
+      "metadata_owned_stream": true,
+      "state": {
+        "same_batch_plan": [
+          1,
+          5
+        ],
+        "same_stream_job": [
+          1,
+          6
+        ],
+        "new_job": [
+          5
+        ]
+      }
+    },
+    {
+      "id": "rust_example",
+      "command": "CARGO_TARGET_DIR=target/relational/cargo CARGO_BUILD_JOBS=4 cargo run -p calc-flow --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256' --example 32_sql_expression_pipeline",
+      "result": "passed",
+      "log_sha256": "023e2b9ba3c73a13298a80241420730fa22af4166a13ac59372bd822a8cb61ad",
+      "net": [
+        18,
+        27
+      ]
+    },
+    {
+      "id": "core_clippy",
+      "command": "CARGO_TARGET_DIR=target/relational/cargo CARGO_BUILD_JOBS=4 cargo clippy -p calc-flow --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256' --lib --test relational_frontend --test relational_program --test relational_validation --test relational_metadata --example 32_sql_expression_pipeline -- -D warnings",
+      "result": "passed",
+      "log_sha256": "393b422ad00d10e4267439697011c83cf0e196248f0138db7521346387805fb6"
+    },
+    {
+      "id": "new_native_build",
+      "command": "PYO3_PYTHON=/home/wegamekinglc/anaconda3/bin/python CARGO_TARGET_DIR=target/relational/cargo CARGO_BUILD_JOBS=4 /home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python -m maturin build --release --config 'profile.release.package.calc-flow.opt-level=0' --config 'profile.release.package.calc-flow.codegen-units=256' --config 'profile.release.package.calc-flow-python.opt-level=0' --config 'profile.release.package.calc-flow-python.codegen-units=256' --interpreter /home/wegamekinglc/anaconda3/bin/python --out target/relational/revision-wheels",
+      "result": "passed",
+      "log_sha256": "366ffc22e4a1f600ef73c1fa185a31c823dc487c4d4c1577a4891ebf22471baf"
+    },
+    {
+      "id": "matched_wheel_python",
+      "command": "PYTHONPATH=target/relational/revision-wheel-python JAX_PLATFORMS=cpu python -m pytest python/tests/test_relational_frontend.py python/tests/test_symbolic_expr.py::test_public_surface_is_the_frozen_export_list python/tests/test_program_engine.py python/tests/test_symbolic_compile_cache.py python/tests/test_query_history_portability.py::test_legacy_results_and_native_identities_survive_analysis -q --junitxml=target/relational/revision-python-final.xml",
+      "result": "passed",
+      "log_sha256": "b92af0eb912d493c2cce6ca67ab64927af46d9a1d2a4cccda5f471621ef5a258",
+      "tests": 84,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "id": "python_example",
+      "command": "PYTHONPATH=target/relational/revision-wheel-python python examples/32_sql_expression_pipeline.py",
+      "result": "passed",
+      "log_sha256": "481f7a4bc04ca9d6e139f95989135e230952969f115abbb718f50ca4a9de5f15",
+      "net": [
+        18,
+        27
+      ]
+    },
+    {
+      "id": "python_example_optimized",
+      "command": "PYTHONPATH=target/relational/revision-wheel-python python -O examples/32_sql_expression_pipeline.py",
+      "result": "passed",
+      "log_sha256": "481f7a4bc04ca9d6e139f95989135e230952969f115abbb718f50ca4a9de5f15",
+      "net": [
+        18,
+        27
+      ]
+    },
+    {
+      "id": "docs_CI_RED",
+      "command": "git diff --check 775ea9738265597de492b848f8e0763962c7041b HEAD",
+      "result": "expected_failure",
+      "log_sha256": "69c40a42a90d695eb7c09d3d785455afa2a87e44992fefcc263432e92adbc68b"
+    },
+    {
+      "id": "docs_CI_GREEN",
+      "command": "git diff --cached --check 775ea9738265597de492b848f8e0763962c7041b; python scripts/check_spec_references.py",
+      "result": "passed",
+      "log_sha256": "451465601c9c0f0c187f07ad02a49cb0b66dc2a13af19c6b12312249756af1ab"
+    }
+  ],
+  "codacy_complexity": {
+    "lizard": "1.26.0",
+    "limit": 8,
+    "original_check_run": 130370405171,
+    "fixed_functions": [
+      {
+        "file": "crates/calc-flow/examples/32_sql_expression_pipeline.rs",
+        "function": "main",
+        "before": 13,
+        "after": 5
+      },
+      {
+        "file": "crates/calc-flow/src/dataframe.rs",
+        "function": "table_input",
+        "before": 14,
+        "after": 4
+      },
+      {
+        "file": "crates/calc-flow/src/dataframe.rs",
+        "function": "projection",
+        "before": 12,
+        "after": 6
+      },
+      {
+        "file": "crates/calc-flow/src/dataframe.rs",
+        "function": "render",
+        "before": 11,
+        "after": 5
+      },
+      {
+        "file": "crates/calc-flow/src/dataframe.rs",
+        "function": "dtype",
+        "before": 21,
+        "after": 7
+      },
+      {
+        "file": "crates/calc-flow/src/dataframe.rs",
+        "function": "binary_type",
+        "before": 9,
+        "after": 5
+      },
+      {
+        "file": "crates/calc-flow/src/program/lower.rs",
+        "function": "add_error",
+        "before": 13,
+        "after": 2
+      },
+      {
+        "file": "crates/calc-flow/src/program/lower.rs",
+        "function": "builder",
+        "before": 10,
+        "after": 6
+      },
+      {
+        "file": "crates/calc-flow/src/program/lower.rs",
+        "function": "node_operator",
+        "before": 9,
+        "after": 5
+      },
+      {
+        "file": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "function": "declaration",
+        "before": 10,
+        "after": 5
+      },
+      {
+        "file": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "function": "check_shape",
+        "before": 14,
+        "after": 7
+      },
+      {
+        "file": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "function": "main",
+        "before": 10,
+        "after": 6
+      },
+      {
+        "file": "crates/calc-flow/tests/relational_frontend.rs",
+        "function": "dataframe_filter_cast_and_boolean_null_semantics",
+        "before": 9,
+        "after": 7
+      },
+      {
+        "file": "crates/calc-flow/tests/relational_frontend.rs",
+        "function": "schema_errors_keep_logical_paths_and_codes",
+        "before": 14,
+        "after": 6
+      },
+      {
+        "file": "crates/calc-flow/tests/relational_frontend.rs",
+        "function": "filtered_projection",
+        "before": 9,
+        "after": 7
+      },
+      {
+        "file": "crates/calc-flow/tests/relational_program.rs",
+        "function": "mixed_program",
+        "before": 14,
+        "after": 6
+      },
+      {
+        "file": "crates/calc-flow/tests/relational_program.rs",
+        "function": "named_mixed_dag_reuses_declarations_and_isolates_executions",
+        "before": 10,
+        "after": 7
+      },
+      {
+        "file": "crates/calc-flow/tests/relational_program.rs",
+        "function": "verify_export",
+        "before": 9,
+        "after": 8
+      },
+      {
+        "file": "crates/calc-flow/tests/relational_validation.rs",
+        "function": "analysis_reports_schema_errors_at_logical_roles",
+        "before": 9,
+        "after": 7
+      },
+      {
+        "file": "crates/calc-flow/tests/relational_validation.rs",
+        "function": "derived_projection_cannot_replace_existing_field",
+        "before": 10,
+        "after": 7
+      },
+      {
+        "file": "crates/calc-flow/tests/relational_validation.rs",
+        "function": "schema_planning_rejects_unresolved_or_nonportable_outputs",
+        "before": 9,
+        "after": 5
+      },
+      {
+        "file": "crates/calc-flow/tests/relational_validation.rs",
+        "function": "native_input_identity_survives_dataframe_but_is_cleared_by_sql",
+        "before": 12,
+        "after": 5
+      },
+      {
+        "file": "crates/calc-flow/tests/relational_validation.rs",
+        "function": "literal_columns",
+        "before": 12,
+        "after": 6
+      },
+      {
+        "file": "python/calc_flow/symbolic/program.py",
+        "function": "_engine_selection",
+        "before": 9,
+        "after": 6
+      },
+      {
+        "file": "python/tests/test_relational_frontend.py",
+        "function": "_shape",
+        "before": 14,
+        "after": 1
+      }
+    ],
+    "example_asserts": 0
+  },
+  "unchanged_complexity_issue": {
+    "path": "python/calc_flow/symbolic/program.py",
+    "function": "_validate_engine_node",
+    "ccn": 9,
+    "body": "byte-identical to reviewed baseline"
+  },
+  "review_sha256": "f2b6751470416825b3bd2fcb1a8347ad11d02a50966e14f32f08ce2fae748776",
+  "product_sources_unchanged_since_build_commit": true,
+  "reused_evidence": {
+    "original_artifacts_unchanged": [
+      ".codex/artifacts/analysis/first-class-relational-frontends.md",
+      ".codex/artifacts/analysis/first-class-relational-frontends.json",
+      ".codex/artifacts/api-notes/first-class-relational-frontends.md"
+    ],
+    "boundary": "Unchanged low-level history/runtime lifecycle/async cancellation, PyO3 getter source, dependency/feature and publication architecture evidence; prior artifact hashes are not candidate hashes. Modified paths are revalidated above."
+  },
+  "static_checks": {
+    "rustfmt": "passed",
+    "Ruff lint/format on five affected Python files": "passed",
+    "Python 3.9 grammar": "passed; not a runtime matrix",
+    "complexity ratchet": "passed; no suppression/baseline changes",
+    "project-v3 schema, team definitions, root manifests and lockfiles": "unchanged",
+    "git diff --check": "passed"
+  },
+  "not_run": [
+    "full workspace",
+    "connector services",
+    "coverage",
+    "cross-platform matrix",
+    "performance"
+  ],
+  "merge_state": "Independent blocker/direct-impact reviewer recheck and required CI gates remain; no merge.",
+  "review_storage": "Original task-local file remains untracked and byte-identical; existing Multica attachment 01a1c967-d08e-77a2-b329-6a1dcc25a56a retained.",
+  "ci_repair": {
+    "snapshot_head": "77a4c4f8031de1702720e430a89702dbccf4fd29",
+    "snapshot_counts": {
+      "IN_PROGRESS": 15,
+      "SUCCESS": 5,
+      "FAILURE": 1
+    },
+    "failed_job": 130389253020,
+    "diagnostic_command": "gh api repos/wegamekinglc/calc-flow/actions/jobs/130389253020/logs",
+    "cause": "Newly tracked original review report has an existing extra blank line at EOF.",
+    "fix": "Remove only Git tracking introduced by this run; preserve exact original report locally and in the existing issue attachment.",
+    "product_sources_changed": false,
+    "new_head_ci": "Triggered by corrective push; not polled after the single snapshot."
+  }
+}

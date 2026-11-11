@@ -344,6 +344,11 @@ awaited cleanup. Console rendering is excluded.
 
 ## Complete-replacement snapshot SQL
 
+For the Program-wide `with_update_semantics("latest_relation")` choice, supported
+snapshot transforms, and mandatory preflight, see
+[explicit relation updates](relational-frontends.md#explicit-relation-updates).
+The default ordinary SQL interpretation remains `legacy_append`.
+
 `cf.snapshot_sql(query: str, /, **tables: TableExpr) -> TableExpr` is a
 stream-only, read-only DataFusion query over one or more named latest
 relations. Aliases must be valid SQL identifiers without case-insensitive
@@ -902,6 +907,16 @@ state uses layout 5 and has no `input-retained` segment. Its `rows` metadata
 continues to count cumulative accepted input, not live groups.
 
 ### SQL aggregate recovery compatibility
+
+`Runtime().capabilities()` lists SQL `state_version=2` with
+`state_layouts=(3, 4, 5)`: ordinary compact, retained input, and ordered compact
+state, respectively. The operator's semantic state version is separate from
+the checkpoint layout and its native accumulator semantics. Compact control
+records use `native_semantics=1` for layout 3 and `native_semantics=2` for
+layout 5; retained layout 4 has no native accumulator semantics field.
+These are stream checkpoints; the inventory does not provide batch query
+resume. Layout numbers belong to each operator: rolling layouts 5/6 are
+independent of SQL's formats.
 
 Compatible layout-3 compact and layout-4 retained checkpoints remain supported.
 A nonempty retained checkpoint resumes retained execution even if its query

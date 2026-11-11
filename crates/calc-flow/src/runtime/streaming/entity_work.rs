@@ -67,6 +67,7 @@ struct PairRecord {
     cancellation: Arc<AtomicBool>,
     abandoned: bool,
     launching: bool,
+    launched_lanes: usize,
     requests: Vec<Option<NumericLaneRequest>>,
     handles: Vec<Option<JoinHandle<NumericLaneExit>>>,
     exits: Vec<Option<NumericLaneExit>>,
@@ -95,9 +96,11 @@ impl PairRecord {
             .iter()
             .try_fold(0_u64, |rows, exit| rows.checked_add(exit.work.numeric_rows));
         if let Some(lease) = self.lease.take() {
+            let lanes = u64::try_from(self.launched_lanes).ok();
             lease.settle(
                 rows.unwrap_or(0),
-                rows.is_none() || exits.iter().any(|exit| exit.work.overflowed),
+                lanes.unwrap_or(0),
+                rows.is_none() || lanes.is_none() || exits.iter().any(|exit| exit.work.overflowed),
             );
         }
     }
@@ -329,6 +332,7 @@ impl ScopedEntityWorkClient {
             cancellation: Arc::new(AtomicBool::new(false)),
             abandoned: false,
             launching: true,
+            launched_lanes: 0,
             requests: Vec::new(),
             handles: (0..lanes).map(|_| None).collect(),
             exits: (0..lanes).map(|_| None).collect(),
@@ -413,6 +417,7 @@ impl PairLaunchGuard {
             });
             // The first returned handle is registered before another launch.
             pair.handles[lane] = Some(handle);
+            pair.launched_lanes += 1;
             #[cfg(test)]
             owner.launches.fetch_add(1, Ordering::SeqCst);
         }

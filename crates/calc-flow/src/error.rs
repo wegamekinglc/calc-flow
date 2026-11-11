@@ -41,6 +41,15 @@ pub enum CalcFlowError {
     },
     #[error("project format version {found} is unsupported; expected {expected}")]
     UnsupportedVersion { expected: u32, found: u32 },
+    /// An explicit cross-lifecycle comparison was not proved.
+    #[error("{report}")]
+    QueryPortability { report: Box<crate::QueryAnalysis> },
+    /// Explicit latest-relation admission failed before any source is acquired.
+    #[error("{}", report.update_failure_message(*mode))]
+    QueryUpdateSemantics {
+        mode: crate::CompileMode,
+        report: Box<crate::QueryAnalysis>,
+    },
     #[error("graph compilation failed: {message}")]
     Compile { message: String },
     #[error("node {node_id} failed: {message}")]

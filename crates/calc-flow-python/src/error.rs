@@ -36,38 +36,32 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 pub(crate) fn to_py_err(error: calc_flow::CalcFlowError) -> PyErr {
     let message = error.to_string();
     match error {
-        calc_flow::CalcFlowError::InvalidArgument { .. }
-        | calc_flow::CalcFlowError::UnsupportedVersion { .. }
-        | calc_flow::CalcFlowError::Format { .. }
-        | calc_flow::CalcFlowError::Conflict { .. }
-        | calc_flow::CalcFlowError::NotFound { .. } => ConfigError::new_err(message),
         calc_flow::CalcFlowError::ProjectValidation { issues } => {
-            Python::attach(|py| {
-                let translated = ConfigError::new_err(message);
-                let entries = issues
-                    .iter()
-                    .map(|issue| {
-                        let entry = pyo3::types::PyDict::new(py);
-                        entry.set_item("path", &issue.path)?;
-                        entry.set_item("code", &issue.code)?;
-                        entry.set_item("message", &issue.message)?;
-                        Ok(entry.into_any().unbind())
-                    })
-                    .collect::<Result<Vec<_>, PyErr>>()
-                    .unwrap_or_default();
-                if let Ok(tuple) = pyo3::types::PyTuple::new(py, entries) {
-                    // The attribute stays absent when attachment is impossible;
-                    // Python consumers read it through a `getattr` default.
-                    let _ = translated.value(py).setattr("issues", tuple);
-                }
-                translated
-            })
+            project_validation_error(&issues, message)
         }
+        calc_flow::CalcFlowError::QueryPortability { report }
+        | calc_flow::CalcFlowError::QueryUpdateSemantics { report, .. } => {
+            query_compile_error(&report, message)
+        }
+        error => basic_py_error(error, message),
+    }
+}
+
+fn configuration_error(error: &calc_flow::CalcFlowError) -> bool {
+    matches!(
+        error,
+        calc_flow::CalcFlowError::InvalidArgument { .. }
+            | calc_flow::CalcFlowError::UnsupportedVersion { .. }
+            | calc_flow::CalcFlowError::Format { .. }
+            | calc_flow::CalcFlowError::Conflict { .. }
+            | calc_flow::CalcFlowError::NotFound { .. }
+    )
+}
+
+fn basic_py_error(error: calc_flow::CalcFlowError, message: String) -> PyErr {
+    match error {
+        error if configuration_error(&error) => ConfigError::new_err(message),
         calc_flow::CalcFlowError::Compile { .. } => CompileError::new_err(message),
-        calc_flow::CalcFlowError::Operator { .. }
-        | calc_flow::CalcFlowError::DataFusion { .. }
-        | calc_flow::CalcFlowError::PlanLeased { .. }
-        | calc_flow::CalcFlowError::Internal { .. } => ExecutionError::new_err(message),
         calc_flow::CalcFlowError::ExternalProvider { .. } => ProviderError::new_err(message),
         calc_flow::CalcFlowError::Cancelled { .. } => CancelledError::new_err(message),
         calc_flow::CalcFlowError::CheckpointMismatch { .. }
@@ -79,11 +73,56 @@ pub(crate) fn to_py_err(error: calc_flow::CalcFlowError) -> PyErr {
             });
             translated
         }
-        // The core error is deliberately non-exhaustive. New categories remain
-        // catchable as execution failures until this mapping gives them a more
-        // precise Python exception.
         _ => future_core_error(message),
     }
+}
+
+fn project_validation_error(issues: &[calc_flow::ValidationIssue], message: String) -> PyErr {
+    Python::attach(|py| {
+        let translated = ConfigError::new_err(message);
+        let entries = issues
+            .iter()
+            .map(|issue| {
+                let entry = pyo3::types::PyDict::new(py);
+                entry.set_item("path", &issue.path)?;
+                entry.set_item("code", &issue.code)?;
+                entry.set_item("message", &issue.message)?;
+                Ok(entry.into_any().unbind())
+            })
+            .collect::<Result<Vec<_>, PyErr>>()
+            .unwrap_or_default();
+        if let Ok(tuple) = pyo3::types::PyTuple::new(py, entries) {
+            // The attribute stays absent when attachment is impossible;
+            // Python consumers read it through a `getattr` default.
+            let _ = translated.value(py).setattr("issues", tuple);
+        }
+        translated
+    })
+}
+
+fn query_compile_error(report: &calc_flow::QueryAnalysis, message: String) -> PyErr {
+    Python::attach(|py| {
+        let translated = CompileError::new_err(message);
+        match attach_query_report(py, &translated, report) {
+            Ok(()) => translated,
+            Err(error) => error,
+        }
+    })
+}
+
+fn attach_query_report(
+    py: Python<'_>,
+    translated: &PyErr,
+    report: &calc_flow::QueryAnalysis,
+) -> PyResult<()> {
+    let encoded = serde_json::to_string(report)
+        .map_err(|error| ExecutionError::new_err(error.to_string()))?;
+    let value = py.import("json")?.call_method1("loads", (encoded,))?;
+    let projected = py
+        .import("calc_flow.symbolic.query_analysis")?
+        .getattr("_from_dict")?
+        .call1((value,))?;
+    translated.value(py).setattr("query_analysis", projected)
 }
 
 fn future_core_error(message: String) -> PyErr {
@@ -261,6 +300,105 @@ mod tests {
             ExpectedException::Execution,
             "task 17 panicked: connector invariant",
         );
+    }
+
+    #[test]
+    fn query_portability_errors_keep_the_immutable_report() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let builder = calc_flow::PipelineBuilder::new("unproved")
+            .unwrap()
+            .add_node(
+                "distinct",
+                Box::new(
+                    calc_flow::SqlOperator::new(
+                        "distinct",
+                        "SELECT DISTINCT x FROM input",
+                        vec!["input".into()],
+                        vec![],
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        let request = calc_flow::PortabilityRequest::new(
+            calc_flow::Comparison::FinalRelation,
+            calc_flow::HistoryScope::AcceptedHistory,
+            calc_flow::ComparisonCutoff::AllSourcesEof,
+        )
+        .unwrap();
+        let Err(error) = runtime.block_on(
+            builder.compile_batch_checked(&calc_flow::UdfRegistrySnapshot::default(), &request),
+        ) else {
+            panic!("unproved comparison compiled")
+        };
+        Python::initialize();
+        Python::attach(|py| {
+            let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../python")
+                .canonicalize()
+                .unwrap();
+            let sys = py.import("sys").unwrap();
+            sys.getattr("path")
+                .unwrap()
+                .call_method1("insert", (0, source.to_str().unwrap()))
+                .unwrap();
+            let native = PyModule::new(py, "calc_flow._native").unwrap();
+            crate::calc_flow_python(&native).unwrap();
+            sys.getattr("modules")
+                .unwrap()
+                .set_item("calc_flow._native", native)
+                .unwrap();
+            let projection = py.import("calc_flow.symbolic.query_analysis").unwrap();
+            let loaded: String = projection.getattr("__file__").unwrap().extract().unwrap();
+            assert_eq!(
+                std::fs::canonicalize(loaded).unwrap(),
+                source.join("calc_flow/symbolic/query_analysis.py")
+            );
+            let translated = to_py_err(error);
+            assert!(
+                translated.is_instance_of::<CompileError>(py),
+                "{translated}"
+            );
+            let report = translated.value(py).getattr("query_analysis").unwrap();
+            assert_eq!(
+                report
+                    .getattr("schema_version")
+                    .unwrap()
+                    .extract::<u32>()
+                    .unwrap(),
+                2
+            );
+            assert_eq!(
+                report
+                    .getattr("portability")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "unsupported"
+            );
+            assert_eq!(
+                report
+                    .getattr("nodes")
+                    .unwrap()
+                    .get_item(0)
+                    .unwrap()
+                    .getattr("path")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "graph.nodes[\"distinct\"]"
+            );
+            let mutation = report.setattr("analysis_revision", 0).unwrap_err();
+            assert!(mutation.is_instance_of::<pyo3::exceptions::PyAttributeError>(py));
+            assert_eq!(
+                report
+                    .getattr("analysis_revision")
+                    .unwrap()
+                    .extract::<u32>()
+                    .unwrap(),
+                2
+            );
+        });
     }
 
     #[test]

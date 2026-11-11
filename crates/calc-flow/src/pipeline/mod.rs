@@ -7,6 +7,7 @@
 //! [`StreamExecutionPlan`]. Both entry points share every graph-validation
 //! pass in `compile` so the two paths cannot drift (plan task M1.1).
 
+mod analysis;
 mod batch;
 mod compile;
 mod stream;
@@ -133,6 +134,14 @@ pub struct PipelineBuilder {
     pub(crate) datafusion_config: crate::DataFusionConfig,
     pub(crate) nodes: BTreeMap<String, NodeDefinition>,
     pub(crate) edges: Vec<Edge>,
+    pub(crate) frontend_bindings: Option<FrontendBindings>,
+    pub(crate) update_semantics: crate::UpdateSemantics,
+}
+
+#[derive(Clone)]
+pub(crate) struct FrontendBindings {
+    pub inputs: BTreeMap<String, PortEndpoint>,
+    pub outputs: BTreeMap<String, PortEndpoint>,
 }
 
 impl PipelineBuilder {
@@ -153,6 +162,8 @@ impl PipelineBuilder {
             datafusion_config: crate::DataFusionConfig::default(),
             nodes: BTreeMap::new(),
             edges: Vec::new(),
+            frontend_bindings: None,
+            update_semantics: crate::UpdateSemantics::default(),
         })
     }
 
@@ -161,6 +172,26 @@ impl PipelineBuilder {
     pub const fn with_datafusion_config(mut self, config: crate::DataFusionConfig) -> Self {
         self.datafusion_config = config;
         self
+    }
+
+    /// Selects how complete relation updates must be consumed at compilation.
+    ///
+    /// ```
+    /// use calc_flow::{PipelineBuilder, UpdateSemantics};
+    /// let graph = PipelineBuilder::new("latest")?
+    ///     .with_update_semantics(UpdateSemantics::LatestRelation);
+    /// assert_eq!(graph.update_semantics(), UpdateSemantics::LatestRelation);
+    /// # Ok::<(), calc_flow::CalcFlowError>(())
+    /// ```
+    #[must_use]
+    pub const fn with_update_semantics(mut self, semantics: crate::UpdateSemantics) -> Self {
+        self.update_semantics = semantics;
+        self
+    }
+
+    /// Returns the declaration's relation update interpretation.
+    pub const fn update_semantics(&self) -> crate::UpdateSemantics {
+        self.update_semantics
     }
 
     /// Returns a new builder that owns the added operator.

@@ -162,7 +162,7 @@ parsed as formulas.
 
 ## Reusable programs and collection
 
-`cf.Program(name, /, *, engine, inputs=None, outputs=())` accepts outputs as a mapping
+`cf.Program(name, /, *, mode=..., inputs=None, outputs=())` accepts outputs as a mapping
 in insertion order or a sequence of `(name, TableExpr | ArrayExpr)` pairs. Omitting
 `inputs` discovers reachable table inputs, native array inputs and parameters in
 deterministic order,
@@ -170,31 +170,42 @@ including when outputs are added later with `program.output(...)`.
 Explicit input sequences are respected, including `inputs=()`; missing referenced
 inputs become analysis errors. Conflicting roots with the same name fail.
 Declarations and output mappings are copied and remain immutable.
-Pass `engine="sql"` or `engine="streaming"` when constructing the program,
-before adding declarations. `program.execute(inputs)` uses that fixed engine.
+Pass exactly one of `mode="batch"|"stream"` or legacy
+`engine="sql"|"streaming"` when constructing the program, before adding declarations.
+Neither is a default; explicit `None` and supplying both are errors. `program.execute(inputs)` uses that fixed engine.
 Immutable `with_input` and `output` calls preserve it, and incompatible graph
 shapes are rejected when outputs are declared. The same declarations retain
-their fingerprint in either engine; construct a separate `Program` to use the
-other engine. Calls for the other engine raise `RuntimeError`.
+their fingerprint in either engine; use `program.for_mode("batch"|"stream")` to copy the declarations
+into an independent wrapper for the other lifecycle. Calls for the other engine raise `RuntimeError`.
 `analyze` and `explain` accept an explicit opposite `mode` only for hypothetical
 diagnostics; it does not change the program engine or permit opposite-mode
 compilation, export, or execution.
 
-| Method                                                                                              | Result and input contract                                                      |
-|-----------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|
-| `table_expr.collect(inputs, /, *, runtime=None, options=None)`                                      | One Arrow table; one table root accepts data directly, otherwise use a mapping |
-| `array_expr.collect_array(inputs, /, *, runtime, options=None, array_options=None)`                 | One NativeArray from native array/table roots; explicit registered Runtime     |
-| `program.collect(inputs, /, *, runtime=None, options=None)`                                         | `dict[str, pyarrow.Table]` in logical output order; always supply a mapping    |
-| `cf.Program(name, engine=...)`                                                                      | Require `"sql"` or `"streaming"` at construction                               |
-| `program.execute(inputs, /, *, runtime=None, options=None, config=None, watermarks=None)`           | SQL: named Arrow tables; streaming: owned `StreamOutput` events                |
-| `table_expr.collect_async(...)` / `program.collect_async(...)`                                      | Awaitable forms of the same contracts                                          |
-| `table_expr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                       | Owned async iterator of Arrow tables                                           |
-| `program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                          | Owned async iterator of named `StreamOutput` events; input mapping required    |
-| `program.analyze(runtime=None, /, *, mode=None)`                                                    | Immutable analysis result; defaults to the selected engine                     |
-| `program.explain(runtime=None, /, *, mode=None)`                                                    | Deterministic explanation text                                                 |
-| `program.compile_batch(runtime=None, /)`                                                            | Explicit batch execution plan                                                  |
-| `program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0, late_policy="error")`        | Explicit stream plan for a runner                                              |
-| `program.to_project(runtime=None, /, *, mode=None, allowed_lateness_micros=0, late_policy="error")` | Validated, data-only project-v3 document for the selected engine               |
+| Method                                                                                                | Result and input contract                                                        |
+|-------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|
+| `table_expr.collect(inputs, /, *, runtime=None, options=None)`                                        | One Arrow table; one table root accepts data directly, otherwise use a mapping   |
+| `array_expr.collect_array(inputs, /, *, runtime, options=None, array_options=None)`                   | One NativeArray from native array/table roots; explicit registered Runtime       |
+| `program.collect(inputs, /, *, runtime=None, options=None)`                                           | `dict[str, pyarrow.Table]` in logical output order; always supply a mapping      |
+| `cf.Program(name, mode=...)`                                                                          | Require `"batch"` or `"stream"`; legacy engine is an exclusive alias             |
+| `program.execute(inputs, /, *, runtime=None, options=None, config=None, watermarks=None)`             | SQL: named Arrow tables; streaming: owned `StreamOutput` events                  |
+| `table_expr.collect_async(...)` / `program.collect_async(...)`                                        | Awaitable forms of the same contracts                                            |
+| `table_expr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                         | Owned async iterator of Arrow tables                                             |
+| `program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                            | Owned async iterator of named `StreamOutput` events; input mapping required      |
+| `program.analyze(runtime=None, /, *, mode=None)`                                                      | Immutable analysis result; defaults to the selected engine                       |
+| `program.explain(runtime=None, /, *, mode=None)`                                                      | Deterministic explanation text                                                   |
+| `program.compile_batch(runtime=None, /)`                                                              | Explicit batch execution plan                                                    |
+| `program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0, late_policy="error")`          | Explicit stream plan for a runner                                                |
+| `program.to_project(runtime=None, /, *, mode=None, allowed_lateness_micros=0, late_policy="error")`   | Validated, data-only project-v3 document for the selected engine                 |
+
+`BatchExecutionPlan.external_inputs` and `.external_outputs` are deterministic
+tuples of physical binding names. Use them when executing a reloaded project;
+they do not restore the symbolic Program's logical alias mapping.
+
+`program.collect_schema(runtime=None, /, *, mode=None)` returns exact named
+Arrow schemas. `table_expr.collect_schema(*, runtime=None, mode="batch")` returns
+one schema. Both plan without data and reject an active event loop; use a worker
+for schema planning from async code. See [relation frontends](relational-frontends.md)
+for the lifecycle, compatibility and export contracts.
 
 `execute` uses finite table inputs with the SQL engine and stream inputs with
 the streaming engine. `options` is SQL-only; `config` and `watermarks` are
@@ -1656,6 +1667,13 @@ optional JAX paths are in
 [`examples/07_array_and_dataframe.py`](../examples/07_array_and_dataframe.py).
 
 ## Symbolic declarations and static analysis
+
+`Program.analyze(options=AnalysisOptions(portability=request))` adds immutable
+query history, update, finality, ordering and consumption-edge facts. Explicit
+`portability=request` on Program compilation and execution checks those facts
+before reading inputs or starting a job, including preparation-cache hits.
+See [query history and portability](query-history-portability.md) for requests,
+stable codes, comparison premises and proof limits.
 
 The [expression API reference](symbolic-api.md) covers typed declarations,
 `FeatureSet`, `Program`, static analysis, ordering, and the supported

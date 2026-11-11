@@ -19,6 +19,7 @@ from calc_flow.symbolic.lower.bindings import _BatchBindings
 from calc_flow.symbolic.native_arrays import is_native_array
 from calc_flow.symbolic.nodes import CDType, CInt, CSeq, CStr
 from calc_flow.symbolic.program import Program, _node_name, _selected_runtime
+from calc_flow.symbolic.query_analysis import PortabilityRequest, _gate
 
 TableData = TypeAliasType("TableData", Union[pa.Table, pa.RecordBatch, Batch])
 T = TypeVar("T")
@@ -183,9 +184,16 @@ def _prepare_collect(
     program: Program,
     inputs: Mapping[str, TableData | NativeArray],
     runtime: Runtime | None,
+    portability: PortabilityRequest | None = None,
 ) -> tuple[BatchExecutionPlan, dict[str, Batch], dict[str, str]]:
-    batches = _collect_batches(program, inputs)
-    return _prepare_collect_batches(program, batches, _selected_runtime(runtime))
+    if portability is None and program.update_semantics == "legacy_append":
+        batches = _collect_batches(program, inputs)
+        return _prepare_collect_batches(program, batches, _selected_runtime(runtime))
+    selected = _selected_runtime(runtime)
+    with selected._registration_lock:
+        _gate(program, selected, portability)
+        batches = _collect_batches(program, inputs)
+        return _prepare_collect_batches(program, batches, selected)
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,10 +328,11 @@ def _collect(
     inputs: Mapping[str, TableData | NativeArray],
     runtime: Runtime | None,
     options: ExecutionOptions | None,
+    portability: PortabilityRequest | None = None,
 ) -> dict[str, pa.Table]:
     _require_blocking("collect")
     _require_table_outputs(program)
-    plan, bound, outputs = _prepare_collect(program, inputs, runtime)
+    plan, bound, outputs = _prepare_collect(program, inputs, runtime, portability)
     _validate_options(options)
     return _tables(plan.execute(bound, options=options), outputs)
 
@@ -390,8 +399,21 @@ def _collect_async(
     inputs: Mapping[str, TableData | NativeArray],
     runtime: Runtime | None,
     options: ExecutionOptions | None,
+    portability: PortabilityRequest | None = None,
 ) -> Awaitable[dict[str, pa.Table]]:
     _require_table_outputs(program)
+    if portability is not None or program.update_semantics == "latest_relation":
+        selected = _selected_runtime(runtime)
+        _validate_options(options)
+        captured = dict(inputs)
+
+        async def strict_execute() -> dict[str, pa.Table]:
+            plan, bound, outputs = await _run_blocking_compile(
+                _prepare_collect, program, captured, selected, portability
+            )
+            return await _execute_collect(plan, bound, outputs, options)
+
+        return strict_execute()
     batches = _collect_batches(program, inputs)
     selected = _selected_runtime(runtime)
     _validate_options(options)

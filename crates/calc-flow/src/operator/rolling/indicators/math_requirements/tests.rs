@@ -67,6 +67,7 @@ fn state(
         &operator.compiled,
         "features",
         None,
+        None,
         &mut || Ok(()),
     )
     .unwrap();
@@ -111,6 +112,7 @@ fn math_quote_covers_real_cells_with_scans_strings_and_old_histories() {
                     &source.histories,
                     &operator.compiled,
                     "features",
+                    None,
                     None,
                     &mut || Ok(()),
                 )
@@ -161,6 +163,7 @@ fn empty_cells_quote_still_charges_derived_container() {
                 &source.histories,
                 &operator.compiled,
                 "features",
+                None,
                 None,
                 &mut || Ok(()),
             )

@@ -1,6 +1,6 @@
 //! Python 29: the same SQL graph produces a batch total or cumulative snapshots.
 mod support;
-use calc_flow::{ExecutionOptions, PipelineBuilder, UdfRegistry};
+use calc_flow::{AnalysisOptions, ExecutionOptions, HistoryScope, PipelineBuilder, UdfRegistry};
 use std::collections::BTreeMap;
 use support::{ExampleResult, ReplaySource, collect, i64_values, ints, sql, stream_plan, table};
 
@@ -15,6 +15,14 @@ fn declaration() -> calc_flow::Result<PipelineBuilder> {
 async fn main() -> ExampleResult {
     let args: Vec<_> = support::arguments()?;
     let engine = selected_engine(&args)?;
+    let analysis = declaration()?
+        .analyze(&UdfRegistry::new().snapshot(), &AnalysisOptions::default())
+        .await?;
+    assert_eq!(analysis.nodes[0].batch.history, HistoryScope::CurrentBatch);
+    assert_eq!(
+        analysis.nodes[0].stream.history,
+        HistoryScope::AcceptedHistory
+    );
     if engine != "streaming" {
         batch_total().await?;
     }
