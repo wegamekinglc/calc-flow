@@ -1,6 +1,7 @@
 //! Data-only history facts and explicit cross-lifecycle comparison checks.
 
 mod sql;
+mod updates;
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -170,6 +171,7 @@ pub struct AnalysisOptions {
 pub struct QueryAnalysis {
     pub schema_version: u32,
     pub analysis_revision: u64,
+    pub update_semantics: crate::UpdateSemantics,
     pub request: Option<PortabilityRequest>,
     pub portability: Option<SupportStatus>,
     pub nodes: Vec<QueryNodeFacts>,
@@ -288,6 +290,40 @@ impl std::fmt::Display for QueryAnalysis {
 }
 
 impl QueryAnalysis {
+    pub(crate) fn check_updates(self, mode: crate::CompileMode) -> Result<()> {
+        if !self.update_semantics.is_legacy() && self.update_failure(mode).is_some() {
+            Err(CalcFlowError::QueryUpdateSemantics {
+                mode,
+                report: Box::new(self),
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn update_failure_message(&self, mode: crate::CompileMode) -> String {
+        self.update_failure(mode).map_or_else(
+            || "latest_relation update semantics could not be proved".into(),
+            |issue| format!("{}: {}: {}", issue.path, issue.code, issue.message),
+        )
+    }
+
+    fn update_failure(&self, mode: crate::CompileMode) -> Option<&QueryDiagnostic> {
+        self.diagnostics.iter().find(|issue| {
+            issue.status != SupportStatus::Supported
+                && (self.nodes.iter().any(|node| {
+                    issue
+                        .path
+                        .starts_with(&format!("{}.{}.", node.path, mode.name()))
+                }) || self.edges.iter().any(|edge| {
+                    issue
+                        .path
+                        .starts_with(&format!("{}.{}.", edge.path, mode.name()))
+                        || mode == crate::CompileMode::Stream && issue.path == edge.path
+                }))
+        })
+    }
+
     pub(crate) fn check(self) -> Result<()> {
         if self.portability == Some(SupportStatus::Supported) {
             Ok(())
@@ -376,6 +412,8 @@ pub(crate) struct DeclarationGraph {
     pub options: AnalysisOptions,
     #[serde(default)]
     pub diagnostics: Vec<QueryDiagnostic>,
+    #[serde(default)]
+    pub update_semantics: crate::UpdateSemantics,
 }
 
 /// Private data-only binding seam. Accepts no data, factories or runtime objects.
@@ -403,12 +441,14 @@ pub(crate) fn analyze_graph(graph: DeclarationGraph) -> Result<QueryAnalysis> {
         edges: declared_edges,
         options,
         mut diagnostics,
+        update_semantics,
     } = graph;
     let AnalyzedNodes { by_path, proofs } = analyze_nodes(
         declarations,
         &declared_edges,
         options.portability.as_ref(),
         &mut diagnostics,
+        update_semantics,
     )?;
     let mut edges = analyze_edges(
         &by_path,
@@ -416,6 +456,7 @@ pub(crate) fn analyze_graph(graph: DeclarationGraph) -> Result<QueryAnalysis> {
         &declared_edges,
         options.portability.as_ref(),
         &mut diagnostics,
+        update_semantics,
     );
     check_ordering(
         &by_path,
@@ -433,8 +474,9 @@ pub(crate) fn analyze_graph(graph: DeclarationGraph) -> Result<QueryAnalysis> {
         .as_ref()
         .map(|_| conjunction(diagnostics.iter().map(|issue| issue.status)));
     Ok(QueryAnalysis {
-        schema_version: 1,
-        analysis_revision: 1,
+        schema_version: 2,
+        analysis_revision: 2,
+        update_semantics,
         request: options.portability,
         portability,
         nodes: by_path.into_values().collect(),
@@ -455,6 +497,7 @@ fn analyze_nodes(
     declared_edges: &[DeclarationEdge],
     request: Option<&PortabilityRequest>,
     diagnostics: &mut Vec<QueryDiagnostic>,
+    update_semantics: crate::UpdateSemantics,
 ) -> Result<AnalyzedNodes> {
     let mut pending = declarations
         .into_iter()
@@ -477,7 +520,7 @@ fn analyze_nodes(
                 message: "unresolved input or cycle".into(),
             })?;
         let node = pending.remove(&ready).expect("ready declaration exists");
-        let (mut facts, proof, aggregate) = node_facts(&node, diagnostics)?;
+        let (mut facts, proof, aggregate) = node_facts(&node, diagnostics, update_semantics)?;
         propagate_inputs(
             &node,
             &mut facts,
@@ -486,6 +529,9 @@ fn analyze_nodes(
             &by_path,
             diagnostics,
         );
+        if !update_semantics.is_legacy() {
+            updates::node(&node, &mut facts, proof, aggregate, diagnostics);
+        }
         if let Some(request) = request {
             obligations(&node, &facts, proof, aggregate, request, diagnostics);
         }
@@ -520,12 +566,8 @@ fn propagate_mode(local: &mut QueryModeFacts, proof: sql::Proof, inputs: &[&Quer
             local.reason = "batch transform of complete snapshot events".into();
         }
     }
-    if inputs
-        .iter()
-        .any(|facts| facts.support == SupportStatus::Unsupported)
-    {
-        local.support = SupportStatus::Unsupported;
-    }
+    local.support =
+        conjunction(std::iter::once(local.support).chain(inputs.iter().map(|facts| facts.support)));
 }
 
 fn propagate_inputs(
@@ -566,6 +608,7 @@ fn analyze_edges(
     declared_edges: &[DeclarationEdge],
     request: Option<&PortabilityRequest>,
     diagnostics: &mut Vec<QueryDiagnostic>,
+    update_semantics: crate::UpdateSemantics,
 ) -> Vec<QueryEdgeFacts> {
     let mut edges = vec![];
     for edge in declared_edges {
@@ -595,6 +638,9 @@ fn analyze_edges(
         };
         let batch = edge_mode(&source.batch, &target.batch);
         let mut stream = edge_mode(&source.stream, &target.stream);
+        if !update_semantics.is_legacy() {
+            updates::edge(&edge, &mut stream, &proofs[&edge.target_path], diagnostics);
+        }
         if proofs[&edge.source_path].2 == "snapshot_sql" {
             stream.support = SupportStatus::Unsupported;
             diagnostic(
@@ -707,6 +753,7 @@ fn diagnostic(
 fn node_facts(
     node: &Declaration,
     diagnostics: &mut Vec<QueryDiagnostic>,
+    update_semantics: crate::UpdateSemantics,
 ) -> Result<(QueryNodeFacts, sql::Proof, bool)> {
     let schema = node
         .schema
@@ -719,7 +766,7 @@ fn node_facts(
                 .map(|fields| Arc::new(Schema::new(fields)))
         })
         .transpose()?;
-    let class = classify(node, schema.is_some(), diagnostics);
+    let class = classify(node, schema.is_some(), diagnostics, update_semantics);
     let proof = class.proof;
     let aggregate = class.aggregate;
     let support = class.support;
@@ -769,6 +816,7 @@ fn batch_facts(
     if aggregate && node.kind != "snapshot_sql" {
         batch.history = HistoryScope::CurrentBatch;
         batch.finality = QueryFinality::PerBatch;
+        batch.update = UpdateKind::Append;
         batch.reason = "each batch execute consumes one independent complete input".into();
     }
     batch
@@ -815,6 +863,7 @@ fn classify(
     node: &Declaration,
     schema_known: bool,
     diagnostics: &mut Vec<QueryDiagnostic>,
+    update_semantics: crate::UpdateSemantics,
 ) -> Classification {
     let row_local = row_local_kind(&node.kind);
     let mut proof = if row_local {
@@ -835,7 +884,11 @@ fn classify(
         SupportStatus::Unknown
     };
     if let Some(query) = &node.query {
-        if let Ok(sql) = sql::inspect(query, node.schema.as_deref().unwrap_or_default()) {
+        if let Ok(sql) = sql::inspect(
+            query,
+            node.schema.as_deref().unwrap_or_default(),
+            !update_semantics.is_legacy(),
+        ) {
             proof = sql.proof;
             aggregate = sql.aggregate;
             ordering = sql.ordering;

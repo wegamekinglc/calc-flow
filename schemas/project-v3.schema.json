@@ -1507,6 +1507,10 @@
             "$ref": "#/$defs/NodeSpec"
           },
           "type": "array"
+        },
+        "update_semantics": {
+          "$ref": "#/$defs/UpdateSemantics",
+          "description": "Relation update interpretation; omitted legacy graphs keep their original bytes."
         }
       },
       "required": [
@@ -3676,6 +3680,21 @@
         "kind"
       ],
       "type": "object"
+    },
+    "UpdateSemantics": {
+      "description": "How consumers interpret complete relation updates, independently of lifecycle.",
+      "oneOf": [
+        {
+          "const": "legacy_append",
+          "description": "Preserve the original per-event append interpretation.",
+          "type": "string"
+        },
+        {
+          "const": "latest_relation",
+          "description": "Require complete replacement wherever a producer emits a full snapshot.",
+          "type": "string"
+        }
+      ]
     },
     "WindowGeometry": {
       "description": "Fixed UTC window geometry represented in exact microseconds.",

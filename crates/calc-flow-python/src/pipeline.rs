@@ -290,6 +290,18 @@ impl PyExecutionPlan {
         self.identity().map(|(_, fingerprint)| fingerprint)
     }
 
+    #[getter]
+    fn external_inputs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let (plan, _) = self.execution_handles()?;
+        PyTuple::new(py, plan.external_inputs().keys().cloned())
+    }
+
+    #[getter]
+    fn external_outputs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let (plan, _) = self.execution_handles()?;
+        PyTuple::new(py, plan.external_outputs().keys().cloned())
+    }
+
     #[pyo3(signature = (inputs, *, options = None))]
     fn execute(
         &self,

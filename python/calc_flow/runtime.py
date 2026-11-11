@@ -806,6 +806,23 @@ class RollingCallbackMetrics(TypedDict):
     numeric_rows: int
     numeric_lanes_started: int
     numeric_parallel_rows: int
+    history_charge_scalar_rows: int
+    history_charge_columnar_chunks: int
+    history_append_rows_prepared: int
+    history_evict_rows_prepared: int
+    numeric_serial_calls: int
+    numeric_general_calls: int
+    numeric_parallel_calls: int
+    parallel_fallback_no_work_client: int
+    parallel_fallback_small_batch: int
+    parallel_fallback_unsupported_plan: int
+    parallel_fallback_cpu_limit: int
+    parallel_fallback_prepared_ineligible: int
+    parallel_fallback_lane_partition_rejected: int
+    parallel_fallback_owner_busy: int
+    parallel_fallback_owner_already_used: int
+    parallel_fallback_generation_exhausted: int
+    parallel_fallback_scratch_unrepresentable: int
     history_rows_materialized: int
     scalar_value_conversions: int
     output_rows_prepared: int

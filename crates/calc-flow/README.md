@@ -2,7 +2,8 @@
 
 `calc-flow` executes immutable Arrow batches and stateful streaming graphs with
 Apache DataFusion. It provides graph compilation, SQL and expression operators,
-async runners, checkpoints, and recovery. Native applications need no Python
+typed DataFrame/SQL relations, named Programs, async runners, checkpoints, and
+recovery. Native applications need no Python
 interpreter.
 
 ## Install
@@ -14,42 +15,45 @@ or newer and these dependencies (the current shared release version is
 ```toml
 [dependencies]
 calc-flow = "=2026.11.2"
-datafusion = { version = "=55.0.0", default-features = false }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-Use DataFusion's Arrow re-exports for compatible table types. All table execution
+Use `calc_flow::arrow` for compatible table types. All table execution
 uses DataFusion 55 / Arrow 59. The optional `benchmark-*` features expose
 diagnostic internals; ordinary applications need no crate features. Transport
 implementations live in the separate `calc-flow-connectors` workspace crate.
+
+DataFrame and SQL declarations can be mixed in one graph and compiled for
+batch or streaming. See [the relation guide](../../docs/relational-frontends.md#rust)
+and the independently runnable `32_sql_expression_pipeline` example.
 
 ## A first calculation
 
 ```rust
 use std::{collections::BTreeMap, sync::Arc};
-
-use calc_flow::{
-    Batch, BatchMetadata, ExecutionOptions, ExpressionOperator, PipelineBuilder,
-    UdfRegistry,
-};
-use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
+use calc_flow::arrow::{array::Int64Array, record_batch::RecordBatch};
+use calc_flow::{Batch, BatchMetadata, CompileMode, CompileOptions,
+    ExecutionOptions, InputOptions, Program, UdfRegistry, table_input};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let plan = PipelineBuilder::new("totals")?
-        .add_node("calculate", Box::new(ExpressionOperator::new(
-            "calculate", "total = a + b", Vec::new(), None, Vec::new(),
-        )?))?
-        .compile_batch(&UdfRegistry::new().snapshot())?;
     let input = RecordBatch::try_from_iter(vec![
         ("a", Arc::new(Int64Array::from(vec![1, 3])) as _),
         ("b", Arc::new(Int64Array::from(vec![2, 4])) as _),
     ])?;
+    let source = table_input("events", input.schema(), InputOptions::default())?;
+    let total = source.select(vec![
+        (source.column("a")? + source.column("b")?).alias("total")?,
+    ])?;
+    let program = Program::new("totals", CompileMode::Batch,
+        BTreeMap::from([("totals".into(), total)]))?;
+    let plan = program.compile_batch(&UdfRegistry::new().snapshot(),
+        &CompileOptions::default()).await?;
     let result = plan.execute(
-        BTreeMap::from([("input".into(), Batch::table(vec![input], BatchMetadata::default())?)]),
+        BTreeMap::from([("events".into(), Batch::table(vec![input], BatchMetadata::default())?)]),
         ExecutionOptions::default(),
     ).await?;
-    let output = result.outputs["output"].table_payload()?;
+    let output = result.outputs["totals"].table_payload()?;
     let totals = output.batches()[0].column_by_name("total").unwrap()
         .as_any().downcast_ref::<Int64Array>().unwrap();
     assert_eq!(totals.values(), &[3, 7]);

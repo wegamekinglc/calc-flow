@@ -5,8 +5,10 @@
 `Program.analyze()` reports query facts without reading input rows or starting
 a job. Its `query` field contains deterministic node and consumption-edge paths,
 exact schemas where known, and separate batch/stream history, update, finality,
-ordering and lifecycle support. `schema_version=1` describes the report format;
-`analysis_revision=1` describes its proof rules. Runtime capability registration
+ordering and lifecycle support. `schema_version=2` describes the report format;
+`analysis_revision=2` describes its proof rules, including the required
+`update_semantics` field. Older v1 reports can be displayed as legacy only.
+Runtime capability registration
 revisions remain separate.
 
 An explicit `PortabilityRequest` asks whether the same declaration can be

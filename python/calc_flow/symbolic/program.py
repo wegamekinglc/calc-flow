@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Awaitable, Mapping, Sequence
-from typing import TYPE_CHECKING, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, TypedDict, cast, overload
 
 from typing_extensions import Unpack
 
@@ -23,7 +23,12 @@ from calc_flow.symbolic.nodes import (
     _text,
     _u64,
 )
-from calc_flow.symbolic.query_analysis import AnalysisOptions, PortabilityRequest
+from calc_flow.symbolic.query_analysis import (
+    AnalysisOptions,
+    PortabilityRequest,
+    UpdateSemantics,
+    _segment,
+)
 from calc_flow.symbolic.types import CompileMode
 
 if TYPE_CHECKING:
@@ -36,9 +41,70 @@ if TYPE_CHECKING:
     from calc_flow.runtime import StreamRuntimeConfig, WatermarkPolicy
     from calc_flow.stream import StreamInput, StreamOutput, StreamResults
     from calc_flow.symbolic.analyzer import AnalysisResult
-    from calc_flow.symbolic.types import LatePolicy
+    from calc_flow.symbolic.types import Field, LatePolicy
 
 _PROGRAM_TAG = 0x21
+_OMITTED = object()
+
+
+def _engine_selection(engine: object, mode: object) -> Literal["sql", "streaming"]:
+    if engine is _OMITTED and mode is _OMITTED:
+        raise TypeError(
+            "Program.mode: invalid_literal: provide exactly one of mode or engine"
+        )
+    if engine is not _OMITTED and mode is not _OMITTED:
+        raise ValueError(
+            "Program.mode: invalid_literal: mode and legacy engine "
+            "cannot both be supplied"
+        )
+    field, value, allowed = (
+        ("engine", engine, ("sql", "streaming"))
+        if mode is _OMITTED
+        else ("mode", mode, ("batch", "stream"))
+    )
+    return _checked_engine_value(field, value, allowed)
+
+
+def _checked_engine_value(
+    field: str, value: object, allowed: tuple[str, str]
+) -> Literal["sql", "streaming"]:
+    message = f"Program.{field}: invalid_literal: expected {allowed!r}"
+    if type(value) is not str:
+        raise TypeError(message)
+    if value not in allowed:
+        raise ValueError(message)
+    return "sql" if value in ("sql", "batch") else "streaming"
+
+
+def _check_schema_output_types(
+    program: Program, runtime: Runtime, mode: CompileMode
+) -> None:
+    from calc_flow.symbolic.analyzer import _require_mode
+    from calc_flow.symbolic.lower.program import _check_expression_capability
+    from calc_flow.symbolic.query_analysis import _declaration_paths
+
+    analyzer, _ = _check_expression_capability(program, runtime, _require_mode(mode))
+    for name, value in program.outputs:
+        path = _segment("outputs", name)
+        fields = analyzer.table(value._node, path).schema
+        _check_schema_fields(fields, path)
+    paths, nodes, _ = _declaration_paths(program)
+    for digest, node in nodes.items():
+        if node.op.name in {"sql", "snapshot_sql"}:
+            _check_schema_fields(
+                analyzer.table(node, paths[digest]).schema, paths[digest]
+            )
+
+
+def _check_schema_fields(fields: Sequence[Field], path: str) -> None:
+    from calc_flow.errors import CompileError
+    from calc_flow.symbolic.types import check_table_field_type
+
+    for index, field in enumerate(fields):
+        try:
+            check_table_field_type(field.data_type, f"{path}.schema[{index}].data_type")
+        except ValueError as error:
+            raise CompileError(str(error)) from error
 
 
 class _StreamingExecuteOptions(TypedDict, total=False):
@@ -380,13 +446,39 @@ class Program:
     _fingerprint: str
     _engine: Literal["sql", "streaming"]
     _inputs_inferred: bool
+    _update_semantics: UpdateSemantics
 
+    @overload
+    def __init__(
+        self,
+        name: str,
+        /,
+        *,
+        mode: CompileMode,
+        inputs: Sequence[TableExpr | ArrayExpr | Parameter[object]] | None = None,
+        outputs: Mapping[str, TableExpr | ArrayExpr]
+        | Sequence[tuple[str, TableExpr | ArrayExpr]] = (),
+    ) -> None: ...
+
+    @overload
     def __init__(
         self,
         name: str,
         /,
         *,
         engine: Literal["sql", "streaming"],
+        inputs: Sequence[TableExpr | ArrayExpr | Parameter[object]] | None = None,
+        outputs: Mapping[str, TableExpr | ArrayExpr]
+        | Sequence[tuple[str, TableExpr | ArrayExpr]] = (),
+    ) -> None: ...
+
+    def __init__(
+        self,
+        name: str,
+        /,
+        *,
+        engine: object = _OMITTED,
+        mode: object = _OMITTED,
         inputs: Sequence[TableExpr | ArrayExpr | Parameter[object]] | None = None,
         outputs: Mapping[str, TableExpr | ArrayExpr]
         | Sequence[tuple[str, TableExpr | ArrayExpr]] = (),
@@ -397,10 +489,7 @@ class Program:
             raise ValueError(
                 "Program.name: invalid_literal: must be a non-empty string"
             )
-        if type(engine) is not str:
-            raise TypeError("Program.engine: expected 'sql' or 'streaming'")
-        if engine not in ("sql", "streaming"):
-            raise ValueError("Program.engine: expected 'sql' or 'streaming'")
+        engine = _engine_selection(engine, mode)
         copied_outputs = _validated_outputs(outputs)
         _validate_engine_outputs(engine, copied_outputs)
         copied_inputs = (
@@ -413,6 +502,7 @@ class Program:
         object.__setattr__(self, "_outputs", copied_outputs)
         object.__setattr__(self, "_engine", engine)
         object.__setattr__(self, "_inputs_inferred", inputs is None)
+        object.__setattr__(self, "_update_semantics", "legacy_append")
         object.__setattr__(
             self,
             "_fingerprint",
@@ -449,6 +539,47 @@ class Program:
 
         return self._engine
 
+    @property
+    def mode(self) -> CompileMode:
+        """The immutable execution lifecycle, independent of frontend syntax."""
+        return "batch" if self._engine == "sql" else "stream"
+
+    @property
+    def update_semantics(self) -> UpdateSemantics:
+        """How complete relation events are interpreted by this declaration."""
+        return self._update_semantics
+
+    def with_update_semantics(self, semantics: UpdateSemantics, /) -> Program:
+        """Copy the update interpretation without planning or reading data."""
+        if type(semantics) is not str:
+            raise TypeError("Program.update_semantics: expected a string")
+        if semantics not in ("legacy_append", "latest_relation"):
+            raise ValueError("Program.update_semantics: invalid_literal: unknown value")
+        candidate = Program(
+            self._name,
+            engine=self._engine,
+            inputs=None if self._inputs_inferred else self._inputs,
+            outputs=self._outputs,
+        )
+        object.__setattr__(candidate, "_update_semantics", semantics)
+        if semantics == "latest_relation":
+            identity = b"program-update-semantics-v1\0" + bytes.fromhex(
+                candidate.fingerprint
+            )
+            object.__setattr__(
+                candidate, "_fingerprint", hashlib.sha256(identity).hexdigest()
+            )
+        return candidate
+
+    def for_mode(self, mode: CompileMode, /) -> Program:
+        """Copy declarations into a fresh wrapper and validate the target mode."""
+        return Program(
+            self._name,
+            mode=mode,
+            inputs=None if self._inputs_inferred else self._inputs,
+            outputs=self._outputs,
+        ).with_update_semantics(self._update_semantics)
+
     def with_input(
         self, value: TableExpr | ArrayExpr | Parameter[object], /
     ) -> Program:
@@ -459,7 +590,7 @@ class Program:
             engine=self._engine,
             inputs=(*self._inputs, value),
             outputs=self._outputs,
-        )
+        ).with_update_semantics(self._update_semantics)
 
     def _require_engine(self, engine: Literal["sql", "streaming"], /) -> None:
         if self._engine != engine:
@@ -541,7 +672,7 @@ class Program:
             engine=self._engine,
             inputs=None if self._inputs_inferred else self._inputs,
             outputs=(*self._outputs, (name, value)),
-        )
+        ).with_update_semantics(self._update_semantics)
 
     def analyze(
         self,
@@ -558,6 +689,39 @@ class Program:
         selected = _selected_runtime(runtime)
         with selected._registration_lock:
             return analyze_program(self, selected, self._analysis_mode(mode), options)
+
+    def collect_schema(
+        self,
+        runtime: Runtime | None = None,
+        /,
+        *,
+        mode: CompileMode | None = None,
+    ) -> dict[str, pa.Schema]:
+        """Plan exact named table schemas without reading data or starting jobs."""
+        from calc_flow.compute import _require_blocking
+        from calc_flow.symbolic import errors
+        from calc_flow.symbolic.lower import lower_program_document
+        from calc_flow.symbolic.lower.schema import infer_document_schemas
+
+        _require_blocking("collect_schema")
+        for name, value in self._outputs:
+            if not isinstance(value, TableExpr):
+                errors.raise_compile(
+                    f"{_segment('outputs', name)}.schema",
+                    "unsupported_type",
+                    "collect_schema requires table outputs",
+                )
+        if not self._outputs:
+            errors.raise_compile(
+                "outputs", "unresolved_type", "at least one output is required"
+            )
+        selected = _selected_runtime(runtime)
+        with selected._registration_lock:
+            selected_mode = self._analysis_mode(mode)
+            _check_schema_output_types(self, selected, selected_mode)
+            document = lower_program_document(self, selected, selected_mode)
+            schemas = infer_document_schemas(document, selected)
+            return {name: schemas[name] for name, _ in self._outputs}
 
     def explain(
         self,

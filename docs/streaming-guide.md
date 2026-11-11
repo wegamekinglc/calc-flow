@@ -344,6 +344,11 @@ awaited cleanup. Console rendering is excluded.
 
 ## Complete-replacement snapshot SQL
 
+For the Program-wide `with_update_semantics("latest_relation")` choice, supported
+snapshot transforms, and mandatory preflight, see
+[explicit relation updates](relational-frontends.md#explicit-relation-updates).
+The default ordinary SQL interpretation remains `legacy_append`.
+
 `cf.snapshot_sql(query: str, /, **tables: TableExpr) -> TableExpr` is a
 stream-only, read-only DataFusion query over one or more named latest
 relations. Aliases must be valid SQL identifiers without case-insensitive

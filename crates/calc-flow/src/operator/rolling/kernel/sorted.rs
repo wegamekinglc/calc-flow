@@ -169,6 +169,21 @@ impl RollingKernelPlan {
         builders: &mut [DerivedBuilder],
         node_id: &str,
     ) -> Result<()> {
+        if self.decay_pool.is_some() {
+            self.fill_sorted_ranges_impl::<true>(ranges, inputs, entity, builders, node_id)
+        } else {
+            self.fill_sorted_ranges_impl::<false>(ranges, inputs, entity, builders, node_id)
+        }
+    }
+
+    fn fill_sorted_ranges_impl<const HAS_DECAY: bool>(
+        &self,
+        ranges: &[Range<usize>],
+        inputs: &SortedInputs<'_>,
+        entity: &mut Option<TypedEntityState>,
+        builders: &mut [DerivedBuilder],
+        node_id: &str,
+    ) -> Result<()> {
         for (range_index, range) in ranges.iter().enumerate() {
             if range_index > 0 || entity.is_none() {
                 *entity = Some(TypedEntityState::new(&self.groups, range.len()));
@@ -178,13 +193,13 @@ impl RollingKernelPlan {
                 current.prepare_shared_rows(self.shared_rows);
             }
             for row_index in range.clone() {
-                self.update_sorted_row(current, inputs, row_index, builders, node_id)?;
+                self.update_sorted_row::<HAS_DECAY>(current, inputs, row_index, builders, node_id)?;
             }
         }
         Ok(())
     }
 
-    fn update_sorted_row(
+    fn update_sorted_row<const HAS_DECAY: bool>(
         &self,
         current: &mut TypedEntityState,
         inputs: &SortedInputs<'_>,
@@ -205,7 +220,7 @@ impl RollingKernelPlan {
             self.nan_as_value,
             node_id,
         )?;
-        append_typed_outputs(
+        append_typed_outputs::<HAS_DECAY>(
             &self.outputs,
             builders,
             current,

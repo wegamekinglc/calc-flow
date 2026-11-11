@@ -210,6 +210,41 @@
       "candidate_sha256": "58bcbbb21ea091d6c21f28a364059b2ee473c68b7fd36e1f3acbadef8ee8411d",
       "reason": "Retain the final validated job native rolling snapshot and primary elapsed duration in the existing payload-free proof. Native metrics capture and owning-handle drop remain inside the unchanged primary timer; snapshot retention/serialization and duration Cell update remain outside it. The exact composed endpoint preserves all prior declared core retirements and rolling case additions. Fixtures, formulas, lane/full-output/input-immutability checks, Criterion samples and input/output schemas are unchanged. Diagnostic --test retains the existing one preflight plus one timed job; no historical timing equivalence or speed verdict is declared.",
       "reference": "P4 bounded regression diagnosis after PR #594 measurement; original126-worker results remain unchanged"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "58bcbbb21ea091d6c21f28a364059b2ee473c68b7fd36e1f3acbadef8ee8411d",
+      "candidate_sha256": "8cea102961011d3c932129718e5e04f5f885789d066993a0df77cc0abe8b95d3",
+      "reason": "Exact composed core workload migration through the retained rolling history/grouped-lane declarations: add one cold two-state-group/four-output Rows case (a Rows37 SUM+Mean, b Rows61 SUM+Mean), with independent integer dyadic full-row oracles. All prior case formulas, schemas, samples, runner/drop/snapshot timer boundaries and cumulative proof gates are unchanged; second input-column validation applies only to the new case outside timing. Both feature products use this identical benchmark overlay. New case is additional coverage, never historical timing evidence.",
+      "reference": "PR #594 / 2026-11-12 bounded multi-group performance validation"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "2eb16d32096c12e25e705b7c137593d09641849163c95d28c01f8fbbdc508bd8",
+      "candidate_sha256": "8cea102961011d3c932129718e5e04f5f885789d066993a0df77cc0abe8b95d3",
+      "reason": "Exact composed core workload migration through the retained rolling history/grouped-lane declarations: add one cold two-state-group/four-output Rows case (a Rows37 SUM+Mean, b Rows61 SUM+Mean), with independent integer dyadic full-row oracles. All prior case formulas, schemas, samples, runner/drop/snapshot timer boundaries and cumulative proof gates are unchanged; second input-column validation applies only to the new case outside timing. Both feature products use this identical benchmark overlay. New case is additional coverage, never historical timing evidence.",
+      "reference": "PR #594 / 2026-11-12 bounded multi-group performance validation"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "a6211fa6b0c2e765167f9af9f513e52a0c4b164c28227cfaaeb07e3780b80b4f",
+      "candidate_sha256": "8cea102961011d3c932129718e5e04f5f885789d066993a0df77cc0abe8b95d3",
+      "reason": "Exact composed core workload migration through the retained rolling history/grouped-lane declarations: add one cold two-state-group/four-output Rows case (a Rows37 SUM+Mean, b Rows61 SUM+Mean), with independent integer dyadic full-row oracles. All prior case formulas, schemas, samples, runner/drop/snapshot timer boundaries and cumulative proof gates are unchanged; second input-column validation applies only to the new case outside timing. Both feature products use this identical benchmark overlay. New case is additional coverage, never historical timing evidence.",
+      "reference": "PR #594 / 2026-11-12 bounded multi-group performance validation"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "d506749a896357a4902ce60a3bf3b2a2fdb274ad8b168d1450e231b23f967a64",
+      "candidate_sha256": "8cea102961011d3c932129718e5e04f5f885789d066993a0df77cc0abe8b95d3",
+      "reason": "Exact composed core workload migration through the retained rolling history/grouped-lane declarations: add one cold two-state-group/four-output Rows case (a Rows37 SUM+Mean, b Rows61 SUM+Mean), with independent integer dyadic full-row oracles. All prior case formulas, schemas, samples, runner/drop/snapshot timer boundaries and cumulative proof gates are unchanged; second input-column validation applies only to the new case outside timing. Both feature products use this identical benchmark overlay. New case is additional coverage, never historical timing evidence.",
+      "reference": "PR #594 / 2026-11-12 bounded multi-group performance validation"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "1977e38423122a9a4be36d56317cd905d64dd2fb95e37005e05669f436d47c98",
+      "candidate_sha256": "8cea102961011d3c932129718e5e04f5f885789d066993a0df77cc0abe8b95d3",
+      "reason": "Exact composed core workload migration through the retained rolling history/grouped-lane declarations: add one cold two-state-group/four-output Rows case (a Rows37 SUM+Mean, b Rows61 SUM+Mean), with independent integer dyadic full-row oracles. All prior case formulas, schemas, samples, runner/drop/snapshot timer boundaries and cumulative proof gates are unchanged; second input-column validation applies only to the new case outside timing. Both feature products use this identical benchmark overlay. New case is additional coverage, never historical timing evidence.",
+      "reference": "PR #594 / 2026-11-12 bounded multi-group performance validation"
     }
   ]
 }

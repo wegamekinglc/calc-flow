@@ -1,6 +1,7 @@
 mod capability_parallel;
 mod capability_profiles;
 mod decay_tests;
+mod execution_diagnostics;
 mod incremental_accounting;
 mod incremental_history;
 mod indicators;
@@ -2371,6 +2372,7 @@ async fn assert_rejected_compaction_preserves_state(cancelled: bool) {
     let (mut operator, job, mut collector) = rolling_with_large_retained_label().await;
     let prior = format!("{:?}", operator.state.typed_kernel_state);
     let prior_buffers = retained_buffer_addresses(&operator);
+    let prior_ipc = retained_state_ipc(&operator);
     let sequence = operator.state.next_output_sequence;
     let next = Batch::table(
         vec![float64_fast_record(&[(3, "a", 3, Some(5.0))])],
@@ -2406,6 +2408,7 @@ async fn assert_rejected_compaction_preserves_state(cancelled: bool) {
         Some(EventTime::from_micros(2))
     );
     assert_eq!(retained_buffer_addresses(&operator), prior_buffers);
+    assert_eq!(retained_state_ipc(&operator), prior_ipc);
     let history = operator.state.histories.by_entity.values().next().unwrap();
     assert_eq!(history.transition_count, 2);
     assert!(retained_column_bytes(history, 5) >= 8 * 1024 * 1024);
@@ -2416,6 +2419,9 @@ async fn assert_rejected_compaction_preserves_state(cancelled: bool) {
     assert_eq!(metrics.numeric_rows, 1);
     assert_eq!(metrics.output_rows_prepared, 1);
     assert_eq!(metrics.output_chunks_prepared, 1);
+    assert_eq!(metrics.history_append_rows_prepared, 1);
+    assert_eq!(metrics.history_evict_rows_prepared, 1);
+    assert!(metrics.history_charge_scalar_rows + metrics.history_charge_columnar_chunks > 0);
     assert!(collector.drain("output").is_empty());
     assert_retry_releases_evicted_label(&mut operator, &job, &mut collector, next, sequence).await;
 }
@@ -2457,6 +2463,23 @@ async fn rolling_with_large_retained_label() -> (
         .unwrap();
     collector.drain("output");
     (operator, job, collector)
+}
+
+fn retained_state_ipc(operator: &RollingOperator) -> Vec<u8> {
+    assert!(operator.state.ordered.is_empty());
+    let mut histories = operator.state.histories.clone();
+    histories
+        .materialize_columnar(&operator.compiled, "rolling", None)
+        .unwrap();
+    encode_state_segment(
+        &histories,
+        &operator.state.buffer,
+        operator.input_ports()[0].schema().unwrap().as_ref(),
+        &operator.compiled,
+        TEST_FINGERPRINT,
+        "rolling",
+    )
+    .unwrap()
 }
 
 fn retained_buffer_addresses(operator: &RollingOperator) -> Vec<usize> {

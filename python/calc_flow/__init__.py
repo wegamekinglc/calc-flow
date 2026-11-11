@@ -93,6 +93,7 @@ from calc_flow.symbolic import (
     AnalysisResult,
     ArrayExpr,
     ColumnExpr,
+    CompileMode,
     CrossSectionGroup,
     DurationFrame,
     EventTimeBucket,
@@ -145,6 +146,7 @@ from calc_flow.symbolic.query_analysis import (
     QueryTieOrder,
     SupportStatus,
     UpdateKind,
+    UpdateSemantics,
 )
 
 __version__ = "2026.11.2"
@@ -154,6 +156,7 @@ ProviderContext = _native.ProviderContext
 RunResult = _native.RunResult
 
 __all__ = [
+    "CompileMode",
     "AnalysisOptions",
     "Comparison",
     "ComparisonCutoff",
@@ -175,6 +178,7 @@ __all__ = [
     "QueryTieOrder",
     "SupportStatus",
     "UpdateKind",
+    "UpdateSemantics",
     "AsofJoinSide",
     "AsofJoinSpec",
     "AsofStateLimits",

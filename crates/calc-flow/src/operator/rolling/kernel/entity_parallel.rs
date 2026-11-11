@@ -14,13 +14,16 @@ use std::{
 use super::{
     Array, ArrayRef, DataType, DerivedBuilder, Float64Array, Float64Builder, KernelSelection,
     OutputStorage, PreparedTypedFill, RecordBatch, RollingKernelExecution, RollingKernelPlan,
-    RollingKernelState, RollingMetricsRecorder, RollingNumericalProfile, Statistic,
-    StreamKernelUpdate, TimestampMicrosecondArray, TypedEntityState, TypedFloatReadout,
-    TypedFloatReadoutKind, TypedFrame, TypedGroupInput, TypedGroupPlan, TypedOutputKind,
-    TypedOutputPlan, TypedWindowState, float_mean, internal_error, operator_error,
+    RollingKernelState, RollingMetricsRecorder, RollingNumericalProfile, RollingWork,
+    RollingWorkBatch, Statistic, StreamKernelUpdate, TimestampMicrosecondArray, TypedEntityState,
+    TypedFloatReadout, TypedFloatReadoutKind, TypedFrame, TypedGroupInput, TypedGroupPlan,
+    TypedOutputKind, TypedOutputPlan, TypedWindowState, float_mean, internal_error, operator_error,
     read_typed_float, typed_output_mismatch, valid_float64,
 };
 use crate::{CalcFlowError, Result};
+
+mod route;
+pub(super) use route::{LaneRoute, RouteCursor, RouteStep, RoutingLayout};
 
 const ROWS_PER_LANE: usize = 16_000;
 
@@ -28,6 +31,7 @@ const ROWS_PER_LANE: usize = 16_000;
 thread_local! {
     pub(super) static SCHEDULE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static ENTITY_COUNT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static ROUTE_WORD_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static MERGE_VALIDATION_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -99,7 +103,7 @@ pub(crate) struct NumericLaneExit {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct LaneRow {
+pub(crate) struct LaneRow {
     pub(super) original_row: u32,
     pub(super) lane_entity: u32,
 }
@@ -112,8 +116,7 @@ pub(super) struct OwnedLaneEntity {
 struct PreparedNumericInput {
     entity_ids: Vec<usize>,
     assignments: Vec<EntityAssignment>,
-    // Anchor validated routes so worker copy-on-write changes their identity.
-    schedules: Vec<Arc<Vec<LaneRow>>>,
+    routes: Vec<Arc<LaneRoute>>,
     columns: Vec<TypedGroupInput>,
     event_times: TimestampMicrosecondArray,
     outputs: Vec<TypedOutputPlan>,
@@ -125,7 +128,7 @@ struct PreparedNumericInput {
 pub(crate) struct NumericLaneRequest {
     input: Arc<PreparedNumericInput>,
     row_count: usize,
-    pub(super) rows: Arc<Vec<LaneRow>>,
+    pub(super) rows: Arc<LaneRoute>,
     pub(super) entities: Vec<OwnedLaneEntity>,
     #[cfg(test)]
     pub(super) test_hook: Option<Arc<dyn Fn(NumericTestPoint) + Send + Sync>>,
@@ -147,6 +150,10 @@ impl NumericLaneRequest {
         Arc::downgrade(&input)
     }
 
+    pub(super) fn use_explicit_route_for_test(&mut self) {
+        mutable_route_for_test(&mut self.rows, &self.input);
+    }
+
     pub(super) fn replace_inputs_and_outputs_for_test(
         &mut self,
         columns: Vec<TypedGroupInput>,
@@ -161,7 +168,7 @@ impl NumericLaneRequest {
 pub(crate) struct NumericLaneResult {
     input: Option<Arc<PreparedNumericInput>>,
     pub(super) entities: Vec<OwnedLaneEntity>,
-    pub(super) rows: Arc<Vec<LaneRow>>,
+    pub(super) rows: Arc<LaneRoute>,
     columns: Vec<Float64Array>,
 }
 
@@ -169,6 +176,39 @@ pub(crate) struct NumericLaneResult {
 impl NumericLaneResult {
     pub(super) fn columns_for_test(&mut self) -> &mut Vec<Float64Array> {
         &mut self.columns
+    }
+
+    pub(super) fn rows_for_test(&self) -> Vec<LaneRow> {
+        let input = self.input.as_ref().expect("test input remains owned");
+        let mut cursor = self.rows.cursor(&input.entity_ids, &input.assignments);
+        std::iter::from_fn(|| cursor.next_row())
+            .map(|row| row.expect("valid fixture route"))
+            .collect()
+    }
+
+    pub(super) fn rows_mut_for_test(&mut self) -> &mut Vec<LaneRow> {
+        mutable_route_for_test(
+            &mut self.rows,
+            self.input.as_ref().expect("test input remains owned"),
+        )
+    }
+}
+
+#[cfg(test)]
+fn mutable_route_for_test<'a>(
+    route: &'a mut Arc<LaneRoute>,
+    input: &PreparedNumericInput,
+) -> &'a mut Vec<LaneRow> {
+    let replacement = (!route.is_explicit()).then(|| {
+        let mut cursor = route.cursor(&input.entity_ids, &input.assignments);
+        std::iter::from_fn(|| cursor.next_row())
+            .map(|row| row.expect("valid fixture route"))
+            .collect()
+    });
+    let route = Arc::make_mut(route);
+    match replacement {
+        Some(rows) => route.replace_explicit(rows),
+        None => route.explicit_mut().expect("explicit route"),
     }
 }
 
@@ -205,6 +245,7 @@ impl NumericJoinSeed {
 pub(crate) struct ScratchPlan {
     bytes: Option<usize>,
     lanes: usize,
+    routing: RoutingLayout,
 }
 
 impl ScratchPlan {
@@ -218,7 +259,7 @@ impl ScratchPlan {
 
     #[cfg(test)]
     pub(crate) fn large_test_plan() -> Self {
-        Self::for_dimensions(1_000_000, 64, 2, 1)
+        Self::for_dimensions(1_000_000, 64, 3, 1)
     }
 
     #[cfg(test)]
@@ -239,8 +280,14 @@ impl ScratchPlan {
         name_bytes: usize,
         lanes: usize,
     ) -> Self {
-        let bytes = Self::owned_capacity(rows, entities, outputs, groups, name_bytes, lanes);
-        Self { bytes, lanes }
+        let routing = RoutingLayout::choose(rows, lanes);
+        let bytes = routing
+            .and_then(|_| Self::owned_capacity(rows, entities, outputs, groups, name_bytes, lanes));
+        Self {
+            bytes,
+            lanes,
+            routing: routing.unwrap_or(RoutingLayout::Explicit),
+        }
     }
 
     fn owned_capacity(
@@ -251,7 +298,7 @@ impl ScratchPlan {
         name_bytes: usize,
         lanes: usize,
     ) -> Option<usize> {
-        let routing = Self::routing_capacity(rows, entities)?;
+        let routing = Self::routing_capacity(rows, entities, lanes)?;
         let output = Self::output_capacity(rows, outputs, lanes)?;
         let fixed_metadata = Self::fixed_capacity(lanes, groups, outputs)?;
         routing
@@ -262,34 +309,50 @@ impl ScratchPlan {
 
     fn fixed_capacity(lanes: usize, groups: usize, outputs: usize) -> Option<usize> {
         let controls = lanes.checked_mul(4096 + COMPILED_LANE_READOUT_METADATA_BYTES / 2)?;
-        let descriptors = groups
-            .checked_mul(size_of::<TypedGroupInput>())?
-            .checked_add(outputs.checked_mul(size_of::<TypedOutputPlan>())?)?;
-        let lane_headers = lanes.checked_mul(
-            size_of::<NumericLaneRequest>()
-                + size_of::<NumericLaneResult>()
-                + size_of::<Vec<&mut TypedEntityState>>(),
-        )?;
-        // Fund conversion staging, shared owners and Arc allocation headers.
-        let schedule_owners = lanes.checked_mul(
-            2 * size_of::<Vec<LaneRow>>() + size_of::<Arc<Vec<LaneRow>>>() + 2 * size_of::<usize>(),
-        )?;
+        let descriptors = Self::descriptor_capacity(groups, outputs)?;
+        let lane_headers = Self::lane_header_capacity(lanes)?;
+        let merge_headers = Self::merge_header_capacity(outputs)?;
+        let fixed_headers = NULL_FREE_MERGE_METADATA_BYTES
+            + size_of::<NumericResults>()
+            + size_of::<LaneRoutes>()
+            + size_of::<PreparedNumericInput>();
         controls
             .checked_add(descriptors)?
             .checked_add(lane_headers)?
-            .checked_add(schedule_owners)?
-            .checked_add(NULL_FREE_MERGE_METADATA_BYTES)?
-            .checked_add(size_of::<NumericResults>())?
-            .checked_add(size_of::<LaneRoutes>())?
-            .checked_add(size_of::<PreparedNumericInput>())
+            .checked_add(merge_headers)?
+            .checked_add(fixed_headers)
+    }
+
+    fn descriptor_capacity(groups: usize, outputs: usize) -> Option<usize> {
+        groups
+            .checked_mul(size_of::<TypedGroupInput>())?
+            .checked_add(outputs.checked_mul(size_of::<TypedOutputPlan>())?)
+    }
+
+    fn lane_header_capacity(lanes: usize) -> Option<usize> {
+        lanes.checked_mul(
+            size_of::<NumericLaneRequest>()
+                + size_of::<NumericLaneResult>()
+                + size_of::<Vec<&mut TypedEntityState>>()
+                + 2 * size_of::<LaneRoute>()
+                + size_of::<Arc<LaneRoute>>()
+                + 2 * size_of::<usize>()
+                + 2 * size_of::<RouteCursor<'_>>(),
+        )
+    }
+
+    fn merge_header_capacity(outputs: usize) -> Option<usize> {
+        outputs
+            .checked_mul(size_of::<Vec<f64>>() + size_of::<&[f64]>())?
+            .checked_add(size_of::<Vec<&[f64]>>())
     }
 
     fn name_capacity(name_bytes: usize, lanes: usize) -> Option<usize> {
         name_bytes.checked_mul(lanes.checked_mul(2)?.checked_add(1)?)
     }
 
-    fn routing_capacity(rows: usize, entities: usize) -> Option<usize> {
-        let schedules = rows.checked_mul(size_of::<LaneRow>())?;
+    fn routing_capacity(rows: usize, entities: usize, lanes: usize) -> Option<usize> {
+        let schedules = RoutingLayout::choose(rows, lanes)?.payload_bytes(rows, lanes)?;
         // Charge the lane slot and a conservative Arc owner allowance; the
         // prepared entity payload is shared with the serial fallback.
         let moved = entities.checked_mul(
@@ -318,7 +381,7 @@ impl ScratchPlan {
 }
 
 #[derive(Clone, Copy, Default)]
-struct EntityAssignment {
+pub(crate) struct EntityAssignment {
     rows: usize,
     lane: usize,
     local: usize,
@@ -337,7 +400,17 @@ impl RollingKernelPlan {
         &self,
         input: &RecordBatch,
     ) -> bool {
-        self.parallel_dimensions(input)
+        self.entity_parallel_fallback(input).is_none()
+    }
+
+    pub(in crate::operator::rolling) fn entity_parallel_fallback(
+        &self,
+        input: &RecordBatch,
+    ) -> Option<RollingWork> {
+        if input.num_rows() < 64_000 {
+            return Some(RollingWork::ParallelFallbackSmallBatch);
+        }
+        let supported = self.parallel_dimensions(input)
             && self
                 .groups
                 .iter()
@@ -345,12 +418,12 @@ impl RollingKernelPlan {
             && self
                 .outputs
                 .iter()
-                .all(|output| self.parallel_output(output))
+                .all(|output| self.parallel_output(output));
+        (!supported).then_some(RollingWork::ParallelFallbackUnsupportedPlan)
     }
 
     fn parallel_dimensions(&self, input: &RecordBatch) -> bool {
-        input.num_rows() >= 64_000
-            && u32::try_from(input.num_rows()).is_ok()
+        u32::try_from(input.num_rows()).is_ok()
             && self.selection == KernelSelection::OrderedPrimitive
             && !self.groups.is_empty()
             && !self.outputs.is_empty()
@@ -393,13 +466,13 @@ impl RollingKernelPlan {
 impl PreparedOrderedKernel<'_> {
     #[cfg(test)]
     pub(in crate::operator::rolling) fn scratch_plan(&self) -> Option<ScratchPlan> {
-        self.scratch_plan_for_cpu(2)
+        self.scratch_plan_for_cpu(2).ok()
     }
 
     pub(in crate::operator::rolling) fn scratch_plan_for_cpu(
         &self,
         cpus: usize,
-    ) -> Option<ScratchPlan> {
+    ) -> std::result::Result<ScratchPlan, RollingWork> {
         let plan = self.plan;
         let states = &self.fill.stream.state.states;
         if !self.parallel_shape
@@ -408,13 +481,13 @@ impl PreparedOrderedKernel<'_> {
                 .iter()
                 .all(|entity| parallel_entity_state(entity, &plan.groups))
         {
-            return None;
+            return Err(RollingWork::ParallelFallbackPreparedIneligible);
         }
         let lanes = cpus
             .min(self.fill.row_count / ROWS_PER_LANE)
             .min(states.len());
         if lanes < 2 {
-            return None;
+            return Err(RollingWork::ParallelFallbackPreparedIneligible);
         }
         let scratch = ScratchPlan::for_lanes(
             self.fill.row_count,
@@ -424,13 +497,18 @@ impl PreparedOrderedKernel<'_> {
             self.node_id.len(),
             lanes,
         );
-        scratch.accounted_bytes().map(|_| scratch)
+        scratch
+            .accounted_bytes()
+            .map(|_| scratch)
+            .ok_or(RollingWork::ParallelFallbackScratchUnrepresentable)
     }
 
     pub(in crate::operator::rolling) fn finish_serial(
         self,
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<StreamKernelUpdate> {
+        let mut work = RollingWorkBatch::new(observer);
+        work.add(RollingWork::NumericSerialCalls, 1);
         self.plan
             .finish_typed_fill(self.fill, self.node_id, observer)
             .map(|execution| StreamKernelUpdate { execution })
@@ -458,7 +536,7 @@ impl PreparedOrderedKernel<'_> {
         self,
         cpus: usize,
     ) -> std::result::Result<(NumericJoinSeed, Vec<NumericLaneRequest>), Self> {
-        let Some(scratch) = self.scratch_plan_for_cpu(cpus) else {
+        let Ok(scratch) = self.scratch_plan_for_cpu(cpus) else {
             return Err(self);
         };
         let lanes = scratch.lanes();
@@ -468,6 +546,9 @@ impl PreparedOrderedKernel<'_> {
             entities,
         }) = lane_routes(&self.fill, self.plan.outputs.len(), lanes)
         else {
+            return Err(self);
+        };
+        let Some(routes) = prepare_routes(&self.fill, &assignments, &loads, scratch.routing) else {
             return Err(self);
         };
         let PreparedTypedFill {
@@ -483,25 +564,10 @@ impl PreparedOrderedKernel<'_> {
         for (local_id, state) in stream.state.states.drain(..).enumerate() {
             lane_entities[assignments[local_id].lane].push(OwnedLaneEntity { local_id, state });
         }
-        let mut schedules = loads
-            .iter()
-            .map(|&rows| Vec::with_capacity(rows))
-            .collect::<Vec<_>>();
-        for (row, &entity) in stream.entity_ids.iter().enumerate() {
-            let assignment = assignments[entity];
-            schedules[assignment.lane].push(LaneRow {
-                original_row: u32::try_from(row).expect("qualified rows fit u32"),
-                lane_entity: u32::try_from(assignment.local).expect("qualified entities fit u32"),
-            });
-        }
-        let mut shared_schedules = Vec::with_capacity(lanes);
-        for schedule in schedules {
-            shared_schedules.push(Arc::new(schedule));
-        }
         let shared = Arc::new(PreparedNumericInput {
             entity_ids: stream.entity_ids,
             assignments,
-            schedules: shared_schedules,
+            routes,
             columns,
             event_times,
             outputs: self.plan.outputs.clone(),
@@ -513,7 +579,7 @@ impl PreparedOrderedKernel<'_> {
             .map(|lane| NumericLaneRequest {
                 input: Arc::clone(&shared),
                 row_count: loads[lane],
-                rows: Arc::clone(&shared.schedules[lane]),
+                rows: Arc::clone(&shared.routes[lane]),
                 entities: mem::take(&mut lane_entities[lane]),
                 #[cfg(test)]
                 test_hook: None,
@@ -540,6 +606,47 @@ impl PreparedOrderedKernel<'_> {
     }
 }
 
+fn prepare_routes(
+    fill: &PreparedTypedFill,
+    assignments: &[EntityAssignment],
+    loads: &[usize],
+    layout: RoutingLayout,
+) -> Option<Vec<Arc<LaneRoute>>> {
+    let mut routes = loads
+        .iter()
+        .enumerate()
+        .map(|(lane, &rows)| LaneRoute::new(layout, lane, fill.row_count, rows))
+        .collect::<Vec<_>>();
+    for (row, &entity) in fill.stream.entity_ids.iter().enumerate() {
+        append_routed_row(&mut routes, assignments, entity, row)?;
+    }
+    if routes
+        .iter()
+        .enumerate()
+        .any(|(lane, route)| !route.complete(lane, fill.row_count))
+    {
+        return None;
+    }
+    let mut anchored = Vec::with_capacity(routes.len());
+    for route in routes {
+        anchored.push(Arc::new(route));
+    }
+    Some(anchored)
+}
+
+fn append_routed_row(
+    routes: &mut [LaneRoute],
+    assignments: &[EntityAssignment],
+    entity: usize,
+    row: usize,
+) -> Option<()> {
+    let assignment = assignments.get(entity)?;
+    routes.get_mut(assignment.lane)?.push(LaneRow {
+        original_row: u32::try_from(row).ok()?,
+        lane_entity: u32::try_from(assignment.local).ok()?,
+    })
+}
+
 struct LaneRoutes {
     assignments: Vec<EntityAssignment>,
     loads: Vec<usize>,
@@ -553,10 +660,7 @@ fn lane_routes(fill: &PreparedTypedFill, outputs: usize, lanes: usize) -> Option
         ENTITY_COUNT_VISITS.set(ENTITY_COUNT_VISITS.get() + 1);
         assignment.rows = count;
     }
-    let weights = entity_work_weights(fill, outputs)?;
-    let total_work = weights
-        .iter()
-        .try_fold(0_usize, |sum, &work| sum.checked_add(work))?;
+    let (weights, total_work) = entity_work_weights(fill, outputs)?;
     let mut work_loads = vec![0_usize; lanes];
     let mut loads = vec![0_usize; lanes];
     let mut entities = vec![0_usize; lanes];
@@ -574,11 +678,7 @@ fn lane_routes(fill: &PreparedTypedFill, outputs: usize, lanes: usize) -> Option
         work_loads[lane] = work;
         available.push(Reverse((work, lane)));
     }
-    if loads.contains(&0)
-        || loads
-            .iter()
-            .try_fold(0_usize, |sum, &rows| sum.checked_add(rows))
-            != Some(fill.row_count)
+    if !lane_rows_cover_input(&loads, fill.row_count)
         || !balanced_lane_loads(&work_loads, total_work)
     {
         return None;
@@ -588,6 +688,14 @@ fn lane_routes(fill: &PreparedTypedFill, outputs: usize, lanes: usize) -> Option
         loads,
         entities,
     })
+}
+
+fn lane_rows_cover_input(loads: &[usize], rows: usize) -> bool {
+    !loads.contains(&0)
+        && loads
+            .iter()
+            .try_fold(0_usize, |sum, &rows| sum.checked_add(rows))
+            == Some(rows)
 }
 
 fn balanced_lane_loads(loads: &[usize], row_count: usize) -> bool {
@@ -648,7 +756,7 @@ fn parallel_frame(actual: TypedFrame, expected: TypedFrame, retained: usize) -> 
 }
 
 // Scheduling weight is a work heuristic, not a bound on profile-specific refolds.
-fn entity_work_weights(fill: &PreparedTypedFill, outputs: usize) -> Option<Vec<usize>> {
+fn entity_work_weights(fill: &PreparedTypedFill, outputs: usize) -> Option<(Vec<usize>, usize)> {
     if fill.stream.state.states.len() != fill.stream.entity_rows.counts.len() {
         return None;
     }
@@ -660,17 +768,7 @@ fn entity_work_weights(fill: &PreparedTypedFill, outputs: usize) -> Option<Vec<u
         .map(|(entity, &rows)| {
             let steps = entity.groups.len().checked_add(outputs)?;
             let retained = entity.groups.iter().try_fold(0_usize, |work, state| {
-                let samples = match state {
-                    TypedWindowState::Numeric(state) => state.samples.len(),
-                    TypedWindowState::Exact(state) => state.samples.len(),
-                    TypedWindowState::Extrema(state) => {
-                        state.values.len().checked_add(state.candidates.len())?
-                    }
-                    TypedWindowState::Pair(state) => state.samples.len().checked_mul(2)?,
-                    TypedWindowState::Ewma(_) | TypedWindowState::Cumulative(_) => 1,
-                    TypedWindowState::Decay(_) | TypedWindowState::Scan(_) => return None,
-                };
-                work.checked_add(samples)
+                work.checked_add(retained_group_work(state)?)
             })?;
             let shared = entity
                 .shared_rows
@@ -680,7 +778,24 @@ fn entity_work_weights(fill: &PreparedTypedFill, outputs: usize) -> Option<Vec<u
                 .checked_add(retained)?
                 .checked_add(shared)
         })
-        .collect()
+        .collect::<Option<Vec<_>>>()
+        .and_then(|weights| {
+            weights
+                .iter()
+                .try_fold(0_usize, |sum, &work| sum.checked_add(work))
+                .map(|total| (weights, total))
+        })
+}
+
+fn retained_group_work(state: &TypedWindowState) -> Option<usize> {
+    match state {
+        TypedWindowState::Numeric(state) => Some(state.samples.len()),
+        TypedWindowState::Exact(state) => Some(state.samples.len()),
+        TypedWindowState::Extrema(state) => state.values.len().checked_add(state.candidates.len()),
+        TypedWindowState::Pair(state) => state.samples.len().checked_mul(2),
+        TypedWindowState::Ewma(_) | TypedWindowState::Cumulative(_) => Some(1),
+        TypedWindowState::Decay(_) | TypedWindowState::Scan(_) => None,
+    }
 }
 
 #[cfg(test)]
@@ -1182,7 +1297,20 @@ fn run_prepared_numeric_lane<const GROUPS: usize>(
             state
         })
         .collect::<Vec<_>>();
-    for (ordinal, row) in request.rows.iter().copied().enumerate() {
+    assert!(
+        request.rows.is_explicit()
+            || request
+                .input
+                .routes
+                .get(request.rows.lane())
+                .is_some_and(|route| Arc::ptr_eq(route, &request.rows)),
+        "numeric lane bitmap is not producer-qualified"
+    );
+    let mut cursor = request
+        .rows
+        .cursor(&request.input.entity_ids, &request.input.assignments);
+    let mut ordinal = 0;
+    while let Some(row) = next_lane_row(&mut cursor, cancellation, progress)? {
         #[cfg(test)]
         SCHEDULE_VISITS.set(SCHEDULE_VISITS.get() + 1);
         context.check_row(ordinal, progress)?;
@@ -1190,6 +1318,7 @@ fn run_prepared_numeric_lane<const GROUPS: usize>(
         context.update_entity(entity, row, progress)?;
         context.append_outputs(&mut builders, entity, row, progress, &mut append)?;
         progress.active_site = None;
+        ordinal += 1;
     }
     drop(entities);
     check_cancelled(cancellation, progress)?;
@@ -1202,6 +1331,21 @@ fn run_prepared_numeric_lane<const GROUPS: usize>(
         rows: request.rows,
         columns,
     })
+}
+
+fn next_lane_row(
+    cursor: &mut RouteCursor<'_>,
+    cancellation: &AtomicBool,
+    progress: &mut LaneProgress,
+) -> std::result::Result<Option<LaneRow>, NumericLaneStop> {
+    while let Some(step) = cursor.next_step() {
+        match step {
+            RouteStep::Poll => check_cancelled(cancellation, progress)?,
+            RouteStep::Row(row) => return Ok(Some(row)),
+            RouteStep::Invalid => panic!("producer-qualified numeric lane bitmap changed"),
+        }
+    }
+    Ok(None)
 }
 
 fn finish_numeric_columns(builders: Vec<DerivedBuilder>) -> Vec<Float64Array> {
@@ -1226,6 +1370,7 @@ pub(super) fn finish_null_free_numeric_columns<const COLUMNS: usize>(
 enum NumericOutputBuffers {
     One([Vec<f64>; 1]),
     Two([Vec<f64>; 2]),
+    Many(Vec<Vec<f64>>),
     Nullable(Vec<Float64Builder>),
 }
 
@@ -1242,40 +1387,69 @@ impl NumericOutputBuffers {
         let entity_ids = &input.entity_ids;
         let assignments = &input.assignments;
         let rows = entity_ids.len();
-        let null_free = matches!(count, 1 | 2)
+        let null_free = count > 0
             && results
                 .iter()
                 .all(|result| result.columns.iter().all(|column| column.null_count() == 0));
-        let trusted = null_free && trusted_numeric_routes(input, results);
-        match count {
-            1 if null_free => {
-                gather_prepared_numeric_columns(input, results, trusted).map(Self::One)
-            }
-            2 if null_free => {
-                gather_prepared_numeric_columns(input, results, trusted).map(Self::Two)
-            }
-            _ => {
-                let mut builders = (0..count)
-                    .map(|_| Float64Builder::with_capacity(rows))
-                    .collect::<Vec<_>>();
-                merge_numeric_rows(entity_ids, assignments, results, |lane, offset| {
-                    for (builder, column) in builders.iter_mut().zip(&results[lane].columns) {
-                        if column.is_null(offset) {
-                            builder.append_null();
-                        } else {
-                            builder.append_value(column.value(offset));
-                        }
-                    }
-                })?;
-                Ok(Self::Nullable(builders))
-            }
+        if null_free && trusted_numeric_routes(input, results) {
+            return match count {
+                1 => gather_trusted_numeric_columns(input, results).map(Self::One),
+                2 => gather_trusted_numeric_columns(input, results).map(Self::Two),
+                _ => gather_trusted_numeric_columns_many(input, results, count).map(Self::Many),
+            };
         }
+        match count {
+            1 if null_free => gather_null_free_numeric_columns_impl(
+                entity_ids,
+                assignments,
+                results,
+                [Vec::with_capacity(rows)],
+            )
+            .map(Self::One),
+            2 if null_free => gather_null_free_numeric_columns_impl(
+                entity_ids,
+                assignments,
+                results,
+                std::array::from_fn(|_| Vec::with_capacity(rows)),
+            )
+            .map(Self::Two),
+            _ => Self::gather_nullable(input, results, count),
+        }
+    }
+
+    fn gather_nullable(
+        input: &PreparedNumericInput,
+        results: &[NumericLaneResult],
+        count: usize,
+    ) -> Result<Self> {
+        let mut builders = (0..count)
+            .map(|_| Float64Builder::with_capacity(input.entity_ids.len()))
+            .collect::<Vec<_>>();
+        merge_numeric_rows(
+            &input.entity_ids,
+            &input.assignments,
+            results,
+            |lane, offset| {
+                for (builder, column) in builders.iter_mut().zip(&results[lane].columns) {
+                    if column.is_null(offset) {
+                        builder.append_null();
+                    } else {
+                        builder.append_value(column.value(offset));
+                    }
+                }
+            },
+        )?;
+        Ok(Self::Nullable(builders))
     }
 
     fn finish(self) -> Vec<ArrayRef> {
         match self {
             Self::One(values) => finish_null_free_numeric_columns(values),
             Self::Two(values) => finish_null_free_numeric_columns(values),
+            Self::Many(values) => values
+                .into_iter()
+                .map(|values| Arc::new(Float64Array::from(values)) as ArrayRef)
+                .collect(),
             Self::Nullable(builders) => builders
                 .into_iter()
                 .map(|mut builder| Arc::new(builder.finish()) as ArrayRef)
@@ -1285,12 +1459,15 @@ impl NumericOutputBuffers {
 }
 
 fn trusted_numeric_routes(input: &PreparedNumericInput, results: &[NumericLaneResult]) -> bool {
-    input.schedules.len() == results.len()
+    input.routes.len() == results.len()
         && input
-            .schedules
+            .routes
             .iter()
             .zip(results)
-            .all(|(schedule, result)| Arc::ptr_eq(schedule, &result.rows))
+            .enumerate()
+            .all(|(lane, (route, result))| {
+                Arc::ptr_eq(route, &result.rows) && route.complete(lane, input.entity_ids.len())
+            })
         && results
             .iter()
             .try_fold((0_usize, 0_usize), |(rows, entities), result| {
@@ -1304,33 +1481,61 @@ fn trusted_numeric_routes(input: &PreparedNumericInput, results: &[NumericLaneRe
             .assignments
             .iter()
             .enumerate()
-            .all(|(local_id, assignment)| {
+            .all(|(id, assignment)| {
                 results
                     .get(assignment.lane)
                     .and_then(|result| result.entities.get(assignment.local))
-                    .is_some_and(|entity| entity.local_id == local_id)
+                    .is_some_and(|entity| entity.local_id == id)
             })
 }
 
-fn gather_prepared_numeric_columns<const COLUMNS: usize>(
+fn gather_trusted_numeric_columns<const COLUMNS: usize>(
     input: &PreparedNumericInput,
     results: &[NumericLaneResult],
-    trusted: bool,
 ) -> Result<[Vec<f64>; COLUMNS]> {
-    if !trusted {
-        return gather_null_free_numeric_columns_impl(
-            &input.entity_ids,
-            &input.assignments,
-            results,
-            std::array::from_fn(|_| Vec::with_capacity(input.entity_ids.len())),
-        );
-    }
     let mut values = std::array::from_fn(|_| vec![0.0; input.entity_ids.len()]);
     for result in results {
-        for (values, column) in values.iter_mut().zip(&result.columns) {
-            for (row, &value) in result.rows.iter().zip(column.values().iter()) {
-                values[row.original_row as usize] = value;
+        let columns: [&[f64]; COLUMNS] =
+            std::array::from_fn(|column| result.columns[column].values().as_ref());
+        let mut cursor = result.rows.cursor(&input.entity_ids, &input.assignments);
+        let mut offset = 0;
+        while let Some(row) = cursor.next_row() {
+            let row = row.map_err(|()| {
+                internal_error("numeric lane row coverage or entity identity changed")
+            })?;
+            for (values, column) in values.iter_mut().zip(columns) {
+                values[row.original_row as usize] = column[offset];
             }
+            offset += 1;
+        }
+    }
+    Ok(values)
+}
+
+fn gather_trusted_numeric_columns_many(
+    input: &PreparedNumericInput,
+    results: &[NumericLaneResult],
+    count: usize,
+) -> Result<Vec<Vec<f64>>> {
+    let mut values = (0..count)
+        .map(|_| vec![0.0; input.entity_ids.len()])
+        .collect::<Vec<_>>();
+    for result in results {
+        let columns = result
+            .columns
+            .iter()
+            .map(|column| column.values().as_ref())
+            .collect::<Vec<_>>();
+        let mut cursor = result.rows.cursor(&input.entity_ids, &input.assignments);
+        let mut offset = 0;
+        while let Some(row) = cursor.next_row() {
+            let row = row.map_err(|()| {
+                internal_error("numeric lane row coverage or entity identity changed")
+            })?;
+            for (values, column) in values.iter_mut().zip(&columns) {
+                values[row.original_row as usize] = column[offset];
+            }
+            offset += 1;
         }
     }
     Ok(values)
@@ -1368,16 +1573,29 @@ fn merge_numeric_rows(
     entity_ids: &[usize],
     assignments: &[EntityAssignment],
     results: &[NumericLaneResult],
+    append: impl FnMut(usize, usize),
+) -> Result<()> {
+    if let [left, right] = results {
+        let mut cursors = [
+            left.rows.cursor(entity_ids, assignments),
+            right.rows.cursor(entity_ids, assignments),
+        ];
+        return merge_cursor_rows(entity_ids, assignments, results, &mut cursors, append);
+    }
+    let mut cursors = results
+        .iter()
+        .map(|result| result.rows.cursor(entity_ids, assignments))
+        .collect::<Vec<_>>();
+    merge_cursor_rows(entity_ids, assignments, results, &mut cursors, append)
+}
+
+fn merge_cursor_rows(
+    entity_ids: &[usize],
+    assignments: &[EntityAssignment],
+    results: &[NumericLaneResult],
+    cursors: &mut [RouteCursor<'_>],
     mut append: impl FnMut(usize, usize),
 ) -> Result<()> {
-    let mut inline = [0_usize; 2];
-    let mut dynamic = Vec::new();
-    let offsets = if results.len() <= inline.len() {
-        &mut inline[..results.len()]
-    } else {
-        dynamic.resize(results.len(), 0_usize);
-        dynamic.as_mut_slice()
-    };
     for (global, expected_entity) in entity_ids.iter().enumerate() {
         #[cfg(test)]
         MERGE_VALIDATION_VISITS.set(MERGE_VALIDATION_VISITS.get() + 1);
@@ -1388,33 +1606,44 @@ fn merge_numeric_rows(
             .ok_or_else(|| {
                 internal_error("numeric lane row coverage or entity identity changed")
             })?;
-        let result = &results[lane];
-        let row = result
-            .rows
-            .get(offsets[lane])
-            .ok_or_else(|| internal_error("numeric lane row coverage is incomplete"))?;
-        if row.original_row as usize != global
-            || result
-                .entities
-                .get(row.lane_entity as usize)
-                .map(|entity| entity.local_id)
-                != Some(*expected_entity)
-        {
-            return Err(internal_error(
-                "numeric lane row coverage or entity identity changed",
-            ));
-        }
-        append(lane, offsets[lane]);
-        offsets[lane] += 1;
+        let offset =
+            validate_cursor_row(&mut cursors[lane], &results[lane], global, *expected_entity)?;
+        append(lane, offset);
     }
-    if results
-        .iter()
-        .zip(offsets.iter())
-        .any(|(result, &consumed)| result.rows.len() != consumed)
-    {
+    if cursors.iter_mut().zip(results).any(|(cursor, result)| {
+        cursor.consumed() != result.rows.len() || cursor.next_row().is_some()
+    }) {
         return Err(internal_error("numeric lane row coverage has extra rows"));
     }
     Ok(())
+}
+
+fn validate_cursor_row(
+    cursor: &mut RouteCursor<'_>,
+    result: &NumericLaneResult,
+    global: usize,
+    expected_entity: usize,
+) -> Result<usize> {
+    let offset = cursor.consumed();
+    if offset >= result.rows.len() {
+        return Err(internal_error("numeric lane row coverage is incomplete"));
+    }
+    let row = cursor
+        .next_row()
+        .ok_or_else(|| internal_error("numeric lane row coverage is incomplete"))?
+        .map_err(|()| internal_error("numeric lane row coverage or entity identity changed"))?;
+    if row.original_row as usize != global
+        || result
+            .entities
+            .get(row.lane_entity as usize)
+            .map(|entity| entity.local_id)
+            != Some(expected_entity)
+    {
+        return Err(internal_error(
+            "numeric lane row coverage or entity identity changed",
+        ));
+    }
+    Ok(offset)
 }
 
 fn take_numeric_input(results: &mut [NumericLaneResult]) -> Result<PreparedNumericInput> {

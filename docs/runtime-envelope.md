@@ -898,24 +898,29 @@ requirements are met. Mixed windows retain the union of the row suffix and
 the duration interval with an open lower bound, using widened timestamp
 arithmetic.
 
-An ordered typed calculation can assign whole entities to owned CPU lanes
-when its groups support independent owned transitions and all readouts fit the
-Float64 merge. This includes Rows, Duration, and mixed frames, multiple groups
-and outputs, and both numerical profiles. The compiled NaN policy and each
-entity's operation order remain unchanged. Plans requiring shared decay
-reference quotas or unsupported output storage remain serial.
-A finalized batch has at least 64,000 rows and two touched entities. The lane
-count is the minimum of available CPU capacity, the batch's 16,000-row work
-units and touched entities; fewer than two lanes use the serial path. Entity
-routing counts are reused, one pass builds stable lane schedules, and each
-lane visits only its assigned rows. Scheduling weights include incoming rows,
-group and output counts, and retained state; empty lanes or a lane with more
-than 5/8 of the estimated work use serial execution. These weights are a
-heuristic, rather than an upper bound on numerical refolding work. Initial
-creation and reconstruction after restore complete before preparing private
-lane state. Unsupported shapes, small or skewed batches and unavailable
-admission use the serial loop. Preparing a serial fallback does not repeat
-entity resolution or state copying.
+Ordered typed plans can assign whole entities to owned CPU lanes when every
+group supports the same independent owned transition and every output is
+Float64. This includes Rows, Duration and mixed windows, multiple groups and
+readouts, and both numerical profiles. The workers preserve the plan's profile
+and NaN policy. Scan groups and Count, integer or Float32 outputs use the serial
+path. Cold and restored state can use lanes after reconstruction from the
+authoritative history. A finalized batch has at least 64,000 rows and two
+touched entities. The lane count is the minimum of available CPU capacity, the
+batch's 16,000-row work units and touched entities; fewer than two lanes use the
+serial path. Routing uses incoming transitions, groups, readouts and retained
+work to estimate lane balance; no lane may own more than 5/8 of that estimate.
+This estimate is a scheduling heuristic, not a work quota. Unsupported shapes,
+small or skewed batches and unavailable admission use the original serial loop.
+Preparing a serial fallback does not repeat entity resolution or state copying.
+
+One producer pass builds immutable lane routes. Checked storage costs select
+membership bitmaps or explicit row descriptors, whichever has the smaller
+payload. Workers iterate only their assigned rows in original order. Non-null
+Float64 output columns reuse the producer's immutable route identity and
+validated entity mapping to scatter into final owned buffers. Nullable columns
+or results without that route identity retain the full ordered coverage
+validation. Both representations and all output arities retain forward-only
+route iteration.
 
 Each job admits at most one numeric work group. Its checked scratch ledger
 accounts for the additional declared capacities without a private byte ceiling;
@@ -944,6 +949,22 @@ row transitions. The owner settles both counts after draining the work,
 including partial launches, failures and cancellation. A task cancelled before
 its first row still counts as started. These counters describe actual work;
 they do not measure simultaneous CPU utilization.
+
+The same callback observations count actual scalar history-charge row visits,
+columnar history-charge chunk visits, and history rows prepared for append or
+eviction. Charge visits include repeated checks and exclude cache hits and
+input-buffer accounting. Prepared rows include candidates later rejected by a
+budget or output failure; they are not committed-row totals. Fixed counters
+also identify actual typed serial, general, and owned parallel invocations,
+with the parallel count settled after drain whenever at least one lane started.
+Serial fallback reasons distinguish small batches, unsupported plans, CPU
+capacity, preparation and partition eligibility, and owned-work admission.
+These are job-lifetime attempted-work observations; a restored job starts with
+fresh counters. Synchronous preparation accumulates counters locally and
+publishes them in a batch before an await or callback finalization.
+The call counters cover synchronous row kernels and owned entity lanes;
+dedicated indicator workers retain their existing work observations. Fallback
+counters describe actual entity-lane decisions and synchronous bridge fallback.
 
 Retained history keeps Scalar and Arrow blocks in event order. A shared
 descriptor-cost policy chooses the representation for Rows, Duration, and

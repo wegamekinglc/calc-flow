@@ -40,6 +40,7 @@ fn dropped_callback_waits_for_numeric_join_and_freezes_its_first_outcome() {
     assert_eq!(snapshot.watermark.numeric_rows, 9);
     assert_eq!(snapshot.watermark.numeric_parallel_rows, 9);
     assert_eq!(snapshot.watermark.numeric_lanes_started, 2);
+    assert_eq!(snapshot.watermark.numeric_parallel_calls, 1);
     assert_eq!(
         snapshot.watermark.numeric_update_duration,
         Duration::from_nanos(5)
@@ -79,6 +80,7 @@ fn joined_numeric_work_does_not_publish_before_emit_and_commit_complete() {
     assert_eq!(snapshot.data.numeric_rows, 8);
     assert_eq!(snapshot.data.numeric_parallel_rows, 8);
     assert_eq!(snapshot.data.numeric_lanes_started, 2);
+    assert_eq!(snapshot.data.numeric_parallel_calls, 1);
     assert_eq!(snapshot.data.output_rows_prepared, 8);
     assert_eq!(
         snapshot.data.numeric_update_duration,
@@ -108,6 +110,7 @@ fn explicit_error_then_guard_drop_and_late_cancel_remain_failed_after_join() {
     assert_eq!(snapshot.end.numeric_rows, 17);
     assert_eq!(snapshot.end.numeric_parallel_rows, 17);
     assert_eq!(snapshot.end.numeric_lanes_started, 1);
+    assert_eq!(snapshot.end.numeric_parallel_calls, 1);
 }
 
 #[test]

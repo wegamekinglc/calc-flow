@@ -2084,6 +2084,23 @@ fn rolling_callback_to_py<'py>(
         "numeric_rows" => status.numeric_rows,
         "numeric_lanes_started" => status.numeric_lanes_started,
         "numeric_parallel_rows" => status.numeric_parallel_rows,
+        "history_charge_scalar_rows" => status.history_charge_scalar_rows,
+        "history_charge_columnar_chunks" => status.history_charge_columnar_chunks,
+        "history_append_rows_prepared" => status.history_append_rows_prepared,
+        "history_evict_rows_prepared" => status.history_evict_rows_prepared,
+        "numeric_serial_calls" => status.numeric_serial_calls,
+        "numeric_general_calls" => status.numeric_general_calls,
+        "numeric_parallel_calls" => status.numeric_parallel_calls,
+        "parallel_fallback_no_work_client" => status.parallel_fallback_no_work_client,
+        "parallel_fallback_small_batch" => status.parallel_fallback_small_batch,
+        "parallel_fallback_unsupported_plan" => status.parallel_fallback_unsupported_plan,
+        "parallel_fallback_cpu_limit" => status.parallel_fallback_cpu_limit,
+        "parallel_fallback_prepared_ineligible" => status.parallel_fallback_prepared_ineligible,
+        "parallel_fallback_lane_partition_rejected" => status.parallel_fallback_lane_partition_rejected,
+        "parallel_fallback_owner_busy" => status.parallel_fallback_owner_busy,
+        "parallel_fallback_owner_already_used" => status.parallel_fallback_owner_already_used,
+        "parallel_fallback_generation_exhausted" => status.parallel_fallback_generation_exhausted,
+        "parallel_fallback_scratch_unrepresentable" => status.parallel_fallback_scratch_unrepresentable,
         "history_rows_materialized" => status.history_rows_materialized,
         "scalar_value_conversions" => status.scalar_value_conversions,
         "output_rows_prepared" => status.output_rows_prepared,
@@ -2732,6 +2749,54 @@ mod tests {
                     mapped.get_item(name).unwrap().extract::<u64>().unwrap(),
                     expected
                 );
+            }
+        });
+    }
+
+    #[test]
+    fn rolling_history_and_route_status_matches_native_integer_fields() {
+        Python::initialize();
+        Python::attach(|py| {
+            let mut status = calc_flow::RollingCallbackMetrics::default();
+            for (index, field) in [
+                &mut status.history_charge_scalar_rows,
+                &mut status.history_charge_columnar_chunks,
+                &mut status.history_append_rows_prepared,
+                &mut status.history_evict_rows_prepared,
+                &mut status.numeric_serial_calls,
+                &mut status.numeric_general_calls,
+                &mut status.numeric_parallel_calls,
+                &mut status.parallel_fallback_no_work_client,
+                &mut status.parallel_fallback_small_batch,
+                &mut status.parallel_fallback_unsupported_plan,
+                &mut status.parallel_fallback_cpu_limit,
+                &mut status.parallel_fallback_prepared_ineligible,
+                &mut status.parallel_fallback_lane_partition_rejected,
+                &mut status.parallel_fallback_owner_busy,
+                &mut status.parallel_fallback_owner_already_used,
+                &mut status.parallel_fallback_generation_exhausted,
+                &mut status.parallel_fallback_scratch_unrepresentable,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                *field = u64::MAX - u64::try_from(index).unwrap();
+            }
+            let expected = serde_json::to_value(&status).unwrap();
+            let actual = super::rolling_callback_to_py(py, &status).unwrap();
+            for (name, value) in expected.as_object().unwrap() {
+                if let Some(expected) = value.as_u64() {
+                    assert_eq!(
+                        actual
+                            .get_item(name)
+                            .unwrap()
+                            .unwrap()
+                            .extract::<u64>()
+                            .unwrap(),
+                        expected,
+                        "{name}"
+                    );
+                }
             }
         });
     }

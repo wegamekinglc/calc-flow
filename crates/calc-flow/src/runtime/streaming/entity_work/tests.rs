@@ -30,6 +30,7 @@ async fn cpu_rolling_observation_counts_actual_lanes_after_drain() {
     assert!(metrics.watermark.numeric_rows > 0);
     let observed = serde_json::to_value(&metrics.watermark).unwrap();
     assert_eq!(observed["numeric_lanes_started"], serde_json::json!(2));
+    assert_eq!(observed["numeric_parallel_calls"], serde_json::json!(1));
     assert_eq!(
         observed["numeric_parallel_rows"],
         serde_json::json!(metrics.watermark.numeric_rows),
@@ -311,6 +312,7 @@ async fn partial_launch_panic_keeps_the_first_handle_until_scope_settlement() {
     assert_eq!(store.snapshot().watermark.numeric_rows, 0);
     let observed = serde_json::to_value(&store.snapshot().watermark).unwrap();
     assert_eq!(observed["numeric_lanes_started"], serde_json::json!(1));
+    assert_eq!(observed["numeric_parallel_calls"], serde_json::json!(1));
     assert_eq!(observed["numeric_parallel_rows"], serde_json::json!(0));
     scope.settle_abandoned().await;
     assert_eq!(store.snapshot().watermark.interrupted, 1);

@@ -32,6 +32,11 @@ def test_rolling_metrics_types_export_fixed_callback_units() -> None:
     )
 
 
+def _assert_integer_callback_fields(values: calc_flow.RollingCallbackMetrics) -> None:
+    for name in get_type_hints(calc_flow.RollingCallbackMetrics):
+        assert type(values[name]) is int
+
+
 def test_managed_rolling_metrics_publish_eof_and_detached_status(
     tmp_path: Path,
 ) -> None:
@@ -152,8 +157,11 @@ def test_managed_rolling_metrics_publish_eof_and_detached_status(
             assert observation["end"]["succeeded"] == 1
             for callback in ("data", "watermark", "end"):
                 values = observation[callback]
+                _assert_integer_callback_fields(values)
                 assert values["numeric_lanes_started"] == 0
                 assert values["numeric_parallel_rows"] == 0
+                assert values["numeric_parallel_calls"] == 0
+                assert values["numeric_general_calls"] == 0
                 assert values["started"] == sum(
                     values[name]
                     for name in ("succeeded", "failed", "cancelled", "interrupted")

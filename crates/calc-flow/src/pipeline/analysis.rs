@@ -62,6 +62,7 @@ impl PipelineBuilder {
             edges,
             options: options.clone(),
             diagnostics,
+            update_semantics: self.update_semantics,
         })
     }
 
@@ -88,6 +89,8 @@ impl PipelineBuilder {
         udfs: &UdfRegistrySnapshot,
         request: &PortabilityRequest,
     ) -> Result<BatchExecutionPlan> {
+        self.check_update_admission(udfs, crate::CompileMode::Batch)
+            .await?;
         self.analyze(
             udfs,
             &AnalysisOptions {
@@ -109,6 +112,8 @@ impl PipelineBuilder {
         requirements: &StreamRequirements,
         request: &PortabilityRequest,
     ) -> Result<StreamExecutionPlan> {
+        self.check_update_admission(udfs, crate::CompileMode::Stream)
+            .await?;
         self.analyze(
             udfs,
             &AnalysisOptions {
@@ -119,6 +124,75 @@ impl PipelineBuilder {
         .check()?;
         self.compile_stream(udfs, requirements)
     }
+
+    async fn check_update_admission(
+        &self,
+        udfs: &UdfRegistrySnapshot,
+        mode: crate::CompileMode,
+    ) -> Result<()> {
+        if !self.update_semantics.is_legacy() {
+            self.analyze(udfs, &AnalysisOptions::default())
+                .await?
+                .check_updates(mode)?;
+        }
+        Ok(())
+    }
+}
+
+/// The synchronous compiler uses only declared exact ports and the same AST rules.
+pub(super) fn gate_updates(builder: &PipelineBuilder, execution_mode: &str) -> Result<()> {
+    if builder.update_semantics.is_legacy() {
+        return Ok(());
+    }
+    let nodes = builder
+        .nodes
+        .iter()
+        .map(|(id, node)| {
+            let op = &node.operator;
+            let (kind, query) = operator_declaration(op);
+            let opaque = !op.udf_references().is_empty();
+            Declaration {
+                path: node_path(id),
+                kind: if opaque { "opaque" } else { kind }.into(),
+                query: if opaque { None } else { query },
+                schema: op
+                    .output_ports()
+                    .first()
+                    .and_then(|port| port.schema())
+                    .map(schema_fields),
+                ordering: QueryOrderingFacts::default(),
+                batch_support: None,
+                stream_support: None,
+            }
+        })
+        .collect();
+    let edges = builder
+        .edges
+        .iter()
+        .map(|edge| DeclarationEdge {
+            path: format!(
+                "graph.edges[{}][{}][{}][{}]",
+                quoted(&edge.source.node_id),
+                quoted(&edge.source.port),
+                quoted(&edge.target.node_id),
+                quoted(&edge.target.port)
+            ),
+            source_path: node_path(&edge.source.node_id),
+            target_path: node_path(&edge.target.node_id),
+        })
+        .collect();
+    analyze_graph(DeclarationGraph {
+        nodes,
+        edges,
+        options: AnalysisOptions::default(),
+        diagnostics: vec![],
+        update_semantics: builder.update_semantics,
+    })?
+    .check_updates(if execution_mode == "stream" {
+        crate::CompileMode::Stream
+    } else {
+        crate::CompileMode::Batch
+    })
 }
 
 fn input_schemas(

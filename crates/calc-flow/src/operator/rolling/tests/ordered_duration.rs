@@ -115,6 +115,11 @@ async fn test_ordered_duration_hybrid_chunks_expire_and_fallback_in_order() {
         .unwrap();
     assert!(matches!(&tiny[5], ScalarValue::Utf8(Some(label)) if label.as_ptr() == retained_label));
     assert_canonical_histories(&mut operator, &input, &reference);
+    let observed = store.snapshot().watermark;
+    assert!(observed.history_charge_scalar_rows > 0);
+    assert!(observed.history_charge_columnar_chunks > 0);
+    assert!(observed.history_append_rows_prepared > 0);
+    assert!(observed.history_evict_rows_prepared > 0);
 }
 
 #[tokio::test]

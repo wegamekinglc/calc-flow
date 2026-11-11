@@ -35,6 +35,7 @@ pages explain how the implementation provides those behaviors.
 
 ## 3. API references
 
+- [DataFrame and SQL relations in Rust and Python](relational-frontends.md).
 - [Query history and strict portability checks](query-history-portability.md).
 
 1. [API reference](api-reference.md): public surfaces, errors,

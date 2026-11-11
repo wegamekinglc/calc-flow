@@ -12,8 +12,10 @@ use datafusion::arrow::{
 pub(super) use super::history::ColumnarHistory;
 use super::history::{RetainedHistoryAppend, RetainedRows, RetentionPolicy};
 use super::kernel::{EntityRows, RecurrenceSeed, StreamKernelUpdate};
-use crate::operator::rolling_metrics::{RollingMetricsRecorder, RollingStage, RollingWork};
-use crate::runtime::streaming::entity_work::ReservePair;
+use crate::operator::rolling_metrics::{
+    RollingMetricsRecorder, RollingStage, RollingWork, RollingWorkBatch,
+};
+use crate::runtime::streaming::entity_work::{ReservePair, SerialReason};
 
 use super::{
     Arc, Array, BTreeMap, Batch, BufferedRow, CompiledRollingSpec, EventTime, KeyValue,
@@ -134,17 +136,19 @@ impl RollingOperator {
         last_identity: Option<Vec<u8>>,
         error: super::CalcFlowError,
         node: &str,
+        observer: Option<&RollingMetricsRecorder>,
     ) -> Result<()> {
         self.state
             .owned_mut()?
             .ordered
             .restore_front(records, last_identity);
-        if let Ok(charge) = super::budget::full_state_charge(
+        if let Ok(charge) = super::budget::full_state_charge_observed(
             &self.state.buffer,
             &self.state.ordered,
             &self.state.histories,
             &self.compiled,
             node,
+            observer,
         ) {
             self.state.owned_mut()?.charge = charge;
         }
@@ -156,9 +160,10 @@ impl RollingOperator {
         prepared: &mut PreparedOrderedOutput,
         removed: super::budget::StateCharge,
         node: &str,
+        observer: Option<&RollingMetricsRecorder>,
     ) -> Result<(super::budget::StateCharge, super::budget::StateCharge)> {
         let current = self.state.charge.checked_sub(removed)?;
-        let next = prepared.projected_charge(self, current, node)?;
+        let next = prepared.projected_charge(self, current, node, observer)?;
         self.check_state_budget(next, node)?;
         Ok((current, next))
     }
@@ -263,13 +268,12 @@ impl RollingOperator {
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<BTreeMap<RowIdentity, BufferedRow>> {
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::InputValidation));
+        let mut work = RollingWorkBatch::new(observer);
         let mut materialized = BTreeMap::new();
         for record in &self.state.ordered.records {
             for index in 0..record.num_rows() {
                 let row = read_buffered_row(record, index, &self.compiled, &self.name)?;
-                if let Some(recorder) = observer {
-                    recorder.add(RollingWork::ScalarValueConversions, record.num_columns());
-                }
+                work.add(RollingWork::ScalarValueConversions, record.num_columns());
                 materialized.insert(row.identity.clone(), row);
             }
         }
@@ -379,34 +383,36 @@ impl RollingOperator {
             .typed_kernel_state
             .as_deref()
             .expect("state initialized above");
-        let Some(client) = context
-            .entity_work()
-            .filter(|_| plan.supports_entity_parallel(input))
-        else {
-            return plan.prepare_ordered_stream_with_history(
-                prior,
+        let Some(client) = context.entity_work() else {
+            return self.serial_ordered_update(
                 input,
-                Some(&self.state.histories),
-                context.operator_id(),
-                observer,
+                context,
+                RollingWork::ParallelFallbackNoWorkClient,
             );
         };
+        if let Some(reason) = plan.entity_parallel_fallback(input) {
+            return self.serial_ordered_update(input, context, reason);
+        }
         let cpus = context.job().gather_owner().parallelism();
         #[cfg(test)]
         let cpus = client.parallelism(cpus);
         if cpus < 2 {
-            return plan.prepare_ordered_stream_with_history(
-                prior,
+            return self.serial_ordered_update(
                 input,
-                Some(&self.state.histories),
-                context.operator_id(),
-                observer,
+                context,
+                RollingWork::ParallelFallbackCpuLimit,
             );
         }
         let prepared =
             plan.prepare_ordered_stream_inputs(prior, input, context.operator_id(), observer)?;
-        let Some(scratch) = prepared.scratch_plan_for_cpu(cpus) else {
-            return prepared.finish_serial(observer);
+        let scratch = match prepared.scratch_plan_for_cpu(cpus) {
+            Ok(scratch) => scratch,
+            Err(reason) => {
+                if let Some(recorder) = observer {
+                    recorder.add(reason, 1);
+                }
+                return prepared.finish_serial(observer);
+            }
         };
         match client.try_reserve(scratch) {
             ReservePair::Reserved(launch) => match prepared.split_lanes(cpus) {
@@ -421,10 +427,28 @@ impl RollingOperator {
                 }
                 Err(prepared) => {
                     drop(launch);
+                    if let Some(recorder) = observer {
+                        recorder.add(RollingWork::ParallelFallbackLanePartitionRejected, 1);
+                    }
                     prepared.finish_serial(observer)
                 }
             },
-            ReservePair::Serial(_reason) => prepared.finish_serial(observer),
+            ReservePair::Serial(reason) => {
+                let work = match reason {
+                    SerialReason::Busy => RollingWork::ParallelFallbackOwnerBusy,
+                    SerialReason::AlreadyUsed => RollingWork::ParallelFallbackOwnerAlreadyUsed,
+                    SerialReason::GenerationExhausted => {
+                        RollingWork::ParallelFallbackGenerationExhausted
+                    }
+                    SerialReason::Unrepresentable => {
+                        RollingWork::ParallelFallbackScratchUnrepresentable
+                    }
+                };
+                if let Some(recorder) = observer {
+                    recorder.add(work, 1);
+                }
+                prepared.finish_serial(observer)
+            }
             ReservePair::Stopped => {
                 context.check_cancelled()?;
                 Err(crate::CalcFlowError::Cancelled {
@@ -432,6 +456,30 @@ impl RollingOperator {
                 })
             }
         }
+    }
+
+    fn serial_ordered_update(
+        &self,
+        input: &RecordBatch,
+        context: &StreamOperatorContext<'_>,
+        reason: RollingWork,
+    ) -> Result<StreamKernelUpdate> {
+        let observer = context.rolling_metrics();
+        let mut work = RollingWorkBatch::new(observer);
+        work.add(reason, 1);
+        work.add(RollingWork::NumericSerialCalls, 1);
+        self.compiled
+            .kernel_plan
+            .prepare_ordered_stream_with_history(
+                self.state
+                    .typed_kernel_state
+                    .as_deref()
+                    .expect("state initialized above"),
+                input,
+                Some(&self.state.histories),
+                context.operator_id(),
+                observer,
+            )
     }
 
     pub(super) async fn emit_ordered(
@@ -454,6 +502,7 @@ impl RollingOperator {
                     last_identity,
                     internal_error("ordered rolling state has unsupported state charge"),
                     context.operator_id(),
+                    observer,
                 );
             }
             Err(error) => {
@@ -462,6 +511,7 @@ impl RollingOperator {
                     last_identity,
                     error,
                     context.operator_id(),
+                    observer,
                 );
             }
         };
@@ -478,6 +528,7 @@ impl RollingOperator {
                     last_identity,
                     error,
                     context.operator_id(),
+                    observer,
                 );
             }
         };
@@ -490,21 +541,27 @@ impl RollingOperator {
                     last_identity,
                     error,
                     context.operator_id(),
+                    observer,
                 );
             }
         };
-        let (current_charge, next_charge) =
-            match self.projected_ordered_charge(&mut prepared, removed, context.operator_id()) {
-                Ok(charge) => charge,
-                Err(error) => {
-                    return self.restore_ordered_failure(
-                        records,
-                        last_identity,
-                        error,
-                        context.operator_id(),
-                    );
-                }
-            };
+        let (current_charge, next_charge) = match self.projected_ordered_charge(
+            &mut prepared,
+            removed,
+            context.operator_id(),
+            observer,
+        ) {
+            Ok(charge) => charge,
+            Err(error) => {
+                return self.restore_ordered_failure(
+                    records,
+                    last_identity,
+                    error,
+                    context.operator_id(),
+                    observer,
+                );
+            }
+        };
         let state = self.state.owned_mut()?;
         state.charge = current_charge;
         for batch in std::mem::take(&mut prepared.batches) {
@@ -542,12 +599,14 @@ impl PreparedOrderedOutput {
         operator: &RollingOperator,
         current: super::budget::StateCharge,
         node: &str,
+        observer: Option<&RollingMetricsRecorder>,
     ) -> Result<super::budget::StateCharge> {
+        let mut work = RollingWorkBatch::new(observer);
         let mut old = super::budget::StateCharge::default();
         let mut new = super::budget::StateCharge::default();
         for tail in &mut self.touched {
             let previous = operator.state.histories.by_entity.get(&tail.entity);
-            let (previous, projected) = tail.changed_charge(previous, node)?;
+            let (previous, projected) = tail.changed_charge(previous, node, &mut work)?;
             old = old.checked_add(previous, node)?;
             new = new.checked_add(projected, node)?;
         }
@@ -746,7 +805,7 @@ impl EntityTail {
         compiled: &CompiledRollingSpec,
         seeds: &[Option<RecurrenceSeed>],
         node_id: &str,
-        observer: Option<&RollingMetricsRecorder>,
+        work: &mut RollingWorkBatch<'_>,
     ) -> Result<RetainedHistoryAppend> {
         let source = input;
         let input = source.record;
@@ -756,9 +815,7 @@ impl EntityTail {
             .map(|column| {
                 let value = ScalarValue::try_from_array(input.column(column.index), self.first)
                     .map_err(|error| operator_error(node_id, &error.to_string()))?;
-                if let Some(recorder) = observer {
-                    recorder.add(RollingWork::ScalarValueConversions, 1);
-                }
+                work.add(RollingWork::ScalarValueConversions, 1);
                 KeyValue::from_nullable_scalar(&value, node_id)
             })
             .collect::<Result<Vec<_>>>()?;
@@ -791,10 +848,8 @@ impl EntityTail {
                                 .map_err(|error| operator_error(node_id, &error.to_string()))
                         })
                         .collect::<Result<Vec<_>>>()?;
-                    if let Some(recorder) = observer {
-                        recorder.add(RollingWork::HistoryRowsMaterialized, 1);
-                        recorder.add(RollingWork::ScalarValueConversions, input.num_columns());
-                    }
+                    work.add(RollingWork::HistoryRowsMaterialized, 1);
+                    work.add(RollingWork::ScalarValueConversions, input.num_columns());
                     Ok(values)
                 })
                 .collect::<Result<VecDeque<_>>>()?;
@@ -815,6 +870,8 @@ impl EntityTail {
             })
             .transpose()?
             .flatten();
+        work.add(RollingWork::HistoryAppendRowsPrepared, rows.len());
+        work.add(RollingWork::HistoryEvictRowsPrepared, discarded_rows);
         Ok(RetainedHistoryAppend {
             entity,
             rows,
@@ -835,6 +892,7 @@ fn retained_histories(
     node_id: &str,
     observer: Option<&RollingMetricsRecorder>,
 ) -> Result<Vec<RetainedHistoryAppend>> {
+    let mut work = RollingWorkBatch::new(observer);
     let retention = RetentionPolicy::new(compiled);
     let times = timestamps(input, compiled)?;
     let input = RetainedInput {
@@ -853,7 +911,7 @@ fn retained_histories(
     )?
     .map(|tail| {
         let seeds = &seeds[tail.entity_id];
-        tail.prepare(&input, histories, compiled, seeds, node_id, observer)
+        tail.prepare(&input, histories, compiled, seeds, node_id, &mut work)
     })
     .collect()
 }

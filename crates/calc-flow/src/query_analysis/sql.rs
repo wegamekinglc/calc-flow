@@ -41,7 +41,11 @@ pub(super) struct SqlFacts {
     pub ordering: QueryOrderingFacts,
 }
 
-pub(super) fn inspect(text: &str, fields: &[crate::ArrowFieldSpec]) -> crate::Result<SqlFacts> {
+pub(super) fn inspect(
+    text: &str,
+    fields: &[crate::ArrowFieldSpec],
+    latest: bool,
+) -> crate::Result<SqlFacts> {
     let validated = parse_select_query(text)?;
     let aggregate = validated.has_stream_aggregate();
     let mut result = SqlFacts {
@@ -55,17 +59,29 @@ pub(super) fn inspect(text: &str, fields: &[crate::ArrowFieldSpec]) -> crate::Re
     let Statement::Query(query) = statement.as_ref() else {
         return Ok(result);
     };
+    if proved_cte(&statement, query, aggregate, latest) {
+        result.proof = Proof::RowLocal;
+        return Ok(result);
+    }
     let SetExpr::Select(select) = query.body.as_ref() else {
         return Ok(result);
     };
     if !has_simple_shape(query) {
         return Ok(result);
     }
-    result.proof = query_proof(&statement, query, select, aggregate);
+    result.proof = query_proof(&statement, query, select, aggregate, latest);
     if let Some(order) = &query.order_by {
         result.ordering = order_keys(order, fields);
     }
     Ok(result)
+}
+
+fn proved_cte(statement: &Statement, query: &Query, aggregate: bool, latest: bool) -> bool {
+    latest
+        && !aggregate
+        && query.with.is_some()
+        && row_local_cte(query)
+        && row_local_statement(statement)
 }
 
 fn has_simple_shape(query: &Query) -> bool {
@@ -90,11 +106,17 @@ fn has_simple_shape(query: &Query) -> bool {
     simple_query(&normalized)
 }
 
-fn query_proof(statement: &Statement, query: &Query, select: &Select, aggregate: bool) -> Proof {
+fn query_proof(
+    statement: &Statement,
+    query: &Query,
+    select: &Select,
+    aggregate: bool,
+    latest: bool,
+) -> Proof {
     if aggregate {
         aggregate_proof(query, select)
     } else if row_local_statement(statement) {
-        row_local_proof(query, select)
+        row_local_proof(query, select, latest)
     } else if select.projection.iter().all(row_number_item) {
         selection_proof(select.selection.is_none())
     } else {
@@ -114,7 +136,7 @@ fn aggregate_proof(query: &Query, select: &Select) -> Proof {
     }
 }
 
-fn row_local_proof(query: &Query, select: &Select) -> Proof {
+fn row_local_proof(query: &Query, select: &Select, latest: bool) -> Proof {
     if let Some(limit) = &query.limit_clause {
         return selection_proof(positive_limit(limit) && select.selection.is_none());
     }
@@ -125,7 +147,27 @@ fn row_local_proof(query: &Query, select: &Select) -> Proof {
             Proof::PerBatchUnproven
         };
     }
-    Proof::RowLocal
+    if latest && query.order_by.is_some() {
+        Proof::PerBatchUnproven
+    } else {
+        Proof::RowLocal
+    }
+}
+
+fn row_local_cte(query: &Query) -> bool {
+    let mut local = query.clone();
+    local.with = None;
+    let SetExpr::Select(select) = local.body.as_ref() else {
+        return false;
+    };
+    has_simple_shape(&local)
+        && select.distinct.is_none()
+        && select.having.is_none()
+        && query.order_by.is_none()
+        && query.limit_clause.is_none()
+        && query.with.as_ref().is_none_or(|with| {
+            !with.recursive && with.cte_tables.iter().all(|cte| row_local_cte(&cte.query))
+        })
 }
 
 fn selection_proof(proved: bool) -> Proof {

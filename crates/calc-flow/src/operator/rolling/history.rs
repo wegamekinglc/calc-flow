@@ -8,9 +8,9 @@ use datafusion::arrow::{
 use super::{
     BufferedRow, CompiledRollingSpec, CompiledWindowGroup, EntityRollingState, HistoryUpdates,
     KeyValue, RecordBatch, Result, RollingHistories, RollingMetricsRecorder, RollingStage,
-    RollingWork, ScalarValue, VecDeque, WindowState, budget, fresh_windows, group_rows_by_entity,
-    history_event_time, internal_error, kernel::StreamKernelUpdate, operator_error,
-    read_buffered_row, state_codec::recurrence_windows,
+    RollingWork, RollingWorkBatch, ScalarValue, VecDeque, WindowState, budget, fresh_windows,
+    group_rows_by_entity, history_event_time, internal_error, kernel::StreamKernelUpdate,
+    operator_error, read_buffered_row, state_codec::recurrence_windows,
 };
 use budget::{HistoryCharge, StateCharge};
 
@@ -20,14 +20,27 @@ pub(super) enum PreparedHistoryUpdate {
 }
 
 impl PreparedHistoryUpdate {
+    #[cfg(test)]
     pub(super) fn changed_charge(
         &mut self,
         histories: &RollingHistories,
         node: &str,
     ) -> Result<(StateCharge, StateCharge)> {
+        self.changed_charge_observed(histories, node, None)
+    }
+
+    pub(super) fn changed_charge_observed(
+        &mut self,
+        histories: &RollingHistories,
+        node: &str,
+        observer: Option<&RollingMetricsRecorder>,
+    ) -> Result<(StateCharge, StateCharge)> {
+        let mut work = RollingWorkBatch::new(observer);
         let tails = match self {
             Self::Replace(updates) => {
-                return budget::changed_histories_charge(histories, updates, node);
+                return budget::changed_histories_charge_with_work(
+                    histories, updates, node, &mut work,
+                );
             }
             Self::Append(tails) => tails,
         };
@@ -35,7 +48,7 @@ impl PreparedHistoryUpdate {
         let mut new = StateCharge::default();
         for tail in tails {
             let previous = histories.by_entity.get(&tail.entity);
-            let (previous, projected) = tail.changed_charge(previous, node)?;
+            let (previous, projected) = tail.changed_charge(previous, node, &mut work)?;
             old = old.checked_add(previous, node)?;
             new = new.checked_add(projected, node)?;
         }
@@ -60,7 +73,9 @@ pub(super) fn prepare_scalar_appends(
     compiled: &CompiledRollingSpec,
     update: &StreamKernelUpdate,
     node: &str,
+    observer: Option<&RollingMetricsRecorder>,
 ) -> Result<PreparedHistoryUpdate> {
+    let mut work = RollingWorkBatch::new(observer);
     let seeds = update.recurrence_seeds();
     let tails = group_rows_by_entity(rows)
         .into_iter()
@@ -85,6 +100,8 @@ pub(super) fn prepare_scalar_appends(
             {
                 windows = fresh_windows(compiled);
             }
+            work.add(RollingWork::HistoryAppendRowsPrepared, indices.len() - skip);
+            work.add(RollingWork::HistoryEvictRowsPrepared, discarded_rows);
             Ok(RetainedHistoryAppend {
                 entity: entity.clone(),
                 rows: RetainedRows::Scalar(
@@ -103,6 +120,22 @@ pub(super) fn prepare_scalar_appends(
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(PreparedHistoryUpdate::Append(tails))
+}
+
+pub(super) fn observe_replacement(
+    incoming: usize,
+    previous: Option<&EntityRollingState>,
+    state: &EntityRollingState,
+    work: &mut RollingWorkBatch<'_>,
+) {
+    let retained = state.rows.len() + state.columnar.rows;
+    let appended = incoming.min(retained);
+    let old = previous.map_or(0, |state| state.rows.len() + state.columnar.rows);
+    work.add(RollingWork::HistoryAppendRowsPrepared, appended);
+    work.add(
+        RollingWork::HistoryEvictRowsPrepared,
+        old.saturating_sub(retained - appended),
+    );
 }
 
 /// Rows and duration consumers retain the union of their required suffixes.
@@ -382,7 +415,7 @@ impl ColumnarHistory {
         &self,
         compiled: &CompiledRollingSpec,
         node_id: &str,
-        observer: Option<&RollingMetricsRecorder>,
+        work: &mut RollingWorkBatch<'_>,
     ) -> Result<Vec<Option<ScalarRows>>> {
         self.records
             .iter()
@@ -393,10 +426,8 @@ impl ColumnarHistory {
                 let mut rows = VecDeque::with_capacity(record.num_rows());
                 for index in 0..record.num_rows() {
                     rows.push_back(read_buffered_row(record, index, compiled, node_id)?.values);
-                    if let Some(recorder) = observer {
-                        recorder.add(RollingWork::HistoryRowsMaterialized, 1);
-                        recorder.add(RollingWork::ScalarValueConversions, record.num_columns());
-                    }
+                    work.add(RollingWork::HistoryRowsMaterialized, 1);
+                    work.add(RollingWork::ScalarValueConversions, record.num_columns());
                 }
                 Ok(Some(rows))
             })
@@ -425,13 +456,14 @@ impl RollingHistories {
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<()> {
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
+        let mut work = RollingWorkBatch::new(observer);
         let prepared = self
             .by_entity
             .values()
             .map(|state| {
                 state
                     .columnar
-                    .prepare_materialize(compiled, node_id, observer)
+                    .prepare_materialize(compiled, node_id, &mut work)
             })
             .collect::<Result<Vec<_>>>()?;
         for (state, rows) in self.by_entity.values_mut().zip(prepared) {
@@ -473,21 +505,22 @@ impl RetainedHistoryAppend {
         &mut self,
         previous: Option<&EntityRollingState>,
         node: &str,
+        work: &mut RollingWorkBatch<'_>,
     ) -> Result<(StateCharge, StateCharge)> {
         let prior = previous
-            .map(|state| budget::cached_history_entity_charge(&self.entity, state, node))
+            .map(|state| budget::cached_history_entity_charge(&self.entity, state, node, work))
             .transpose()?
             .unwrap_or_default();
         let old = prior.total(node)?;
         let discarded = previous
-            .map(|state| self.discarded_charge(state, node))
+            .map(|state| self.discarded_charge(state, node, work))
             .transpose()?
             .unwrap_or_default();
         let next = HistoryCharge {
             retained: prior
                 .retained
                 .checked_sub(discarded)?
-                .checked_add(self.appended_charge(node)?, node)?,
+                .checked_add(self.appended_charge(node, work)?, node)?,
             metadata: budget::history_metadata_charge(
                 &self.entity,
                 &self.windows,
@@ -500,32 +533,39 @@ impl RetainedHistoryAppend {
         Ok((old, new))
     }
 
-    fn discarded_charge(&self, previous: &EntityRollingState, node: &str) -> Result<StateCharge> {
+    fn discarded_charge(
+        &self,
+        previous: &EntityRollingState,
+        node: &str,
+        work: &mut RollingWorkBatch<'_>,
+    ) -> Result<StateCharge> {
         let scalar_discard = self.discarded_rows.min(previous.rows.len());
         let mut charge = StateCharge::default();
         for row in previous.rows.iter().take(scalar_discard) {
-            charge = charge.checked_add(budget::scalar_history_row_charge(row, node)?, node)?;
+            charge =
+                charge.checked_add(budget::scalar_history_row_charge(row, node, work)?, node)?;
         }
         charge.checked_add(
             previous.columnar.discarded_charge(
                 self.discarded_rows - scalar_discard,
                 self.prepared_front.as_ref(),
                 node,
+                work,
             )?,
             node,
         )
     }
 
-    fn appended_charge(&self, node: &str) -> Result<StateCharge> {
+    fn appended_charge(&self, node: &str, work: &mut RollingWorkBatch<'_>) -> Result<StateCharge> {
         match &self.rows {
             RetainedRows::Columnar(record) if record.num_rows() != 0 => {
-                budget::ordered_record_charge(record, node)?
+                budget::columnar_history_charge(record, node, work)?
                     .ok_or_else(|| internal_error("columnar tail has unsupported charge"))
             }
             RetainedRows::Columnar(_) => Ok(StateCharge::default()),
             RetainedRows::Scalar(rows) => {
                 rows.iter().try_fold(StateCharge::default(), |charge, row| {
-                    charge.checked_add(budget::scalar_history_row_charge(row, node)?, node)
+                    charge.checked_add(budget::scalar_history_row_charge(row, node, work)?, node)
                 })
             }
         }
@@ -561,6 +601,7 @@ impl ColumnarHistory {
         mut discard: usize,
         prepared_front: Option<&RecordBatch>,
         node: &str,
+        work: &mut RollingWorkBatch<'_>,
     ) -> Result<StateCharge> {
         let mut charge = StateCharge::default();
         for chunk in &self.records {
@@ -570,8 +611,8 @@ impl ColumnarHistory {
             let rows = chunk.len();
             if let RetainedRows::Scalar(values) = chunk {
                 for row in values.iter().take(discard) {
-                    charge =
-                        charge.checked_add(budget::scalar_history_row_charge(row, node)?, node)?;
+                    charge = charge
+                        .checked_add(budget::scalar_history_row_charge(row, node, work)?, node)?;
                 }
                 discard = discard.saturating_sub(rows);
                 continue;
@@ -579,7 +620,7 @@ impl ColumnarHistory {
             let RetainedRows::Columnar(record) = chunk else {
                 unreachable!()
             };
-            let original = budget::ordered_record_charge(record, node)?
+            let original = budget::columnar_history_charge(record, node, work)?
                 .ok_or_else(|| internal_error("columnar history has unsupported charge"))?;
             if discard >= rows {
                 charge = charge.checked_add(original, node)?;
@@ -587,7 +628,7 @@ impl ColumnarHistory {
                 continue;
             }
             let retained = prepared_front.expect("partial discard has a prepared front");
-            let retained_charge = budget::ordered_record_charge(retained, node)?
+            let retained_charge = budget::columnar_history_charge(retained, node, work)?
                 .ok_or_else(|| internal_error("columnar history has unsupported charge"))?;
             charge = charge.checked_add(original.checked_sub(retained_charge)?, node)?;
             discard = 0;

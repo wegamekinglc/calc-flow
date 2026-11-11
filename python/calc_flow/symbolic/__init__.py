@@ -43,9 +43,10 @@ from calc_flow.symbolic.query_analysis import (
     QueryTieOrder,
     SupportStatus,
     UpdateKind,
+    UpdateSemantics,
 )
 from calc_flow.symbolic.sql import snapshot_sql, sql
-from calc_flow.symbolic.types import Field
+from calc_flow.symbolic.types import CompileMode, Field
 from calc_flow.symbolic.windows import (
     CrossSectionGroup,
     DurationFrame,
@@ -59,6 +60,7 @@ from calc_flow.symbolic.windows import (
 )
 
 __all__ = [
+    "CompileMode",
     "AnalysisOptions",
     "Comparison",
     "ComparisonCutoff",
@@ -80,6 +82,7 @@ __all__ = [
     "QueryTieOrder",
     "SupportStatus",
     "UpdateKind",
+    "UpdateSemantics",
     "AnalysisIssue",
     "AnalysisResult",
     "ArrayExpr",

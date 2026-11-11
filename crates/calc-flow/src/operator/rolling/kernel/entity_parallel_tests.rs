@@ -235,6 +235,7 @@ pub(crate) fn entity_parallel_test_work(
         .unwrap();
     let scratch = prepared
         .scratch_plan_for_cpu(cpus)
+        .ok()
         .expect("supported CPU work");
     let (seed, requests) = prepared
         .split_lanes(cpus)
@@ -405,6 +406,23 @@ fn entity_parallel_scratch_uses_checked_capacity_including_entity_containers() {
 }
 
 #[test]
+fn test_entity_parallel_scratch_rejects_unrepresentable_capacity_with_its_actual_reason() {
+    let input = input(64_000, 64, false);
+    let plan = lane_plan(false);
+    let state = warm(&plan, &input);
+    let prior = format!("{state:?}");
+    let mut prepared = plan
+        .prepare_ordered_stream_inputs(&state, &input, "r", None)
+        .unwrap();
+    prepared.fill.row_count = usize::MAX;
+    assert_eq!(format!("{state:?}"), prior);
+    assert!(matches!(
+        prepared.scratch_plan_for_cpu(2),
+        Err(RollingWork::ParallelFallbackScratchUnrepresentable)
+    ));
+}
+
+#[test]
 fn entity_parallel_two_output_columns_preserve_full_window_and_value_bits() {
     for special in [false, true] {
         let input = input(64_000, 64, special);
@@ -511,7 +529,10 @@ fn check_lane_builder_allocation(loads: [usize; 2], count: usize, late_null: boo
     let allowance = ScratchPlan::for_dimensions(rows, 0, count, 0)
         .accounted_bytes()
         .unwrap()
-        - rows * size_of::<LaneRow>();
+        - RoutingLayout::choose(rows, 2)
+            .unwrap()
+            .payload_bytes(rows, 2)
+            .unwrap();
     let retained_bytes = typed_array_capacity_bytes + retained_buffer_bytes;
     assert!(retained_bytes <= allowance);
     assert!(observed.bytes_max >= u64::try_from(retained_bytes).unwrap());
@@ -556,9 +577,8 @@ fn entity_parallel_split_preserves_reserved_container_capacities() {
         let mut container_bytes = 0;
         for request in &requests {
             assert_eq!(request.rows.len(), rows / 2);
-            assert_eq!(request.rows.capacity(), rows / 2);
             assert_eq!(request.entities.capacity(), request.entities.len());
-            container_bytes += request.rows.capacity() * size_of::<LaneRow>()
+            container_bytes += request.rows.payload_bytes()
                 + request.entities.capacity() * size_of::<OwnedLaneEntity>();
         }
         let values_and_validity = 2 * (rows * 8 + rows.div_ceil(8) + 128);
@@ -877,7 +897,7 @@ fn entity_parallel_merge_checks_global_row_coverage_before_returning_state() {
     let NumericLaneOutcome::Complete(second) = &mut results[1].outcome else {
         unreachable!()
     };
-    Arc::make_mut(&mut second.rows)[0].original_row = 0;
+    second.rows_mut_for_test()[0].original_row = 0;
     assert!(
         merge_numeric_results(seed, &mut results, "job")
             .err()
@@ -905,7 +925,11 @@ fn entity_parallel_lazy_rows_reuse_reserved_capacities_and_original_ids() {
                 !request.rows.is_empty(),
                 "split prepares compact schedules once"
             );
-            (request.rows.as_ptr(), request.rows.capacity())
+            (
+                Arc::as_ptr(&request.rows),
+                request.rows.payload_bytes(),
+                request.rows.len(),
+            )
         });
         let token = AtomicBool::new(false);
         let mut results = requests.map(|request| exit(request, &token));
@@ -913,10 +937,10 @@ fn entity_parallel_lazy_rows_reuse_reserved_capacities_and_original_ids() {
             let NumericLaneOutcome::Complete(result) = &result.outcome else {
                 panic!("qualified lane must complete");
             };
-            assert_eq!(reserved[lane].1, loads[lane]);
+            assert_eq!(reserved[lane].2, loads[lane]);
             assert_eq!(result.rows.len(), loads[lane]);
-            assert_eq!(result.rows.capacity(), reserved[lane].1);
-            assert_eq!(result.rows.as_ptr(), reserved[lane].0);
+            assert_eq!(result.rows.payload_bytes(), reserved[lane].1);
+            assert_eq!(Arc::as_ptr(&result.rows), reserved[lane].0);
         }
         let update = merge_numeric_results(seed, &mut results, "job").unwrap();
         assert_eq!(update.execution.entity_ids.as_ptr(), ids_pointer);
@@ -980,11 +1004,19 @@ fn entity_parallel_lazy_scan_long_foreign_spans_preserve_values_and_state() {
 fn entity_parallel_lazy_foreign_gap_keeps_before_output_cancel_attempt_order() {
     use std::sync::atomic::AtomicUsize;
 
-    for rows in [64_000, 256_000] {
+    for (rows, explicit) in [
+        (64_000, false),
+        (64_000, true),
+        (256_000, false),
+        (256_000, true),
+    ] {
         let input = foreign_gap_input(rows, false);
         let plan = lane_plan(false);
         let state = warm(&plan, &input);
         let (_, [_, mut request]) = pair(&plan, &state, &input);
+        if explicit {
+            request.use_explicit_route_for_test();
+        }
         let token = Arc::new(AtomicBool::new(false));
         let cancel = Arc::clone(&token);
         let groups = Arc::new(AtomicUsize::new(0));
@@ -1003,7 +1035,7 @@ fn entity_parallel_lazy_foreign_gap_keeps_before_output_cancel_attempt_order() {
         let outcome = run_numeric_lane(request, &token, &mut progress);
         assert!(matches!(outcome, Err(NumericLaneStop::Cancelled)));
         assert_eq!(groups.load(Ordering::Relaxed), 15);
-        assert_eq!(progress.work.numeric_rows, 16);
+        assert_eq!(progress.work.numeric_rows, if explicit { 16 } else { 15 });
         assert_eq!(progress.active_site, None);
     }
 }
@@ -1021,6 +1053,61 @@ fn entity_parallel_lazy_merge_rejects_results_from_different_inputs() {
         .err()
         .expect("mixed private inputs must be rejected before ownership recovery");
     assert!(error.to_string().contains("numeric lane inputs differ"));
+}
+
+#[test]
+fn test_entity_parallel_route_preparation_uses_compressed_storage() {
+    let rows = 64_000;
+    let input = input(rows, 64, false);
+    let plan = lane_plan(false);
+    let state = warm(&plan, &input);
+    let expected = plan
+        .prepare_ordered_stream(&state, &input, "r", None)
+        .unwrap();
+    let prepared = plan
+        .prepare_ordered_stream_inputs(&state, &input, "r", None)
+        .unwrap();
+    let mut split = None;
+    let allocations = allocation_counter::measure(|| {
+        split = Some(prepared.split_two().ok().expect("eligible owned lanes"));
+    });
+    let (seed, requests) = split.unwrap();
+    let mut exits = requests.map(|request| exit(request, &AtomicBool::new(false)));
+    let actual = merge_numeric_results(seed, &mut exits, "job").unwrap();
+    assert_eq!(actual.entity_ids(), expected.entity_ids());
+    assert_eq!(
+        actual.execution.columns.len(),
+        expected.execution.columns.len()
+    );
+    for (actual, expected) in actual
+        .execution
+        .columns
+        .iter()
+        .zip(&expected.execution.columns)
+    {
+        assert_eq!(actual.to_data(), expected.to_data());
+    }
+    assert_eq!(
+        actual.execution.state.entities,
+        expected.execution.state.entities
+    );
+    assert_eq!(
+        format!("{:?}", actual.execution.state.states),
+        format!("{:?}", expected.execution.state.states)
+    );
+    assert_eq!(
+        actual.execution.state.kernel_fingerprint,
+        expected.execution.state.kernel_fingerprint
+    );
+    assert_eq!(
+        actual.execution.state.last_identity,
+        expected.execution.state.last_identity
+    );
+    println!("route preparation rows={rows}: {allocations:?}");
+    assert!(
+        allocations.bytes_total < u64::try_from(rows).unwrap(),
+        "routing preparation must not allocate a full per-row schedule: {allocations:?}"
+    );
 }
 
 #[test]
@@ -1168,11 +1255,12 @@ fn merge_fixture(count: usize, null_case: usize) -> (NumericJoinSeed, [NumericLa
     let mut exits = requests.map(|request| exit(request, &AtomicBool::new(false)));
     for (lane, exit) in exits.iter_mut().enumerate() {
         let result = complete_result(exit);
+        let schedule = result.rows_for_test();
         let prefix = 3 + lane * 2;
         let columns = (0..count)
             .map(|column| {
                 let values = std::iter::repeat_n(-71.0, prefix)
-                    .chain(result.rows.iter().map(|row| {
+                    .chain(schedule.iter().map(|row| {
                         if merge_slot_is_null(null_case, row.original_row as usize, column) {
                             -91.0
                         } else {
@@ -1184,7 +1272,7 @@ fn merge_fixture(count: usize, null_case: usize) -> (NumericJoinSeed, [NumericLa
                 let validity = (null_case != 0).then(|| {
                     NullBuffer::from(
                         std::iter::repeat_n(true, prefix)
-                            .chain(result.rows.iter().map(|row| {
+                            .chain(schedule.iter().map(|row| {
                                 !merge_slot_is_null(null_case, row.original_row as usize, column)
                             }))
                             .chain([true])
@@ -1200,25 +1288,113 @@ fn merge_fixture(count: usize, null_case: usize) -> (NumericJoinSeed, [NumericLa
 }
 
 #[test]
-fn test_entity_parallel_trusted_merge_preserves_bits_without_revalidating_rows() {
-    let (seed, mut exits) = merge_fixture(2, 1);
+fn test_entity_parallel_four_float_outputs_skip_repeated_row_validation() {
+    let (seed, mut exits) = merge_fixture(4, 0);
+    let input = input(64_000, 64, false);
+    let plan = lane_plan(false);
+    let expected = plan
+        .prepare_ordered_stream(&warm(&plan, &input), &input, "r", None)
+        .unwrap();
     MERGE_VALIDATION_VISITS.set(0);
+    ROUTE_WORD_VISITS.set(0);
     let actual = merge_numeric_results(seed, &mut exits, "job").unwrap();
     let visits = MERGE_VALIDATION_VISITS.replace(0);
-    assert_eq!(actual.execution.columns.len(), 2);
+    assert_eq!(actual.entity_ids(), expected.entity_ids());
+    assert_eq!(
+        actual.execution.state.entities,
+        expected.execution.state.entities
+    );
+    assert_eq!(
+        format!("{:?}", actual.execution.state.states),
+        format!("{:?}", expected.execution.state.states)
+    );
+    assert_eq!(
+        actual.execution.state.kernel_fingerprint,
+        expected.execution.state.kernel_fingerprint
+    );
+    assert_eq!(
+        actual.execution.state.last_identity,
+        expected.execution.state.last_identity
+    );
+    assert_eq!(actual.execution.columns.len(), 4);
     for (column, array) in actual.execution.columns.iter().enumerate() {
         let array = array.as_any().downcast_ref::<Float64Array>().unwrap();
-        assert_eq!(array.data_type(), &DataType::Float64);
         assert_eq!(array.len(), 64_000);
         assert_eq!(array.null_count(), 0);
         for (row, value) in array.values().iter().enumerate() {
             assert_eq!(value.to_bits(), merge_value_bits(row, column));
         }
     }
+    assert!(ROUTE_WORD_VISITS.get() <= 2 * 64_000_usize.div_ceil(64));
     assert_eq!(
         visits, 0,
-        "immutable producer-validated routing must avoid a second per-row coverage scan"
+        "all non-null Float64 arities must use the producer route proof"
     );
+}
+
+#[test]
+fn test_bitmap_result_repacking_and_stale_counts_keep_safe_coverage_errors() {
+    for change in ["repack", "tail", "short_count", "long_count"] {
+        let (seed, mut exits) = merge_fixture(4, 0);
+        let result = complete_result(&mut exits[0]);
+        match change {
+            "repack" => result.rows = Arc::new(result.rows.as_ref().clone()),
+            "tail" => Arc::make_mut(&mut result.rows)
+                .bitmap_mut_for_test()
+                .unwrap()
+                .0
+                .push(1),
+            "short_count" => {
+                *Arc::make_mut(&mut result.rows)
+                    .bitmap_mut_for_test()
+                    .unwrap()
+                    .1 -= 1;
+                for column in result.columns_for_test() {
+                    *column = column.slice(0, column.len() - 1);
+                }
+            }
+            "long_count" => {
+                *Arc::make_mut(&mut result.rows)
+                    .bitmap_mut_for_test()
+                    .unwrap()
+                    .1 += 1;
+                for column in result.columns_for_test() {
+                    *column = column.iter().chain([Some(1.0)]).collect();
+                }
+            }
+            _ => unreachable!(),
+        }
+        MERGE_VALIDATION_VISITS.set(0);
+        ROUTE_WORD_VISITS.set(0);
+        let result = merge_numeric_results(seed, &mut exits, "job");
+        assert!(ROUTE_WORD_VISITS.get() <= 2 * 64_000_usize.div_ceil(64) + 1);
+        assert!(MERGE_VALIDATION_VISITS.get() > 0);
+        match change {
+            "repack" => {
+                let result = result.unwrap();
+                for (column, array) in result.execution.columns.iter().enumerate() {
+                    let array = array.as_any().downcast_ref::<Float64Array>().unwrap();
+                    for (row, value) in array.values().iter().enumerate() {
+                        assert_eq!(value.to_bits(), merge_value_bits(row, column));
+                    }
+                }
+            }
+            "short_count" => assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("row coverage is incomplete")
+            ),
+            _ => assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("row coverage has extra rows")
+            ),
+        }
+    }
 }
 
 #[test]
@@ -1287,7 +1463,7 @@ fn corrupt_merge(
     match case {
         0 => {
             complete_result(&mut exits[0]).columns_for_test().clear();
-            Arc::make_mut(&mut complete_result(&mut exits[0]).rows)[0].original_row = 9;
+            complete_result(&mut exits[0]).rows_mut_for_test()[0].original_row = 9;
             seed.execution.state.entities.insert(vec![255], 64);
             "numeric lane output shape changed"
         }
@@ -1298,32 +1474,34 @@ fn corrupt_merge(
             "numeric lane output shape changed"
         }
         2 => {
-            Arc::make_mut(&mut complete_result(&mut exits[1]).rows)[0].original_row = 0;
+            complete_result(&mut exits[1]).rows_mut_for_test()[0].original_row = 0;
             "numeric lane row coverage or entity identity changed"
         }
         3 => {
-            Arc::make_mut(&mut complete_result(&mut exits[0]).rows).swap(0, 1);
+            complete_result(&mut exits[0])
+                .rows_mut_for_test()
+                .swap(0, 1);
             "numeric lane row coverage or entity identity changed"
         }
         4 => {
             let result = complete_result(&mut exits[1]);
-            Arc::make_mut(&mut result.rows).pop();
+            result.rows_mut_for_test().pop();
             for column in result.columns_for_test() {
                 *column = column.slice(0, column.len() - 1);
             }
             "numeric lane row coverage is incomplete"
         }
         5 => {
-            Arc::make_mut(&mut complete_result(&mut exits[0]).rows)[0].lane_entity = u32::MAX;
+            complete_result(&mut exits[0]).rows_mut_for_test()[0].lane_entity = u32::MAX;
             "numeric lane row coverage or entity identity changed"
         }
         6 => {
-            Arc::make_mut(&mut complete_result(&mut exits[0]).rows)[0].lane_entity = 1;
+            complete_result(&mut exits[0]).rows_mut_for_test()[0].lane_entity = 1;
             "numeric lane row coverage or entity identity changed"
         }
         7 => {
             let result = complete_result(&mut exits[0]);
-            Arc::make_mut(&mut result.rows).push(LaneRow {
+            result.rows_mut_for_test().push(LaneRow {
                 original_row: 64_000,
                 lane_entity: 0,
             });
@@ -1347,7 +1525,7 @@ fn corrupt_merge(
         }
         10 => {
             let result = complete_result(&mut exits[0]);
-            Arc::make_mut(&mut result.rows).remove(10);
+            result.rows_mut_for_test().remove(10);
             for column in result.columns_for_test() {
                 *column = column
                     .iter()
@@ -1999,7 +2177,7 @@ fn entity_parallel_readout_compatibility_short_zip_and_extra_state_keep_sites() 
         }
         let mut actual = actual.unwrap();
         let column = actual.columns_for_test()[0].clone();
-        for (offset, row) in actual.rows.iter().enumerate() {
+        for (offset, row) in actual.rows_for_test().iter().enumerate() {
             let row = row.original_row as usize;
             assert_eq!(column.is_valid(offset), expected_column.is_valid(row));
             assert_eq!(
