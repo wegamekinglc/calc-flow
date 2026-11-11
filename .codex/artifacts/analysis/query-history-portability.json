@@ -130,6 +130,16 @@
     },
     "isolation": "Existing interpreter; target-only symlinks expose only requirement modules/metadata; sitecustomize removes global/user package paths; real model and linked test unchanged",
     "native_rebuilt": false,
-    "runtime_package_sources_changed": false
+    "runtime_package_sources_changed": false,
+    "release_contract_followup": {
+      "failed_ci_head": "ec55f1c4a4a7a6998397061d68a997dde6793e73",
+      "failed_job": 130302234730,
+      "root_cause": "Release configuration test still expected the old inline pip command",
+      "correction": "Shared requirements command; preserved setup/install ordering and old NumPy/PyArrow constraints; added metadata-derived typing-extensions requirement check",
+      "targeted_red_failed": 1,
+      "targeted_green_passed": 2,
+      "release_config_module_passed": 42,
+      "native_sources_changed": false
+    }
   }
 }

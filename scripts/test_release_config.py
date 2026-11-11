@@ -413,6 +413,22 @@ class ReleaseConfigTests(unittest.TestCase):
                         all(character in "0123456789abcdef" for character in reference)
                     )
 
+    def test_rust_test_dependencies_cover_runtime_model_imports(self) -> None:
+        requirements = (
+            (ROOT / "scripts/requirements-rust-tests.txt")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        typing_dependency = next(
+            dependency
+            for dependency in project["project"]["dependencies"]
+            if dependency.startswith("typing-extensions")
+        )
+        for dependency in ("numpy>=2.0.0", "pyarrow==24.0.0", typing_dependency):
+            with self.subTest(dependency=dependency):
+                self.assertIn(dependency, requirements)
+
     def test_rust_core_ci_sets_python_313_before_all_features(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
         rust_core = workflow.split("  rust-core:\n", 1)[1].split(
@@ -426,7 +442,7 @@ class ReleaseConfigTests(unittest.TestCase):
             "uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"
         )
         install_test_dependencies = (
-            'python -m pip install "numpy>=2.0.0" "pyarrow==24.0.0"'
+            "python -m pip install -r scripts/requirements-rust-tests.txt"
         )
         self.assertIn(setup_python, rust_core)
         self.assertIn("python-version-file: .python-version", rust_core)

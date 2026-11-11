@@ -526,3 +526,37 @@ runtime/package diff from native build commit `e185be26` remain unchanged, so
 the previously approved native, product and codec verification is reused.
 Codacy, Ruff/unit, Windows Python, Python 3.9–3.14 and package-consumer successes
 reported by the coordinator are reused rather than rerun locally.
+
+### Release dependency contract follow-up
+
+The dependency commit `ec55f1c4` was pushed and its single snapshot showed a
+new completed failure in `Build + isolated wheel smoke test` (job
+`130302234730`, run `42953214941`); Codacy succeeded. The original Rust/model
+repair was not left waiting on that failure. Reading the raw job log located
+one failing test among 285 script tests:
+`test_rust_core_ci_sets_python_313_before_all_features` still asserted the old
+inline two-package pip command. That release-contract assertion was missed in
+the first dependency change.
+
+The contract now references the shared requirements command while preserving
+Python setup, dependency-installation ordering, all-feature compilation and
+runtime timeout assertions. A separate focused dependency-content regression
+preserves the NumPy/PyArrow constraints formerly checked inside the inline
+command and verifies the typing-extensions requirement from project metadata.
+No assertion or gate is removed to pass the build.
+
+```bash
+/home/wegamekinglc/anaconda3/bin/python -m unittest \
+  scripts.test_release_config.ReleaseConfigTests.test_rust_core_ci_sets_python_313_before_all_features
+/home/wegamekinglc/anaconda3/bin/python -m unittest \
+  scripts.test_release_config.ReleaseConfigTests.test_rust_core_ci_sets_python_313_before_all_features \
+  scripts.test_release_config.ReleaseConfigTests.test_rust_test_dependencies_cover_runtime_model_imports
+/home/wegamekinglc/anaconda3/bin/python -m unittest scripts.test_release_config
+```
+
+RED: the original targeted contract failed on the stale inline command.
+GREEN: both focused cases passed; the entire directly affected release-config
+module passed **42 tests**. Changed-file Ruff lint/format and the actual
+complexity ratchet passed. Logs: `dependency-release-{red,green,module}.log`
+under the same target directory. Product, harness, native sources and the
+dependency-isolated five-test GREEN are unchanged and reused.
