@@ -441,6 +441,7 @@ criterion_main!(core_benchmarks);
 
 mod rolling_history {
     use std::{
+        cell::{Cell, OnceCell},
         collections::VecDeque,
         time::{Duration, Instant},
     };
@@ -948,24 +949,31 @@ mod rolling_history {
             .measurement_time(Duration::from_millis(20))
             .sampling_mode(SamplingMode::Flat);
         for case in [Case::DurationSum, Case::MixedExtrema, Case::RowsSum] {
+            let fixture = OnceCell::new();
+            let validated = Cell::new(0_u64);
             group.bench_function(case.name(), |b| {
-                let fixture = Fixture::new(case);
-                let warm = runtime.block_on(run(&fixture));
-                validate(&fixture, &warm);
-                let mut validated = 1;
+                let fixture = fixture.get_or_init(|| {
+                    let fixture = Fixture::new(case);
+                    let warm = runtime.block_on(run(&fixture));
+                    validate(&fixture, &warm);
+                    validated.set(1);
+                    fixture
+                });
                 b.iter_custom(|iterations| {
                     let mut elapsed = Duration::ZERO;
                     for _ in 0..iterations {
                         let start = Instant::now();
-                        let result = runtime.block_on(run(&fixture));
+                        let result = runtime.block_on(run(fixture));
                         elapsed += start.elapsed();
-                        validate(&fixture, &result);
-                        validated += 1;
+                        validate(fixture, &result);
+                        validated.set(validated.get() + 1);
                     }
-                    proof(&fixture, validated);
                     elapsed
                 });
             });
+            if let Some(fixture) = fixture.get() {
+                proof(fixture, validated.get());
+            }
         }
         group.finish();
     }
