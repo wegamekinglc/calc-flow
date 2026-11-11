@@ -368,3 +368,211 @@ async fn replacement_grouped_empty_and_whole_output_edge_limits() {
         signature(&empty)
     );
 }
+
+async fn replacement_sql() -> SqlOperator {
+    let mut op = *operator("SELECT SUM(x) AS total FROM p").await.declaration;
+    op.enable_replacement().unwrap();
+    op.set_replacement_budget(StateBudget::new(100, 1 << 24).unwrap())
+        .unwrap();
+    op
+}
+
+#[tokio::test]
+async fn test_replacement_legacy_input_budget_limits_each_candidate() {
+    let mut op = replacement_sql().await;
+    let active_job = job();
+    let context = StreamOperatorContext::new(&active_job, "replacement", None);
+    let mut out = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("p", batch(&[&[1]]), &context, &mut out)
+        .await
+        .unwrap();
+    assert_eq!(sum(&drain(&mut out)[0]), Some(1));
+    let saved = op.checkpoint(Epoch::INITIAL).unwrap();
+    let candidate = batch(&[&[2, 3]]);
+    let bytes = candidate.estimated_bytes().unwrap() as u64;
+    for (budget, field) in [
+        (StateBudget::new(1, bytes).unwrap(), "max_rows"),
+        (StateBudget::new(2, bytes - 1).unwrap(), "max_bytes"),
+    ] {
+        op.set_state_budget(budget).unwrap();
+        let error = op
+            .process_data("p", candidate.clone(), &context, &mut out)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&format!("replacement.p: sql_state_budget.{field}")));
+        assert!(error.contains("required=") && error.contains("limit="));
+        assert!(drain(&mut out).is_empty());
+        assert_eq!(
+            signature(&op.checkpoint(Epoch::INITIAL).unwrap()),
+            signature(&saved)
+        );
+    }
+    op.set_state_budget(StateBudget::new(2, bytes).unwrap())
+        .unwrap();
+    for (input, expected) in [(candidate, 5), (batch(&[&[4, 5]]), 9)] {
+        op.process_data("p", input, &context, &mut out)
+            .await
+            .unwrap();
+        let events = drain(&mut out);
+        assert_eq!(events.len(), 1);
+        assert_eq!(sum(&events[0]), Some(expected));
+    }
+}
+
+#[tokio::test]
+async fn test_replacement_restore_honors_tighter_legacy_input_budget() {
+    let mut original = replacement_sql().await;
+    let active_job = job();
+    let context = StreamOperatorContext::new(&active_job, "replacement", None);
+    let mut out = EdgeCollector::new(original.output_ports().to_vec());
+    let input = batch(&[&[2, 3]]);
+    let bytes = input.estimated_bytes().unwrap() as u64;
+    original
+        .process_data("p", input, &context, &mut out)
+        .await
+        .unwrap();
+    assert_eq!(sum(&drain(&mut out)[0]), Some(5));
+    let saved = original.checkpoint(Epoch::INITIAL).unwrap();
+    let mut target = replacement_sql().await;
+    target
+        .process_data("p", batch(&[&[9]]), &context, &mut out)
+        .await
+        .unwrap();
+    assert_eq!(sum(&drain(&mut out)[0]), Some(9));
+    let before = target.checkpoint(Epoch::INITIAL).unwrap();
+    for (budget, field) in [
+        (StateBudget::new(1, bytes).unwrap(), "max_rows"),
+        (StateBudget::new(2, bytes - 1).unwrap(), "max_bytes"),
+    ] {
+        target.set_state_budget(budget).unwrap();
+        let error = target.restore(&saved).unwrap_err().to_string();
+        assert!(error.contains(&format!("replacement.p: sql_state_budget.{field}")));
+        assert_eq!(
+            signature(&target.checkpoint(Epoch::INITIAL).unwrap()),
+            signature(&before)
+        );
+        assert!(drain(&mut out).is_empty());
+    }
+    target
+        .set_state_budget(StateBudget::new(2, bytes).unwrap())
+        .unwrap();
+    target.restore(&saved).unwrap();
+    assert!(drain(&mut out).is_empty());
+    assert_eq!(
+        signature(&target.checkpoint(Epoch::INITIAL).unwrap()),
+        signature(&saved)
+    );
+    for op in [&mut original, &mut target] {
+        op.process_data("p", batch(&[&[4], &[5]]), &context, &mut out)
+            .await
+            .unwrap();
+        let events = drain(&mut out);
+        assert_eq!(events.len(), 1);
+        assert_eq!(sum(&events[0]), Some(9));
+    }
+}
+
+#[tokio::test]
+async fn test_replacement_cancelled_pending_emit_refunds_candidate_and_output() {
+    struct Pending(Arc<tokio::sync::Notify>);
+    #[async_trait]
+    impl StreamCollector for Pending {
+        async fn emit(&mut self, _: &str, _: Batch) -> Result<()> {
+            self.0.notify_one();
+            std::future::pending().await
+        }
+    }
+    let mut op = operator("SELECT SUM(x) AS total FROM p").await;
+    let active_job = job();
+    let context = StreamOperatorContext::new(&active_job, "replacement", None);
+    let mut out = EdgeCollector::new(op.output_ports().to_vec());
+    let input = batch(&[&[1]]);
+    op.process_data("p", input.clone(), &context, &mut out)
+        .await
+        .unwrap();
+    let produced = drain(&mut out).pop().unwrap();
+    let saved = op.checkpoint(Epoch::INITIAL).unwrap();
+    let pool = op.pool.as_ref().unwrap().clone();
+    let before = pool.reserved();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let mut pending = Pending(entered.clone());
+    let mut work = Box::pin(op.process_data("p", input.clone(), &context, &mut pending));
+    tokio::select! {
+        () = entered.notified() => {},
+        result = &mut work => panic!("emit must remain pending: {result:?}"),
+    }
+    assert_eq!(
+        pool.reserved(),
+        before + backing_bytes(&input).unwrap() + backing_bytes(&produced).unwrap() + 8192
+    );
+    active_job.cancellation().cancel();
+    drop(work);
+    assert_eq!(pool.reserved(), before);
+    assert!(drain(&mut out).is_empty());
+    assert_eq!(
+        signature(&op.checkpoint(Epoch::INITIAL).unwrap()),
+        signature(&saved)
+    );
+    let retry_job = job();
+    let retry_context = StreamOperatorContext::new(&retry_job, "replacement", None);
+    op.process_data("p", batch(&[&[2, 3]]), &retry_context, &mut out)
+        .await
+        .unwrap();
+    let events = drain(&mut out);
+    assert_eq!(events.len(), 1);
+    assert_eq!(sum(&events[0]), Some(5));
+}
+
+#[tokio::test]
+async fn test_replacement_successful_emit_commits_when_collector_cancels() {
+    struct CancelAfterEmit {
+        cancellation: CancellationToken,
+        emitted: Vec<Batch>,
+    }
+    #[async_trait]
+    impl StreamCollector for CancelAfterEmit {
+        async fn emit(&mut self, port: &str, batch: Batch) -> Result<()> {
+            assert_eq!(port, "output");
+            self.emitted.push(batch);
+            self.cancellation.cancel();
+            tokio::task::yield_now().await;
+            Ok(())
+        }
+    }
+    let mut op = operator("SELECT SUM(x) AS total FROM p").await;
+    let active_job = job();
+    let context = StreamOperatorContext::new(&active_job, "replacement", None);
+    let mut out = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("p", batch(&[&[1]]), &context, &mut out)
+        .await
+        .unwrap();
+    assert_eq!(sum(&drain(&mut out)[0]), Some(1));
+    let saved = op.checkpoint(Epoch::INITIAL).unwrap();
+    let mut collector = CancelAfterEmit {
+        cancellation: active_job.cancellation().clone(),
+        emitted: Vec::new(),
+    };
+    op.process_data("p", batch(&[&[2, 3]]), &context, &mut collector)
+        .await
+        .unwrap();
+    assert!(context.check_cancelled().is_err());
+    assert_eq!(collector.emitted.len(), 1);
+    assert_eq!(sum(&collector.emitted[0]), Some(5));
+    let committed = op.checkpoint(Epoch::INITIAL).unwrap();
+    assert_ne!(signature(&committed), signature(&saved));
+    let mut restored = operator("SELECT SUM(x) AS total FROM p").await;
+    restored.restore(&committed).unwrap();
+    assert_eq!(restored.relations[0].as_ref().unwrap().batch.num_rows(), 2);
+    let retry_job = job();
+    let retry_context = StreamOperatorContext::new(&retry_job, "replacement", None);
+    for target in [&mut op, &mut restored] {
+        target
+            .process_data("p", batch(&[&[4]]), &retry_context, &mut out)
+            .await
+            .unwrap();
+        let events = drain(&mut out);
+        assert_eq!(events.len(), 1);
+        assert_eq!(sum(&events[0]), Some(4));
+    }
+}
