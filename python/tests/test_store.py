@@ -130,6 +130,41 @@ def test_project_document_transforms_are_bounded_strict_and_rust_backed() -> Non
         import_project_json(b"x" * (10 * 1024 * 1024 + 1))
 
 
+@pytest.mark.parametrize("literal", ["future", True, 7, None, [], {}])
+def test_update_semantics_json_yaml_import_diagnostics_agree(literal) -> None:
+    project = _project("updates").model_dump()
+    project["graph"]["update_semantics"] = literal
+    yaml_value = json.dumps(literal)
+    yaml = export_project_yaml(_project("updates"))
+    yaml = yaml.replace("graph:\n", f"graph:\n  update_semantics: {yaml_value}\n", 1)
+    diagnostics = []
+    for load, document in [
+        (import_project_json, json.dumps(project)),
+        (import_project_yaml, yaml),
+    ]:
+        with pytest.raises(ConfigError) as caught:
+            load(document)
+        diagnostics.append(caught.value.issues)
+    assert diagnostics[0] == diagnostics[1]
+    assert diagnostics[0][0]["path"] == "graph.update_semantics"
+    assert diagnostics[0][0]["code"] == "invalid_literal"
+
+
+@pytest.mark.parametrize("semantics", ["legacy_append", "latest_relation"])
+def test_update_semantics_public_formats_roundtrip(semantics) -> None:
+    raw = _project("updates").model_dump()
+    raw["graph"]["update_semantics"] = semantics
+    project = ProjectDocument.model_validate(raw)
+    canonical = export_project_json(project)
+    assert (
+        import_project_yaml(export_project_yaml(project)).canonical_json() == canonical
+    )
+    assert import_project_json(json.dumps(raw)).canonical_json() == canonical
+    assert ("update_semantics" in project.model_dump()["graph"]) == (
+        semantics == "latest_relation"
+    )
+
+
 def test_project_document_transforms_reject_subclass_hooks_without_calling_them() -> (
     None
 ):

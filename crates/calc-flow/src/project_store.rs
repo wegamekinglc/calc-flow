@@ -349,19 +349,7 @@ pub fn import_project_yaml_with_limit(document: &[u8], max_bytes: usize) -> Resu
         match serde_saphyr::from_slice_with_options(document, yaml_options(max_bytes)) {
             Ok(project) => project,
             Err(error) => {
-                if let Ok(value) = serde_saphyr::from_slice_with_options::<Value>(
-                    document,
-                    yaml_options(max_bytes),
-                ) {
-                    reject_project_version(&value)?;
-                    if let Ok(join_issues) = collect_raw_stream_join_issues(&value)
-                        && !join_issues.is_empty()
-                    {
-                        return Err(CalcFlowError::ProjectValidation {
-                            issues: join_issues,
-                        });
-                    }
-                }
+                validate_raw_yaml_project(document, text, max_bytes)?;
                 return Err(format_error(error.to_string()));
             }
         };
@@ -371,6 +359,26 @@ pub fn import_project_yaml_with_limit(document: &[u8], max_bytes: usize) -> Resu
     validate_project_identity(&project)?;
     validate_project_json_values(&project)?;
     Ok(project)
+}
+
+fn validate_raw_yaml_project(document: &[u8], text: &str, max_bytes: usize) -> Result<()> {
+    let Ok(value) =
+        serde_saphyr::from_slice_with_options::<Value>(document, yaml_options(max_bytes))
+    else {
+        return Ok(());
+    };
+    reject_project_version(&value)?;
+    // The raw parse enforces the same budgets before scanning presentation tags.
+    reject_yaml_tags(text)?;
+    validate_update_semantics_value(&value)?;
+    if let Ok(join_issues) = collect_raw_stream_join_issues(&value)
+        && !join_issues.is_empty()
+    {
+        return Err(CalcFlowError::ProjectValidation {
+            issues: join_issues,
+        });
+    }
+    Ok(())
 }
 
 fn validate_project_json_values(project: &ProjectSpec) -> Result<()> {

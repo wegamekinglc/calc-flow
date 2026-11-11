@@ -54,6 +54,93 @@ fn project_json_and_yaml_round_trip_through_strict_project_spec() {
     assert!(yaml.ends_with('\n'));
 }
 
+fn update_diagnostic(error: CalcFlowError) -> (String, String, String) {
+    let CalcFlowError::ProjectValidation { issues } = error else {
+        panic!("expected a structured update diagnostic, got {error}");
+    };
+    assert_eq!(issues.len(), 1);
+    let issue = issues.into_iter().next().unwrap();
+    (issue.path, issue.code, issue.message)
+}
+
+#[test]
+fn update_semantics_import_diagnostics_match_json_and_yaml() {
+    for literal in [
+        json!("future"),
+        json!(true),
+        json!(7),
+        Value::Null,
+        json!([]),
+        json!({}),
+    ] {
+        let mut raw = serde_json::to_value(project("updates", "Updates")).unwrap();
+        raw["graph"]["update_semantics"] = literal;
+        let json = serde_json::to_vec(&raw).unwrap();
+        let yaml = serde_saphyr::to_string(&raw).unwrap();
+        let expected = update_diagnostic(import_project_json(&json).unwrap_err());
+        assert_eq!(expected.0, "graph.update_semantics");
+        assert_eq!(expected.1, "invalid_literal");
+        assert_eq!(
+            update_diagnostic(import_project_yaml(yaml.as_bytes()).unwrap_err()),
+            expected
+        );
+    }
+}
+
+#[test]
+fn update_semantics_roundtrips_latest_and_normalizes_explicit_legacy() {
+    for semantics in [
+        calc_flow::UpdateSemantics::LegacyAppend,
+        calc_flow::UpdateSemantics::LatestRelation,
+    ] {
+        let mut expected = project("updates", "Updates");
+        expected.graph.update_semantics = semantics;
+        let canonical = export_project_json(&expected).unwrap();
+        let mut raw = serde_json::to_value(&expected).unwrap();
+        raw["graph"]["update_semantics"] = serde_json::to_value(semantics).unwrap();
+        let yaml = serde_saphyr::to_string(&raw).unwrap();
+        assert_eq!(import_project_yaml(yaml.as_bytes()).unwrap(), expected);
+        assert_eq!(
+            import_project_json(&serde_json::to_vec(&raw).unwrap()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            export_project_json(&import_project_yaml(yaml.as_bytes()).unwrap()).unwrap(),
+            canonical
+        );
+    }
+}
+
+#[test]
+fn yaml_format_limits_precede_update_semantics_diagnostics() {
+    let mut raw = serde_json::to_value(project("demo", "Demo")).unwrap();
+    raw["graph"]["update_semantics"] = json!("future");
+    let yaml = serde_saphyr::to_string(&raw).unwrap();
+    assert!(matches!(
+        import_project_yaml_with_limit(yaml.as_bytes(), yaml.len() - 1),
+        Err(CalcFlowError::Format { .. })
+    ));
+    assert_eq!(
+        update_diagnostic(import_project_yaml_with_limit(yaml.as_bytes(), yaml.len()).unwrap_err())
+            .1,
+        "invalid_literal"
+    );
+    for invalid in [
+        yaml.replacen("id: demo", "id: !evil demo", 1),
+        yaml.replacen("id: demo", "id: &shared demo\ndescription: *shared", 1),
+        format!("{yaml}deep: {}0{}\n", "[".repeat(40), "]".repeat(40)),
+        format!("{yaml}---\n{yaml}"),
+    ] {
+        assert!(
+            matches!(
+                import_project_yaml(invalid.as_bytes()),
+                Err(CalcFlowError::Format { .. })
+            ),
+            "{invalid}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn file_project_store_conversion_helpers_match_free_functions() {
     let directory = tempfile::tempdir().unwrap();
