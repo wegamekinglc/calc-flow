@@ -892,3 +892,103 @@ The final issue handoff records the final pushed HEAD and one new nonblocking
 CI snapshot; pending checks are not successful gates. PR #605 remains open
 and unmerged, the coordinator's persistent wakeup is untouched, and DAL-519
 remains in_progress.
+
+## Public capability catalog ordering and frozen export expectations
+
+Product/test fix commit: `aa674bd503f6cfe10643cf9cca75c6783c7c7a9e`.
+The actual failed Linux Ruff + unit tests job at HEAD 8169297b was
+https://github.com/wegamekinglc/calc-flow/actions/runs/43315612576/job/131535880147.
+Its downloaded log at 2026-11-12 22:24:20 UTC reports:
+
+```text
+FAILED test_capabilities.py::test_empty_runtime_capabilities_are_frozen_and_session_scoped
+FAILED test_project_v3.py::TestProjectV3Surface::test_v3_schema_constant
+FAILED test_symbolic_event_window_analysis.py::test_native_window_capability_is_precise_and_sorted
+FAILED test_symbolic_expr.py::test_public_surface_is_the_frozen_export_list
+4 failed, 3005 passed, 3 skipped in 32.51s
+```
+
+Three complete public-list expectations omitted the delivered DISTINCT
+capability/kind/DistinctSpec. The fourth failure revealed a product regression:
+the fixed operator tuple in Python runtime_capabilities placed distinct after
+stream_join. The minimal production correction moves the identical distinct@1
+entry after cross_section, restoring (kind, version) order for the catalog.
+No capability value, native operator, registration lifecycle or API was changed.
+
+The existing full OperatorCapability tuple now explicitly spells out distinct@1,
+its input/output ports, batch/stream modes, group_final_append_only finality,
+DataFusion requirement, stateful/microbatch/replay/determinism properties,
+requires_watermark=False, checkpointed_stateful, state_version1 and layouts(2,3).
+The existing full kind/export lists add literal distinct/DistinctSpec. The
+adjacent durable-layout check explicitly asserts distinct state_version1 and
+layouts(2,3). No assertion was deleted, weakened to a subset, or generated from
+the tested producer. The window precision/sortedness test is unchanged, and
+the original snapshot/session/frozen-field assertions are preserved.
+
+RED/GREEN command, run from the same checkout with the existing interpreter:
+
+```sh
+target/venv/bin/python -m pytest -q python/tests/test_capabilities.py::test_empty_runtime_capabilities_are_frozen_and_session_scoped python/tests/test_project_v3.py::TestProjectV3Surface::test_v3_schema_constant python/tests/test_symbolic_expr.py::test_public_surface_is_the_frozen_export_list python/tests/test_symbolic_event_window_analysis.py::test_native_window_capability_is_precise_and_sorted
+```
+
+Before edits: exit1, 4 failed in 0.52s, reproducing all four CI causes.
+After only updating independent test literals, the same command with
+`--tb=short` still exits1: 3 failed / 1 passed in 0.31s. The export check
+passes, but all three order-sensitive comparisons still fail at the same
+misplaced distinct entry. This confirms the corrected expectations still
+demand a product ordering fix. After moving the producer entry and rebuilding
+and installing the matching wheel: exit0, all 4 passed in 0.30s.
+
+Matching native/package build and install actually completed:
+
+```sh
+PYO3_PYTHON="$PWD/target/venv/bin/python" target/venv/bin/maturin build --locked --profile dev --out target/wheels
+uv pip install --python target/venv/bin/python --reinstall --no-deps target/wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl
+```
+
+Both exited0. Maturin rebuilt the PyO3 binding and emitted the local CPython3.13
+Linux wheel. Its linux-tag warning means this is a local verification artifact,
+not evidence of PyPI/manylinux release portability. Environment remains the
+reused CPython3.13.9 Anaconda venv, Rust/Cargo1.94, PyArrow24, pytest9.2,
+maturin1.16 and Ruff0.16; no new checkout/environment was created.
+
+A Python provenance check read the wheel with zipfile, asserted its native
+entry byte-equal to the imported site-packages _native, and compared the wheel
+capabilities.py and both public __init__.py files to the current source. It
+also asserted the imported capability producer equals the current source bytes.
+Observed hashes:
+
+- Native: `c7810be6d86b5c5798c398589f7d812fae571842bef2ba59eb0677768a1758f2`.
+- Wheel: `3d561bedd821ef10acd7a3f21a50316479fcd6c649acecc4894c06ed9e7f7653`.
+- Installed/source capabilities.py: `3630ec7e6e0e3ea6a10467c318005fd13a9660eb09b9fecb99d719b30c19a434`.
+- Product tree fingerprint at aa674bd5: `2f579edca3a2ba48b884d371b14a772e6edbd167b97bb2d9ea47da807c9314d6`,
+  using the same documented git ls-tree source/manifest/lock paths.
+
+The rebuilt native hash is unchanged because the production change is confined
+to the packaged Python capability tuple; the Rust core/binding source is
+unchanged. The new wheel's Python producer hash and byte checks demonstrate
+that the GREEN process loads the corrected catalog, rather than the old wheel.
+
+Necessary directly adjacent checks actually run:
+
+```sh
+target/venv/bin/python -m pytest -q python/tests/test_capabilities.py::test_capability_catalog_reports_every_durable_state_layout python/tests/test_capabilities.py::test_capability_snapshot_stays_immutable_across_later_registrations python/tests/test_capabilities.py::test_successful_provider_registration_advances_revision_once python/tests/test_capabilities.py::test_capability_values_are_top_level_public_exports python/tests/test_project_v3.py::TestProjectV3Surface::test_v3_types_are_re_exported python/tests/test_native_stub.py python/tests/test_bounded_global_distinct.py::test_finite_distinct_v2_literal_and_export python/tests/test_distinct_late_policy.py::test_layout2_runtime_accepts_error_and_rejects_drop python/tests/test_distinct_late_policy.py::test_unknown_distinct_state_version_is_rejected
+target/venv/bin/ruff check python/calc_flow/capabilities.py python/tests/test_capabilities.py python/tests/test_project_v3.py python/tests/test_symbolic_expr.py
+target/venv/bin/ruff format --check python/calc_flow/capabilities.py python/tests/test_capabilities.py python/tests/test_project_v3.py python/tests/test_symbolic_expr.py
+git diff --check
+```
+
+All exited0: 12 adjacent tests passed in 0.38s; Ruff check passed and 4 files
+were already formatted. Together with the four original cases this is 16
+targeted passes. Existing layout2 Error admission/Drop refusal, unknown state
+version rejection, Rust-backed DF/SQL finite export, native stub surface and
+registration/frozen snapshot protections remain valid. No full local matrix,
+performance run, new feature or full review restart was introduced. Prior
+Rust lint/ownership/F1/F2 evidence is reused for unchanged Rust code.
+
+The reviewer artifact remains untracked/unstaged and untouched, SHA-256
+`e7681127a4a42ce562cde3ac0201d13ae51a0e861fbde18f72a72d9676c9dce7`.
+The final issue handoff records the final pushed HEAD and one necessary CI
+snapshot. Sorting is the only new product behavior for incremental review;
+existing F1/F2 Approve is not represented as review of this later correction.
+No merge/delegation/wakeup changes are made, and DAL-519 stays in_progress.
