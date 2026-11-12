@@ -49,7 +49,9 @@ def passthrough(node):
 def time_is_input(node, name):
     operation = node.op.name
     if operation == "table_input":
-        return True
+        from calc_flow.symbolic.analyzer import _schema_fields
+
+        return any(field.name == name for field in _schema_fields(node.attr("schema")))
     if operation == "sql":
         return _sql_time_is_input(node, name)
     if operation in {"project", "filter"}:

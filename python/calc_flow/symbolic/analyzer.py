@@ -1718,8 +1718,8 @@ class _Analyzer:
     def _event_window_table(self, node: Node, path: str, /, *, role=None) -> TableFacts:
         role = role or f"{path}.{node.op.name}"
         self._event_window_capability(role)
-        self._window_input_path(node.args[0], f"{role}.value", set())
         child = self.table(node.args[0], f"{role}.value")
+        self._window_input_path(node.args[0], f"{role}.value", set())
         if node.args[0].digest in self._invalid_table_nodes:
             return TableFacts(
                 (),

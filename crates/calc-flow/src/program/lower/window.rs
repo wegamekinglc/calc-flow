@@ -80,7 +80,7 @@ fn input_path(table: &TableExpr, path: &str) -> Result<()> {
 }
 fn time_source(table: &TableExpr, name: &str) -> Result<bool> {
     match &table.0.kind {
-        RelationKind::Input { .. } => Ok(true),
+        RelationKind::Input { schema, .. } => Ok(schema.field_with_name(name).is_ok()),
         RelationKind::Filter { input, .. } => time_source(input, name),
         RelationKind::Project {
             input,
@@ -120,10 +120,10 @@ fn sql_time_source(
     let Some(columns) = crate::sql::sql_passthrough_columns(query, alias)? else {
         return Ok(false);
     };
-    let source = columns
-        .get(name)
-        .map(String::as_str)
-        .or_else(|| columns.contains_key("*").then_some(name));
+    let source = match columns.get(name) {
+        Some(source) => source.as_deref(),
+        None => columns.contains_key("*").then_some(name),
+    };
     match source {
         Some(name) => time_source(input, name),
         None => Ok(false),

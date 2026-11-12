@@ -5,6 +5,7 @@ use datafusion::{
     execution::FunctionRegistry,
     sql::{
         parser::Statement as DFStatement,
+        planner::IdentNormalizer,
         sqlparser::ast::{
             Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident,
             ObjectName, Query, Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr,
@@ -250,7 +251,7 @@ fn aggregate(item: &SelectItem) -> Result<crate::AggregateSpec> {
     Ok(crate::AggregateSpec {
         function,
         column,
-        output: alias.value.clone(),
+        output: normalized(alias),
     })
 }
 fn aggregate_function(name: &ObjectName) -> Result<AggregateFunction> {
@@ -314,7 +315,7 @@ fn duration_arg(arg: &FunctionArg, field: &str) -> Result<Duration> {
 }
 fn column(expr: &Expr) -> Result<String> {
     match expr {
-        Expr::Identifier(name) => Ok(name.value.clone()),
+        Expr::Identifier(name) => Ok(normalized(name)),
         _ => Err(error("expected a direct unqualified column")),
     }
 }
@@ -323,7 +324,7 @@ fn column(expr: &Expr) -> Result<String> {
 pub fn sql_passthrough_columns(
     text: &str,
     alias: &str,
-) -> Result<Option<BTreeMap<String, String>>> {
+) -> Result<Option<BTreeMap<String, Option<String>>>> {
     if !crate::query_analysis::union_arm_proved(text) {
         return Ok(None);
     }
@@ -334,7 +335,14 @@ pub fn sql_passthrough_columns(
     };
     Ok(columns_for_query(query, text, alias))
 }
-fn columns_for_query(query: &Query, text: &str, alias: &str) -> Option<BTreeMap<String, String>> {
+fn columns_for_query(
+    query: &Query,
+    text: &str,
+    alias: &str,
+) -> Option<BTreeMap<String, Option<String>>> {
+    if query.with.is_some() {
+        return None;
+    }
     let SetExpr::Select(select) = query.body.as_ref() else {
         return None;
     };
@@ -369,19 +377,18 @@ fn native_functions(query: &Query) -> bool {
     !matches!(functions, ControlFlow::Break(()))
 }
 
-fn identifier_matches(name: &Ident, expected: &str) -> bool {
-    if name.quote_style.is_some() {
-        name.value == expected
-    } else {
-        name.value.eq_ignore_ascii_case(expected)
-    }
+fn normalized(name: &Ident) -> String {
+    IdentNormalizer::default().normalize(name.clone())
+}
+fn identifier_matches(name: &Ident, expected: &Ident) -> bool {
+    normalized(name) == normalized(expected)
 }
 fn passthrough_relation<'a>(select: &'a Select, alias: &str) -> Option<&'a Ident> {
     let [from] = select.from.as_slice() else {
         return None;
     };
     let (name, correlation) = direct_relation(from)?;
-    if !identifier_matches(name, alias) {
+    if normalized(name) != alias {
         return None;
     }
     match correlation {
@@ -412,24 +419,24 @@ fn passthrough_column<'a>(expr: &'a Expr, qualifier: &Ident) -> Option<&'a Ident
     match expr {
         Expr::Identifier(name) => Some(name),
         Expr::CompoundIdentifier(parts)
-            if parts.len() == 2 && identifier_matches(&parts[0], &qualifier.value) =>
+            if parts.len() == 2 && identifier_matches(&parts[0], qualifier) =>
         {
             Some(&parts[1])
         }
         _ => None,
     }
 }
-fn projected_column(item: &SelectItem, qualifier: &Ident) -> Option<(String, String)> {
+fn projected_column(item: &SelectItem, qualifier: &Ident) -> Option<(String, Option<String>)> {
     match item {
         SelectItem::UnnamedExpr(expr) => {
             let name = passthrough_column(expr, qualifier)?;
-            Some((name.value.clone(), name.value.clone()))
+            Some((normalized(name), Some(normalized(name))))
         }
         SelectItem::ExprWithAlias { expr, alias } => Some((
-            alias.value.clone(),
-            passthrough_column(expr, qualifier)?.value.clone(),
+            normalized(alias),
+            passthrough_column(expr, qualifier).map(normalized),
         )),
-        _ => plain_wildcard(item, qualifier).then(|| ("*".into(), "*".into())),
+        _ => plain_wildcard(item, qualifier).then(|| ("*".into(), Some("*".into()))),
     }
 }
 fn plain_wildcard(item: &SelectItem, qualifier: &Ident) -> bool {
@@ -447,5 +454,5 @@ fn qualifier_name(name: &ObjectName, qualifier: &Ident) -> bool {
     name.0.len() == 1
         && name.0[0]
             .as_ident()
-            .is_some_and(|n| identifier_matches(n, &qualifier.value))
+            .is_some_and(|n| identifier_matches(n, qualifier))
 }

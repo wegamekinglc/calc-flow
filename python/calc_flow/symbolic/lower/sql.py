@@ -188,10 +188,7 @@ class _SQLGraph:
         if node.op.name == "table_input":
             self.schemas[node.digest] = self.analyzer.table(node, "sql.input").schema
             return self.graph.source(node)
-        if (
-            node.op.name in _EVENT_WINDOW_OPS
-            or node.digest in self.analyzer._sql_window_nodes
-        ):
+        if self._is_event_window(node):
             return self._append_window(node)
         if node.op.name == "union_all":
             output_id = self.graph.allocate(f"cf_union_{node.digest[:24]}")
@@ -207,6 +204,11 @@ class _SQLGraph:
         self._append_sql(node, output_id)
         self._remember(node, output_id)
         return output_id
+
+    def _is_event_window(self, node: Node) -> bool:
+        return node.digest in self.analyzer._sql_window_nodes or (
+            node.op.name in _EVENT_WINDOW_OPS and node.op.version == 2
+        )
 
     def _append_window(self, node):
         from calc_flow.symbolic.lower.event_windows import _window_node, _WindowPlan

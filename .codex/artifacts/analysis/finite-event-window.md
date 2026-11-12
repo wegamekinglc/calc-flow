@@ -322,3 +322,115 @@ this increment covers only the SQL-fixture organization and this evidence.
 The final increment SHA and one-shot hosted status snapshot are reported in
 the issue reply. Pending checks remain pending; DAL-516 remains in_progress,
 and review/merge handling stays with the coordinator.
+
+## Independent review F1–F4 corrections
+
+Correction base: `bdb50a73a72595575e121a3b37808d84d9a5f965` on the existing
+feature branch and PR #600. The reviewer report remains untracked and is neither
+edited nor staged by the implementer. The coordinator confirms reviewer revision
+2 already covers the `85dbad46..bdb50a73` Codacy increment without new findings;
+the remaining Request Changes concerns F1–F4. This section records fixes and
+implementation checks, not independent approval of those fixes.
+
+The design stays at the shared SQL proof seam. An explicit computed output must
+block wildcard fallback; a wildcard may refer only to an actual original input
+field. CTE is rejected within this limited proof, rather than adding CTE scope
+resolution. SQL identifiers follow the native planner's normalization while
+macro string arguments remain exact. The Python SQL DAG only dispatches @2
+windows to the new executable boundary; @1 keeps its original rejection.
+
+| Finding | RED evidence | Minimum correction and GREEN coverage |
+|---------|--------------|---------------------------------------|
+| F1 | Rust `wildcard_cannot...`: unsafe time admitted; Python: 8 failed expected-rejection cases. | The shared descriptor retains explicit computed aliases as null mappings; both consumers stop at that denial instead of taking wildcard fallback. Original input schemas bound wildcard lookup. Rust and Python reject plain/qualified wildcard time computation and subsequent pure rename, in DF/SQL window declarations, legacy/latest, ordinary/checked batch and stream compilation. |
+| F2 | Rust `cte_cannot...`: unsafe time admitted; Python: 2 failed expected-rejection cases. | `query.with` is rejected by the local passthrough seam. Python plans the input schema before emitting the local path rejection, preventing a bogus missing-q diagnostic from hiding the capability error. Same-named CTE is rejected across the same compilation choices; ordinary SQL without a window still executes that CTE unchanged. |
+| F3 | Rust rename compile fails capability_mismatch; Python: 3 failures for TS AS TIME and uppercase macro boundaries. | Reuse DataFusion `IdentNormalizer` for passthrough columns, aliases, qualifiers, macro group/aggregate fields and outputs. Uppercase unquoted references succeed; quoted field, correlation and output names keep their exact case. Macro alias/time string arguments are not normalized. |
+| F4 | Python batch and stream both raise the reported bare KeyError. | `_SQLGraph` dispatch recognizes @2 or analyzed SQL macros; @1 returns through the existing lowerer and raises structured unknown_primitive_version. The new test checks declaration version and unchanged canonical bytes/digest, and the existing declaration golden tests pass. |
+
+The RED files are `review-f1-rust-red.log`, `review-f2-rust-red.log`,
+`review-f3-rust-red.log` and `review-f1/f2/f3/f4-python-red.log` (individual
+filenames use one finding number). The actual commands were:
+
+```sh
+cargo test --locked -p calc-flow --test finite_event_time_proof wildcard_cannot
+cargo test --locked -p calc-flow --test finite_event_time_proof cte_cannot
+cargo test --locked -p calc-flow --test finite_event_time_proof unquoted_sql
+python -m pytest python/tests/test_finite_event_window_review.py -k wildcard -q -W error
+python -m pytest python/tests/test_finite_event_window_review.py -k cte_cannot -q -W error
+python -m pytest python/tests/test_finite_event_window_review.py -k unquoted -q -W error
+python -m pytest python/tests/test_finite_event_window_review.py -k legacy_window -q -W error
+```
+
+Each Rust RED preceded its corresponding production change. Python RED uses the
+preserved base candidate site/native (hash `d001cc88...`) before replacing it
+with the rebuilt correction. The additional real-watermark probes reproduce
+both review counterexamples at that base: ts=[100,101], q=[1,2], W=99 between
+rows, finite SUM=[3], stream SUM=[1]. `review-watermark-baseline.log` preserves
+these historical failures. The corrected compile rejection prevents both unsafe
+graphs from starting. Positive real-wildcard controls use the same source
+watermark/EOF trace and still yield finite=[3], stream=[3]. No state reset,
+watermark replacement or EOF/latest proof weakening is involved.
+
+GREEN and directly affected checks:
+
+```sh
+cargo test --locked -p calc-flow --test finite_event_time_proof \
+  --test finite_event_frontend --test finite_event_window --test query_history_portability
+python -m pytest python/tests/test_finite_event_window_review.py -q -W error
+```
+
+The Rust selection passes **19** cases (5 new time-proof tests and 14 existing
+cases). The new Python module passes **25** cases, including all F1–F4 rejection
+and compatibility cases, real/qualified wildcard with unrelated arithmetic,
+quoted-name controls, ordinary CTE control, and real watermark/EOF controls.
+The directly affected Python feature/declaration/analysis/lowering/schema/
+update-semantics/portability selection passes **321** cases with `-W error`,
+including those 25; counts are not additive. Core and PyO3 clippy with warnings
+denied, changed-file Ruff/format, Rust formatting, pinned lizard 1.26.0 limit 8,
+the repository complexity ratchet and the original SQL-security rule all pass.
+The rule actually scans the new Python test file with intrafile taint enabled:
+zero findings and zero scan errors. Logs use the `review-*` prefix.
+
+Native was rebuilt with locked Maturin dev profile from this checkout using the
+same CPython 3.13 interpreter and existing Cargo artifact cache. Wheel-site
+Python sources equal the current checkout. Native SHA-256:
+`c7d665ab7262cd4dadc8af5825179509cbc03ba591b37a70a54f88689b088240`.
+The generated project schema remains unchanged. `review-native-build.log` and
+`review-native-provenance.log` record the origins; the final correction manifest
+also hashes sources and the unchanged reviewer report. Existing unaffected
+state/layout/durable-recovery/example evidence is reused; no full suite,
+coverage/connector service, cross-platform or performance run was added.
+
+### Reported Windows r5 fixture failure
+
+During these fixes, the coordinator supplied Windows job `130924906995` on base
+`bdb50a73`, failing the union frontend's old `(2,4)` report assertion. The exact
+job log was retrieved through GitHub's job-log endpoint (the CLI run-log command
+could not read a still-active overall run). Local
+`cargo test --locked -p calc-flow --test finite_union_frontend` reproduced
+**3 passed / 1 failed**, actual `(2,5)`, expected `(2,4)`.
+
+A bounded search found one same-contract stale assertion in `latest_relation`.
+Its focused admission test independently reproduced actual `(2,5)` versus
+expected `(2,4)`. Only the two expected-version literals change to `(2,5)`,
+matching the frozen r5 producer/parser contract; all other bytes and behavior
+assertions in both fixture files are identical to the base. Production revision
+stays 5 and no gate changes.
+
+```sh
+cargo test --locked -p calc-flow --test latest_relation \
+  latest_admission_preserves_logical_consumer_and_exported_selection
+cargo test --locked -p calc-flow --test finite_union_frontend --test latest_relation
+python -m pytest python/tests/test_finite_union.py -q -W error
+```
+
+The first command is RED; the final Rust command is GREEN: union **4** and latest
+**11** pass. The Python union counterpart passes **27** cases (separate from
+the 321 above). The latest checks retain legacy 7/latest 6, complete replacement,
+warm-plan isolation and recovery identity assertions. Logs are
+`review-union-revision-red.log`, `review-latest-revision-red.log`,
+`review-revision-green.log` and `review-union-python-green.log`.
+
+Hand back the final correction SHA and one-shot CI snapshot to the coordinator
+for focused F1–F4 and fixture-increment review. The prior Request Changes is not
+lifted by these implementation checks; required CI and independent acceptance
+still block merge. DAL-516 stays in_progress; no merge or further dispatch.

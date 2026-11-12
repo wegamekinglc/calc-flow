@@ -91,7 +91,7 @@ async fn latest_admission_preserves_logical_consumer_and_exported_selection() ->
             legacy.fingerprint()
         );
         let report = latest.analyze(&udfs, &AnalysisOptions::default()).await?;
-        assert_eq!((report.schema_version, report.analysis_revision), (2, 4));
+        assert_eq!((report.schema_version, report.analysis_revision), (2, 5));
         assert!(report.request.is_none());
         let edge = report
             .edges
