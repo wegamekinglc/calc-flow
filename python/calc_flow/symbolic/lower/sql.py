@@ -77,6 +77,7 @@ _TABLE_BOUNDARIES = frozenset(
     {
         *_EVENT_WINDOW_OPS,
         "aggregate",
+        "distinct",
         "union_all",
         "sql",
         "snapshot_sql",
@@ -189,6 +190,11 @@ class _SQLGraph:
         if node.op.name == "table_input":
             self.schemas[node.digest] = self.analyzer.table(node, "sql.input").schema
             return self.graph.source(node)
+        if (
+            node.op.name == "distinct"
+            or node.digest in self.analyzer._sql_distinct_nodes
+        ):
+            return self._append_distinct(node)
         if self._is_join(node):
             return self._append_join(node)
         if self._is_event_window(node):
@@ -205,6 +211,43 @@ class _SQLGraph:
             return self._append_expression(node)
         output_id = self.graph.allocate(f"cf_sql_{node.digest[:24]}")
         self._append_sql(node, output_id)
+        self._remember(node, output_id)
+        return output_id
+
+    def _append_distinct(self, node):
+        import json
+
+        from calc_flow.symbolic.analyzer import _cstr_seq
+
+        distinct = self.analyzer._sql_distinct_nodes.get(node.digest, node)
+        parent = self.table(distinct.args[0])
+        output_id = self.graph.allocate(f"cf_distinct_{node.digest[:24]}")
+        schema = self.analyzer.table(node, "distinct.output").schema
+        self.schemas[node.digest] = schema
+        self.graph.nodes.append(
+            dict(
+                id=output_id,
+                input_ports=[
+                    _table_port(
+                        self.analyzer._distinct_input_schemas[node.digest], "input"
+                    )
+                ],
+                output_ports=[_table_port(schema, "output")],
+                operator=dict(
+                    kind="distinct",
+                    columns=list(_cstr_seq(distinct.attr("columns"))),
+                    spec=json.loads(distinct.attr("spec").value),
+                ),
+            )
+        )
+        self.graph.edges.append(
+            dict(
+                source_node=parent,
+                source_port="output",
+                target_node=output_id,
+                target_port="input",
+            )
+        )
         self._remember(node, output_id)
         return output_id
 
@@ -393,6 +436,7 @@ class _SQLGraph:
                 in {
                     *_EVENT_WINDOW_OPS,
                     "aggregate",
+                    "distinct",
                     "union_all",
                     "sql",
                     "snapshot_sql",
@@ -608,7 +652,15 @@ def lower_sql_program(
 ) -> dict[str, object] | None:
     if not _macd_input_boundaries(program) and not any(
         node.op.name
-        in {"aggregate", "union_all", "sql", "snapshot_sql", "late_output", "late_rows"}
+        in {
+            "distinct",
+            "aggregate",
+            "union_all",
+            "sql",
+            "snapshot_sql",
+            "late_output",
+            "late_rows",
+        }
         or (
             analyzer._mode == "batch"
             and node.op.name in {"stream_join", "stream_asof_join"}

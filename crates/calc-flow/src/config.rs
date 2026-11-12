@@ -154,6 +154,11 @@ pub struct NodeSpec {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[non_exhaustive]
 pub enum OperatorSpec {
+    /// Final DISTINCT over an explicit finite history domain.
+    Distinct {
+        columns: Vec<String>,
+        spec: crate::DistinctSpec,
+    },
     Expression {
         #[serde(default)]
         expression: String,
@@ -1380,6 +1385,30 @@ fn project_node_operator(
             ))
         }
         OperatorSpec::Union => union_node(node, inputs, &outputs, mode),
+        OperatorSpec::Distinct { columns, spec } => {
+            let (inputs, outputs) =
+                builtin_ports(inputs, outputs, &["input"], &["output"], BatchKind::Table)?;
+            let schema = inputs[0]
+                .schema()
+                .ok_or_else(|| {
+                    crate::dataframe::invalid(
+                        "distinct.input",
+                        "unresolved_type",
+                        "exact schema required",
+                    )
+                })?
+                .clone();
+            let operator =
+                crate::DistinctOperator::new(&node.id, schema, columns.clone(), spec.clone())?;
+            if outputs[0].schema() != crate::OperatorMetadata::output_ports(&operator)[0].schema() {
+                return Err(crate::dataframe::invalid(
+                    "distinct.output",
+                    "schema_mismatch",
+                    "exact projected schema required",
+                ));
+            }
+            Ok(operator.into())
+        }
         OperatorSpec::Window { spec } => window_node(node, &inputs, &outputs, spec, mode),
         OperatorSpec::Rolling { spec } => rolling_node(node, &inputs, &outputs, spec),
         OperatorSpec::CrossSection { spec } => cross_section_node(node, &inputs, &outputs, spec),
@@ -2194,6 +2223,7 @@ fn validate_operator(
             validate_union_operator(node, index, mode, &base, issues);
             (None, Some(vec!["output"]))
         }
+        OperatorSpec::Distinct { .. } => single_table_io(),
         OperatorSpec::Window { spec } => {
             validate_window_operator(node, index, spec, mode, &base, issues);
             single_table_io()
@@ -3191,6 +3221,7 @@ fn operator_udfs(operator: &OperatorSpec) -> &[UdfReference] {
         | OperatorSpec::Sql { udfs, .. }
         | OperatorSpec::SnapshotSql { udfs, .. } => udfs,
         OperatorSpec::Union
+        | OperatorSpec::Distinct { .. }
         | OperatorSpec::Window { .. }
         | OperatorSpec::Rolling { .. }
         | OperatorSpec::CrossSection { .. }

@@ -344,6 +344,7 @@ _PRIMITIVES: dict[str, PrimitiveSpec] = {
     "aggregate": PrimitiveSpec(
         frozenset({"query", "aliases", "group_by", "reducers"}), CMap(())
     ),
+    "distinct": PrimitiveSpec(frozenset({"columns", "spec"}), CMap(())),
     "union_all": PrimitiveSpec(frozenset(), CMap(())),
     "sql": PrimitiveSpec(frozenset({"query", "aliases"}), CMap(())),
     "snapshot_sql": PrimitiveSpec(frozenset({"query", "aliases"}), CMap(())),
@@ -716,4 +717,11 @@ def explain_node(node: Node, /) -> str:
             walk(child, depth + 1)
 
     walk(node, 1)
+    from calc_flow.symbolic.distinct import has_distinct
+
+    if has_distinct(node):
+        lines.append(
+            "copy_visible_v2: max_bytes bounds owned participating peak; "
+            "temporarily borrowed ingress backing and other graph owners are excluded"
+        )
     return "\n".join(lines)

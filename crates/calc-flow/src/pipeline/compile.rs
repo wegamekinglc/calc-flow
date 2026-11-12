@@ -75,6 +75,7 @@ pub(crate) fn compile_graph(
         .collect();
     let (external_inputs, external_outputs) = external_ports(&builder.nodes, &builder.edges)?;
     super::analysis::gate_updates(builder, execution_mode)?;
+    super::distinct::validate(builder)?;
     let (external_inputs, external_outputs) =
         frontend_ports(builder, external_inputs, external_outputs)?;
     let fingerprint = graph_fingerprint(

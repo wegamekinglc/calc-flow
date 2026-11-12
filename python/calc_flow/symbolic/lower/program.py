@@ -618,6 +618,9 @@ def _check_stateful_lowering(
     allowed_lateness_micros: int,
     late_policy: str,
 ) -> None:
+    from calc_flow.symbolic.distinct import check_lateness
+
+    check_lateness(program, mode_value, late_policy)
     needs_rolling = _program_needs_rolling(program)
     needs_cross_section = _program_needs_cross_section(program)
     if _program_needs_stream_join(program):
@@ -698,7 +701,7 @@ def _pin_update_semantics(document, runtime):
 def _can_pin_update_graph(graph):
     return all(
         node["operator"]["kind"]
-        in {"expression", "sql", "snapshot_sql", "union", "window"}
+        in {"expression", "sql", "snapshot_sql", "union", "window", "distinct"}
         and not node["operator"].get("udfs")
         for node in graph["nodes"]
     )
@@ -823,6 +826,7 @@ def _preparation_key(
 def compile_program_batch(program: Program, runtime: object, /) -> BatchExecutionPlan:
     """Lower one program to a strict project-v3 batch plan."""
     selected = _require_runtime(runtime, "compile_batch")
+    from calc_flow.symbolic.distinct import cache_policy as distinct_cache_policy
     from calc_flow.symbolic.event_window_sql import cache_policy as window_cache_policy
     from calc_flow.symbolic.inner_join_sql import cache_policy as join_cache_policy
     from calc_flow.symbolic.union import cache_policy
@@ -831,6 +835,7 @@ def compile_program_batch(program: Program, runtime: object, /) -> BatchExecutio
         *_preparation_key(program, "batch", 0, "error"),
         *cache_policy(program, selected),
         *window_cache_policy(program),
+        *distinct_cache_policy(program),
         *join_cache_policy(program),
     )
     return selected._cached_symbolic_compile(
@@ -851,6 +856,7 @@ def compile_program_stream(
     """Cache stream declarations while giving every call an owning native plan."""
     selected = _require_runtime(runtime, "compile_stream")
     _validate_lateness(allowed_lateness_micros, late_policy)
+    from calc_flow.symbolic.distinct import cache_policy as distinct_cache_policy
     from calc_flow.symbolic.event_window_sql import cache_policy as window_cache_policy
     from calc_flow.symbolic.inner_join_sql import cache_policy as join_cache_policy
     from calc_flow.symbolic.union import cache_policy
@@ -859,6 +865,7 @@ def compile_program_stream(
         *_preparation_key(program, "stream", allowed_lateness_micros, late_policy),
         *cache_policy(program, selected),
         *window_cache_policy(program),
+        *distinct_cache_policy(program),
         *join_cache_policy(program),
     )
     return selected._compile_symbolic_stream(

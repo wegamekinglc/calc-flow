@@ -51,7 +51,8 @@ Rust users call `PipelineBuilder::analyze(&udfs, &options).await` and explicitly
 select `compile_batch_checked(&udfs, &request).await` or
 `compile_stream_checked(&udfs, &requirements, &request).await`. Original
 compilers and their final lifecycle and recovery checks continue to apply.
-There is no Rust typed DataFrame/SQL frontend in this slice.
+Typed Rust and Python relations share these facts; see the
+[relational frontends](relational-frontends.md).
 
 `support` describes local lifecycle admission; `portability` describes the
 requested whole-graph comparison. The latter is `None` without a request.
@@ -116,3 +117,17 @@ names use JSON string subscripts. Shared nodes use their smallest reachable
 logical path; adding or renaming outputs may therefore change that address.
 Rust paths use quoted node IDs and endpoint quadruples, independent of insertion
 order. Reports are data, and cannot be imported as execution authorization.
+
+## Bounded final DISTINCT (analysis revision 9)
+
+Explicit DISTINCT accepts final-relation comparison over accepted history at EOF,
+or one selected event window at its closed-window cutoff. The proof is conditional
+on the same accepted tuples, successful budgets and actual closure. No row order
+is promised. Per-batch comparison is rejected for these explicit declarations;
+ordinary per-batch SQL remains unchanged. Binding boundedness/window progress is
+rechecked before startup, including cached and imported plans.
+
+Explain states the `copy_visible_v2` owned participating peak and the temporary
+borrowed-ingress exception. Older r1–r7 reports remain readable; strict/latest
+execution requires the current schema 2/revision 9 producer. Draft r8 does not
+provide a v2 execution permit. See [budget and ownership scope](bounded-global-distinct.md).

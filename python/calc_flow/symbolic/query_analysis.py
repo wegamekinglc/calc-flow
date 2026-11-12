@@ -246,7 +246,7 @@ def _node_from_dict(node):
 
 def _wire_semantics(value: dict) -> UpdateSemantics:
     version = (value["schema_version"], value["analysis_revision"])
-    if version not in ((1, 1), (2, 2), (2, 3), (2, 4), (2, 5), (2, 6), (2, 7)):
+    if version not in ((1, 1), (2, 2), (2, 3), (2, 4), (2, 5), (2, 6), (2, 7), (2, 9)):
         raise ValueError("query_analysis: unsupported revision")
     semantics = (
         value.get("update_semantics", "legacy_append")
@@ -440,7 +440,7 @@ def _issue_diagnostic(issue, mode, paths, legacy_paths):
     )
     window_issue = any(
         role in issue.path
-        for role in (".sql.window", ".window_tumbling", ".window_hopping")
+        for role in (".sql.window", ".window_tumbling", ".window_hopping", ".distinct")
     )
     status = (
         "unknown"
@@ -521,6 +521,9 @@ def _declaration(node, path, facts, statuses):
         path=path,
         kind="union" if node.op.name == "union_all" else node.op.name,
         query=query.value if isinstance(query, CStr) else None,
+        distinct_spec=json.loads(node.attr("spec").value)
+        if node.op.name == "distinct"
+        else None,
         schema=_query_schema(facts),
         ordering=dict(
             kind="unspecified",
@@ -591,10 +594,23 @@ def _native_relation_kinds(graph, paths, analyzers):
         for key in getattr(analyzer, attribute)
         if key in paths
     }
+    distincts = {
+        paths[key]: json.loads(node.attr("spec").value)
+        for analyzer in analyzers
+        for key, node in analyzer._sql_distinct_nodes.items()
+        if key in paths
+    }
     return dict(
         graph,
         nodes=[
-            {**node, "kind": kinds[node["path"]], "query": None}
+            {
+                **node,
+                "kind": "distinct",
+                "query": None,
+                "distinct_spec": distincts[node["path"]],
+            }
+            if node["path"] in distincts
+            else {**node, "kind": kinds[node["path"]], "query": None}
             if node["path"] in kinds
             else node
             for node in graph["nodes"]
@@ -610,12 +626,12 @@ def _gate(program, runtime, request):
     report = program.analyze(
         runtime, options=AnalysisOptions(portability=request)
     ).query
-    if (report.schema_version, report.analysis_revision) != (2, 7):
+    if (report.schema_version, report.analysis_revision) != (2, 9):
         from calc_flow.errors import CompileError
 
         error = CompileError(
             "Program.portability: finality_unproven: strict compilation requires "
-            "matching r7 analysis"
+            "matching r9 analysis"
         )
         error.query_analysis = report
         raise error
@@ -632,7 +648,7 @@ def _gate_latest(program, runtime):
     report = program.analyze(runtime).query
     if (report.schema_version, report.analysis_revision, report.update_semantics) != (
         2,
-        7,
+        9,
         "latest_relation",
     ):
         error = CompileError(

@@ -441,6 +441,7 @@ fn json_map(value: &Bound<'_, PyAny>, label: &str) -> calc_flow::Result<calc_flo
 }
 
 struct PythonContinuousSource {
+    descriptor: std::sync::OnceLock<(calc_flow::SourceCapabilities, calc_flow::SourceBoundedness)>,
     binding: Arc<PythonRoot>,
     awaits: Arc<PythonAwaitRegistry>,
     capability_error: Arc<Mutex<Option<String>>>,
@@ -513,6 +514,9 @@ async fn call_connector(
 
 impl PythonContinuousSource {
     fn parsed_capabilities(&self) -> PyResult<calc_flow::SourceCapabilities> {
+        if let Some((capabilities, _)) = self.descriptor.get() {
+            return Ok(capabilities.clone());
+        }
         Python::attach(|py| {
             let value = self
                 .binding
@@ -520,13 +524,33 @@ impl PythonContinuousSource {
                 .bind(py)
                 .call_method0("_native_capabilities")?;
             let value = value.cast::<PyDict>()?;
-            parse_source_capabilities(value)
+            let boundedness = match value
+                .get_item("boundedness")?
+                .map(|v| v.extract::<String>())
+                .transpose()?
+                .as_deref()
+            {
+                Some("bounded") => calc_flow::SourceBoundedness::Bounded,
+                Some("unbounded") => calc_flow::SourceBoundedness::Unbounded,
+                None | Some("unknown") => calc_flow::SourceBoundedness::Unknown,
+                _ => return Err(PyValueError::new_err("invalid source boundedness")),
+            };
+            let capabilities = parse_source_capabilities(value)?;
+            let _ = self.descriptor.set((capabilities.clone(), boundedness));
+            Ok(capabilities)
         })
     }
 }
 
 #[async_trait::async_trait]
 impl calc_flow::StreamSource for PythonContinuousSource {
+    fn boundedness(&self) -> calc_flow::SourceBoundedness {
+        self.descriptor
+            .get()
+            .map_or(calc_flow::SourceBoundedness::Unknown, |(_, boundedness)| {
+                *boundedness
+            })
+    }
     fn capabilities(&self) -> calc_flow::SourceCapabilities {
         self.parsed_capabilities().unwrap_or_else(|error| {
             self.capability_error.lock().replace(error.to_string());
@@ -911,6 +935,7 @@ fn build_sources(
         }
         let root = Arc::new(PythonRoot::new(binding.unbind()));
         let source = PythonContinuousSource {
+            descriptor: std::sync::OnceLock::new(),
             binding: Arc::clone(&root),
             awaits: Arc::clone(awaits),
             capability_error: Arc::new(Mutex::new(None)),
@@ -2466,6 +2491,7 @@ const fn streaming_failure_reason_name(
     reason: calc_flow::StreamingFailureReason,
 ) -> Option<&'static str> {
     match reason {
+        calc_flow::StreamingFailureReason::StateBudgetExceeded => Some("state_budget_exceeded"),
         calc_flow::StreamingFailureReason::JoinStateLimitExceeded => {
             Some("join_state_limit_exceeded")
         }
@@ -3631,6 +3657,7 @@ mod tests {
         let context = Arc::new(super::Mutex::new(None));
         let ownership = Arc::new(super::ConnectorOwnership::new());
         let python_source = |name: &str| super::PythonContinuousSource {
+            descriptor: std::sync::OnceLock::new(),
             binding: Arc::new(crate::config::PythonRoot::new(
                 locals.get_item(name).unwrap().unwrap().unbind(),
             )),

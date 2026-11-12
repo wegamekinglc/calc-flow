@@ -214,6 +214,9 @@ pub(crate) enum SourceDeliveryCapability {
 /// Internal source lifecycle contract for M2 runtime completion.
 #[async_trait]
 pub(crate) trait StreamSource: Send {
+    fn boundedness(&self) -> crate::SourceBoundedness {
+        crate::SourceBoundedness::Unknown
+    }
     fn history_spec(&self) -> Option<crate::SourceHistorySpec> {
         None
     }
@@ -312,6 +315,7 @@ pub(crate) struct SourceBinding {
     history: Option<crate::SourceHistoryContext>,
     source: Box<dyn StreamSource>,
     capabilities: Option<SourceCapabilities>,
+    boundedness: Option<crate::SourceBoundedness>,
     delivery: Option<SourceDeliveryCapability>,
     declared_schema: Option<DeclaredSchema>,
     native_watermarks: Option<NativeWatermarkCapability>,
@@ -341,6 +345,7 @@ impl SourceBinding {
             history_replay_factory: None,
             history: None,
             capabilities: None,
+            boundedness: None,
             delivery: None,
             declared_schema: None,
             native_watermarks: None,
@@ -397,6 +402,7 @@ impl SourceBinding {
         self.history_spec = self.source.history_spec();
         self.history_replay_factory = self.source.history_replay_factory();
         self.capabilities = Some(capabilities);
+        self.boundedness = Some(self.source.boundedness());
         self.delivery = Some(self.source.delivery_capability());
         self.declared_schema = Some(self.source.declared_schema());
         self.native_watermarks = Some(self.source.native_watermark_capability());
@@ -411,6 +417,10 @@ impl SourceBinding {
         self.durable_cursor_acknowledger = self.source.durable_cursor_acknowledger();
         self.checkpoint_gate = self.source.checkpoint_gate();
         capabilities
+    }
+
+    pub(crate) fn sampled_boundedness(&self) -> crate::SourceBoundedness {
+        self.boundedness.expect("sampled source boundedness")
     }
 
     pub(crate) fn sampled_capabilities(&self) -> SourceCapabilities {

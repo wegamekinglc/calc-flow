@@ -182,6 +182,7 @@ pub(crate) enum CompiledStreamOperator {
     Expression(crate::ExpressionOperator),
     Sql(crate::SqlOperator),
     SnapshotSql(crate::SnapshotSqlOperator),
+    Distinct(crate::DistinctOperator),
     CheckpointLoan,
     Union(UnionOperator),
     Window(crate::WindowAggregateOperator),
@@ -439,6 +440,7 @@ impl CompiledStreamOperator {
             | Self::Expression(_)
             | Self::Sql(_)
             | Self::SnapshotSql(_)
+            | Self::Distinct(_)
             | Self::Union(_)
             | Self::Window(_)
             | Self::Rolling(_)
@@ -462,6 +464,7 @@ impl CompiledStreamOperator {
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::SnapshotSql(operator) => operator.on_ingress_progress(ingress, context).await,
+            Self::Distinct(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::Union(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::Window(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::Rolling(operator) => operator.on_ingress_progress(ingress, context).await,
@@ -507,6 +510,12 @@ impl CompiledStreamOperator {
                 }
                 Ok(Self::SnapshotSql(operator))
             }
+            NodeOperator::Distinct(mut operator) => {
+                if let Some(table) = table {
+                    operator.set_datafusion_config(table.config);
+                }
+                Ok(Self::Distinct(operator))
+            }
             NodeOperator::Union(operator) => Ok(Self::Union(operator)),
             NodeOperator::Window(operator) => Ok(Self::Window(operator)),
             NodeOperator::Rolling(operator) => Ok(Self::Rolling(operator)),
@@ -540,6 +549,7 @@ impl CompiledStreamOperator {
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.reset(),
             Self::SnapshotSql(operator) => operator.reset(),
+            Self::Distinct(operator) => operator.reset(),
             Self::Union(operator) => operator.reset(),
             Self::Window(operator) => operator.reset(),
             Self::Rolling(operator) => operator.reset(),
@@ -559,6 +569,7 @@ impl CompiledStreamOperator {
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.prepare_checkpoint_async(context).await,
             Self::SnapshotSql(operator) => operator.prepare_checkpoint_async(context).await,
+            Self::Distinct(operator) => operator.prepare_checkpoint_async(context).await,
             Self::Union(operator) => operator.prepare_checkpoint_async(context).await,
             Self::Window(operator) => operator.prepare_checkpoint_async(context).await,
             Self::Rolling(operator) => operator.prepare_checkpoint_async(context).await,
@@ -582,6 +593,7 @@ impl CompiledStreamOperator {
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.checkpoint(epoch),
             Self::SnapshotSql(operator) => operator.checkpoint(epoch),
+            Self::Distinct(operator) => operator.checkpoint(epoch),
             Self::Union(operator) => operator.checkpoint(epoch),
             Self::Window(operator) => operator.checkpoint(epoch),
             Self::Rolling(operator) => operator.checkpoint(epoch),
@@ -602,6 +614,7 @@ impl CompiledStreamOperator {
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.restore(snapshot),
             Self::SnapshotSql(operator) => operator.restore(snapshot),
+            Self::Distinct(operator) => operator.restore(snapshot),
             Self::Union(operator) => operator.restore(snapshot),
             Self::Window(operator) => operator.restore(snapshot),
             Self::Rolling(operator) => operator.restore(snapshot),
@@ -618,6 +631,7 @@ impl CompiledStreamOperator {
     ) -> Result<()> {
         match self {
             Self::External(operator) => operator.restore_async(snapshot, context).await,
+            Self::Distinct(operator) => operator.restore_async(snapshot, context).await,
             Self::Rolling(operator)
                 if matches!(
                     operator.state_layout_version(),
@@ -664,6 +678,9 @@ impl CompiledStreamOperator {
             Self::SnapshotSql(operator) => {
                 operator.process_data(ingress, batch, context, output).await
             }
+            Self::Distinct(operator) => {
+                operator.process_data(ingress, batch, context, output).await
+            }
             Self::Union(operator) => operator.process_data(ingress, batch, context, output).await,
             Self::Window(operator) => operator.process_data(ingress, batch, context, output).await,
             Self::Rolling(operator) => operator.process_data(ingress, batch, context, output).await,
@@ -691,6 +708,7 @@ impl CompiledStreamOperator {
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.on_watermark(watermark, context, output).await,
             Self::SnapshotSql(operator) => operator.on_watermark(watermark, context, output).await,
+            Self::Distinct(operator) => operator.on_watermark(watermark, context, output).await,
             Self::Union(operator) => operator.on_watermark(watermark, context, output).await,
             Self::Window(operator) => operator.on_watermark(watermark, context, output).await,
             Self::Rolling(operator) => operator.on_watermark(watermark, context, output).await,
@@ -712,6 +730,7 @@ impl CompiledStreamOperator {
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.on_end(context, output).await,
             Self::SnapshotSql(operator) => operator.on_end(context, output).await,
+            Self::Distinct(operator) => operator.on_end(context, output).await,
             Self::Union(operator) => operator.on_end(context, output).await,
             Self::Window(operator) => operator.on_end(context, output).await,
             Self::Rolling(operator) => operator.on_end(context, output).await,
@@ -728,6 +747,7 @@ impl CompiledStreamOperator {
             Self::SnapshotSql(operator) => operator.stream_runtime_initialized(),
             Self::StreamJoin(operator) => operator.stream_runtime_initialized(),
             Self::CheckpointLoan
+            | Self::Distinct(_)
             | Self::StreamAsofJoin(_)
             | Self::External(_)
             | Self::Union(_)
@@ -976,6 +996,7 @@ fn validate_stream_node(node_id: &str, operator: &NodeOperator) -> Result<()> {
         }
         NodeOperator::Expression(_)
         | NodeOperator::Union(_)
+        | NodeOperator::Distinct(_)
         | NodeOperator::Window(_)
         | NodeOperator::Rolling(_)
         | NodeOperator::CrossSection(_)

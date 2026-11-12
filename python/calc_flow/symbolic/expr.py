@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from calc_flow.runtime import StreamRuntimeConfig, WatermarkPolicy
     from calc_flow.stream import StreamInput, StreamResults
     from calc_flow.symbolic.asof import _AsofJoinOptions
+    from calc_flow.symbolic.distinct import DistinctSpec
     from calc_flow.symbolic.program import FeatureSet
 
 ColumnOperand = TypeAliasType("ColumnOperand", Union["ColumnExpr", ScalarLiteral])
@@ -510,6 +511,17 @@ def _reflected_array(
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
 class TableExpr(Expr[object]):
     """An Arrow-backed table expression."""
+
+    def distinct(self, columns: Sequence[str], /, *, spec: DistinctSpec) -> TableExpr:
+        """Final DISTINCT with copy_visible_v2 owned peak accounting.
+
+        Borrowed external ingress backing is excluded while synchronously copied;
+        retained history, query workspace, output and captures are charged.
+        Stream finalization requires proved boundedness or window closure.
+        """
+        from calc_flow.symbolic.distinct import declaration
+
+        return TableExpr(declaration(self._node, columns, spec))
 
     def union_all(self, other: TableExpr, /) -> TableExpr:
         """Append rows with an exact matching schema, preserving duplicates.

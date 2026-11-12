@@ -154,6 +154,9 @@ impl ArrowSource {
 
 #[async_trait::async_trait]
 impl StreamSource for ArrowSource {
+    fn boundedness(&self) -> calc_flow::SourceBoundedness {
+        calc_flow::SourceBoundedness::Bounded
+    }
     fn capabilities(&self) -> SourceCapabilities {
         SourceCapabilities {
             replay_positioning: ReplayPositioning::Unsupported,

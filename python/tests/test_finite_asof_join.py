@@ -89,7 +89,7 @@ def test_asof_conditional_final_relation_proof_revision():
         cutoff="all_sources_eof",
     )
     report = p.analyze(options=cf.AnalysisOptions(portability=request)).query
-    assert report.analysis_revision == 7
+    assert report.analysis_revision == 9
     assert report.portability == "supported", report.diagnostics
     result = next(node for node in report.nodes if node.path == "outputs.matched")
     assert result.stream.finality == "group_final"

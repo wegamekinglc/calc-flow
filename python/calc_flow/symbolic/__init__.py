@@ -7,6 +7,7 @@ uses the Rust runtime; Python builders never become serialized project data.
 from __future__ import annotations
 
 from calc_flow.symbolic.analyzer import AnalysisIssue, AnalysisResult
+from calc_flow.symbolic.distinct import DistinctSpec
 from calc_flow.symbolic.expr import (
     AggregateExpr,
     ArrayExpr,
@@ -62,6 +63,7 @@ from calc_flow.symbolic.windows import (
 )
 
 __all__ = [
+    "DistinctSpec",
     "CompileMode",
     "AnalysisOptions",
     "Comparison",

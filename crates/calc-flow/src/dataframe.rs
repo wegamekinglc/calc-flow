@@ -73,6 +73,13 @@ pub(crate) struct Relation {
 }
 #[derive(Debug)]
 pub(crate) enum RelationKind {
+    Distinct {
+        input: TableExpr,
+        columns: Vec<String>,
+        spec: crate::DistinctSpec,
+        sql: bool,
+        wildcard: bool,
+    },
     AsofJoin {
         inputs: [TableExpr; 2],
         spec: crate::StreamAsofJoinSpec,
@@ -336,6 +343,65 @@ pub fn lit(value: impl Into<LiteralValue>) -> Result<ColumnExpr> {
 }
 
 impl TableExpr {
+    /// Projects ordered keys and returns their final, unordered distinct relation.
+    ///
+    /// Uses `copy_visible_v2`: `max_bytes` bounds node-owned participating peak.
+    /// Temporarily borrowed external ingress backing and other graph owners are
+    /// excluded; retained history and prepared output always use owned copies.
+    ///
+    /// # Errors
+    /// Rejects empty or duplicate keys. Compilation checks exact schema and domain.
+    pub fn distinct(&self, columns: Vec<String>, spec: crate::DistinctSpec) -> Result<Self> {
+        if columns.is_empty() {
+            return Err(invalid(
+                "distinct.columns",
+                "invalid_literal",
+                "provide at least one column",
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for (i, name) in columns.iter().enumerate() {
+            check_name(name, &format!("distinct.columns[{i}]"))?;
+            if !seen.insert(name) {
+                return Err(invalid(
+                    &format!("distinct.columns[{i}]"),
+                    "duplicate_name",
+                    name,
+                ));
+            }
+        }
+        Ok(Self(Arc::new(Relation {
+            id: digest(&json!(["distinct", self.0.id, columns, spec])),
+            kind: RelationKind::Distinct {
+                input: self.clone(),
+                columns,
+                spec,
+                sql: false,
+                wildcard: false,
+            },
+        })))
+    }
+    pub(crate) fn distinct_sql_relation(
+        &self,
+        columns: Option<Vec<String>>,
+        spec: crate::DistinctSpec,
+    ) -> Result<Self> {
+        let wildcard = columns.is_none();
+        let columns = columns.unwrap_or_default();
+        if !wildcard {
+            self.distinct(columns.clone(), spec.clone())?;
+        }
+        Ok(Self(Arc::new(Relation {
+            id: digest(&json!(["sql.distinct", self.0.id, columns, wildcard, spec])),
+            kind: RelationKind::Distinct {
+                input: self.clone(),
+                columns,
+                spec,
+                sql: true,
+                wildcard,
+            },
+        })))
+    }
     /// Appends rows from two exact-schema relations, preserving duplicates and NULLs.
     ///
     /// Each input keeps its FIFO order; cross-input order is unspecified.
@@ -367,6 +433,7 @@ impl TableExpr {
             | RelationKind::AsofJoin { .. }
             | RelationKind::InnerJoin { .. }
             | RelationKind::Window { .. }
+            | RelationKind::Distinct { .. }
             | RelationKind::Union { .. }
             | RelationKind::Sql { .. }
             | RelationKind::Aggregate { .. } => &self.0.id,
@@ -395,6 +462,15 @@ impl TableExpr {
                 Some(names)
             }
             RelationKind::Filter { input, .. } => input.known_names(),
+            RelationKind::Distinct {
+                columns, wildcard, ..
+            } => {
+                if *wildcard {
+                    None
+                } else {
+                    Some(columns.iter().cloned().collect())
+                }
+            }
             RelationKind::Union { inputs } => inputs[0].known_names(),
             RelationKind::Aggregate {
                 aggregates,

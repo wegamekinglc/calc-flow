@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import tempfile
+import uuid
 from collections.abc import AsyncIterator, Mapping
+from contextlib import suppress
 from dataclasses import fields, replace
 from types import TracebackType
 from typing import Any, Generic, TypeVar, cast
@@ -45,6 +48,7 @@ from calc_flow.runtime import (
     ManagedCheckpointRuntime,
     SinkBinding,
     SourceBinding,
+    StreamingError,
     StreamingJob,
     StreamingRunner,
     StreamRuntimeConfig,
@@ -200,6 +204,31 @@ def _outcome_error(
     return error
 
 
+def _logical_distinct_error(error, names):
+    """Project native DISTINCT binding obligations to convenience input names."""
+    if error.component_kind != "source":
+        return error
+    physical = error.component_id
+    logical = next((name for name, ports in names.items() if physical in ports), None)
+    prefix = f"stream.inputs.{physical}."
+    if logical is None or not error.message.startswith(prefix):
+        return error
+    suffix = error.message[len(prefix) :]
+    if not suffix.startswith(
+        ("boundedness: source_", "watermark_policy: finality_unproven")
+    ):
+        return error
+    details = {
+        field.name: getattr(error, field.name) for field in fields(StreamingError)
+    }
+    details.update(message=f"stream.inputs.{logical}.{suffix}", component_id=logical)
+    projected = StreamingRuntimeError(details["message"])
+    projected._calc_flow_native_safe_fields = tuple(
+        details[field.name] for field in fields(StreamingError)
+    )
+    return projected
+
+
 T = TypeVar("T")
 
 
@@ -287,7 +316,13 @@ class StreamResults(Generic[T]):
         runner = StreamingRunner(
             plan, sources, sinks, checkpoints, config=config, static_inputs=static
         )
-        self._job = await runner.start_async()
+        try:
+            self._job = await runner.start_async()
+        except StreamingRuntimeError as error:
+            projected = _logical_distinct_error(error, names)
+            if projected is error:
+                raise
+            raise projected from None
         self._waiter = asyncio.create_task(self._job.wait_async())
         self._waiter.add_done_callback(lambda _: self._ready.set())
 
@@ -325,6 +360,14 @@ class StreamResults(Generic[T]):
         return sources, static
 
     async def _create_root(self) -> None:
+        from calc_flow.symbolic.distinct import cache_policy
+
+        if cache_policy(self._request.program):
+            # Native preflight must validate the binding before creating state.
+            self._root = os.path.join(
+                tempfile.gettempdir(), f"calc-flow-{uuid.uuid4().hex}"
+            )
+            return
         task = asyncio.create_task(
             asyncio.to_thread(tempfile.mkdtemp, prefix="calc-flow-")
         )
@@ -472,7 +515,8 @@ class StreamResults(Generic[T]):
             finally:
                 try:
                     if self._root is not None:
-                        await asyncio.to_thread(shutil.rmtree, self._root)
+                        with suppress(FileNotFoundError):
+                            await asyncio.to_thread(shutil.rmtree, self._root)
                 finally:
                     self._request = replace(self._request, inputs={})
                     queue = getattr(self, "_queue", None)
