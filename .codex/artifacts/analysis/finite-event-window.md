@@ -602,3 +602,83 @@ source/native manifest and one nonblocking CI snapshot are handed back to the
 coordinator. No full-suite, local coverage, platform, connector-service or
 performance expansion, merge or further delegation is performed. DAL-516 stays
 in_progress.
+
+## PyO3 current-producer exception-report r5 expectation
+
+Approved base: `7b0dd8b4a3a5ad89a2b65595b8962687756a4901`.
+Combined-coverage job `130958376329` stops in
+`error::tests::query_portability_errors_keep_the_immutable_report` with actual
+revision 5 versus expected 4, 145 passed / 1 failed and harness exit 101.
+Coverage has not been settled at this failure point; this is a unit assertion
+failure rather than an observed coverage-floor or infrastructure failure.
+
+The test builds a fresh `PipelineBuilder` and invokes current
+`compile_batch_checked`, then translates its error into Python. It therefore
+checks the current producer (schema 2 / revision 5), not a legacy r4 wire fixture.
+After attempting a forbidden mutation to revision 0, it verifies the snapshot
+still has its original producer revision. The only code-file change is that
+expected literal **4 -> 5**, inside `#[cfg(test)]` in PyO3 `error.rs`.
+The exception class, schema version 2, unsupported portability, exact
+`graph.nodes["distinct"]` path, current Python module source path, immutable
+mutation exception and all remaining test bytes are unchanged. Production error
+translation before `#[cfg(test)]` is byte-identical. No product protocol changes.
+
+A single bounded occurrence audit covered Rust core/PyO3 and Rust/Python tests
+plus the Python report reader/gate. Other current-producer assertions already
+expect r5. The Python reader's accepted `(2,4)` and the intentionally stale
+`(2,4)` strict-cache-gate fixture remain unchanged, as do six audited producer/
+reader/gate files. `report-r5-audit.log`, `report-r5-preserved-version-files.json`
+and `report-r5-preservation.log` record the audit and exact preservation checks;
+there was no global replacement of version literals.
+
+The scoped PyO3 test executable is compiled with the repository harness's
+all-features lib-test configuration, using the same CPython 3.13 interpreter and
+Cargo artifact cache. Only the requested filters execute; neither the full Rust
+matrix nor local combined coverage is invoked:
+
+```sh
+PYO3_PYTHON=/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python \
+CARGO_TARGET_DIR=/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug \
+CARGO_BUILD_JOBS=2 cargo test --locked -p calc-flow-python --lib --all-features \
+  --no-run --message-format=json
+```
+
+The target-local `run-report-error-tests.py` selects the unique test executable
+from Cargo JSON, invokes the repository `scripts/run_rust_tests.py` helpers
+`_python_test_environment` and `_run`, and records checkout, interpreter, LIBDIR,
+binary path/hash and exact argv. The interpreter is the explicit `.venv/bin/python`
+above; its `LIBDIR=/home/wegamekinglc/anaconda3/lib` is prepended to the loader
+path. Each process runs with `--test-threads=1` and a 300-second runtime timeout,
+which starts after compilation. The test's original `__file__` assertion proves
+the loaded Python report projection is from this checkout. The binding module is
+embedded in the newly compiled test executable, rather than borrowed from a
+different wheel or checkout.
+
+```sh
+<same-python> target/finite-event-window/run-report-error-tests.py \
+  target/finite-event-window/report-r5-build-red.jsonl \
+  error::tests::query_portability_errors_keep_the_immutable_report --exact
+<same-python> target/finite-event-window/run-report-error-tests.py \
+  target/finite-event-window/report-r5-build-green.jsonl \
+  error::tests::query_portability_errors_keep_the_immutable_report --exact
+<same-python> target/finite-event-window/run-report-error-tests.py \
+  target/finite-event-window/report-r5-build-green.jsonl error::tests::
+```
+
+RED before editing: exit **101**, **1 failed / 145 filtered**, actual 5 / expected
+4, matching hosted evidence. After the one-literal correction and rebuild,
+GREEN exact case: **1 passed / 145 filtered**; GREEN complete error module:
+**5 passed / 141 filtered**. The counts overlap. Build logs are
+`report-r5-build-red.log` and `report-r5-build-green.log`; execution logs are
+`report-r5-red.log`, `report-r5-green.log` and
+`report-r5-error-module-green.log`. The GREEN test-executable SHA-256 is
+`ec698f8bb7e3afd5207d9166f6a8fb018730c4cc7faf570653be3a59df511b55`.
+Rust formatting and whitespace checks pass. No packaged-native rebuild is
+needed for this test-only assertion; existing approved product/native evidence
+is reused without claiming an unchanged wheel executed this embedded test.
+
+The reviewer report remains untracked, untouched and excluded from staging.
+The final increment SHA, preservation/source manifests and one nonblocking CI
+snapshot are returned to the coordinator for this increment's focused review.
+No full-suite/coverage, connector test/service, platform or performance run,
+product/gate change, merge or delegation is performed; DAL-516 stays in_progress.
