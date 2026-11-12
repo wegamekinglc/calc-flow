@@ -1,5 +1,9 @@
 //! Read-only SQL relations composable with typed `DataFrame` declarations.
 
+mod inner_join;
+pub use inner_join::JoinOutputOrdering;
+#[doc(hidden)]
+pub use inner_join::{InnerJoinQuery, inner_join_query};
 mod union;
 mod window;
 #[doc(hidden)]
@@ -40,6 +44,14 @@ pub fn sql(query: &str, tables: BTreeMap<String, TableExpr>) -> Result<TableExpr
                 "normalized SQL aliases must be unique",
             ));
         }
+    }
+    if let Some(plan) = inner_join_query(query, &tables.keys().cloned().collect::<Vec<_>>())? {
+        return tables[&plan.left_alias].inner_join_relation(
+            &tables[&plan.right_alias],
+            plan.spec,
+            plan.output_ordering,
+            true,
+        );
     }
     if let Some(plan) = event_window_query(query, &tables.keys().cloned().collect::<Vec<_>>())? {
         return tables[&plan.alias].window_relation(plan.spec, true);

@@ -120,7 +120,7 @@ def test_window_analysis_proves_conditional_eof_and_leaves_prefix_unknown():
         ordering="unordered",
     )
     report = program.analyze(options=cf.AnalysisOptions(portability=request)).query
-    assert (report.schema_version, report.analysis_revision) == (2, 5)
+    assert (report.schema_version, report.analysis_revision) == (2, 6)
     assert report.portability == "supported", report.diagnostics
     request = cf.PortabilityRequest(
         comparison="final_relation",

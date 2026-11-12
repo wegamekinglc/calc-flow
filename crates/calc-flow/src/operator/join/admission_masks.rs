@@ -161,6 +161,25 @@ async fn send_masks(
 }
 
 impl AdmissionMasks {
+    pub(super) fn finite(
+        record: &RecordBatch,
+        plan: &SidePlan,
+        times: &BatchEventTimes<'_>,
+        start: usize,
+        length: usize,
+    ) -> Self {
+        let pure = PureMasks::new(record, &plan.key_indices, times, start, length);
+        Self {
+            times: pure.times,
+            null_time: pure.null_time,
+            conversion_error: pure.conversion_error,
+            null_key: pure.null_key,
+            late: 0,
+            retain: low_bits(length),
+            watermark: i128::MIN,
+        }
+    }
+
     pub(super) async fn new(
         config: &AdmissionMaskContext<'_>,
         times: &BatchEventTimes<'_>,

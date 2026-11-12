@@ -1522,13 +1522,8 @@ fn stream_join_node(
     inputs: &[Port],
     outputs: &[Port],
     spec: &StreamJoinSpec,
-    mode: CompileMode,
+    _mode: CompileMode,
 ) -> Result<NodeOperator> {
-    if mode != CompileMode::Stream {
-        return Err(CalcFlowError::Compile {
-            message: format!("node {:?} uses a stream-only stream_join", node.id),
-        });
-    }
     let [left, right] = inputs else {
         return Err(CalcFlowError::InvalidArgument {
             field: "node.input_ports".into(),
@@ -2445,17 +2440,10 @@ fn validate_stream_join_operator(
     node: &NodeSpec,
     index: usize,
     spec: &StreamJoinSpec,
-    mode: CompileMode,
+    _mode: CompileMode,
     base: &str,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    if mode != CompileMode::Stream {
-        issues.push(issue(
-            base,
-            "incompatible_runtime",
-            "stream_join is available only in stream runtime mode",
-        ));
-    }
     if !stream_join_inputs_valid(node) {
         issues.push(issue(
             format!("graph.nodes[{index}].input_ports"),

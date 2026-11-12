@@ -483,7 +483,7 @@ pub(crate) fn analyze_graph(graph: DeclarationGraph) -> Result<QueryAnalysis> {
         .map(|_| conjunction(diagnostics.iter().map(|issue| issue.status)));
     Ok(QueryAnalysis {
         schema_version: 2,
-        analysis_revision: 5,
+        analysis_revision: 6,
         update_semantics,
         request: options.portability,
         portability,
@@ -731,7 +731,9 @@ fn analyze_edges(
             request,
             &stream,
             consumption,
-            proofs[&edge.target_path].1 || target_kind == "union" || window_kind(target_kind),
+            proofs[&edge.target_path].1
+                || matches!(target_kind.as_str(), "union" | "stream_join")
+                || window_kind(target_kind),
         ) {
             stream.support = SupportStatus::Unsupported;
             diagnostic(
@@ -910,10 +912,16 @@ fn batch_facts(
     } else {
         support
     });
-    if window_kind(&node.kind) {
+    if window_kind(&node.kind) || node.kind == "stream_join" {
         batch.support = node.batch_support.unwrap_or(SupportStatus::Supported);
         batch.reason =
             "one finite execute finalizes every nonempty window of its complete input".into();
+    }
+    if node.kind == "stream_join" {
+        batch.history = HistoryScope::CurrentBatch;
+        batch.update = UpdateKind::Append;
+        batch.finality = QueryFinality::PerBatch;
+        batch.reason = "one independent complete input per finite execution".into();
     }
     if aggregate && node.kind != "snapshot_sql" {
         batch.history = HistoryScope::CurrentBatch;
@@ -1065,10 +1073,7 @@ fn window_kind(kind: &str) -> bool {
 }
 
 fn stream_only_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "snapshot_sql" | "stream_join" | "stream_asof_join" | "stream_only"
-    )
+    matches!(kind, "snapshot_sql" | "stream_asof_join" | "stream_only")
 }
 
 fn stream_facts(node: &Declaration, class: Classification) -> QueryModeFacts {
@@ -1081,7 +1086,10 @@ fn stream_facts(node: &Declaration, class: Classification) -> QueryModeFacts {
     } = class;
     let (mut update, mut finality) = ordinary_lifecycle(aggregate, proof);
     let stream_only = stream_only_kind(&node.kind);
-    if stream_only || window_kind(&node.kind) || node.kind == "union" {
+    if stream_only
+        || window_kind(&node.kind)
+        || matches!(node.kind.as_str(), "union" | "stream_join")
+    {
         support = SupportStatus::Supported;
         (history, update, finality) = match node.kind.as_str() {
             "snapshot_sql" => (
@@ -1099,7 +1107,12 @@ fn stream_facts(node: &Declaration, class: Classification) -> QueryModeFacts {
                 UpdateKind::Append,
                 QueryFinality::PerRowFinal,
             ),
-            "stream_join" | "stream_asof_join" => (
+            "stream_join" => (
+                HistoryScope::AcceptedHistory,
+                UpdateKind::Append,
+                QueryFinality::PerRowFinal,
+            ),
+            "stream_asof_join" => (
                 HistoryScope::AcceptedHistory,
                 UpdateKind::Append,
                 QueryFinality::Unknown,
@@ -1212,6 +1225,21 @@ fn obligations(
     diagnostics: &mut Vec<QueryDiagnostic>,
 ) {
     record_unknown_support(node, facts, diagnostics);
+    if node.kind == "stream_join" {
+        if request.comparison != Comparison::FinalRelation
+            || request.cutoff != ComparisonCutoff::AllSourcesEof
+            || request.history != HistoryScope::AcceptedHistory
+        {
+            diagnostic(
+                diagnostics,
+                &format!("{}.stream.finality", node.path),
+                "finality_unproven",
+                SupportStatus::Unknown,
+                "inner join equivalence requires complete H, coexisting candidates, no late/progress discards, and all_sources_eof",
+            );
+        }
+        return;
+    }
     if window_kind(&node.kind) {
         if request.cutoff != ComparisonCutoff::AllSourcesEof
             || request.history != HistoryScope::AcceptedHistory

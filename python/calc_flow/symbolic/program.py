@@ -125,7 +125,6 @@ def _stream_controls(
 _STREAM_ONLY_OPS = frozenset(
     {
         "snapshot_sql",
-        "stream_join",
         "stream_asof_join",
         "late_output",
         "late_rows",
@@ -150,6 +149,10 @@ def _validate_engine_node(
 
 
 def _validate_stream_sql(node: Node, path: str) -> None:
+    from calc_flow.symbolic.inner_join_sql import native_plan
+
+    if native_plan(node) is not None:
+        return
     aliases = node.attr("aliases")
     if isinstance(aliases, CSeq) and len(aliases.items) != 1:
         from calc_flow.symbolic.union import has_late_input, sql_queries

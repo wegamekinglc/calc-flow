@@ -14,6 +14,7 @@ use datafusion::arrow::datatypes::SchemaRef;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod join;
 mod union;
 mod window;
 
@@ -24,6 +25,7 @@ pub(super) struct Lowered {
     update_semantics: crate::UpdateSemantics,
     pub schemas: BTreeMap<String, SchemaRef>,
     orderings: BTreeMap<String, QueryOrderingFacts>,
+    join_paths: BTreeSet<String>,
     nodes: Vec<NodeSpec>,
     edges: Vec<EdgeSpec>,
     declarations: Vec<Declaration>,
@@ -45,6 +47,21 @@ fn endpoint(table: &TableExpr, port: &str) -> PortEndpoint {
 }
 pub(super) fn children(table: &TableExpr, path: &str) -> Vec<(String, TableExpr, String)> {
     match &table.0.kind {
+        RelationKind::InnerJoin { inputs, sql, .. } => inputs
+            .iter()
+            .enumerate()
+            .map(|(i, input)| {
+                let side = if i == 0 { "left" } else { "right" };
+                (
+                    side.into(),
+                    input.clone(),
+                    format!(
+                        "{path}.{}.{side}",
+                        if *sql { "sql.inner_join" } else { "inner_join" }
+                    ),
+                )
+            })
+            .collect(),
         RelationKind::Window { input, sql, .. } => vec![(
             "input".into(),
             input.clone(),
@@ -128,6 +145,7 @@ pub(super) async fn lower(program: &Program) -> Result<Lowered> {
         update_semantics: program.update_semantics,
         schemas: BTreeMap::new(),
         orderings: BTreeMap::new(),
+        join_paths: join::sql_paths(&order),
         nodes: vec![],
         edges: vec![],
         declarations: vec![],
@@ -308,6 +326,21 @@ impl Lowered {
     }
     async fn prepare(&self, table: &TableExpr, path: &str) -> Result<Prepared> {
         match &table.0.kind {
+            RelationKind::InnerJoin {
+                inputs,
+                spec,
+                ordering,
+                sql,
+            } => self.prepare_join(
+                table,
+                inputs,
+                spec,
+                ordering.as_ref(),
+                &format!(
+                    "{path}.{}",
+                    if *sql { "sql.inner_join" } else { "inner_join" }
+                ),
+            ),
             RelationKind::Window { input, spec, sql } => self.prepare_window(
                 table,
                 input,
@@ -451,7 +484,7 @@ impl Lowered {
             schema,
             kind: "sql",
             query: Some(query.to_owned()),
-            ordering: QueryOrderingFacts::default(),
+            ordering: self.join_sql_ordering(table, query, tables)?,
         })
     }
     pub fn analyze(&self, options: &AnalysisOptions) -> Result<QueryAnalysis> {
@@ -565,6 +598,7 @@ fn native_edge(edge: &EdgeSpec) -> Result<Edge> {
 }
 fn relation_kind(table: &TableExpr) -> (&'static str, Option<String>) {
     match &table.0.kind {
+        RelationKind::InnerJoin { .. } => ("stream_join", None),
         RelationKind::Window { .. } => ("window", None),
         RelationKind::Union { .. } => ("union", None),
         RelationKind::Input { .. } => ("table_input", None),
@@ -693,6 +727,13 @@ fn node_operator(node: &NodeSpec, schemas: &PlannedPorts) -> Result<NodeOperator
     let inputs = schemas.inputs()?;
     let output = exact_port("output", &schemas.output)?;
     match &node.operator {
+        OperatorSpec::StreamJoin { spec } => Ok(crate::StreamJoinOperator::new(
+            &node.id,
+            inputs[0].schema().expect("exact left").clone(),
+            inputs[1].schema().expect("exact right").clone(),
+            spec.clone(),
+        )?
+        .into()),
         OperatorSpec::Window { spec } => Ok(crate::WindowAggregateOperator::new(
             &node.id,
             inputs[0].schema().expect("exact window input").clone(),

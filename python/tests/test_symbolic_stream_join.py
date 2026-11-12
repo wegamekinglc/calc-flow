@@ -160,9 +160,9 @@ def test_stream_join_analysis_infers_prefixed_exact_schema() -> None:
     assert "max_state_rows_per_side=100" in explanation
 
 
-def test_stream_join_analysis_rejects_batch_and_missing_ordering() -> None:
+def test_stream_join_analysis_admits_batch_and_rejects_missing_ordering() -> None:
     batch = _program().analyze(Runtime(), mode="batch")
-    assert any(issue.code == "unsupported_mode" for issue in batch.issues)
+    assert not batch.issues
     with pytest.raises(RuntimeError, match="engine.*streaming.*sql"):
         _program().compile_batch(Runtime())
 

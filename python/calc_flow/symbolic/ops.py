@@ -1562,8 +1562,10 @@ class TableNamespace:
         output_event_time: str | None = None,
         output_sequence_by: Sequence[str] = (),
     ) -> TableExpr:
-        """Declare one bounded native inner join between two stream tables.
+        """Declare one bounded native inner join for finite or streaming execution.
 
+        Finite limits cover each complete input Batch, including all RecordBatches.
+        Each finite execution owns fresh state. Streaming state persists across batches.
         Output ordering is optional for a terminal row-local join. Declare all
         three output ordering arguments when the result feeds another join or
         a stateful symbolic stage.

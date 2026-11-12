@@ -938,29 +938,6 @@ impl<'a> Iterator for GroupIter<'a> {
 mod fixtures {
     use super::super::AdmittedRow;
     use super::*;
-    impl AdmittedRows for Vec<AdmittedRow> {
-        fn len(&self) -> usize {
-            Vec::len(self)
-        }
-        fn row(&self, index: usize) -> AdmittedRef<'_> {
-            let row = &self[index];
-            AdmittedRef {
-                record: (&row.record).into(),
-                event_time: row.event_time,
-                row_id: row.row_id,
-                retain: row.retain,
-            }
-        }
-        fn group_end(&self, start: usize) -> usize {
-            let columns = self[start].record.columns();
-            (start + 1..self.len())
-                .find(|&index| !std::ptr::eq(columns, self[index].record.columns()))
-                .unwrap_or(self.len())
-        }
-        fn source_index(&self, index: usize) -> usize {
-            index
-        }
-    }
     impl<const N: usize> AdmittedRows for [AdmittedRow; N] {
         fn len(&self) -> usize {
             N
@@ -1020,5 +997,30 @@ mod fixtures {
             batch.total_records = batch.current;
             batch
         }
+    }
+}
+
+use super::AdmittedRow;
+impl AdmittedRows for Vec<AdmittedRow> {
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+    fn row(&self, index: usize) -> AdmittedRef<'_> {
+        let row = &self[index];
+        AdmittedRef {
+            record: (&row.record).into(),
+            event_time: row.event_time,
+            row_id: row.row_id,
+            retain: row.retain,
+        }
+    }
+    fn group_end(&self, start: usize) -> usize {
+        let columns = self[start].record.columns();
+        (start + 1..self.len())
+            .find(|&index| !std::ptr::eq(columns, self[index].record.columns()))
+            .unwrap_or(self.len())
+    }
+    fn source_index(&self, index: usize) -> usize {
+        index
     }
 }
