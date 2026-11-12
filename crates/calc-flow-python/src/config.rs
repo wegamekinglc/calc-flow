@@ -1192,11 +1192,18 @@ mod tests {
         Python::initialize();
         Python::attach(|py| {
             let aliases = PyList::new(py, ["a"]).unwrap();
-            let result = _distinct_query(
-                "SELECT DISTINCT x FROM CF_DISTINCT_BOUNDED('a', 2, 8388608)",
-                &aliases,
-            )
-            .unwrap();
+            let module = PyModule::new(py, "distinct_bridge").unwrap();
+            register_query_planners(&module).unwrap();
+            let result = module
+                .getattr("_distinct_query")
+                .unwrap()
+                .call1((
+                    "SELECT DISTINCT x FROM CF_DISTINCT_BOUNDED('a', 2, 8388608)",
+                    aliases,
+                ))
+                .unwrap()
+                .extract::<String>()
+                .unwrap();
             let value: serde_json::Value = serde_json::from_str(&result).unwrap();
             assert_eq!(value["spec"]["ingress_policy"], "copy_visible_v2");
             assert_eq!(value["columns"], serde_json::json!(["x"]));
