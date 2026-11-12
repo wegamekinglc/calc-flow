@@ -144,15 +144,27 @@ def _validate_engine_node(
             "directly to sinks"
         )
     if engine == "streaming" and node.op.name == "sql":
-        aliases = node.attr("aliases")
-        if isinstance(aliases, CSeq) and len(aliases.items) != 1:
-            raise ValueError(
-                f"{path}: unsupported_mode: streaming SQL accepts one table alias"
-            )
+        _validate_stream_sql(node, path)
     if engine == "sql" and node.op.name in _STREAM_ONLY_OPS:
         raise ValueError(
             f"{path}: unsupported_mode: {node.op.name} requires the streaming engine"
         )
+
+
+def _validate_stream_sql(node: Node, path: str) -> None:
+    aliases = node.attr("aliases")
+    if isinstance(aliases, CSeq) and len(aliases.items) != 1:
+        from calc_flow.symbolic.union import has_late_input, sql_queries
+
+        if has_late_input(node):
+            raise ValueError(
+                f"{path}: unsupported_mode: late output requires single-input SQL"
+            )
+        if sql_queries(node) is None:
+            raise ValueError(
+                f"{path}: unsupported_mode: streaming SQL accepts one table alias "
+                "or the exact-schema UNION ALL subset"
+            )
 
 
 def _validate_engine_outputs(

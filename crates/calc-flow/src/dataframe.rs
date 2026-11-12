@@ -73,6 +73,9 @@ pub(crate) struct Relation {
 }
 #[derive(Debug)]
 pub(crate) enum RelationKind {
+    Union {
+        inputs: [TableExpr; 2],
+    },
     Input {
         name: String,
         schema: SchemaRef,
@@ -159,6 +162,54 @@ pub(crate) fn segment(root: &str, name: &str) -> String {
 }
 pub(crate) fn quote(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+pub(crate) fn union_schema(expected: &SchemaRef, found: &SchemaRef, path: &str) -> Result<()> {
+    if expected.fields().len() != found.fields().len() {
+        return Err(invalid(
+            &format!("{path}.schema"),
+            "schema_mismatch",
+            format!(
+                "exact schema required: expected {} fields, found {}",
+                expected.fields().len(),
+                found.fields().len()
+            ),
+        ));
+    }
+    for (index, (left, right)) in expected.fields().iter().zip(found.fields()).enumerate() {
+        let difference = if left.name() != right.name() {
+            Some((
+                "name",
+                format!("{:?}", left.name()),
+                format!("{:?}", right.name()),
+            ))
+        } else if left.data_type() != right.data_type() {
+            Some((
+                "data_type",
+                left.data_type().to_string(),
+                right.data_type().to_string(),
+            ))
+        } else if left.is_nullable() != right.is_nullable() {
+            Some((
+                "nullable",
+                left.is_nullable().to_string(),
+                right.is_nullable().to_string(),
+            ))
+        } else {
+            None
+        };
+        if let Some((field, expected, found)) = difference {
+            return Err(invalid(
+                &format!("{path}.schema[{index}].{field}"),
+                "schema_mismatch",
+                format!(
+                    "exact schema required for field {index} {:?}: expected {expected}, found {found}",
+                    left.name()
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Declares an exact Arrow input schema without capturing input rows.
@@ -269,12 +320,35 @@ pub fn lit(value: impl Into<LiteralValue>) -> Result<ColumnExpr> {
 }
 
 impl TableExpr {
+    /// Appends rows from two exact-schema relations, preserving duplicates and NULLs.
+    ///
+    /// Each input keeps its FIFO order; cross-input order is unspecified.
+    /// Complete snapshots cannot feed this append-only union under latest semantics.
+    ///
+    /// # Errors
+    /// Exact field names, order, types and nullability are checked during planning.
+    ///
+    /// ```
+    /// # use calc_flow::{Result, TableExpr};
+    /// fn combine(a: &TableExpr, b: &TableExpr) -> Result<TableExpr> {
+    ///     a.union_all(b)
+    /// }
+    /// ```
+    pub fn union_all(&self, other: &TableExpr) -> Result<Self> {
+        Ok(Self(Arc::new(Relation {
+            id: digest(&json!(["union_all", self.0.id, other.0.id])),
+            kind: RelationKind::Union {
+                inputs: [self.clone(), other.clone()],
+            },
+        })))
+    }
     pub(crate) fn lineage(&self) -> &str {
         match &self.0.kind {
             RelationKind::Project { input, .. } | RelationKind::Filter { input, .. } => {
                 input.lineage()
             }
             RelationKind::Input { .. }
+            | RelationKind::Union { .. }
             | RelationKind::Sql { .. }
             | RelationKind::Aggregate { .. } => &self.0.id,
         }
@@ -302,6 +376,7 @@ impl TableExpr {
                 Some(names)
             }
             RelationKind::Filter { input, .. } => input.known_names(),
+            RelationKind::Union { inputs } => inputs[0].known_names(),
             RelationKind::Aggregate {
                 aggregates,
                 group_by,

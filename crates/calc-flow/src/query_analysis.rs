@@ -3,6 +3,11 @@
 mod sql;
 mod updates;
 
+pub(crate) fn union_arm_proved(query: &str) -> bool {
+    sql::inspect(query, &[], true)
+        .is_ok_and(|facts| facts.proof == sql::Proof::RowLocal && !facts.aggregate)
+}
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use datafusion::arrow::datatypes::{DataType, Schema, SchemaRef, TimeUnit};
@@ -477,7 +482,7 @@ pub(crate) fn analyze_graph(graph: DeclarationGraph) -> Result<QueryAnalysis> {
         .map(|_| conjunction(diagnostics.iter().map(|issue| issue.status)));
     Ok(QueryAnalysis {
         schema_version: 2,
-        analysis_revision: 3,
+        analysis_revision: 4,
         update_semantics,
         request: options.portability,
         portability,
@@ -654,15 +659,8 @@ fn analyze_edges(
         let source = &by_path[&edge.source_path];
         let target = &by_path[&edge.target_path];
         let target_kind = &proofs[&edge.target_path].2;
-        let consumption = if target_kind == "snapshot_sql"
-            || (!update_semantics.is_legacy()
-                && proofs[&edge.target_path].0 == sql::Proof::Replacement
-                && source.stream.update == UpdateKind::CompleteSnapshot)
-        {
-            InputInterpretation::CompleteReplacement
-        } else {
-            InputInterpretation::Append
-        };
+        let consumption =
+            input_interpretation(&proofs[&edge.target_path], source, update_semantics);
         let edge_mode = |producer: &QueryModeFacts, consumer: &QueryModeFacts| QueryEdgeModeFacts {
             support: conjunction([producer.support, consumer.support]),
             producer_update: producer.update,
@@ -695,7 +693,12 @@ fn analyze_edges(
                 "snapshot_sql outputs must connect directly to sinks",
             );
         }
-        if snapshot_append_mismatch(request, &stream, consumption, proofs[&edge.target_path].1) {
+        if snapshot_append_mismatch(
+            request,
+            &stream,
+            consumption,
+            proofs[&edge.target_path].1 || target_kind == "union",
+        ) {
             stream.support = SupportStatus::Unsupported;
             diagnostic(
                 diagnostics,
@@ -714,6 +717,22 @@ fn analyze_edges(
         });
     }
     edges
+}
+
+fn input_interpretation(
+    target: &(sql::Proof, bool, String),
+    source: &QueryNodeFacts,
+    semantics: crate::UpdateSemantics,
+) -> InputInterpretation {
+    if target.2 == "snapshot_sql"
+        || (!semantics.is_legacy()
+            && target.0 == sql::Proof::Replacement
+            && source.stream.update == UpdateKind::CompleteSnapshot)
+    {
+        InputInterpretation::CompleteReplacement
+    } else {
+        InputInterpretation::Append
+    }
 }
 
 fn snapshot_append_mismatch(
@@ -903,29 +922,38 @@ fn row_local_kind(kind: &str) -> bool {
     )
 }
 
+fn builtin_proof(kind: &str) -> sql::Proof {
+    if kind == "union" {
+        sql::Proof::AppendUnion
+    } else if row_local_kind(kind) {
+        sql::Proof::RowLocal
+    } else {
+        sql::Proof::Unknown
+    }
+}
+
 fn classify(
     node: &Declaration,
     schema_known: bool,
     diagnostics: &mut Vec<QueryDiagnostic>,
     update_semantics: crate::UpdateSemantics,
 ) -> Classification {
-    let row_local = row_local_kind(&node.kind);
-    let mut proof = if row_local {
-        sql::Proof::RowLocal
-    } else {
-        sql::Proof::Unknown
-    };
+    let mut proof = builtin_proof(&node.kind);
     let mut aggregate = false;
-    let mut history = if row_local {
-        HistoryScope::CurrentBatch
-    } else {
+    let mut history = if proof == sql::Proof::Unknown {
         HistoryScope::Unknown
-    };
-    let mut ordering = node.ordering.clone();
-    let mut support = if row_local {
-        SupportStatus::Supported
     } else {
+        HistoryScope::CurrentBatch
+    };
+    let mut ordering = if node.kind == "union" {
+        QueryOrderingFacts::default()
+    } else {
+        node.ordering.clone()
+    };
+    let mut support = if proof == sql::Proof::Unknown {
         SupportStatus::Unknown
+    } else {
+        SupportStatus::Supported
     };
     if let Some(query) = &node.query {
         if let Ok(sql) = sql::inspect(
@@ -997,7 +1025,6 @@ fn stream_only_kind(kind: &str) -> bool {
     matches!(
         kind,
         "snapshot_sql"
-            | "union"
             | "window_tumbling"
             | "window_hopping"
             | "window"
@@ -1017,7 +1044,7 @@ fn stream_facts(node: &Declaration, class: Classification) -> QueryModeFacts {
     } = class;
     let (mut update, mut finality) = ordinary_lifecycle(aggregate, proof);
     let stream_only = stream_only_kind(&node.kind);
-    if stream_only {
+    if stream_only || node.kind == "union" {
         support = SupportStatus::Supported;
         (history, update, finality) = match node.kind.as_str() {
             "snapshot_sql" => (
@@ -1067,7 +1094,7 @@ fn ordinary_lifecycle(aggregate: bool, proof: sql::Proof) -> (UpdateKind, QueryF
     };
     let finality = if aggregate {
         QueryFinality::RevisableSnapshot
-    } else if proof == sql::Proof::RowLocal {
+    } else if matches!(proof, sql::Proof::RowLocal | sql::Proof::AppendUnion) {
         QueryFinality::PerRowFinal
     } else if proof.per_batch() {
         QueryFinality::PerBatch
@@ -1114,11 +1141,16 @@ fn history_mismatch(
     aggregate: bool,
 ) -> bool {
     (request.comparison == Comparison::PerBatch && aggregate)
+        || union_latest_history(proof, request)
         || (request.comparison == Comparison::FinalRelation
             && proof.counterexample()
             && facts.stream.update == UpdateKind::Append)
         || (request.history == HistoryScope::EventWindow
             && facts.stream.history != HistoryScope::EventWindow)
+}
+
+fn union_latest_history(proof: sql::Proof, request: &PortabilityRequest) -> bool {
+    proof == sql::Proof::AppendUnion && request.history == HistoryScope::LatestRelation
 }
 
 fn semantics_unproven(
@@ -1127,7 +1159,8 @@ fn semantics_unproven(
     proof: sql::Proof,
 ) -> bool {
     matches!(proof, sql::Proof::Unknown | sql::Proof::PerBatchUnproven)
-        || (request.comparison == Comparison::PerBatch && proof == sql::Proof::Selection)
+        || (request.comparison == Comparison::PerBatch
+            && matches!(proof, sql::Proof::Selection | sql::Proof::AppendUnion))
         || (request.comparison == Comparison::FinalRelation
             && proof.per_batch()
             && facts.stream.update != UpdateKind::Append)

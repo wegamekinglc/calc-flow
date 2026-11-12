@@ -63,7 +63,7 @@ def test_latest_gate_reports_consumer_before_source_or_job(monkeypatch, transfor
     monkeypatch.setattr(cf.StreamingRunner, "start_async", forbid_job)
     report = latest.analyze(runtime).query
     assert report.update_semantics == "latest_relation"
-    assert (report.schema_version, report.analysis_revision) == (2, 3)
+    assert (report.schema_version, report.analysis_revision) == (2, 4)
     edge = next(
         edge for edge in report.edges if edge.path == "outputs.result.sql.tables.input"
     )
@@ -306,14 +306,17 @@ def test_report_wire_accepts_legacy_display_and_rejects_unknown_semantics():
         _from_dict(wire)
 
 
-def test_latest_rejects_stale_report_before_preparation_cache(monkeypatch):
+@pytest.mark.parametrize("version,revision", [(1, 1), (2, 2), (2, 3)])
+def test_latest_rejects_stale_report_before_preparation_cache(
+    monkeypatch, version, revision
+):
     from dataclasses import replace
 
     program = _program()
     runtime = cf.Runtime()
     program.compile_stream(runtime)
     analysis = program.analyze(runtime)
-    stale = replace(analysis.query, schema_version=1, analysis_revision=1)
+    stale = replace(analysis.query, schema_version=version, analysis_revision=revision)
     monkeypatch.setattr(
         cf.Program,
         "analyze",

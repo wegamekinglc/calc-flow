@@ -53,9 +53,9 @@ input inference, explicit inputs and the declaration fingerprint, then checks th
 target shape. Prepared caches still include mode and registration identity;
 plans are distinct across modes and stream contexts always own a fresh job.
 Within batch mode, the existing Runtime cache can reuse a compiled plan; each
-execute call still has independent run state. Multi-alias
-SQL cannot be converted to ordinary append streaming; stream-only relations
-cannot be converted to batch.
+execute call still has independent run state. The exact-schema UNION ALL
+subset below also supports multiple stream aliases. Other multi-alias SQL
+keeps its existing batch-only behavior.
 
 `collect_schema` plans all table outputs without data, including zero-row inputs.
 It returns exact column order, Arrow types and nullability. Array outputs reject
@@ -177,6 +177,62 @@ exact declared table ports to prove event boundaries. They never block on schema
 planning. Legacy checkpoints retain their existing layouts; an actual restore
 across update choices rejects before Source acquisition. Existing snapshot SQL
 initialization, slicing, output-route and delivery restrictions still apply.
+
+## Same-schema union
+
+Rust `a.union_all(&b)?` and Python `a.union_all(b)` append rows through the same
+native UnionOperator in batch and stream. SQL
+`SELECT x FROM a UNION ALL SELECT x FROM b` lowers each arm through the SQL
+planner into that same union. Both frontends support downstream DataFrame/SQL
+and shared named outputs without collecting intermediate tables.
+
+| Interface        | Declaration                            | Batch and stream |
+|------------------|----------------------------------------|------------------|
+| Rust DataFrame   | `a.union_all(&b)?`                     | supported        |
+| Rust SQL         | `calc_flow::sql::sql(query, aliases)?` | approved subset  |
+| Python DataFrame | `a.union_all(b)`                       | supported        |
+| Python SQL       | `cf.sql(query, a=a, b=b)`              | approved subset  |
+
+Inputs must match exactly in column names, order, Arrow dtype and nullability.
+Union preserves duplicates, NULL and empty inputs, creates a new row lineage
+and clears temporal ordering. Each ingress keeps its FIFO; cross-source order
+and stable ties are unspecified. Repeating an input (`a.union_all(a)`, or two
+SQL aliases bound to `a`) computes its upstream once and consumes its rows twice.
+
+The shared SQL subset is a pure UNION ALL tree with at least two distinct,
+explicit aliases, each referenced exactly once, and no unused alias. Each arm
+is a deterministic single-alias row-local SELECT with optional projection,
+aliasing, wildcard and filter. Parentheses are supported. CTEs, joins,
+subqueries, aggregates, DISTINCT, OVER, ORDER BY, limits, other set operators,
+BY NAME, UDFs and volatile/clock functions are outside this subset. Each arm is
+planned before set-operation coercion. Wider SQL, including coercion and a
+single alias referenced repeatedly, retains its legacy batch behavior and
+does not acquire a shared-union proof.
+
+One batch execute consumes each input's complete Batch, including every
+RecordBatch. A missing required input is an error; typed empty input is valid.
+The same compiled finite plan can execute with new inputs and then empty inputs
+without retaining old rows. Stream completion waits for all sources' EOF and
+pending FIFO data. Its final relation is the concatenation of **all append
+output rows**, including duplicates, rather than the last output Batch. Compare
+using `final_relation / accepted_history / all_sources_eof` with unordered
+ordering. Declared global ordering remains unproved.
+
+Union consumes append events. Under legacy semantics it also appends complete
+snapshot events. Explicit latest rejects any complete snapshot entering union
+with `update_interpretation_mismatch` before sources, bindings, jobs or state
+are acquired; strict final-relation comparison also rejects that legacy edge.
+A finite aggregate result can still feed a batch union. This adds no
+replacement-union state, budget parameter, checkpoint layout or batch recovery.
+Low-level finite UnionOperator requires table ports with an explicit exact
+schema and `required=true`; the existing wider stream forwarding stays available.
+
+Query reports now use schema version 2, analysis revision 4. Old SQL declaration
+digests stay unchanged, but admitted multi-alias SQL exports a new native union
+topology and fingerprint. Saved legacy SQL projects retain their SQL nodes;
+checkpoints with different fingerprints cannot be restored across the change.
+See the runnable [Python example](../examples/finite_union.py) and
+[Rust core example](../crates/calc-flow/examples/finite_union.rs).
 
 ## Named aggregates
 

@@ -364,51 +364,45 @@ fn discover(outputs: &BTreeMap<String, TableExpr>) -> Result<Vec<TableExpr>> {
     Ok(inputs.into_values().collect())
 }
 fn discover_table(table: &TableExpr, inputs: &mut BTreeMap<String, TableExpr>) -> Result<()> {
-    match &table.0.kind {
-        RelationKind::Input { name, .. } => {
-            if inputs.get(name).is_some_and(|old| old.0.id != table.0.id) {
-                return Err(invalid(
-                    &lower::segment("inputs", name),
-                    "duplicate_name",
-                    "conflicting declarations for one input name",
-                ));
-            }
-            inputs.insert(name.clone(), table.clone());
+    if let RelationKind::Input { name, .. } = &table.0.kind {
+        if inputs.get(name).is_some_and(|old| old.0.id != table.0.id) {
+            return Err(invalid(
+                &lower::segment("inputs", name),
+                "duplicate_name",
+                "conflicting declarations for one input name",
+            ));
         }
-        RelationKind::Aggregate { input, .. }
-        | RelationKind::Project { input, .. }
-        | RelationKind::Filter { input, .. } => {
-            discover_table(input, inputs)?;
-        }
-        RelationKind::Sql { tables, .. } => {
-            for table in tables.values() {
-                discover_table(table, inputs)?;
-            }
+        inputs.insert(name.clone(), table.clone());
+    } else {
+        for (_, child, _) in lower::children(table, "") {
+            discover_table(&child, inputs)?;
         }
     }
     Ok(())
 }
+
 fn validate_stream(table: &TableExpr, path: &str) -> Result<()> {
-    match &table.0.kind {
-        RelationKind::Input { .. } => {}
-        RelationKind::Aggregate { input, .. } => {
-            validate_stream(input, &format!("{path}.aggregate.value"))?;
-        }
-        RelationKind::Project { input, .. } | RelationKind::Filter { input, .. } => {
-            validate_stream(input, &format!("{path}.project.value"))?;
-        }
-        RelationKind::Sql { tables, .. } => {
-            if tables.len() != 1 {
-                return Err(invalid(
-                    path,
-                    "unsupported_mode",
-                    "stream SQL accepts one table alias",
-                ));
-            }
-            for (name, table) in tables {
-                validate_stream(table, &lower::segment(&format!("{path}.sql.tables"), name))?;
-            }
-        }
+    validate_sql_mode(table, path)?;
+    let role = match &table.0.kind {
+        RelationKind::Filter { .. } => format!("{path}.project.value"),
+        _ => String::new(),
+    };
+    for (_, child, child_path) in lower::children(table, path) {
+        validate_stream(&child, if role.is_empty() { &child_path } else { &role })?;
+    }
+    Ok(())
+}
+fn validate_sql_mode(table: &TableExpr, path: &str) -> Result<()> {
+    if let RelationKind::Sql { query, tables } = &table.0.kind
+        && tables.len() != 1
+        && crate::sql::union_all_queries(query, &tables.keys().cloned().collect::<Vec<_>>())?
+            .is_none()
+    {
+        return Err(invalid(
+            path,
+            "unsupported_mode",
+            "stream SQL accepts one table alias or the exact-schema UNION ALL subset",
+        ));
     }
     Ok(())
 }

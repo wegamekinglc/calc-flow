@@ -764,7 +764,10 @@ slow consumers. `StreamRuntimeConfig.edge_budget` also bounds each iterable
 input batch; schema mismatches and oversized batches fail with the input name.
 This does not bound tables that application code accumulates after reading them.
 
-An append streaming SQL stage supports exactly one alias. Ordinary aggregates
+An append streaming SQL stage supports one alias or the shared
+[exact-schema UNION ALL subset](relational-frontends.md#same-schema-union).
+Union preserves each ingress FIFO and duplicates; compare all output rows at
+all-source EOF without a cross-source ordering promise. Ordinary aggregates
 and `GROUP BY` emit a full cumulative result after each batch.
 For example, `SELECT SUM(value) AS total FROM input` emits `1` after `[1]` and
 `6` after `[2, 3]`; grouped snapshots include every current group, including

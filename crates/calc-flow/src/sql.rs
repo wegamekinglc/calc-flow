@@ -1,5 +1,9 @@
 //! Read-only SQL relations composable with typed `DataFrame` declarations.
 
+mod union;
+#[doc(hidden)]
+pub use union::{UnionArm, UnionArmQuery, UnionPlan, plan_union_all, union_all_queries};
+
 use crate::{
     Result, SqlOperator, TableExpr,
     dataframe::{Relation, RelationKind, digest, invalid},

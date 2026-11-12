@@ -246,7 +246,7 @@ def _node_from_dict(node):
 
 def _wire_semantics(value: dict) -> UpdateSemantics:
     version = (value["schema_version"], value["analysis_revision"])
-    if version not in ((1, 1), (2, 2), (2, 3)):
+    if version not in ((1, 1), (2, 2), (2, 3), (2, 4)):
         raise ValueError("query_analysis: unsupported revision")
     semantics = (
         value.get("update_semantics", "legacy_append")
@@ -390,6 +390,8 @@ def _named_roles(node):
 
 
 def _roles(node):
+    if node.op.name == "union_all":
+        return tuple(f".union_all.inputs[{index}]" for index in range(len(node.args)))
     named = _named_roles(node)
     return tuple(
         named[index] if index < len(named) else f".{node.op.name}.args[{index}]"
@@ -509,7 +511,7 @@ def _declaration(node, path, facts, statuses):
     query = node.attr("query")
     return dict(
         path=path,
-        kind=node.op.name,
+        kind="union" if node.op.name == "union_all" else node.op.name,
         query=query.value if isinstance(query, CStr) else None,
         schema=_query_schema(facts),
         ordering=dict(
@@ -560,6 +562,9 @@ def _query(program, runtime, options, analyzers) -> QueryAnalysis:
         diagnostics=diagnostics,
         update_semantics=program.update_semantics,
     )
+    from calc_flow.symbolic.union import expand_query_graph
+
+    graph = expand_query_graph(graph, nodes, paths, analyzers)
     return _from_dict(
         json.loads(runtime._inner._analyze_query_graph(json.dumps(graph)))
     )
@@ -586,7 +591,7 @@ def _gate_latest(program, runtime):
     report = program.analyze(runtime).query
     if (report.schema_version, report.analysis_revision, report.update_semantics) != (
         2,
-        3,
+        4,
         "latest_relation",
     ):
         error = CompileError(

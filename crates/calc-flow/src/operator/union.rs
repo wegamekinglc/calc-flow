@@ -1,23 +1,31 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    sync::Arc,
 };
 
 use async_trait::async_trait;
+use datafusion::arrow::{
+    datatypes::{Schema, SchemaRef},
+    record_batch::{RecordBatch, RecordBatchOptions},
+};
 
-use crate::{Batch, CalcFlowError, EventTime, JsonMap, Port, Result, UdfReference};
+use crate::{
+    Batch, BatchKind, BatchMetadata, CalcFlowError, EventTime, JsonMap, Port, Result, UdfReference,
+};
 
 use super::{
-    OperatorMetadata, StreamCollector, StreamOperator, StreamOperatorContext,
-    validate_operator_name,
+    BatchOperator, BatchOperatorContext, OperatorMetadata, StreamCollector, StreamOperator,
+    StreamOperatorContext, validate_operator_name,
 };
 
 /// A multi-ingress forwarding operator (spec S4, API note A2.4).
 ///
-/// Every ingress keeps its own FIFO; the operator forwards each batch to the
-/// single `output` port unchanged. All input ports share one kind and one
-/// exact schema (or are all schema-less). Stream-only: batch graphs compose
-/// multi-input logic through SQL aliases.
+/// Every ingress keeps its own FIFO. The low-level constructor forwards batches
+/// unchanged and requires uniform exact input schemas (or all schema-less).
+/// Typed frontends normalize schema metadata at the union boundary while sharing
+/// Arrow buffers and preserving envelope metadata. Finite execution requires
+/// required table ports with an exact schema and appends only the current inputs.
 pub struct UnionOperator {
     name: String,
     input_ports: Vec<Port>,
@@ -36,6 +44,139 @@ impl fmt::Debug for UnionOperator {
 }
 
 impl UnionOperator {
+    pub(crate) fn new_frontend(name: &str, inputs: Vec<Port>) -> Result<Self> {
+        let normalized = inputs
+            .iter()
+            .map(|port| {
+                Port::with_schema_ref(
+                    port.name(),
+                    port.kind(),
+                    port.required(),
+                    port.schema().map(normalized_union_schema),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut operator = Self::new(name, normalized)?;
+        operator.input_ports = inputs;
+        Ok(operator)
+    }
+
+    fn normalize_record(&self, record: &RecordBatch) -> Result<RecordBatch> {
+        let Some(schema) = self.output_ports[0].schema() else {
+            return Ok(record.clone());
+        };
+        if record.schema_ref() == schema {
+            return Ok(record.clone());
+        }
+        RecordBatch::try_new_with_options(
+            schema.clone(),
+            record.columns().to_vec(),
+            &RecordBatchOptions::new().with_row_count(Some(record.num_rows())),
+        )
+        .map_err(|error| CalcFlowError::Operator {
+            node_id: self.name.clone(),
+            message: format!("union output schema: {error}"),
+        })
+    }
+
+    fn normalize_output(&self, batch: Batch) -> Result<Batch> {
+        let Some(schema) = self.output_ports[0].schema() else {
+            return Ok(batch);
+        };
+        if batch.table_payload()?.schema() == schema {
+            return Ok(batch);
+        }
+        let records = batch
+            .table_payload()?
+            .batches()
+            .iter()
+            .map(|record| self.normalize_record(record))
+            .collect::<Result<Vec<_>>>()?;
+        Batch::table(records, batch.metadata().clone())
+    }
+
+    fn push_record(
+        &self,
+        records: &mut Vec<RecordBatch>,
+        rows: &mut usize,
+        bytes: &mut usize,
+        record: &RecordBatch,
+        context: &BatchOperatorContext<'_>,
+    ) -> Result<()> {
+        context.run.check_cancelled()?;
+        let record = self.normalize_record(record)?;
+        crate::datafusion::push_bounded_sql_batch(
+            records,
+            rows,
+            bytes,
+            record,
+            crate::datafusion::MAX_SQL_RESULT_ROWS,
+            crate::datafusion::MAX_SQL_RESULT_BYTES,
+        )
+        .map_err(|error| self.result_error(error))
+    }
+    fn validate_finite_inputs(&self, inputs: &BTreeMap<String, Batch>) -> Result<()> {
+        self.validate_batch()?;
+        for port in &self.input_ports {
+            let batch = inputs
+                .get(port.name())
+                .ok_or_else(|| CalcFlowError::Operator {
+                    node_id: self.name.clone(),
+                    message: format!("missing required input {}", port.name()),
+                })?;
+            port.validate(batch, &format!("{}.{}", self.name, port.name()))?;
+        }
+        Ok(())
+    }
+
+    fn finite_records(
+        &self,
+        inputs: &BTreeMap<String, Batch>,
+        context: &BatchOperatorContext<'_>,
+    ) -> Result<Vec<RecordBatch>> {
+        let mut records = Vec::new();
+        let mut rows = 0;
+        let mut bytes = 0;
+        for port in &self.input_ports {
+            for record in inputs[port.name()].table_payload()?.batches() {
+                self.push_record(&mut records, &mut rows, &mut bytes, record, context)?;
+            }
+        }
+        if records.is_empty() {
+            records.push(RecordBatch::new_empty(
+                self.output_ports[0]
+                    .schema()
+                    .expect("validated table schema")
+                    .clone(),
+            ));
+        }
+        Ok(records)
+    }
+
+    fn result_error(&self, error: CalcFlowError) -> CalcFlowError {
+        match error {
+            CalcFlowError::InvalidArgument { message, .. } => CalcFlowError::InvalidArgument {
+                field: format!("{}.output", self.name),
+                message,
+            },
+            error => error,
+        }
+    }
+
+    pub(crate) fn validate_batch(&self) -> Result<()> {
+        for port in &self.input_ports {
+            if port.kind() != BatchKind::Table || port.schema().is_none() || !port.required() {
+                return Err(CalcFlowError::Compile {
+                    message: format!(
+                        "node {:?} input {:?}: unsupported_mode: batch union requires table + exact schema + required=true",
+                        self.name,
+                        port.name()
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
     /// Creates a union operator over at least two uniform input ports.
     ///
     /// # Errors
@@ -86,6 +227,21 @@ impl UnionOperator {
     }
 }
 
+#[async_trait]
+impl BatchOperator for UnionOperator {
+    async fn process(
+        &mut self,
+        inputs: &BTreeMap<String, Batch>,
+        context: &BatchOperatorContext<'_>,
+    ) -> Result<BTreeMap<String, Batch>> {
+        context.run.check_cancelled()?;
+        self.validate_finite_inputs(inputs)?;
+        let records = self.finite_records(inputs, context)?;
+        let batch = Batch::table(records, BatchMetadata::new(&self.name, 0, BTreeMap::new())?)?;
+        Ok(BTreeMap::from([("output".into(), batch)]))
+    }
+}
+
 impl OperatorMetadata for UnionOperator {
     fn name(&self) -> &str {
         &self.name
@@ -126,6 +282,7 @@ impl StreamOperator for UnionOperator {
                 message: format!("unknown ingress {ingress:?}"),
             })?;
         port.validate(&batch, &format!("{}.{ingress}", self.name))?;
+        let batch = self.normalize_output(batch)?;
         output.emit("output", batch).await
     }
 
@@ -145,4 +302,19 @@ impl StreamOperator for UnionOperator {
     ) -> Result<()> {
         Ok(())
     }
+}
+
+pub(crate) fn normalized_union_schema(schema: &SchemaRef) -> SchemaRef {
+    Arc::new(Schema::new(
+        schema
+            .fields()
+            .iter()
+            .map(|field| {
+                field
+                    .as_ref()
+                    .clone()
+                    .with_metadata(std::collections::HashMap::new())
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
