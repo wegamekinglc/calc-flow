@@ -213,6 +213,55 @@ fn test_output_payload_access_keeps_order_without_reading_metadata_or_the_unused
 }
 
 #[test]
+fn test_interval_view_output_chunks_preserve_order_and_budgets() {
+    use super::super::matches::{Matches, Selection};
+
+    for incoming_left in [true, false] {
+        let fixture = Fixture::new(incoming_left);
+        let columns: Arc<[usize]> = vec![0, 4].into();
+        let schema = Arc::new(fixture.schema.project(&columns).unwrap());
+        let mut selection = Selection::with_capacity(7, 3);
+        selection.append_interval(0, 0..3);
+        selection.append_run(1, [2, 0].into_iter());
+        selection.append_interval(2, 1..3);
+        let selected = selection.view().slice(1..6);
+        let expected =
+            [(0, 1), (0, 2), (1, 2), (1, 0), (2, 1)].map(|(pos, opposite_index)| MatchedPair {
+                pos,
+                opposite_index,
+            });
+        let output = JoinOutput {
+            matched: &selected,
+            admitted_charges: None,
+            ..fixture.output(&schema, Some(&columns), incoming_left)
+        };
+        let oracle = JoinOutput {
+            matched: &expected,
+            ..output
+        };
+        // Two projected i64 columns: bytes, rather than rows, split each chunk.
+        let budget = EdgeBudget::new(3, 32).unwrap();
+        let ranges = output.ranges(budget).unwrap();
+        assert_eq!(ranges, vec![0..2, 2..4, 4..5]);
+        assert_eq!(ranges, oracle.ranges(budget).unwrap());
+        for range in ranges {
+            let chunk = output.materialize(range.clone()).unwrap();
+            assert_eq!(chunk, oracle.materialize(range).unwrap());
+            assert!(chunk.num_rows() <= budget.max_rows);
+            assert!(
+                crate::Batch::table(vec![chunk.clone()], crate::BatchMetadata::default())
+                    .unwrap()
+                    .estimated_bytes()
+                    .unwrap()
+                    <= budget.max_bytes
+            );
+            assert_independent(&fixture, &chunk);
+        }
+        assert_eq!(output.materialize(5..5).unwrap().num_rows(), 0);
+    }
+}
+
+#[test]
 fn test_output_preflight_uses_payload_only_for_fixed_variable_and_nested_projections() {
     for incoming_left in [true, false] {
         let fixture = Fixture::new(incoming_left);

@@ -1,7 +1,9 @@
 use super::{PayloadRef, canonical_column, concat_output_column, operator_error};
 use crate::Result;
 use datafusion::arrow::{
-    array::{Array, ArrayRef, BinaryViewArray, StringViewArray, UInt64Array, make_array},
+    array::{
+        Array, ArrayRef, BinaryViewArray, StringViewArray, UInt32Array, UInt64Array, make_array,
+    },
     compute::{interleave, take},
     datatypes::DataType,
 };
@@ -13,10 +15,13 @@ pub(super) use owned::{ColumnResult, cancelled, materialize};
 #[cfg(test)]
 pub(super) mod test_support;
 
+#[cfg(test)]
+mod tests;
+
 pub(super) enum SideGather<'a> {
     Single {
         columns: &'a [ArrayRef],
-        rows: UInt64Array,
+        rows: Indices,
     },
     Multiple {
         columns: Vec<&'a [ArrayRef]>,
@@ -24,29 +29,75 @@ pub(super) enum SideGather<'a> {
     },
 }
 
+pub(super) enum Indices {
+    Narrow(UInt32Array),
+    Wide(UInt64Array),
+}
+
+impl Indices {
+    fn as_array(&self) -> &dyn Array {
+        match self {
+            Self::Narrow(rows) => rows,
+            Self::Wide(rows) => rows,
+        }
+    }
+}
+
 impl<'a> SideGather<'a> {
     pub(super) fn new(mut payloads: impl Iterator<Item = PayloadRef<'a>>) -> Option<Self> {
         let first = payloads.next()?;
         let columns = first.columns();
+        // Array lengths bound logical source coordinates, including sliced arrays.
+        let narrow = columns.first().is_some_and(|column| {
+            first.offset() < column.len()
+                && column
+                    .len()
+                    .checked_sub(1)
+                    .is_some_and(|last| u32::try_from(last).is_ok())
+        });
+        if narrow {
+            Self::single(first, payloads, |rows: Vec<u32>| {
+                Indices::Narrow(UInt32Array::from(rows))
+            })
+        } else {
+            Self::single(first, payloads, |rows: Vec<u64>| {
+                Indices::Wide(UInt64Array::from(rows))
+            })
+        }
+    }
+
+    fn single<I>(
+        first: PayloadRef<'a>,
+        mut payloads: impl Iterator<Item = PayloadRef<'a>>,
+        finish: impl FnOnce(Vec<I>) -> Indices,
+    ) -> Option<Self>
+    where
+        I: TryFrom<usize>,
+        usize: TryFrom<I>,
+    {
+        let columns = first.columns();
         let mut rows = Vec::with_capacity(payloads.size_hint().0 + 1);
-        rows.push(u64::try_from(first.offset()).ok()?);
+        rows.push(I::try_from(first.offset()).ok()?);
         for payload in payloads.by_ref() {
             if !std::ptr::eq(columns, payload.columns()) {
                 return Self::multiple(columns, rows, std::iter::once(payload).chain(payloads));
             }
-            rows.push(u64::try_from(payload.offset()).ok()?);
+            rows.push(I::try_from(payload.offset()).ok()?);
         }
         Some(Self::Single {
             columns,
-            rows: UInt64Array::from(rows),
+            rows: finish(rows),
         })
     }
 
-    fn multiple(
+    fn multiple<I>(
         first_columns: &'a [ArrayRef],
-        first_rows: Vec<u64>,
+        first_rows: Vec<I>,
         payloads: impl Iterator<Item = PayloadRef<'a>>,
-    ) -> Option<Self> {
+    ) -> Option<Self>
+    where
+        usize: TryFrom<I>,
+    {
         let mut columns = vec![first_columns];
         let mut previous = ((first_columns.as_ptr(), first_columns.len()), 0);
         let mut sources = BTreeMap::from([previous]);
@@ -85,7 +136,7 @@ impl<'a> SideGather<'a> {
 
     pub(super) fn selected_column(&self, index: usize) -> Result<ArrayRef> {
         let result = match self {
-            Self::Single { columns, rows } => take(columns[index].as_ref(), rows, None),
+            Self::Single { columns, rows } => take(columns[index].as_ref(), rows.as_array(), None),
             Self::Multiple { columns, rows } => {
                 let sources = columns
                     .iter()
