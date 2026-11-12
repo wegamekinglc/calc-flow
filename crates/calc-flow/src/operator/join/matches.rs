@@ -141,9 +141,13 @@ impl<'a> View<'a> {
     /// Visits pairs in order, advancing incoming runs instead of searching.
     pub(super) fn iter(self) -> Cursor<'a> {
         let remaining = self.len();
+        let index = match self {
+            Self::Intervals { base, .. } => base,
+            _ => 0,
+        };
         Cursor {
             view: self,
-            index: 0,
+            index,
             run: 0,
             remaining,
         }
@@ -170,6 +174,7 @@ fn run_containing_ranges(ranges: &[RangeMatch], index: usize) -> usize {
 #[derive(Clone)]
 pub(super) struct Cursor<'a> {
     view: View<'a>,
+    // Intervals advance in selection coordinates; other views use a local index.
     index: usize,
     run: usize,
     remaining: usize,
@@ -216,15 +221,16 @@ impl Iterator for Cursor<'_> {
                 base,
                 opposite,
             } => next_run_pair(runs, *base, index, opposite, &mut self.run)?,
-            View::Intervals { ranges, base, .. } => {
+            View::Intervals { ranges, .. } => {
                 if self.remaining == 0 {
                     return None;
                 }
-                let index = base + index;
-                while index >= ranges[self.run].first + ranges[self.run].range.len() {
+                let mut matched = &ranges[self.run];
+                // Each step crosses at most one nonempty, contiguous interval.
+                if index >= matched.first + matched.range.len() {
                     self.run += 1;
+                    matched = &ranges[self.run];
                 }
-                let matched = &ranges[self.run];
                 MatchedPair {
                     pos: matched.position,
                     opposite_index: matched.range.start + index - matched.first,
