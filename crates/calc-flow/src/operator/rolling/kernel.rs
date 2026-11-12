@@ -19,7 +19,7 @@ use datafusion::arrow::{
         StringArray, TimestampMicrosecondArray, UInt64Array, UInt64Builder,
     },
     compute::cast,
-    datatypes::{DataType, Schema, TimestampMicrosecondType, UInt64Type},
+    datatypes::{DataType, Int64Type, Schema, TimestampMicrosecondType, UInt64Type},
     record_batch::RecordBatch,
     row::{RowConverter, SortField},
 };
@@ -332,12 +332,26 @@ enum CanonicalOrder {
     Proven(Option<OrderBounds>),
 }
 
-/// Non-null microsecond time, Utf8 entity, and `UInt64` sequence columns,
+/// Non-null microsecond time, Utf8 entity, and 64-bit integer sequence columns,
 /// compared in place in the same order as their Arrow row encoding.
 struct DirectOrderColumns<'a> {
     times: &'a [i64],
     entities: &'a StringArray,
-    sequences: &'a [u64],
+    sequences: DirectSequences<'a>,
+}
+
+enum DirectSequences<'a> {
+    Signed(&'a [i64]),
+    Unsigned(&'a [u64]),
+}
+
+impl DirectSequences<'_> {
+    fn compare(&self, left: usize, right: usize) -> Ordering {
+        match self {
+            Self::Signed(values) => values[left].cmp(&values[right]),
+            Self::Unsigned(values) => values[left].cmp(&values[right]),
+        }
+    }
 }
 
 impl<'a> DirectOrderColumns<'a> {
@@ -355,16 +369,28 @@ impl<'a> DirectOrderColumns<'a> {
             .column(time)
             .as_primitive_opt::<TimestampMicrosecondType>()?;
         let entities = input.column(entity).as_string_opt::<i32>()?;
-        let sequences = input.column(sequence).as_primitive_opt::<UInt64Type>()?;
-        let null_free = [
+        let sequences = input.column(sequence);
+        if [
             times.null_count(),
             entities.null_count(),
             sequences.null_count(),
-        ] == [0; 3];
-        null_free.then(|| Self {
+        ] != [0; 3]
+        {
+            return None;
+        }
+        let sequences = match sequences.data_type() {
+            DataType::Int64 => {
+                DirectSequences::Signed(sequences.as_primitive_opt::<Int64Type>()?.values())
+            }
+            DataType::UInt64 => {
+                DirectSequences::Unsigned(sequences.as_primitive_opt::<UInt64Type>()?.values())
+            }
+            _ => return None,
+        };
+        Some(Self {
             times: times.values(),
             entities,
-            sequences: sequences.values(),
+            sequences,
         })
     }
 
@@ -375,7 +401,7 @@ impl<'a> DirectOrderColumns<'a> {
                 let left = self.entities.value(left).as_bytes();
                 left.cmp(self.entities.value(right).as_bytes())
             })
-            .then_with(|| self.sequences[left].cmp(&self.sequences[right]))
+            .then_with(|| self.sequences.compare(left, right))
     }
 }
 
@@ -2772,15 +2798,17 @@ struct SlidingSampleQueue<V> {
 
 impl<V: Clone> Clone for SlidingSampleQueue<V> {
     fn clone(&self) -> Self {
-        let values = match self.frame {
-            TypedFrame::Rows(_) => {
-                // Preserve the spare slide slot in a transactional row-window copy.
-                let mut values = VecDeque::with_capacity(self.values.capacity());
-                values.extend(self.values.iter().cloned());
-                values
-            }
-            TypedFrame::Duration(_) => self.values.clone(),
+        let capacity = match self.frame {
+            TypedFrame::Rows(_) => self.values.capacity(),
+            // A slide pushes before expiring. Keep one spare slot without
+            // retaining a historical burst's unused capacity in every copy.
+            TypedFrame::Duration(_) => self
+                .values
+                .len()
+                .saturating_add(usize::from(!self.values.is_empty())),
         };
+        let mut values = VecDeque::with_capacity(capacity);
+        values.extend(self.values.iter().cloned());
         Self {
             frame: self.frame,
             values,
@@ -4477,6 +4505,113 @@ mod tests {
         assert!(large <= small + 256, "small={small}, large={large}");
     }
 
+    fn signed_order_rows(rows: &[(i64, Option<&str>, i64)]) -> RecordBatch {
+        let fields = schema()
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                if index == 1 {
+                    Field::new("sequence", DataType::Int64, true)
+                } else {
+                    field.as_ref().clone().with_nullable(true)
+                }
+            })
+            .collect::<Vec<_>>();
+        RecordBatch::try_new(
+            Arc::new(Schema::new(fields)),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from_iter_values(
+                    rows.iter().map(|row| row.0),
+                )),
+                Arc::new(Int64Array::from_iter_values(rows.iter().map(|row| row.2))),
+                Arc::new(rows.iter().map(|row| row.1).collect::<StringArray>()),
+                Arc::new(Float64Array::from(vec![Some(1.0); rows.len()])),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn signed_stream_order_proof_does_not_encode_every_row() {
+        let bytes = |row_count: usize| {
+            let rows = (0..row_count)
+                .map(|row| {
+                    let index = i64::try_from(row).unwrap();
+                    (index / 2, Some(["alpha", "beta"][row % 2]), index - 2048)
+                })
+                .collect::<Vec<_>>();
+            let input = signed_order_rows(&rows);
+            let plan = stream_order_plan();
+            allocation_counter::measure(|| {
+                assert!(
+                    plan.ordered_stream_bounds(&input, "r", None)
+                        .unwrap()
+                        .is_some()
+                );
+            })
+            .bytes_total
+        };
+        let small = bytes(32);
+        let large = bytes(4096);
+        assert!(large <= small + 256, "small={small}, large={large}");
+    }
+
+    #[test]
+    fn signed_stream_order_proof_matches_row_encoding_at_boundaries() {
+        let plan = stream_order_plan();
+        let cases: [&[(i64, Option<&str>, i64)]; 8] = [
+            &[],
+            &[(i64::MIN, Some(""), i64::MIN)],
+            &[
+                (1, Some("a"), i64::MIN),
+                (1, Some("a"), -1),
+                (1, Some("a"), 0),
+                (1, Some("a"), i64::MAX),
+            ],
+            &[(1, Some("a"), -1), (1, Some("a"), -1)],
+            &[(1, Some("a"), 0), (1, Some("a"), -1)],
+            &[
+                (1, Some("a"), i64::MAX),
+                (1, Some("ab"), i64::MIN),
+                (2, Some("a"), i64::MIN),
+            ],
+            &[(1, None, -1), (1, Some("a"), 0)],
+            &[(1, Some("é"), -1), (1, Some("z"), 0), (1, Some("éa"), 1)],
+        ];
+        for rows in cases {
+            assert_order_parity(&plan, &signed_order_rows(rows));
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 256,
+            failure_persistence: None,
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        #[test]
+        fn signed_stream_order_proof_matches_row_encoding(
+            rows in proptest::collection::vec(
+                (proptest::num::i64::ANY,
+                 proptest::option::weighted(0.95, 0_usize..4),
+                 proptest::num::i64::ANY),
+                0..16,
+            ),
+            sorted in proptest::bool::weighted(0.7),
+        ) {
+            const KEYS: [&str; 4] = ["", "a", "ab", "é"];
+            let mut rows = rows.into_iter()
+                .map(|(time, key, sequence)| (time, key.map(|key| KEYS[key]), sequence))
+                .collect::<Vec<_>>();
+            if sorted {
+                rows.sort_unstable();
+            }
+            assert_order_parity(&stream_order_plan(), &signed_order_rows(&rows));
+        }
+    }
+
     #[test]
     fn direct_stream_order_proof_matches_row_encoding_at_boundaries() {
         let plan = stream_order_plan();
@@ -4707,6 +4842,38 @@ mod tests {
         });
         assert_eq!(resident.accumulator.mean.to_bits(), 22.5_f64.to_bits());
         println!("prepared row-window copy allocations: {measured:?}");
+        assert_eq!(measured.count_total, 1, "{measured:?}");
+    }
+
+    #[test]
+    fn prepared_duration_clone_does_not_reallocate_on_its_first_slide() {
+        let mut resident = Float64NumericState::new(TypedFrame::Duration(20), 32);
+        for index in 1..=32_u32 {
+            resident
+                .update(
+                    i64::from(index),
+                    Some(f64::from(index)),
+                    RollingNumericalProfile::StableV1,
+                    u64::from(index),
+                    "rolling",
+                )
+                .unwrap();
+        }
+        let measured = allocation_counter::measure(|| {
+            let mut prepared = resident.clone();
+            prepared
+                .update(
+                    33,
+                    Some(33.0),
+                    RollingNumericalProfile::StableV1,
+                    33,
+                    "rolling",
+                )
+                .unwrap();
+            assert_eq!(prepared.accumulator.valid_count, 20);
+            assert_eq!(prepared.accumulator.mean.to_bits(), 23.5_f64.to_bits());
+        });
+        assert_eq!(resident.accumulator.mean.to_bits(), 22.5_f64.to_bits());
         assert_eq!(measured.count_total, 1, "{measured:?}");
     }
 
