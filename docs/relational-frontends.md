@@ -20,7 +20,9 @@ batch = cf.Program("mixed", mode="batch", outputs={"scaled": scaled, "result": r
 stream = batch.for_mode("stream")
 assert batch.fingerprint == stream.fingerprint
 assert batch.collect_schema()["result"] == pa.schema([("z", pa.int64())])
-assert batch.collect({"events": pa.table({"x": [1, None, 3]})})["result"].to_pydict() == {"z": [4, 8]}
+assert batch.collect({"events": pa.table({"x": [1, None, 3]})})[
+    "result"
+].to_pydict() == {"z": [4, 8]}
 ```
 
 `collect_async` captures the input mapping when called and returns an awaitable.
@@ -244,8 +246,11 @@ NULL rows. Aggregate declarations are separate from row-local columns.
 
 ```python
 summary = source.aggregate(
-    {"total": source["x"].sum(), "non_null": source["x"].count(),
-     "rows": cf.count_rows()},
+    {
+        "total": source["x"].sum(),
+        "non_null": source["x"].count(),
+        "rows": cf.count_rows(),
+    },
     group_by=(),
 )
 ```

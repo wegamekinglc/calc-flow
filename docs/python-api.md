@@ -1353,8 +1353,20 @@ import calc_flow.array as cfa
 close = cfa.from_arrow(pa.array([10.0, 11.0, 12.0, 11.0, 11.0]))
 high = cfa.from_arrow(pa.array([11.0, 12.0, 13.0, 12.0, 12.0]))
 low = cfa.from_arrow(pa.array([9.0, 10.0, 11.0, 10.0, 10.0]))
-assert cfa.rsi(close, period=2).to_arrow().to_pylist() == [None, None, 100.0, 50.0, 50.0]
-assert cfa.atr(high, low, close, period=2).to_arrow().to_pylist() == [None, None, 2.0, 2.0, 2.0]
+assert cfa.rsi(close, period=2).to_arrow().to_pylist() == [
+    None,
+    None,
+    100.0,
+    50.0,
+    50.0,
+]
+assert cfa.atr(high, low, close, period=2).to_arrow().to_pylist() == [
+    None,
+    None,
+    2.0,
+    2.0,
+    2.0,
+]
 ```
 
 The first complete row establishes the previous price/close. The first valid
@@ -1801,8 +1813,12 @@ linearized and cancellation arrives during thread cleanup, that outcome wins
 and cleanup still completes.
 
 `Cursor` payloads, capability/config mappings, pre-commit values, recovery
-values, status, and outcomes cross the boundary as defensive copies. Status
-and outcomes are typed: `job.status()` returns a `JobStatus` mapping that
+values, status, and outcomes cross the boundary as defensive copies.
+`Cursor.payload` and `SinkRecovery.pre_commit` are read-only mappings. Reading
+nested dicts or lists returns independent, mutable copies, including through
+mapping views, `copy()`, and `dict(mapping)`; changing a copy leaves the owned
+position or evidence unchanged. Use `json.dumps(dict(mapping))` to serialize it.
+Status and outcomes are typed: `job.status()` returns a `JobStatus` mapping that
 includes `stream_joins`, a per-node mapping of `StreamJoinStatus` values with
 `StreamJoinSideStatus` per side (empty when the graph has no inner Join node).
 Each side includes its last accepted `watermark_micros: int | None`, `idle`,
