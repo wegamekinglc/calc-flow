@@ -242,3 +242,18 @@ and 36 recovery tests under `-W error` (80 total), and affected Python adapter
 checks pass separately. Core and PyO3 clippy, pinned limit-8 complexity checks,
 Ruff and the unchanged complexity ratchet are GREEN. The hosted Codacy result
 for the follow-up head is separate and is reported from the final CI snapshot.
+
+The next snapshot at `ca0c4db697498cb214c21cc424160745b1722a5c`
+confirmed all sixteen complexity findings were removed. Codacy check
+`130918013163` retained the SQL-injection classification at the warm-cache
+test's native Batch execution call. `codacy-followup-annotations.json` preserves
+that RED result. A typed `execute_table(BatchExecutionPlan, pa.Table)` helper
+now isolates Arrow-to-Batch binding from the test's window declarations and
+chunk matrix, and is shared by the warm-plan and exported-project checks.
+It still calls the exact same plan with the exact same input objects; every
+schema, row, sharing, EOF and isolation assertion remains unchanged. No SQL
+text reaches this helper, and no analyzer configuration or suppression changed.
+The existing candidate native binary is reused because this follow-up changes
+only test organization. All 44 feature cases pass with `-W error`; affected
+Ruff lint/format and pinned lizard 1.26.0 at limit 8 pass. The hosted result is
+reported separately, not inferred from these local checks.

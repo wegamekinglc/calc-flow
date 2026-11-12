@@ -64,6 +64,12 @@ def rows(table):
     return sorted(zip(*columns), key=repr)
 
 
+def execute_table(plan: cf.BatchExecutionPlan, table: pa.Table) -> cf.RunResult:
+    batch = cf.Batch.from_pyarrow(table)
+    bindings = {plan.external_inputs[0]: batch}
+    return plan.execute(inputs=bindings)
+
+
 @pytest.mark.parametrize("sql", [False, True])
 def test_finite_window_public_fixture_and_schema(sql):
     source, table = fixture()
@@ -157,8 +163,7 @@ def test_window_batch_stream_eof_and_compiled_plan_isolation(sql, hop):
         ),
         (table.slice(0, 0), 0),
     ]:
-        bindings = {plan.external_inputs[0]: cf.Batch.from_pyarrow(current)}
-        out = plan.execute(inputs=bindings)
+        out = execute_table(plan, current)
         actual = next(iter(out.outputs.values())).to_pyarrow()
         assert actual.num_rows == count
         if current is single:
@@ -226,8 +231,7 @@ def test_window_mixed_graph_retains_shared_and_independent_branches(sql):
         cf.ProjectDocument.model_validate(doc).model_dump_json()
     )
     assert len(reloaded.external_inputs) == 1
-    bindings = {reloaded.external_inputs[0]: cf.Batch.from_pyarrow(table)}
-    restored = reloaded.execute(inputs=bindings)
+    restored = execute_table(reloaded, table)
     actual = {
         tuple(batch.to_pyarrow().column_names): sorted(
             batch.to_pyarrow().to_pylist(), key=repr
