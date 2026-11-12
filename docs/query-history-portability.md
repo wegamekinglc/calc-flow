@@ -6,8 +6,10 @@
 a job. Its `query` field contains deterministic node and consumption-edge paths,
 exact schemas where known, and separate batch/stream history, update, finality,
 ordering and lifecycle support. `schema_version=2` describes the report format;
-`analysis_revision=2` describes its proof rules, including the required
-`update_semantics` field. Older v1 reports can be displayed as legacy only.
+`analysis_revision=4` describes its proof rules, including exact-schema union
+and unordered append-history reduction at all-source EOF. The
+`update_semantics` field is required. Older v1 and v2 revisions remain readable;
+latest execution requires the current proof rules.
 Runtime capability registration
 revisions remain separate.
 

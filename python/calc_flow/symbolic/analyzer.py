@@ -638,6 +638,7 @@ class _Analyzer:
         self._bindings: _BatchBindings | None = None
         self._window_input_schemas: dict[str, tuple[Field, ...]] = {}
         self._native_row_schemas: dict[str, tuple[Field, ...]] = {}
+        self._union_plans: dict[str, object] = {}
         self._issues: list[AnalysisIssue] = []
         self._table_cache: dict[str, TableFacts] = {}
         self._invalid_table_nodes: set[str] = set()
@@ -806,6 +807,7 @@ class _Analyzer:
         if self._runtime is None or node.op.name in {
             "table_input",
             "aggregate",
+            "union_all",
             "sql",
             "snapshot_sql",
             "attach_columns",
@@ -849,6 +851,7 @@ class _Analyzer:
             elif current.op.name in {
                 *_EVENT_WINDOW_OPS,
                 "aggregate",
+                "union_all",
                 "sql",
                 "snapshot_sql",
                 "late_output",
@@ -879,6 +882,7 @@ class _Analyzer:
             "stream_asof_join": self._stream_asof_join_table,
             "window_tumbling": self._window_table,
             "window_hopping": self._window_table,
+            "union_all": self._union_table,
             "aggregate": self._aggregate_table,
             "sql": self._sql_table,
             "snapshot_sql": self._sql_table,
@@ -898,42 +902,121 @@ class _Analyzer:
         validate(self, node, path)
         return self._sql_table(node, path)
 
-    def _sql_table(self, node: Node, path: str, /) -> TableFacts:
+    def _union_table(self, node: Node, path: str, /) -> TableFacts:
+        inputs = tuple(
+            self.table(child, f"{path}.union_all.inputs[{index}]")
+            for index, child in enumerate(node.args)
+        )
+        expected = inputs[0].schema
+        from calc_flow.symbolic.union import schema_mismatch
+
+        mismatch = schema_mismatch(expected, inputs[1].schema)
+        if mismatch is not None:
+            suffix, message = mismatch
+            self.issue(
+                f"{path}.union_all.inputs[1]{suffix}", "schema_mismatch", message
+            )
+        return TableFacts(
+            expected,
+            _SQLRowOrigin(node.digest),
+            inputs[0].state | inputs[1].state,
+            None,
+            (),
+            (),
+        )
+
+    def _sql_inputs(self, node, path):
         kind = node.op.name
-        aliases = _cstr_seq(node.attr("aliases"))
-        inputs = {
+        return {
             alias: self.table(child, f"{path}.{kind}.tables.{alias}")
-            for alias, child in zip(aliases, node.args, strict=True)
+            for alias, child in zip(
+                _cstr_seq(node.attr("aliases")), node.args, strict=True
+            )
         }
+
+    def _sql_empty(self, node, inputs):
         state = frozenset().union(*(facts.state for facts in inputs.values()))
-        if kind == "snapshot_sql":
+        if node.op.name == "snapshot_sql":
             state = state | {"snapshot_sql"}
-        empty = TableFacts((), _SQLRowOrigin(node.digest), state, None, (), ())
-        if kind == "snapshot_sql" and self._mode != "stream":
-            self.issue(path, "unsupported_mode", "snapshot_sql requires stream mode")
+        return TableFacts((), _SQLRowOrigin(node.digest), state, None, (), ())
+
+    def _sql_table(self, node: Node, path: str, /) -> TableFacts:
+        inputs = self._sql_inputs(node, path)
+        empty = self._sql_empty(node, inputs)
+        union = self._maybe_sql_union(node, inputs, path)
+        if union is not None:
+            return replace(empty, schema=union)
+        if self._issues or self._sql_mode_rejected(node, path) or self._runtime is None:
             return empty
-        if kind == "sql" and self._mode == "stream" and len(aliases) != 1:
+        return self._planned_sql_table(node, inputs, path, empty)
+
+    def _maybe_sql_union(self, node, inputs, path):
+        if node.op.name == "sql" and len(node.args) > 1:
+            return self._sql_union(node, inputs, path)
+        return None
+
+    def _sql_mode_rejected(self, node, path):
+        if node.op.name == "snapshot_sql" and self._mode != "stream":
+            self.issue(path, "unsupported_mode", "snapshot_sql requires stream mode")
+            return True
+        if node.op.name == "sql" and self._mode == "stream" and len(node.args) != 1:
             self.issue(
                 path,
                 "unsupported_mode",
                 "multi-input SQL has no incremental stream semantics",
             )
-            return empty
-        if self._issues or self._runtime is None:
-            return empty
+            return True
+        return False
+
+    def _planned_sql_table(self, node, inputs, path, empty):
         try:
-            schema = self._sql_schema(node, inputs, path)
-            return replace(empty, schema=schema)
+            return replace(empty, schema=self._sql_schema(node, inputs, path))
         except (CompileError, ConfigError, ExecutionError, ValueError) as error:
-            self.issue(f"{path}.{kind}.schema", "unsupported_type", str(error))
+            self.issue(f"{path}.{node.op.name}.schema", "unsupported_type", str(error))
             return empty
 
     def _sql_schema(
         self, node: Node, inputs: dict[str, TableFacts], path: str
     ) -> tuple[Field, ...]:
-        from calc_flow.symbolic.lower.schema import _arrow_schema, _fields
+        from calc_flow.symbolic.lower.schema import _fields
 
-        schemas = {
+        return _fields(
+            self._runtime._infer_symbolic_sql_schema(
+                _cstr_or_none(node.attr("query")),
+                self._sql_input_schemas(node, inputs, path),
+            )
+        )
+
+    def _sql_union(self, node, inputs, path):
+        if self._runtime is None or self._issues:
+            return None
+        from calc_flow.symbolic.union import sql_plan
+
+        plan = sql_plan(
+            self._runtime, node, self._sql_input_schemas(node, inputs, path)
+        )
+        if plan is None:
+            return None
+        if plan["planning_error"] is not None:
+            index, message = plan["planning_error"]
+            self.issue(f"{path}.sql.arms[{index}]", "schema_mismatch", message)
+            return None
+        mismatch = plan["mismatch"]
+        if mismatch is not None:
+            if self._mode == "stream":
+                index, suffix, message = mismatch
+                alias = plan["arms"][index]["alias"]
+                self.issue(
+                    f"{path}.sql.tables.{alias}{suffix}", "schema_mismatch", message
+                )
+            return None
+        self._union_plans[node.digest] = plan
+        return tuple(Field(**field) for field in plan["arms"][0]["schema"])
+
+    def _sql_input_schemas(self, node, inputs, path):
+        from calc_flow.symbolic.lower.schema import _arrow_schema
+
+        return {
             alias: _arrow_schema(
                 self._native_row_schema(
                     child,
@@ -945,11 +1028,6 @@ class _Analyzer:
                 _cstr_seq(node.attr("aliases")), node.args, strict=True
             )
         }
-        return _fields(
-            self._runtime._infer_symbolic_sql_schema(
-                _cstr_or_none(node.attr("query")), schemas
-            )
-        )
 
     def _table_declaration(self, node: Node, path: str, /) -> TableFacts:
         name = _cstr_or_none(node.attr("name"))

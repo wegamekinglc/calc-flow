@@ -67,6 +67,7 @@ pub use stream::{
     StateSegment, StreamCollector, StreamOperator, StreamOperatorContext, StreamOperatorLifecycle,
 };
 pub use union::UnionOperator;
+pub(crate) use union::normalized_union_schema;
 pub use window::{
     AggregateFunction, AggregateSpec, MAX_WINDOW_OVERLAP, WindowAggregateOperator, WindowGeometry,
     WindowSpec,

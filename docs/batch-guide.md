@@ -339,8 +339,10 @@ are `[140, 216, 72]` for order IDs `[1, 2, 3]`.
 
 SQL aliases are local to the query, and Calc Flow never looks them up in caller
 globals. Multiple aliases are supported in batch mode. A streaming SQL node
-accepts exactly one alias, even when several aliases would reference the same
-input; use the [bounded stream join](streaming-guide.md#bounded-event-time-join)
+accepts one alias or the
+[exact-schema UNION ALL subset](relational-frontends.md#same-schema-union).
+Other multi-alias SQL remains batch-only; use the
+[bounded stream join](streaming-guide.md#bounded-event-time-join)
 for stateful matching between streams.
 
 A SQL node accepts one read-only `SELECT` or CTE. DDL, DML, utility commands,

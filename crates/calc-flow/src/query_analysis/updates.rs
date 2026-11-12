@@ -70,7 +70,7 @@ fn missing_schema(declaration: &Declaration) -> bool {
     declaration.schema.is_none()
         && matches!(
             declaration.kind.as_str(),
-            "table_input" | "expression" | "sql" | "project" | "filter" | "with_columns"
+            "table_input" | "expression" | "sql" | "project" | "filter" | "with_columns" | "union"
         )
 }
 

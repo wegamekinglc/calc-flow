@@ -135,11 +135,7 @@ impl StreamSource for Source {
             batch.with_metadata(BatchMetadata::new("events", self.sequence, JsonMap::new())?);
         Ok(Some(SourceEvent::Data {
             batch,
-            cursor: Cursor::new(
-                "events",
-                self.sequence.to_be_bytes().to_vec(),
-                JsonMap::new(),
-            )?,
+            cursor: Cursor::unbound(self.sequence.to_be_bytes().to_vec(), JsonMap::new())?,
         }))
     }
     async fn close(&mut self) -> Result<()> {
@@ -167,6 +163,19 @@ async fn run_stream(
     batches: Vec<Batch>,
     options: &CompileOptions,
 ) -> Result<BTreeMap<String, Vec<Batch>>> {
+    run_stream_inputs(
+        program,
+        BTreeMap::from([("events".into(), batches)]),
+        options,
+    )
+    .await
+}
+
+async fn run_stream_inputs(
+    program: &Program,
+    inputs: BTreeMap<String, Vec<Batch>>,
+    options: &CompileOptions,
+) -> Result<BTreeMap<String, Vec<Batch>>> {
     let udfs = UdfRegistry::new().snapshot();
     let requirements = StreamRequirements {
         delivery: program
@@ -180,13 +189,8 @@ async fn run_stream(
         .await?;
     let opened = Arc::new(AtomicUsize::new(0));
     let closed = Arc::new(AtomicUsize::new(0));
-    let source = Source {
-        schema: batches[0].table_payload()?.schema().clone(),
-        batches: batches.into_iter(),
-        opened: opened.clone(),
-        closed: closed.clone(),
-        sequence: 0,
-    };
+    let count = inputs.len();
+    let sources = union_sources(inputs, &opened, &closed)?;
     let mut captured = BTreeMap::new();
     let mut sinks = BTreeMap::new();
     for name in program.outputs().keys() {
@@ -197,32 +201,60 @@ async fn run_stream(
         );
         captured.insert(name.clone(), captured_batches);
     }
-    let outcome = StreamingRunner::without_checkpoints(
-        plan,
-        BTreeMap::from([(
-            "events".into(),
-            SourceBinding::new(source)
-                .with_watermark_policy(calc_flow::WatermarkPolicy::Disabled { idle_timeout: None }),
-        )]),
-        sinks,
-    )?
-    .with_runtime_config(calc_flow::StreamRuntimeConfig {
-        checkpointing: false,
-        sql_replacement_state_budget: Some(calc_flow::StateBudget::new(100, 8 << 20)?),
-        ..Default::default()
-    })?
-    .start()
-    .await?
-    .wait()
-    .await;
-    assert_eq!(outcome.state, JobState::Completed, "{outcome:?}");
-    assert!(outcome.errors.is_empty());
-    assert_eq!(opened.load(Ordering::SeqCst), 1);
-    assert_eq!(closed.load(Ordering::SeqCst), 1);
+    finish_stream(plan, sources, sinks).await?;
+    assert_eq!(opened.load(Ordering::SeqCst), count);
+    assert_eq!(closed.load(Ordering::SeqCst), count);
     Ok(captured
         .into_iter()
         .map(|(name, batches)| (name, batches.lock().unwrap().clone()))
         .collect())
+}
+
+fn union_sources(
+    inputs: BTreeMap<String, Vec<Batch>>,
+    opened: &Arc<AtomicUsize>,
+    closed: &Arc<AtomicUsize>,
+) -> Result<BTreeMap<String, SourceBinding>> {
+    let mut sources = BTreeMap::new();
+    for (name, batches) in inputs {
+        let schema = match batches.first() {
+            Some(batch) => batch.table_payload()?.schema().clone(),
+            None => data(vec![])?.table_payload()?.schema().clone(),
+        };
+        let source = Source {
+            schema,
+            batches: batches.into_iter(),
+            opened: opened.clone(),
+            closed: closed.clone(),
+            sequence: 0,
+        };
+        sources.insert(
+            name,
+            SourceBinding::new(source)
+                .with_watermark_policy(calc_flow::WatermarkPolicy::Disabled { idle_timeout: None }),
+        );
+    }
+    Ok(sources)
+}
+
+async fn finish_stream(
+    plan: calc_flow::StreamExecutionPlan,
+    sources: BTreeMap<String, SourceBinding>,
+    sinks: BTreeMap<String, Vec<SinkBinding>>,
+) -> Result<()> {
+    let outcome = StreamingRunner::without_checkpoints(plan, sources, sinks)?
+        .with_runtime_config(calc_flow::StreamRuntimeConfig {
+            checkpointing: false,
+            sql_replacement_state_budget: Some(calc_flow::StateBudget::new(100, 8 << 20)?),
+            ..Default::default()
+        })?
+        .start()
+        .await?
+        .wait()
+        .await;
+    assert_eq!(outcome.state, JobState::Completed, "{outcome:?}");
+    assert!(outcome.errors.is_empty());
+    Ok(())
 }
 
 async fn verify_frontend(
@@ -327,6 +359,9 @@ async fn check_export(batch: &Program, input: Batch, mut expected: Vec<Option<i6
     Ok(())
 }
 async fn check_shape(shape: &str) -> Result<()> {
+    if shape.starts_with("union_") {
+        return check_union(shape == "union_sql").await;
+    }
     let (shared, result, expected) = declaration(shape)?;
     let batch = Program::new(
         shape,
@@ -434,10 +469,102 @@ async fn main() -> Result<()> {
     check_aggregate_groups().await?;
     check_unsigned_negation().await?;
     check_metadata_stream().await?;
-    for shape in ["dataframe", "sql", "df_sql_df_sql", "sql_df_sql"] {
+    for shape in [
+        "dataframe",
+        "sql",
+        "df_sql_df_sql",
+        "sql_df_sql",
+        "union_df",
+        "union_sql",
+    ] {
         check_shape(shape).await?;
     }
     check_state().await?;
+    Ok(())
+}
+
+async fn check_union(sql: bool) -> Result<()> {
+    let batch = union_declaration(sql)?;
+    let stream = batch.for_mode(CompileMode::Stream)?;
+    let options = CompileOptions {
+        portability: Some(PortabilityRequest::new(
+            Comparison::FinalRelation,
+            HistoryScope::AcceptedHistory,
+            ComparisonCutoff::AllSourcesEof,
+        )?),
+    };
+    let plan = batch
+        .compile_batch(&UdfRegistry::new().snapshot(), &options)
+        .await?;
+    for (left, right, expected) in [
+        (
+            vec![Some(1), None, Some(1)],
+            vec![Some(1), Some(2)],
+            vec![Some(1), Some(1), Some(1), Some(2), None],
+        ),
+        (vec![Some(9)], vec![], vec![Some(9)]),
+        (vec![], vec![], vec![]),
+    ] {
+        check_union_case(&plan, &stream, &options, (left, right, expected)).await?;
+    }
+    println!(
+        "union {sql}: public DF/SQL, EOF oracle, duplicate/NULL/empty, same plan isolation and shared output passed"
+    );
+    Ok(())
+}
+
+fn union_declaration(sql: bool) -> Result<Program> {
+    let schema = data(vec![])?.table_payload()?.schema().clone();
+    let a = table_input("a", schema.clone(), InputOptions::default())?;
+    let b = table_input("b", schema, InputOptions::default())?;
+    let result = if sql {
+        calc_flow::sql::sql(
+            "SELECT x FROM a UNION ALL SELECT x FROM b",
+            BTreeMap::from([("a".into(), a.clone()), ("b".into(), b)]),
+        )?
+    } else {
+        a.union_all(&b)?
+    };
+    Program::new(
+        "finite-union",
+        CompileMode::Batch,
+        BTreeMap::from([("result".into(), result), ("shared".into(), a)]),
+    )
+}
+
+type UnionCase = (Vec<Option<i64>>, Vec<Option<i64>>, Vec<Option<i64>>);
+async fn check_union_case(
+    plan: &calc_flow::BatchExecutionPlan,
+    stream: &Program,
+    options: &CompileOptions,
+    case: UnionCase,
+) -> Result<()> {
+    let (left, right, mut expected) = case;
+
+    let left = data(left)?;
+    let right = data(right)?;
+    expected.sort();
+    let actual = plan
+        .execute(
+            BTreeMap::from([("a".into(), left.clone()), ("b".into(), right.clone())]),
+            ExecutionOptions::default(),
+        )
+        .await?;
+    let mut actual = values(&actual.outputs["result"], "x");
+    actual.sort();
+    assert_eq!(actual, expected);
+    let observed = run_stream_inputs(
+        &stream,
+        BTreeMap::from([("a".into(), vec![left]), ("b".into(), vec![right])]),
+        &options,
+    )
+    .await?;
+    let mut actual: Vec<_> = observed["result"]
+        .iter()
+        .flat_map(|batch| values(batch, "x"))
+        .collect();
+    actual.sort();
+    assert_eq!(actual, expected);
     Ok(())
 }
 
@@ -506,7 +633,50 @@ async fn check_metadata_stream() -> Result<()> {
     let actual = run_stream(&program, vec![batch.clone()], &CompileOptions::default()).await?;
     assert_eq!(values(&actual["result"][0], "x"), vec![Some(1)]);
     assert_eq!(batch.table_payload()?.schema(), &schema);
+    check_union_metadata(&batch).await?;
     println!("metadata: owned stream accepts schema and field metadata without mutating input");
+    Ok(())
+}
+
+fn metadata_union_program(batch: &Batch) -> Result<Program> {
+    let input = table_input(
+        "events",
+        batch.table_payload()?.schema().clone(),
+        InputOptions::default(),
+    )?;
+    let df = input.union_all(&input)?;
+    let sql = calc_flow::sql::sql(
+        "SELECT x FROM a UNION ALL SELECT x FROM b",
+        BTreeMap::from([("a".into(), input.clone()), ("b".into(), input)]),
+    )?;
+    Program::new(
+        "union-metadata",
+        CompileMode::Stream,
+        BTreeMap::from([("df".into(), df), ("sql".into(), sql)]),
+    )
+}
+async fn check_union_metadata(batch: &Batch) -> Result<()> {
+    let program = metadata_union_program(batch)?;
+    let actual = run_stream(&program, vec![batch.clone()], &CompileOptions::default()).await?;
+    for name in ["df", "sql"] {
+        let rows: Vec<_> = actual[name]
+            .iter()
+            .flat_map(|batch| values(batch, "x"))
+            .collect();
+        assert_eq!(rows, vec![Some(1), Some(1)]);
+        assert!(
+            actual[name][0]
+                .table_payload()?
+                .schema()
+                .field(0)
+                .metadata()
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        batch.table_payload()?.schema().field(0).metadata()["unit"],
+        "USD"
+    );
     Ok(())
 }
 

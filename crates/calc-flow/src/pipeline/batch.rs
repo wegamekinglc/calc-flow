@@ -25,6 +25,7 @@ pub(crate) enum CompiledBatchOperator {
     External(Box<dyn BatchOperator>),
     Expression(ExpressionOperator),
     Sql(SqlOperator),
+    Union(crate::UnionOperator),
     Rolling(crate::RollingOperator),
     CrossSection(crate::CrossSectionOperator),
 }
@@ -34,11 +35,14 @@ impl CompiledBatchOperator {
         match definition.operator {
             NodeOperator::Expression(operator) => Ok(Self::Expression(operator)),
             NodeOperator::Sql(operator) => Ok(Self::Sql(operator)),
+            NodeOperator::Union(operator) => {
+                operator.validate_batch()?;
+                Ok(Self::Union(operator))
+            }
             NodeOperator::Rolling(operator) => Ok(Self::Rolling(operator)),
             NodeOperator::CrossSection(operator) => Ok(Self::CrossSection(operator)),
             NodeOperator::Batch(operator) => Ok(Self::External(operator)),
             NodeOperator::SnapshotSql(_)
-            | NodeOperator::Union(_)
             | NodeOperator::Window(_)
             | NodeOperator::StreamJoin(_)
             | NodeOperator::StreamAsofJoin(_)
@@ -54,32 +58,44 @@ impl CompiledBatchOperator {
     pub(crate) fn snapshot(&self) -> Result<Value> {
         match self {
             Self::External(operator) => operator.snapshot(),
-            Self::Expression(_) | Self::Sql(_) | Self::Rolling(_) | Self::CrossSection(_) => {
-                Ok(Value::Null)
-            }
+            Self::Expression(_)
+            | Self::Sql(_)
+            | Self::Rolling(_)
+            | Self::CrossSection(_)
+            | Self::Union(_) => Ok(Value::Null),
         }
     }
 
     pub(crate) fn restore(&mut self, state: &Value) -> Result<()> {
         match self {
             Self::External(operator) => operator.restore(state),
-            Self::Expression(_) | Self::Sql(_) | Self::Rolling(_) | Self::CrossSection(_)
+            Self::Expression(_)
+            | Self::Sql(_)
+            | Self::Rolling(_)
+            | Self::CrossSection(_)
+            | Self::Union(_)
                 if state.is_null() =>
             {
                 Ok(())
             }
-            Self::Expression(_) | Self::Sql(_) | Self::Rolling(_) | Self::CrossSection(_) => {
-                Err(CalcFlowError::Format {
-                    message: "stateless operator state must be null".into(),
-                })
-            }
+            Self::Expression(_)
+            | Self::Sql(_)
+            | Self::Rolling(_)
+            | Self::CrossSection(_)
+            | Self::Union(_) => Err(CalcFlowError::Format {
+                message: "stateless operator state must be null".into(),
+            }),
         }
     }
 
     pub(crate) fn reset(&mut self) -> Result<()> {
         match self {
             Self::External(operator) => operator.reset(),
-            Self::Expression(_) | Self::Sql(_) | Self::Rolling(_) | Self::CrossSection(_) => Ok(()),
+            Self::Expression(_)
+            | Self::Sql(_)
+            | Self::Rolling(_)
+            | Self::CrossSection(_)
+            | Self::Union(_) => Ok(()),
         }
     }
 
@@ -91,6 +107,11 @@ impl CompiledBatchOperator {
     ) -> Result<BTreeMap<String, Batch>> {
         match self {
             Self::External(operator) => {
+                operator
+                    .process(inputs, &BatchOperatorContext { run })
+                    .await
+            }
+            Self::Union(operator) => {
                 operator
                     .process(inputs, &BatchOperatorContext { run })
                     .await
@@ -220,6 +241,22 @@ struct PlanTransaction<'a> {
     _guard: tokio::sync::MutexGuard<'a, ()>,
 }
 
+fn validate_finite_node(node_id: &str, operator: &NodeOperator) -> Result<()> {
+    match operator {
+        NodeOperator::Union(union) => union.validate_batch(),
+        NodeOperator::SnapshotSql(_)
+        | NodeOperator::Window(_)
+        | NodeOperator::StreamJoin(_)
+        | NodeOperator::StreamAsofJoin(_)
+        | NodeOperator::Stream(_) => Err(CalcFlowError::Compile {
+            message: format!(
+                "node {node_id:?} is stream-only; batch graphs compose multi-input logic through SQL aliases"
+            ),
+        }),
+        _ => Ok(()),
+    }
+}
+
 impl PipelineBuilder {
     /// Validates and consumes this graph into an immutable batch execution
     /// topology (the v2 finite one-shot contract).
@@ -236,21 +273,7 @@ impl PipelineBuilder {
     /// unreachable and guards the internal invariant only.
     pub fn compile_batch(self, udfs: &UdfRegistrySnapshot) -> Result<BatchExecutionPlan> {
         for (node_id, node) in &self.nodes {
-            if matches!(
-                node.operator,
-                NodeOperator::SnapshotSql(_)
-                    | NodeOperator::Union(_)
-                    | NodeOperator::Window(_)
-                    | NodeOperator::StreamJoin(_)
-                    | NodeOperator::StreamAsofJoin(_)
-                    | NodeOperator::Stream(_)
-            ) {
-                return Err(CalcFlowError::Compile {
-                    message: format!(
-                        "node {node_id:?} is stream-only; batch graphs compose multi-input logic through SQL aliases"
-                    ),
-                });
-            }
+            validate_finite_node(node_id, &node.operator)?;
         }
         let graph = compile_graph(&self, "batch", udfs)?;
         let name = self.name.clone();

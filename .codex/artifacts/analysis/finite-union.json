@@ -1,0 +1,2042 @@
+{
+  "issue": "DAL-515",
+  "base_commit": "a5a5f4d8972e5eba47147589d695bf0ecbb20994",
+  "branch": "feature/dal-515-finite-union",
+  "environment": {
+    "system": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "rust": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "python": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+    "cargo_target_dir": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug",
+    "cargo_build_jobs": 2,
+    "pythonpath": "target/finite-union/delivery-site",
+    "jax_platforms": "cpu",
+    "native_only_pyo3_python": true
+  },
+  "provenance": {
+    "wheel": "target/finite-union/delivery-wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl",
+    "wheel_sha256": "70e4e50745f66b6f45f0b41710a04d6bc77e225d2fa1d73b07df274194c7e418",
+    "native_sha256": "c04dd4911d60da5eaf4cfc5f0d65b063a7f73e439b6d3f642d98b69912a61169",
+    "matching_python_files": 56,
+    "source_files": 1667,
+    "source_manifest_sha256": "e5a61bb9844c709696a91f3362cb407c69267ea442527687ee67d677b26fff60"
+  },
+  "schema_and_import_provenance": {
+    "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+    "pyarrow": "24.0.0",
+    "package": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/target/finite-union/delivery-site/calc_flow/__init__.py",
+    "native": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/target/finite-union/delivery-site/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+    "native_sha256": "c04dd4911d60da5eaf4cfc5f0d65b063a7f73e439b6d3f642d98b69912a61169",
+    "project_schema_matches": true
+  },
+  "changed_files": [
+    ".codex/artifacts/analysis/finite-union.json",
+    ".codex/artifacts/analysis/finite-union.md",
+    ".codex/artifacts/api-notes/finite-union.md",
+    "CHANGELOG.md",
+    "crates/calc-flow-python/src/config.rs",
+    "crates/calc-flow/examples/finite_union.rs",
+    "crates/calc-flow/src/config.rs",
+    "crates/calc-flow/src/dataframe.rs",
+    "crates/calc-flow/src/operator/mod.rs",
+    "crates/calc-flow/src/operator/union.rs",
+    "crates/calc-flow/src/pipeline/analysis.rs",
+    "crates/calc-flow/src/pipeline/batch.rs",
+    "crates/calc-flow/src/program.rs",
+    "crates/calc-flow/src/program/lower.rs",
+    "crates/calc-flow/src/program/lower/union.rs",
+    "crates/calc-flow/src/query_analysis.rs",
+    "crates/calc-flow/src/query_analysis/sql.rs",
+    "crates/calc-flow/src/query_analysis/updates.rs",
+    "crates/calc-flow/src/sql.rs",
+    "crates/calc-flow/src/sql/union.rs",
+    "crates/calc-flow/tests/finite_union.rs",
+    "crates/calc-flow/tests/finite_union_frontend.rs",
+    "crates/calc-flow/tests/finite_union_sql.rs",
+    "crates/calc-flow/tests/latest_relation.rs",
+    "crates/calc-flow/tests/query_history_portability.rs",
+    "crates/calc-flow/tests/relational-consumer/src/main.rs",
+    "docs/batch-guide.md",
+    "docs/introduction.md",
+    "docs/query-history-portability.md",
+    "docs/relational-frontends.md",
+    "docs/rust-api.md",
+    "docs/streaming-guide.md",
+    "examples/finite_union.py",
+    "python/calc_flow/_native.pyi",
+    "python/calc_flow/compute.py",
+    "python/calc_flow/symbolic/analyzer.py",
+    "python/calc_flow/symbolic/expr.py",
+    "python/calc_flow/symbolic/lower/program.py",
+    "python/calc_flow/symbolic/lower/sql.py",
+    "python/calc_flow/symbolic/nodes.py",
+    "python/calc_flow/symbolic/program.py",
+    "python/calc_flow/symbolic/query_analysis.py",
+    "python/calc_flow/symbolic/union.py",
+    "python/tests/test_finite_union.py",
+    "python/tests/test_query_history_portability.py",
+    "python/tests/test_symbolic_late_output.py",
+    "python/tests/test_update_semantics.py"
+  ],
+  "red": [
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--test",
+        "finite_union",
+        "finite_union_reuses_one_plan_without_old_rows",
+        "--",
+        "--exact"
+      ],
+      "expected_exit": 101,
+      "path": "target/finite-union/red-core.log",
+      "sha256": "fda91deb46fc370ebdd20ab1c2b87bdcf23f0061048e96b4c367255c0e1b68c6",
+      "tail": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.32s\n     Running tests/finite_union.rs (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug/debug/deps/finite_union-2f2ded5d8fdd3013)\n\nrunning 1 test\ntest finite_union_reuses_one_plan_without_old_rows ... FAILED\n\nfailures:\n\n---- finite_union_reuses_one_plan_without_old_rows stdout ----\nError: Compile { message: \"node \\\"merge\\\" is stream-only; batch graphs compose multi-input logic through SQL aliases\" }\n\n\nfailures:\n    finite_union_reuses_one_plan_without_old_rows\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\nerror: test failed, to rerun pass `-p calc-flow --test finite_union`"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--test",
+        "finite_union_frontend",
+        "dataframe_union_exports_and_compiles_both_lifecycles",
+        "--",
+        "--exact"
+      ],
+      "expected_exit": 101,
+      "path": "target/finite-union/red-df.log",
+      "sha256": "cb58c7c30781399647470f110a82d1752c252b247833ee8c01f77a6d3f5d4149",
+      "tail": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow)\nerror[E0599]: no method named `union_all` found for struct `TableExpr` in the current scope\n  --> crates/calc-flow/tests/finite_union_frontend.rs:13:22\n   |\n13 |     let relation = a.union_all(&b)?;\n   |                      ^^^^^^^^^ method not found in `TableExpr`\n\nFor more information about this error, try `rustc --explain E0599`.\nerror: could not compile `calc-flow` (test \"finite_union_frontend\") due to 1 previous error"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--test",
+        "finite_union_sql",
+        "sql_union_uses_native_union_with_textual_arm_order",
+        "--",
+        "--exact"
+      ],
+      "expected_exit": 101,
+      "path": "target/finite-union/red-sql.log",
+      "sha256": "8bcef2209a6b5c597514a0074c2f1cae0ec5fad989d61a597763ecba48a04408",
+      "tail": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.25s\n     Running tests/finite_union_sql.rs (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug/debug/deps/finite_union_sql-5db0711fc68ff4ef)\n\nrunning 1 test\ntest sql_union_uses_native_union_with_textual_arm_order ... FAILED\n\nfailures:\n\n---- sql_union_uses_native_union_with_textual_arm_order stdout ----\n\nthread 'sql_union_uses_native_union_with_textual_arm_order' (5781) panicked at crates/calc-flow/tests/finite_union_sql.rs:20:102:\nSQL must lower to native union\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    sql_union_uses_native_union_with_textual_arm_order\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\nerror: test failed, to rerun pass `-p calc-flow --test finite_union_sql`"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--test",
+        "finite_union_frontend",
+        "append_union_proves_unordered_eof_history",
+        "--",
+        "--exact"
+      ],
+      "expected_exit": 101,
+      "path": "target/finite-union/red-analysis.log",
+      "sha256": "36c525f3ce5d0ae6bfd64eec2019f3151825be4b7552d765d3cdc30f8ed35913",
+      "tail": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.53s\n     Running tests/finite_union_frontend.rs (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug/debug/deps/finite_union_frontend-06a691409951849f)\n\nrunning 1 test\ntest append_union_proves_unordered_eof_history ... FAILED\n\nfailures:\n\n---- append_union_proves_unordered_eof_history stdout ----\n\nthread 'append_union_proves_unordered_eof_history' (6240) panicked at crates/calc-flow/tests/finite_union_frontend.rs:53:5:\nassertion `left == right` failed\n  left: (2, 3)\n right: (2, 4)\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    append_union_proves_unordered_eof_history\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s\n\nerror: test failed, to rerun pass `-p calc-flow --test finite_union_frontend`"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--test",
+        "finite_union",
+        "finite_union_rejects_non_exact_or_optional_ports_in_analysis",
+        "--",
+        "--exact"
+      ],
+      "expected_exit": 101,
+      "path": "target/finite-union/red-shape.log",
+      "sha256": "56e875172b3940cc81bdd7da8dd2347bc6d5cc6c68320a1994cd8373251df27b",
+      "tail": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.74s\n     Running tests/finite_union.rs (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug/debug/deps/finite_union-2f2ded5d8fdd3013)\n\nrunning 1 test\ntest finite_union_rejects_non_exact_or_optional_ports_in_analysis ... FAILED\n\nfailures:\n\n---- finite_union_rejects_non_exact_or_optional_ports_in_analysis stdout ----\n\nthread 'finite_union_rejects_non_exact_or_optional_ports_in_analysis' (12598) panicked at crates/calc-flow/tests/finite_union.rs:111:9:\nassertion `left == right` failed\n  left: Supported\n right: Unsupported\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    finite_union_rejects_non_exact_or_optional_ports_in_analysis\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s\n\nerror: test failed, to rerun pass `-p calc-flow --test finite_union`"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--test",
+        "finite_union_frontend",
+        "union_normalizes_declaration_metadata_without_mutating_it",
+        "--",
+        "--exact"
+      ],
+      "expected_exit": 101,
+      "path": "target/finite-union/red-metadata.log",
+      "sha256": "3ff04d40e61d2de60802e55fcb5a29dc7cac6315a59ea9439c827ad1d4894416",
+      "tail": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.94s\n     Running tests/finite_union_frontend.rs (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug/debug/deps/finite_union_frontend-06a691409951849f)\n\nrunning 1 test\ntest union_normalizes_declaration_metadata_without_mutating_it ... FAILED\n\nfailures:\n\n---- union_normalizes_declaration_metadata_without_mutating_it stdout ----\n\nthread 'union_normalizes_declaration_metadata_without_mutating_it' (13753) panicked at crates/calc-flow/tests/finite_union_frontend.rs:112:5:\nassertion `left == right` failed\n  left: Schema { fields: [Field { name: \"x\", data_type: Int64, nullable: true, metadata: {\"user\": \"left\"} }], metadata: {\"schema\": \"left\"} }\n right: Schema { fields: [Field { name: \"x\", data_type: Int64, nullable: true }], metadata: {} }\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    union_normalizes_declaration_metadata_without_mutating_it\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s\n\nerror: test failed, to rerun pass `-p calc-flow --test finite_union_frontend`"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--test",
+        "finite_union_frontend",
+        "union_does_not_invent_a_cross_ingress_batch_boundary",
+        "--",
+        "--exact"
+      ],
+      "expected_exit": 101,
+      "path": "target/finite-union/red-boundary.log",
+      "sha256": "272cd9c7eaa28c6068280c0b2366c87aafd0eecd4c750fcd4e1b7b3b97da9a90",
+      "tail": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.73s\n     Running tests/finite_union_frontend.rs (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug/debug/deps/finite_union_frontend-06a691409951849f)\n\nrunning 1 test\ntest union_does_not_invent_a_cross_ingress_batch_boundary ... FAILED\n\nfailures:\n\n---- union_does_not_invent_a_cross_ingress_batch_boundary stdout ----\n\nthread 'union_does_not_invent_a_cross_ingress_batch_boundary' (16983) panicked at crates/calc-flow/tests/finite_union_frontend.rs:139:5:\nassertion `left == right` failed\n  left: Some(Supported)\n right: Some(Unknown)\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    union_does_not_invent_a_cross_ingress_batch_boundary\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\nerror: test failed, to rerun pass `-p calc-flow --test finite_union_frontend`"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--test",
+        "finite_union",
+        "finite_union_enforces_existing_table_result_limit",
+        "--",
+        "--exact"
+      ],
+      "expected_exit": 101,
+      "path": "target/finite-union/red-limit.log",
+      "sha256": "bfdc59c9743a801c64b8273d08f4f6639a0784f715412838f9efbe60bdeff44e",
+      "tail": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.91s\n     Running tests/finite_union.rs (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug/debug/deps/finite_union-2f2ded5d8fdd3013)\n\nrunning 1 test\ntest finite_union_enforces_existing_table_result_limit ... FAILED\n\nfailures:\n\n---- finite_union_enforces_existing_table_result_limit stdout ----\n\nthread 'finite_union_enforces_existing_table_result_limit' (19011) panicked at crates/calc-flow/tests/finite_union.rs:180:5:\nunion must enforce the existing 100M table result row limit\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    finite_union_enforces_existing_table_result_limit\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\nerror: test failed, to rerun pass `-p calc-flow --test finite_union`"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--test",
+        "finite_union_sql",
+        "sql_union_arm_schema_errors_keep_the_arm_path",
+        "--",
+        "--exact"
+      ],
+      "expected_exit": 101,
+      "path": "target/finite-union/red-arm-error.log",
+      "sha256": "fd47a4bdaa59ac27c14c25932cddd6f3741beb80d4a6c1cf364768ec9d7aa7b7",
+      "tail": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.98s\n     Running tests/finite_union_sql.rs (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug/debug/deps/finite_union_sql-5db0711fc68ff4ef)\n\nrunning 1 test\ntest sql_union_arm_schema_errors_keep_the_arm_path ... FAILED\n\nfailures:\n\n---- sql_union_arm_schema_errors_keep_the_arm_path stdout ----\n\nthread 'sql_union_arm_schema_errors_keep_the_arm_path' (20921) panicked at crates/calc-flow/tests/finite_union_sql.rs:70:5:\n[QueryDiagnostic { path: \"outputs.out.batch.support\", code: \"unsupported_mode\", status: Unsupported, message: \"this declaration has no supported lifecycle in the selected mode\" }, QueryDiagnostic { path: \"outputs.out.sql.schema\", code: \"schema_mismatch\", status: Unsupported, message: \"Schema error: No field named missing.\\nValid fields are b.x.; location is the relation node; no subexpression span is available\" }, QueryDiagnostic { path: \"outputs.out.stream.support\", code: \"unsupported_mode\", status: Unsupported, message: \"this declaration has no supported lifecycle in the selected mode\" }]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    sql_union_arm_schema_errors_keep_the_arm_path\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.01s\n\nerror: test failed, to rerun pass `-p calc-flow --test finite_union_sql`"
+    },
+    {
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "python/tests/test_symbolic_late_output.py",
+        "-q",
+        "-k",
+        "late_successors_reject_even_after_allowed_transform"
+      ],
+      "expected_exit": 1,
+      "path": "target/finite-union/red-late-union.log",
+      "sha256": "b7adde86e560d3bdb4b4d421a6b975177af74242c8554fa7667396a31f338b02",
+      "tail": "    @pytest.mark.parametrize(\"transformed\", [False, True])\n    @pytest.mark.parametrize(\"successor\", [\"rolling\", \"array\", \"merge\"])\n    def test_late_successors_reject_even_after_allowed_transform(\n        transformed: bool, successor: str\n    ) -> None:\n        source = quotes()\n        pair = cf.with_late_output(rolling(source))\n        late = cf.sql(\"SELECT * FROM rows\", rows=pair.late) if transformed else pair.late\n        if successor == \"rolling\":\n            rejected = rolling(late)\n        elif successor == \"array\":\n            rejected = cf.linalg.from_columns(late, columns=[\"x\"], backend=\"numpy\")\n        else:\n            rejected = cf.sql(\"SELECT * FROM a UNION ALL SELECT * FROM b\", a=late, b=late)\n        if successor == \"merge\":\n>           with pytest.raises(ValueError, match=r\"outputs.rejected.*unsupported_mode\"):\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE           Failed: DID NOT RAISE ValueError\n\npython/tests/test_symbolic_late_output.py:303: Failed\n=========================== short test summary info ============================\nFAILED python/tests/test_symbolic_late_output.py::test_late_successors_reject_even_after_allowed_transform[merge-False]\nFAILED python/tests/test_symbolic_late_output.py::test_late_successors_reject_even_after_allowed_transform[merge-True]\n2 failed, 54 deselected in 0.57s"
+    }
+  ],
+  "final_checks": [
+    {
+      "name": "delivery-clippy-core",
+      "argv": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--lib",
+        "--example",
+        "finite_union",
+        "--test",
+        "finite_union",
+        "--test",
+        "finite_union_frontend",
+        "--test",
+        "finite_union_sql",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "seconds": 0.409,
+      "log": "target/finite-union/delivery-clippy-core.log",
+      "pyo3_python": null,
+      "pythonpath": null,
+      "evidence": {
+        "path": "target/finite-union/delivery-clippy-core.log",
+        "sha256": "02bbe68de4d278f826fffee135ca2def641e2b88bc24d247ee5d4b462a2d41b6",
+        "tail": "    Checking calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.35s"
+      }
+    },
+    {
+      "name": "delivery-native-build",
+      "argv": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "maturin",
+        "build",
+        "--locked",
+        "--profile",
+        "dev",
+        "--interpreter",
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "--out",
+        "target/finite-union/delivery-wheels"
+      ],
+      "exit_code": 0,
+      "seconds": 52.313,
+      "log": "target/finite-union/delivery-native-build.log",
+      "pyo3_python": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+      "pythonpath": null,
+      "evidence": {
+        "path": "target/finite-union/delivery-native-build.log",
+        "sha256": "740715a0f656ed80e4a20464898b466ed9f4883df863194573724a4ec2619460",
+        "tail": "\ud83c\udf79 Building a mixed python/rust project\n\ud83d\udc0d Found CPython 3.13 at /home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python\n\ud83d\udd17 Found pyo3 bindings\n   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow)\n   Compiling calc-flow-connectors v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow-connectors)\n   Compiling calc-flow-python v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow-python)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 48.17s\n\u26a0\ufe0f  Warning: No compatible platform tag found, using the linux tag instead. You won't be able to upload those wheels to PyPI.\n\ud83d\udce6 Built wheel for CPython 3.13 to target/finite-union/delivery-wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl"
+      }
+    },
+    {
+      "name": "delivery-python",
+      "argv": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "pytest",
+        "python/tests/test_finite_union.py",
+        "python/tests/test_update_semantics.py",
+        "python/tests/test_query_history_portability.py",
+        "python/tests/test_aggregate_replacement.py",
+        "python/tests/test_relational_frontend.py",
+        "-q"
+      ],
+      "exit_code": 0,
+      "seconds": 7.876,
+      "log": "target/finite-union/delivery-python.log",
+      "pyo3_python": null,
+      "pythonpath": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/target/finite-union/delivery-site",
+      "evidence": {
+        "path": "target/finite-union/delivery-python.log",
+        "sha256": "5bc3829ab8427068c6acaded31c9cc93816ace75799f896759383eec15278fc4",
+        "tail": "........................................................................ [ 39%]\n........................................................................ [ 79%]\n.....................................                                    [100%]\n181 passed in 7.31s"
+      }
+    },
+    {
+      "name": "delivery-late-boundary",
+      "argv": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "pytest",
+        "python/tests/test_symbolic_late_output.py",
+        "-q",
+        "-k",
+        "late_successors_reject_even_after_allowed_transform"
+      ],
+      "exit_code": 0,
+      "seconds": 0.531,
+      "log": "target/finite-union/delivery-late-boundary.log",
+      "pyo3_python": null,
+      "pythonpath": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/target/finite-union/delivery-site",
+      "evidence": {
+        "path": "target/finite-union/delivery-late-boundary.log",
+        "sha256": "fb324a47f3b22bdd2f9eb774c683bc9d3040b5fa86cd625f762ef3703eaf215f",
+        "tail": "........                                                                 [100%]\n8 passed, 50 deselected in 0.31s"
+      }
+    },
+    {
+      "name": "delivery-python-example",
+      "argv": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "examples/finite_union.py"
+      ],
+      "exit_code": 0,
+      "seconds": 0.289,
+      "log": "target/finite-union/delivery-python-example.log",
+      "pyo3_python": null,
+      "pythonpath": "/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/target/finite-union/delivery-site",
+      "evidence": {
+        "path": "target/finite-union/delivery-python-example.log",
+        "sha256": "a75174f740c1628e65fe0ccf96a52b9665fc253fcefb1537df7279d9e9a518f5",
+        "tail": "DataFrame and SQL: five rows in batch and completed stream"
+      }
+    },
+    {
+      "name": "delivery-clippy-native",
+      "argv": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "-p",
+        "calc-flow-python",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "seconds": 17.998,
+      "log": "target/finite-union/delivery-clippy-native.log",
+      "pyo3_python": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+      "pythonpath": null,
+      "evidence": {
+        "path": "target/finite-union/delivery-clippy-native.log",
+        "sha256": "02629a60b95a02a93b4e0fa472fd4ad0e0c944b5afce43bc6976cdb907b912d0",
+        "tail": "   Compiling pyo3-build-config v0.28.3\n    Checking calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow)\n   Compiling pyo3-ffi v0.28.3\n   Compiling pyo3-macros-backend v0.28.3\n   Compiling pyo3 v0.28.3\n   Compiling pyo3-macros v0.28.3\n   Compiling numpy v0.28.0\n   Compiling calc-flow-python v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow-python)\n    Checking pyo3-arrow v0.18.0\n    Checking pyo3-async-runtimes v0.28.0\n    Checking calc-flow-connectors v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow-connectors)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 17.94s"
+      }
+    },
+    {
+      "name": "delivery-core-build",
+      "argv": [
+        "cargo",
+        "build",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--lib"
+      ],
+      "exit_code": 0,
+      "seconds": 46.449,
+      "log": "target/finite-union/delivery-core-build.log",
+      "pyo3_python": null,
+      "pythonpath": null,
+      "evidence": {
+        "path": "target/finite-union/delivery-core-build.log",
+        "sha256": "15e4bf46d20698b320335f8b4ecf3893b4d62fbcf821bc65970e2c5ca0e54a6e",
+        "tail": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 46.41s"
+      }
+    },
+    {
+      "name": "delivery-rust-example",
+      "argv": [
+        "cargo",
+        "run",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--example",
+        "finite_union"
+      ],
+      "exit_code": 0,
+      "seconds": 58.602,
+      "log": "target/finite-union/delivery-rust-example.log",
+      "pyo3_python": null,
+      "pythonpath": null,
+      "evidence": {
+        "path": "target/finite-union/delivery-rust-example.log",
+        "sha256": "5a942ba3a7cd34ea7a535d57142d765379d96447620d580135da8b35d7603dde",
+        "tail": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 58.52s\n     Running `/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug/debug/examples/finite_union`\nDataFrame and SQL: duplicate/NULL oracle passed; both lifecycles compile"
+      }
+    },
+    {
+      "name": "delivery-rust-tests",
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--test",
+        "finite_union",
+        "--test",
+        "finite_union_frontend",
+        "--test",
+        "finite_union_sql",
+        "--test",
+        "latest_relation",
+        "--test",
+        "query_history_portability"
+      ],
+      "exit_code": 0,
+      "seconds": 42.304,
+      "log": "target/finite-union/delivery-rust-tests.log",
+      "pyo3_python": null,
+      "pythonpath": null,
+      "evidence": {
+        "path": "target/finite-union/delivery-rust-tests.log",
+        "sha256": "a86eac95bab3f49d3df684baecc648a0910ac2b2ed229de5e8d5228f1a3d76ed",
+        "tail": "test terminal_sum_keeps_cumulative_snapshots_in_both_choices ... ok\ntest latest_filter_delivers_empty_events ... ok\ntest unsupported_snapshot_consumers_remain_unknown_and_deterministic ... ok\ntest latest_admission_preserves_logical_consumer_and_exported_selection ... ok\ntest managed_recovery_rejects_both_update_identity_mismatches_before_source ... ok\ntest dataframe_sql_replacement_chain_is_six_legacy_is_seven ... ok\n\ntest result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s\n\n     Running tests/query_history_portability.rs (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug/debug/deps/query_history_portability-b61fbeb720a0f57e)\n\nrunning 9 tests\ntest requests_validate_and_roundtrip_without_becoming_execution_permits ... ok\ntest known_missing_udf_keeps_the_existing_compilation_error ... ok\ntest union_modes_and_sql_schema_errors_are_reported_without_execution ... ok\ntest snapshot_edges_keep_the_original_stream_mode_rejection ... ok\ntest ordered_dictionary_schema_roundtrips_through_public_analysis ... ok\ntest row_local_checked_compile_keeps_the_original_identity ... ok\ntest unordered_dictionary_schema_roundtrips_through_public_analysis ... ok\ntest aggregate_history_and_snapshot_append_edges_are_distinct ... ok\ntest sql_shapes_separate_per_batch_scope_from_unproved_semantics ... ok\n\ntest result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s\n"
+      }
+    },
+    {
+      "name": "delivery-stream-union",
+      "argv": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "calc-flow",
+        "--test",
+        "stream_operator",
+        "union"
+      ],
+      "exit_code": 0,
+      "seconds": 4.744,
+      "log": "target/finite-union/delivery-stream-union.log",
+      "pyo3_python": null,
+      "pythonpath": null,
+      "evidence": {
+        "path": "target/finite-union/delivery-stream-union.log",
+        "sha256": "c05865024b150276596e07996cfd39e1379afaefabaedbbaedc98614613db558",
+        "tail": "   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.69s\n     Running tests/stream_operator.rs (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug/debug/deps/stream_operator-d8a884d37086ca1b)\n\nrunning 2 tests\ntest union_forwards_each_ingress_in_arrival_order_sharing_the_payload ... ok\ntest union_rejects_an_unknown_ingress_and_ignores_control_callbacks ... ok\n\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s\n"
+      }
+    },
+    {
+      "name": "delivery-ruff",
+      "argv": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "ruff",
+        "check",
+        "examples/finite_union.py",
+        "python/calc_flow/_native.pyi",
+        "python/calc_flow/compute.py",
+        "python/calc_flow/symbolic/analyzer.py",
+        "python/calc_flow/symbolic/expr.py",
+        "python/calc_flow/symbolic/lower/program.py",
+        "python/calc_flow/symbolic/lower/sql.py",
+        "python/calc_flow/symbolic/nodes.py",
+        "python/calc_flow/symbolic/program.py",
+        "python/calc_flow/symbolic/query_analysis.py",
+        "python/calc_flow/symbolic/union.py",
+        "python/tests/test_finite_union.py",
+        "python/tests/test_query_history_portability.py",
+        "python/tests/test_symbolic_late_output.py",
+        "python/tests/test_update_semantics.py"
+      ],
+      "exit_code": 0,
+      "log": "target/finite-union/delivery-ruff.log",
+      "evidence": {
+        "path": "target/finite-union/delivery-ruff.log",
+        "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+        "tail": "All checks passed!"
+      }
+    },
+    {
+      "name": "delivery-ruff-format",
+      "argv": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "-m",
+        "ruff",
+        "format",
+        "--check",
+        "examples/finite_union.py",
+        "python/calc_flow/_native.pyi",
+        "python/calc_flow/compute.py",
+        "python/calc_flow/symbolic/analyzer.py",
+        "python/calc_flow/symbolic/expr.py",
+        "python/calc_flow/symbolic/lower/program.py",
+        "python/calc_flow/symbolic/lower/sql.py",
+        "python/calc_flow/symbolic/nodes.py",
+        "python/calc_flow/symbolic/program.py",
+        "python/calc_flow/symbolic/query_analysis.py",
+        "python/calc_flow/symbolic/union.py",
+        "python/tests/test_finite_union.py",
+        "python/tests/test_query_history_portability.py",
+        "python/tests/test_symbolic_late_output.py",
+        "python/tests/test_update_semantics.py"
+      ],
+      "exit_code": 0,
+      "log": "target/finite-union/delivery-ruff-format.log",
+      "evidence": {
+        "path": "target/finite-union/delivery-ruff-format.log",
+        "sha256": "d41ae50829b47e318b0787bc39d2a2ea2d52b518cfc7900d2efd569e6d26ab88",
+        "tail": "15 files already formatted"
+      }
+    },
+    {
+      "name": "delivery-rustfmt",
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": 0,
+      "log": "target/finite-union/delivery-rustfmt.log",
+      "evidence": {
+        "path": "target/finite-union/delivery-rustfmt.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "tail": ""
+      }
+    },
+    {
+      "name": "delivery-consumer-fmt",
+      "argv": [
+        "rustfmt",
+        "--edition",
+        "2024",
+        "--check",
+        "crates/calc-flow/tests/relational-consumer/src/main.rs"
+      ],
+      "exit_code": 0,
+      "log": "target/finite-union/delivery-consumer-fmt.log",
+      "evidence": {
+        "path": "target/finite-union/delivery-consumer-fmt.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "tail": ""
+      }
+    },
+    {
+      "name": "delivery-spec-references",
+      "argv": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "scripts/check_spec_references.py"
+      ],
+      "exit_code": 0,
+      "log": "target/finite-union/delivery-spec-references.log",
+      "evidence": {
+        "path": "target/finite-union/delivery-spec-references.log",
+        "sha256": "451465601c9c0f0c187f07ad02a49cb0b66dc2a13af19c6b12312249756af1ab",
+        "tail": "spec reference check passed: every spec tag section resolves"
+      }
+    },
+    {
+      "name": "delivery-ratchet",
+      "argv": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+        "scripts/verify_complexity_gates.py"
+      ],
+      "exit_code": 0,
+      "log": "target/finite-union/delivery-ratchet.log",
+      "evidence": {
+        "path": "target/finite-union/delivery-ratchet.log",
+        "sha256": "28c0f0ab344cc7f838249423ae355d6721a4a977d35165c20462fa028b1a5d7d",
+        "tail": "complexity ratchet holds"
+      }
+    },
+    {
+      "name": "delivery-lizard",
+      "argv": [
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "lizard==1.26.0",
+        "python",
+        "target/finite-union/check_changed_complexity.py"
+      ],
+      "exit_code": 0,
+      "log": "target/finite-union/delivery-lizard.log",
+      "evidence": {
+        "path": "target/finite-union/delivery-lizard.log",
+        "sha256": "e402aea4da20e868699c22a08124094ebc33485b8183f3422c0a7b851e276438",
+        "tail": "{\"changed_functions\": 181, \"max_ccn\": 9, \"unchanged_above_8\": [{\"file\": \"crates/calc-flow/tests/latest_relation.rs\", \"function\": \"latest_admission_preserves_logical_consumer_and_exported_selection\", \"line\": 76, \"ccn\": 9, \"baseline_ccn\": [9]}], \"failures\": []}"
+      }
+    },
+    {
+      "name": "delivery-whitespace",
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "exit_code": 0,
+      "log": "target/finite-union/delivery-whitespace.log",
+      "evidence": {
+        "path": "target/finite-union/delivery-whitespace.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "tail": ""
+      }
+    },
+    {
+      "name": "external-rust-consumer",
+      "argv": [
+        "cargo",
+        "run",
+        "--locked",
+        "--manifest-path",
+        "crates/calc-flow/tests/relational-consumer/Cargo.toml"
+      ],
+      "exit_code": 0,
+      "pyo3_python": null,
+      "log": "target/finite-union/consumer-cursor-green.log",
+      "source_note": "Same production and consumer source as final manifest; subsequent edit renamed only an integration-test local variable.",
+      "evidence": {
+        "path": "target/finite-union/consumer-cursor-green.log",
+        "sha256": "a9f5502bc0667b4213174815701d5d37a80a9ed1df0a11b8aee521b132496fa1",
+        "tail": "warning: patch `parquet v59.2.0 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/vendor/parquet)` was not used in the crate graph\nhelp: Check that the patched package version and available features are compatible\n      with the dependency requirements. If the patch has a different version from\n      what is locked in the Cargo.lock file, run `cargo update` to use the new\n      version. This may also occur with an optional dependency that is not enabled.\n   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow)\n   Compiling relational-public-consumer v0.0.0 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow/tests/relational-consumer)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.73s\n     Running `/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug/debug/relational-public-consumer`\naggregate: root exports, exact schema, empty/NULL oracles and latest 1/6 passed\nmetadata: owned stream accepts schema and field metadata without mutating input\ndataframe: schema, analysis, batch, owned stream, export/reload passed\nsql: schema, analysis, batch, owned stream, export/reload passed\ndf_sql_df_sql: schema, analysis, batch, owned stream, export/reload passed\nsql_df_sql: schema, analysis, batch, owned stream, export/reload passed\nunion false: public DF/SQL, EOF oracle, duplicate/NULL/empty, same plan isolation and shared output passed\nunion true: public DF/SQL, EOF oracle, duplicate/NULL/empty, same plan isolation and shared output passed\nstate: same batch plan 1/5; same stream job 1/6; new stream job 5"
+      }
+    }
+  ],
+  "summary": {
+    "python_tests_passed": 189,
+    "rust_integration_tests_passed": 32,
+    "external_public_consumer": "passed",
+    "python_and_rust_examples": "passed",
+    "full_suites_run": false
+  },
+  "complexity": {
+    "lizard_version": "1.26.0",
+    "functions": [
+      {
+        "file": "crates/calc-flow-python/src/config.rs",
+        "function": "_plan_union_all",
+        "line": 762,
+        "ccn": 5
+      },
+      {
+        "file": "crates/calc-flow-python/src/config.rs",
+        "function": "_union_all_queries",
+        "line": 900,
+        "ccn": 3
+      },
+      {
+        "file": "crates/calc-flow-python/src/config.rs",
+        "function": "register",
+        "line": 907,
+        "ccn": 4
+      },
+      {
+        "file": "crates/calc-flow-python/src/config.rs",
+        "function": "register_query_planners",
+        "line": 914,
+        "ccn": 7
+      },
+      {
+        "file": "crates/calc-flow-python/src/config.rs",
+        "function": "register_array_queries",
+        "line": 921,
+        "ccn": 7
+      },
+      {
+        "file": "crates/calc-flow/src/config.rs",
+        "function": "union_node",
+        "line": 1406,
+        "ccn": 5
+      },
+      {
+        "file": "crates/calc-flow/src/config.rs",
+        "function": "validate_union_operator",
+        "line": 2281,
+        "ccn": 4
+      },
+      {
+        "file": "crates/calc-flow/src/config.rs",
+        "function": "validate_union_mode",
+        "line": 2302,
+        "ccn": 3
+      },
+      {
+        "file": "crates/calc-flow/src/dataframe.rs",
+        "function": "union_schema",
+        "line": 167,
+        "ccn": 7
+      },
+      {
+        "file": "crates/calc-flow/src/dataframe.rs",
+        "function": "union_all",
+        "line": 337,
+        "ccn": 1
+      },
+      {
+        "file": "crates/calc-flow/src/dataframe.rs",
+        "function": "lineage",
+        "line": 345,
+        "ccn": 2
+      },
+      {
+        "file": "crates/calc-flow/src/dataframe.rs",
+        "function": "known_names",
+        "line": 356,
+        "ccn": 8
+      },
+      {
+        "file": "crates/calc-flow/src/operator/union.rs",
+        "function": "new_frontend",
+        "line": 47,
+        "ccn": 3
+      },
+      {
+        "file": "crates/calc-flow/src/operator/union.rs",
+        "function": "normalize_record",
+        "line": 64,
+        "ccn": 3
+      },
+      {
+        "file": "crates/calc-flow/src/operator/union.rs",
+        "function": "normalize_output",
+        "line": 82,
+        "ccn": 6
+      },
+      {
+        "file": "crates/calc-flow/src/operator/union.rs",
+        "function": "push_record",
+        "line": 98,
+        "ccn": 3
+      },
+      {
+        "file": "crates/calc-flow/src/operator/union.rs",
+        "function": "validate_finite_inputs",
+        "line": 118,
+        "ccn": 5
+      },
+      {
+        "file": "crates/calc-flow/src/operator/union.rs",
+        "function": "finite_records",
+        "line": 132,
+        "ccn": 6
+      },
+      {
+        "file": "crates/calc-flow/src/operator/union.rs",
+        "function": "result_error",
+        "line": 156,
+        "ccn": 2
+      },
+      {
+        "file": "crates/calc-flow/src/operator/union.rs",
+        "function": "validate_batch",
+        "line": 166,
+        "ccn": 5
+      },
+      {
+        "file": "crates/calc-flow/src/operator/union.rs",
+        "function": "process",
+        "line": 232,
+        "ccn": 6
+      },
+      {
+        "file": "crates/calc-flow/src/operator/union.rs",
+        "function": "process_data",
+        "line": 269,
+        "ccn": 4
+      },
+      {
+        "file": "crates/calc-flow/src/operator/union.rs",
+        "function": "normalized_union_schema",
+        "line": 307,
+        "ccn": 1
+      },
+      {
+        "file": "crates/calc-flow/src/pipeline/analysis.rs",
+        "function": "describe_operator",
+        "line": 254,
+        "ccn": 7
+      },
+      {
+        "file": "crates/calc-flow/src/pipeline/analysis.rs",
+        "function": "union_batch_support",
+        "line": 302,
+        "ccn": 3
+      },
+      {
+        "file": "crates/calc-flow/src/pipeline/batch.rs",
+        "function": "try_convert",
+        "line": 34,
+        "ccn": 8
+      },
+      {
+        "file": "crates/calc-flow/src/pipeline/batch.rs",
+        "function": "snapshot",
+        "line": 58,
+        "ccn": 2
+      },
+      {
+        "file": "crates/calc-flow/src/pipeline/batch.rs",
+        "function": "restore",
+        "line": 69,
+        "ccn": 4
+      },
+      {
+        "file": "crates/calc-flow/src/pipeline/batch.rs",
+        "function": "reset",
+        "line": 91,
+        "ccn": 2
+      },
+      {
+        "file": "crates/calc-flow/src/pipeline/batch.rs",
+        "function": "process",
+        "line": 102,
+        "ccn": 8
+      },
+      {
+        "file": "crates/calc-flow/src/pipeline/batch.rs",
+        "function": "validate_finite_node",
+        "line": 244,
+        "ccn": 3
+      },
+      {
+        "file": "crates/calc-flow/src/pipeline/batch.rs",
+        "function": "compile_batch",
+        "line": 274,
+        "ccn": 8
+      },
+      {
+        "file": "crates/calc-flow/src/program.rs",
+        "function": "discover_table",
+        "line": 366,
+        "ccn": 6
+      },
+      {
+        "file": "crates/calc-flow/src/program.rs",
+        "function": "validate_stream",
+        "line": 384,
+        "ccn": 6
+      },
+      {
+        "file": "crates/calc-flow/src/program.rs",
+        "function": "validate_sql_mode",
+        "line": 395,
+        "ccn": 5
+      },
+      {
+        "file": "crates/calc-flow/src/program/lower.rs",
+        "function": "children",
+        "line": 45,
+        "ccn": 6
+      },
+      {
+        "file": "crates/calc-flow/src/program/lower.rs",
+        "function": "ensure_valid",
+        "line": 177,
+        "ccn": 3
+      },
+      {
+        "file": "crates/calc-flow/src/program/lower.rs",
+        "function": "add_relation",
+        "line": 222,
+        "ccn": 8
+      },
+      {
+        "file": "crates/calc-flow/src/program/lower.rs",
+        "function": "prepare",
+        "line": 285,
+        "ccn": 8
+      },
+      {
+        "file": "crates/calc-flow/src/program/lower.rs",
+        "function": "relation_kind",
+        "line": 522,
+        "ccn": 7
+      },
+      {
+        "file": "crates/calc-flow/src/program/lower.rs",
+        "function": "node_operator",
+        "line": 647,
+        "ccn": 7
+      },
+      {
+        "file": "crates/calc-flow/src/program/lower.rs",
+        "function": "prepare_union",
+        "line": 736,
+        "ccn": 2
+      },
+      {
+        "file": "crates/calc-flow/src/query_analysis.rs",
+        "function": "union_arm_proved",
+        "line": 6,
+        "ccn": 2
+      },
+      {
+        "file": "crates/calc-flow/src/query_analysis.rs",
+        "function": "analyze_graph",
+        "line": 445,
+        "ccn": 4
+      },
+      {
+        "file": "crates/calc-flow/src/query_analysis.rs",
+        "function": "analyze_edges",
+        "line": 643,
+        "ccn": 7
+      },
+      {
+        "file": "crates/calc-flow/src/query_analysis.rs",
+        "function": "input_interpretation",
+        "line": 722,
+        "ccn": 5
+      },
+      {
+        "file": "crates/calc-flow/src/query_analysis.rs",
+        "function": "builtin_proof",
+        "line": 925,
+        "ccn": 3
+      },
+      {
+        "file": "crates/calc-flow/src/query_analysis.rs",
+        "function": "classify",
+        "line": 935,
+        "ccn": 8
+      },
+      {
+        "file": "crates/calc-flow/src/query_analysis.rs",
+        "function": "stream_only_kind",
+        "line": 1024,
+        "ccn": 1
+      },
+      {
+        "file": "crates/calc-flow/src/query_analysis.rs",
+        "function": "stream_facts",
+        "line": 1037,
+        "ccn": 7
+      },
+      {
+        "file": "crates/calc-flow/src/query_analysis.rs",
+        "function": "ordinary_lifecycle",
+        "line": 1087,
+        "ccn": 6
+      },
+      {
+        "file": "crates/calc-flow/src/query_analysis.rs",
+        "function": "history_mismatch",
+        "line": 1137,
+        "ccn": 8
+      },
+      {
+        "file": "crates/calc-flow/src/query_analysis.rs",
+        "function": "union_latest_history",
+        "line": 1152,
+        "ccn": 2
+      },
+      {
+        "file": "crates/calc-flow/src/query_analysis.rs",
+        "function": "semantics_unproven",
+        "line": 1156,
+        "ccn": 6
+      },
+      {
+        "file": "crates/calc-flow/src/query_analysis/updates.rs",
+        "function": "missing_schema",
+        "line": 69,
+        "ccn": 2
+      },
+      {
+        "file": "crates/calc-flow/tests/latest_relation.rs",
+        "function": "latest_admission_preserves_logical_consumer_and_exported_selection",
+        "line": 76,
+        "ccn": 9,
+        "baseline_ccn": [
+          9
+        ]
+      },
+      {
+        "file": "crates/calc-flow/tests/query_history_portability.rs",
+        "function": "union_modes_and_sql_schema_errors_are_reported_without_execution",
+        "line": 310,
+        "ccn": 1
+      },
+      {
+        "file": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "function": "next",
+        "line": 129,
+        "ccn": 4
+      },
+      {
+        "file": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "function": "run_stream",
+        "line": 161,
+        "ccn": 1
+      },
+      {
+        "file": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "function": "run_stream_inputs",
+        "line": 174,
+        "ccn": 6
+      },
+      {
+        "file": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "function": "union_sources",
+        "line": 213,
+        "ccn": 6
+      },
+      {
+        "file": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "function": "finish_stream",
+        "line": 240,
+        "ccn": 5
+      },
+      {
+        "file": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "function": "check_shape",
+        "line": 361,
+        "ccn": 8
+      },
+      {
+        "file": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "function": "main",
+        "line": 467,
+        "ccn": 8
+      },
+      {
+        "file": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "function": "check_union",
+        "line": 486,
+        "ccn": 7
+      },
+      {
+        "file": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "function": "union_declaration",
+        "line": 516,
+        "ccn": 8
+      },
+      {
+        "file": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "function": "check_union_case",
+        "line": 536,
+        "ccn": 5
+      },
+      {
+        "file": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "function": "check_metadata_stream",
+        "line": 629,
+        "ccn": 7
+      },
+      {
+        "file": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "function": "metadata_union_program",
+        "line": 641,
+        "ccn": 5
+      },
+      {
+        "file": "crates/calc-flow/tests/relational-consumer/src/main.rs",
+        "function": "check_union_metadata",
+        "line": 658,
+        "ccn": 6
+      },
+      {
+        "file": "python/calc_flow/compute.py",
+        "function": "_lowered_collect",
+        "line": 227,
+        "ccn": 2
+      },
+      {
+        "file": "python/calc_flow/symbolic/analyzer.py",
+        "function": "__init__",
+        "line": 624,
+        "ccn": 1
+      },
+      {
+        "file": "python/calc_flow/symbolic/analyzer.py",
+        "function": "_native_row_schema",
+        "line": 802,
+        "ccn": 8
+      },
+      {
+        "file": "python/calc_flow/symbolic/analyzer.py",
+        "function": "_row_schema_boundaries",
+        "line": 840,
+        "ccn": 5
+      },
+      {
+        "file": "python/calc_flow/symbolic/analyzer.py",
+        "function": "_analyze_table",
+        "line": 868,
+        "ccn": 3
+      },
+      {
+        "file": "python/calc_flow/symbolic/analyzer.py",
+        "function": "_union_table",
+        "line": 905,
+        "ccn": 3
+      },
+      {
+        "file": "python/calc_flow/symbolic/analyzer.py",
+        "function": "_sql_inputs",
+        "line": 928,
+        "ccn": 2
+      },
+      {
+        "file": "python/calc_flow/symbolic/analyzer.py",
+        "function": "_sql_empty",
+        "line": 937,
+        "ccn": 3
+      },
+      {
+        "file": "python/calc_flow/symbolic/analyzer.py",
+        "function": "_sql_table",
+        "line": 943,
+        "ccn": 5
+      },
+      {
+        "file": "python/calc_flow/symbolic/analyzer.py",
+        "function": "_maybe_sql_union",
+        "line": 953,
+        "ccn": 3
+      },
+      {
+        "file": "python/calc_flow/symbolic/analyzer.py",
+        "function": "_sql_mode_rejected",
+        "line": 958,
+        "ccn": 6
+      },
+      {
+        "file": "python/calc_flow/symbolic/analyzer.py",
+        "function": "_planned_sql_table",
+        "line": 971,
+        "ccn": 2
+      },
+      {
+        "file": "python/calc_flow/symbolic/analyzer.py",
+        "function": "_sql_schema",
+        "line": 978,
+        "ccn": 1
+      },
+      {
+        "file": "python/calc_flow/symbolic/analyzer.py",
+        "function": "_sql_union",
+        "line": 990,
+        "ccn": 8
+      },
+      {
+        "file": "python/calc_flow/symbolic/analyzer.py",
+        "function": "_sql_input_schemas",
+        "line": 1016,
+        "ccn": 2
+      },
+      {
+        "file": "python/calc_flow/symbolic/expr.py",
+        "function": "union_all",
+        "line": 514,
+        "ccn": 2
+      },
+      {
+        "file": "python/calc_flow/symbolic/lower/program.py",
+        "function": "_can_pin_update_graph",
+        "line": 698,
+        "ccn": 3
+      },
+      {
+        "file": "python/calc_flow/symbolic/lower/program.py",
+        "function": "compile_program_batch",
+        "line": 822,
+        "ccn": 1
+      },
+      {
+        "file": "python/calc_flow/symbolic/lower/program.py",
+        "function": "compile_program_stream",
+        "line": 839,
+        "ccn": 1
+      },
+      {
+        "file": "python/calc_flow/symbolic/lower/sql.py",
+        "function": "table",
+        "line": 180,
+        "ccn": 7
+      },
+      {
+        "file": "python/calc_flow/symbolic/lower/sql.py",
+        "function": "_append_union_node",
+        "line": 206,
+        "ccn": 3
+      },
+      {
+        "file": "python/calc_flow/symbolic/lower/sql.py",
+        "function": "_append_sql",
+        "line": 241,
+        "ccn": 7
+      },
+      {
+        "file": "python/calc_flow/symbolic/lower/sql.py",
+        "function": "_append_sql_union",
+        "line": 277,
+        "ccn": 3
+      },
+      {
+        "file": "python/calc_flow/symbolic/lower/sql.py",
+        "function": "_prepare_expression_inputs",
+        "line": 319,
+        "ccn": 7
+      },
+      {
+        "file": "python/calc_flow/symbolic/lower/sql.py",
+        "function": "lower_sql_program",
+        "line": 535,
+        "ccn": 7
+      },
+      {
+        "file": "python/calc_flow/symbolic/program.py",
+        "function": "_validate_engine_node",
+        "line": 138,
+        "ccn": 7
+      },
+      {
+        "file": "python/calc_flow/symbolic/program.py",
+        "function": "_validate_stream_sql",
+        "line": 154,
+        "ccn": 5
+      },
+      {
+        "file": "python/calc_flow/symbolic/query_analysis.py",
+        "function": "_wire_semantics",
+        "line": 247,
+        "ccn": 6
+      },
+      {
+        "file": "python/calc_flow/symbolic/query_analysis.py",
+        "function": "_roles",
+        "line": 392,
+        "ccn": 5
+      },
+      {
+        "file": "python/calc_flow/symbolic/query_analysis.py",
+        "function": "_declaration",
+        "line": 508,
+        "ccn": 3
+      },
+      {
+        "file": "python/calc_flow/symbolic/query_analysis.py",
+        "function": "_query",
+        "line": 550,
+        "ccn": 2
+      },
+      {
+        "file": "python/calc_flow/symbolic/query_analysis.py",
+        "function": "_gate_latest",
+        "line": 588,
+        "ccn": 3
+      },
+      {
+        "file": "python/tests/test_query_history_portability.py",
+        "function": "test_row_local_report_and_checked_compile_preserve_identity",
+        "line": 15,
+        "ccn": 1
+      },
+      {
+        "file": "python/tests/test_query_history_portability.py",
+        "function": "test_explain_accepts_options_and_renders_the_same_query_report",
+        "line": 150,
+        "ccn": 1
+      },
+      {
+        "file": "python/tests/test_symbolic_late_output.py",
+        "function": "test_late_successors_reject_even_after_allowed_transform",
+        "line": 290,
+        "ccn": 6
+      },
+      {
+        "file": "python/tests/test_update_semantics.py",
+        "function": "test_latest_gate_reports_consumer_before_source_or_job",
+        "line": 47,
+        "ccn": 4
+      },
+      {
+        "file": "python/tests/test_update_semantics.py",
+        "function": "test_latest_rejects_stale_report_before_preparation_cache",
+        "line": 310,
+        "ccn": 1
+      },
+      {
+        "file": "crates/calc-flow/examples/finite_union.rs",
+        "function": "data",
+        "line": 14,
+        "ccn": 1
+      },
+      {
+        "file": "crates/calc-flow/examples/finite_union.rs",
+        "function": "declaration",
+        "line": 21,
+        "ccn": 5
+      },
+      {
+        "file": "crates/calc-flow/examples/finite_union.rs",
+        "function": "main",
+        "line": 37,
+        "ccn": 8
+      },
+      {
+        "file": "crates/calc-flow/examples/finite_union.rs",
+        "function": "assert_outputs",
+        "line": 60,
+        "ccn": 3
+      },
+      {
+        "file": "crates/calc-flow/examples/finite_union.rs",
+        "function": "input_batches",
+        "line": 82,
+        "ccn": 3
+      },
+      {
+        "file": "crates/calc-flow/src/program/lower/union.rs",
+        "function": "add_sql_union",
+        "line": 8,
+        "ccn": 8
+      },
+      {
+        "file": "crates/calc-flow/src/program/lower/union.rs",
+        "function": "add_union_arm",
+        "line": 93,
+        "ccn": 1
+      },
+      {
+        "file": "crates/calc-flow/src/sql/union.rs",
+        "function": "union_all_queries",
+        "line": 46,
+        "ccn": 6
+      },
+      {
+        "file": "crates/calc-flow/src/sql/union.rs",
+        "function": "named_arms",
+        "line": 63,
+        "ccn": 5
+      },
+      {
+        "file": "crates/calc-flow/src/sql/union.rs",
+        "function": "unmodified",
+        "line": 79,
+        "ccn": 1
+      },
+      {
+        "file": "crates/calc-flow/src/sql/union.rs",
+        "function": "flatten_query",
+        "line": 95,
+        "ccn": 2
+      },
+      {
+        "file": "crates/calc-flow/src/sql/union.rs",
+        "function": "flatten_set",
+        "line": 102,
+        "ccn": 6
+      },
+      {
+        "file": "crates/calc-flow/src/sql/union.rs",
+        "function": "arm_alias",
+        "line": 124,
+        "ccn": 7
+      },
+      {
+        "file": "crates/calc-flow/src/sql/union.rs",
+        "function": "proved_arm",
+        "line": 150,
+        "ccn": 6
+      },
+      {
+        "file": "crates/calc-flow/src/sql/union.rs",
+        "function": "plan_union_all",
+        "line": 175,
+        "ccn": 6
+      },
+      {
+        "file": "crates/calc-flow/src/sql/union.rs",
+        "function": "plan_arm",
+        "line": 221,
+        "ccn": 3
+      },
+      {
+        "file": "crates/calc-flow/tests/finite_union.rs",
+        "function": "schema",
+        "line": 12,
+        "ccn": 1
+      },
+      {
+        "file": "crates/calc-flow/tests/finite_union.rs",
+        "function": "data",
+        "line": 16,
+        "ccn": 1
+      },
+      {
+        "file": "crates/calc-flow/tests/finite_union.rs",
+        "function": "values",
+        "line": 30,
+        "ccn": 1
+      },
+      {
+        "file": "crates/calc-flow/tests/finite_union.rs",
+        "function": "wrong_schema_data",
+        "line": 48,
+        "ccn": 1
+      },
+      {
+        "file": "crates/calc-flow/tests/finite_union.rs",
+        "function": "finite_union_reuses_one_plan_without_old_rows",
+        "line": 61,
+        "ccn": 8
+      },
+      {
+        "file": "crates/calc-flow/tests/finite_union.rs",
+        "function": "finite_union_rejects_non_exact_or_optional_ports_in_analysis",
+        "line": 138,
+        "ccn": 8
+      },
+      {
+        "file": "crates/calc-flow/tests/finite_union.rs",
+        "function": "finite_union_has_no_checkpoint_state",
+        "line": 171,
+        "ccn": 4
+      },
+      {
+        "file": "crates/calc-flow/tests/finite_union.rs",
+        "function": "finite_union_enforces_existing_table_result_limit",
+        "line": 193,
+        "ccn": 6
+      },
+      {
+        "file": "crates/calc-flow/tests/finite_union.rs",
+        "function": "null_union_plan",
+        "line": 228,
+        "ccn": 4
+      },
+      {
+        "file": "crates/calc-flow/tests/finite_union_frontend.rs",
+        "function": "union_program",
+        "line": 8,
+        "ccn": 4
+      },
+      {
+        "file": "crates/calc-flow/tests/finite_union_frontend.rs",
+        "function": "dataframe_union_exports_and_compiles_both_lifecycles",
+        "line": 20,
+        "ccn": 7
+      },
+      {
+        "file": "crates/calc-flow/tests/finite_union_frontend.rs",
+        "function": "append_union_proves_unordered_eof_history",
+        "line": 49,
+        "ccn": 6
+      },
+      {
+        "file": "crates/calc-flow/tests/finite_union_frontend.rs",
+        "function": "union_normalizes_declaration_metadata_without_mutating_it",
+        "line": 98,
+        "ccn": 8
+      },
+      {
+        "file": "crates/calc-flow/tests/finite_union_frontend.rs",
+        "function": "metadata_data",
+        "line": 127,
+        "ccn": 1
+      },
+      {
+        "file": "crates/calc-flow/tests/finite_union_frontend.rs",
+        "function": "assert_metadata_execution",
+        "line": 139,
+        "ccn": 3
+      },
+      {
+        "file": "crates/calc-flow/tests/finite_union_frontend.rs",
+        "function": "union_does_not_invent_a_cross_ingress_batch_boundary",
+        "line": 160,
+        "ccn": 7
+      },
+      {
+        "file": "crates/calc-flow/tests/finite_union_sql.rs",
+        "function": "sql_program",
+        "line": 8,
+        "ccn": 4
+      },
+      {
+        "file": "crates/calc-flow/tests/finite_union_sql.rs",
+        "function": "sql_union_uses_native_union_with_textual_arm_order",
+        "line": 24,
+        "ccn": 8
+      },
+      {
+        "file": "crates/calc-flow/tests/finite_union_sql.rs",
+        "function": "sql_union_arm_schema_errors_keep_the_arm_path",
+        "line": 62,
+        "ccn": 7
+      },
+      {
+        "file": "examples/finite_union.py",
+        "function": "main",
+        "line": 13,
+        "ccn": 4
+      },
+      {
+        "file": "python/calc_flow/symbolic/union.py",
+        "function": "sql_queries",
+        "line": 10,
+        "ccn": 1
+      },
+      {
+        "file": "python/calc_flow/symbolic/union.py",
+        "function": "has_late_input",
+        "line": 21,
+        "ccn": 4
+      },
+      {
+        "file": "python/calc_flow/symbolic/union.py",
+        "function": "sql_plan",
+        "line": 34,
+        "ccn": 2
+      },
+      {
+        "file": "python/calc_flow/symbolic/union.py",
+        "function": "expand_query_graph",
+        "line": 49,
+        "ccn": 6
+      },
+      {
+        "file": "python/calc_flow/symbolic/union.py",
+        "function": "_analysis_plans",
+        "line": 63,
+        "ccn": 4
+      },
+      {
+        "file": "python/calc_flow/symbolic/union.py",
+        "function": "_arm_graph",
+        "line": 72,
+        "ccn": 2
+      },
+      {
+        "file": "python/calc_flow/symbolic/union.py",
+        "function": "cache_policy",
+        "line": 115,
+        "ccn": 7
+      },
+      {
+        "file": "python/calc_flow/symbolic/union.py",
+        "function": "schema_mismatch",
+        "line": 134,
+        "ccn": 5
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "schema",
+        "line": 9,
+        "ccn": 1
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "source",
+        "line": 13,
+        "ccn": 1
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "test_union_declaration_keeps_order_and_multiplicity",
+        "line": 17,
+        "ccn": 1
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "table",
+        "line": 26,
+        "ccn": 1
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "program",
+        "line": 30,
+        "ccn": 2
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "test_public_union_both_modes_keep_nulls_duplicates_and_empty",
+        "line": 41,
+        "ccn": 1
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "_public_union_both_modes",
+        "line": 47,
+        "ccn": 4
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "request",
+        "line": 70,
+        "ccn": 1
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "test_union_reports_append_history_and_no_global_order",
+        "line": 80,
+        "ccn": 3
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "test_dataframe_union_rejects_inexact_schema",
+        "line": 110,
+        "ccn": 3
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "test_sql_union_coercion_stays_legacy_batch_only",
+        "line": 124,
+        "ccn": 4
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "snapshot_union",
+        "line": 146,
+        "ccn": 2
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "test_latest_snapshot_union_rejects_before_all_source_resources.forbid",
+        "line": 169,
+        "ccn": 1
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "test_latest_snapshot_union_rejects_before_all_source_resources.forbid_async",
+        "line": 173,
+        "ccn": 1
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "test_latest_snapshot_union_rejects_before_all_source_resources.__aiter__",
+        "line": 178,
+        "ccn": 1
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "test_latest_snapshot_union_rejects_before_all_source_resources",
+        "line": 158,
+        "ccn": 7
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "enter",
+        "line": 214,
+        "ccn": 1
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "test_stream_union_fifo_shared_upstream_and_silent_source",
+        "line": 220,
+        "ccn": 1
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "stream_fifo.ingress",
+        "line": 248,
+        "ccn": 2
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "stream_fifo.silent",
+        "line": 263,
+        "ccn": 2
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "stream_fifo",
+        "line": 226,
+        "ccn": 6
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "assert_fifo",
+        "line": 274,
+        "ccn": 5
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "test_sql_union_row_local_arms",
+        "line": 288,
+        "ccn": 1
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "test_wider_union_sql_keeps_legacy_scope",
+        "line": 307,
+        "ccn": 1
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "test_union_project_roundtrip_and_new_cache_policy",
+        "line": 321,
+        "ccn": 2
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "test_single_alias_set_sql_retains_original_topology",
+        "line": 337,
+        "ccn": 3
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "test_sql_union_arm_errors_are_data_only_diagnostics",
+        "line": 350,
+        "ccn": 3
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "test_legacy_snapshot_union_keeps_seven_and_batch_six",
+        "line": 365,
+        "ccn": 1
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "snapshot_history.silent",
+        "line": 379,
+        "ccn": 2
+      },
+      {
+        "file": "python/tests/test_finite_union.py",
+        "function": "snapshot_history",
+        "line": 378,
+        "ccn": 2
+      }
+    ],
+    "failures": []
+  },
+  "earlier_observed_failures": [
+    {
+      "path": "target/finite-union/verified-rust-consumer.log",
+      "sha256": "80c0b0fb4a2a8edbc1ce945817e6b5e401b77ba284cf592b4493cdd9912d0493",
+      "tail": "   Compiling datafusion-functions-aggregate v55.0.0\n   Compiling datafusion-physical-plan v55.0.0\n   Compiling datafusion-session v55.0.0\n   Compiling datafusion-physical-expr-adapter v55.0.0\n   Compiling datafusion-datasource v55.0.0\n   Compiling datafusion-catalog v55.0.0\n   Compiling datafusion-pruning v55.0.0\n   Compiling datafusion-functions-nested v55.0.0\n   Compiling datafusion-sql v55.0.0\n   Compiling datafusion-physical-optimizer v55.0.0\n   Compiling datafusion-datasource-csv v55.0.0\n   Compiling datafusion-datasource-json v55.0.0\n   Compiling datafusion-datasource-arrow v55.0.0\n   Compiling datafusion-optimizer v55.0.0\n   Compiling datafusion-functions-window v55.0.0\n   Compiling datafusion-catalog-listing v55.0.0\n   Compiling datafusion-functions-table v55.0.0\n   Compiling datafusion v55.0.0\n   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow)\n   Compiling relational-public-consumer v0.0.0 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow/tests/relational-consumer)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5m 10s\n     Running `/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug/debug/relational-public-consumer`\naggregate: root exports, exact schema, empty/NULL oracles and latest 1/6 passed\nError: Streaming(StreamingError { category: Validation, reason_code: None, message: \"source \\\"events\\\" capability validation failed\", job_id: Some(2), epoch: None, checkpoint_phase: None, component_kind: Some(Source), component_id: Some(\"events\"), diagnostic_id: None, position: 0 })"
+    },
+    {
+      "path": "target/finite-union/consumer-metadata-green.log",
+      "sha256": "e58e627f8763610a96272b32f5c864c46bced32a05648180cbc88a3d296b79dd",
+      "tail": "warning: patch `parquet v59.2.0 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/vendor/parquet)` was not used in the crate graph\nhelp: Check that the patched package version and available features are compatible\n      with the dependency requirements. If the patch has a different version from\n      what is locked in the Cargo.lock file, run `cargo update` to use the new\n      version. This may also occur with an optional dependency that is not enabled.\n   Compiling calc-flow v2026.11.2 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow)\n   Compiling relational-public-consumer v0.0.0 (/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-515-e18e31f2354e/workdir/calc-flow/crates/calc-flow/tests/relational-consumer)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 53.51s\n     Running `/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/pr-repair-20261112/cargo-debug/debug/relational-public-consumer`\naggregate: root exports, exact schema, empty/NULL oracles and latest 1/6 passed\nmetadata: owned stream accepts schema and field metadata without mutating input\ndataframe: schema, analysis, batch, owned stream, export/reload passed\nsql: schema, analysis, batch, owned stream, export/reload passed\ndf_sql_df_sql: schema, analysis, batch, owned stream, export/reload passed\nsql_df_sql: schema, analysis, batch, owned stream, export/reload passed\n\nthread 'main' (59335) panicked at src/main.rs:259:5:\nassertion `left == right` failed: JobOutcome { state: Failed, cause: Failure, completed_epoch: None, errors: [StreamingError { category: Connector, reason_code: None, message: \"source \\\"a\\\" callback failed\", job_id: Some(16), epoch: None, checkpoint_phase: None, component_kind: Some(Source), component_id: Some(\"a\"), diagnostic_id: None, position: 0 }] }\n  left: Failed\n right: Completed\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace"
+    },
+    {
+      "path": "target/finite-union/clippy-metadata-first.log",
+      "sha256": "c18826e29ad7497ab762449995b87bfeeaa1805979ed3ccbed63393245eabb9e",
+      "tail": "note: existing binding defined here\n   --> crates/calc-flow/tests/finite_union_frontend.rs:107:9\n    |\n107 |     let plain = Arc::new(Schema::new(vec![Field::new(\"x\", DataType::Int64, true)]));\n    |         ^^^^^\n    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#similar_names\n    = note: `-D clippy::similar-names` implied by `-D clippy::pedantic`\n    = help: to override `-D clippy::pedantic` add `#[allow(clippy::similar_names)]`\n\nerror: binding's name is too similar to existing binding\n   --> crates/calc-flow/tests/finite_union_frontend.rs:142:5\n    |\n142 |     plain: Arc<Schema>,\n    |     ^^^^^\n    |\nnote: existing binding defined here\n   --> crates/calc-flow/tests/finite_union_frontend.rs:140:5\n    |\n140 |     plan: &calc_flow::BatchExecutionPlan,\n    |     ^^^^\n    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#similar_names\n\nerror: could not compile `calc-flow` (test \"finite_union_frontend\") due to 2 previous errors\nwarning: build failed, waiting for other jobs to finish..."
+    }
+  ],
+  "unrun": [
+    "full Rust/Python suites",
+    "all-features workspace Clippy/rustdoc",
+    "90% line coverage",
+    "connector services",
+    "benchmarks",
+    "release wheel matrix",
+    "cross-platform checks"
+  ],
+  "handoff": {
+    "independent_review_required": true,
+    "required_checks_required_before_merge": true,
+    "merge_performed": false,
+    "issue_status": "in_progress",
+    "parent_status_untouched": true
+  },
+  "commit_provenance": {
+    "source_commit": "3b24bcea192a3a05e923c9e71582d5cef4687bdb",
+    "trees": {
+      "crates/calc-flow": "d8ec16f63252eae7a6bd80ad6207595a77aab745",
+      "crates/calc-flow-python": "87676daec8f8bb9b67f6048ed3ba31bb09ae896d",
+      "python/calc_flow": "cb058477cea034710b46756e343a670de19732e3",
+      "python/tests": "c90701c0911cc1b1de913382087ab2f3ccbd2729",
+      "docs": "626146c352e8fc5dece8adb70273a70117ab79f3",
+      "examples": "895fd3c7fce4c25dc1ae183086401cd7779fd16e"
+    },
+    "manifest_matches_commit": true,
+    "source_files": 1667
+  },
+  "commit_command": [
+    "git",
+    "-c",
+    "user.name=Cheng Li",
+    "-c",
+    "user.email=scrappedprince.li@gmail.com",
+    "commit",
+    "-m",
+    "feat: add finite union across relation frontends",
+    "-m",
+    "Support exact-schema append union through the shared native operator in Rust and Python batch and stream plans. Preserve legacy SQL identity and reject latest snapshots before source acquisition."
+  ],
+  "identity_note": "The inherited checkout had no Git author configured. Used the on-behalf-of user identity per command; no global/shared configuration was modified.",
+  "frozen_note_note": "Preserved the frozen contract text; removed only its extra trailing blank line to pass staged diff whitespace checking.",
+  "staged_whitespace_check": "git diff --cached --check: exit 0 after trimming inherited trailing blank line.",
+  "codacy_follow_up": {
+    "reviewed_head": "2e9a6a51318eb19bbe95b745bb09babbff5cfce9",
+    "pr": "https://github.com/wegamekinglc/calc-flow/pull/599",
+    "scope": [
+      "examples/finite_union.py",
+      "AGENTS.md",
+      ".codex/artifacts/analysis/finite-union.md",
+      ".codex/artifacts/analysis/finite-union.json"
+    ],
+    "commit_subject": "fix: keep finite union example validation active",
+    "red": {
+      "argv": [
+        "uv",
+        "run",
+        "--no-project",
+        "--with",
+        "bandit==1.9.4",
+        "bandit",
+        "-q",
+        "-t",
+        "B101",
+        "-f",
+        "json",
+        "examples/finite_union.py"
+      ],
+      "exit_code": 1,
+      "findings": [
+        {
+          "code": "28     for result in (await batch.collect_async({\"a\": av, \"b\": bv})).values():\n29         assert Counter(result[\"x\"].to_pylist()) == expected\n30     observed = {\"df\": [], \"sql\": []}\n",
+          "col_offset": 8,
+          "end_col_offset": 59,
+          "filename": "./examples/finite_union.py",
+          "issue_confidence": "HIGH",
+          "issue_cwe": {
+            "id": 703,
+            "link": "https://cwe.mitre.org/data/definitions/703.html"
+          },
+          "issue_severity": "LOW",
+          "issue_text": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
+          "line_number": 29,
+          "line_range": [
+            29
+          ],
+          "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html",
+          "test_id": "B101",
+          "test_name": "assert_used"
+        },
+        {
+          "code": "33             observed[event.name].extend(event.table[\"x\"].to_pylist())\n34     assert all(Counter(values) == expected for values in observed.values())\n35     print(\"DataFrame and SQL: five rows in batch and completed stream\")\n",
+          "col_offset": 4,
+          "end_col_offset": 75,
+          "filename": "./examples/finite_union.py",
+          "issue_confidence": "HIGH",
+          "issue_cwe": {
+            "id": 703,
+            "link": "https://cwe.mitre.org/data/definitions/703.html"
+          },
+          "issue_severity": "LOW",
+          "issue_text": "Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.",
+          "line_number": 34,
+          "line_range": [
+            34
+          ],
+          "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html",
+          "test_id": "B101",
+          "test_name": "assert_used"
+        }
+      ],
+      "log_sha256": "6135e919890a91730daffd698e6aeaa5907c139f643193a79624a1a164b59f31"
+    },
+    "checks": [
+      {
+        "name": "bandit",
+        "argv": [
+          "uv",
+          "run",
+          "--no-project",
+          "--with",
+          "bandit==1.9.4",
+          "bandit",
+          "-q",
+          "-t",
+          "B101",
+          "-f",
+          "json",
+          "examples/finite_union.py"
+        ],
+        "exit_code": 0,
+        "log": "target/finite-union/codacy-fix-bandit.log",
+        "log_sha256": "a35272328a55708c474fab37b0be7847f164a744bdc4794358a5b87931384c3b",
+        "output": "{\n  \"errors\": [],\n  \"generated_at\": \"2026-11-11T22:16:13Z\",\n  \"metrics\": {\n    \"./examples/finite_union.py\": {\n      \"CONFIDENCE.HIGH\": 0,\n      \"CONFIDENCE.LOW\": 0,\n      \"CONFIDENCE.MEDIUM\": 0,\n      \"CONFIDENCE.UNDEFINED\": 0,\n      \"SEVERITY.HIGH\": 0,\n      \"SEVERITY.LOW\": 0,\n      \"SEVERITY.MEDIUM\": 0,\n      \"SEVERITY.UNDEFINED\": 0,\n      \"loc\": 33,\n      \"nosec\": 0,\n      \"skipped_tests\": 0\n    },\n    \"_totals\": {\n      \"CONFIDENCE.HIGH\": 0,\n      \"CONFIDENCE.LOW\": 0,\n      \"CONFIDENCE.MEDIUM\": 0,\n      \"CONFIDENCE.UNDEFINED\": 0,\n      \"SEVERITY.HIGH\": 0,\n      \"SEVERITY.LOW\": 0,\n      \"SEVERITY.MEDIUM\": 0,\n      \"SEVERITY.UNDEFINED\": 0,\n      \"loc\": 33,\n      \"nosec\": 0,\n      \"skipped_tests\": 0\n    }\n  },\n  \"results\": []\n}"
+      },
+      {
+        "name": "ruff",
+        "argv": [
+          "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+          "-m",
+          "ruff",
+          "check",
+          "examples/finite_union.py"
+        ],
+        "exit_code": 0,
+        "log": "target/finite-union/codacy-fix-ruff.log",
+        "log_sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+        "output": "All checks passed!\n"
+      },
+      {
+        "name": "ruff-format",
+        "argv": [
+          "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+          "-m",
+          "ruff",
+          "format",
+          "--check",
+          "examples/finite_union.py"
+        ],
+        "exit_code": 0,
+        "log": "target/finite-union/codacy-fix-ruff-format.log",
+        "log_sha256": "fd2299c9f1c6dc869070883e281051bfe93aacf66c1a3b0069f45b4aa410ca50",
+        "output": "1 file already formatted\n"
+      },
+      {
+        "name": "example",
+        "argv": [
+          "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+          "examples/finite_union.py"
+        ],
+        "exit_code": 0,
+        "log": "target/finite-union/codacy-fix-example.log",
+        "log_sha256": "a75174f740c1628e65fe0ccf96a52b9665fc253fcefb1537df7279d9e9a518f5",
+        "output": "DataFrame and SQL: five rows in batch and completed stream\n"
+      },
+      {
+        "name": "optimized-example",
+        "argv": [
+          "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+          "-O",
+          "examples/finite_union.py"
+        ],
+        "exit_code": 0,
+        "log": "target/finite-union/codacy-fix-optimized-example.log",
+        "log_sha256": "a75174f740c1628e65fe0ccf96a52b9665fc253fcefb1537df7279d9e9a518f5",
+        "output": "DataFrame and SQL: five rows in batch and completed stream\n"
+      },
+      {
+        "name": "lizard",
+        "argv": [
+          "uv",
+          "run",
+          "--no-project",
+          "--with",
+          "lizard==1.26.0",
+          "lizard",
+          "-C",
+          "8",
+          "examples/finite_union.py"
+        ],
+        "exit_code": 0,
+        "log": "target/finite-union/codacy-fix-lizard.log",
+        "log_sha256": "3930ac885af125ccb8fa01ed9348f05abae29f0c20de2365efd2f81804596067",
+        "output": "================================================\n  NLOC    CCN   token  PARAM  length  location  \n------------------------------------------------\n      25      6    324      0      25 main@13-37@examples/finite_union.py\n1 file analyzed.\n==============================================================\nNLOC    Avg.NLOC  AvgCCN  Avg.token  function_cnt    file\n--------------------------------------------------------------\n     32      25.0     6.0      324.0         1     examples/finite_union.py\n\n==============================================================================================================\nNo thresholds exceeded (cyclomatic_complexity > 8 or length > 1000 or nloc > 1000000 or parameter_count > 100)\n==========================================================================================\nTotal nloc   Avg.NLOC  AvgCCN  Avg.token   Fun Cnt  Warning cnt   Fun Rt   nloc Rt\n------------------------------------------------------------------------------------------\n        32      25.0     6.0      324.0        1            0      0.00    0.00\n"
+      },
+      {
+        "name": "whitespace",
+        "argv": [
+          "git",
+          "diff",
+          "--check"
+        ],
+        "exit_code": 0,
+        "log": "target/finite-union/codacy-fix-whitespace.log",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "output": ""
+      }
+    ],
+    "unchanged": {
+      "source_manifest_files": 1667,
+      "packaged_python_files": 56,
+      "wheel_sha256": "70e4e50745f66b6f45f0b41710a04d6bc77e225d2fa1d73b07df274194c7e418",
+      "native_sha256": "c04dd4911d60da5eaf4cfc5f0d65b063a7f73e439b6d3f642d98b69912a61169",
+      "reviewer_report_sha256": "b01c0c07a341bd00f6df6b62625c9357e48df8a0d46fc77a132640b39e1ca44c",
+      "reviewer_report_untracked": true
+    },
+    "reused_results": {
+      "rust_tests_passed": 32,
+      "python_tests_passed": 189,
+      "standalone_core": "previously passed, not rerun",
+      "external_public_consumer": "previously passed, not rerun"
+    },
+    "not_run": [
+      "native rebuild",
+      "Cargo checks",
+      "product test matrix",
+      "new formal example tests",
+      "full regression"
+    ],
+    "head_and_ci_snapshot": "Actual new SHA and one post-push snapshot are reported in the final issue reply.",
+    "merged": false,
+    "issue_status": "in_progress"
+  }
+}
