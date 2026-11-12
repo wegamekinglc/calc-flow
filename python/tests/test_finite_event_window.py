@@ -238,16 +238,17 @@ def test_window_mixed_graph_retains_shared_and_independent_branches(sql):
     assert len(reloaded.external_inputs) == 1
     restored = execute_table(reloaded, table)
     actual = {
-        tuple(batch.to_pyarrow().column_names): sorted(
-            batch.to_pyarrow().to_pylist(), key=repr
-        )
+        tuple(batch.to_pyarrow().column_names): batch.to_pyarrow()
         for batch in restored.outputs.values()
     }
-    expected = {
-        tuple(value.column_names): sorted(value.to_pylist(), key=repr)
-        for value in result.values()
-    }
-    assert actual == expected
+    expected = {tuple(value.column_names): value for value in result.values()}
+    assert actual.keys() == expected.keys()
+    for columns, value in actual.items():
+        assert value.schema.equals(expected[columns].schema, check_metadata=True)
+        order = [(column, "ascending") for column in columns]
+        assert value.sort_by(order).equals(
+            expected[columns].sort_by(order), check_metadata=True
+        )
 
 
 def test_window_sql_time_arithmetic_is_rejected():

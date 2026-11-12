@@ -682,3 +682,73 @@ The final increment SHA, preservation/source manifests and one nonblocking CI
 snapshot are returned to the coordinator for this increment's focused review.
 No full-suite/coverage, connector test/service, platform or performance run,
 product/gate change, merge or delegation is performed; DAL-516 stays in_progress.
+
+## Portable mixed-graph project round-trip comparison
+
+Approved base: `cdee55ace2b283dd518e08ad8bbd839448b79265`.
+Windows Python job `130971946700` reports only the two DF/SQL instances of
+`test_window_mixed_graph_retains_shared_and_independent_branches` failing with
+`ZoneInfoNotFoundError: UTC`, alongside 2870 passed / 5 skipped. The Windows
+gate propagates that Python failure; it is not a second independent root cause.
+The failure occurs after successful execution/export/reload when the test's
+whole-table `to_pylist()` asks PyArrow to create Python timezone objects.
+
+The minimal correction keeps the round-trip values in Arrow. Both output maps
+retain every original column, compare their exact schema (including UTC,
+timestamp unit, nullable flags and metadata), and compare full tables with
+`check_metadata=True` after test-local canonical ordering by **every** column.
+All timestamp values, non-time fields, NULLs and duplicate multiplicities remain
+part of equality. Canonical ordering only removes the unpromised relation order;
+no executor ordering, time cast, dropped column, dependency, skip or gate change
+is introduced. The fixture, declarations, shared-window-owner and independent
+union/aggregate assertions, physical binding count and project reload are
+byte-identical, as are all other tests. The schema assertion strengthens the
+previous Python-row comparison.
+
+Local isolation uses a fresh process with `PYTHONTZPATH=''`. This interpreter
+has neither `tzdata` nor `pytz`; `zoneinfo.TZPATH == ()` and a direct UTC lookup
+raises `ZoneInfoNotFoundError`, recorded in `timezone-preservation.log`.
+No system timezone files or installed packages are modified.
+
+```sh
+PYTHONTZPATH='' PYTHONPATH=target/finite-event-window/site \
+  /home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python \
+  -m pytest python/tests/test_finite_event_window.py \
+  -k test_window_mixed_graph_retains_shared_and_independent_branches -q -W error
+PYTHONTZPATH='' PYTHONPATH=target/finite-event-window/site \
+  /home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python \
+  -m pytest python/tests/test_finite_event_window.py -q -W error
+```
+
+Before editing, the first command is RED: exit **1**, **2 failed / 48 deselected**,
+both at the original whole-table conversion with `ZoneInfoNotFoundError: UTC`,
+matching hosted failure. After changing only the comparison block, the same
+command is GREEN: **2 passed / 48 deselected**. The directly affected full module
+under the same isolation is GREEN: **50 passed** (overlapping count). Logs are
+`timezone-red.log`, `timezone-green.log` and `timezone-module-green.log`;
+`timezone-ci-job.log` preserves the hosted source. Changed-file Ruff lint/format,
+complexity at limit 8, whitespace and unchanged generated schema checks pass.
+The first draft added an unnecessary nested generator and measured CCN 9;
+retaining the original direct batch conversion keeps the function at CCN 8.
+Pinned `uvx --from lizard==1.26.0 lizard -C 8 -w
+python/tests/test_finite_event_window.py` passes; after this refactor the same
+isolated module is rerun, **50 passed** in `timezone-module-final-green.log`.
+
+Product source is unchanged. The loaded native is the matching dev wheel built
+from this checkout's approved `7b0dd8b4` product code, SHA-256
+`71461334fd10082ebbd66f2df4629d42555f363959ab064d0e70b2911e340bae`.
+All 58 wheel-site Python files match the current checkout. Core, connectors,
+Python adapters, manifests/lockfile and binding product code remain identical
+to that build; the sole earlier PyO3 difference is the reviewed cfg(test)
+revision expectation. There is no Rust/PyO3 product change requiring a rebuild.
+The interpreter, package/native paths, hashes and these preservation checks are
+in `timezone-preservation.log`.
+
+The reviewer report remains untracked and unchanged, SHA-256
+`6adbff73a4bfb11d37e40d5981250df45c2fbaed84378ed2b704fdc55aea45cc`.
+Only this test correction and implementation evidence are committed. The exact
+increment SHA, source/native evidence and one nonblocking CI snapshot are
+returned to the coordinator for focused review. The base Approve does not cover
+this increment automatically. Windows execution, full suites/coverage,
+connector services and performance were not run locally; prior unaffected
+evidence is reused. No merge or delegation; DAL-516 stays in_progress.
