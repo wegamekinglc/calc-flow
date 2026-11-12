@@ -15,6 +15,7 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod union;
+mod window;
 
 pub(super) struct Lowered {
     name: String,
@@ -44,6 +45,14 @@ fn endpoint(table: &TableExpr, port: &str) -> PortEndpoint {
 }
 pub(super) fn children(table: &TableExpr, path: &str) -> Vec<(String, TableExpr, String)> {
     match &table.0.kind {
+        RelationKind::Window { input, sql, .. } => vec![(
+            "input".into(),
+            input.clone(),
+            format!(
+                "{path}.{}.value",
+                if *sql { "sql.window" } else { "window" }
+            ),
+        )],
         RelationKind::Union { inputs } => inputs
             .iter()
             .enumerate()
@@ -225,6 +234,21 @@ impl Lowered {
         path: &str,
         paths: &BTreeMap<String, String>,
     ) -> Result<()> {
+        if !matches!(
+            table.0.kind,
+            RelationKind::Window { .. }
+                | RelationKind::Input { .. }
+                | RelationKind::Project { .. }
+                | RelationKind::Filter { .. }
+                | RelationKind::Sql { .. }
+        ) && window::contains_window(table)
+        {
+            return Err(crate::dataframe::invalid(
+                path,
+                "capability_mismatch",
+                "window outputs support only row-local transformations",
+            ));
+        }
         if self.add_sql_union(table, path, paths).await? {
             return Ok(());
         }
@@ -284,6 +308,12 @@ impl Lowered {
     }
     async fn prepare(&self, table: &TableExpr, path: &str) -> Result<Prepared> {
         match &table.0.kind {
+            RelationKind::Window { input, spec, sql } => self.prepare_window(
+                table,
+                input,
+                spec,
+                &format!("{path}.{}", if *sql { "sql.window" } else { "window" }),
+            ),
             RelationKind::Union { inputs } => prepare_union(
                 table,
                 path,
@@ -376,6 +406,20 @@ impl Lowered {
         let RelationKind::Sql { query, tables } = &table.0.kind else {
             unreachable!("dispatched SQL")
         };
+        if window::contains_window(table)
+            && (tables.len() != 1
+                || crate::sql::sql_passthrough_columns(
+                    query,
+                    tables.first_key_value().expect("one input").0,
+                )?
+                .is_none())
+        {
+            return Err(crate::dataframe::invalid(
+                "sql.window.value",
+                "capability_mismatch",
+                "window outputs require row-local SQL",
+            ));
+        }
         self.prepare_sql_parts(table, query, tables).await
     }
     async fn prepare_sql_parts(
@@ -521,6 +565,7 @@ fn native_edge(edge: &EdgeSpec) -> Result<Edge> {
 }
 fn relation_kind(table: &TableExpr) -> (&'static str, Option<String>) {
     match &table.0.kind {
+        RelationKind::Window { .. } => ("window", None),
         RelationKind::Union { .. } => ("union", None),
         RelationKind::Input { .. } => ("table_input", None),
         RelationKind::Aggregate { .. } => ("aggregate", None),
@@ -648,6 +693,12 @@ fn node_operator(node: &NodeSpec, schemas: &PlannedPorts) -> Result<NodeOperator
     let inputs = schemas.inputs()?;
     let output = exact_port("output", &schemas.output)?;
     match &node.operator {
+        OperatorSpec::Window { spec } => Ok(crate::WindowAggregateOperator::new(
+            &node.id,
+            inputs[0].schema().expect("exact window input").clone(),
+            spec.clone(),
+        )?
+        .into()),
         OperatorSpec::Union => Ok(NodeOperator::Union(crate::UnionOperator::new_frontend(
             &node.id, inputs,
         )?)),

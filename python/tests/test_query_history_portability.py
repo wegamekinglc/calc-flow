@@ -24,7 +24,7 @@ def test_row_local_report_and_checked_compile_preserve_identity():
     )
     assert report.issues == ()
     assert report.query.portability == "supported"
-    assert (report.query.schema_version, report.query.analysis_revision) == (2, 4)
+    assert (report.query.schema_version, report.query.analysis_revision) == (2, 5)
     assert report.query.nodes[-1].stream.history == "current_batch"
     checked = program.compile_batch(runtime, portability=_request())
     assert checked.fingerprint == ordinary.fingerprint
@@ -151,7 +151,7 @@ def test_explain_accepts_options_and_renders_the_same_query_report():
     source = cf.table_input("values", schema=pa.schema([("x", pa.int64())]))
     program = cf.Program("scope", engine="sql", outputs={"result": source})
     text = program.explain(options=cf.AnalysisOptions(portability=_request()))
-    assert "schema_version 2 analysis_revision 4" in text
+    assert "schema_version 2 analysis_revision 5" in text
     assert "current_batch" in text
     assert "same accepted" in text
 

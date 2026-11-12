@@ -64,18 +64,41 @@ def test_engine_specific_compilation_and_project_export_are_fixed() -> None:
         streaming_program.to_project(mode="batch")
 
 
-def test_sql_engine_rejects_stream_only_output_on_immutable_copy() -> None:
+@pytest.mark.parametrize("engine", ["sql", "streaming"])
+def test_legacy_window_copy_preserves_engine_and_rejects_execution(engine) -> None:
     source = cf.table_input(
         "events",
-        schema=pa.schema([("ts", pa.timestamp("us", tz="UTC")), ("x", pa.int64())]),
+        schema=pa.schema(
+            [
+                pa.field("ts", pa.timestamp("us", tz="UTC"), False),
+                pa.field("entity", pa.string(), False),
+                pa.field("seq", pa.uint64(), False),
+                pa.field("x", pa.int64()),
+            ]
+        ),
         event_time="ts",
+        entity_by=["entity"],
+        sequence_by=["seq"],
     )
-    program = cf.Program("windows", engine="sql").with_input(source)
+    program = cf.Program("windows", engine=engine).with_input(source)
+    original = program.fingerprint
     value = cf.window.tumbling(source, event_time="ts", size_micros=60_000_000)
+    identity = (value.digest, value._node.node_bytes)
+    complete = program.output("windows", value)
 
-    with pytest.raises(ValueError, match="window_tumbling requires the streaming"):
-        program.output("windows", value)
+    assert complete is not program
     assert program.outputs == ()
+    assert program.fingerprint == original
+    assert program.engine == complete.engine == engine
+    assert complete.outputs == (("windows", value),)
+    assert value._node.op.version == 1
+    assert value._node.attrs.get("aggregates") is None
+    compile_plan = (
+        complete.compile_batch if engine == "sql" else complete.compile_stream
+    )
+    with pytest.raises(cf.CompileError, match="unknown_primitive_version"):
+        compile_plan()
+    assert (value.digest, value._node.node_bytes) == identity
 
 
 def test_streaming_program_rejects_multi_alias_sql_at_declaration() -> None:

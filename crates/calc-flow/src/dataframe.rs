@@ -73,6 +73,11 @@ pub(crate) struct Relation {
 }
 #[derive(Debug)]
 pub(crate) enum RelationKind {
+    Window {
+        input: TableExpr,
+        spec: crate::WindowSpec,
+        sql: bool,
+    },
     Union {
         inputs: [TableExpr; 2],
     },
@@ -348,6 +353,7 @@ impl TableExpr {
                 input.lineage()
             }
             RelationKind::Input { .. }
+            | RelationKind::Window { .. }
             | RelationKind::Union { .. }
             | RelationKind::Sql { .. }
             | RelationKind::Aggregate { .. } => &self.0.id,
@@ -386,6 +392,13 @@ impl TableExpr {
                     .iter()
                     .cloned()
                     .chain(aggregates.iter().map(|a| a.name.clone()))
+                    .collect(),
+            ),
+            RelationKind::Window { spec, .. } => Some(
+                std::iter::once("window_start".into())
+                    .chain(std::iter::once("window_end".into()))
+                    .chain(spec.group_by.iter().cloned())
+                    .chain(spec.aggregates.iter().map(|a| a.output.clone()))
                     .collect(),
             ),
             RelationKind::Sql { .. } => None,
@@ -863,3 +876,31 @@ pub(crate) fn portable_type(dtype: &DataType, path: &str) -> Result<()> {
 
 pub(crate) mod aggregate;
 pub use aggregate::{AggregateExpr, NamedAggregate, count_rows};
+
+impl TableExpr {
+    /// Declares a fixed UTC event window with named non-NULL count and numeric reductions.
+    /// Finite execution finalizes the complete input; streams finalize on real watermarks or EOF.
+    ///
+    /// # Errors
+    /// Rejects empty aggregates. Planning validates geometry, columns, schema and time passthrough.
+    pub fn window(&self, spec: crate::WindowSpec) -> Result<Self> {
+        self.window_relation(spec, false)
+    }
+    pub(crate) fn window_relation(&self, spec: crate::WindowSpec, sql: bool) -> Result<Self> {
+        if spec.aggregates.is_empty() {
+            return Err(invalid(
+                "window.aggregates",
+                "invalid_literal",
+                "provide at least one window aggregate",
+            ));
+        }
+        Ok(Self(Arc::new(Relation {
+            id: digest(&json!(["window", sql, self.0.id, spec])),
+            kind: RelationKind::Window {
+                input: self.clone(),
+                spec,
+                sql,
+            },
+        })))
+    }
+}

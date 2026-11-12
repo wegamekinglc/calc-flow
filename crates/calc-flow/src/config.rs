@@ -1417,7 +1417,7 @@ fn union_node(
     Ok(NodeOperator::Union(operator))
 }
 
-// Window construction validates the complete stream-only operator contract
+// Window construction validates the complete window operator contract
 // before exposing the node to the compiled plan.
 // #lizard forgives
 fn window_node(
@@ -1425,13 +1425,8 @@ fn window_node(
     inputs: &[Port],
     outputs: &[Port],
     spec: &WindowSpec,
-    mode: CompileMode,
+    _mode: CompileMode,
 ) -> Result<NodeOperator> {
-    if mode != CompileMode::Stream {
-        return Err(CalcFlowError::Compile {
-            message: format!("node {:?} uses a stream-only window", node.id),
-        });
-    }
     let [input] = inputs else {
         return Err(CalcFlowError::InvalidArgument {
             field: "node.input_ports".into(),
@@ -2319,17 +2314,10 @@ fn validate_window_operator(
     node: &NodeSpec,
     index: usize,
     spec: &WindowSpec,
-    mode: CompileMode,
+    _mode: CompileMode,
     base: &str,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    if mode != CompileMode::Stream {
-        issues.push(issue(
-            base,
-            "incompatible_runtime",
-            "window is available only in stream runtime mode",
-        ));
-    }
     let valid_input = matches!(
         node.input_ports.as_slice(),
         [input]

@@ -38,19 +38,19 @@ The declaration catalog is intentionally wider than the implemented project
 lowerers. Use this availability matrix when constructing user-facing formula
 editors or validating stored declarations:
 
-| Domain                    | Construct/analyze | Batch/stream compile   | Current lowering boundary                                             |
-|---------------------------|-------------------|------------------------|-----------------------------------------------------------------------|
-| row-local columns         | yes               | yes                    | portable scalar types and the documented SQL allowlist                |
-| SQL table stages          | yes               | yes; one stream alias  | native SELECT/CTE schema; row-local expressions after SQL             |
-| rolling `ts`              | yes               | yes                    | source/alias/row-local operands and earlier rolling results           |
-| cross-section `cs`        | yes               | yes                    | staged values; event time and partitions resolve to inputs or aliases |
-| relational stream joins   | yes               | stream only            | independent/nested native joins with proved post-join ordering        |
-| backward ASOF joins       | yes               | stream only            | strict final left preservation; typed identity and bounded state      |
-| NumPy/JAX matrix          | yes               | exact supported shape  | one static `weights` parameter and one allowlisted matmul             |
-| event `window`            | yes               | stream with aggregates | fixed UTC tumbling/hopping; stateless table work on either side       |
-| native table-array bridge | yes               | batch and stream       | row-preserving work; at most one static-RHS matmul per table stage    |
-| native array outputs      | yes               | batch only             | single ArrayExpr.collect_array; array/table roots; no mixed outputs   |
-| NumPy/JAX array outputs   | yes               | no                     | use the existing supported table attachment                           |
+| Domain                    | Construct/analyze | Batch/stream compile         | Current lowering boundary                                             |
+|---------------------------|-------------------|------------------------------|-----------------------------------------------------------------------|
+| row-local columns         | yes               | yes                          | portable scalar types and the documented SQL allowlist                |
+| SQL table stages          | yes               | yes; one stream alias        | native SELECT/CTE schema; row-local expressions after SQL             |
+| rolling `ts`              | yes               | yes                          | source/alias/row-local operands and earlier rolling results           |
+| cross-section `cs`        | yes               | yes                          | staged values; event time and partitions resolve to inputs or aliases |
+| relational stream joins   | yes               | stream only                  | independent/nested native joins with proved post-join ordering        |
+| backward ASOF joins       | yes               | stream only                  | strict final left preservation; typed identity and bounded state      |
+| NumPy/JAX matrix          | yes               | exact supported shape        | one static `weights` parameter and one allowlisted matmul             |
+| event `window`            | yes               | batch/stream with aggregates | fixed UTC tumbling/hopping; stateless table work on either side       |
+| native table-array bridge | yes               | batch and stream             | row-preserving work; at most one static-RHS matmul per table stage    |
+| native array outputs      | yes               | batch only                   | single ArrayExpr.collect_array; array/table roots; no mixed outputs   |
+| NumPy/JAX array outputs   | yes               | no                           | use the existing supported table attachment                           |
 
 `Program.analyze` reports `unsupported_type` for stateful operands outside
 the current materialization boundary, so a clean analysis does not advertise
@@ -338,7 +338,11 @@ do not migrate checkpoint identities; see
 aggregates=None)` and `window.hopping(value, /, *, event_time, size_micros,
 slide_micros, group_by=(), aggregates=None)` declare fixed UTC event windows.
 Pass a non-empty sequence of immutable `WindowAggregate(function, column,
-output)` values to execute them with `Program.compile_stream(runtime)`.
+output)` values to execute them with `Program.compile_stream(runtime)` or
+`Program(mode="batch", ...).compile_batch(runtime)`. Finite execution finalizes
+the complete input and retains no state between executions. The explicit
+`CF_TUMBLE` / `CF_HOP` SQL dialect lowers to the same native operator; see
+[the shared window contract](relational-frontends.md#fixed-utc-event-windows).
 The helpers `window.count`, `window.sum`, `window.min`, `window.max`, and
 `window.avg` each accept a positional column name and a required keyword-only
 `output` name. All three declaration fields are non-empty strings; `function`
@@ -447,8 +451,8 @@ signed-zero, overflow, metrics, and chunking semantics.
 Each dependency path through a window supports stateless `table.project`,
 `table.filter`, `with_columns`, and row-local expressions before and after
 one window. Window results have a distinct row origin; they cannot mix with
-raw input columns or arrays by position. SQL results cannot feed a symbolic
-window. The compiler rejects rolling,
+raw input columns or arrays by position. Deterministic single-input row-local
+SQL can feed a window when its time column passes through or is purely renamed. The compiler rejects rolling,
 cross-section, joins, another event window, array/matrix attachment, external
 stateful providers, and cross-row reductions on that path. Independent
 windows and unrelated legal outputs may coexist in the same `Program`.
@@ -465,7 +469,7 @@ rolling/cross-section consumer rejects non-default values with
 geometry, aggregates, physical state sharing, layout, finality, and ordering;
 active window/group counts depend on runtime data.
 
-Batch mode fails with `unsupported_mode`. Missing or unproven native
+Batch finalizes its complete input. Missing or unproven native
 `window@1` capability fails with `capability_mismatch`. Invalid declarations
 fail before any source opens, with field paths such as
 `calc_flow.symbolic.window.hopping.slide_micros` or

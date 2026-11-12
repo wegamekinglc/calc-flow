@@ -229,12 +229,62 @@ replacement-union state, budget parameter, checkpoint layout or batch recovery.
 Low-level finite UnionOperator requires table ports with an explicit exact
 schema and `required=true`; the existing wider stream forwarding stays available.
 
-Query reports now use schema version 2, analysis revision 4. Old SQL declaration
+Query reports now use schema version 2, analysis revision 5. Old SQL declaration
 digests stay unchanged, but admitted multi-alias SQL exports a new native union
 topology and fingerprint. Saved legacy SQL projects retain their SQL nodes;
 checkpoints with different fingerprints cannot be restored across the change.
 See the runnable [Python example](../examples/finite_union.py) and
 [Rust core example](../crates/calc-flow/examples/finite_union.rs).
+
+## Fixed UTC event windows
+
+Python `window.tumbling` / `window.hopping` with a nonempty `aggregates` sequence
+and Rust `TableExpr::window(WindowSpec)` support both batch and stream modes.
+The five reductions are non-NULL `count(column)`, `sum`, `min`, `max`, and `avg`.
+SQL has an explicit narrow dialect lowered to the same native window operator:
+
+```sql
+SELECT window_start, window_end, symbol, COUNT(quantity) AS n, SUM(quantity) AS volume
+FROM CF_TUMBLE('trades', 'ts', 10)
+GROUP BY window_start, window_end, symbol
+```
+
+`CF_HOP('trades', 'ts', 10, 5)` adds the slide in integer microseconds.
+Supply exactly the referenced table alias. SELECT and GROUP BY begin with both
+boundaries and the same ordered group columns; every reduction needs `AS output`.
+One top-level SELECT is supported. Filtering, derived operands and result
+transformations belong in separate row-local DF/SQL stages. COUNT(*), aggregate
+expressions/modifiers, CTEs, joins, OVER, DISTINCT, ordering, limits and offset
+parameters are rejected by this dialect. Ordinary SQL retains its existing behavior.
+
+Geometry is epoch aligned with half-open bounds and mathematical floor for
+negative timestamps. Time accepts naive timestamp[ms] or naive/UTC timestamp[us].
+The time column may pass through or be renamed by deterministic single-input
+row-local SQL; arithmetic, casts and truncation are rejected. Window paths allow
+one window and row-local transformations. Shared window outputs and independent
+aggregate/union branches retain their own native owners.
+
+Boundaries are nonnullable timestamp[us, UTC]; group fields keep their types and
+nullability. Count is nonnullable uint64. Signed, unsigned and floating sums
+promote to int64, uint64 and float64 respectively. Average is nullable float64;
+min/max preserve the supported ordered input type. NULL time contributes no
+assignment. A valid group whose operands are all NULL emits count 0 and NULL
+reductions. Typed empty input emits zero windows.
+
+Finite execution consumes every RecordBatch of the complete input, finalizes all
+nonempty windows, and retains no state between executions of the same plan.
+Stream data accumulates until a real watermark closes `end <= watermark`, or
+real EOF drains the remainder. Empty data does not end or reset the stream.
+No synthetic maximum watermark is used. Compare whole results with
+`final_relation / accepted_history / all_sources_eof` only when all assignments
+of the same complete input were accepted. A closed-window prefix remains
+`finality_unproven` without a concrete selected cut. Explicit latest accepts
+append inputs and rejects complete snapshots entering windows before resources
+are acquired. Window state version remains 1; supported checkpoint layouts are
+1 and 2, with no checkpoint format change.
+
+Run [the Python example](../examples/finite_event_window.py) or
+[the standalone Rust core example](../crates/calc-flow/examples/finite_event_window.rs).
 
 ## Named aggregates
 

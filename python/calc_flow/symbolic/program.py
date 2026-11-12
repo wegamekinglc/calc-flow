@@ -127,8 +127,6 @@ _STREAM_ONLY_OPS = frozenset(
         "snapshot_sql",
         "stream_join",
         "stream_asof_join",
-        "window_tumbling",
-        "window_hopping",
         "late_output",
         "late_rows",
     }

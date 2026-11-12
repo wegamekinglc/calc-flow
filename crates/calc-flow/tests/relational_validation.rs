@@ -266,6 +266,56 @@ fn readonly_sql_constructor_keeps_public_query_path() -> calc_flow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn readonly_sql_errors_keep_typed_public_diagnostics() -> calc_flow::Result<()> {
+    let source = input("events")?;
+    for query in [
+        "DELETE FROM input",
+        "UPDATE input SET x = 1",
+        "INSERT INTO input VALUES (1)",
+        "CREATE TABLE output (x BIGINT)",
+        "SELECT x FROM input; SELECT x FROM input",
+        "SELECT ( FROM input",
+    ] {
+        let error = source.sql(query).unwrap_err();
+        let CalcFlowError::InvalidArgument { field, message } = error else {
+            panic!("unexpected error for {query}: {error}");
+        };
+        assert_eq!(field, "sql.query", "{query}");
+        assert!(
+            message.starts_with("invalid_literal: "),
+            "{query}: {message}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn window_sql_errors_keep_their_specific_field_and_code() -> calc_flow::Result<()> {
+    let source = input("events")?;
+    for (query, path, code) in [
+        (
+            "SELECT window_start, window_end, COUNT(x) AS n FROM CF_TUMBLE('a', 'ts', 10, 0) GROUP BY window_start, window_end",
+            "sql.window.geometry",
+            "invalid_literal",
+        ),
+        (
+            "SELECT window_start, window_end, COUNT(*) AS n FROM CF_TUMBLE('a', 'ts', 10) GROUP BY window_start, window_end",
+            "sql.window",
+            "capability_mismatch",
+        ),
+    ] {
+        let error =
+            calc_flow::sql::sql(query, BTreeMap::from([("a".into(), source.clone())])).unwrap_err();
+        let CalcFlowError::InvalidArgument { field, message } = error else {
+            panic!("unexpected window error: {error}");
+        };
+        assert_eq!(field, path);
+        assert!(message.starts_with(&format!("{code}: ")), "{message}");
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn known_empty_input_schema_is_not_an_unresolved_schema() -> calc_flow::Result<()> {
     let source = table_input("empty", Arc::new(Schema::empty()), InputOptions::default())?;

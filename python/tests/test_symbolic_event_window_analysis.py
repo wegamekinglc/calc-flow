@@ -62,13 +62,13 @@ def test_native_window_capability_is_precise_and_sorted() -> None:
 
     assert capabilities.schema_version == 5
     assert window.version == "1"
-    assert window.modes == ("stream",)
+    assert window.modes == ("batch", "stream")
     assert window.input_ports == (ProviderPort("input", "table", required=True),)
     assert window.output_ports == (ProviderPort("output", "table", required=True),)
     assert window.finality == "group_final_append_only"
     assert window.checkpoint_support == "checkpointed_stateful"
     assert window.state_version == 1
-    assert window.state_layouts == (1,)
+    assert window.state_layouts == (1, 2)
     assert window.requires_datafusion is False
     assert window.stateful and window.requires_watermark
     assert window.deterministic and window.replay_safe and window.microbatch_invariant
@@ -207,16 +207,11 @@ def test_window_rejects_non_native_ordered_types(dtype, use) -> None:
     ]
 
 
-def test_window_is_stream_only_in_analysis_and_compile() -> None:
+def test_window_supports_finite_analysis_and_mode_conversion() -> None:
     trades = _trades()
     program = _program(trades, _minute(trades))
-
-    assert [
-        (issue.path, issue.code)
-        for issue in program.analyze(Runtime(), mode="batch").issues
-    ] == [("outputs.minute.window_tumbling", "unsupported_mode")]
-    with pytest.raises(RuntimeError, match="engine.*streaming.*sql"):
-        program.compile_batch(Runtime())
+    assert program.analyze(Runtime(), mode="batch").issues == ()
+    program.for_mode("batch").compile_batch(Runtime())
 
 
 @pytest.mark.parametrize(

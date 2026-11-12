@@ -1098,6 +1098,10 @@ input watermark.
 
 ## Event-time windows
 
+Fixed UTC windows also support finite batch execution and the explicit
+`CF_TUMBLE` / `CF_HOP` SQL dialect. See
+[the shared window contract](relational-frontends.md#fixed-utc-event-windows).
+
 Python expressions imported from `calc_flow` declare the same native operator with
 `window.tumbling` or `window.hopping` and an ordered sequence of
 `window.count`, `window.sum`, `window.min`, `window.max`, or `window.avg`

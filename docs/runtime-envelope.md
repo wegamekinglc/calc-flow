@@ -1094,7 +1094,9 @@ neither classifies nor drops late rows and exposes no late-row runtime metric.
 ## Window state and storage
 
 The public Rust surface includes a data-only `WindowSpec` for fixed UTC
-tumbling and hopping windows and the stream-only `WindowAggregateOperator`.
+tumbling and hopping windows and `WindowAggregateOperator`. Its batch lifecycle
+uses fresh temporary accumulators and finalizes the complete input; the stream
+lifecycle retains state until real watermark closure or EOF.
 The compiler validates geometry, overlap, exact event-time/group types,
 aggregate combinations, output names, state layout, and deterministic
 configuration fingerprints before source open. Supported aggregates are

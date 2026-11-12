@@ -404,7 +404,7 @@ fn project_v3_compiles_builtin_window_and_union_nodes() {
 }
 
 #[test]
-fn project_v3_rejects_window_in_batch_runtime() {
+fn project_v3_compiles_window_in_batch_runtime_with_complete_source_coverage() {
     let value = serde_json::json!({
         "format_version": 3,
         "id": "batch-window",
@@ -434,21 +434,44 @@ fn project_v3_rejects_window_in_batch_runtime() {
                     ]
                 }]
             }]
-        }
+        },
+        "data_sources": [{
+            "id": "events",
+            "input": "input",
+            "format": "json",
+            "data": []
+        }]
     });
-    let project: ProjectSpec = serde_json::from_value(value).expect("document parses");
+    let mut project: ProjectSpec = serde_json::from_value(value).expect("document parses");
+    let providers = ProviderRegistry::default();
+    let udfs = UdfRegistry::new().snapshot();
+    let report = calc_flow::validate_project(&project, &providers, &udfs);
+    assert!(report.valid, "{:?}", report.issues);
+    assert!(report.issues.is_empty());
+    let plan = calc_flow::compile_project(&project, &providers, &udfs)
+        .expect("finite window project compiles");
+    assert_eq!(
+        plan.external_inputs()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["input"]
+    );
+
+    project.data_sources.clear();
     let report = calc_flow::validate_project(
         &project,
         &ProviderRegistry::default(),
         &UdfRegistry::new().snapshot(),
     );
-    assert!(
+    assert!(!report.valid);
+    assert_eq!(
         report
             .issues
             .iter()
-            .any(|issue| issue.code == "incompatible_runtime"),
-        "{:?}",
-        report.issues
+            .map(|issue| issue.code.as_str())
+            .collect::<Vec<_>>(),
+        vec!["source_input_mismatch"]
     );
 }
 

@@ -80,7 +80,7 @@ def request(history="accepted_history", ordering="unordered"):
 def test_union_reports_append_history_and_no_global_order(kind):
     batch = program(kind)
     report = batch.analyze(options=cf.AnalysisOptions(portability=request())).query
-    assert (report.schema_version, report.analysis_revision) == (2, 4)
+    assert (report.schema_version, report.analysis_revision) == (2, 5)
     assert report.portability == "supported", report.diagnostics
     report = batch.analyze(
         options=cf.AnalysisOptions(portability=request(ordering="declared"))
@@ -122,14 +122,20 @@ def test_dataframe_union_rejects_inexact_schema(fields, suffix):
 
 
 def test_sql_union_coercion_stays_legacy_batch_only():
+    from collections import Counter
+
     a = source("a")
     b = cf.table_input("b", schema=pa.schema([("x", pa.int32())]))
     value = cf.sql("SELECT x FROM a UNION ALL SELECT x FROM b", a=a, b=b)
     batch = cf.Program("coercion", mode="batch", outputs={"out": value})
     actual = batch.collect(
-        {"a": table([1]), "b": pa.table({"x": pa.array([2], type=pa.int32())})}
+        {
+            "a": table([1, None, 1]),
+            "b": pa.table({"x": pa.array([2, 1, None], type=pa.int32())}),
+        }
     )
-    assert actual["out"]["x"].to_pylist() == [1, 2]
+    assert actual["out"].schema == schema()
+    assert Counter(actual["out"]["x"].to_pylist()) == Counter({1: 3, None: 2, 2: 1})
     assert not any(
         node["operator"]["kind"] == "union"
         for node in batch.to_project().model_dump()["graph"]["nodes"]

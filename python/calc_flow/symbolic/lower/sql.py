@@ -188,6 +188,8 @@ class _SQLGraph:
         if node.op.name == "table_input":
             self.schemas[node.digest] = self.analyzer.table(node, "sql.input").schema
             return self.graph.source(node)
+        if self._is_event_window(node):
+            return self._append_window(node)
         if node.op.name == "union_all":
             output_id = self.graph.allocate(f"cf_union_{node.digest[:24]}")
             parents = [self.table(child) for child in node.args]
@@ -200,6 +202,34 @@ class _SQLGraph:
             return self._append_expression(node)
         output_id = self.graph.allocate(f"cf_sql_{node.digest[:24]}")
         self._append_sql(node, output_id)
+        self._remember(node, output_id)
+        return output_id
+
+    def _is_event_window(self, node: Node) -> bool:
+        return node.digest in self.analyzer._sql_window_nodes or (
+            node.op.name in _EVENT_WINDOW_OPS and node.op.version == 2
+        )
+
+    def _append_window(self, node):
+        from calc_flow.symbolic.lower.event_windows import _window_node, _WindowPlan
+
+        window = self.analyzer._sql_window_nodes.get(node.digest, node)
+        parent = self.table(window.args[0])
+        output_id = self.graph.allocate(f"cf_window_{node.digest[:24]}")
+        schema = self.analyzer.table(node, "window.output").schema
+        self.schemas[node.digest] = schema
+        plan = _WindowPlan(
+            window, output_id, self.analyzer._window_input_schemas[node.digest], schema
+        )
+        self.graph.nodes.append(_window_node(plan))
+        self.graph.edges.append(
+            dict(
+                source_node=parent,
+                source_port="output",
+                target_node=output_id,
+                target_port="input",
+            )
+        )
         self._remember(node, output_id)
         return output_id
 
@@ -325,6 +355,7 @@ class _SQLGraph:
             if (
                 boundary.op.name
                 in {
+                    *_EVENT_WINDOW_OPS,
                     "aggregate",
                     "union_all",
                     "sql",
