@@ -218,7 +218,7 @@ impl Lowered {
         let identity = self.orderings[&input.0.id]
             .temporal_identity
             .as_ref()
-            .and_then(|identity| mapped_identity(identity, &columns));
+            .and_then(|identity| mapped_identity(identity, |name| mapped_column(&columns, name)));
         Ok(QueryOrderingFacts {
             temporal_identity: identity,
             ..QueryOrderingFacts::default()
@@ -375,21 +375,21 @@ fn mapped_column(columns: &BTreeMap<String, Option<String>>, name: &str) -> Opti
         .find_map(|(out, source)| (source.as_deref() == Some(name)).then(|| out.clone()))
         .or_else(|| columns.contains_key("*").then(|| name.to_owned()))
 }
-fn mapped_identity(
+pub(super) fn mapped_identity(
     identity: &QueryTemporalIdentity,
-    columns: &BTreeMap<String, Option<String>>,
+    column: impl Fn(&str) -> Option<String>,
 ) -> Option<QueryTemporalIdentity> {
     Some(QueryTemporalIdentity {
         entity_by: identity
             .entity_by
             .iter()
-            .map(|n| mapped_column(columns, n))
+            .map(|n| column(n))
             .collect::<Option<_>>()?,
-        event_time: mapped_column(columns, &identity.event_time)?,
+        event_time: column(&identity.event_time)?,
         sequence_by: identity
             .sequence_by
             .iter()
-            .map(|n| mapped_column(columns, n))
+            .map(|n| column(n))
             .collect::<Option<_>>()?,
     })
 }

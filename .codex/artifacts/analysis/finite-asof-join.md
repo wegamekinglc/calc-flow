@@ -236,3 +236,155 @@ remain tests. The original stream example and its watermark/EOF purpose are inta
 Full workspace, coverage, hosted platforms and release gates belong to CI;
 independent dal-reviewer acceptance and required checks remain outstanding.
 DAL-518 stays in_progress and this run does not merge or delegate.
+
+## F1 repair — Rust DataFrame identity aliases
+
+Repair baseline: `8135297faaea2fcb25b5cc17216a782274200641`, same branch
+and [PR #602](https://github.com/wegamekinglc/calc-flow/pull/602). The reviewer
+report remains untracked and byte-identical, SHA-256
+`31cda92bf764ac72aacf33afd3a43ca4a4e6598c9227978f9d60da74a722a21d`.
+The coordinator authorized only F1 and its direct effects; no new specification,
+public API, delegation, second PR or merge is introduced.
+
+`prepare_projection` previously discarded temporal identity when aliases removed
+the old field names. The join-scoped projection helper now proves direct column
+references against the input lineage and maps the complete entity/event-time/
+sequence vectors together. The existing SQL mapper supplies the same complete
+identity construction through a private column-mapping callback; SQL's own
+column selection is unchanged. Missing identity components and derived
+expressions cannot create proof. Appended fields and projections retaining an
+original identity field prefer that original name over additional aliases.
+Outside the established join paths, the previous projection retention and
+ordinary SQL behavior remain in force. Native relation IDs, ports and operator
+configuration construction are untouched.
+
+The increment is confined to `program/lower.rs`, `program/lower/{join,projection}.rs`,
+`tests/finite_asof_frontend.rs`, its `rename.rs` and `stream.rs` helpers, and this
+analysis. Tests execute source → DF rename → ASOF and ASOF → DF rename → ASOF
+in batch and through actual source/sink streaming, comparing literal expected
+values 7 and 3. The nested test also exposes the shared first output. Controls
+cover complete entity/sequence requirements, casts, sequence arithmetic,
+ordinary DF/SQL proof boundaries, and additional aliases with retained originals.
+
+### F1 RED evidence
+
+The unchanged independent caller in the reviewer report was run first against
+the pre-repair library:
+
+```sh
+CF_DEPS="$CARGO_TARGET_DIR/debug/deps"
+rustdoc --test .codex/artifacts/reviews/finite-asof-join.md --edition=2024 \
+  --crate-name finite_asof_rename_review -L dependency="$CF_DEPS" \
+  --extern calc_flow="$CF_DEPS/libcalc_flow-0cbf0666ea3b0fc9.rlib" \
+  --extern tokio="$CF_DEPS/libtokio-4a0c17d14ad9501c.rlib"
+cargo test --locked -p calc-flow --test finite_asof_frontend rename::
+```
+
+Independent caller: **0 passed, 1 failed**, exit 101. DF Batch and Stream both
+reported `outputs.out.asof_join.left: ordering_required`; equivalent SQL Batch
+and Stream both succeeded. The added integration tests then produced **2 passed,
+2 failed**, exit 101: the source and nested DF alias paths failed for the same
+missing identity, while the negative and ordinary-proof controls passed.
+This is the expected product RED. A later test-only refactor needed an explicit
+unwrap for a known Arrow fixture field, because ArrowError does not convert to
+CalcFlowError; that compile error is not counted as product RED.
+
+### F1 independent caller GREEN
+
+The same immutable reviewer caller passes with the repaired core artifacts:
+
+```sh
+rustdoc --test .codex/artifacts/reviews/finite-asof-join.md --edition=2024 \
+  --crate-name finite_asof_rename_review -L dependency="$CF_DEPS" \
+  --extern calc_flow="$CF_DEPS/libcalc_flow-c4242eaab5409a3b.rlib" \
+  --extern tokio="$CF_DEPS/libtokio-b3a17c46acc34096.rlib" \
+  --test-args=--nocapture
+```
+
+Result: **1 passed, 0 failed**, including all four DF/SQL × Batch/Stream
+schema-collection branches. Repaired core rlib SHA-256:
+`05f6164bb4d0f313b580441fbf109199f4f4d7319495bad0dc15684b07e40a28`.
+The log is retained as `target/finite-asof-join/f1-caller-green.log`.
+
+### F1 integration GREEN
+
+`cargo test --locked -p calc-flow --test finite_asof_frontend rename::`:
+**5 passed, 0 failed, 4 filtered**. Both new positive chains execute the batch
+plan and an actual StreamingRunner against literal expected values, rather
+than stopping at schema collection. The negative cases reject in both modes;
+ordinary DF/SQL outputs have no temporal proof. Appended aliases and a select
+containing both originals and aliases both execute with their original ASOF spec.
+
+The shared Cargo cache was occupied by another task's core unit builds during
+this run. Those builds were neither terminated nor counted as F1 verification.
+
+Directly affected checks, without rerunning the five unchanged rename tests:
+
+```sh
+cargo test --locked -p calc-flow --test finite_asof_frontend \
+  --test finite_inner_frontend --test query_history_portability -- --skip rename::
+cargo clippy --locked -p calc-flow --lib --test finite_asof_frontend \
+  --test finite_inner_frontend --test query_history_portability -- -D warnings
+cargo fmt --all --check
+```
+
+Results: **4 + 3 + 9 = 16 passed**, Clippy and formatting passed. Together
+with the five F1 tests, this run verifies **21 distinct Rust integration tests**
+and the independent caller. Coverage includes existing DF/SQL execution and
+project reload, shared/nested ASOF and inner join, incomplete identity rejection,
+ordinary SQL support boundaries, snapshot/history admission and existing row-local
+identity. The unchanged kernel, recovery/terminal behavior and standalone core
+example results above are reused, not claimed as fresh F1 runs. No full suite,
+coverage matrix or new benchmark was run. The two new production helper functions
+have measured Lizard cyclomatic complexity 2 and 4; no baseline or lint was relaxed.
+
+### F1 native/Python source correspondence
+
+The native extension was rebuilt once after the repair and directed Rust checks:
+
+```sh
+$CF_PY -m maturin build --locked --profile dev --interpreter "$CF_PY" \
+  --out target/finite-asof-join/wheels-f1
+PYTHONPATH=target/finite-asof-join/site-f1 JAX_PLATFORMS=cpu \
+  $CF_PY -m pytest python/tests/test_finite_asof_join.py -q \
+  -k legacy_asof_declaration_and_native_topology_identity
+```
+
+Build passed in 47.35 seconds. The local dev wheel was extracted into the
+separate `site-f1` directory; both imported Python and native module paths were
+checked against that directory. The targeted compatibility regression passed:
+**1 passed, 37 deselected**. It checks the unchanged declaration digest, shared
+program fingerprint and complete project/topology JSON against the historical
+vectors above. No Python or stub source changed; the earlier 340 Python results
+are reused, not represented as a new broad run on this repair.
+
+Observed provenance at 2026-11-12 12:28 UTC, in
+`target/finite-asof-join/provenance-f1.json`:
+
+- Native SHA-256:
+  `7cb42529a6df7e6f4f46cb55e3f25a1d5112d161e49072d4ca56018f2eb10baa`.
+- Wheel SHA-256:
+  `bb3da74877e68f10337acc7101eeaf9e68f438d1c897ca8510f358f32d7116c4`.
+- Source manifest SHA-256:
+  `9702d0a5d86338017f664e958505cb1154bd4765e2c71d298c3a678cfac95c7f`.
+- **1642 Rust/Cargo files**, including the two new F1 Rust files and seven
+  unchanged fuzz/tool/vendor lock entries not listed in the earlier inventory;
+  **59/59 Python/stub files** match the extracted package exactly. The manifest
+  hash is SHA-256 of compact, sorted UTF-8 JSON containing `rust_sources` and
+  `python_sources`. Its recorded repaired core rlib hash also matches the
+  independent caller's library. The final commit is recorded in that manifest
+  after verifying every source hash against Git HEAD.
+
+The old wheel/site/provenance remain available separately. These are local dev
+verification artifacts, not release wheels or release-gate evidence.
+
+### F1 handoff and remaining gates
+
+This repair remains on PR #602 and DAL-518 remains `in_progress`. The original
+reviewer still needs to recheck F1 and its direct effects; no independent review
+acceptance is claimed. Only the coordinator-supplied CI snapshot for the
+pre-repair HEAD is used this turn: macOS passed, Linux/Windows/crate release
+were running, and returned jobs had no failure. That does not prove all checks
+green or verify the repair HEAD. There is no additional CI snapshot, watch or
+poll. Full hosted, coverage and release checks remain CI responsibilities; this
+run does not merge or dispatch further work.

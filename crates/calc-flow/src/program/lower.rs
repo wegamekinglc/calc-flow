@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod asof;
 mod join;
+mod projection;
 mod union;
 mod window;
 
@@ -424,7 +425,7 @@ impl Lowered {
         let schema = operator.infer_stream_schema(input_schema.clone()).await?;
         Ok(Prepared {
             node: expression_node(&id, select, None, input_schema, &schema),
-            ordering: retained_ordering(&self.orderings[&input.0.id], &schema),
+            ordering: self.projection_ordering(table, &schema),
             schema,
             kind: if *append { "with_columns" } else { "project" },
             query: None,

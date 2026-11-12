@@ -79,6 +79,8 @@ fn values(batches: &[calc_flow::Batch]) -> Vec<Option<i64>> {
         })
         .collect()
 }
+#[path = "finite_asof_frontend/rename.rs"]
+mod rename;
 #[path = "finite_asof_frontend/stream.rs"]
 mod stream;
 

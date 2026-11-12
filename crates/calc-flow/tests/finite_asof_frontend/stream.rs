@@ -67,6 +67,19 @@ pub(super) async fn verify(
     plan: calc_flow::StreamExecutionPlan,
     inputs: BTreeMap<String, Batch>,
 ) -> Result<()> {
+    let expected = plan
+        .external_outputs()
+        .keys()
+        .map(|name| (name.clone(), vec![Some(7)]))
+        .collect();
+    verify_expected(plan, inputs, expected).await
+}
+pub(super) async fn verify_expected(
+    plan: calc_flow::StreamExecutionPlan,
+    inputs: BTreeMap<String, Batch>,
+    expected: BTreeMap<String, Vec<Option<i64>>>,
+) -> Result<()> {
+    let input_count = inputs.len();
     let opened = Arc::new(AtomicUsize::new(0));
     let sources = inputs
         .into_iter()
@@ -97,7 +110,7 @@ pub(super) async fn verify(
             name.clone(),
             vec![SinkBinding::ordinary(name, Sink(batches.clone()))?],
         );
-        captured.push(batches);
+        captured.push((name.clone(), batches));
     }
     let outcome = StreamingRunner::without_checkpoints(plan, sources, sinks)?
         .start()
@@ -106,9 +119,13 @@ pub(super) async fn verify(
         .await;
     assert_eq!(outcome.state, calc_flow::JobState::Completed, "{outcome:?}");
     assert!(outcome.errors.is_empty());
-    assert_eq!(opened.load(Ordering::SeqCst), 2);
-    for batches in captured {
-        assert_eq!(super::values(&batches.lock().unwrap()), vec![Some(7)]);
+    assert_eq!(opened.load(Ordering::SeqCst), input_count);
+    for (name, batches) in captured {
+        assert_eq!(
+            super::values(&batches.lock().unwrap()),
+            expected[&name],
+            "{name}"
+        );
     }
     Ok(())
 }
