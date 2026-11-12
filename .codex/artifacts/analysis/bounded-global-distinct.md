@@ -743,3 +743,69 @@ diff is exactly 118 added lines with zero removed lines. F1/F2 and their direct
 effects are ready for independent recheck; this is not a merge approval. The
 final issue handoff records the single nonblocking CI snapshot, including Codacy;
 local complexity correction is not a claim that the remote check is green.
+
+## PyO3 lib-test Clippy gate correction
+
+The independent F1/F2 recheck approved `d2a68c85`; its appended reviewer report
+is preserved untracked and unstaged. Its current SHA-256 is
+`e7681127a4a42ce562cde3ac0201d13ae51a0e861fbde18f72a72d9676c9dce7`.
+This correction addresses only the subsequent CI test-compilation failure.
+
+The actual failed Rust core parity job was
+https://github.com/wegamekinglc/calc-flow/actions/runs/43306366639/job/131490764624.
+Its downloaded log reports at 2026-11-12 21:09:08–21:10:03 UTC:
+
+```text
+error: used underscore-prefixed item
+--> crates/calc-flow-python/src/config.rs:1195:26
+1195 | let result = _distinct_query(
+= note: `-D clippy::used-underscore-items` implied by `-D clippy::pedantic`
+error: could not compile `calc-flow-python` (lib test) due to 1 previous error
+Process completed with exit code 101.
+```
+
+The failed step was Clippy, not a product assertion; subsequent Rust test and
+rustdoc steps did not run. Earlier binding lint evidence selected `--lib`
+without the lib-test target and therefore did not cover this reference.
+
+Fix commit: `1ba4aec984c031424f582ea4655fd9e867fff7a4`.
+The existing bridge test now registers the query planners in a PyModule and
+calls `getattr("_distinct_query").call1(...)`, then extracts the same JSON string.
+Both original policy/column assertions remain unchanged. The production Rust
+function, Python export name, registration and signature are unchanged. No test
+case, lint suppression, dependency, gate or production behavior was added.
+
+Actual necessary commands in the reused environment:
+
+```sh
+PYO3_PYTHON=/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-519-d83ca711d94c/workdir/calc-flow/target/venv/bin/python cargo clippy --locked -p calc-flow-python --lib --tests -- -D warnings
+PYO3_PYTHON=/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-519-d83ca711d94c/workdir/calc-flow/target/venv/bin/python LD_LIBRARY_PATH=/home/wegamekinglc/anaconda3/lib PYTHONPATH=/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-519-d83ca711d94c/workdir/calc-flow/target/venv/lib/python3.13/site-packages cargo test --locked -p calc-flow-python --lib test_distinct_
+target/venv/bin/python -m pytest python/tests/test_native_stub.py -q
+cargo fmt --all --check
+git diff --check
+```
+
+All exited 0: Clippy now includes lib tests, the two existing native tests passed
+(including registered Python-name lookup and real foreign-owner release), and
+the three existing stub checks passed. Format and whitespace checks passed.
+
+An initial package-scoped `cargo clippy --locked -p calc-flow-python --lib
+--tests --all-features -- -D warnings` attempt exited 101 in the local optional
+rdkafka-sys build, before a completed lint result:
+
+```text
+rdkafka_conf.c:60:10: fatal error: curl/curl.h: No such file or directory
+```
+
+This is a local all-feature dependency limitation, not the observed CI cause.
+No product or environment workaround was introduced; the feature-complete
+workspace gate remains CI work and is not reported as locally passed.
+
+All changes in config.rs are inside its existing `#[cfg(test)] mod tests`.
+A byte comparison against `d2a68c85` confirms the complete non-test prefix is
+unchanged (SHA-256 `abd6f90ebfb3b72cf2b2e84e307528166d4c65f7599780fa4170b16cec38fd10`).
+The build script only calls use_pyo3_cfgs and embeds no Git revision. Therefore
+the validated production native module and prior product/reviewer evidence are
+reused; no wheel rebuild, full matrix, performance run or full review restart
+is needed for this test-only correction. The final handoff records the pushed
+HEAD and one fresh CI snapshot; pending checks are not a successful gate.
