@@ -136,7 +136,9 @@ opt-in. Ordinary SQL DISTINCT keeps its existing per-batch behavior.
 external ingress backing and other graph/source/caller owners are excluded;
 retained history and prepared output are independent copies. Duplicate accepted
 rows count toward `max_rows`. `distinct@1` supports batch/stream with state version
-1 and checkpoint layout/accounting 2; analysis uses schema 2/revision 9. See the
+1 and accounting 2. Window Error preserves layout2; local Drop uses layout3 with
+checkpointed late metrics. Global lateness arguments configure only independent
+unmarked rolling/cross-section consumers. Analysis uses schema 2/revision 9. See the
 [complete DISTINCT contract and examples](bounded-global-distinct.md).
 
 ## Explicit relation updates

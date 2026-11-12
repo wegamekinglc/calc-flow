@@ -403,3 +403,57 @@ async fn test_public_rust_df_and_sql_drop_survive_lowering_and_stream_runtime() 
         assert_eq!(op.max_lateness, Some(std::time::Duration::from_micros(11)));
     }
 }
+
+#[tokio::test]
+async fn test_drop_schema_failure_does_not_change_closed_capture() {
+    use calc_flow::arrow::{
+        array::{Float64Array, TimestampMicrosecondArray},
+        datatypes::{DataType, Field, Schema, TimeUnit},
+        record_batch::RecordBatch,
+    };
+    use calc_flow::{
+        Batch, BatchMetadata, CancellationToken, EdgeCollector, Epoch, EventTime, OperatorMetadata,
+        StreamJobContext, StreamOperator, StreamOperatorContext,
+    };
+    use std::sync::Arc;
+    let mut op = node(true);
+    let job = StreamJobContext::new(
+        1,
+        "schema",
+        calc_flow::JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "unique", None);
+    let mut output = EdgeCollector::new(op.output_ports().to_vec());
+    op.on_watermark(EventTime::from_micros(10), &context, &mut output)
+        .await
+        .unwrap();
+    let before = op.checkpoint(Epoch::INITIAL).unwrap();
+    let wrong = Arc::new(Schema::new(vec![
+        Field::new("ts", DataType::Timestamp(TimeUnit::Microsecond, None), true),
+        Field::new("q", DataType::Float64, true),
+    ]));
+    let raw = Batch::table(
+        vec![
+            RecordBatch::try_new(
+                wrong,
+                vec![
+                    Arc::new(TimestampMicrosecondArray::from(vec![0])),
+                    Arc::new(Float64Array::from(vec![2.0])),
+                ],
+            )
+            .unwrap(),
+        ],
+        BatchMetadata::default(),
+    )
+    .unwrap();
+    assert!(
+        op.process_data("input", raw, &context, &mut output)
+            .await
+            .is_err()
+    );
+    assert_capture(&op.checkpoint(Epoch::INITIAL).unwrap(), &before);
+    assert_eq!(control(&mut op)["late_metrics"]["late_rows"], 0);
+    assert_eq!(output.drain("output").len(), 1);
+}

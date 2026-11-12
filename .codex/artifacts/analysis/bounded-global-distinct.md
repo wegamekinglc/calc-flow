@@ -668,3 +668,78 @@ crate test targets were type/lint checked to include the private quota/metric
 tests after actual pedantic failures; this was not a full regression run.
 Ruff, complexity ratchet, spec references and diff whitespace checks are GREEN.
 Final matching wheel, Python/runtime recovery and CI results follow below.
+
+### Matching native and completed addendum checks
+
+Product implementation commit: `2ac85c3d39667dd28bd1294d6933d61cc9772e59`.
+The follow-up commit adds only tests, the support-table correction and this
+evidence. Its product fingerprint is checked against this commit before push.
+The original checkout/branch/environment and user's Git identity are retained.
+
+At that implementation commit, the actual matching build/install commands were:
+
+```sh
+PYO3_PYTHON=/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-519-d83ca711d94c/workdir/calc-flow/target/venv/bin/python target/venv/bin/maturin build --locked --profile dev --out target/wheels
+uv pip install --python target/venv/bin/python --reinstall --no-deps target/wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl
+target/venv/bin/python -m pytest python/tests/test_distinct_late_policy.py python/tests/test_bounded_global_distinct.py python/tests/test_native_stub.py -q --maxfail=3
+```
+
+The final run is **41 passed**: 15 direct addendum cases, 23 prior feature cases
+and 3 stub cases. The new cases exercise real Rust-backed DF/SQL declarations,
+default/error/drop canonical export, local policy precedence with independent
+rolling and cross-section consumers, marker exclusion, shared ownership, cache
+isolation and finite reuse after a row-budget failure, empty history and success.
+The initial expanded mixed-graph fixture incorrectly marked its temporal input
+nullable; the fixture was corrected to the existing non-null timestamp/entity/
+sequence contract. That ordering_required result was not a product RED.
+
+For both Python DF and SQL, actual managed execution produces literal {1},
+captures closed Drop with 2/1/10, and restores totals before allowing new source
+events. W=12 then ts=1 yields 3/2/11 with no second final. Replaying from a copied
+prior cut produces the same totals. Swapping to Error fails before Source.open
+(observed open count 0). Both observed reopened cursors are exactly 4. Warm-cache
+Error/Drop plans have distinct native fingerprints; old layout2-only capability
+still admits Error and refuses Drop, and an unknown state version is refused.
+
+The fresh wheel's native entry and installed native were read and asserted
+byte-for-byte equal. Actual hashes:
+
+- Native: `c7810be6d86b5c5798c398589f7d812fae571842bef2ba59eb0677768a1758f2`.
+- Wheel: `8c61ae1d07074863e515fda854bff772dfa5b41db3d307500375984eed71d4ae`.
+- Product tree: `f05f960ba05248e826de56bd6a648b501a93c7c9cccd15437f8c7fd99fa30531`.
+
+The tree fingerprint uses the same git ls-tree paths documented above (core
+and binding src, Python package and dependency manifests/lock). Python loaded
+the existing target/venv site-packages native module. Python 3.13.9, PyArrow24,
+pytest9.2, Rust/Cargo1.94, Ruff0.16 and maturin1.16 were unchanged; Lizard1.26 and
+jsonschema4.26 were added only as local validation utilities, with no dependency
+manifest or lock changes. No new environment or checkout was created.
+
+The final PyO3 source check and real C-stream ownership verification were:
+
+```sh
+PYO3_PYTHON=/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-519-d83ca711d94c/workdir/calc-flow/target/venv/bin/python cargo clippy --locked -p calc-flow-python --lib -- -D warnings
+PYO3_PYTHON=/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-519-d83ca711d94c/workdir/calc-flow/target/venv/bin/python LD_LIBRARY_PATH=/home/wegamekinglc/anaconda3/lib PYTHONPATH=/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-519-d83ca711d94c/workdir/calc-flow/target/venv/lib/python3.13/site-packages cargo test --locked -p calc-flow-python --lib test_distinct_
+```
+
+Both exited 0; **2 native tests passed**, including the real 8 MiB foreign owner
+release while copied H is live and before EOF. A final native schema-failure
+regression also passed: wrong raw key type after Drop closure leaves the complete
+capture and zero metrics intact. Its command was `cargo test --locked -p
+calc-flow --test distinct_late_policy test_drop_schema_failure_does_not_change_closed_capture`,
+followed by scoped Clippy on that test. This brings the unique core integration
+cases in this correction to **22 passed** (the earlier 21 plus this case).
+
+Final Ruff check/format covers all 9 changed Python files; complexity ratchet,
+spec-reference check, compileall, Rust format, diff whitespace and the Python
+example all passed. Local Lizard <=8 is rechecked over the affected DISTINCT
+Rust/Python files and new tests. No full regression or benchmark was run; prior
+unaffected evidence is reused and full/platform/coverage work remains in CI.
+
+Reviewer file SHA-256 remains
+`bd6b67fcc9cc7c2db61db7ec976cef68de813d8794070dfd64f30618a7d42877`.
+Its contents remain untracked and unstaged for the reviewer. The frozen note's
+diff is exactly 118 added lines with zero removed lines. F1/F2 and their direct
+effects are ready for independent recheck; this is not a merge approval. The
+final issue handoff records the single nonblocking CI snapshot, including Codacy;
+local complexity correction is not a claim that the remote check is green.

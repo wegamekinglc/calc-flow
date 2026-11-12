@@ -99,7 +99,11 @@ def operators(program, **options):
     ]
 
 
-def test_mixed_local_policies_shared_owner_and_independent_global_consumer():
+@pytest.mark.parametrize("consumer", ["rolling", "cross_section"])
+@pytest.mark.parametrize("marked", [False, True])
+def test_mixed_local_policies_shared_owner_and_independent_global_consumer(
+    consumer, marked
+):
     events = cf.table_input(
         "events",
         schema=pa.schema(
@@ -111,28 +115,46 @@ def test_mixed_local_policies_shared_owner_and_independent_global_consumer():
     quotes = cf.table_input(
         "quotes",
         schema=[
-            cf.Field("ts", "timestamp[us, UTC]"),
-            cf.Field("symbol", "string"),
-            cf.Field("seq", "uint64"),
+            cf.Field("ts", "timestamp[us, UTC]", nullable=False),
+            cf.Field("symbol", "string", nullable=False),
+            cf.Field("seq", "uint64", nullable=False),
             cf.Field("x", "float64"),
         ],
         entity_by=["symbol"],
         event_time="ts",
         sequence_by=["seq"],
     )
-    temporal = quotes.with_columns(avg=cf.ts.mean(quotes["x"], window=cf.rows(2)))
+    feature = (
+        cf.ts.mean(quotes["x"], window=cf.rows(2))
+        if consumer == "rolling"
+        else cf.cs.rank(quotes["x"], group=cf.exact_time(quotes["ts"]))
+    )
+    temporal = quotes.with_columns(avg=feature)
+    outputs = {"drop": drop, "alias": drop, "error": error, "temporal": temporal}
+    if marked:
+        pair = cf.with_late_output(temporal)
+        outputs.update(temporal=pair.output, late=pair.late)
     program = cf.Program(
         "mixed",
         mode="stream",
-        outputs={"drop": drop, "alias": drop, "error": error, "rolling": temporal},
+        outputs=outputs,
     )
+    if marked:
+        with pytest.raises(cf.CompileError, match="no applicable.*consumer"):
+            program.to_project(late_policy="drop", allowed_lateness_micros=2)
+        assert_local_pair(operators(program))
+        return
     ops = operators(program, late_policy="drop", allowed_lateness_micros=2)
+    assert_local_pair(ops)
+    rolling = next(o for o in ops if o["kind"] == consumer)
+    assert rolling["spec"]["late_policy"] == {"kind": "drop", "metrics_version": 1}
+    program.compile_stream(late_policy="drop", allowed_lateness_micros=2)
+
+
+def assert_local_pair(ops):
     distinct = [o for o in ops if o["kind"] == "distinct"]
     assert len(distinct) == 2
     assert sum("late_policy" in o["spec"] for o in distinct) == 1
-    rolling = next(o for o in ops if o["kind"] == "rolling")
-    assert rolling["spec"]["late_policy"] == {"kind": "drop", "metrics_version": 1}
-    program.compile_stream(late_policy="drop", allowed_lateness_micros=2)
 
 
 @pytest.mark.parametrize("syntax", ["df", "sql"])
@@ -147,6 +169,14 @@ def test_finite_reuse_and_policy_cache_isolation(syntax):
     for chosen in [drop, error]:
         finite = chosen.for_mode("batch")
         plan = finite.compile_batch(runtime)
+        over = pa.table(
+            {
+                "ts": pa.array([0, 0, 9], pa.timestamp("us")),
+                "q": pa.array([1, 1, 1], pa.int64()),
+            }
+        )
+        with pytest.raises(cf.CalcFlowError, match="state_budget_exceeded"):
+            finite.collect({"events": over}, runtime=runtime)
         for times, values, expected in [
             ([0, 9], [1, 1], {1}),
             ([], [], set()),
