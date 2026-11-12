@@ -388,3 +388,120 @@ were running, and returned jobs had no failure. That does not prove all checks
 green or verify the repair HEAD. There is no additional CI snapshot, watch or
 poll. Full hosted, coverage and release checks remain CI responsibilities; this
 run does not merge or dispatch further work.
+
+## F1 follow-up — appended pure alias chains
+
+Repair baseline: `318a64dfbf0e6af7fbeb737030a9899d5770fa23`, same branch
+and PR #602. The reviewer's new failing caller establishes the need for this
+local correction; other original review conclusions remain in force. The
+updated reviewer report is preserved untracked and unchanged during this round,
+SHA-256 `bb9f59cd8759e830a388ebe4506c7ae706ad4c5e35b2dc48c201ea9918321cda`.
+Its caller replaces the report's prior direct-select caller; the earlier RED/
+GREEN records above describe their respective historical invocations.
+
+### Cause and bounded correction
+
+The first F1 repair deliberately retained original identity names after
+`with_columns`. A subsequent select containing only the appended aliases could
+not match those names. The new comparison follows direct Project references and
+transparent Filter inputs back to a `(relation id, field name)` origin. It stops
+at other relation boundaries, so different native join outputs remain distinct.
+Cast, arithmetic and other scalar expressions provide no column origin. The
+comparison still requires an existing complete identity; it cannot manufacture
+one for an unproved input. Full entity/event-time/sequence mapping, original-name
+priority and the existing join-path gate remain unchanged. SQL proof, public
+signatures, native node/port construction and operator state are untouched.
+
+This increment changes only `program/lower/projection.rs`, the existing rename
+test module's child registration, its new `alias_chain.rs` tests, and this report.
+The new tests actually execute BatchExecutionPlan and StreamingRunner for:
+
+- `with_columns → select only aliases → ASOF`, matching the independent caller;
+- ASOF → appended aliases → Filter → another appended alias layer → select only
+  aliases → ASOF, with the shared first result exposed and literal values 7/3;
+- the complete two-field sequence vector through the same alias-only selection.
+
+Controls reject dropped composite entity/sequence components, cast key/time,
+sequence arithmetic and a rewritten post-ASOF sequence in both modes (12
+rejection checks). An ordinary alias chain still has no temporal identity proof.
+Previous direct-alias, original-name-priority, SQL and nested cases are retained.
+
+### RED and GREEN
+
+The updated reviewer caller was first run against its recorded pre-correction
+core rlib SHA-256 `05f6164bb4d0f313b580441fbf109199f4f4d7319495bad0dc15684b07e40a28`:
+
+```sh
+CF_DEPS="$CARGO_TARGET_DIR/debug/deps"
+rustdoc --test .codex/artifacts/reviews/finite-asof-join.md --edition=2024 \
+  --crate-name finite_asof_f1_alias_chain_review -L dependency="$CF_DEPS" \
+  --extern calc_flow="$CF_DEPS/libcalc_flow-c4242eaab5409a3b.rlib" \
+  --extern tokio="$CF_DEPS/libtokio-b3a17c46acc34096.rlib"
+cargo test --locked -p calc-flow --test finite_asof_frontend rename::chain::
+```
+
+Independent caller RED: **0 passed, 1 failed**, exit 101; DF Batch and Stream
+both rejected with `ordering_required`, SQL controls both succeeded. Integration
+RED: **2 passed, 3 failed**, exit 101; all three legitimate execution paths failed
+for missing identity, while the distortion and ordinary-proof controls passed.
+After the minimal projection correction, the same commands are GREEN: **1/1
+independent caller and 5/5 new tests**. Repaired core rlib SHA-256:
+`3a43339999c6debf09e46275e2ce7d1e5a032eef02f2aff76b02c6613433760d`.
+Logs are `target/finite-asof-join/f1-chain-{caller,tests}-{red,green}.log`.
+
+Directly affected checks, avoiding a repeat of those five tests:
+
+```sh
+cargo test --locked -p calc-flow --test finite_asof_frontend \
+  --test finite_inner_frontend -- --skip rename::chain::
+cargo clippy --locked -p calc-flow --lib --test finite_asof_frontend \
+  --test finite_inner_frontend -- -D warnings
+cargo fmt --all --check
+```
+
+Results: **9 + 3 = 12 passed**, Clippy and formatting passed. This round has
+**17 distinct successful Rust integration tests**, plus the independent caller.
+Production helper Lizard complexity is at most 5. The earlier nine query-history
+checks, native kernel/recovery/terminal evidence, example compilation and broader
+Python results remain reused evidence. No full suite, coverage or performance
+run was added, and no baseline or lint rule was relaxed.
+
+### Follow-up source correspondence and handoff
+
+The repaired sources were used for one native build and the existing identity
+compatibility check:
+
+```sh
+$CF_PY -m maturin build --locked --profile dev --interpreter "$CF_PY" \
+  --out target/finite-asof-join/wheels-f1-chain
+PYTHONPATH=target/finite-asof-join/site-f1-chain JAX_PLATFORMS=cpu \
+  $CF_PY -m pytest python/tests/test_finite_asof_join.py -q \
+  -k legacy_asof_declaration_and_native_topology_identity
+```
+
+Build passed in 30.17 seconds; the compatibility test passed **1/1** (37
+deselected), including unchanged declaration, shared program and full exported
+project/topology hashes. Imported package/native paths were verified under
+`site-f1-chain`, extracted separately from the new local dev wheel. Python and
+stub sources are unchanged and all **59/59** extracted files match exactly.
+
+`target/finite-asof-join/provenance-f1-chain.json` records the build at
+2026-11-12 12:46 UTC, using the same interpreter/cache and manifest encoding as
+the preceding repair. Its inventory is **1643 Rust/Cargo + 59 Python/stub files**,
+including the new alias-chain test. Hashes:
+
+- Native: `386732408239bd09e27962299975ab2ee617919d2c4b38c739f993504db5cccd`.
+- Wheel: `201a8b25b354582351b636a1ba1cea964c676a672155463d07d447d3d01a082c`.
+- Source manifest:
+  `f78854687c5f004cbd5781fd30d7674e1b656691f12b2854768c4dd0c3f11c8f`.
+
+The core rlib hash matches the independent GREEN caller above. After commit,
+every recorded source is verified against both the worktree and Git HEAD, and
+the exact delivery commit is recorded in the manifest. Previous wheel/site/
+provenance artifacts remain separate; no release verification is claimed.
+
+The remaining gate is the original reviewer's local F1 recheck, arranged by the
+coordinator. CI reuses only the supplied `318a64df` snapshot: 8 SUCCESS,
+12 IN_PROGRESS, 0 failed, with four workflows unfinished. It is not evidence
+that this follow-up HEAD is green. No new CI read/watch/poll, broad review chain,
+delegation or merge occurred. DAL-518 remains `in_progress`.

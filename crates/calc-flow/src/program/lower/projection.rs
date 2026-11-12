@@ -43,12 +43,37 @@ fn projected_column(
     if append {
         return Some(name.into());
     }
+    let expected = column_origin(input, name)?;
     columns
         .iter()
         .filter(|column| {
-            matches!(column.value.0.as_ref(), Scalar::Column { lineage, name: source }
-                if lineage == input.lineage() && source == name)
+            direct_column(input, column)
+                .and_then(|source| column_origin(input, source))
+                .is_some_and(|origin| origin == expected)
         })
         .min_by_key(|column| column.name != name)
         .map(|column| column.name.clone())
+}
+
+fn direct_column<'a>(input: &TableExpr, column: &'a NamedExpr) -> Option<&'a str> {
+    match column.value.0.as_ref() {
+        Scalar::Column { lineage, name } if lineage == input.lineage() => Some(name),
+        _ => None,
+    }
+}
+
+fn column_origin<'a>(table: &'a TableExpr, name: &'a str) -> Option<(&'a str, &'a str)> {
+    match &table.0.kind {
+        RelationKind::Project {
+            input,
+            columns,
+            append,
+        } => match columns.iter().find(|column| column.name == name) {
+            Some(column) => column_origin(input, direct_column(input, column)?),
+            None if *append => column_origin(input, name),
+            None => None,
+        },
+        RelationKind::Filter { input, .. } => column_origin(input, name),
+        _ => Some((&table.0.id, name)),
+    }
 }

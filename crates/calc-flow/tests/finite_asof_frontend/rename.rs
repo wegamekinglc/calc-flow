@@ -5,6 +5,9 @@ use calc_flow::{
 };
 use std::collections::BTreeMap;
 
+#[path = "alias_chain.rs"]
+mod chain;
+
 fn renamed(input: &TableExpr, from: &str, to: &str) -> Result<TableExpr> {
     input.select(
         ["key", "time", "sequence", "value"]
