@@ -56,20 +56,9 @@ fn upstream(
             return Err(unsupported(builder, &edge.source.node_id));
         }
         let (sql, alias) = query(source).unwrap();
-        let columns = crate::sql::sql_passthrough_columns(sql, alias)?.unwrap();
         let source_time = match time {
             None => None,
-            Some(name) => match columns.get(name) {
-                Some(Some(source)) => Some(source.as_str()),
-                None if columns.contains_key("*") => Some(name),
-                _ => {
-                    return Err(invalid(
-                        &format!("graph.nodes.{}.distinct.spec.history", edge.source.node_id),
-                        "capability_mismatch",
-                        "window time must be an unchanged input timestamp or pure rename",
-                    ));
-                }
-            },
+            Some(name) => Some(crate::sql::window_time_column(sql, alias, name)?),
         };
         upstream(
             builder,
@@ -77,7 +66,7 @@ fn upstream(
                 node_id: edge.source.node_id.clone(),
                 port: alias.into(),
             },
-            source_time,
+            source_time.as_deref(),
             origins,
         )?;
     }

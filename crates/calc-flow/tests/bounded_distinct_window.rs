@@ -6,7 +6,7 @@ use calc_flow::arrow::{
 };
 use calc_flow::{
     Batch, BatchMetadata, CompileMode, DistinctSpec, EventTime, ExecutionOptions, InputOptions,
-    Program, Result, StateBudget, UdfRegistry, table_input,
+    Program, StateBudget, UdfRegistry, table_input,
 };
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -55,29 +55,33 @@ fn spec() -> DistinctSpec {
 }
 
 #[tokio::test]
-async fn test_selected_window_filters_before_key_projection_and_row_budget() -> Result<()> {
-    let input = table_input("events", schema(), InputOptions::default())?;
-    let df = input.distinct(vec!["q".into()], spec())?;
+async fn test_selected_window_filters_before_key_projection_and_row_budget() {
+    let input = table_input("events", schema(), InputOptions::default()).unwrap();
+    let df = input.distinct(vec!["q".into()], spec()).unwrap();
     let sq = calc_flow::sql::sql(
         "SELECT DISTINCT q FROM CF_DISTINCT_WINDOW('a', 'ts', 0, 10, 2, 8388608)",
         BTreeMap::from([("a".into(), input)]),
-    )?;
+    )
+    .unwrap();
     let program = Program::new(
         "fixed_cut",
         CompileMode::Batch,
         BTreeMap::from([("df".into(), df), ("sql".into(), sq)]),
-    )?;
+    )
+    .unwrap();
     let plan = program
         .compile_batch(&UdfRegistry::new().snapshot(), &CompileOptions::default())
-        .await?;
+        .await
+        .unwrap();
     let result = plan
         .execute(
             BTreeMap::from([("events".into(), data())]),
             ExecutionOptions::default(),
         )
-        .await?;
+        .await
+        .unwrap();
     for output in result.outputs.values() {
-        let t = output.table_payload()?;
+        let t = output.table_payload().unwrap();
         assert_eq!(
             t.schema().as_ref(),
             &Schema::new(vec![Field::new("q", DataType::Int64, true)])
@@ -95,5 +99,4 @@ async fn test_selected_window_filters_before_key_projection_and_row_budget() -> 
             .collect::<Vec<_>>();
         assert_eq!(values, vec![Some(1)]);
     }
-    Ok(())
 }

@@ -17,6 +17,7 @@ use crate::{
 
 mod budget;
 mod checkpoint;
+mod late;
 mod owned;
 mod spec;
 pub use spec::{DistinctHistory, DistinctSpec};
@@ -46,6 +47,7 @@ struct StreamState {
     watermark: Option<EventTime>,
     _control: datafusion::execution::memory_pool::MemoryReservation,
     capture: Option<crate::OperatorStateSnapshot>,
+    metrics: super::stream::LateMetricDelta,
 }
 
 fn qualify(name: &str, error: crate::CalcFlowError) -> crate::CalcFlowError {
@@ -95,26 +97,7 @@ impl DistinctOperator {
         spec: DistinctSpec,
     ) -> Result<Self> {
         super::validate_operator_name(name)?;
-        let pool = Arc::new(OwnedStatePool::new(
-            Arc::new(UnboundedMemoryPool::default()),
-            "distinct copy_visible_v2 owned peak",
-            "distinct max_bytes",
-        ));
-        pool.set_limit(Some(spec.state_budget().max_bytes()))
-            .map_err(owned::error)?;
-        let erased: Arc<dyn MemoryPool> = pool.clone();
-        let column_bytes = columns.iter().try_fold(0, |n, c| {
-            owned::add(n, owned::add(256, owned::mul(c.len(), 4)?)?)
-        })?;
-        let declaration = owned::reserve(
-            &erased,
-            owned::add(
-                owned::mul(owned::schema_quote(&schema)?, 4)?,
-                owned::add(column_bytes, owned::mul(name.len(), 4)?)?,
-            )?,
-            "declaration schema/metadata",
-        )
-        .map_err(|e| qualify(name, e))?;
+        let (pool, declaration) = declaration_pool(name, &schema, &columns, &spec)?;
         let fresh_schema = owned::fresh_schema(&schema);
         drop(schema);
         let schema = fresh_schema;
@@ -124,30 +107,7 @@ impl DistinctOperator {
             .collect::<Vec<_>>();
         drop(columns);
         let columns = fresh_columns;
-        if let DistinctHistory::ClosedWindow {
-            event_time_column, ..
-        } = spec.history()
-        {
-            use datafusion::arrow::datatypes::{DataType, TimeUnit};
-            let time = schema.field_with_name(event_time_column).map_err(|_| {
-                invalid(
-                    "distinct.spec.history.event_time_column",
-                    "unresolved_type",
-                    event_time_column,
-                )
-            })?;
-            if !matches!(
-                time.data_type(),
-                DataType::Timestamp(TimeUnit::Millisecond, None)
-            ) && !matches!(time.data_type(),DataType::Timestamp(TimeUnit::Microsecond,tz) if tz.as_deref().is_none_or(|tz|tz=="UTC"))
-            {
-                return Err(invalid(
-                    "distinct.spec.history.event_time_column",
-                    "unsupported_type",
-                    "requires timestamp[ms] naive or timestamp[us] naive/UTC",
-                ));
-            }
-        }
+        validate_window_type(&schema, &spec)?;
         // The validated time name is covered by the declaration reservation;
         // cloning releases any excess capacity carried by a deserialized spec.
         let fresh_spec = spec.clone();
@@ -218,41 +178,59 @@ impl DistinctOperator {
         pool: Arc<dyn MemoryPool>,
         check: &(dyn Fn() -> Result<()> + Sync),
     ) -> Result<owned::OwnedBatch> {
-        let partitions = if self.config.parallelism_mode == crate::DataFusionParallelismMode::Fixed
-        {
-            self.config.target_partitions
-        } else {
-            self.config.max_partitions
-        };
-        let bound = owned::add(
-            owned::mul(history.charge(), 16)?,
-            owned::mul(owned::mul(self.columns.len(), partitions)?, 131_072)?,
-        )?;
-        let _result = owned::reserve(&pool, bound, "prepared query result")?;
-        let runtime = DataFusionRuntime::new_with_pool(self.config, pool.clone(), Instant::now())?;
-        let query = format!(
+        let (runtime, lease) = self.prepare_query(history, &pool)?;
+        check()?;
+        let result = runtime
+            .sql(
+                &self.query_text(),
+                &BTreeMap::from([("input".into(), history.batch.clone())]),
+                Some(&self.name),
+            )
+            .await?;
+        check()?;
+        let compact = self.compact_result(&result, lease.size(), &pool, check)?;
+        check()?;
+        Ok(compact)
+    }
+    fn query_text(&self) -> String {
+        format!(
             "SELECT DISTINCT {} FROM input",
             self.columns
                 .iter()
                 .map(|n| quote(n))
                 .collect::<Vec<_>>()
                 .join(", ")
-        );
-        check()?;
-        let result = runtime
-            .sql(
-                &query,
-                &BTreeMap::from([("input".into(), history.batch.clone())]),
-                Some(&self.name),
-            )
-            .await?;
-        check()?;
-        self.output[0].validate(&result, "distinct.output")?;
-        if owned::backing(&result)? > bound {
+        )
+    }
+    fn prepare_query(
+        &self,
+        history: &owned::OwnedBatch,
+        pool: &Arc<dyn MemoryPool>,
+    ) -> Result<(
+        DataFusionRuntime,
+        datafusion::execution::memory_pool::MemoryReservation,
+    )> {
+        let partitions = match self.config.parallelism_mode {
+            crate::DataFusionParallelismMode::Fixed => self.config.target_partitions,
+            _ => self.config.max_partitions,
+        };
+        let bound = prepared_bound(history.charge(), self.columns.len(), partitions)?;
+        let lease = owned::reserve(pool, bound, "prepared query result")?;
+        let runtime = DataFusionRuntime::new_with_pool(self.config, pool.clone(), Instant::now())?;
+        Ok((runtime, lease))
+    }
+    fn compact_result(
+        &self,
+        result: &Batch,
+        bound: usize,
+        pool: &Arc<dyn MemoryPool>,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<owned::OwnedBatch> {
+        self.output[0].validate(result, "distinct.output")?;
+        if owned::backing(result)? > bound {
             return Err(owned::error("query result exceeded prepaid bound"));
         }
-        let mut compact = owned::normalize(&result, &self.columns, &pool, None, check)?;
-        check()?;
+        let mut compact = owned::normalize(result, &self.columns, pool, None, check)?;
         compact.batch =
             compact
                 .batch
@@ -264,7 +242,7 @@ impl DistinctOperator {
         if self.stream.is_none() {
             let pool = self.pool.clone();
             let erased: Arc<dyn MemoryPool> = pool.clone();
-            let control = owned::reserve(&erased, 4096, "stream control")
+            let control = owned::reserve(&erased, 4096 + self.metric_storage(), "stream control")
                 .map_err(|e| qualify(&self.name, e))?;
             self.stream = Some(StreamState {
                 pool,
@@ -274,6 +252,7 @@ impl DistinctOperator {
                 watermark: None,
                 _control: control,
                 capture: None,
+                metrics: super::stream::LateMetricDelta::default(),
             });
         }
         Ok(())
@@ -284,11 +263,30 @@ impl DistinctOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        let Some((combined, pool)) = self.close_input(context)? else {
+            return Ok(());
+        };
+        let result = self
+            .finalize(&combined, pool, &|| context.check_cancelled())
+            .await?;
+        validate_final(&result.batch, context.output_budget())?;
+        context.check_cancelled()?;
+        output.emit("output", result.batch.clone()).await?;
+        let state = self.stream.as_mut().unwrap();
+        state.closed = true;
+        state.history = Vec::new();
+        state.capture = None;
+        Ok(())
+    }
+    fn close_input(
+        &mut self,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<Option<(owned::OwnedBatch, Arc<dyn MemoryPool>)>> {
         context.check_cancelled()?;
         self.ensure_stream()?;
         let state = self.stream.as_ref().unwrap();
         if state.closed {
-            return Ok(());
+            return Ok(None);
         }
         let pool: Arc<dyn MemoryPool> = state.pool.clone();
         let combined = owned::combine(
@@ -298,22 +296,47 @@ impl DistinctOperator {
             &pool,
             &|| context.check_cancelled(),
         )?;
-        let result = self
-            .finalize(&combined, pool, &|| context.check_cancelled())
-            .await?;
-        let budget = context.output_budget();
-        if result.batch.num_rows() > budget.max_rows
-            || result.batch.estimated_bytes()? > budget.max_bytes
-        {
-            return Err(owned::error(
-                "final relation exceeds whole output edge budget",
+        Ok(Some((combined, pool)))
+    }
+    fn accepted_rows(&self, raw: &Batch, context: &StreamOperatorContext<'_>) -> Result<usize> {
+        let old = self.stream.as_ref().map_or(0, |s| s.accepted);
+        let rows = owned::count(raw, Some(self.spec.history()), &|| {
+            context.check_cancelled()
+        })?;
+        let accepted = owned::add(old, rows)?;
+        if accepted as u64 > self.spec.state_budget().max_rows() {
+            return Err(invalid(
+                "distinct.spec.state_budget",
+                "state_budget_exceeded",
+                format!(
+                    "copy_visible_v2 history required={accepted} rows limit={}",
+                    self.spec.state_budget().max_rows()
+                ),
             ));
         }
+        Ok(accepted)
+    }
+    fn admit_data(&mut self, raw: Batch, context: &StreamOperatorContext<'_>) -> Result<()> {
+        let accepted = self.accepted_rows(&raw, context)?;
+        self.ensure_stream()?;
+        let state = self.stream.as_ref().unwrap();
+        let pool: Arc<dyn MemoryPool> = state.pool.clone();
+        let copy = owned::normalize(
+            &raw,
+            &self.columns,
+            &pool,
+            Some(self.spec.history()),
+            &|| context.check_cancelled(),
+        )?;
+        drop(raw);
+        let _candidate = history_candidate_lease(state, &pool)?;
+        let mut history = Vec::with_capacity(state.history.len() + 1);
+        history.extend(state.history.iter().cloned());
+        history.push(Arc::new(copy));
         context.check_cancelled()?;
-        output.emit("output", result.batch.clone()).await?;
         let state = self.stream.as_mut().unwrap();
-        state.closed = true;
-        state.history = Vec::new();
+        state.history = history;
+        state.accepted = accepted;
         state.capture = None;
         Ok(())
     }
@@ -377,64 +400,15 @@ impl StreamOperator for DistinctOperator {
             return Err(owned::error("unknown ingress"));
         }
         self.input[0].validate(&raw, "distinct.input")?;
-        let old_rows = self.stream.as_ref().map_or(0, |s| s.accepted);
-        let rows = owned::count(&raw, Some(self.spec.history()), &|| {
-            context.check_cancelled()
-        })?;
-        let accepted = owned::add(old_rows, rows)?;
-        if accepted as u64 > self.spec.state_budget().max_rows() {
-            return Err(qualify(
-                &self.name,
-                invalid(
-                    "distinct.spec.state_budget",
-                    "state_budget_exceeded",
-                    format!(
-                        "copy_visible_v2 history required={accepted} rows limit={}",
-                        self.spec.state_budget().max_rows()
-                    ),
-                ),
-            ));
+        if self.stream.as_ref().is_some_and(|state| state.closed) {
+            return self
+                .closed_data(raw, context)
+                .map_err(|e| qualify(&self.name, e));
         }
-        self.ensure_stream()?;
-        let state = self.stream.as_ref().unwrap();
-        if state.closed {
-            if matches!(self.spec.history(), DistinctHistory::ClosedWindow { .. }) && rows == 0 {
-                return Ok(());
-            }
-            return Err(owned::error("late data after final relation"));
-        }
-        let pool: Arc<dyn MemoryPool> = state.pool.clone();
-        let copy = owned::normalize(
-            &raw,
-            &self.columns,
-            &pool,
-            Some(self.spec.history()),
-            &|| context.check_cancelled(),
-        )
-        .map_err(|e| qualify(&self.name, e))?;
-        drop(raw);
-        let _candidate = owned::reserve(
-            &pool,
-            owned::add(
-                owned::mul(state.history.len() + 1, 64)?,
-                state
-                    .history
-                    .iter()
-                    .try_fold(0, |n, h| owned::add(n, h.charge()))?,
-            )?,
-            "candidate history",
-        )
-        .map_err(|e| qualify(&self.name, e))?;
-        let mut history = Vec::with_capacity(state.history.len() + 1);
-        history.extend(state.history.iter().cloned());
-        history.push(Arc::new(copy));
-        context.check_cancelled()?;
-        let state = self.stream.as_mut().unwrap();
-        state.history = history;
-        state.accepted = accepted;
-        state.capture = None;
-        Ok(())
+        self.admit_data(raw, context)
+            .map_err(|e| qualify(&self.name, e))
     }
+
     async fn on_watermark(
         &mut self,
         watermark: EventTime,
@@ -479,7 +453,7 @@ impl StreamOperator for DistinctOperator {
         snapshot: &crate::OperatorStateSnapshot,
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
-        self.restore_capture_checked(snapshot, &|| context.check_cancelled())
+        self.restore_with_context(snapshot, context)
             .map_err(|e| qualify(&self.name, e))
     }
     fn checkpoint(&mut self, _epoch: crate::Epoch) -> Result<crate::OperatorStateSnapshot> {
@@ -489,4 +463,93 @@ impl StreamOperator for DistinctOperator {
         self.restore_capture(snapshot)
             .map_err(|e| qualify(&self.name, e))
     }
+}
+
+fn declaration_pool(
+    name: &str,
+    schema: &SchemaRef,
+    columns: &[String],
+    spec: &DistinctSpec,
+) -> Result<(
+    Arc<OwnedStatePool>,
+    datafusion::execution::memory_pool::MemoryReservation,
+)> {
+    let pool = Arc::new(OwnedStatePool::new(
+        Arc::new(UnboundedMemoryPool::default()),
+        "distinct copy_visible_v2 owned peak",
+        "distinct max_bytes",
+    ));
+    pool.set_limit(Some(spec.state_budget().max_bytes()))
+        .map_err(owned::error)?;
+    let erased: Arc<dyn MemoryPool> = pool.clone();
+    let policy = if spec.state_layout() == 3 { 64 } else { 0 };
+    let bound = owned::add(declaration_bound(name, schema, columns)?, policy)?;
+    let lease = owned::reserve(&erased, bound, "declaration schema/metadata")
+        .map_err(|e| qualify(name, e))?;
+    Ok((pool, lease))
+}
+fn declaration_bound(name: &str, schema: &SchemaRef, columns: &[String]) -> Result<usize> {
+    let parts = [
+        owned::mul(owned::schema_quote(schema)?, 4)?,
+        column_names_bound(columns)?,
+        owned::mul(name.len(), 4)?,
+    ];
+    parts.into_iter().try_fold(0, owned::add)
+}
+fn column_names_bound(columns: &[String]) -> Result<usize> {
+    columns.iter().try_fold(0, |n, c| {
+        owned::add(n, owned::add(256, owned::mul(c.len(), 4)?)?)
+    })
+}
+fn validate_window_type(schema: &SchemaRef, spec: &DistinctSpec) -> Result<()> {
+    if let DistinctHistory::ClosedWindow {
+        event_time_column, ..
+    } = spec.history()
+    {
+        let time = schema.field_with_name(event_time_column).map_err(|_| {
+            invalid(
+                "distinct.spec.history.event_time_column",
+                "unresolved_type",
+                event_time_column,
+            )
+        })?;
+        if !window_time_type(time.data_type()) {
+            return Err(invalid(
+                "distinct.spec.history.event_time_column",
+                "unsupported_type",
+                "requires timestamp[ms] naive or timestamp[us] naive/UTC",
+            ));
+        }
+    }
+    Ok(())
+}
+fn window_time_type(dtype: &datafusion::arrow::datatypes::DataType) -> bool {
+    use datafusion::arrow::datatypes::{DataType, TimeUnit};
+    matches!(dtype, DataType::Timestamp(TimeUnit::Millisecond, None))
+        || matches!(dtype,DataType::Timestamp(TimeUnit::Microsecond,tz) if tz.as_deref().is_none_or(|tz|tz=="UTC"))
+}
+fn prepared_bound(history: usize, columns: usize, partitions: usize) -> Result<usize> {
+    owned::add(
+        owned::mul(history, 16)?,
+        owned::mul(owned::mul(columns, partitions)?, 131_072)?,
+    )
+}
+fn validate_final(batch: &Batch, budget: crate::EdgeBudget) -> Result<()> {
+    if batch.num_rows() > budget.max_rows || batch.estimated_bytes()? > budget.max_bytes {
+        return Err(owned::error(
+            "final relation exceeds whole output edge budget",
+        ));
+    }
+    Ok(())
+}
+fn history_candidate_lease(
+    state: &StreamState,
+    pool: &Arc<dyn MemoryPool>,
+) -> Result<datafusion::execution::memory_pool::MemoryReservation> {
+    let history = state
+        .history
+        .iter()
+        .try_fold(0, |n, h| owned::add(n, h.charge()))?;
+    let bound = owned::add(owned::mul(state.history.len() + 1, 64)?, history)?;
+    owned::reserve(pool, bound, "candidate history")
 }

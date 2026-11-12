@@ -218,6 +218,10 @@ def _logical_distinct_error(error, names):
         ("boundedness: source_", "watermark_policy: finality_unproven")
     ):
         return error
+    return _rename_distinct_error(error, logical, suffix)
+
+
+def _rename_distinct_error(error, logical, suffix):
     details = {
         field.name: getattr(error, field.name) for field in fields(StreamingError)
     }

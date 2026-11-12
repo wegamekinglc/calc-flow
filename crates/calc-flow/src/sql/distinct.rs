@@ -49,6 +49,21 @@ impl Visitor for Find {
 fn error(message: impl std::fmt::Display) -> crate::CalcFlowError {
     invalid("sql.distinct", "capability_mismatch", message)
 }
+pub(crate) fn window_time_column(text: &str, alias: &str, time: &str) -> Result<String> {
+    let invalid = || {
+        invalid(
+            "distinct.spec.history",
+            "capability_mismatch",
+            "window time must be an unchanged input timestamp or pure rename",
+        )
+    };
+    let columns = super::sql_passthrough_columns(text, alias)?.ok_or_else(invalid)?;
+    match columns.get(time) {
+        Some(Some(original)) => Ok(original.clone()),
+        None if columns.contains_key("*") => Ok(time.into()),
+        _ => Err(invalid()),
+    }
+}
 fn query(statement: &DFStatement) -> Option<&Query> {
     let DFStatement::Statement(s) = statement else {
         return None;
@@ -74,6 +89,27 @@ pub fn distinct_query(text: &str, aliases: &[String]) -> Result<Option<DistinctQ
     if !matches!(q.visit(&mut Find), ControlFlow::Break(())) {
         return Ok(None);
     }
+    let plan = plan_select(q, aliases)?;
+    validate_shape(q)?;
+    Ok(Some(plan))
+}
+fn plan_select(q: &Query, aliases: &[String]) -> Result<DistinctQuery> {
+    let select = top_select(q)?;
+    let (window, args) = macro_arguments(&select.from[0].relation)?;
+    validate_arity(window, args.len())?;
+    let alias = string(&args[0])?;
+    if aliases != [alias.clone()] {
+        return Err(error("exactly the referenced input alias must be supplied"));
+    }
+    let spec = selected_spec(window, args)?;
+    let columns = key_columns(select, &alias)?;
+    Ok(DistinctQuery {
+        alias,
+        columns,
+        spec,
+    })
+}
+fn top_select(q: &Query) -> Result<&datafusion::sql::sqlparser::ast::Select> {
     let SetExpr::Select(select) = q.body.as_ref() else {
         return Err(error(
             "one top-level SELECT DISTINCT required; no set operation",
@@ -90,6 +126,9 @@ pub fn distinct_query(text: &str, aliases: &[String]) -> Result<Option<DistinctQ
     if !from.joins.is_empty() {
         return Err(error("JOIN is unsupported"));
     }
+    Ok(select)
+}
+fn macro_arguments(table: &TableFactor) -> Result<(bool, &[FunctionArg])> {
     let TableFactor::Table {
         name,
         alias: None,
@@ -101,12 +140,11 @@ pub fn distinct_query(text: &str, aliases: &[String]) -> Result<Option<DistinctQ
         json_path: None,
         sample: None,
         index_hints,
-    } = &from.relation
+    } = table
     else {
         return Err(error("unaliased CF_DISTINCT_BOUNDED FROM required"));
     };
-    if name.0.len() != 1
-        || !with_hints.is_empty()
+    if !with_hints.is_empty()
         || !partitions.is_empty()
         || !index_hints.is_empty()
         || args.settings.is_some()
@@ -115,47 +153,78 @@ pub fn distinct_query(text: &str, aliases: &[String]) -> Result<Option<DistinctQ
             "qualified macro names and FROM modifiers are unsupported",
         ));
     }
-    let macro_name = name.0[0].as_ident().unwrap().value.to_ascii_lowercase();
-    let window = match macro_name.as_str() {
-        "cf_distinct_bounded" => false,
-        "cf_distinct_window" => true,
-        _ => return Err(error("expected CF_DISTINCT_BOUNDED or CF_DISTINCT_WINDOW")),
-    };
-    if args.args.len() != if window { 6 } else { 3 } {
+    Ok((window_macro(name)?, &args.args))
+}
+fn window_macro(name: &ObjectName) -> Result<bool> {
+    if name.0.len() != 1 {
+        return Err(error("qualified macro names are unsupported"));
+    }
+    match name.0[0]
+        .as_ident()
+        .unwrap()
+        .value
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "cf_distinct_bounded" => Ok(false),
+        "cf_distinct_window" => Ok(true),
+        _ => Err(error("expected CF_DISTINCT_BOUNDED or CF_DISTINCT_WINDOW")),
+    }
+}
+fn validate_arity(window: bool, count: usize) -> Result<()> {
+    if !matches!((window, count), (true, 6 | 7) | (false, 3)) {
         return Err(error(
-            "expected alias, optional window time/start/end, max_rows, max_bytes",
+            "expected alias, optional window time/start/end, max_rows, max_bytes and optional window late policy",
         ));
     }
-    let alias = string(&args.args[0])?;
-    if aliases != [alias.clone()] {
-        return Err(error("exactly the referenced input alias must be supplied"));
+    Ok(())
+}
+fn selected_spec(window: bool, args: &[FunctionArg]) -> Result<DistinctSpec> {
+    if window {
+        return window_spec(args);
     }
-    let spec = if window {
-        DistinctSpec::closed_window(
-            &string(&args.args[1])?,
-            EventTime::from_micros(signed(&args.args[2])?),
-            EventTime::from_micros(signed(&args.args[3])?),
-            StateBudget::new(integer(&args.args[4])?, integer(&args.args[5])?)?,
-        )?
-    } else {
-        DistinctSpec::bounded_source(StateBudget::new(
-            integer(&args.args[1])?,
-            integer(&args.args[2])?,
-        )?)
+    Ok(DistinctSpec::bounded_source(sql_budget(args, 1)?))
+}
+fn sql_budget(args: &[FunctionArg], start: usize) -> Result<StateBudget> {
+    StateBudget::new(integer(&args[start])?, integer(&args[start + 1])?)
+}
+fn window_spec(args: &[FunctionArg]) -> Result<DistinctSpec> {
+    DistinctSpec::closed_window(
+        &string(&args[1])?,
+        EventTime::from_micros(signed(&args[2])?),
+        EventTime::from_micros(signed(&args[3])?),
+        sql_budget(args, 4)?,
+    )?
+    .with_late_policy(late_policy(args.get(6))?)
+}
+
+fn late_policy(arg: Option<&FunctionArg>) -> Result<crate::LatePolicySpec> {
+    use crate::{LateErrorScope, LatePolicySpec};
+    let invalid = || {
+        invalid(
+            "sql.distinct.late_policy",
+            "invalid_literal",
+            "requires the string literal 'error' or 'drop'",
+        )
     };
-    let columns = key_columns(select, &alias)?;
-    validate_shape(q)?;
-    Ok(Some(DistinctQuery {
-        alias,
-        columns,
-        spec,
-    }))
+    match arg
+        .map(string)
+        .transpose()
+        .map_err(|_| invalid())?
+        .as_deref()
+    {
+        None | Some("error") => Ok(LatePolicySpec::Error {
+            scope: LateErrorScope::Envelope,
+        }),
+        Some("drop") => Ok(LatePolicySpec::Drop { metrics_version: 1 }),
+        _ => Err(invalid()),
+    }
 }
 fn key_columns(
     select: &datafusion::sql::sqlparser::ast::Select,
     alias: &str,
 ) -> Result<Option<Vec<String>>> {
-    let columns = if select.projection.len() == 1 && select.projection[0].to_string() == "*" {
+    let columns = if star_projection(select) {
         None
     } else {
         Some(
@@ -262,4 +331,8 @@ fn signed(arg: &FunctionArg) -> Result<i64> {
     } else {
         n.parse().map_err(error)
     }
+}
+
+fn star_projection(select: &datafusion::sql::sqlparser::ast::Select) -> bool {
+    select.projection.len() == 1 && select.projection[0].to_string() == "*"
 }

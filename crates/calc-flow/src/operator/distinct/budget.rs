@@ -17,6 +17,7 @@ const ROLES: &[&str] = &[
     "restore IPC decode",
     "restore metadata",
     "restored live captures",
+    "late metric transaction",
 ];
 
 pub(super) fn detail(error: &CalcFlowError, node: &str) -> Option<String> {
@@ -57,6 +58,10 @@ fn reservation(message: &str) -> Option<String> {
 fn workspace(message: &str) -> Option<String> {
     let (_, suffix) = message.split_once("distinct copy_visible_v2 owned peak exceeded at ")?;
     let (consumer, numbers) = suffix.rsplit_once(": ")?;
+    let (required, limit) = workspace_numbers(numbers)?;
+    Some(render(workspace_role(consumer), required, "bytes", limit))
+}
+fn workspace_numbers(numbers: &str) -> Option<(u128, u128)> {
     let (used, remaining) = numbers.split_once(" + ")?;
     let (additional, limit) = remaining.split_once(" bytes > ")?;
     let required = used
@@ -64,15 +69,17 @@ fn workspace(message: &str) -> Option<String> {
         .ok()?
         .checked_add(additional.parse().ok()?)?;
     let limit = limit.parse().ok()?;
-    let role = if consumer == "distinct.metadata" {
+    Some((required, limit))
+}
+fn workspace_role(consumer: &str) -> &str {
+    if consumer == "distinct.metadata" {
         "normalization metadata"
     } else {
         consumer
             .strip_prefix("distinct copy_visible_v2 ")
             .filter(|role| ROLES.contains(role))
             .unwrap_or("query workspace")
-    };
-    Some(render(role, required, "bytes", limit))
+    }
 }
 
 fn render(role: &str, required: u128, unit: &str, limit: u128) -> String {

@@ -34,13 +34,7 @@ pub(super) fn validate_progress(
             .iter()
             .find(|p| p.identity.as_str() == source)
             .unwrap();
-        let valid = match &prepared.normalized_watermark {
-            NormalizedWatermarkMode::SourceProvided { .. } => true,
-            NormalizedWatermarkMode::Generated { event_time, .. } => {
-                event_time.name.as_ref() == time
-            }
-            NormalizedWatermarkMode::Disabled { .. } => false,
-        };
+        let valid = progress_matches(&prepared.normalized_watermark, &time);
         if !valid && bindings[source].sampled_boundedness() != SourceBoundedness::Bounded {
             return Err(invalid(
                 &format!("stream.inputs.{source}.watermark_policy"),
@@ -50,6 +44,13 @@ pub(super) fn validate_progress(
         }
     }
     Ok(())
+}
+fn progress_matches(mode: &NormalizedWatermarkMode, time: &str) -> bool {
+    match mode {
+        NormalizedWatermarkMode::SourceProvided { .. } => true,
+        NormalizedWatermarkMode::Generated { event_time, .. } => event_time.name.as_ref() == time,
+        NormalizedWatermarkMode::Disabled { .. } => false,
+    }
 }
 
 fn source_time<'a>(
@@ -72,19 +73,8 @@ fn source_time<'a>(
                     ));
                 }
             };
-            let mapping = crate::sql::sql_passthrough_columns(query, alias)?.unwrap();
-            let original = mapping
-                .get(time)
-                .and_then(|v| v.as_deref())
-                .or_else(|| mapping.contains_key("*").then_some(time))
-                .ok_or_else(|| {
-                    invalid(
-                        "distinct.spec.history",
-                        "capability_mismatch",
-                        "window time lineage was rewritten",
-                    )
-                })?;
-            source_time(plan, node.ingress_edges.values().next().unwrap(), original)
+            let original = crate::sql::window_time_column(query, alias, time)?;
+            source_time(plan, node.ingress_edges.values().next().unwrap(), &original)
         }
     }
 }
@@ -139,21 +129,7 @@ pub(super) fn fingerprint(
         }
         for source in inputs {
             let boundedness = bindings[source].sampled_boundedness();
-            if matches!(
-                operator.spec().history(),
-                crate::DistinctHistory::BoundedSource
-            ) && boundedness != SourceBoundedness::Bounded
-            {
-                return Err(invalid(
-                    &format!("stream.inputs.{source}.boundedness"),
-                    if boundedness == SourceBoundedness::Unknown {
-                        "source_boundedness_unproved"
-                    } else {
-                        "source_unbounded"
-                    },
-                    "final DISTINCT requires a fixed finite cut; a possible future EOF is insufficient",
-                ));
-            }
+            validate_boundedness(operator.spec().history(), source, boundedness)?;
             proofs.insert(source, boundedness);
         }
     }
@@ -166,4 +142,25 @@ pub(super) fn fingerprint(
         proofs
     ]))?;
     Ok(hex::encode(Sha256::digest(encoded.as_bytes())))
+}
+fn validate_boundedness(
+    history: &crate::DistinctHistory,
+    source: &str,
+    boundedness: SourceBoundedness,
+) -> Result<()> {
+    if matches!(history, crate::DistinctHistory::BoundedSource)
+        && boundedness != SourceBoundedness::Bounded
+    {
+        let code = if boundedness == SourceBoundedness::Unknown {
+            "source_boundedness_unproved"
+        } else {
+            "source_unbounded"
+        };
+        return Err(invalid(
+            &format!("stream.inputs.{source}.boundedness"),
+            code,
+            "final DISTINCT requires a fixed finite cut; a possible future EOF is insufficient",
+        ));
+    }
+    Ok(())
 }

@@ -10,9 +10,11 @@ measurements. Use the current guides for supported behavior.
 ## 2026-11
 
 - 2026-11-13: Add explicit bounded-history final DISTINCT declarations, owned
-  scalar normalization under copy_visible_v2, layout/accounting 2 checkpoints,
+  scalar normalization under copy_visible_v2, accounting 2 checkpoints,
   source boundedness and conditional window-closure admission. Query analysis
-  advances to revision 9. Ordinary per-batch SQL DISTINCT is unchanged. See
+  advances to revision 9. Local window Error preserves layout2 compatibility;
+  Drop persists transactional late metrics in layout3. Ordinary per-batch SQL
+  DISTINCT is unchanged. See
   [the final DISTINCT guide](docs/bounded-global-distinct.md) for budget scope.
 
 - 2026-11-12: Isolate nested JSON reads from Python `Cursor.payload` and

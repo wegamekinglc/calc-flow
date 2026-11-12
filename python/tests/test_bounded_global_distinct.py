@@ -281,7 +281,7 @@ def test_native_distinct_schema_diagnostic_keeps_literal_key_path_and_code():
     )
 
 
-def test_unrepresentable_window_drop_selection_is_rejected_before_export():
+def test_global_drop_without_temporal_consumer_is_rejected_before_export():
     events = cf.table_input(
         "events",
         schema=pa.schema(

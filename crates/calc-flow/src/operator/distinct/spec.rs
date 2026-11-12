@@ -1,4 +1,4 @@
-use crate::{EventTime, Result, StateBudget, dataframe::invalid};
+use crate::{EventTime, LateErrorScope, LatePolicySpec, Result, StateBudget, dataframe::invalid};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -31,10 +31,17 @@ enum IngressPolicy {
 /// synchronous admission is outside `max_bytes`; retained data is always owned.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(extend(
+    "if" = {"properties":{"history":{"properties":{"kind":{"const":"bounded_source"}}}}},
+    "then" = {"properties":{"late_policy":{"properties":{"kind":{"const":"error"}}}}}
+))]
 pub struct DistinctSpec {
     ingress_policy: IngressPolicy,
     history: DistinctHistory,
     state_budget: StateBudget,
+    #[serde(default = "default_policy", skip_serializing_if = "is_error")]
+    #[schemars(with = "LocalLatePolicySchema")]
+    late_policy: LatePolicySpec,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,6 +49,8 @@ struct Wire {
     ingress_policy: IngressPolicy,
     history: DistinctHistory,
     state_budget: StateBudget,
+    #[serde(default = "default_policy")]
+    late_policy: LatePolicySpec,
 }
 impl<'de> Deserialize<'de> for DistinctSpec {
     fn deserialize<D: serde::Deserializer<'de>>(
@@ -63,11 +72,13 @@ impl TryFrom<Wire> for DistinctSpec {
         {
             validate_window(event_time_column, *start_micros, *end_micros)?;
         }
-        Ok(Self {
+        Self {
             ingress_policy: wire.ingress_policy,
             history: wire.history,
             state_budget: wire.state_budget,
-        })
+            late_policy: default_policy(),
+        }
+        .with_late_policy(wire.late_policy)
     }
 }
 fn validate_window(name: &str, start: i64, end: i64) -> Result<()> {
@@ -103,6 +114,7 @@ impl DistinctSpec {
                 end_micros: end.as_micros(),
             },
             state_budget,
+            late_policy: default_policy(),
         })
     }
     /// Selects a bounded source's complete history, finalized only at normal EOF.
@@ -113,6 +125,7 @@ impl DistinctSpec {
             ingress_policy: IngressPolicy::CopyVisibleV2,
             history: DistinctHistory::BoundedSource,
             state_budget,
+            late_policy: default_policy(),
         }
     }
     /// Returns the historical domain.
@@ -122,5 +135,60 @@ impl DistinctSpec {
     /// Returns inclusive node-owned limits.
     pub const fn state_budget(&self) -> StateBudget {
         self.state_budget
+    }
+    /// Selects this window's persistent policy; global compile options do not override it.
+    ///
+    /// # Errors
+    /// Rejects side output, unsupported metric versions and bounded-source Drop.
+    pub fn with_late_policy(mut self, policy: LatePolicySpec) -> Result<Self> {
+        let supported = match policy {
+            LatePolicySpec::Error {
+                scope: LateErrorScope::Envelope,
+            } => true,
+            LatePolicySpec::Drop { metrics_version: 1 } => {
+                matches!(self.history, DistinctHistory::ClosedWindow { .. })
+            }
+            _ => false,
+        };
+        if !supported {
+            return Err(invalid(
+                "distinct.spec.late_policy",
+                "invalid_literal",
+                "requires Error(envelope), or closed-window Drop(metrics_version=1)",
+            ));
+        }
+        self.late_policy = policy;
+        Ok(self)
+    }
+    /// Returns the local persistent late policy.
+    pub const fn late_policy(&self) -> LatePolicySpec {
+        self.late_policy
+    }
+    pub(crate) const fn state_layout(&self) -> u32 {
+        match self.late_policy {
+            LatePolicySpec::Drop { .. } => 3,
+            _ => 2,
+        }
+    }
+}
+
+const fn default_policy() -> LatePolicySpec {
+    LatePolicySpec::Error {
+        scope: LateErrorScope::Envelope,
+    }
+}
+fn is_error(policy: &LatePolicySpec) -> bool {
+    *policy == default_policy()
+}
+struct LocalLatePolicySchema;
+impl JsonSchema for LocalLatePolicySchema {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "DistinctLatePolicy".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({"oneOf":[
+            {"type":"object","additionalProperties":false,"required":["kind","scope"],"properties":{"kind":{"const":"error"},"scope":{"const":"envelope"}}},
+            {"type":"object","additionalProperties":false,"required":["kind","metrics_version"],"properties":{"kind":{"const":"drop"},"metrics_version":{"type":"integer","const":1}}}
+        ]})
     }
 }

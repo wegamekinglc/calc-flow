@@ -717,11 +717,12 @@ def explain_node(node: Node, /) -> str:
             walk(child, depth + 1)
 
     walk(node, 1)
-    from calc_flow.symbolic.distinct import has_distinct
+    from calc_flow.symbolic.distinct import has_distinct, policy_explanations
 
     if has_distinct(node):
         lines.append(
             "copy_visible_v2: max_bytes bounds owned participating peak; "
             "temporarily borrowed ingress backing and other graph owners are excluded"
         )
+        lines.extend(policy_explanations(node))
     return "\n".join(lines)

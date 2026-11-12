@@ -54,30 +54,35 @@ impl StreamSource for NoProgress {
     }
 }
 #[tokio::test]
-async fn test_window_rejects_unknown_source_without_closure_before_open() -> Result<()> {
+async fn test_window_rejects_unknown_source_without_closure_before_open() {
     let opened = Arc::new(AtomicUsize::new(0));
-    let input = table_input("events", schema(), InputOptions::default())?;
-    let output = input.distinct(
-        vec!["q".into()],
-        DistinctSpec::closed_window(
-            "ts",
-            EventTime::from_micros(0),
-            EventTime::from_micros(10),
-            StateBudget::new(2, 8 << 20)?,
-        )?,
-    )?;
+    let input = table_input("events", schema(), InputOptions::default()).unwrap();
+    let output = input
+        .distinct(
+            vec!["q".into()],
+            DistinctSpec::closed_window(
+                "ts",
+                EventTime::from_micros(0),
+                EventTime::from_micros(10),
+                StateBudget::new(2, 8 << 20).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
     let program = Program::new(
         "closure",
         CompileMode::Stream,
         BTreeMap::from([("out".into(), output)]),
-    )?;
+    )
+    .unwrap();
     let plan = program
         .compile_stream(
             &UdfRegistry::new().snapshot(),
             &StreamRequirements::default(),
             &CompileOptions::default(),
         )
-        .await?;
+        .await
+        .unwrap();
     let runner = StreamingRunner::without_checkpoints(
         plan,
         BTreeMap::from([(
@@ -85,12 +90,15 @@ async fn test_window_rejects_unknown_source_without_closure_before_open() -> Res
             SourceBinding::new(NoProgress(opened.clone()))
                 .with_watermark_policy(WatermarkPolicy::Disabled { idle_timeout: None }),
         )]),
-        BTreeMap::from([("out".into(), vec![SinkBinding::ordinary("sink", Sink)?])]),
-    )?;
+        BTreeMap::from([(
+            "out".into(),
+            vec![SinkBinding::ordinary("sink", Sink).unwrap()],
+        )]),
+    )
+    .unwrap();
     let Err(error) = runner.start().await else {
         panic!("missing closure accepted")
     };
     assert!(error.to_string().contains("finality_unproven"), "{error}");
     assert_eq!(opened.load(Ordering::SeqCst), 0);
-    Ok(())
 }

@@ -599,6 +599,12 @@ impl<'a> StreamOperatorContext<'a> {
     ) -> Result<PreparedLateMetrics> {
         Arc::clone(&self.late_metrics).prepare(delta)
     }
+    pub(crate) fn prepare_restored_window_metrics(
+        &self,
+        totals: LateMetricDelta,
+    ) -> Result<PreparedLateMetrics> {
+        Arc::clone(&self.late_metrics).prepare_restore(totals)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -620,6 +626,11 @@ pub(crate) trait LateMetricSink: Send + Sync {
     fn prepare(self: Arc<Self>, _delta: LateMetricDelta) -> Result<PreparedLateMetrics> {
         Err(CalcFlowError::Internal {
             message: "late metric sink does not support staged updates".into(),
+        })
+    }
+    fn prepare_restore(self: Arc<Self>, _totals: LateMetricDelta) -> Result<PreparedLateMetrics> {
+        Err(CalcFlowError::Internal {
+            message: "late metric sink does not support restored totals".into(),
         })
     }
 }
@@ -653,6 +664,9 @@ impl LateMetricSink for LateMetricRecorder {
         let next = accumulate_late_metrics(*self.0.lock(), delta)?;
         // Native callbacks serialize metric writes across prepare/emit/install.
         Ok(PreparedLateMetrics::new(move || *self.0.lock() = next))
+    }
+    fn prepare_restore(self: Arc<Self>, totals: LateMetricDelta) -> Result<PreparedLateMetrics> {
+        Ok(PreparedLateMetrics::new(move || *self.0.lock() = totals))
     }
 }
 

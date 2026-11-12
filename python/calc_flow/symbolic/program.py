@@ -806,6 +806,8 @@ class Program:
 
         The lateness arguments configure unmarked rolling/cross-section stages;
         with_late_output declarations retain their local policy and lateness.
+        DISTINCT windows retain the policy in their local DistinctSpec. Global
+        lateness options require an independent unmarked temporal consumer.
         Row-local-only programs accept the same compile signature but have no
         stateful late-row surface.
         """
@@ -869,7 +871,11 @@ class Program:
         allowed_lateness_micros: int = 0,
         late_policy: LatePolicy = "error",
     ) -> ProjectDocument:
-        """Export a strict native project; logical aliases stay in Python."""
+        """Export a strict native project; logical aliases stay in Python.
+
+        Global lateness options configure unmarked rolling/cross-section stages;
+        each DISTINCT window preserves its local persistent late policy.
+        """
         from calc_flow.config import ProjectDocument
         from calc_flow.symbolic.lower import lower_program_document
 

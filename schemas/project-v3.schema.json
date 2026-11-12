@@ -1027,15 +1027,66 @@
         }
       ]
     },
+    "DistinctLatePolicy": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "error"
+            },
+            "scope": {
+              "const": "envelope"
+            }
+          },
+          "required": [
+            "kind",
+            "scope"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "drop"
+            },
+            "metrics_version": {
+              "const": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "metrics_version"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "DistinctSpec": {
       "additionalProperties": false,
       "description": "DISTINCT domain and mandatory owned peak limits.\n\nEvery input is copied. Unknown external backing temporarily borrowed during\nsynchronous admission is outside `max_bytes`; retained data is always owned.",
+      "if": {
+        "properties": {
+          "history": {
+            "properties": {
+              "kind": {
+                "const": "bounded_source"
+              }
+            }
+          }
+        }
+      },
       "properties": {
         "history": {
           "$ref": "#/$defs/DistinctHistory"
         },
         "ingress_policy": {
           "$ref": "#/$defs/IngressPolicy"
+        },
+        "late_policy": {
+          "$ref": "#/$defs/DistinctLatePolicy"
         },
         "state_budget": {
           "$ref": "#/$defs/StateBudget"
@@ -1046,6 +1097,17 @@
         "history",
         "state_budget"
       ],
+      "then": {
+        "properties": {
+          "late_policy": {
+            "properties": {
+              "kind": {
+                "const": "error"
+              }
+            }
+          }
+        }
+      },
       "type": "object"
     },
     "EdgeSpec": {

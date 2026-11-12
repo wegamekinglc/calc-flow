@@ -18,10 +18,28 @@ An unbounded/unknown source needs a proved watermark route. Earlier watermarks d
 not discard still-open window members. Cancellation, errors and disconnects fail
 the job; they do not produce a successful final relation.
 
-The current implementation handles post-close window members with `error`.
-Selecting `drop` is rejected before compilation/export because the frozen v2
-declaration has no field that can preserve that selection. This contract gap is
-tracked on DAL-519; the implementation remains a draft pending its resolution.
+Each window has a persistent local policy. Python adds `late_policy="drop"` to
+`DistinctSpec.closed_window`; Rust uses `.with_late_policy(LatePolicySpec::Drop
+{ metrics_version: 1 })?`; SQL accepts an optional final `'drop'` argument in
+`CF_DISTINCT_WINDOW`. The default is `error` with envelope scope. Its wire omits
+the policy field, preserving existing default declarations and layout2 state.
+Only selected windows accept Drop; side output and other metric versions are
+rejected before reading data.
+
+Global Program lateness arguments configure independent unmarked rolling or
+cross-section consumers. They never override a DISTINCT policy, including the
+default global `error`. Without such a consumer, global `drop` or nonzero lateness
+is rejected with a pointer to the local window spec. Separate Error and Drop
+nodes can share a graph; a shared declaration's fan-out keeps one owner.
+
+After watermark closure, Drop ignores NULL/outside-window rows and drops members
+without increasing accepted history, even when `max_rows` was already reached.
+It records `late_rows`, one `affected_batches` increment per complete Data, and
+the maximum checked `W-ts` lateness in microseconds. Error rejects the whole Data
+without changing these metrics. Both policies keep the already emitted final;
+neither emits a second relation. Schema/time errors, cancellation, counter overflow
+and reservation failures leave state and metrics unchanged. Finite execution
+retains the declaration but makes no late decisions.
 
 `max_rows` counts **accepted history including duplicates**, not unique keys. Two
 events `[1]`, `[1]` need two rows of history even though the final relation is `{1}`.
@@ -48,14 +66,18 @@ through a pure rename.
 
 Project format 3 exports `kind="distinct"`, ordered keys and a required
 `ingress_policy="copy_visible_v2"`. Native identity is `distinct_v2`, state version
-1, layout 2, accounting 2. Checkpoints preserve duplicate history, closed state,
-watermark and output sequence. Old draft layouts/policies are refused. Captures
+1, accounting 2. Error reads/writes layout2; Drop uses layout3, including zero or
+nonzero checkpointed metrics. Runtime inventory offers layouts `(2,3)`; a runtime
+offering only layout2 can still accept Error. Policy/layout/version mismatches
+are refused before source replay. Restoration installs totals instead of adding
+them again. Checkpoints preserve duplicate history, closed state, watermark and
+output sequence. Old draft layouts/policies are refused. Captures
 remain charged while alive. Finite execution starts fresh on every call; it has
 NULL batch snapshots and requires no reset between calls.
 
 Analysis schema 2/revision 9 reports conditional finality and binding obligations;
 it does not inspect input rows or promise a runtime budget will suffice.
 The capability is `distinct@1`, batch/stream, `group_final_append_only`, checkpoint
-layout `(2,)`. It has no unconditional watermark requirement; the selected window
+layouts `(2,3)`. It has no unconditional watermark requirement; the selected window
 still performs its conditional closure check. Full regression and coverage run in
 CI; this feature does not assert a performance guarantee.

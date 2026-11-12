@@ -4,6 +4,7 @@ mod asof_join;
 mod distinct;
 #[doc(hidden)]
 pub use asof_join::{AsofJoinQuery, asof_join_query};
+pub(crate) use distinct::window_time_column;
 #[doc(hidden)]
 pub use distinct::{DistinctQuery, distinct_query};
 mod inner_join;

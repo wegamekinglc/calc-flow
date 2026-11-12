@@ -620,9 +620,9 @@ def _check_stateful_lowering(
 ) -> None:
     from calc_flow.symbolic.distinct import check_lateness
 
-    check_lateness(program, mode_value, late_policy)
     needs_rolling = _program_needs_rolling(program)
     needs_cross_section = _program_needs_cross_section(program)
+    check_lateness(program, mode_value, late_policy, allowed_lateness_micros)
     if _program_needs_stream_join(program):
         _check_stream_join_capability(program, capabilities, mode_value)
     if needs_rolling or needs_cross_section:

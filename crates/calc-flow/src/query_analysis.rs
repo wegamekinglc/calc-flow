@@ -480,6 +480,7 @@ pub(crate) fn analyze_graph(graph: DeclarationGraph) -> Result<QueryAnalysis> {
             );
         }
     }
+    let invalid_distinct_times = distinct::invalid_times(&declarations, &declared_edges);
     let AnalyzedNodes {
         mut by_path,
         proofs,
@@ -490,7 +491,13 @@ pub(crate) fn analyze_graph(graph: DeclarationGraph) -> Result<QueryAnalysis> {
         &mut diagnostics,
         update_semantics,
     )?;
-    distinct::validate(&mut by_path, &proofs, &declared_edges, &mut diagnostics);
+    distinct::validate(
+        &mut by_path,
+        &proofs,
+        &declared_edges,
+        &invalid_distinct_times,
+        &mut diagnostics,
+    );
     let mut edges = analyze_edges(
         &by_path,
         &proofs,
@@ -1158,7 +1165,9 @@ fn stream_facts(node: &Declaration, class: Classification) -> QueryModeFacts {
             finality: QueryFinality::GroupFinal,
             ordering: QueryOrderingFacts::default(),
             reason: format!(
-                "copy_visible_v2: owned-only participating peak; borrowed ingress and other graph owners excluded; duplicate accepted tuples count toward max_rows; {closure}; equivalence is conditional on the same accepted set and successful budgets"
+                "copy_visible_v2: owned-only participating peak; borrowed ingress and other graph owners excluded; duplicate accepted tuples count toward max_rows; {closure}; local late_policy={:?}; layout={}; equivalence is conditional on the same accepted set and successful budgets",
+                spec.late_policy(),
+                spec.state_layout()
             ),
         };
     }

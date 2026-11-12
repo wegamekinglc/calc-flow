@@ -561,3 +561,110 @@ The one nonblocking CI snapshot is reported with the PR in the issue handoff.
 
 The late-policy contract gap described above remains open. These GREEN local
 checks do not turn the draft into complete v2 product acceptance.
+
+## Local late-policy addendum and reviewer F1/F2 correction
+
+This section implements the frozen 118-line addendum to the original API note.
+The previous gap is resolved by that approved persistent contract; its historical
+counterexample and all earlier evidence remain above. The reviewer artifact is
+preserved separately and is neither edited nor staged by the implementer.
+
+The local spec reuses LatePolicySpec. Default Error(envelope) is read when absent
+and omitted when serialized, preserving the existing canonical spec/config and
+layout2 control. Drop(metrics_version=1) is explicit and window-only. Rust exposes
+the consuming builder/getter; Python adds the one trailing keyword; WINDOW SQL
+adds one optional seventh string literal. The schema has a strict two-policy
+subset and excludes bounded_source+Drop. No Runner option or public policy alias
+was added. Each DISTINCT keeps its local policy when global options configure
+independent unmarked rolling/cross-section consumers. Unused global options are
+rejected on this new path; local declarations and shared fan-out remain distinct.
+
+Native processing recognizes closure before admitting history rows, fixing F1's
+full-max_rows counterexample. Closed Drop scans all RecordBatches at one committed
+watermark, stages checked delta/totals and the existing metric sink, releases raw,
+then installs state, commits metrics and invalidates capture without an await or
+fallible operation. NULL/outside rows do not count; affected_batches increments
+once per Data; lateness is W-ts. Error rejects the complete envelope. Schema,
+conversion, cancellation, reservation, staged-sink and overflow errors remain
+failures. No discarded keys or raw owner enters retained state or a metric closure.
+
+Drop adds prepaid declaration/control/transaction storage (64/256/512 bytes) and
+1024 bytes to the capture descriptor quote. Its layout3 control persists strict
+LateMetricDelta totals; Error remains layout2 without that field. Restore rejects
+inconsistent policy/layout/version/cut/metrics before installation. The DISTINCT
+entry uses the async restore path, installs metric totals by replacement and
+mirrors them into runtime status before source entry acknowledgement. It does
+not replay saved totals as new deltas. Version1 layouts (2,3), accounting2 and r9
+remain consistent with capability/export/cache identities; an old layout2-only
+inventory can still admit Error, while Drop and unknown state versions fail.
+
+F2 is fixed with the shared native window_time_column proof used by compile,
+query analysis and source-coordinate tracing. Arithmetic, CAST and truncation
+are Unsupported/capability_mismatch at DISTINCT history; unchanged/pure-renamed
+time stays Supported for Rust DF and SQL macro declarations. No data is read.
+
+### New RED/GREEN evidence
+
+- `cargo test --locked -p calc-flow --test distinct_analysis
+  test_window_analysis_proves_only_original_or_pure_renamed_time`: RED observed
+  Some(Supported) for `ts + INTERVAL '1 microsecond'`; GREEN covers arithmetic,
+  CAST, truncation and pure rename through both Rust declaration forms.
+- The first two `distinct_late_policy` tests were RED: unknown late_policy wire
+  field and rejection of the seventh SQL argument. Both are GREEN with canonical
+  default/error equality and strict policy/version rejection unchanged.
+- The full-history Drop trace was RED at required=4/limit=2 after closure. GREEN
+  emits one final, retains accepted_rows=2 and persists literal totals 2/1/10;
+  repeated restore/replay at W=12 then ts=1 reaches 3/2/11 without another final.
+- Restore mismatch test was RED for positive late totals without a closing
+  watermark. GREEN rejects that cut, missing metrics, unknown version, layouts
+  and Error/Drop swaps while preserving the prior complete capture.
+- Python keyword test was RED at unexpected keyword. The inventory state-version
+  test was RED (did not raise); expression explanation was RED missing the local
+  policy. These pure declaration cases are now GREEN (4 passed) without claiming
+  that the old native module implements Drop.
+- The independent JSON Schema probe was RED accepting bounded_source+Drop.
+  After generation, Draft202012Validator 4.26.0 accepts three literal default/
+  Error/Drop window cases and rejects four bounded/side-output/version/scope
+  negative cases. JSON Schema is a validation utility in the reused environment;
+  it is not a product dependency.
+
+Harness-only compilation corrections (snapshot field equality, public root
+OperatorSpec import and Result-return handling) are not behavior RED evidence.
+The public Rust status check identifies DISTINCT by exported node IDs; source
+and output passthrough nodes legitimately have zero counters, and Rust exposes
+Duration while Python exposes microseconds. No assertion was removed to pass.
+
+### Necessary core checks and Codacy diagnosis
+
+`cargo test --locked -p calc-flow --lib operator::distinct::`: **10 passed**.
+This includes the five existing ownership/budget checks plus new Drop storage,
+transaction/capture prepayment, staged failure/cancellation, replaced restore
+totals and counter-overflow atomicity. Independent new literal quotas are
+31368/31367 (stream control), 31880/31879 (512-byte transaction), and
+434312/434311 (402944-byte prepaid control). Allocation hooks stay zero at B-1.
+The existing literal 9282/9281 normalization and live-capture query checks remain
+GREEN after the ownership-helper refactor.
+
+The targeted integration command with bounded_global_distinct,
+bounded_distinct_window, distinct_analysis, distinct_late_policy,
+distinct_closure, distinct_owned_schema and distinct_admission: **21 passed**.
+It includes actual public Rust DF/SQL stream lowering/export and 3/2/11 status
+for each DISTINCT, plus the old per-batch compatibility and owner release cases.
+The core example independently rebuilt and printed 3 distinct tuples; the
+project-v3 generator succeeded. The unaffected 15 adjacent regressions and the
+prior broader Python matrix are reused rather than rerun by default.
+
+GitHub check-run 131435216694 was completed/action_required: “37 new issues
+(0 max.) of at least minor severity.” Its annotations identify 36 complexity
+findings and one executable-example assert. These were actual code findings,
+not an account-activation problem. Helpers now separate admission, reservation,
+copying, capture, restore and IPC invariants. Tests keep all literal expectations,
+using unwrap for fail-fast setup. The example raises RuntimeError on a bad result
+even under optimized Python. Local Lizard 1.26.0 reports all affected/new DISTINCT
+functions at complexity <=8; no suppression, gate or baseline was changed.
+
+`cargo clippy --locked -p calc-flow --lib --tests -- -D warnings`: GREEN. The
+crate test targets were type/lint checked to include the private quota/metric
+tests after actual pedantic failures; this was not a full regression run.
+Ruff, complexity ratchet, spec references and diff whitespace checks are GREEN.
+Final matching wheel, Python/runtime recovery and CI results follow below.

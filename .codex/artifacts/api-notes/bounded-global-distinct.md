@@ -363,3 +363,121 @@ v2 对外部 backing 的选项评估已完成：可验证的 allocator/owner led
 **本轮内部合同缺口已作决策，无需用户重新授权或选择。** 本文 v2 取代错误的外部 backing 覆盖承诺，并冻结所有权/复制/计量、layout/accounting2 与 r9。真实实施工作是所列六项增量和验证，尚未证明产品满足新政策；由协调器恢复 implementer，再独立 review。更宽 keys（特别浮点代表值）、可认证零拷贝 owner seam、多窗口/多源 cut、replacement/增量输出、top-k/OVER 和 spill 都是后续范围。若实现发现受控新分配无法先 reserve，带具体分配/生存期证据回报，不能暗中扩大借读例外到 retained data。
 
 本修订仅做必要源码核对及文档自检：围栏、Python 片段 AST、相对链接、表格/JSON、policy/版本一致性、analysis 原正文前缀保留与写入范围/空白；具体结果见交付评论。复用原复现日志，Rust/SQL 种子未编译执行，不声称归一化、产品测试或性能已通过。只修订本 note 并向原 analysis 追加决策，没有产品修改、提交/推送、PR 或扩派。交协调器安排 implementer → 独立 reviewer → 修正及门禁后合并；DAL-519 保持 in_progress。
+
+## 迟到策略持久化增补（2026-11-13）
+
+状态：本次局部合同已冻结，**待实现修正**。基线为 PR #605 的 `4d89b7777f2d86cbf4285ec7205ff58709291cf9`，分支仍为 `agent/dal-orchestrator/d83ca711d94c`；本轮开始工作树干净。输入为触发评论 `01a1d13d-b208-75ea-beb3-f7eb31030afc` 和现有 analysis 的“Material contract gap: late-policy representation”。上方 v2 正文保留原样，供并行 reviewer 按指定提交核对；**本增补取代“按既有 error/drop 选择”但未定义持久 selector 的空缺，并具体修订 Drop 所需的 layout/inventory；其余 v2 合同继续有效。** 本轮不改产品、analysis 或 reviewer 的文件，不将已有实现证据记成本次新验证。
+
+### 既有表示与最小配置增量
+
+已核对的实际事实：
+
+- `crates/calc-flow/src/operator/rolling.rs:311,322` 已定义且 crate root 已导出 `LateErrorScope::Envelope`、严格 tagged serde 的 `LatePolicySpec::Error { scope } / Drop { metrics_version } / SideOutput { ... }`。`operator/late_output.rs:132` 校验 Drop 的 metrics_version=1；`operator/stream.rs:596,606,629` 已有可预备后提交的 late metric 数据和 sink。
+- `crates/calc-flow/src/operator/distinct/spec.rs:34,40` 当前只有 ingress_policy/history/state_budget，`sql/distinct.rs:137` 宏只接3/6参数。`operator/distinct/mod.rs:408` 的 closed 分支只报错；而历史行预算检查先于该分支，尚不能正确丢掉已经不进入 H 的 late rows。
+- `python/calc_flow/symbolic/distinct.py:215` 当前以守卫拒绝全局 drop；`symbolic/program.py:796,863` 的 compile_stream/to_project 有默认 late_policy="error"，compile_stream docstring 明示其适用未标记 rolling/cross-section。Rust `program.rs:51` 的 CompileOptions 与 `pipeline/stream.rs:36` 的 StreamRequirements 均没有 job-wide late selector。不能把 runtime 暂存参数当成已存在的持久合同。
+- 当前 `operator/distinct/checkpoint.rs:27,72,303` 已将整个 spec 和 configuration digest 纳入恢复校验，并写 layout2/accounting2；复用这些身份接线比另加 Runner 全局策略更小。
+
+选择**复用现有 LatePolicySpec，在 DistinctSpec 内增加一个 private late_policy 字段**，不新增同义公共枚举、全局 runtime 配置或另一种 DISTINCT 节点。支持域只有 Error(scope=Envelope) 与 Drop(metrics_version=1)。SideOutput、其他 scope/version、未知字段/字面量在构造或严格导入时拒绝，不等 Source 打开。project JSON schema 也必须约束到这个子集，不能因为复用共享 enum 就把 side_output 宣称支持。
+
+默认是 `Error { scope: Envelope }`。wire 缺 late_policy 时按此默认读取；序列化此值必须省略该字段，显式 error 规范化后也省略。这样当前默认 error 的 spec、声明/配置 hash、项目字节和 layout2 checkpoint 保持兼容。Drop 必须显式持久化为下面的字段片段，不提供静默回退：
+
+```json
+{"late_policy":{"kind":"drop","metrics_version":1}}
+```
+
+字段放在 `operator.spec.late_policy`，与 history/state_budget 同级；不是 history 中的参数，也不是项目 runtime.options。`bounded_source` 没有已闭合时间窗口的迟到输入：仅接受默认 Error，显式 Drop 在构造/导入时以 invalid_literal 拒绝；不能保存一个实际不会生效的选择。finite 的 closed_window 接受两种策略以保留同一声明，完整输入筛选/去重结果相同、late counters 为0，没有模拟水位/迟到或跨 execute 状态。
+
+### 四单元入口
+
+Rust 现有两个构造器签名不改，均默认 Error；增加一个不可变消费式配置方法及 getter，复用 crate root 已有类型：
+
+```rust
+impl DistinctSpec {
+    pub fn with_late_policy(self, policy: LatePolicySpec) -> Result<Self>;
+    pub const fn late_policy(&self) -> LatePolicySpec;
+}
+```
+
+`closed_window(...)? .with_late_policy(LatePolicySpec::Drop { metrics_version: 1 })?` 是 Rust DF 的显式 Drop；`.distinct(columns, spec)` 保持。方法拥有并返回配置，校验支持域；不会修改另一份 spec/关系声明。Error(scope=Envelope) 规范化为旧默认；BoundedSource+Drop、SideOutput 或 metrics_version!=1 立即定位 `distinct.spec.late_policy` 拒绝。
+
+Python 只在既有 closed_window 的必选 keyword 后追加一个可选 keyword；不再另加同义 with_late_policy 方法，也不改 bounded_source：
+
+```python
+class DistinctSpec:
+    @classmethod
+    def closed_window(
+        cls, event_time: str, /, *, start_micros: int, end_micros: int,
+        state_budget: StateBudget, late_policy: Literal["error", "drop"] = "error",
+    ) -> DistinctSpec: ...
+```
+
+仍为 frozen owned 声明。late_policy 必须是确切 str 且为小写 error/drop；None、bool、其他值准确 TypeError/ValueError。Python 的 drop 编码为上述原生 Drop map，error 不写 wire 字段。根包与 symbolic 的现有 DistinctSpec export 不增加平行容器；PyO3/stub、schema planner 与 native 描述 seam 同步透传这个字段。
+
+两语言 SQL 仍使用同一个公开 sql(query, tables) 入口；只扩 CF_DISTINCT_WINDOW 的**末尾可选第7个参数**，普通单引号字符串 literal，严格 error/drop，缺省 error。前6项的意义/顺序/类型及其余 SQL 形状约束保持。CF_DISTINCT_BOUNDED 仍只能3参数，不能额外传 drop 或 error。SQL 配置以 literal 编码，宿主 API 仍使用小配置对象，不增加7个宿主位置参数。
+
+```sql
+SELECT DISTINCT q FROM CF_DISTINCT_WINDOW('a', 'ts', 0, 10, 1000, 8388608)
+SELECT DISTINCT q FROM CF_DISTINCT_WINDOW('a', 'ts', 0, 10, 1000, 8388608, 'drop')
+```
+
+第7项为 error 时与省略项导出相同规范 spec；不同 SQL 文本的声明 fingerprint 仍不要求相同。非 literal、NULL、未知字符串、多于7项由同一 Rust AST authority 定位 `sql.distinct.late_policy`/参数数目拒绝；Python 不另写 parser。Rust DF/Python DF/两端 SQL 必须降到同一带本地 late_policy 的 spec，导出后不依赖原 SQL 或 Python 的编译选项。
+
+### Program 编译/导出选项优先级
+
+**DISTINCT 本地 spec 是唯一执行真值。** Program.compile_stream、to_project、stream/execute 转发的 late_policy 与 allowed_lateness_micros 继续只配置既有未标记 rolling/cross-section，不能覆盖、填充或改写 DISTINCT。Rust CompileOptions/StreamRequirements 不增加这两个全局字段；reload 后 Runner 也没有 late override。采用这个边界，避免默认全局 error 意外抹去已持久化 Drop，或 compile/to_project 生成不同语义。
+
+对包含 selected-window DISTINCT 的 Python Program，冻结如下规则；其他图继续已有规则：
+
+| Local DISTINCT / compile request                              | Required result                                                                                 |
+|---------------------------------------------------------------|-------------------------------------------------------------------------------------------------|
+| local Drop + 默认 late_policy="error"、allowed_lateness_micros=0 | 使用并导出本地 Drop；默认全局参数不构成覆盖，也不拒绝这个合法声明。                                                            |
+| local Error/Drop + 非默认全局选项，且有独立未标记 rolling/cross-section      | 全局选项仅作用于那些消费者；每个 DISTINCT 保留各自本地值。                                                              |
+| 没有上述消费者，却传全局 late_policy="drop" 或非零 allowed_lateness          | 编译/导出前 capability_mismatch，指出该选项无适用消费者，提示在 DistinctSpec.closed_window(late_policy="drop") 选择策略。 |
+| 独立 DISTINCT 节点一 Error、一 Drop，默认 compile/to_project            | 两者可同图，逐节点持久化；无全图统一/last-wins。共享同一声明的 fan-out 仍只有一个 owner 与一次 late 决策。                           |
+
+最后一条无适用消费者的拒绝是新 DISTINCT 路径的准确诊断，不扩改普通 row-local-only Program 的旧选项行为。现有 event-window、late-output marker 等自己的选项边界保持。不可用“只要本图有 Drop 就把全局 drop 忽略”掩盖误用；也不通过追踪调用者是否显式传了默认 error 来创造另一套优先级。
+
+本地 Drop 的典型调用（待本增补实现后可用，本轮仅语法检查）：
+
+```python
+spec = cf.DistinctSpec.closed_window(
+    "ts", start_micros=0, end_micros=10,
+    state_budget=cf.StateBudget(1000, 8 << 20), late_policy="drop",
+)
+result = events.distinct(["q"], spec=spec)
+program = cf.Program("window-distinct", mode="stream", outputs={"out": result})
+project = program.to_project()  # Contains Drop; default global error does not override it.
+plan = program.compile_stream()
+```
+
+### 迟到定义、事务与复用 Drop metrics
+
+保留 v2 的闭合定义：只在 start<=ts<end 的所属窗口已经由有效水位 W>=end 关闭后，该行才迟到；W<end 时即使 ts<=W 也不能按 rolling 的逐行阈值丢行。NULL时间/区间外行不属于本窗口，不是 late。每个完整 Data（全部 RecordBatch）只采样一次已提交的有效输入 W；不增加 grace period、二次减 allowed_lateness 或窗口重开。
+
+Error 的 scope 是 envelope：任一 late member 令整个 Data 失败，不改变 history、accepted_rows、closed、已发序号、metrics 或 capture generation；此前成功发出的 final 不回滚。Drop 丢掉所有 late members，忽略该 Data 的 NULL/区间外行，不再发结果/撤回、不重新保存历史。丢弃行不进入 accepted_rows/max_rows；尤其已达到 max_rows 的已闭合 H 仍可成功丢掉新 late Data，不能先做 old_rows+late_rows 的预算拒绝。schema/时间转换错误及取消仍是整个 Data 的错误，不被 Drop 吞掉。
+
+正常 EOF 后 runtime 禁止继续 Data，两策略都不把非法 post-EOF 输入改成普通迟到；取消、断连、sender drop 不变成 EOF。水位闭合后再正常 EOF 不重复 final。finite 完整 H 不产生 late decision。
+
+复用 LatePolicySpec::Drop 也复用其 **metrics_version=1** 合同，不把这个字段当无效装饰：[SCE D7 合同](../specs/symbolic-computation-contract.md) 的 `:525,539,558` 将三个 per-operator 值定义为 checkpointed semantic state。按现有 native 名保存 late_rows、affected_batches、max_lateness_micros，初始0/0/None；一次 Data 丢 n行，前两者分别加n和（n>0时）1，第三者合并这些行的 `checked_u64(i128(W)-i128(ts))` 最大值，使用原始规范事件时间 ts，**不是 W-end**。两个 RecordBatch 仍只增加一次 affected_batches。此增补不新增 NULL-time telemetry；复用 LateMetricDelta 时两个 null_event_time 计数为0。
+
+先验证/扫描全部 Data、预备 metric delta/checked sums 和既有 sink 的 staged update，再放开 raw owner，在同一无 await、不可失败提交段安装新 counters、提交 runtime metric sink 并 invalidate capture。取消、溢出或准备失败不能部分推进 counters/状态/telemetry。可复用 `operator/stream.rs:596,629` 的 PreparedLateMetrics，不将 raw Batch/闭包装入 staged update；Drop 的扫描和控制对象同样遵守 copy_visible_v2 的预留与 raw-owner 释放边界。此时不复制/保留被丢弃的 keys。
+
+### 导出、缓存与恢复身份
+
+Error(scope=Envelope) 的 canonical omission 保留当前所有 default-error 身份；旧没有字段的 v2 project 合法读取为 Error。非默认 Drop 的完整 tagged map 参与 Python node bytes/Rust relation digest、Program fingerprint、native configuration、prepared/cache key 与 checkpoint identity；同一个模式下 Error/Drop 不能共用计划或状态。for_mode 仍共享带策略的声明而不共享状态；全局编译参数的旧 cache scope 保持，但不能替代持久的本地值。
+
+state_version=1、native kind=distinct_v2、ingress_policy=copy_visible_v2、accounting_version=2 保持，计量对象规则不变；追加的策略/metric/control bytes 仍要预付，不靠旧固定额度假称免费。**Error 继续写/读 layout2；Drop 写/读 layout3**，其中 control 额外持久化 late_metrics（复用 LateMetricDelta 的字段与严格格式），spec 中的 metrics_version=1 标定含义。Drop 即使尚未出现 late rows 也写 layout3 和0/0/None，不能把“刚好还没丢过”作为 layout2 兼容证明。Error layout2 不增加该字段；拒绝带不一致 metrics/policy 的 control。
+
+layout3 继续保存 v2 的 owned H/cut/watermark/closed/sequence/digests，三个 Drop totals 校验后恢复，在 source replay 前安装并重建现有 job 汇总；不能把恢复 totals 当新增 delta 重复相加。reject Error↔Drop 恢复、Drop-layout2、Error-layout3、未知 metrics_version/layout、缺 metrics、无效计数、spec/config/schema/engine/cut 不匹配，在安装及 Source open 前失败。不提供从旧 error checkpoint 改策略续算的迁移；需要改选策略时使用新配置和新逻辑执行。
+
+capability distinct@1 的实际清单扩为 state_version1 / layouts=(2,3)，四单元按所选 policy 检查所需布局；旧 runtime 只有layout2时能保留 Error，不能编译/恢复 Drop。project-v3 schema 同步 default/strict subset；不改项目/manifest版本。QueryAnalysis 仍为 schema2/revision9：本次没有新增报告字段或改变已证明历史/终态的含义，reason/explain 展示本地策略和同一接受集合前提；新增配置身份、capability/layout gate 足以避免以旧 Error 证明准入 Drop，不能只看 r9 数字。
+
+### 定向验收与实现交接
+
+1. 四单元分别构造窗口 Error/Drop。Rust builder、Python新keyword、SQL省略/显式error/显式drop均产生正确原生 spec；default-error 规范导出与当前提交相同。Drop 字段、required layout 与 schema/analysis/explain/导出再加载一致；SideOutput、BoundedSource+Drop、错类型/版本/参数数目在读 Source 前拒绝。
+2. 独立轨迹 `[0,10)`，先 `(ts,q)=(0,1),(9,1)`，W=9 还无输出，W=10 final恰为{1}；随后一个 Data 含 `(0,2),(9,3),(10,4),(NULL,5)`。Error 整个 Data 拒绝且 counters=0/0/None；Drop 无新输出，accepted_rows仍2，counters=2/1/Some(10)。跨两个 RecordBatch 仍是一次 affected_batches；max_rows=2 不得妨碍这次 Drop。
+3. 取 Drop 的该 closed checkpoint，恢复后 W=12，再 Data `(1,8)`，应保持原final且 counters=3/2/Some(11)，不重发final。崩溃在后一 Data 的checkpoint提交前时，从前cut重放应得到同样3/2/11而非重复计数。错误schema、取消、counter溢出与预留不足不提交；raw foreign owner 不进入丢弃状态/metric closure。复用已有copy_visible_v2证据，只补这些直接影响。
+4. 测试上述 Program 优先级表、compile_stream与to_project一致、默认全局error不覆盖本地Drop、同图不同策略/共享owner、暖缓存两策略隔离；读取前计数器证明拒绝不创建job/state root。finite同plan完整H/empty/失败后重用仍独立、两策略结果相同、无late counters。
+5. 捕获/恢复检查Error-layout2字节兼容、Drop-layout3及metrics/data/control同时计费、所有policy/layout/version负例，B/B-1只重测新增control/metrics存储的直接峰值。更新现有“drop应拒绝”guard测试为本地Drop成功与误用全局选项准确拒绝，不能直接删除Drop验收或删守卫后忽略选择。
+
+必要产品增量仅为 DistinctSpec默认/验证/getter/builder、Python keyword与wire、Rust宏第7项、共同native闭合分支/事务metrics、layout3 capture/restore与inventory、相关cache/schema/stub/docs及上述定向验证。复用既有late表示和stage helpers，不加新Runner选项或重设计旧窗口/rolling接口。增补无待用户选择项；完成的只是合同决策，PR的drop修正、独立主审与门禁仍待完成，DAL-519保持in_progress。本轮只追加本note并做文档自检，不改产品、不跑产品矩阵、不提交/推送/合并或扩派，也不轮询CI。

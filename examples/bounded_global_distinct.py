@@ -12,5 +12,6 @@ program = cf.Program("unique", engine="sql", inputs=[events], outputs={"out": ou
 result = program.collect(
     {"events": pa.table({"x": pa.array([1, None, 1, None, 2], pa.int64())})}
 )
-assert set(result["out"]["x"].to_pylist()) == {None, 1, 2}
+if set(result["out"]["x"].to_pylist()) != {None, 1, 2}:
+    raise RuntimeError("unexpected DISTINCT tuple set")
 print(result["out"])

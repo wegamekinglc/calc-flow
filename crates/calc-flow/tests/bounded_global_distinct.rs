@@ -12,7 +12,7 @@ use calc_flow::{
 };
 
 #[tokio::test]
-async fn test_distinct_boundedness_is_checked_before_source_or_sink_open() -> Result<()> {
+async fn test_distinct_boundedness_is_checked_before_source_or_sink_open() {
     use calc_flow::{
         SinkBinding, SourceBinding, SourceBoundedness, StreamRequirements, StreamingRunner,
     };
@@ -23,23 +23,28 @@ async fn test_distinct_boundedness_is_checked_before_source_or_sink_open() -> Re
             "events",
             Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)])),
             InputOptions::default(),
-        )?;
-        let out = input.distinct(
-            vec!["x".into()],
-            DistinctSpec::bounded_source(StateBudget::new(2, 8 << 20)?),
-        )?;
+        )
+        .unwrap();
+        let out = input
+            .distinct(
+                vec!["x".into()],
+                DistinctSpec::bounded_source(StateBudget::new(2, 8 << 20).unwrap()),
+            )
+            .unwrap();
         let program = Program::new(
             "preflight",
             CompileMode::Stream,
             BTreeMap::from([("out".into(), out)]),
-        )?;
+        )
+        .unwrap();
         let plan = program
             .compile_stream(
                 &UdfRegistry::new().snapshot(),
                 &StreamRequirements::default(),
                 &CompileOptions::default(),
             )
-            .await?;
+            .await
+            .unwrap();
         let runner = StreamingRunner::without_checkpoints(
             plan,
             BTreeMap::from([(
@@ -51,9 +56,10 @@ async fn test_distinct_boundedness_is_checked_before_source_or_sink_open() -> Re
             )]),
             BTreeMap::from([(
                 "out".into(),
-                vec![SinkBinding::ordinary("sink", ProofSink(opened.clone()))?],
+                vec![SinkBinding::ordinary("sink", ProofSink(opened.clone())).unwrap()],
             )]),
-        )?;
+        )
+        .unwrap();
         let Err(error) = runner.start().await else {
             panic!("unproved source was opened")
         };
@@ -69,7 +75,6 @@ async fn test_distinct_boundedness_is_checked_before_source_or_sink_open() -> Re
         );
         assert_eq!(opened.load(Ordering::SeqCst), 0);
     }
-    Ok(())
 }
 
 struct ProofSource {
@@ -174,7 +179,7 @@ impl calc_flow::StreamSink for StoreSink {
 }
 
 #[tokio::test]
-async fn test_rust_df_and_sql_stream_literal_final_relations_and_old_per_batch() -> Result<()> {
+async fn test_rust_df_and_sql_stream_literal_final_relations_and_old_per_batch() {
     use calc_flow::{
         Cursor, JobState, JsonMap, SinkBinding, SourceBinding, SourceEvent, StreamRequirements,
         StreamingRunner, WatermarkPolicy,
@@ -183,16 +188,20 @@ async fn test_rust_df_and_sql_stream_literal_final_relations_and_old_per_batch()
         "events",
         Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)])),
         InputOptions::default(),
-    )?;
-    let df = input.distinct(
-        vec!["x".into()],
-        DistinctSpec::bounded_source(StateBudget::new(4, 8 << 20)?),
-    )?;
+    )
+    .unwrap();
+    let df = input
+        .distinct(
+            vec!["x".into()],
+            DistinctSpec::bounded_source(StateBudget::new(4, 8 << 20).unwrap()),
+        )
+        .unwrap();
     let sq = calc_flow::sql::sql(
         "SELECT DISTINCT x FROM CF_DISTINCT_BOUNDED('a',4,8388608)",
         BTreeMap::from([("a".into(), input.clone())]),
-    )?;
-    let legacy = input.sql("SELECT DISTINCT x FROM input")?;
+    )
+    .unwrap();
+    let legacy = input.sql("SELECT DISTINCT x FROM input").unwrap();
     let program = Program::new(
         "literal_stream",
         CompileMode::Stream,
@@ -201,14 +210,16 @@ async fn test_rust_df_and_sql_stream_literal_final_relations_and_old_per_batch()
             ("sql".into(), sq),
             ("legacy".into(), legacy),
         ]),
-    )?;
+    )
+    .unwrap();
     let plan = program
         .compile_stream(
             &UdfRegistry::new().snapshot(),
             &StreamRequirements::default(),
             &CompileOptions::default(),
         )
-        .await?;
+        .await
+        .unwrap();
     let source = FiniteSource(
         (1..=2)
             .map(|sequence| SourceEvent::Data {
@@ -223,13 +234,11 @@ async fn test_rust_df_and_sql_stream_literal_final_relations_and_old_per_batch()
         .map(|name| {
             Ok((
                 name.into(),
-                vec![SinkBinding::ordinary(
-                    name,
-                    StoreSink(name.into(), written.clone()),
-                )?],
+                vec![SinkBinding::ordinary(name, StoreSink(name.into(), written.clone())).unwrap()],
             ))
         })
-        .collect::<Result<BTreeMap<_, _>>>()?;
+        .collect::<Result<BTreeMap<_, _>>>()
+        .unwrap();
     let job = StreamingRunner::without_checkpoints(
         plan,
         BTreeMap::from([(
@@ -238,15 +247,18 @@ async fn test_rust_df_and_sql_stream_literal_final_relations_and_old_per_batch()
                 .with_watermark_policy(WatermarkPolicy::Disabled { idle_timeout: None }),
         )]),
         sinks,
-    )?
+    )
+    .unwrap()
     .start()
-    .await?;
+    .await
+    .unwrap();
     assert_eq!(job.wait().await.state, JobState::Completed);
     let written = written.lock().unwrap();
     for name in ["df", "sql"] {
         assert_eq!(written[name].len(), 1);
         let mut values = written[name][0]
-            .table_payload()?
+            .table_payload()
+            .unwrap()
             .batches()
             .iter()
             .flat_map(|r| {
@@ -261,7 +273,6 @@ async fn test_rust_df_and_sql_stream_literal_final_relations_and_old_per_batch()
         assert_eq!(values, vec![None, Some(1)]);
     }
     assert_eq!(written["legacy"].len(), 2);
-    Ok(())
 }
 
 fn unique_operator(rows: u64) -> calc_flow::DistinctOperator {
@@ -397,7 +408,7 @@ async fn test_duplicate_row_budget_and_failed_emit_preserve_committed_capture() 
     Ok(())
 }
 #[tokio::test]
-async fn test_distinct_checkpoint_preserves_duplicate_history_and_closed_state() -> Result<()> {
+async fn test_distinct_checkpoint_preserves_duplicate_history_and_closed_state() {
     use calc_flow::{
         CancellationToken, EdgeCollector, Epoch, JsonMap, OperatorMetadata, StreamJobContext,
         StreamOperator, StreamOperatorContext,
@@ -407,8 +418,9 @@ async fn test_distinct_checkpoint_preserves_duplicate_history_and_closed_state()
     let mut op = unique_operator(2);
     let mut output = EdgeCollector::new(op.output_ports().to_vec());
     op.process_data("input", x_data(vec![Some(1)]), &context, &mut output)
-        .await?;
-    let capture = op.checkpoint(Epoch::INITIAL)?;
+        .await
+        .unwrap();
+    let capture = op.checkpoint(Epoch::INITIAL).unwrap();
     assert_eq!(
         capture.inline_metadata.get("state_layout"),
         Some(&serde_json::json!(2))
@@ -418,19 +430,25 @@ async fn test_distinct_checkpoint_preserves_duplicate_history_and_closed_state()
         Some(&serde_json::json!(2))
     );
     let mut resumed = unique_operator(2);
-    resumed.restore(&capture)?;
+    resumed.restore(&capture).unwrap();
     resumed
         .process_data("input", x_data(vec![Some(1)]), &context, &mut output)
-        .await?;
-    let next = resumed.checkpoint(Epoch::INITIAL)?;
+        .await
+        .unwrap();
+    let next = resumed.checkpoint(Epoch::INITIAL).unwrap();
     let control: serde_json::Value =
         serde_json::from_slice(next.segments["control"].bytes()).unwrap();
     assert_eq!(control["accepted_rows"], 2);
     assert_eq!(control["retained_rows"], 2);
-    resumed.on_end(&context, &mut output).await?;
+    resumed.on_end(&context, &mut output).await.unwrap();
     let events = output.drain("output");
     assert_eq!(events.len(), 1);
-    let record = &events[0].as_data().unwrap().table_payload()?.batches()[0];
+    let record = &events[0]
+        .as_data()
+        .unwrap()
+        .table_payload()
+        .unwrap()
+        .batches()[0];
     assert_eq!(
         record
             .column(0)
@@ -441,18 +459,17 @@ async fn test_distinct_checkpoint_preserves_duplicate_history_and_closed_state()
             .collect::<Vec<_>>(),
         vec![Some(1)]
     );
-    let terminal = resumed.checkpoint(Epoch::INITIAL)?;
+    let terminal = resumed.checkpoint(Epoch::INITIAL).unwrap();
     let mut closed = unique_operator(2);
-    closed.restore(&terminal)?;
-    closed.on_end(&context, &mut output).await?;
+    closed.restore(&terminal).unwrap();
+    closed.on_end(&context, &mut output).await.unwrap();
     assert!(output.drain("output").is_empty());
     let mut bad = capture.clone();
     bad.inline_metadata
         .insert("state_layout".into(), serde_json::json!(1));
     assert!(op.restore(&bad).is_err());
-    let after = op.checkpoint(Epoch::INITIAL)?;
+    let after = op.checkpoint(Epoch::INITIAL).unwrap();
     assert_eq!(after.segments["control"], capture.segments["control"]);
-    Ok(())
 }
 
 #[tokio::test]
@@ -491,7 +508,7 @@ async fn test_distinct_sql_macro_exports_native_policy() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_distinct_stream_copies_raw_owner_and_waits_for_real_end() -> Result<()> {
+async fn test_distinct_stream_copies_raw_owner_and_waits_for_real_end() {
     use calc_flow::{
         CancellationToken, DistinctOperator, EdgeCollector, JsonMap, OperatorMetadata,
         StreamJobContext, StreamOperator, StreamOperatorContext,
@@ -501,8 +518,9 @@ async fn test_distinct_stream_copies_raw_owner_and_waits_for_real_end() -> Resul
         "unique",
         schema.clone(),
         vec!["x".into()],
-        DistinctSpec::bounded_source(StateBudget::new(2, 8 << 20)?),
-    )?;
+        DistinctSpec::bounded_source(StateBudget::new(2, 8 << 20).unwrap()),
+    )
+    .unwrap();
     let mut output = EdgeCollector::new(op.output_ports().to_vec());
     let job = StreamJobContext::new(1, "test", JsonMap::new(), None, CancellationToken::new());
     let context = StreamOperatorContext::new(&job, "unique", None);
@@ -512,9 +530,12 @@ async fn test_distinct_stream_copies_raw_owner_and_waits_for_real_end() -> Resul
     let raw = Batch::table(
         vec![RecordBatch::try_new(schema.clone(), vec![sliced]).unwrap()],
         BatchMetadata::default(),
-    )?;
+    )
+    .unwrap();
     drop(source);
-    op.process_data("input", raw, &context, &mut output).await?;
+    op.process_data("input", raw, &context, &mut output)
+        .await
+        .unwrap();
     assert_eq!(
         observed_buffer.strong_count(),
         1,
@@ -526,31 +547,38 @@ async fn test_distinct_stream_copies_raw_owner_and_waits_for_real_end() -> Resul
             RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![Some(1)]))]).unwrap(),
         ],
         BatchMetadata::default(),
-    )?;
+    )
+    .unwrap();
     op.process_data("input", second, &context, &mut output)
-        .await?;
+        .await
+        .unwrap();
     assert!(output.drain("output").is_empty());
-    op.on_end(&context, &mut output).await?;
+    op.on_end(&context, &mut output).await.unwrap();
     assert_eq!(output.drain("output").len(), 1);
-    op.on_end(&context, &mut output).await?;
+    op.on_end(&context, &mut output).await.unwrap();
     assert!(output.drain("output").is_empty());
-    Ok(())
 }
 
 #[tokio::test]
-async fn test_distinct_v2_finite_owned_history_and_policy() -> Result<()> {
+async fn test_distinct_v2_finite_owned_history_and_policy() {
     let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)]));
-    let input = table_input("events", schema.clone(), InputOptions::default())?;
-    let output = input.distinct(
-        vec!["x".into()],
-        DistinctSpec::bounded_source(StateBudget::new(5, 8 << 20)?),
-    )?;
+    let input = table_input("events", schema.clone(), InputOptions::default()).unwrap();
+    let output = input
+        .distinct(
+            vec!["x".into()],
+            DistinctSpec::bounded_source(StateBudget::new(5, 8 << 20).unwrap()),
+        )
+        .unwrap();
     let program = Program::new(
         "unique",
         CompileMode::Batch,
         BTreeMap::from([("out".into(), output)]),
-    )?;
-    let project = program.to_project(&UdfRegistry::new().snapshot()).await?;
+    )
+    .unwrap();
+    let project = program
+        .to_project(&UdfRegistry::new().snapshot())
+        .await
+        .unwrap();
     let spec = serde_json::to_value(project).unwrap();
     let distinct = spec["graph"]["nodes"]
         .as_array()
@@ -564,7 +592,8 @@ async fn test_distinct_v2_finite_owned_history_and_policy() -> Result<()> {
     );
     let plan = program
         .compile_batch(&UdfRegistry::new().snapshot(), &CompileOptions::default())
-        .await?;
+        .await
+        .unwrap();
     for (values, expected) in [
         (
             vec![Some(1), None, Some(1), None, Some(2)],
@@ -575,14 +604,15 @@ async fn test_distinct_v2_finite_owned_history_and_policy() -> Result<()> {
     ] {
         let record =
             RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(values))]).unwrap();
-        let batch = Batch::table(vec![record], BatchMetadata::default())?;
+        let batch = Batch::table(vec![record], BatchMetadata::default()).unwrap();
         let result = plan
             .execute(
                 BTreeMap::from([("events".into(), batch)]),
                 ExecutionOptions::default(),
             )
-            .await?;
-        let table = result.outputs["out"].table_payload()?;
+            .await
+            .unwrap();
+        let table = result.outputs["out"].table_payload().unwrap();
         assert_eq!(table.schema(), &schema);
         let mut actual = table
             .batches()
@@ -598,5 +628,4 @@ async fn test_distinct_v2_finite_owned_history_and_policy() -> Result<()> {
         actual.sort_unstable();
         assert_eq!(actual, expected);
     }
-    Ok(())
 }
