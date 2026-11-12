@@ -6,9 +6,9 @@ use datafusion::{
     sql::{
         parser::Statement as DFStatement,
         sqlparser::ast::{
-            Expr, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident, ObjectName,
-            Query, Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, Statement,
-            TableFactor, Value, Visit, Visitor,
+            Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident,
+            ObjectName, Query, Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr,
+            Statement, TableAlias, TableFactor, TableWithJoins, Value, Visit, Visitor,
         },
     },
 };
@@ -72,23 +72,33 @@ pub fn event_window_query(text: &str, aliases: &[String]) -> Result<Option<Event
     if !matches!(query.visit(&mut FindWindow), ControlFlow::Break(())) {
         return Ok(None);
     }
+    window_select(query, aliases).map(Some)
+}
+
+fn window_select(query: &Query, aliases: &[String]) -> Result<EventWindowQuery> {
     let SetExpr::Select(select) = query.body.as_ref() else {
         return Err(error("one top-level SELECT required"));
     };
     let (hopping, args) = window_from(select)?;
-    let mut result = window_spec(args, hopping, aliases)?;
+    let result = window_spec(args, hopping, aliases)?;
     let names = group_names(select)?;
     validate_shape(query)?;
     validate_projection(select, &names)?;
-    result.spec = result.spec.group_by(names[2..].iter().cloned())?;
-    for item in &select.projection[names.len()..] {
-        let aggregate = aggregate(item)?;
-        result.spec =
-            result
-                .spec
-                .aggregate(aggregate.function, &aggregate.column, &aggregate.output)?;
-    }
-    Ok(Some(result))
+    let spec = window_fields(result.spec, &names, &select.projection)?;
+    Ok(EventWindowQuery { spec, ..result })
+}
+fn window_fields(
+    spec: WindowSpec,
+    names: &[String],
+    projection: &[SelectItem],
+) -> Result<WindowSpec> {
+    let grouped = spec.group_by(names[2..].iter().cloned())?;
+    projection[names.len()..]
+        .iter()
+        .try_fold(grouped, |spec, item| {
+            let aggregate = aggregate(item)?;
+            spec.aggregate(aggregate.function, &aggregate.column, &aggregate.output)
+        })
 }
 
 fn window_from(select: &Select) -> Result<(bool, &[FunctionArg])> {
@@ -140,30 +150,42 @@ fn window_spec(
     hopping: bool,
     aliases: &[String],
 ) -> Result<EventWindowQuery> {
-    if args.len() != if hopping { 4 } else { 3 } {
+    window_arity(args.len(), hopping)?;
+    let alias = string_arg(&args[0])?;
+    window_alias(&alias, aliases)?;
+    let spec = window_geometry(&args[1..], hopping)?;
+    Ok(EventWindowQuery { alias, spec })
+}
+fn window_arity(length: usize, hopping: bool) -> Result<()> {
+    if length != if hopping { 4 } else { 3 } {
         return Err(invalid(
             "sql.window.geometry",
             "invalid_literal",
             "expected alias, event time, size and (for CF_HOP) slide; epoch origin only, no offset parameter",
         ));
     }
-    let alias = string_arg(&args[0])?;
-    if aliases != [alias.clone()] {
+    Ok(())
+}
+fn window_alias(alias: &str, aliases: &[String]) -> Result<()> {
+    if aliases != [alias] {
         return Err(invalid(
-            &crate::dataframe::segment("sql.tables", &alias),
+            &crate::dataframe::segment("sql.tables", alias),
             "invalid_literal",
             "exactly the referenced input alias must be supplied",
         ));
     }
-    let event_time = string_arg(&args[1])?;
-    let size = duration_arg(&args[2], "size_micros")?;
-    let spec = if hopping {
-        WindowSpec::hopping(&event_time, size, duration_arg(&args[3], "slide_micros")?)?
-    } else {
-        WindowSpec::tumbling(&event_time, size)?
-    };
-    Ok(EventWindowQuery { alias, spec })
+    Ok(())
 }
+fn window_geometry(args: &[FunctionArg], hopping: bool) -> Result<WindowSpec> {
+    let event_time = string_arg(&args[0])?;
+    let size = duration_arg(&args[1], "size_micros")?;
+    if hopping {
+        WindowSpec::hopping(&event_time, size, duration_arg(&args[2], "slide_micros")?)
+    } else {
+        WindowSpec::tumbling(&event_time, size)
+    }
+}
+
 fn group_names(select: &Select) -> Result<Vec<String>> {
     let GroupByExpr::Expressions(groups, modifiers) = &select.group_by else {
         return Err(error("explicit boundary and group columns required"));
@@ -223,14 +245,25 @@ fn aggregate(item: &SelectItem) -> Result<crate::AggregateSpec> {
     else {
         return Err(error("aggregates require a direct column and AS output"));
     };
-    let function = match f.name.to_string().to_ascii_lowercase().as_str() {
-        "count" => AggregateFunction::Count,
-        "sum" => AggregateFunction::Sum,
-        "min" => AggregateFunction::Min,
-        "max" => AggregateFunction::Max,
-        "avg" => AggregateFunction::Avg,
-        _ => return Err(error("supported window aggregates: COUNT/SUM/MIN/MAX/AVG")),
-    };
+    let function = aggregate_function(&f.name)?;
+    let column = aggregate_column(f)?;
+    Ok(crate::AggregateSpec {
+        function,
+        column,
+        output: alias.value.clone(),
+    })
+}
+fn aggregate_function(name: &ObjectName) -> Result<AggregateFunction> {
+    match name.to_string().to_ascii_lowercase().as_str() {
+        "count" => Ok(AggregateFunction::Count),
+        "sum" => Ok(AggregateFunction::Sum),
+        "min" => Ok(AggregateFunction::Min),
+        "max" => Ok(AggregateFunction::Max),
+        "avg" => Ok(AggregateFunction::Avg),
+        _ => Err(error("supported window aggregates: COUNT/SUM/MIN/MAX/AVG")),
+    }
+}
+fn aggregate_column(f: &Function) -> Result<String> {
     let plain = [
         !f.uses_odbc_syntax,
         matches!(f.parameters, FunctionArguments::None),
@@ -253,12 +286,9 @@ fn aggregate(item: &SelectItem) -> Result<crate::AggregateSpec> {
             "DISTINCT and aggregate argument modifiers are unsupported",
         ));
     }
-    Ok(crate::AggregateSpec {
-        function,
-        column: column(expr)?,
-        output: alias.value.clone(),
-    })
+    column(expr)
 }
+
 fn string_arg(arg: &FunctionArg) -> Result<String> {
     if let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))) = arg
         && let Value::SingleQuotedString(value) = &value.value
@@ -302,22 +332,29 @@ pub fn sql_passthrough_columns(
     let Some(query) = query(&statement) else {
         return Ok(None);
     };
+    Ok(columns_for_query(query, text, alias))
+}
+fn columns_for_query(query: &Query, text: &str, alias: &str) -> Option<BTreeMap<String, String>> {
     let SetExpr::Select(select) = query.body.as_ref() else {
-        return Ok(None);
+        return None;
     };
-    let Some(qualifier) = passthrough_relation(select, alias) else {
-        return Ok(None);
-    };
+    let qualifier = passthrough_relation(select, alias)?;
     let registry = crate::expression::default_function_registry();
-    if crate::expression::validate_no_volatile_functions("window", text, registry).is_err() {
-        return Ok(None);
+    if crate::expression::validate_no_volatile_functions("window", text, registry).is_err()
+        || !native_functions(query)
+    {
+        return None;
     }
-    let columns = select
-        .projection
-        .iter()
-        .filter_map(|item| projected_column(item, qualifier))
-        .collect();
-    // Provider functions must not enter the row-local proof through a known name.
+    Some(
+        select
+            .projection
+            .iter()
+            .filter_map(|item| projected_column(item, qualifier))
+            .collect(),
+    )
+}
+fn native_functions(query: &Query) -> bool {
+    let registry = crate::expression::default_function_registry();
     let functions = datafusion::sql::sqlparser::ast::visit_expressions(query, |expr| {
         if let Expr::Function(f) = expr
             && (f.name.0.len() != 1
@@ -329,7 +366,7 @@ pub fn sql_passthrough_columns(
         }
         ControlFlow::Continue(())
     });
-    Ok((!matches!(functions, ControlFlow::Break(()))).then_some(columns))
+    !matches!(functions, ControlFlow::Break(()))
 }
 
 fn identifier_matches(name: &Ident, expected: &str) -> bool {
@@ -343,12 +380,23 @@ fn passthrough_relation<'a>(select: &'a Select, alias: &str) -> Option<&'a Ident
     let [from] = select.from.as_slice() else {
         return None;
     };
+    let (name, correlation) = direct_relation(from)?;
+    if !identifier_matches(name, alias) {
+        return None;
+    }
+    match correlation {
+        Some(correlation) if correlation.columns.is_empty() => Some(&correlation.name),
+        None => Some(name),
+        _ => None,
+    }
+}
+fn direct_relation(from: &TableWithJoins) -> Option<(&Ident, Option<&TableAlias>)> {
     if !from.joins.is_empty() {
         return None;
     }
     let TableFactor::Table {
         name,
-        alias: correlation,
+        alias,
         args: None,
         ..
     } = &from.relation
@@ -358,15 +406,7 @@ fn passthrough_relation<'a>(select: &'a Select, alias: &str) -> Option<&'a Ident
     let [part] = name.0.as_slice() else {
         return None;
     };
-    let name = part.as_ident()?;
-    if !identifier_matches(name, alias) {
-        return None;
-    }
-    match correlation {
-        Some(correlation) if correlation.columns.is_empty() => Some(&correlation.name),
-        None => Some(name),
-        _ => None,
-    }
+    Some((part.as_ident()?, alias.as_ref()))
 }
 fn passthrough_column<'a>(expr: &'a Expr, qualifier: &Ident) -> Option<&'a Ident> {
     match expr {
@@ -389,24 +429,23 @@ fn projected_column(item: &SelectItem, qualifier: &Ident) -> Option<(String, Str
             alias.value.clone(),
             passthrough_column(expr, qualifier)?.value.clone(),
         )),
-        SelectItem::Wildcard(options)
-            if options
-                == &datafusion::sql::sqlparser::ast::WildcardAdditionalOptions::default() =>
-        {
-            Some(("*".into(), "*".into()))
-        }
+        _ => plain_wildcard(item, qualifier).then(|| ("*".into(), "*".into())),
+    }
+}
+fn plain_wildcard(item: &SelectItem, qualifier: &Ident) -> bool {
+    let plain = datafusion::sql::sqlparser::ast::WildcardAdditionalOptions::default();
+    match item {
+        SelectItem::Wildcard(options) => options == &plain,
         SelectItem::QualifiedWildcard(
             SelectItemQualifiedWildcardKind::ObjectName(name),
             options,
-        ) if name.0.len() == 1
-            && name.0[0]
-                .as_ident()
-                .is_some_and(|n| identifier_matches(n, &qualifier.value))
-            && options
-                == &datafusion::sql::sqlparser::ast::WildcardAdditionalOptions::default() =>
-        {
-            Some(("*".into(), "*".into()))
-        }
-        _ => None,
+        ) => qualifier_name(name, qualifier) && options == &plain,
+        _ => false,
     }
+}
+fn qualifier_name(name: &ObjectName, qualifier: &Ident) -> bool {
+    name.0.len() == 1
+        && name.0[0]
+            .as_ident()
+            .is_some_and(|n| identifier_matches(n, &qualifier.value))
 }

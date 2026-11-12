@@ -14,24 +14,7 @@ async fn dataframe_and_sql_windows_export_native_nodes() -> Result<()> {
 async fn mixed_window_paths_preserve_time_proof_and_independent_union() -> Result<()> {
     let udfs = calc_flow::UdfRegistry::new().snapshot();
     for sql in [false, true] {
-        let input = table_input(
-            "events",
-            sample_batch().table_payload()?.schema().clone(),
-            InputOptions::default(),
-        )?;
-        let bars = mixed_window(&input, sql)?;
-        let post = bars
-            .select(vec![bars.column("n")?.alias("n")?])?
-            .sql("SELECT * FROM input")?;
-        let program = Program::new(
-            "mixed",
-            CompileMode::Batch,
-            BTreeMap::from([
-                ("bars".into(), bars),
-                ("post".into(), post),
-                ("outside".into(), input.union_all(&input)?),
-            ]),
-        )?;
+        let program = mixed_program(sql)?;
         let project = program.to_project(&udfs).await?;
         assert_eq!(
             project
@@ -56,6 +39,30 @@ async fn mixed_window_paths_preserve_time_proof_and_independent_union() -> Resul
         assert_eq!(result.outputs["outside"].num_rows(), 6);
     }
     Ok(())
+}
+
+fn mixed_program(sql: bool) -> Result<Program> {
+    let input = table_input(
+        "events",
+        sample_batch().table_payload()?.schema().clone(),
+        InputOptions::default(),
+    )?;
+    let bars = mixed_window(&input, sql)?;
+    let post = mixed_post(&bars)?;
+    Program::new(
+        "mixed",
+        CompileMode::Batch,
+        BTreeMap::from([
+            ("bars".into(), bars),
+            ("post".into(), post),
+            ("outside".into(), input.union_all(&input)?),
+        ]),
+    )
+}
+
+fn mixed_post(bars: &calc_flow::TableExpr) -> Result<calc_flow::TableExpr> {
+    bars.select(vec![bars.column("n")?.alias("n")?])?
+        .sql("SELECT * FROM input")
 }
 
 fn mixed_window(input: &calc_flow::TableExpr, sql: bool) -> Result<calc_flow::TableExpr> {
@@ -110,7 +117,6 @@ async fn rewritten_sql_time_is_rejected_at_the_window_field() -> Result<()> {
 async fn exercise_frontends(hopping: bool) -> Result<()> {
     let program = window_program(hopping)?;
     let udfs = calc_flow::UdfRegistry::new().snapshot();
-    let options = calc_flow::CompileOptions::default();
     let project = program.to_project(&udfs).await?;
     assert_eq!(
         project
@@ -121,7 +127,24 @@ async fn exercise_frontends(hopping: bool) -> Result<()> {
             .count(),
         2
     );
-    let batch = program.compile_batch(&udfs, &options).await?;
+    let expected = if hopping {
+        vec![(-10, 1), (-5, 2), (0, 1), (5, 1), (10, 1)]
+    } else {
+        vec![(-10, 1), (0, 1), (10, 1)]
+    };
+    assert_batch_rows(&program, expected.len()).await?;
+    let stream = compile_stream(&program, &udfs).await?;
+    assert_stream(stream, &expected).await?;
+    Ok(())
+}
+
+async fn assert_batch_rows(program: &Program, count: usize) -> Result<()> {
+    let batch = program
+        .compile_batch(
+            &calc_flow::UdfRegistry::new().snapshot(),
+            &calc_flow::CompileOptions::default(),
+        )
+        .await?;
     let result = batch
         .execute(
             BTreeMap::from([("events".into(), sample_batch())]),
@@ -129,20 +152,23 @@ async fn exercise_frontends(hopping: bool) -> Result<()> {
         )
         .await?;
     for output in result.outputs.values() {
-        assert_eq!(output.num_rows(), if hopping { 5 } else { 3 });
+        assert_eq!(output.num_rows(), count);
     }
 
-    let stream = program
-        .for_mode(CompileMode::Stream)?
-        .compile_stream(&udfs, &calc_flow::StreamRequirements::default(), &options)
-        .await?;
-    let expected = if hopping {
-        vec![(-10, 1), (-5, 2), (0, 1), (5, 1), (10, 1)]
-    } else {
-        vec![(-10, 1), (0, 1), (10, 1)]
-    };
-    assert_stream(stream, &expected).await?;
     Ok(())
+}
+async fn compile_stream(
+    program: &Program,
+    udfs: &calc_flow::UdfRegistrySnapshot,
+) -> Result<calc_flow::StreamExecutionPlan> {
+    program
+        .for_mode(CompileMode::Stream)?
+        .compile_stream(
+            udfs,
+            &calc_flow::StreamRequirements::default(),
+            &calc_flow::CompileOptions::default(),
+        )
+        .await
 }
 
 fn window_program(hopping: bool) -> Result<Program> {
@@ -154,11 +180,7 @@ fn window_program(hopping: bool) -> Result<Program> {
         ])),
         InputOptions::default(),
     )?;
-    let spec = if hopping {
-        WindowSpec::hopping("ts", Duration::from_micros(10), Duration::from_micros(5))?
-    } else {
-        WindowSpec::tumbling("ts", Duration::from_micros(10))?
-    };
+    let spec = geometry(hopping)?;
     let df = input.window(spec.aggregate(AggregateFunction::Count, "q", "n")?)?;
     let call = if hopping {
         "CF_HOP('a', 'ts', 10, 5)"
@@ -176,6 +198,14 @@ fn window_program(hopping: bool) -> Result<Program> {
         CompileMode::Batch,
         BTreeMap::from([("df".into(), df), ("sql".into(), sql)]),
     )
+}
+
+fn geometry(hopping: bool) -> Result<WindowSpec> {
+    if hopping {
+        WindowSpec::hopping("ts", Duration::from_micros(10), Duration::from_micros(5))
+    } else {
+        WindowSpec::tumbling("ts", Duration::from_micros(10))
+    }
 }
 
 fn sample_batch() -> calc_flow::Batch {

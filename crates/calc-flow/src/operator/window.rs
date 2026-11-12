@@ -1206,6 +1206,21 @@ impl WindowAggregateOperator {
     fn prepare_input_batch(
         &self,
         batch: &Batch,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<InputBatchUpdate> {
+        self.prepare_window_input(
+            batch,
+            &WindowInputContext {
+                operator_id: context.operator_id(),
+                watermark: context.input_watermark(),
+                run: None,
+            },
+        )
+    }
+
+    fn prepare_window_input(
+        &self,
+        batch: &Batch,
         context: &WindowInputContext<'_>,
     ) -> Result<InputBatchUpdate> {
         if self.state.ended {
@@ -1943,7 +1958,7 @@ impl super::BatchOperator for WindowAggregateOperator {
             self.spec.clone(),
         )?;
         fresh.state_budget = self.state_budget;
-        let update = fresh.prepare_input_batch(
+        let update = fresh.prepare_window_input(
             batch,
             &WindowInputContext {
                 operator_id: &self.name,
@@ -1986,14 +2001,7 @@ impl StreamOperator for WindowAggregateOperator {
         _output: &mut dyn StreamCollector,
     ) -> Result<()> {
         self.validate_process_input(ingress, &batch, context)?;
-        let update = self.prepare_input_batch(
-            &batch,
-            &WindowInputContext {
-                operator_id: context.operator_id(),
-                watermark: context.input_watermark(),
-                run: None,
-            },
-        )?;
+        let update = self.prepare_input_batch(&batch, context)?;
         let next_metrics = accumulate_late_metrics(self.state.metrics, update.metrics)?;
         context.record_window_metrics(
             update.metrics.late_rows,

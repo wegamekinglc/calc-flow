@@ -47,28 +47,36 @@ def passthrough(node):
 
 
 def time_is_input(node, name):
-    from calc_flow.symbolic.analyzer import _cstr_seq
-
     operation = node.op.name
     if operation == "table_input":
         return True
     if operation == "sql":
-        columns = passthrough(node)
-        if columns is None:
-            return False
-        source = columns.get(name, name if "*" in columns else None)
-        return source is not None and time_is_input(node.args[0], source)
+        return _sql_time_is_input(node, name)
     if operation in {"project", "filter"}:
         return time_is_input(node.args[0], name)
     if operation == "with_columns":
-        names = _cstr_seq(node.attr("names"))
-        if name not in names:
-            return time_is_input(node.args[0], name)
-        value = node.args[names.index(name) + 1]
-        return value.op.name == "column_ref" and time_is_input(
-            value.args[0], value.attr("name").value
-        )
+        return _derived_time_is_input(node, name)
     return False
+
+
+def _sql_time_is_input(node, name):
+    columns = passthrough(node)
+    if columns is None:
+        return False
+    source = columns.get(name, name if "*" in columns else None)
+    return source is not None and time_is_input(node.args[0], source)
+
+
+def _derived_time_is_input(node, name):
+    from calc_flow.symbolic.analyzer import _cstr_seq
+
+    names = _cstr_seq(node.attr("names"))
+    if name not in names:
+        return time_is_input(node.args[0], name)
+    value = node.args[names.index(name) + 1]
+    return value.op.name == "column_ref" and time_is_input(
+        value.args[0], value.attr("name").value
+    )
 
 
 def cache_policy(program):

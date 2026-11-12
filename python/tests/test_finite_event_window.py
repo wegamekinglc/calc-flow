@@ -157,7 +157,8 @@ def test_window_batch_stream_eof_and_compiled_plan_isolation(sql, hop):
         ),
         (table.slice(0, 0), 0),
     ]:
-        out = plan.execute({plan.external_inputs[0]: cf.Batch.from_pyarrow(current)})
+        bindings = {plan.external_inputs[0]: cf.Batch.from_pyarrow(current)}
+        out = plan.execute(inputs=bindings)
         actual = next(iter(out.outputs.values())).to_pyarrow()
         assert actual.num_rows == count
         if current is single:
@@ -225,9 +226,8 @@ def test_window_mixed_graph_retains_shared_and_independent_branches(sql):
         cf.ProjectDocument.model_validate(doc).model_dump_json()
     )
     assert len(reloaded.external_inputs) == 1
-    restored = reloaded.execute(
-        {reloaded.external_inputs[0]: cf.Batch.from_pyarrow(table)}
-    )
+    bindings = {reloaded.external_inputs[0]: cf.Batch.from_pyarrow(table)}
+    restored = reloaded.execute(inputs=bindings)
     actual = {
         tuple(batch.to_pyarrow().column_names): sorted(
             batch.to_pyarrow().to_pylist(), key=repr
@@ -351,6 +351,21 @@ def test_window_sum_promotes_and_empty_has_no_global_row(dtype, output):
 def test_low_level_latest_snapshot_window_is_rejected_before_execution(
     mode, intermediate
 ):
+    document = _snapshot_window_document(mode, intermediate)
+    import json
+
+    runtime = cf.Runtime()
+    compile_plan = (
+        runtime.compile_batch_project
+        if mode == "batch"
+        else runtime.compile_stream_project
+    )
+    for _ in range(2):
+        with pytest.raises(cf.CompileError, match="update_interpretation_mismatch"):
+            compile_plan(json.dumps(document))
+
+
+def _snapshot_window_document(mode, intermediate):
     source, _ = fixture()
     program = cf.Program("latest", mode=mode, outputs={"out": declared(source)})
     document = (
@@ -385,17 +400,7 @@ def test_low_level_latest_snapshot_window_is_rejected_before_execution(
         )
         edge["source_node"] = "passthrough"
     graph["update_semantics"] = "latest_relation"
-    import json
-
-    runtime = cf.Runtime()
-    compile_plan = (
-        runtime.compile_batch_project
-        if mode == "batch"
-        else runtime.compile_stream_project
-    )
-    for _ in range(2):
-        with pytest.raises(cf.CompileError, match="update_interpretation_mismatch"):
-            compile_plan(json.dumps(document))
+    return document
 
 
 @pytest.mark.parametrize("sql", [False, True])
@@ -509,13 +514,9 @@ def test_sum_overflow_and_schema_failure_leave_the_warm_plan_fresh(dtype, maximu
     )
 
     def execute(table):
-        return next(
-            iter(
-                plan.execute(
-                    {plan.external_inputs[0]: cf.Batch.from_pyarrow(table)}
-                ).outputs.values()
-            )
-        ).to_pyarrow()
+        bindings = {plan.external_inputs[0]: cf.Batch.from_pyarrow(table)}
+        output = plan.execute(inputs=bindings)
+        return next(iter(output.outputs.values())).to_pyarrow()
 
     bad = pa.Table.from_arrays(
         [pa.array([0, 1], type=pa.timestamp("us")), pa.array([maximum, 1], type=dtype)],

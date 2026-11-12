@@ -86,34 +86,47 @@ fn time_source(table: &TableExpr, name: &str) -> Result<bool> {
             input,
             columns,
             append,
-        } => {
-            if let Some(column) = columns.iter().find(|c| c.name == name) {
-                if let Scalar::Column { name, .. } = column.value.0.as_ref() {
-                    time_source(input, name)
-                } else {
-                    Ok(false)
-                }
-            } else if *append {
-                time_source(input, name)
-            } else {
-                Ok(false)
-            }
-        }
+        } => project_time_source(input, columns, *append, name),
         RelationKind::Sql { query, tables } if tables.len() == 1 => {
-            let (alias, input) = tables.first_key_value().expect("one input");
-            let Some(columns) = crate::sql::sql_passthrough_columns(query, alias)? else {
-                return Ok(false);
-            };
-            let source = columns
-                .get(name)
-                .map(String::as_str)
-                .or_else(|| columns.contains_key("*").then_some(name));
-            match source {
-                Some(name) => time_source(input, name),
-                None => Ok(false),
-            }
+            sql_time_source(query, tables, name)
         }
         _ => Ok(false),
+    }
+}
+fn project_time_source(
+    input: &TableExpr,
+    columns: &[crate::NamedExpr],
+    append: bool,
+    name: &str,
+) -> Result<bool> {
+    if let Some(column) = columns.iter().find(|c| c.name == name) {
+        if let Scalar::Column { name, .. } = column.value.0.as_ref() {
+            time_source(input, name)
+        } else {
+            Ok(false)
+        }
+    } else if append {
+        time_source(input, name)
+    } else {
+        Ok(false)
+    }
+}
+fn sql_time_source(
+    query: &str,
+    tables: &std::collections::BTreeMap<String, TableExpr>,
+    name: &str,
+) -> Result<bool> {
+    let (alias, input) = tables.first_key_value().expect("one input");
+    let Some(columns) = crate::sql::sql_passthrough_columns(query, alias)? else {
+        return Ok(false);
+    };
+    let source = columns
+        .get(name)
+        .map(String::as_str)
+        .or_else(|| columns.contains_key("*").then_some(name));
+    match source {
+        Some(name) => time_source(input, name),
+        None => Ok(false),
     }
 }
 fn field<'a>(schema: &'a SchemaRef, name: &str, path: &str) -> Result<&'a DataType> {
@@ -152,6 +165,11 @@ fn ordered(dtype: &DataType) -> bool {
     }
 }
 fn validate_fields(schema: &SchemaRef, spec: &WindowSpec, path: &str) -> Result<()> {
+    validate_time(schema, spec, path)?;
+    validate_groups(schema, spec, path)?;
+    validate_aggregates(schema, spec, path)
+}
+fn validate_time(schema: &SchemaRef, spec: &WindowSpec, path: &str) -> Result<()> {
     let role = format!("{path}.event_time");
     let dtype = field(schema, &spec.event_time_column, &role)?;
     let time = matches!(dtype, DataType::Timestamp(TimeUnit::Millisecond, None))
@@ -165,6 +183,9 @@ fn validate_fields(schema: &SchemaRef, spec: &WindowSpec, path: &str) -> Result<
             ),
         ));
     }
+    Ok(())
+}
+fn validate_groups(schema: &SchemaRef, spec: &WindowSpec, path: &str) -> Result<()> {
     for (index, name) in spec.group_by.iter().enumerate() {
         let role = format!("{path}.group_by[{index}]");
         let dtype = field(schema, name, &role)?;
@@ -176,15 +197,13 @@ fn validate_fields(schema: &SchemaRef, spec: &WindowSpec, path: &str) -> Result<
             ));
         }
     }
+    Ok(())
+}
+fn validate_aggregates(schema: &SchemaRef, spec: &WindowSpec, path: &str) -> Result<()> {
     for (index, aggregate) in spec.aggregates.iter().enumerate() {
         let role = format!("{path}.aggregates[{index}].column");
         let dtype = field(schema, &aggregate.column, &role)?;
-        let supported = match aggregate.function {
-            crate::AggregateFunction::Count => true,
-            crate::AggregateFunction::Min | crate::AggregateFunction::Max => ordered(dtype),
-            _ => dtype.is_integer() || dtype.is_floating(),
-        };
-        if !supported {
+        if !aggregate_supported(aggregate.function, dtype) {
             return Err(invalid(
                 &role,
                 "unsupported_type",
@@ -193,4 +212,11 @@ fn validate_fields(schema: &SchemaRef, spec: &WindowSpec, path: &str) -> Result<
         }
     }
     Ok(())
+}
+fn aggregate_supported(function: crate::AggregateFunction, dtype: &DataType) -> bool {
+    match function {
+        crate::AggregateFunction::Count => true,
+        crate::AggregateFunction::Min | crate::AggregateFunction::Max => ordered(dtype),
+        _ => dtype.is_integer() || dtype.is_floating(),
+    }
 }

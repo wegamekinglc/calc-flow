@@ -189,3 +189,56 @@ successful runner start with them instrumented.
 Independent dal-reviewer review and required checks are still required before
 merge. Hand back to the coordinator; do not merge or dispatch another specialist
 from this implementation run. DAL-516 remains in_progress until its actual merge.
+
+
+## PR #600 check corrections
+
+The first pushed implementation commit is `6c32f614a2237de407ff056e6e53fe984d59cda4`.
+The same PR remains the sole delivery: https://github.com/wegamekinglc/calc-flow/pull/600.
+Its Codacy check `130907298406` reported 17 new findings: sixteen complexity
+findings at the hosted limit of 8, plus one SQL-injection classification on a
+call passing an Arrow Batch mapping to `BatchExecutionPlan.execute`. The first
+local complexity check used the installed lizard 1.23.0 and limit 15; that was
+not the hosted policy. The complete hosted findings and local reproduction are
+preserved in `codacy-annotations.json` and `codacy-red-complexity.log`.
+
+The correction separates AST shape/geometry/aggregate/passthrough checks,
+column provenance and per-role dtype validation, example declaration/data/
+validation, and repeated test setup/assertion boundaries. All original literal
+oracles, error expectations, rows, schemas and lifecycle assertions are retained.
+Python Batch bindings now use the explicit `inputs=` argument and a mapping
+variable; they are not SQL text. No rule, threshold, exclusion, complexity
+baseline, test expectation or team definition is weakened.
+
+The bounded `cargo test --locked -p calc-flow --lib operator::window --no-run`
+check also exposed six original inline tests still calling the private stream
+input adapter (expected StreamOperatorContext, received WindowInputContext).
+`red-window-unit-compile.log` records this actual failure. The original private
+stream adapter now remains in place and delegates to the shared private kernel;
+finite execution calls that kernel with its own context. Existing inline tests
+are unchanged. This compiler gap justified adding only the affected window unit
+module to local verification, not running the entire library test suite.
+
+The correction is checked with pinned `lizard==1.26.0 -C 8` over every new code/
+test/example file, affected Ruff checks, focused core integration and window-unit
+checks, core/PyO3 clippy, a fresh candidate wheel and the feature/recovery tests.
+Final head SHA, observed CI state and per-command outcomes are supplied in the
+issue handoff and evidence bundle; pending checks are not described as passed.
+
+
+The window unit module is GREEN: 45 passed, one pre-existing ignored M7
+high-cardinality soak, 3144 unrelated library tests filtered out. The ignored
+soak was not enabled because no performance/full-state-soak task was requested.
+Pinned lizard 1.26.0 at limit 8 and the repository complexity ratchet both pass
+without suppressions; affected Ruff passes; core clippy with warnings denied
+passes after the extraction. Rebuilt-core integration, standalone example and
+new wheel/Python outcomes are retained in the `codacy-*` logs.
+
+
+Correction results: the affected Rust integration targets pass 14 tests; the
+window unit module passes 45 (one unchanged ignored soak); the standalone core
+example passes. The rebuilt wheel with this correction passes all 44 feature
+and 36 recovery tests under `-W error` (80 total), and affected Python adapter
+checks pass separately. Core and PyO3 clippy, pinned limit-8 complexity checks,
+Ruff and the unchanged complexity ratchet are GREEN. The hosted Codacy result
+for the follow-up head is separate and is reported from the final CI snapshot.
