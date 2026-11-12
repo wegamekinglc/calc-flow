@@ -374,3 +374,78 @@ The issue handoff records the repair SHA and one nonblocking new-head CI
 snapshot. Pending hosted checks remain outstanding; no polling, full suite,
 coverage, performance, delegation or merge was added. DAL-517 stays in_progress
 for the coordinator's original reviewer to recheck F1 and its direct impact.
+
+## Windows CI configuration-contract repair
+
+Repair base: `4fb53afb5fd5800aedde79a8791d469c65f80af6`. The original reviewer
+has approved the implementation and F1 repair. Its updated, untracked report
+is preserved without editing or staging (SHA-256
+`e8db9ce71a86b1fd57bb3629707a04c0d37fecf19e949e0978ebf0404b98b155`).
+
+Completed Windows job `131058606499` in run `43181533672` reports **28 passed,
+2 failed** in the config integration target. Its completed log was downloaded
+directly with `gh api repos/wegamekinglc/calc-flow/actions/jobs/131058606499/logs`;
+the overall run need not complete to inspect that job. No CI polling was used.
+Linux reproduces both failures with the existing shared Cargo artifact cache:
+
+```sh
+cargo test --locked -p calc-flow --test config stream_join -- --nocapture
+```
+
+RED: **0 passed, 2 failed, 28 filtered out**. The compile test expects a removed
+stream-only rejection while supplying no batch sources; the validate test expects
+incompatible_runtime while its generic single-input fixture supplies `{input}`.
+Both actually reach the correct global coverage check requiring `{left,right}`.
+This agrees with the frozen dual-lifecycle contract and the actual Windows log;
+no production defect or new API decision was found.
+
+Only `crates/calc-flow/tests/config.rs` and this evidence document change:
+
+- Declare both batch source bindings in a join-specific fixture. A positive
+  test validates the project, compares its validation/compiled fingerprint,
+  compiles batch and the supported host-provided stream graph, and checks both
+  exact input endpoints.
+- Replace the obsolete runtime expectation with separate operator/port and
+  source-coverage regressions. Missing, left-only and wrong `{input}` batch
+  sources must still fail validation and compilation with source_input_mismatch.
+- Retain missing-port, wrong-left/right-name and incompatible-key-type checks.
+  Exercise optional inputs, missing schemas and valid array declarations at
+  either ingress as well: all nine bad port configurations report invalid_ports
+  and fail both batch and stream compilation at the exact input_ports path.
+  Stream compilation must now succeed for the valid graph, replacing the old
+  conditional allowance of unrelated connector errors. The existing connector
+  source-coverage test still passes separately.
+
+GREEN and the directly affected checks:
+
+```sh
+cargo test --locked -p calc-flow --test config stream_join -- --nocapture
+cargo test --locked -p calc-flow --test config
+cargo clippy --locked -p calc-flow --test config -- -D warnings
+rustfmt --edition 2024 --check crates/calc-flow/tests/config.rs
+python scripts/verify_complexity_gates.py
+git diff --check
+```
+
+Results: **4 focused tests pass**, then **all 32 config tests pass**, including
+the unchanged 28 tests; Clippy, Rustfmt, complexity ratchet and whitespace pass.
+Lizard 1.23.0 and pinned 1.26.0 both find CCN **1–3** in the seven added/modified
+functions. The pre-existing assert_closed_models complexity is unchanged;
+no baseline, ignore, global validator or test outside this target was changed.
+
+This repair changes integration tests only. All **1202** recorded native/Python
+source and manifest hashes still match the F1 provenance, including **1144**
+Rust/Cargo build inputs; the **58** loaded Python/stub files match current source.
+The existing native remains
+`2a6d537354830e3d1dc993ac16f73a7e5359cf10bd1352b4f82c9659b186e4a7`.
+No native rebuild, Python rerun, full workspace suite, coverage or performance
+run was necessary. Earlier implementation, independent tester, recovery,
+examples and F1 evidence is reused without claiming fresh execution.
+`target/finite-inner-join/provenance-config-ci.json` records the final commit,
+integration-test hash, preserved reviewer hash, loaded paths and source hashes.
+
+The triggering issue receives the repair SHA, exact command results and one
+nonblocking new-head CI snapshot. Linux results do not claim Windows execution;
+the new Windows and other hosted gates remain for CI. No delegation or merge
+was performed; DAL-517 stays in_progress for the coordinator's gate handling
+and any necessary incremental review.

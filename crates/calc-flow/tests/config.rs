@@ -14,7 +14,8 @@ use calc_flow::{
     PROJECT_FORMAT_VERSION, PipelineBuilder, PipelineSpec, Port, PortEndpoint, PortSpec,
     PositionSpec, ProjectSpec, ProviderRegistry, Result, RunOptions, RuntimeSpec, StateConfig,
     StreamRequirements, StreamRunOptions, UdfKind, UdfReference, UdfRegistry, ValidationReport,
-    compile_project, compile_stream_project, project_json_schema, validate_project,
+    compile_project, compile_stream_project, compile_stream_project_graph, project_json_schema,
+    validate_project,
 };
 use datafusion::arrow::datatypes::DataType;
 use parking_lot::Mutex;
@@ -1122,31 +1123,87 @@ fn stream_join_node(id: &str, key_type: &str) -> NodeSpec {
     }
 }
 
+fn stream_join_project() -> ProjectSpec {
+    let mut value = project(stream_join_node("join", "int64"));
+    value.data_sources = ["left", "right"]
+        .into_iter()
+        .map(|side| DataSourceSpec {
+            id: format!("{side}_source"),
+            input: side.into(),
+            format: "inline_json".into(),
+            data: json!([]),
+        })
+        .collect();
+    value
+}
+
+fn compile_join_stream_graph(
+    value: &ProjectSpec,
+    providers: &ProviderRegistry,
+    udfs: &calc_flow::UdfRegistrySnapshot,
+) -> Result<calc_flow::StreamExecutionPlan> {
+    let mut value = value.clone();
+    value.runtime = RuntimeSpec::Stream(StreamRunOptions::default());
+    value.data_sources.clear();
+    compile_stream_project_graph(&value, providers, udfs, &StreamRequirements::default())
+}
+
+fn invalid_stream_join_nodes() -> Vec<NodeSpec> {
+    let node = stream_join_node("join", "int64");
+    let mut single_input = node.clone();
+    single_input.input_ports.truncate(1);
+    let mut cases = vec![single_input];
+    for side in 0..2 {
+        let mut wrong_name = node.clone();
+        wrong_name.input_ports[side].name = "other".into();
+        let mut optional = node.clone();
+        optional.input_ports[side].required = false;
+        let mut missing_schema = node.clone();
+        missing_schema.input_ports[side].schema.clear();
+        let mut array = node.clone();
+        array.input_ports[side].kind = BatchKind::Array;
+        array.input_ports[side].schema.clear();
+        cases.extend([wrong_name, optional, missing_schema, array]);
+    }
+    cases
+}
+
 #[test]
-fn validate_reports_stream_join_runtime_port_and_operator_issues() {
+fn validate_and_compile_stream_join_in_both_lifecycles() {
     let (providers, udfs) = empty_registries();
+    let value = stream_join_project();
+    let report = validate_project(&value, &providers, &udfs);
+    assert!(report.valid, "{report:?}");
+    let batch = compile_project(&value, &providers, &udfs)
+        .expect("stream_join supports finite batch compilation");
+    assert_eq!(report.fingerprint.as_deref(), Some(batch.fingerprint()));
+    let stream = compile_join_stream_graph(&value, &providers, &udfs)
+        .expect("stream_join retains host-provided stream compilation");
+    for inputs in [batch.external_inputs(), stream.external_inputs()] {
+        assert_eq!(
+            inputs.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["left", "right"]
+        );
+        for side in ["left", "right"] {
+            assert_eq!(inputs[side].node_id, "join");
+            assert_eq!(inputs[side].port, side);
+        }
+    }
+}
 
-    let batch_mode = project(stream_join_node("join", "int64"));
-    let report = validate_project(&batch_mode, &providers, &udfs);
-    assert_issue(&report, "graph.nodes[0].operator", "incompatible_runtime");
-
-    let mut wrong_ports = batch_mode.clone();
-    wrong_ports.graph.nodes[0].input_ports.truncate(1);
-    assert_issue(
-        &validate_project(&wrong_ports, &providers, &udfs),
-        "graph.nodes[0].input_ports",
-        "invalid_ports",
-    );
-
-    let mut wrong_names = batch_mode.clone();
-    wrong_names.graph.nodes[0].input_ports[0].name = "first".into();
-    assert_issue(
-        &validate_project(&wrong_names, &providers, &udfs),
-        "graph.nodes[0].input_ports",
-        "invalid_ports",
-    );
-
-    let mut wrong_key_type = batch_mode;
+#[test]
+fn validate_reports_stream_join_port_and_operator_issues() {
+    let (providers, udfs) = empty_registries();
+    for node in invalid_stream_join_nodes() {
+        let mut value = stream_join_project();
+        value.graph.nodes[0] = node;
+        assert_issue(
+            &validate_project(&value, &providers, &udfs),
+            "graph.nodes[0].input_ports",
+            "invalid_ports",
+        );
+    }
+    let mut wrong_key_type = stream_join_project();
     wrong_key_type.graph.nodes[0].input_ports[0].schema[0].data_type = "float64".into();
     assert_issue(
         &validate_project(&wrong_key_type, &providers, &udfs),
@@ -1156,53 +1213,49 @@ fn validate_reports_stream_join_runtime_port_and_operator_issues() {
 }
 
 #[test]
-fn compile_rejects_stream_join_outside_stream_mode_and_with_invalid_ports() {
+fn compile_rejects_stream_join_invalid_ports_in_both_lifecycles() {
     let (providers, udfs) = empty_registries();
+    for node in invalid_stream_join_nodes() {
+        let mut value = stream_join_project();
+        value.graph.nodes[0] = node;
+        for result in [
+            compile_project(&value, &providers, &udfs).map(|_| ()),
+            compile_join_stream_graph(&value, &providers, &udfs).map(|_| ()),
+        ] {
+            let error = result.expect_err("stream_join requires both exact-schema table inputs");
+            assert!(
+                error
+                    .to_string()
+                    .contains("graph.nodes[0].input_ports [invalid_ports]"),
+                "{error}"
+            );
+        }
+    }
+}
 
-    let mut batch_mode = project(stream_join_node("join", "int64"));
-    batch_mode.data_sources.clear();
-    let error = compile_project(&batch_mode, &providers, &udfs)
-        .expect_err("batch compilation must reject stream_join");
-    assert!(
-        error
-            .to_string()
-            .contains("stream_join is available only in stream runtime mode"),
-        "{error}"
-    );
-
-    let mut stream_mode = batch_mode;
-    stream_mode.runtime = RuntimeSpec::Stream(StreamRunOptions::default());
-    let connectors = ConnectorRegistry::new().snapshot();
-    let compile = |project: &ProjectSpec| {
-        compile_stream_project(
-            project,
-            &providers,
-            &udfs,
-            &connectors,
-            &StreamRequirements::default(),
-        )
-    };
-
-    // The well-formed Join itself must clear stream validation: any failure
-    // here has to come from the incomplete surrounding graph, never from the
-    // stream_join port or operator contract.
-    if let Err(error) = compile(&stream_mode) {
-        let message = error.to_string();
-        assert!(!message.contains("left and right"), "{message}");
-        assert!(!message.contains("incompatible_runtime"), "{message}");
+#[test]
+fn stream_join_batch_sources_must_cover_both_inputs() {
+    let (providers, udfs) = empty_registries();
+    let mut value = stream_join_project();
+    let wrong_sources = project(stream_join_node("join", "int64")).data_sources;
+    for sources in [
+        Vec::new(),
+        vec![value.data_sources[0].clone()],
+        wrong_sources,
+    ] {
+        value.data_sources = sources;
+        assert_issue(
+            &validate_project(&value, &providers, &udfs),
+            "data_sources",
+            "source_input_mismatch",
+        );
+        let error = compile_project(&value, &providers, &udfs)
+            .expect_err("finite stream_join requires exactly left and right sources");
         assert!(
-            !message.contains("identical supported Arrow types"),
-            "{message}"
+            error
+                .to_string()
+                .contains("data_sources [source_input_mismatch]"),
+            "{error}"
         );
     }
-
-    let mut single_input = stream_mode.clone();
-    single_input.graph.nodes[0].input_ports.truncate(1);
-    let error = compile(&single_input).expect_err("stream_join requires both inputs");
-    assert!(error.to_string().contains("stream_join"), "{error}");
-
-    let mut wrong_names = stream_mode;
-    wrong_names.graph.nodes[0].input_ports[1].name = "second".into();
-    let error = compile(&wrong_names).expect_err("stream_join ports must be left and right");
-    assert!(error.to_string().contains("stream_join"), "{error}");
 }
