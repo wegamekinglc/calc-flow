@@ -523,3 +523,82 @@ The reviewer report stays untracked and untouched. Exact increment SHA, source
 manifest and one-shot CI state are in the issue handoff and evidence bundle.
 The coordinator will arrange review of this fixture increment and verify all
 required checks; DAL-516 stays in_progress, with no merge or delegation here.
+
+## Read-only SQL public-diagnostic correction
+
+Approved correction base: `40911db8ef2c8f1518d50fea4ff068f072a8c610`.
+Windows job `130946255210` then exposes a real diagnostic regression in the
+unchanged `readonly_sql_constructor_keeps_public_query_path` assertion. Local
+RED reproduces the failure: `source.sql("DELETE FROM input")` reports
+`invalid query: exactly one SELECT or CTE query is required`, lacking the public
+`sql.query` field and `invalid_literal` code (`sql-errors-rust-red.log`). The
+hosted failure excerpt is also retained.
+
+The new event-window probe runs before `SqlOperator::new` and its original public
+error mapping. Its read-only parser returns `InvalidArgument { field: "query" }`
+directly, bypassing that mapping. The minimum production correction is confined
+to `sql/window.rs::event_window_query`: map only `parse_select_query` failures
+through `invalid("sql.query", "invalid_literal", error)`. Errors from the
+subsequent window AST/spec validation still propagate unchanged, preserving
+`sql.window.geometry` / `invalid_literal` and `sql.window` /
+`capability_mismatch`. This neither widens accepted syntax nor changes SQL/window
+declaration identity, schemas, lowering, execution state or API signatures.
+
+Before the production change, an additional typed Rust test also fails with
+actual field `query` versus expected `sql.query`. Six Python/native seam cases
+fail for the same reason on the verified approved-base native. The cases cover
+DELETE, UPDATE, INSERT, CREATE TABLE, two SELECT statements and malformed SELECT.
+The original Rust assertion and every earlier test/diagnostic assertion in both
+changed test files remain untouched; changes there are additions only.
+
+Exact RED commands:
+
+```sh
+cargo test --locked -p calc-flow --test relational_validation \
+  readonly_sql_constructor_keeps_public_query_path
+cargo test --locked -p calc-flow --test relational_validation \
+  readonly_sql_errors_keep_typed_public_diagnostics
+python -m pytest python/tests/test_finite_event_window.py \
+  -k ordinary_sql_query_error -q -W error
+```
+
+The Rust cases exit 101 for the expected assertion failures; Python reports
+**6 failed / 44 deselected**. The baseline native/product-source correspondence
+is recorded before editing product code in `sql-errors-baseline-provenance.json`.
+No original diagnostic assertion was weakened to produce GREEN.
+
+Direct GREEN commands:
+
+```sh
+cargo test --locked -p calc-flow --test relational_validation
+cargo test --locked -p calc-flow --test relational_frontend --test relational_program \
+  --test finite_event_frontend --test finite_event_time_proof
+python -m pytest python/tests/test_finite_event_window.py \
+  python/tests/test_finite_event_window_review.py python/tests/test_relational_frontend.py \
+  -q -W error
+```
+
+The primary Rust target passes **15** cases, including the original assertion
+and the two new typed-diagnostic cases. The other affected Rust targets pass
+**13** cases. On the freshly rebuilt native, the Python selection passes **125**
+cases, including all six new native descriptor/public-analysis/ordinary compile
+checks in batch and stream, the existing window-specific diagnostics, and the
+earlier F1–F4 cases. Valid ordinary SELECT/CTE and window paths remain covered.
+
+Locked Maturin dev build uses this checkout and the same CPython 3.13 interpreter
+and Cargo artifact cache. The newly loaded native SHA-256 is
+`71461334fd10082ebbd66f2df4629d42555f363959ab064d0e70b2911e340bae`,
+distinct from the approved-base binary; wheel-site Python equals this checkout.
+Generated project schema is unchanged (`sql-errors-native-provenance.log`).
+Core/PyO3 clippy with warnings denied, Rust formatting, changed-file Ruff/format,
+pinned lizard 1.26.0 limit 8, original SQL-security intrafile scan and whitespace
+checks pass. Logs use the `sql-errors-*` prefix.
+
+The reviewer report remains untracked, unchanged and excluded from the commit.
+Only this parser-boundary correction, direct regressions and implementation
+evidence are delivered. The base Approve remains a baseline conclusion; this
+increment needs focused review and current required checks. Exact final SHA,
+source/native manifest and one nonblocking CI snapshot are handed back to the
+coordinator. No full-suite, local coverage, platform, connector-service or
+performance expansion, merge or further delegation is performed. DAL-516 stays
+in_progress.

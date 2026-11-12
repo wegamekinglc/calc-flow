@@ -65,7 +65,8 @@ fn query(statement: &DFStatement) -> Option<&Query> {
 
 #[doc(hidden)]
 pub fn event_window_query(text: &str, aliases: &[String]) -> Result<Option<EventWindowQuery>> {
-    let parsed = crate::expression::parse_select_query(text)?;
+    let parsed = crate::expression::parse_select_query(text)
+        .map_err(|error| invalid("sql.query", "invalid_literal", error))?;
     let statement = parsed.statement();
     let Some(query) = query(&statement) else {
         return Ok(None);

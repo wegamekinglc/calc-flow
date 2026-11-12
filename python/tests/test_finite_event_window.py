@@ -478,6 +478,46 @@ def test_window_sql_geometry_diagnostic_keeps_native_field_and_code():
     )
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "DELETE FROM input",
+        "UPDATE input SET q = 1",
+        "INSERT INTO input VALUES (1)",
+        "CREATE TABLE output (q BIGINT)",
+        "SELECT q FROM input; SELECT q FROM input",
+        "SELECT ( FROM input",
+    ],
+)
+def test_window_probe_keeps_ordinary_sql_query_error_contract(query):
+    import json
+
+    from calc_flow import _native
+
+    diagnostic = json.loads(_native._event_window_query(query, ["input"]))["error"]
+    assert diagnostic["path"] == "sql.query"
+    assert diagnostic["code"] == "invalid_literal"
+    assert diagnostic["message"]
+
+    source, _ = fixture()
+    value = source.sql(query)
+    candidate = cf.Program("readonly", mode="batch", outputs={"out": value})
+    for mode in ("batch", "stream"):
+        program = candidate.for_mode(mode)
+        report = program.analyze()
+        assert any(
+            issue.path == "outputs.out.sql.query" and issue.code == "invalid_literal"
+            for issue in report.issues
+        )
+        compile_plan = (
+            program.compile_batch if mode == "batch" else program.compile_stream
+        )
+        with pytest.raises(
+            cf.CompileError, match=r"outputs.out.sql.query: invalid_literal"
+        ):
+            compile_plan()
+
+
 def test_closed_window_request_does_not_prove_a_graph_without_windows():
     source, _ = fixture()
     program = cf.Program("plain", mode="batch", outputs={"out": source})
