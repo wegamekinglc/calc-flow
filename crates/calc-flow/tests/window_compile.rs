@@ -325,7 +325,7 @@ fn group_type_matrix_accepts_only_the_frozen_g1_types() {
 }
 
 #[test]
-fn configuration_fingerprint_and_stream_only_mode_are_deterministic() {
+fn configuration_fingerprint_and_both_modes_are_deterministic() {
     let input = input_schema(DataType::Int64);
     let spec = WindowSpec::hopping(
         "event_time",
@@ -402,12 +402,10 @@ fn configuration_fingerprint_and_stream_only_mode_are_deterministic() {
         },
     )
     .unwrap();
-    assert!(matches!(
-        PipelineBuilder::new("orders")
-            .unwrap()
-            .add_node("window", batch_operator)
-            .unwrap()
-            .compile_batch(&udfs),
-        Err(CalcFlowError::Compile { .. })
-    ));
+    PipelineBuilder::new("pipeline")
+        .unwrap()
+        .add_node("window", batch_operator)
+        .unwrap()
+        .compile_batch(&udfs)
+        .unwrap();
 }

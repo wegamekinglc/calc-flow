@@ -471,6 +471,7 @@ pub(crate) fn analyze_graph(graph: DeclarationGraph) -> Result<QueryAnalysis> {
         options.portability.as_ref(),
         &mut diagnostics,
     );
+    check_window_history(&by_path, options.portability.as_ref(), &mut diagnostics);
     edges.sort_by(|a, b| a.path.cmp(&b.path));
     diagnostics.sort_by(|a, b| {
         (&a.path, &a.code, status_name(a.status)).cmp(&(&b.path, &b.code, status_name(b.status)))
@@ -482,7 +483,7 @@ pub(crate) fn analyze_graph(graph: DeclarationGraph) -> Result<QueryAnalysis> {
         .map(|_| conjunction(diagnostics.iter().map(|issue| issue.status)));
     Ok(QueryAnalysis {
         schema_version: 2,
-        analysis_revision: 4,
+        analysis_revision: 5,
         update_semantics,
         request: options.portability,
         portability,
@@ -490,6 +491,26 @@ pub(crate) fn analyze_graph(graph: DeclarationGraph) -> Result<QueryAnalysis> {
         edges,
         diagnostics,
     })
+}
+
+fn check_window_history(
+    nodes: &NodeFacts,
+    request: Option<&PortabilityRequest>,
+    diagnostics: &mut Vec<QueryDiagnostic>,
+) {
+    if request.is_some_and(|r| r.history == HistoryScope::EventWindow)
+        && !nodes
+            .values()
+            .any(|node| node.stream.history == HistoryScope::EventWindow)
+    {
+        diagnostic(
+            diagnostics,
+            "options.portability.history",
+            "history_scope_mismatch",
+            SupportStatus::Unsupported,
+            "event_window comparison requires an event-window declaration",
+        );
+    }
 }
 
 type NodeFacts = BTreeMap<String, QueryNodeFacts>;
@@ -672,7 +693,7 @@ fn analyze_edges(
             }
             .into(),
         };
-        let batch = edge_mode(&source.batch, &target.batch);
+        let mut batch = edge_mode(&source.batch, &target.batch);
         let mut stream = edge_mode(&source.stream, &target.stream);
         if !update_semantics.is_legacy() {
             updates::edge(
@@ -681,6 +702,19 @@ fn analyze_edges(
                 &proofs[&edge.target_path],
                 &target.stream.reason,
                 diagnostics,
+            );
+        }
+        if !update_semantics.is_legacy()
+            && window_kind(target_kind)
+            && source.stream.update == UpdateKind::CompleteSnapshot
+        {
+            batch.support = SupportStatus::Unsupported;
+            diagnostic(
+                diagnostics,
+                &format!("{}.batch.update", edge.path),
+                "update_interpretation_mismatch",
+                SupportStatus::Unsupported,
+                "latest_relation cannot feed complete snapshots into an append-only window, including finite wrappers",
             );
         }
         if proofs[&edge.source_path].2 == "snapshot_sql" {
@@ -697,7 +731,7 @@ fn analyze_edges(
             request,
             &stream,
             consumption,
-            proofs[&edge.target_path].1 || target_kind == "union",
+            proofs[&edge.target_path].1 || target_kind == "union" || window_kind(target_kind),
         ) {
             stream.support = SupportStatus::Unsupported;
             diagnostic(
@@ -876,6 +910,11 @@ fn batch_facts(
     } else {
         support
     });
+    if window_kind(&node.kind) {
+        batch.support = node.batch_support.unwrap_or(SupportStatus::Supported);
+        batch.reason =
+            "one finite execute finalizes every nonempty window of its complete input".into();
+    }
     if aggregate && node.kind != "snapshot_sql" {
         batch.history = HistoryScope::CurrentBatch;
         batch.finality = QueryFinality::PerBatch;
@@ -1021,16 +1060,14 @@ fn record_volatile_sql(node: &Declaration, query: &str, diagnostics: &mut Vec<Qu
     }
 }
 
+fn window_kind(kind: &str) -> bool {
+    matches!(kind, "window" | "window_tumbling" | "window_hopping")
+}
+
 fn stream_only_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "snapshot_sql"
-            | "window_tumbling"
-            | "window_hopping"
-            | "window"
-            | "stream_join"
-            | "stream_asof_join"
-            | "stream_only"
+        "snapshot_sql" | "stream_join" | "stream_asof_join" | "stream_only"
     )
 }
 
@@ -1044,7 +1081,7 @@ fn stream_facts(node: &Declaration, class: Classification) -> QueryModeFacts {
     } = class;
     let (mut update, mut finality) = ordinary_lifecycle(aggregate, proof);
     let stream_only = stream_only_kind(&node.kind);
-    if stream_only || node.kind == "union" {
+    if stream_only || window_kind(&node.kind) || node.kind == "union" {
         support = SupportStatus::Supported;
         (history, update, finality) = match node.kind.as_str() {
             "snapshot_sql" => (
@@ -1110,7 +1147,9 @@ fn history_reason(history: HistoryScope) -> &'static str {
             "ordinary aggregates consume accepted input events and emit revisable cumulative snapshots"
         }
         HistoryScope::CurrentBatch => "this declaration reads the current batch",
-        HistoryScope::EventWindow => "groups finalize only on declared event-window closure",
+        HistoryScope::EventWindow => {
+            "window closure emits append-final groups; EOF comparison requires complete H, no discarded assignments and real all_sources_eof"
+        }
         HistoryScope::LatestRelation => "queries latest initialized replacement relations",
         HistoryScope::Unknown => "no rule proves this declaration's history",
     }
@@ -1145,8 +1184,6 @@ fn history_mismatch(
         || (request.comparison == Comparison::FinalRelation
             && proof.counterexample()
             && facts.stream.update == UpdateKind::Append)
-        || (request.history == HistoryScope::EventWindow
-            && facts.stream.history != HistoryScope::EventWindow)
 }
 
 fn union_latest_history(proof: sql::Proof, request: &PortabilityRequest) -> bool {
@@ -1175,6 +1212,20 @@ fn obligations(
     diagnostics: &mut Vec<QueryDiagnostic>,
 ) {
     record_unknown_support(node, facts, diagnostics);
+    if window_kind(&node.kind) {
+        if request.cutoff != ComparisonCutoff::AllSourcesEof
+            || request.history != HistoryScope::AcceptedHistory
+        {
+            diagnostic(
+                diagnostics,
+                &format!("{}.stream.finality", node.path),
+                "finality_unproven",
+                SupportStatus::Unknown,
+                "finite execution finalizes complete H; no concrete closed-window prefix is selected by this request",
+            );
+        }
+        return;
+    }
     if history_mismatch(request, facts, proof, aggregate) {
         diagnostic(
             diagnostics,

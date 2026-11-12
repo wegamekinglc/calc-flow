@@ -607,6 +607,11 @@ def _contains_event_window(node: Node, /) -> bool:
         visited.add(current.digest)
         if current.op.name in _EVENT_WINDOW_OPS and current.op.version == 2:
             return True
+        if current.op.name == "sql":
+            from calc_flow.symbolic.event_window_sql import _window_candidate
+
+            if _window_candidate(current):
+                return True
         pending.extend(current.args)
     return False
 
@@ -639,6 +644,7 @@ class _Analyzer:
         self._window_input_schemas: dict[str, tuple[Field, ...]] = {}
         self._native_row_schemas: dict[str, tuple[Field, ...]] = {}
         self._union_plans: dict[str, object] = {}
+        self._sql_window_nodes: dict[str, Node] = {}
         self._issues: list[AnalysisIssue] = []
         self._table_cache: dict[str, TableFacts] = {}
         self._invalid_table_nodes: set[str] = set()
@@ -900,6 +906,12 @@ class _Analyzer:
         from calc_flow.symbolic.aggregate import validate
 
         validate(self, node, path)
+        if "window" in self.table(node.args[0], f"{path}.aggregate.value").state:
+            self.issue(
+                path,
+                "capability_mismatch",
+                "event window outputs support only stateless table transformations",
+            )
         return self._sql_table(node, path)
 
     def _union_table(self, node: Node, path: str, /) -> TableFacts:
@@ -907,6 +919,12 @@ class _Analyzer:
             self.table(child, f"{path}.union_all.inputs[{index}]")
             for index, child in enumerate(node.args)
         )
+        if any("window" in facts.state for facts in inputs):
+            self.issue(
+                path,
+                "capability_mismatch",
+                "event window outputs support only stateless table transformations",
+            )
         expected = inputs[0].schema
         from calc_flow.symbolic.union import schema_mismatch
 
@@ -943,12 +961,55 @@ class _Analyzer:
     def _sql_table(self, node: Node, path: str, /) -> TableFacts:
         inputs = self._sql_inputs(node, path)
         empty = self._sql_empty(node, inputs)
+        if any("window" in facts.state for facts in inputs.values()):
+            from calc_flow.symbolic.event_window_sql import passthrough
+
+            if passthrough(node) is None:
+                self.issue(
+                    f"{path}.sql.value",
+                    "capability_mismatch",
+                    "event window outputs require deterministic row-local SQL",
+                )
+        if node.op.name == "sql":
+            window = self._sql_window(node, path)
+            if window is not None:
+                return window
         union = self._maybe_sql_union(node, inputs, path)
         if union is not None:
             return replace(empty, schema=union)
         if self._issues or self._sql_mode_rejected(node, path) or self._runtime is None:
             return empty
         return self._planned_sql_table(node, inputs, path, empty)
+
+    def _sql_window(self, node, path):
+        from calc_flow.symbolic.event_window_sql import native_plan, window_node
+
+        try:
+            plan = native_plan(node)
+            if plan is None:
+                return None
+            if "error" in plan:
+                diagnostic = plan["error"]
+                self.issue(
+                    f"{path}.{diagnostic['path']}",
+                    diagnostic["code"],
+                    diagnostic["message"],
+                )
+                return TableFacts(
+                    (), _SQLRowOrigin(node.digest), frozenset({"window"}), None, (), ()
+                )
+            window = window_node(node, plan)
+            self._sql_window_nodes[node.digest] = window
+            result = self._event_window_table(window, path, role=f"{path}.sql.window")
+            self._window_input_schemas[node.digest] = self._window_input_schemas[
+                window.digest
+            ]
+            return replace(result, lineage=_WindowRowOrigin(node.digest))
+        except (CompileError, ConfigError, ExecutionError, ValueError) as error:
+            self.issue(f"{path}.sql.window", "capability_mismatch", str(error))
+            return TableFacts(
+                (), _SQLRowOrigin(node.digest), frozenset({"window"}), None, (), ()
+            )
 
     def _maybe_sql_union(self, node, inputs, path):
         if node.op.name == "sql" and len(node.args) > 1:
@@ -1654,8 +1715,8 @@ class _Analyzer:
             child.sequence_by,
         )
 
-    def _event_window_table(self, node: Node, path: str, /) -> TableFacts:
-        role = f"{path}.{node.op.name}"
+    def _event_window_table(self, node: Node, path: str, /, *, role=None) -> TableFacts:
+        role = role or f"{path}.{node.op.name}"
         self._event_window_capability(role)
         self._window_input_path(node.args[0], f"{role}.value", set())
         child = self.table(node.args[0], f"{role}.value")
@@ -1691,9 +1752,9 @@ class _Analyzer:
             f"{role}.event_time",
             _WINDOW_TIME_TYPES,
         )
-        if time_field is not None and not _table_field_resolves_to_input(
-            node.args[0], event_time
-        ):
+        from calc_flow.symbolic.event_window_sql import time_is_input
+
+        if time_field is not None and not time_is_input(node.args[0], event_time):
             self.issue(
                 f"{role}.event_time",
                 "capability_mismatch",
@@ -1727,22 +1788,42 @@ class _Analyzer:
         self, node: Node, child: TableFacts, fields: list[Field], role: str, /
     ) -> tuple[Field, ...]:
         exact_input = child.schema
-        if self._mode == "stream" and not self._issues:
+        if not self._issues:
             exact_input = self._native_row_schema(
                 node.args[0], child.schema, f"{role}.value"
             )
         self._window_input_schemas[node.digest] = exact_input
         exact_by_name = {field.name: field for field in exact_input}
         groups = frozenset(_cstr_seq(node.attr("group_by")))
-        return tuple(
+        projected = tuple(
             exact_by_name[field.name] if field.name in groups else field
             for field in fields
+        )
+        if self._issues or self._runtime is None:
+            return projected
+        import json
+
+        from calc_flow import _native
+        from calc_flow.symbolic.lower.event_windows import _window_node, _WindowPlan
+        from calc_flow.symbolic.lower.schema import _arrow_schema, _fields
+
+        spec = _window_node(_WindowPlan(node, "schema", exact_input, projected))[
+            "operator"
+        ]["spec"]
+        return _fields(
+            _native._event_window_schema(json.dumps(spec), _arrow_schema(exact_input))
         )
 
     def _window_input_path(self, node: Node, path: str, seen: set[str], /) -> None:
         if node.digest in seen:
             return
         seen.add(node.digest)
+        if node.op.name == "sql":
+            from calc_flow.symbolic.event_window_sql import passthrough
+
+            if passthrough(node) is not None:
+                self._window_input_path(node.args[0], f"{path}.sql.value", seen)
+                return
         if node.op.name not in _ROW_LOCAL_PRIMITIVES | {
             "table_input",
             "project",
@@ -1772,11 +1853,6 @@ class _Analyzer:
             self._window_input_path(argument, argument_path, seen)
 
     def _event_window_capability(self, path: str, /) -> None:
-        if self._mode != "stream":
-            self.issue(
-                path, "unsupported_mode", "symbolic event windows require stream mode"
-            )
-            return
         capabilities = self._capabilities
         capability = (
             next(
@@ -1792,12 +1868,12 @@ class _Analyzer:
         )
         if capability is not None and all(
             (
-                "stream" in capability.modes,
+                self._mode in capability.modes,
                 capability.finality == "group_final_append_only",
                 capability.stateful,
                 capability.checkpoint_support == "checkpointed_stateful",
                 capability.state_version == 1,
-                capability.state_layouts == (1,),
+                capability.state_layouts == (1, 2),
                 capability.requires_watermark,
                 capability.microbatch_invariant,
                 capability.deterministic,
@@ -1813,7 +1889,7 @@ class _Analyzer:
             path,
             "capability_mismatch",
             "event windows require native window@1 with final append-only output,"
-            " deterministic replay, watermark support, and checkpoint layout 1",
+            " deterministic replay, watermark support, and checkpoint layouts 1/2",
         )
 
     def _window_field(

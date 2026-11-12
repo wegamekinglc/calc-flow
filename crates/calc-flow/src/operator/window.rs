@@ -486,6 +486,23 @@ struct WindowSnapshotMetadata {
     segment_inventory: Vec<SegmentDescriptor>,
 }
 
+struct WindowInputContext<'a> {
+    operator_id: &'a str,
+    watermark: Option<EventTime>,
+    run: Option<&'a crate::RunContext>,
+}
+impl WindowInputContext<'_> {
+    fn operator_id(&self) -> &str {
+        self.operator_id
+    }
+    fn input_watermark(&self) -> Option<EventTime> {
+        self.watermark
+    }
+    fn check_cancelled(&self) -> Result<()> {
+        self.run.map_or(Ok(()), crate::RunContext::check_cancelled)
+    }
+}
+
 struct InputBatchUpdate {
     accumulators: BTreeMap<WindowKey, AccumulatorRow>,
     // Whether each key, in `accumulators` order, was new to live state.
@@ -1189,7 +1206,7 @@ impl WindowAggregateOperator {
     fn prepare_input_batch(
         &self,
         batch: &Batch,
-        context: &StreamOperatorContext<'_>,
+        context: &WindowInputContext<'_>,
     ) -> Result<InputBatchUpdate> {
         if self.state.ended {
             return Err(operator_error(
@@ -1219,11 +1236,12 @@ impl WindowAggregateOperator {
     fn prepare_input_batch_rowwise(
         &self,
         batch: &Batch,
-        context: &StreamOperatorContext<'_>,
+        context: &WindowInputContext<'_>,
     ) -> Result<InputBatchUpdate> {
         let table = batch.table_payload()?;
         let mut scratch = self.new_scratch();
         for record in table.batches() {
+            context.check_cancelled()?;
             let columns =
                 RecordColumns::new(record, &self.spec, &self.compiled, context.operator_id())?;
             for row in 0..record.num_rows() {
@@ -1238,7 +1256,7 @@ impl WindowAggregateOperator {
     fn prepare_input_batch_columnar(
         &self,
         batch: &Batch,
-        context: &StreamOperatorContext<'_>,
+        context: &WindowInputContext<'_>,
     ) -> Result<InputBatchUpdate> {
         let table = batch.table_payload()?;
         let mut scratch = self.new_scratch();
@@ -1251,6 +1269,7 @@ impl WindowAggregateOperator {
             .map(|(default, compiled)| SlotColumn::new(default, &compiled.input_type))
             .collect();
         for record in table.batches() {
+            context.check_cancelled()?;
             let columns =
                 RecordColumns::new(record, &self.spec, &self.compiled, context.operator_id())?;
             let mut pairs = std::mem::take(&mut scratch.pairs);
@@ -1280,7 +1299,7 @@ impl WindowAggregateOperator {
         &self,
         columns: &RecordColumns<'a>,
         row: usize,
-        context: &StreamOperatorContext<'_>,
+        context: &WindowInputContext<'_>,
         scratch: &mut BatchScratch<'a>,
         pairs: &mut Vec<(u32, u32)>,
     ) -> Result<()> {
@@ -1308,7 +1327,7 @@ impl WindowAggregateOperator {
         &self,
         columns: &RecordColumns<'a>,
         row: usize,
-        context: &StreamOperatorContext<'_>,
+        context: &WindowInputContext<'_>,
         scratch: &mut BatchScratch<'a>,
     ) -> Result<Option<usize>> {
         let operator_id = context.operator_id();
@@ -1418,7 +1437,7 @@ impl WindowAggregateOperator {
         &self,
         columns: &RecordColumns<'a>,
         row: usize,
-        context: &StreamOperatorContext<'_>,
+        context: &WindowInputContext<'_>,
         scratch: &mut BatchScratch<'a>,
     ) -> Result<()> {
         let Some(group) = self.resolve_row(columns, row, context, scratch)? else {
@@ -1899,6 +1918,65 @@ impl OperatorMetadata for WindowAggregateOperator {
 }
 
 #[async_trait]
+impl super::BatchOperator for WindowAggregateOperator {
+    async fn process(
+        &mut self,
+        inputs: &BTreeMap<String, Batch>,
+        context: &super::BatchOperatorContext<'_>,
+    ) -> Result<BTreeMap<String, Batch>> {
+        context.run.check_cancelled()?;
+        if inputs.len() != 1 {
+            return Err(operator_error(
+                &self.name,
+                "window requires exactly one input",
+            ));
+        }
+        let batch = inputs
+            .get("input")
+            .ok_or_else(|| operator_error(&self.name, "missing input"))?;
+        if batch.table_payload()?.schema() != self.input_ports[0].schema().expect("exact input") {
+            return Err(operator_error(&self.name, "window input schema mismatch"));
+        }
+        let mut fresh = Self::new(
+            &self.name,
+            batch.table_payload()?.schema().clone(),
+            self.spec.clone(),
+        )?;
+        fresh.state_budget = self.state_budget;
+        let update = fresh.prepare_input_batch(
+            batch,
+            &WindowInputContext {
+                operator_id: &self.name,
+                watermark: None,
+                run: Some(context.run),
+            },
+        )?;
+        let record = build_output_record(
+            &update.accumulators,
+            &self.spec,
+            &self.compiled,
+            self.output_ports[0].schema().expect("exact output"),
+            &self.name,
+        )?;
+        context.run.check_cancelled()?;
+        let mut records = Vec::new();
+        crate::datafusion::push_bounded_sql_batch(
+            &mut records,
+            &mut 0,
+            &mut 0,
+            record,
+            crate::datafusion::MAX_SQL_RESULT_ROWS,
+            crate::datafusion::MAX_SQL_RESULT_BYTES,
+        )?;
+        let output = Batch::table(
+            records,
+            crate::BatchMetadata::new(&self.name, 0, BTreeMap::new())?,
+        )?;
+        Ok(BTreeMap::from([("output".into(), output)]))
+    }
+}
+
+#[async_trait]
 impl StreamOperator for WindowAggregateOperator {
     async fn process_data(
         &mut self,
@@ -1908,7 +1986,14 @@ impl StreamOperator for WindowAggregateOperator {
         _output: &mut dyn StreamCollector,
     ) -> Result<()> {
         self.validate_process_input(ingress, &batch, context)?;
-        let update = self.prepare_input_batch(&batch, context)?;
+        let update = self.prepare_input_batch(
+            &batch,
+            &WindowInputContext {
+                operator_id: context.operator_id(),
+                watermark: context.input_watermark(),
+                run: None,
+            },
+        )?;
         let next_metrics = accumulate_late_metrics(self.state.metrics, update.metrics)?;
         context.record_window_metrics(
             update.metrics.late_rows,

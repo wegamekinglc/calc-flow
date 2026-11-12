@@ -764,9 +764,9 @@ asynchronous and accepts only `Batch` values.
 ### Engine boundary
 
 `ExpressionOperator`, `SqlOperator`, `RollingOperator`, and
-`CrossSectionOperator` and exact-schema table `UnionOperator` are built-in
-operators that implement both `BatchOperator` and `StreamOperator`;
-`WindowAggregateOperator`, `StreamJoinOperator`, and
+`CrossSectionOperator`, exact-schema table `UnionOperator`, and
+`WindowAggregateOperator` are built-in operators that implement both
+`BatchOperator` and `StreamOperator`; `StreamJoinOperator` and
 `StreamAsofJoinOperator` are stream-only. Add them through `PipelineBuilder::add_node`, which accepts a
 `NodeOperator` conversion from a boxed built-in, custom batch operator, or
 custom stream operator.
@@ -1388,8 +1388,10 @@ generation, idle/reactivation, deterministic timers, and multi-ingress
 progress.
 
 `WindowSpec` declares fixed UTC tumbling or hopping windows and ordered
-aggregates. `WindowAggregateOperator` is stream-only: it updates incremental
-state, classifies late row-window assignments against the current input
+aggregates. `TableExpr::window(spec)` and the explicit `CF_TUMBLE` / `CF_HOP`
+SQL dialect create a shared window boundary. In batch mode,
+`WindowAggregateOperator` uses fresh temporary state and finalizes the complete
+input. Its stream lifecycle updates incremental state, classifies late row-window assignments against the current input
 watermark, emits closed windows in deterministic order, and snapshots retained
 Arrow IPC deltas. Retained accumulators default to the JSON counter range,
 9,007,199,254,740,991 windows and logical bytes, without a smaller implicit budget.

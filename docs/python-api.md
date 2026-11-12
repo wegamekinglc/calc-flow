@@ -797,7 +797,7 @@ the engine implementation:
 | `sql@1`              | batch, stream | unproven                | checkpointed_stateful | 2             | 3, 4             |
 | `stream_asof_join@1` | stream        | group_final_append_only | checkpointed_stateful | 3             | 10               |
 | `stream_join@1`      | stream        | unproven                | checkpointed_stateful | 1             | 1, 2, 3          |
-| `window@1`           | stream        | group_final_append_only | checkpointed_stateful | 1             | 1                |
+| `window@1`           | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1, 2             |
 
 The rolling inventory includes retained-history and accumulator layouts as well
 as columnar layout `3` and cumulative layout `4`. See
@@ -805,7 +805,9 @@ as columnar layout `3` and cumulative layout `4`. See
 implemented encoding and restore rules.
 
 `cross_section@1`, `rolling@1`, `stream_asof_join@1`, `stream_join@1`, and
-`window@1` are stateful operators that require a watermark; aggregate-bearing
+`window@1` describe stream state and watermark requirements. Finite windows
+finalize the complete input in fresh temporary state without watermarks or
+checkpoint recovery. Aggregate-bearing
 `sql@1` is stateful without requiring one. Row-local SQL remains stateless.
 `cross_section@1`, `expression@1`, `rolling@1`, `stream_asof_join@1`, and
 `window@1` are micro-batch invariant. All seven

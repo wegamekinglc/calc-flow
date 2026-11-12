@@ -26,6 +26,7 @@ pub(crate) enum CompiledBatchOperator {
     Expression(ExpressionOperator),
     Sql(SqlOperator),
     Union(crate::UnionOperator),
+    Window(crate::WindowAggregateOperator),
     Rolling(crate::RollingOperator),
     CrossSection(crate::CrossSectionOperator),
 }
@@ -39,11 +40,11 @@ impl CompiledBatchOperator {
                 operator.validate_batch()?;
                 Ok(Self::Union(operator))
             }
+            NodeOperator::Window(operator) => Ok(Self::Window(operator)),
             NodeOperator::Rolling(operator) => Ok(Self::Rolling(operator)),
             NodeOperator::CrossSection(operator) => Ok(Self::CrossSection(operator)),
             NodeOperator::Batch(operator) => Ok(Self::External(operator)),
             NodeOperator::SnapshotSql(_)
-            | NodeOperator::Window(_)
             | NodeOperator::StreamJoin(_)
             | NodeOperator::StreamAsofJoin(_)
             | NodeOperator::Stream(_) => Err(CalcFlowError::Compile {
@@ -62,6 +63,7 @@ impl CompiledBatchOperator {
             | Self::Sql(_)
             | Self::Rolling(_)
             | Self::CrossSection(_)
+            | Self::Window(_)
             | Self::Union(_) => Ok(Value::Null),
         }
     }
@@ -73,6 +75,7 @@ impl CompiledBatchOperator {
             | Self::Sql(_)
             | Self::Rolling(_)
             | Self::CrossSection(_)
+            | Self::Window(_)
             | Self::Union(_)
                 if state.is_null() =>
             {
@@ -82,6 +85,7 @@ impl CompiledBatchOperator {
             | Self::Sql(_)
             | Self::Rolling(_)
             | Self::CrossSection(_)
+            | Self::Window(_)
             | Self::Union(_) => Err(CalcFlowError::Format {
                 message: "stateless operator state must be null".into(),
             }),
@@ -95,6 +99,7 @@ impl CompiledBatchOperator {
             | Self::Sql(_)
             | Self::Rolling(_)
             | Self::CrossSection(_)
+            | Self::Window(_)
             | Self::Union(_) => Ok(()),
         }
     }
@@ -107,6 +112,11 @@ impl CompiledBatchOperator {
     ) -> Result<BTreeMap<String, Batch>> {
         match self {
             Self::External(operator) => {
+                operator
+                    .process(inputs, &BatchOperatorContext { run })
+                    .await
+            }
+            Self::Window(operator) => {
                 operator
                     .process(inputs, &BatchOperatorContext { run })
                     .await
@@ -245,7 +255,6 @@ fn validate_finite_node(node_id: &str, operator: &NodeOperator) -> Result<()> {
     match operator {
         NodeOperator::Union(union) => union.validate_batch(),
         NodeOperator::SnapshotSql(_)
-        | NodeOperator::Window(_)
         | NodeOperator::StreamJoin(_)
         | NodeOperator::StreamAsofJoin(_)
         | NodeOperator::Stream(_) => Err(CalcFlowError::Compile {

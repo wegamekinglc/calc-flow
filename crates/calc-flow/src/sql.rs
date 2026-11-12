@@ -1,8 +1,11 @@
 //! Read-only SQL relations composable with typed `DataFrame` declarations.
 
 mod union;
+mod window;
 #[doc(hidden)]
 pub use union::{UnionArm, UnionArmQuery, UnionPlan, plan_union_all, union_all_queries};
+#[doc(hidden)]
+pub use window::{EventWindowQuery, event_window_query, sql_passthrough_columns};
 
 use crate::{
     Result, SqlOperator, TableExpr,
@@ -37,6 +40,9 @@ pub fn sql(query: &str, tables: BTreeMap<String, TableExpr>) -> Result<TableExpr
                 "normalized SQL aliases must be unique",
             ));
         }
+    }
+    if let Some(plan) = event_window_query(query, &tables.keys().cloned().collect::<Vec<_>>())? {
+        return tables[&plan.alias].window_relation(plan.spec, true);
     }
     SqlOperator::new("sql", query, tables.keys().cloned().collect(), vec![])
         .map_err(|error| invalid("sql.query", "invalid_literal", error))?;

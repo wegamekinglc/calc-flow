@@ -246,7 +246,7 @@ def _node_from_dict(node):
 
 def _wire_semantics(value: dict) -> UpdateSemantics:
     version = (value["schema_version"], value["analysis_revision"])
-    if version not in ((1, 1), (2, 2), (2, 3), (2, 4)):
+    if version not in ((1, 1), (2, 2), (2, 3), (2, 4), (2, 5)):
         raise ValueError("query_analysis: unsupported revision")
     semantics = (
         value.get("update_semantics", "legacy_append")
@@ -438,7 +438,15 @@ def _issue_diagnostic(issue, mode, paths, legacy_paths):
         key=len,
         default=None,
     )
-    status = "unknown" if issue.code == "capability_mismatch" else "unsupported"
+    window_issue = any(
+        role in issue.path
+        for role in (".sql.window", ".window_tumbling", ".window_hopping")
+    )
+    status = (
+        "unknown"
+        if issue.code == "capability_mismatch" and not window_issue
+        else "unsupported"
+    )
     key = None
     if owner is None:
         path = f"{issue.path}.{mode}.support"
@@ -565,6 +573,16 @@ def _query(program, runtime, options, analyzers) -> QueryAnalysis:
     from calc_flow.symbolic.union import expand_query_graph
 
     graph = expand_query_graph(graph, nodes, paths, analyzers)
+    windows = {
+        paths[key]
+        for analyzer in analyzers
+        for key in analyzer._sql_window_nodes
+        if key in paths
+    }
+    graph["nodes"] = [
+        {**node, "kind": "window", "query": None} if node["path"] in windows else node
+        for node in graph["nodes"]
+    ]
     return _from_dict(
         json.loads(runtime._inner._analyze_query_graph(json.dumps(graph)))
     )
@@ -591,7 +609,7 @@ def _gate_latest(program, runtime):
     report = program.analyze(runtime).query
     if (report.schema_version, report.analysis_revision, report.update_semantics) != (
         2,
-        4,
+        5,
         "latest_relation",
     ):
         error = CompileError(

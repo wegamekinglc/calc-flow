@@ -272,11 +272,11 @@ def _window_input_source(
     upstream = graph.allocate(f"{plan.node_id}__input")
     fragment = Program(
         graph.program.name,
-        engine="streaming",
+        engine=graph.program.engine,
         inputs=inputs,
         outputs=[(upstream, TableExpr(plan.node.args[0]))],
     )
-    document = lower_program_document(fragment, runtime, "stream")
+    document = lower_program_document(fragment, runtime, graph.program.mode)
     # Pin the complete pre-window schema, including derived columns.
     for node in document["graph"]["nodes"]:
         if node["id"] == upstream:
@@ -373,6 +373,7 @@ def _output_fragment(
     group: tuple[tuple[str, object], ...],
     inputs: list[object],
     bindings: dict[str, str],
+    engine: str,
 ) -> tuple[Program, dict[str, str]]:
     from calc_flow.symbolic.program import Program
 
@@ -385,7 +386,7 @@ def _output_fragment(
         for value in selected_inputs
         if isinstance(value, TableExpr)
     }
-    fragment = Program(name, engine="streaming", inputs=selected_inputs, outputs=group)
+    fragment = Program(name, engine=engine, inputs=selected_inputs, outputs=group)
     return fragment, selected_bindings
 
 
@@ -406,12 +407,12 @@ def _append_window_outputs(
     bindings = {**window_bindings, **other_bindings}
     for ordinal, group in enumerate(groups):
         fragment, selected_bindings = _output_fragment(
-            graph.program.name, group, inputs, bindings
+            graph.program.name, group, inputs, bindings, graph.program.engine
         )
         document = lower_program_document(
             fragment,
             runtime,
-            "stream",
+            graph.program.mode,
             allowed_lateness_micros=allowed_lateness_micros,
             late_policy=late_policy,
         )
@@ -450,7 +451,7 @@ def _lower_event_window_program(
     if bindings is not None:
         bindings.inputs.update(graph.bindings.inputs)
         bindings.outputs.update({name: (name, "output") for name, _ in program.outputs})
-    document = _project_document(program.name, "stream", graph.nodes, graph.edges)
+    document = _project_document(program.name, analyzer._mode, graph.nodes, graph.edges)
     if graph.static_inputs:
         document["static_inputs"] = graph.static_inputs
     return document
