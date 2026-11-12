@@ -336,3 +336,58 @@ complete snapshot, including through projection/filter nodes. It requires
 For source events `[1]`, `[2,3]`, SUM→SUM emits `1,6`; the default
 `legacy_append` emits `1,7`. Batch executions each process only their own input.
 See the streaming guide for replacement admission, budgeting and recovery.
+
+
+## Bounded inner joins
+
+| Interface        | Declaration                                | Finite batch   | Stateful stream   |
+| ---------------- | ------------------------------------------ | -------------- | ----------------- |
+| Rust DataFrame   | `a.inner_join(&b, spec, ordering)`         | Supported      | Supported         |
+| Rust SQL         | `calc_flow::sql::sql` with `CF_INNER_JOIN` | Supported      | Supported         |
+| Python DataFrame | `cf.table.stream_join(a, b, ...)`          | Supported      | Supported         |
+| Python SQL       | `cf.sql` with `CF_INNER_JOIN`              | Supported      | Supported         |
+
+All four export the same native `stream_join` operator. See runnable
+[Python](../examples/finite_inner_join.py) and
+[Rust core](../crates/calc-flow/examples/finite_inner_join.rs) examples.
+The narrow SQL spelling is `SELECT * FROM CF_INNER_JOIN('a', 'b', '<JSON>')`.
+Supply exactly those two distinct aliases and a strict JSON object containing
+`spec` (the existing `StreamJoinSpec` wire representation), optionally
+`output_ordering` with `entity_by`, `event_time`, and `sequence_by`. Bounds and
+all three limits are required. Extra clauses, CTEs, JOIN ON, subqueries and
+qualified function names are outside this dialect; compose row-local operations
+as separate relations before or after it. Ordinary wider batch SQL is unchanged.
+
+Bounds are inclusive: `left.ts - before <= right.ts <= left.ts + after`.
+Duplicate physical rows produce every matching pair. NULL equality keys never
+match. Output fields retain their types and nullability with left then right
+prefixes. Public join time is non-null `timestamp[us, UTC]`; native low-level
+operators also accept nullable time and discard those rows. They are different
+admission layers. A missing binding is an error; an empty side produces a typed
+empty relation.
+
+Finite execution validates both full input envelopes and retains all admitted
+rows without watermark eviction. Side row/byte limits apply even with an empty
+opposite side. The match limit covers each complete Batch, across every included
+RecordBatch. Limits count logical bytes rather than process RSS. Each execute
+owns fresh scratch state: cached plans need no reset, including after failures.
+Stream limits still apply per actual ingress Data envelope and stream state
+persists across batches. Finite queries do not resume from a stream checkpoint.
+
+Nested joins require canonical pair identity: prefixed left keys, either join
+time, and complete left sequence followed by complete right sequence. Declare
+Rust `Some(JoinOutputOrdering { ... })`, Python's three `output_*` arguments,
+or SQL `output_ordering`. These fields name identity and do not sort rows.
+Fan-out shares one owner per unique join; row-local DataFrame/SQL transforms may
+preserve unchanged or renamed identity fields. Rewritten time loses proof.
+Join paths do not yet include union/window/aggregate combinations; those may
+remain independent output branches. Outer, semi, anti, cross and replacement
+joins are outside this contract.
+
+Revision 6 analysis conditionally proves `final_relation / accepted_history /
+all_sources_eof / unordered`: both executions must succeed within their budget,
+and stream candidates must coexist without late/progress discards. Compare the
+multiset of all append pair outputs, not only the last chunk. Global ordering and
+non-EOF cuts remain unproved. Explicit latest semantics reject snapshot inputs
+at either stream ingress before source/resource acquisition; legacy append
+semantics and old stream checkpoint identities remain unchanged.

@@ -2906,7 +2906,6 @@ const PROBE_POS_COLUMN: &str = "__cf_join_pos";
 const STATE_RID_COLUMN: &str = "__cf_join_row_id";
 
 /// One incoming row that passed null-key, null-event-time, and lateness admission.
-#[cfg(test)]
 struct AdmittedRow {
     record: columnar::RowPayload,
     event_time: EventTime,
@@ -3505,6 +3504,7 @@ pub(crate) use benchmark_checkpoint::run_checkpoint_history_diagnostic;
 mod admission_charge;
 pub(crate) mod admission_masks;
 mod admitted;
+mod finite;
 use admitted::{AdmittedBatch, AdmittedRows, PayloadRef};
 mod borrowed_key;
 mod checkpoint_compaction;

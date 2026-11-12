@@ -225,14 +225,16 @@ def _lower_collect(
 
 
 def _lowered_collect(program: Program, selected: Runtime) -> _LoweredCollect:
+    # Registrations clear the runtime cache, so the key needs only the program.
+    from calc_flow.symbolic.inner_join_sql import cache_policy as join_cache_policy
     from calc_flow.symbolic.union import cache_policy
 
-    # Registrations clear the runtime cache, so the key needs only the program.
     key = (
         "collect",
         program.fingerprint,
         tuple(value._node.node_bytes for value in program.inputs),
         *cache_policy(program, selected),
+        *join_cache_policy(program),
     )
     return cast(
         _LoweredCollect,

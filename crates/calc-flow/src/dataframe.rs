@@ -73,6 +73,12 @@ pub(crate) struct Relation {
 }
 #[derive(Debug)]
 pub(crate) enum RelationKind {
+    InnerJoin {
+        inputs: [TableExpr; 2],
+        spec: crate::StreamJoinSpec,
+        ordering: Option<JoinOutputOrdering>,
+        sql: bool,
+    },
     Window {
         input: TableExpr,
         spec: crate::WindowSpec,
@@ -353,6 +359,7 @@ impl TableExpr {
                 input.lineage()
             }
             RelationKind::Input { .. }
+            | RelationKind::InnerJoin { .. }
             | RelationKind::Window { .. }
             | RelationKind::Union { .. }
             | RelationKind::Sql { .. }
@@ -401,7 +408,7 @@ impl TableExpr {
                     .chain(spec.aggregates.iter().map(|a| a.output.clone()))
                     .collect(),
             ),
-            RelationKind::Sql { .. } => None,
+            RelationKind::Sql { .. } | RelationKind::InnerJoin { .. } => None,
         }
     }
     /// References a field from this row lineage.
@@ -899,6 +906,63 @@ impl TableExpr {
             kind: RelationKind::Window {
                 input: self.clone(),
                 spec,
+                sql,
+            },
+        })))
+    }
+}
+
+pub use crate::sql::JoinOutputOrdering;
+impl TableExpr {
+    /// Declares a bounded inner join using the native pair kernel in either lifecycle.
+    /// Output ordering names pair identity for nested joins; it never sorts rows.
+    ///
+    /// # Errors
+    /// Invalid keys, schemas, times or ordering fail during schema analysis/compilation.
+    /// The required spec limits apply to the complete input Batch in finite execution.
+    pub fn inner_join(
+        &self,
+        right: &TableExpr,
+        spec: crate::StreamJoinSpec,
+        output_ordering: Option<JoinOutputOrdering>,
+    ) -> Result<Self> {
+        self.inner_join_relation(right, spec, output_ordering, false)
+    }
+    pub(crate) fn inner_join_relation(
+        &self,
+        right: &TableExpr,
+        spec: crate::StreamJoinSpec,
+        ordering: Option<JoinOutputOrdering>,
+        sql: bool,
+    ) -> Result<Self> {
+        if let Some(order) = &ordering
+            && (order.entity_by.is_empty()
+                || order.event_time.is_empty()
+                || order.sequence_by.is_empty())
+        {
+            return Err(invalid(
+                if sql {
+                    "sql.inner_join.output_ordering"
+                } else {
+                    "inner_join.output_ordering"
+                },
+                "ordering_required",
+                "all three identity fields must be nonempty",
+            ));
+        }
+        let id = digest(&json!([
+            if sql { "sql.inner_join" } else { "inner_join" },
+            self.0.id,
+            right.0.id,
+            spec,
+            ordering
+        ]));
+        Ok(Self(Arc::new(Relation {
+            id,
+            kind: RelationKind::InnerJoin {
+                inputs: [self.clone(), right.clone()],
+                spec,
+                ordering,
                 sql,
             },
         })))

@@ -378,6 +378,70 @@ def test_asof_and_inner_can_lower_in_both_directions(runtime) -> None:
         assert kinds.count("stream_join") == 1
 
 
+def _asof_relay(joined, relay):
+    if relay == "project":
+        return joined.select(
+            "left__symbol", "left__time", "left__sequence", "left__price"
+        )
+    if relay == "filter":
+        return joined.filter(joined["left__price"] == joined["left__price"])
+    return joined
+
+
+def _inner_after_asof(asof, asof_side):
+    reference = _input("reference")
+    left, right = (asof, reference) if asof_side == "left" else (reference, asof)
+    return cf.table.stream_join(
+        left,
+        right,
+        left_keys=["left__symbol" if asof_side == "left" else "symbol"],
+        right_keys=["left__symbol" if asof_side == "right" else "symbol"],
+        left_event_time="left__time" if asof_side == "left" else "time",
+        right_event_time="left__time" if asof_side == "right" else "time",
+        bounds=cf.JoinTimeBounds(timedelta(microseconds=10), timedelta()),
+        limits=cf.JoinStateLimits(100, 1_000_000, 1_000),
+    )
+
+
+@pytest.mark.parametrize("asof_side", ["left", "right"])
+@pytest.mark.parametrize("relay", ["direct", "project", "filter"])
+def test_inner_consumer_accepts_verified_asof_time(runtime, asof_side, relay):
+    joined = _asof_relay(_join(), relay)
+    program = cf.Program(
+        "asof_inner",
+        engine="streaming",
+        outputs={"result": _inner_after_asof(joined, asof_side)},
+    )
+    document = lower_program_document(program, runtime, "stream")
+    kinds = [node["operator"]["kind"] for node in document["graph"]["nodes"]]
+    assert kinds.count("stream_asof_join") == 1
+    assert kinds.count("stream_join") == 1
+    program.compile_stream(runtime)
+    with pytest.raises(cf.CompileError, match="unsupported_mode"):
+        lower_program_document(program, runtime, "batch")
+
+
+@pytest.mark.parametrize("asof_side", ["left", "right"])
+def test_inner_consumer_rejects_rewritten_asof_time(runtime, asof_side):
+    rewritten = _join().sql(
+        "SELECT left__symbol, left__time + INTERVAL '1 microsecond' AS left__time, "
+        "left__sequence, left__price FROM input"
+    )
+    program = cf.Program(
+        "rewritten_asof_time",
+        engine="streaming",
+        outputs={"result": _inner_after_asof(rewritten, asof_side)},
+    )
+    result = program.analyze(runtime, mode="stream")
+    assert any(
+        issue.code == "ordering_required"
+        and issue.path.endswith(f"{asof_side}_event_time")
+        for issue in result.issues
+    )
+    with pytest.raises(cf.CompileError, match="ordering_required"):
+        program.compile_stream(runtime)
+
+
 def test_asof_explain_states_matching_finality_resources_and_unique_ownership(
     runtime,
 ) -> None:

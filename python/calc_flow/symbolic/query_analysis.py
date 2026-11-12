@@ -246,7 +246,7 @@ def _node_from_dict(node):
 
 def _wire_semantics(value: dict) -> UpdateSemantics:
     version = (value["schema_version"], value["analysis_revision"])
-    if version not in ((1, 1), (2, 2), (2, 3), (2, 4), (2, 5)):
+    if version not in ((1, 1), (2, 2), (2, 3), (2, 4), (2, 5), (2, 6)):
         raise ValueError("query_analysis: unsupported revision")
     semantics = (
         value.get("update_semantics", "legacy_append")
@@ -579,6 +579,18 @@ def _query(program, runtime, options, analyzers) -> QueryAnalysis:
         for key in analyzer._sql_window_nodes
         if key in paths
     }
+    joins = {
+        paths[key]
+        for analyzer in analyzers
+        for key in analyzer._sql_join_nodes
+        if key in paths
+    }
+    graph["nodes"] = [
+        {**node, "kind": "stream_join", "query": None}
+        if node["path"] in joins
+        else node
+        for node in graph["nodes"]
+    ]
     graph["nodes"] = [
         {**node, "kind": "window", "query": None} if node["path"] in windows else node
         for node in graph["nodes"]
@@ -609,7 +621,7 @@ def _gate_latest(program, runtime):
     report = program.analyze(runtime).query
     if (report.schema_version, report.analysis_revision, report.update_semantics) != (
         2,
-        5,
+        6,
         "latest_relation",
     ):
         error = CompileError(
@@ -641,11 +653,12 @@ def _current_mode_issue(report, issue, mode):
 
 
 def _update_failure(report, mode):
+    issues = tuple(
+        issue
+        for issue in report.diagnostics
+        if issue.status != "supported" and _current_mode_issue(report, issue, mode)
+    )
     return next(
-        (
-            issue
-            for issue in report.diagnostics
-            if issue.status != "supported" and _current_mode_issue(report, issue, mode)
-        ),
-        None,
+        (issue for issue in issues if issue.code == "update_interpretation_mismatch"),
+        next(iter(issues), None),
     )

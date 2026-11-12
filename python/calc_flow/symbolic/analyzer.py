@@ -645,6 +645,8 @@ class _Analyzer:
         self._native_row_schemas: dict[str, tuple[Field, ...]] = {}
         self._union_plans: dict[str, object] = {}
         self._sql_window_nodes: dict[str, Node] = {}
+        self._sql_join_nodes: dict[str, Node] = {}
+        self._join_sql_paths: set[str] = set()
         self._issues: list[AnalysisIssue] = []
         self._table_cache: dict[str, TableFacts] = {}
         self._invalid_table_nodes: set[str] = set()
@@ -971,6 +973,9 @@ class _Analyzer:
                     "event window outputs require deterministic row-local SQL",
                 )
         if node.op.name == "sql":
+            joined = self._sql_inner_join(node, path)
+            if joined is not None:
+                return joined
             window = self._sql_window(node, path)
             if window is not None:
                 return window
@@ -980,6 +985,22 @@ class _Analyzer:
         if self._issues or self._sql_mode_rejected(node, path) or self._runtime is None:
             return empty
         return self._planned_sql_table(node, inputs, path, empty)
+
+    def _sql_inner_join(self, node, path):
+        from calc_flow.symbolic.inner_join_sql import join_node, native_plan
+
+        plan = native_plan(node)
+        if plan is None:
+            return None
+        if "error" in plan:
+            item = plan["error"]
+            self.issue(f"{path}.{item['path']}", item["code"], item["message"])
+            return TableFacts(
+                (), _SQLRowOrigin(node.digest), frozenset({"stream_join"}), None, (), ()
+            )
+        joined = join_node(node, plan)
+        self._sql_join_nodes[node.digest] = joined
+        return self._stream_join_table(joined, path, role=f"{path}.sql.inner_join")
 
     def _sql_window(self, node, path):
         from calc_flow.symbolic.event_window_sql import native_plan, window_node
@@ -1031,7 +1052,12 @@ class _Analyzer:
 
     def _planned_sql_table(self, node, inputs, path, empty):
         try:
-            return replace(empty, schema=self._sql_schema(node, inputs, path))
+            result = replace(empty, schema=self._sql_schema(node, inputs, path))
+            if node.digest in self._join_sql_paths or "stream_join" in empty.state:
+                from calc_flow.symbolic.inner_join_sql import passthrough_facts
+
+                return passthrough_facts(node, inputs, result)
+            return result
         except (CompileError, ConfigError, ExecutionError, ValueError) as error:
             self.issue(f"{path}.{node.op.name}.schema", "unsupported_type", str(error))
             return empty
@@ -1260,23 +1286,13 @@ class _Analyzer:
 
         return analyze_asof(self, node, path)
 
-    def _stream_join_table(self, node: Node, path: str, /) -> TableFacts:
-        role = f"{path}.stream_join"
-        for side, operand in zip(("left", "right"), node.args, strict=True):
-            if _contains_event_window(operand):
-                self.issue(
-                    f"{role}.{side}",
-                    "capability_mismatch",
-                    "stream joins after an event window are not supported",
-                )
+    def _stream_join_table(
+        self, node: Node, path: str, /, *, role: str | None = None
+    ) -> TableFacts:
+        role = role or f"{path}.stream_join"
+        self._check_join_window_inputs(node, role)
         left = self.table(node.args[0], f"{role}.left")
         right = self.table(node.args[1], f"{role}.right")
-        if self._mode != "stream":
-            self.issue(
-                role,
-                "unsupported_mode",
-                "symbolic stream_join is available only in stream mode",
-            )
         self._stream_join_side(
             left,
             "left",
@@ -1299,6 +1315,7 @@ class _Analyzer:
             _cstr_or_none(node.attr("right_event_time")),
             f"{role}.right_event_time",
         )
+        self._check_join_time_sources(node, role)
         self._stream_join_keys(node, left, right, role)
         left_prefix = _cstr_or_none(node.attr("left_prefix")) or "left"
         right_prefix = _cstr_or_none(node.attr("right_prefix")) or "right"
@@ -1332,6 +1349,28 @@ class _Analyzer:
             output_entity_by,
             output_sequence_by,
         )
+
+    def _check_join_window_inputs(self, node, role):
+        for side, operand in zip(("left", "right"), node.args, strict=True):
+            if _contains_event_window(operand):
+                self.issue(
+                    f"{role}.{side}",
+                    "capability_mismatch",
+                    "stream joins after an event window are not supported",
+                )
+
+    def _check_join_time_sources(self, node, role):
+        from calc_flow.symbolic.inner_join_sql import time_is_original
+
+        for side, operand in zip(("left", "right"), node.args, strict=True):
+            if not time_is_original(
+                operand, _cstr_or_none(node.attr(f"{side}_event_time")), self
+            ):
+                self.issue(
+                    f"{role}.{side}_event_time",
+                    "ordering_required",
+                    "join time must be an unchanged input column or pure rename",
+                )
 
     def _stream_join_side(
         self,
@@ -1589,6 +1628,27 @@ class _Analyzer:
             )
         if any((left_field is None, right_field is None)):
             return
+        supported = frozenset(
+            (
+                *_SIGNED_INT_TYPES,
+                *_UNSIGNED_INT_TYPES,
+                "bool",
+                "string",
+                "large_string",
+                "date32",
+                "date64",
+                "timestamp[us]",
+                _EVENT_TIME_TYPE,
+            )
+        )
+        for side, field in (("left", left_field), ("right", right_field)):
+            if field.data_type not in supported:
+                self.issue(
+                    f"{role}.{side}_keys[{index}]",
+                    "unsupported_type",
+                    "join keys require identical supported Arrow types; "
+                    f"found {field.data_type!r}",
+                )
         if left_field.data_type == right_field.data_type:
             return
         self.issue(
@@ -3210,6 +3270,9 @@ def _run(
         capabilities,
     )
     analyzer._runtime = runtime
+    from calc_flow.symbolic.inner_join_sql import temporal_sql_paths
+
+    analyzer._join_sql_paths = temporal_sql_paths(program)
     for value in program.inputs:
         node = value._node
         root = _declaration_root(node)

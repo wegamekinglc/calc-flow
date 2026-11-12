@@ -188,6 +188,11 @@ class _SQLGraph:
         if node.op.name == "table_input":
             self.schemas[node.digest] = self.analyzer.table(node, "sql.input").schema
             return self.graph.source(node)
+        if (
+            node.op.name == "stream_join"
+            or node.digest in self.analyzer._sql_join_nodes
+        ):
+            return self._append_join(node)
         if self._is_event_window(node):
             return self._append_window(node)
         if node.op.name == "union_all":
@@ -202,6 +207,30 @@ class _SQLGraph:
             return self._append_expression(node)
         output_id = self.graph.allocate(f"cf_sql_{node.digest[:24]}")
         self._append_sql(node, output_id)
+        self._remember(node, output_id)
+        return output_id
+
+    def _append_join(self, node):
+        from calc_flow.symbolic.lower.strategies import _stream_join_node
+
+        joined = self.analyzer._sql_join_nodes.get(node.digest, node)
+        parents = [self.table(child) for child in joined.args]
+        schemas = [self.schemas[child.digest] for child in joined.args]
+        output_id = self.graph.allocate(f"cf_stream_join_{node.digest[:16]}")
+        schema = self.analyzer.table(node, "join.output").schema
+        self.schemas[node.digest] = schema
+        native = _stream_join_node(joined, output_id, *schemas)
+        native["output_ports"] = [_table_port(schema, "output")]
+        self.graph.nodes.append(native)
+        self.graph.edges.extend(
+            dict(
+                source_node=parent,
+                source_port="output",
+                target_node=output_id,
+                target_port=port,
+            )
+            for parent, port in zip(parents, ("left", "right"))
+        )
         self._remember(node, output_id)
         return output_id
 
@@ -572,6 +601,7 @@ def lower_sql_program(
     if not _macd_input_boundaries(program) and not any(
         node.op.name
         in {"aggregate", "union_all", "sql", "snapshot_sql", "late_output", "late_rows"}
+        or (analyzer._mode == "batch" and node.op.name == "stream_join")
         for _, value in program.outputs
         for node in _walk_nodes(value._node)
     ):
