@@ -729,3 +729,53 @@ The final comment supplies one post-push snapshot for the new HEAD, retained as
 evidence; the new hosted check's actual status is reported separately, and pending
 is not claimed as closure or all-green CI. Product approval continues unchanged.
 DAL-518 stays `in_progress`, with no delegation, merge, full tests or performance.
+
+## Capability snapshot expectation — finite ASOF modes
+
+Baseline `65ff7d69be96d0a1af567db9d053228b44032995`. Linux run
+`43229419877`, job `131230235087`, failed only
+`test_empty_runtime_capabilities_are_frozen_and_session_scoped`. The supplied
+log records **1 failed, 2970 passed, 3 skipped**, with **96.22% Python coverage**.
+Those are actual results for that prior HEAD, not a new-head pass claim. The
+coordinator also confirmed hosted Codacy success/zero annotations on that HEAD;
+the product **Approve / F1 closed** remains in force.
+
+The expected operator tuple still listed `stream_asof_join@1` as stream-only.
+The frozen API note's Updates/compatibility contract and the already-delivered
+`capabilities.py` require `("batch", "stream")`. This increment changes only
+that single expected tuple and this report. All complete operator attributes,
+including finality, ports, state version 3, layout 10, deterministic/replay
+properties, and every frozen/session assertion remain intact. An AST comparison
+confirms that normalizing this one expected modes tuple makes the entire test
+module identical to baseline. This is a test contract synchronization, not a
+product change or reduced assertion.
+
+```sh
+PYTHONPATH=target/finite-asof-join/site-f1-chain JAX_PLATFORMS=cpu \
+  $CF_PY -m pytest python/tests/test_capabilities.py::test_empty_runtime_capabilities_are_frozen_and_session_scoped -q --tb=short
+$CF_PY -m ruff check python/tests/test_capabilities.py
+$CF_PY -m ruff format --check python/tests/test_capabilities.py
+git diff --check
+```
+
+RED: **1 failed**, exit 1, with the same index-5 ASOF modes mismatch. GREEN:
+**1 passed**; Ruff check/format and whitespace check pass. The focused test
+executes the full equality and immutability/session assertions. Logs are retained
+as `target/finite-asof-join/capability-ci-{red,green}.log`. No full suite, extra
+review, performance check or native rebuild was run.
+
+`target/finite-asof-join/provenance-capability.json` updates verification
+correspondence. All **1643 Rust/Cargo** and **59 package/stub** source hashes and
+the earlier verification files remain unchanged; the imported 59 package files,
+native and wheel hashes match. The new capability-test hash is recorded
+separately. The reused native build remains `45bf88ec`, native SHA-256
+`386732408239bd09e27962299975ab2ee617919d2c4b38c739f993504db5cccd`;
+the source manifest remains
+`3ba5112cb816b0647aa87c046381d4e1b6a742679d6aa2d7d56a82821d91d48b`.
+Final recorded sources are checked against Git HEAD after commit. Product
+approval and valid native/product verification are reused by author self-review.
+
+The final comment delivers one new-head CI snapshot as
+`capability-ci-snapshot.json`; its actual state is separate from the old 96.22%
+coverage and 2970 passes. No CI watch/poll, delegation or merge is performed.
+DAL-518 remains `in_progress`; the coordinator owns further gate wakeups.
