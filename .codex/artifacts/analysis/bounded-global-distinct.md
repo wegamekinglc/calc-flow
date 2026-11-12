@@ -809,3 +809,86 @@ the validated production native module and prior product/reviewer evidence are
 reused; no wheel rebuild, full matrix, performance run or full review restart
 is needed for this test-only correction. The final handoff records the pushed
 HEAD and one fresh CI snapshot; pending checks are not a successful gate.
+
+## PyO3 immutable error-report revision9 assertion correction
+
+Fix commit: `d52428994c5ef0109733c1b0f69c190dafabedb8`.
+This is a test-only correction to the existing
+`error::tests::query_portability_errors_keep_the_immutable_report`; the
+expected current report revision changes from literal 7 to literal 9. Its
+schema2, unsupported status, node path, CompileError type and failed-mutation
+PyAttributeError assertions remain intact. No production code, public API,
+parser, old report sample, lint configuration or formal test case was changed.
+
+The actual failed job on `1de1f3599108a73a4993e6330c456a132a885317` was
+https://github.com/wegamekinglc/calc-flow/actions/runs/43310610698/job/131505932447.
+Its downloaded log records at 2026-11-12 21:52:33 UTC:
+
+```text
+thread 'error::tests::query_portability_errors_keep_the_immutable_report' panicked at crates/calc-flow-python/src/error.rs:393:13:
+assertion `left == right` failed
+  left: 9
+ right: 7
+test result: FAILED. 147 passed; 1 failed; 0 ignored
+Process completed with exit code 101.
+```
+
+The producer in `crates/calc-flow/src/query_analysis.rs` already emits r9.
+The frozen note's v2 QueryAnalysis contract requires schema2/revision9; the
+late-policy addendum explicitly retains that revision. A source audit of all
+`analysis_revision` occurrences under the core, binding and Python tests found
+the remaining current-producer expectations already use 9. The old r1/r2
+display and r6 stale-admission samples are intentional and remain unchanged.
+The parser still accepts display revisions r1 through r7, rejects unknown r8,
+and strict/latest gates require r9; none of these compatibility guards changed.
+
+Actual RED and GREEN command, run before and after the one-line correction
+from the reused repository root:
+
+```sh
+PYO3_PYTHON="$PWD/target/venv/bin/python" LD_LIBRARY_PATH=/home/wegamekinglc/anaconda3/lib PYTHONPATH="$PWD/target/venv/lib/python3.13/site-packages" cargo test --locked -p calc-flow-python --lib error::tests::query_portability_errors_keep_the_immutable_report -- --exact --test-threads=1
+```
+
+RED exited 101: 0 passed / 1 failed / 136 filtered, actual 9 versus expected 7,
+at the same error.rs:393 assertion as CI. GREEN exited 0: 1 passed / 0 failed /
+136 filtered. The existing immutability check runs before this exact revision
+assertion and passes. This package-scoped default-feature executable has 137
+tests, whereas CI's feature-complete executable reported 148; the focused run
+does not claim the remaining tests or full-feature matrix passed.
+
+Necessary adjacent checks and lint/format commands:
+
+```sh
+target/venv/bin/python -m pytest -q python/tests/test_query_history_portability.py::test_row_local_report_and_checked_compile_preserve_identity python/tests/test_update_semantics.py::test_report_wire_accepts_legacy_display_and_rejects_unknown_semantics python/tests/test_update_semantics.py::test_latest_rejects_stale_report_before_preparation_cache python/tests/test_finite_asof_join.py::test_strict_rejects_pre_r7_report_before_cache
+PYO3_PYTHON="$PWD/target/venv/bin/python" cargo clippy --locked -p calc-flow-python --lib --tests -- -D warnings
+cargo fmt --all --check
+git diff --check
+```
+
+All exited 0. Pytest reports 9 passed in 0.71 seconds: current r9 report identity,
+legacy display/unknown semantics, six existing old-version latest-gate cases
+and the existing stale strict-gate case. Clippy includes the binding lib test
+target and denies warnings. No whole matrix, benchmark or all-feature retry
+was run for this test-literal correction; the previously documented local
+optional rdkafka curl-header limitation is unchanged.
+
+The reused interpreter is target/venv/bin/python, CPython 3.13.9 (Anaconda,
+GCC 11.2.0), with rustc/cargo 1.94.0. The Rust lib-test process registers the
+freshly compiled native binding in sys.modules and checks it loads the
+repository's Python query_analysis projection. For the adjacent Python checks,
+the installed matching production native is
+`target/venv/lib/python3.13/site-packages/calc_flow/_native.cpython-313-x86_64-linux-gnu.so`,
+SHA-256 `c7810be6d86b5c5798c398589f7d812fae571842bef2ba59eb0677768a1758f2`.
+A byte comparison against 1de1f359 proves the full error.rs prefix before
+`#[cfg(test)]` is identical, SHA-256
+`f836b5f77ab7710597f2aa93e90e377093d722b7ea70ec1a6f9a03a04e455a9c`.
+The build script still only calls use_pyo3_cfgs and embeds no revision. Thus
+production native and prior F1/F2 Approve evidence remain valid without a wheel
+rebuild or full review restart.
+
+The reviewer report remains untracked and unstaged, SHA-256
+`e7681127a4a42ce562cde3ac0201d13ae51a0e861fbde18f72a72d9676c9dce7`.
+The final issue handoff records the final pushed HEAD and one new nonblocking
+CI snapshot; pending checks are not successful gates. PR #605 remains open
+and unmerged, the coordinator's persistent wakeup is untouched, and DAL-519
+remains in_progress.
