@@ -179,6 +179,7 @@ class TestProjectV3Surface:
         assert caps.project_format_versions == (3,)
         assert tuple(operator.kind for operator in caps.operators) == (
             "cross_section",
+            "distinct",
             "expression",
             "rolling",
             "snapshot_sql",
