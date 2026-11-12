@@ -484,3 +484,80 @@ cargo test --locked -p calc-flow --test bounded_global_distinct \
 **29 passed**: 14 feature cases and 15 adjacent union/latest regression cases.
 This includes the final config-copy and typed budget-reason implementation;
 no withdrawn prototype binary was used for these results.
+
+### Completed local verification and build provenance
+
+Implementation commit: `275db61941d8455b9fadec6bedfb692bd0093f3e`, on the
+instructed `agent/dal-orchestrator/d83ca711d94c` branch and original checkout,
+based on `be12fd45a18daa5d2f6415993141a8842e114b1f`. The following evidence-only
+commit changes this analysis document; product sources remain identical.
+User Git identity was used for the commit. No new checkout or environment was
+created; the matching wheel was installed into the existing environment. No
+team configuration, dependency lock, gate or coverage baseline was modified.
+
+Actual environment: Linux x86_64, rustc 1.94.0 (4a4ef493e), cargo 1.94.0
+(85eff7c80), uv 0.11.19, existing `target/venv` using Anaconda CPython 3.13.9,
+PyArrow 24.0.0, pytest 9.2.0, Ruff 0.16.0 and maturin 1.16.0. The existing
+Conda shared library path is `/home/wegamekinglc/anaconda3/lib`.
+
+Final matching native build and install, exit 0:
+
+```sh
+PYO3_PYTHON=/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-519-d83ca711d94c/workdir/calc-flow/target/venv/bin/python target/venv/bin/maturin build --locked --profile dev --out target/wheels
+uv pip install --python target/venv/bin/python --reinstall --no-deps target/wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl
+target/venv/bin/python -m pytest python/tests/test_bounded_global_distinct.py python/tests/test_native_stub.py python/tests/test_query_history_portability.py python/tests/test_finite_event_window.py python/tests/test_finite_union.py python/tests/test_update_semantics.py python/tests/test_finite_inner_join.py python/tests/test_finite_asof_join.py -q --maxfail=3
+target/venv/bin/python examples/bounded_global_distinct.py
+```
+
+**227 passed**. The previously failing reason_code assertion is GREEN and
+unchanged. The Python example emitted the literal tuple set {NULL,1,2}.
+This is a local CPython 3.13 Linux wheel, not a package publication check.
+
+`calc_flow._native.__file__` resolved to the installed wheel's
+`target/venv/lib/python3.13/site-packages/calc_flow/_native.cpython-313-x86_64-linux-gnu.so`.
+A Python check read both that file and the wheel's native zip entry and asserted
+byte-for-byte equality. SHA-256 values:
+
+- Installed/wheel native: `737739c65f7ef841a343af6440bb8f10b51d4f8cf9fa223463e97f288b99ea00`.
+- Wheel: `64b6ad50a9020bde2ae7e0f994c6dc68e03bd5ff8c1ec9e6cc2babe7e2d98589`.
+- Product source tree fingerprint: `18c9de458c775aac691e568c85aed75e44136c5d6a8da681a0a13987a0eba7f8`.
+
+The product fingerprint is SHA-256 over `git ls-tree -r HEAD --` with paths
+`crates/calc-flow/src crates/calc-flow-python/src python/calc_flow Cargo.toml
+Cargo.lock pyproject.toml crates/calc-flow/Cargo.toml
+crates/calc-flow-python/Cargo.toml`. It is checked unchanged after the
+evidence-only commit. This ties the final PR code to the tested native module.
+
+The final embedded-Python native verification also exited 0, **2 passed**:
+
+```sh
+PYO3_PYTHON=/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-519-d83ca711d94c/workdir/calc-flow/target/venv/bin/python LD_LIBRARY_PATH=/home/wegamekinglc/anaconda3/lib PYTHONPATH=/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-519-d83ca711d94c/workdir/calc-flow/target/venv/lib/python3.13/site-packages cargo test --locked -p calc-flow-python --lib test_distinct_
+```
+
+This rechecks the actual foreign-owner release before EOF, not just the Rust
+normalization test or the withdrawn prototype's result.
+
+Final scoped Clippy commands exited 0 with warnings denied:
+
+```sh
+cargo clippy --locked -p calc-flow --lib --test bounded_global_distinct --test bounded_distinct_window --test distinct_admission --test distinct_analysis --test distinct_closure --test distinct_owned_schema --example bounded_global_distinct -- -D warnings
+PYO3_PYTHON=/home/wegamekinglc/multica_workspaces/dal-4ee34dfed184/dal-519-d83ca711d94c/workdir/calc-flow/target/venv/bin/python cargo clippy --locked -p calc-flow-python --lib -- -D warnings
+cargo run --locked -p calc-flow --example bounded_global_distinct
+cargo fmt --all --check
+git diff --check
+git diff --cached --check
+python3 scripts/check_spec_references.py
+target/venv/bin/python scripts/verify_complexity_gates.py
+target/venv/bin/python -m compileall -q python/calc_flow examples/bounded_global_distinct.py
+```
+
+The core example independently built only the core example target and printed
+`3 distinct tuples (order unspecified)`. Ruff check and format --check over all
+21 changed/new Python and stub files passed. Native stubs are included in the
+227-case pytest command. The previously valid project-v3 generator result is
+reused: no schema-affecting changes followed it. Full regression, platform
+matrices and coverage remain CI work; no performance result is inferred.
+The one nonblocking CI snapshot is reported with the PR in the issue handoff.
+
+The late-policy contract gap described above remains open. These GREEN local
+checks do not turn the draft into complete v2 product acceptance.
