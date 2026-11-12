@@ -434,3 +434,92 @@ Hand back the final correction SHA and one-shot CI snapshot to the coordinator
 for focused F1–F4 and fixture-increment review. The prior Request Changes is not
 lifted by these implementation checks; required CI and independent acceptance
 still block merge. DAL-516 stays in_progress; no merge or further dispatch.
+
+## Approved-head CI fixture corrections
+
+The coordinator reports independent **Approve** for
+`53d9533b29a58acbe88fc7f374e59e4ee723bffa`, covering F1–F4 and the earlier
+increments. Three subsequent hosted failures are isolated below. This increment
+changes only their tests and this implementation evidence; no native/Python
+product code, engine behavior, CI gate or reviewer report changes. The approval
+for the base is not presented as approval for this new increment.
+
+### Finite project source coverage
+
+Windows job `130935892358` fails the old
+`project_v3_rejects_window_in_batch_runtime` test: it expects
+`incompatible_runtime`, while the only actual issue is `source_input_mismatch`
+because the fixture omits its batch input source. Local
+`cargo test --locked -p calc-flow --test project_connector_compile` reproduces
+the exact failure: **17 pass / 1 fail** (`ci3-project-red.log`).
+
+The frozen finite-window contract admits a valid project-v3 window in batch.
+The corrected fixture supplies the exact `input` data-source binding, asserts
+validation succeeds with no issues, and calls public `compile_project` to prove
+that the finite window graph actually compiles. It checks the sole physical
+input name. Removing the source afterward still produces exactly the unrelated
+`source_input_mismatch`, preserving that negative preflight check without using
+it as evidence of window incompatibility. No connector or service is started.
+The same target is GREEN: **18 pass**, `ci3-project-green.log`.
+
+### Legacy @1 declaration and immutable Program copies
+
+Linux job `130941915769` expects `Program.output` to raise a streaming-only
+ValueError for an aggregate-less @1 window. Local
+`pytest python/tests/test_program_engine.py python/tests/test_finite_union.py
+-q -W error` reproduces that stale phase assertion: **1 fail / 37 pass**.
+The union-order assertion happens to pass locally in this run; no local union
+failure is claimed (`ci3-python-red.log`).
+
+The frozen note preserves the @1 declaration domain and identity, with execution
+rejected; the approved F4 boundary already gives structured
+`unknown_primitive_version` rather than executing or upgrading that declaration.
+The test now uses valid non-null temporal identity metadata so an unrelated
+ordering/schema error cannot mask the intended rejection. Both sql/batch and
+streaming/stream engines retain their selected engine across `output`'s immutable
+copy, leave the original outputs and fingerprint unchanged, preserve the @1
+version/absence of aggregates and declaration bytes/digest, and fail compilation
+with `CompileError: unknown_primitive_version`. This changes the obsolete fixture
+expectation; it does not make @1 executable or alter engine/mode enforcement.
+
+### SQL coercion union is an unordered relation
+
+The hosted Python log records the exact order-only failure, actual `[2,1]` versus
+expected `[1,2]`, in a UNION ALL without ORDER BY. It is valid under the frozen
+cross-source unordered contract. This is a confirmed hosted RED, not an invented
+local failure or a performance/order diagnosis. No retry loop or executor sorting
+is introduced to force a particular schedule.
+
+The test now compares the complete value multiset with an independent literal
+oracle, `{1:3, None:2, 2:1}`, using two inputs with duplicate and NULL values.
+It also asserts the exact output Arrow schema (`x: int64`, nullable), so coercion,
+missing/extra rows, multiplicities and dtype remain checked. The original
+non-native-union export assertion, schema-mismatch diagnostic and stream compile
+rejection remain byte-for-byte unchanged. Other test functions in both Python
+modules are AST-identical to the approved base (`ci3-preservation.log`).
+
+Direct GREEN checks:
+
+```sh
+cargo test --locked -p calc-flow --test project_connector_compile
+python -m pytest python/tests/test_program_engine.py python/tests/test_finite_union.py -q -W error
+python -m pytest python/tests/test_symbolic_event_windows.py \
+  python/tests/test_finite_event_window_review.py -k legacy -q -W error
+cargo clippy --locked -p calc-flow --test project_connector_compile -- -D warnings
+```
+
+Results are **18 Rust pass**, **39 Python module cases pass**, and **8 related
+legacy cases pass**; clippy, rustfmt, affected Ruff lint/format, pinned lizard
+1.26.0 limit 8 and whitespace checks pass. The hosted Python job's **96.15%**
+coverage gate passed; its two test failures, not coverage, motivated this work.
+Local full-suite/coverage/platform/service/performance checks were not added.
+
+The existing approved-head native binary is reused because all product sources
+are unchanged. Before edits, 1,462 corresponding Rust/Python source files match
+the approved manifest; the focused product-only comparison and wheel-site
+Python equality are also recorded. Native SHA-256 remains
+`c7d665ab7262cd4dadc8af5825179509cbc03ba591b37a70a54f88689b088240`.
+The reviewer report stays untracked and untouched. Exact increment SHA, source
+manifest and one-shot CI state are in the issue handoff and evidence bundle.
+The coordinator will arrange review of this fixture increment and verify all
+required checks; DAL-516 stays in_progress, with no merge or delegation here.
