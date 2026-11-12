@@ -27,14 +27,19 @@ def fixture():
 
 def declared(source, sql=False, hop=False):
     if sql:
-        call = "CF_HOP('a', 'ts', 10, 5)" if hop else "CF_TUMBLE('a', 'ts', 10)"
-        return cf.sql(
-            "SELECT window_start, window_end, g, COUNT(q) AS n, SUM(q) AS s, "
-            "MIN(q) AS lo, MAX(q) AS hi, AVG(q) AS mean FROM "
-            + call
-            + " GROUP BY window_start, window_end, g",
-            a=source,
-        )
+        queries = {
+            False: (
+                "SELECT window_start, window_end, g, COUNT(q) AS n, SUM(q) AS s, "
+                "MIN(q) AS lo, MAX(q) AS hi, AVG(q) AS mean FROM "
+                "CF_TUMBLE('a', 'ts', 10) GROUP BY window_start, window_end, g"
+            ),
+            True: (
+                "SELECT window_start, window_end, g, COUNT(q) AS n, SUM(q) AS s, "
+                "MIN(q) AS lo, MAX(q) AS hi, AVG(q) AS mean FROM "
+                "CF_HOP('a', 'ts', 10, 5) GROUP BY window_start, window_end, g"
+            ),
+        }
+        return cf.sql(queries[hop], a=source)
     kwargs = dict(
         event_time="ts",
         size_micros=10,

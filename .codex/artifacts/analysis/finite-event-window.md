@@ -257,3 +257,68 @@ The existing candidate native binary is reused because this follow-up changes
 only test organization. All 44 feature cases pass with `-W error`; affected
 Ruff lint/format and pinned lizard 1.26.0 at limit 8 pass. The hosted result is
 reported separately, not inferred from these local checks.
+
+## Hosted SQL-injection follow-up after independent-review handoff
+
+The new orchestrator handoff reports check `130919930730` at the fixed review
+head `85dbad46d59bf24d4e93768484539347af9f83db`: one SQL-injection finding
+at `python/tests/test_finite_event_window.py:70`. This supersedes the previous
+pending snapshot. The typed helper alone did not resolve the hosted finding.
+The check and its annotation are saved as `codacy-85dbad46-check.json` and
+`codacy-85dbad46-annotations.json`. Codacy's public PR-issues API identifies
+the tool as **Opengrep**, pattern
+`Semgrep_python_sql_rule-hardcoded-sql-expression`; its response is preserved
+as `codacy-public-pr-issues.json`.
+
+The [Codacy wrapper](https://github.com/codacy/codacy-opengrep) imports GitLab
+rules, and the [matching upstream rule](https://gitlab.com/gitlab-org/security-products/sast-rules/-/raw/7dffffb51fef10dd956ce1b38ef117f71963b09c/python/sql/rule-hardcoded-sql-expression.yml)
+tracks formatted/concatenated SQL into generic `.execute(...)` sinks.
+Local Semgrep checks did not reproduce the hosted finding and are not GREEN
+evidence for this failure. Opengrep **1.33.1**, matching the wrapper's current
+declared version, does reproduce the exact line with intrafile taint enabled.
+This is a local reproduction, not a claim about the hosted binary's version.
+The vendor release binary SHA-256 is
+`46e8133cc490f9f50518061590ce2f6be5a08afaeda034471c0ceda4b3899808`,
+verified against its GitHub release asset digest; it lives only under `target/`.
+The unmodified upstream rule and release metadata are included in the evidence.
+
+RED command (exit **1**, one finding at line **70**, zero scan errors):
+
+```sh
+target/finite-event-window/tools/opengrep_manylinux_x86 scan \
+  --config target/finite-event-window/codacy-gitlab-sql-rule.yml \
+  --no-git-ignore --include python/tests/test_finite_event_window.py \
+  --taint-intrafile --error --json python/tests/test_finite_event_window.py
+```
+
+The include/no-git-ignore flags ensure this test file is actually scanned;
+default local test-file exclusions are not evidence about the hosted analysis.
+The dataflow trace starts at `declared`'s SELECT concatenation, flows through
+`Program` and `compile_batch`, and marks the **plan object** reaching the typed
+helper's execution call. That call accepts a physical-name-to-Arrow-Batch map,
+not query text. Moving or annotating this sink cannot remove that source.
+
+The only test change replaces the two fixed tumbling/hopping query assemblies
+with two complete string literals selected by the existing boolean. The queries
+and source bindings are byte-for-byte equal to the original two variants.
+The typed execution helper, all other 25 top-level AST nodes, all 35 assertion
+ASTs, parametrization, data, execution order and warm-plan/EOF checks are
+unchanged. No runtime, SQL parser, public API, CI rule, suppression or reviewer
+report is edited.
+
+GREEN: the identical Opengrep command now exits **0**, scans the same test file,
+and reports **zero findings and zero errors**. The module's
+`pytest python/tests/test_finite_event_window.py -q -W error` run passes all
+**44** cases; affected Ruff lint/format and pinned lizard 1.26.0 at limit 8 pass.
+The AST/query-preservation and native-provenance check is saved in
+`codacy-literal-query-preservation.log`; all 1,425 Rust/native and Python product
+source files match the previous manifest, the candidate native hash remains
+`d001cc88c3ad406b05b86277839b4824aa3e230e001594768699f84a858967ca`,
+and installed Python sources equal this checkout. A native rebuild and repeated
+unaffected Rust/full-suite checks are unnecessary for this test-only change.
+
+The reviewer is independently reading the original fixed head `85dbad46...`;
+this increment covers only the SQL-fixture organization and this evidence.
+The final increment SHA and one-shot hosted status snapshot are reported in
+the issue reply. Pending checks remain pending; DAL-516 remains in_progress,
+and review/merge handling stays with the coordinator.
