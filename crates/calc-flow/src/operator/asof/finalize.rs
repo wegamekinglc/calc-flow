@@ -9,9 +9,12 @@ use super::{
     state::{BatchKey, PayloadView},
     workspace::{ColumnWorkspace, OutputColumns},
 };
+#[cfg(test)]
+use crate::StreamOperatorContext;
+use crate::operator::asof::kernel::KernelContext;
 use crate::{
     Batch, BatchMetadata, CalcFlowError, EventTime, JsonMap, Result, StreamCollector,
-    StreamOperatorContext, StreamingFailureReason, runtime::streaming::gather_work::GatherStop,
+    StreamingFailureReason,
 };
 use ahash::RandomState;
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -67,15 +70,13 @@ impl StreamAsofJoinOperator {
         &mut self,
         frontier: Option<i64>,
         ended: bool,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
         #[cfg(feature = "benchmark-internals")]
-        let _phase =
-            context
-                .job()
-                .join_cpu_trace()
-                .stage(&self.name, "finalize", self.state.left.len());
+        let _phase = context
+            .trace()
+            .stage(&self.name, "finalize", self.state.left.len());
         loop {
             context.check_cancelled()?;
             self.retirement.wait(context).await?;
@@ -84,7 +85,7 @@ impl StreamAsofJoinOperator {
             }
             // Defer right-side eviction until all ready left rows are emitted.
             // Each accepted prefix can then share the committed right segment.
-            let headroom = self.checkpoint_workspace(context.job().checkpointing())?;
+            let headroom = self.checkpoint_workspace(context.checkpointing())?;
             let (mut count, prefix_workspace) = self.finalizable_rows(frontier, ended, context)?;
             let prepared_output = self
                 .prepare_output(&mut count, &prefix_workspace, context)
@@ -120,7 +121,7 @@ impl StreamAsofJoinOperator {
         &self,
         frontier: Option<i64>,
         ended: bool,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<(usize, Arc<MemoryReservation>)> {
         context.check_cancelled()?;
         let limit = context.output_budget().max_rows;
@@ -165,7 +166,7 @@ impl StreamAsofJoinOperator {
         &mut self,
         frontier: Option<i64>,
         ended: bool,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<()> {
         let stamp = SweepStamp::current(&self.status);
         if self.swept == Some(stamp)
@@ -204,7 +205,7 @@ impl StreamAsofJoinOperator {
         &mut self,
         frontier: Option<i64>,
         ended: bool,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<()> {
         let staging = self.reserve_capacity_eviction_staging()?;
         let CapacityEviction {
@@ -215,7 +216,7 @@ impl StreamAsofJoinOperator {
             credit,
             retention_bytes,
             columns,
-        } = self.prepare_capacity_eviction(context.job().checkpointing())?;
+        } = self.prepare_capacity_eviction(context.checkpointing())?;
         let dictionary = self.state.right.prepare_compaction(
             self.state.right.len() - preview.projected_right.0,
             &columns,
@@ -295,7 +296,7 @@ impl StreamAsofJoinOperator {
     async fn checked_right_eviction_copies(
         &self,
         selected: &[u32],
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<super::copy::PreparedRightCopies> {
         let copies = self
             .prepare_right_eviction_copies(selected, context)
@@ -331,7 +332,7 @@ impl StreamAsofJoinOperator {
         &mut self,
         count: &mut usize,
         prefix_workspace: &Arc<MemoryReservation>,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<PreparedOutput> {
         loop {
             context.check_cancelled()?;
@@ -361,14 +362,11 @@ impl StreamAsofJoinOperator {
         &mut self,
         count: usize,
         prefix_workspace: Arc<MemoryReservation>,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<PreparedOutput> {
         let prepared = {
             #[cfg(feature = "benchmark-internals")]
-            let _phase = context
-                .job()
-                .join_cpu_trace()
-                .stage(&self.name, "match_plan", count);
+            let _phase = context.trace().stage(&self.name, "match_plan", count);
             segments::prepare(self, count, prefix_workspace.clone(), context).await?
         };
         if let Some(prepared) = prepared {
@@ -383,7 +381,7 @@ impl StreamAsofJoinOperator {
         &mut self,
         count: usize,
         prefix_workspace: Arc<MemoryReservation>,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<PreparedOutput> {
         let cursor_workspace = self.cursor_workspace(count)?;
         let mut workspace = self.reserve_workspace(0)?;
@@ -416,7 +414,7 @@ impl StreamAsofJoinOperator {
         &mut self,
         prepared: segments::Prepared,
         prefix_workspace: Arc<MemoryReservation>,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<PreparedOutput> {
         let matched = prepared.plans.iter().map(|plan| plan.matched).sum();
         let workspace = self.reserve_workspace(0)?;
@@ -446,7 +444,7 @@ impl StreamAsofJoinOperator {
     async fn output_attempt(
         &mut self,
         count: usize,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<PreparedOutput> {
         let credit = self.reserve_workspace(self.prefix_workspace_bytes(count)?)?;
         self.output_attempt_with_prefix(count, Arc::new(credit), context)
@@ -471,7 +469,7 @@ impl StreamAsofJoinOperator {
             Err(error) => Err(error),
         }
     }
-    fn output_batch(&self, result: &Batch, context: &StreamOperatorContext<'_>) -> Result<Batch> {
+    fn output_batch(&self, result: &Batch, context: &dyn KernelContext) -> Result<Batch> {
         let batch = Batch::table(
             result.table_payload()?.batches().to_vec(),
             BatchMetadata::new(&self.name, self.next_output_sequence, JsonMap::new())?,
@@ -506,15 +504,12 @@ fn cursor_route_keys(left: &state::LeftState, count: usize) -> usize {
 async fn match_output_prefix(
     operator: &StreamAsofJoinOperator,
     count: usize,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
     cursor_workspace: Option<MemoryReservation>,
     workspace: &mut MemoryReservation,
 ) -> Result<MatchedPrefix> {
     #[cfg(feature = "benchmark-internals")]
-    let _phase = context
-        .job()
-        .join_cpu_trace()
-        .stage(&operator.name, "match_plan", count);
+    let _phase = context.trace().stage(&operator.name, "match_plan", count);
     let mut plan = OutputPlanBuilder::new_for_owner(
         count,
         operator.output_columns.as_ref(),
@@ -522,7 +517,7 @@ async fn match_output_prefix(
         &operator.name,
         owner_compact_positions(&operator.state.batches),
     )?
-    .with_stop(GatherStop::from_job(context.job()));
+    .with_stop(context.stop());
     let prefix = if let Some(matches) = probe::parallel_matches(operator, count, context).await? {
         parallel_candidate_rows(
             operator,
@@ -564,7 +559,7 @@ fn finish_output_prefix(
 async fn parallel_candidate_rows(
     operator: &StreamAsofJoinOperator,
     count: usize,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
     matches: &[Option<state::RowRef>],
     plan: &mut OutputPlanBuilder<'_>,
     workspace: &mut MemoryReservation,
@@ -599,7 +594,7 @@ async fn parallel_candidate_rows(
 async fn binary_search_candidate_rows(
     operator: &StreamAsofJoinOperator,
     count: usize,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
     plan: &mut OutputPlanBuilder<'_>,
     workspace: &mut MemoryReservation,
 ) -> Result<LeftPrefix> {
@@ -630,7 +625,7 @@ async fn binary_search_candidate_rows(
 async fn monotonic_candidate_rows(
     operator: &StreamAsofJoinOperator,
     count: usize,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
     plan: &mut OutputPlanBuilder<'_>,
     workspace: &mut MemoryReservation,
 ) -> Result<LeftPrefix> {
@@ -696,7 +691,7 @@ async fn append_monotonic_run<T>(
     rows: impl Iterator<Item = (T, state::RowRef)>,
     mut candidate: impl FnMut(T) -> Option<state::RowRef>,
     operator: &StreamAsofJoinOperator,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
     plan: &mut OutputPlanBuilder<'_>,
     workspace: &mut MemoryReservation,
     index: &mut usize,
@@ -727,7 +722,7 @@ fn left_run_source(
     }
 }
 
-async fn check_match_progress(index: usize, context: &StreamOperatorContext<'_>) -> Result<()> {
+async fn check_match_progress(index: usize, context: &dyn KernelContext) -> Result<()> {
     if index.is_multiple_of(1_024) {
         if index > 0 {
             tokio::task::yield_now().await;
@@ -995,13 +990,13 @@ fn grow_output_workspace(
 
 async fn emit_output(
     batch: Batch,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
     output: &mut dyn StreamCollector,
 ) -> Result<()> {
     context.check_cancelled()?;
     tokio::select! {
         result = output.emit("output", batch) => result,
-        () = context.job().cancellation().cancelled() => context.check_cancelled(),
+        () = context.cancellation().cancelled() => context.check_cancelled(),
     }
 }
 

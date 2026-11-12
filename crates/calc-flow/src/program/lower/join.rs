@@ -11,8 +11,10 @@ use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn contains_join(table: &TableExpr) -> bool {
-    matches!(table.0.kind, RelationKind::InnerJoin { .. })
-        || children(table, "").iter().any(|(_, c, _)| contains_join(c))
+    matches!(
+        table.0.kind,
+        RelationKind::InnerJoin { .. } | RelationKind::AsofJoin { .. }
+    ) || children(table, "").iter().any(|(_, c, _)| contains_join(c))
 }
 pub(super) fn sql_paths(order: &[(TableExpr, String)]) -> BTreeSet<String> {
     let mut paths = BTreeSet::new();
@@ -20,7 +22,9 @@ pub(super) fn sql_paths(order: &[(TableExpr, String)]) -> BTreeSet<String> {
         if contains_join(table) {
             paths.insert(table.0.id.clone());
         }
-        if let RelationKind::InnerJoin { inputs, .. } = &table.0.kind {
+        if let RelationKind::InnerJoin { inputs, .. } | RelationKind::AsofJoin { inputs, .. } =
+            &table.0.kind
+        {
             for input in inputs {
                 ancestors(input, &mut paths);
             }
@@ -94,7 +98,7 @@ impl Lowered {
             },
         })
     }
-    fn validate_join_side(
+    pub(super) fn validate_join_side(
         &self,
         input: &TableExpr,
         schema: &SchemaRef,
@@ -214,7 +218,7 @@ impl Lowered {
         let identity = self.orderings[&input.0.id]
             .temporal_identity
             .as_ref()
-            .and_then(|identity| mapped_identity(identity, &columns));
+            .and_then(|identity| mapped_identity(identity, |name| mapped_column(&columns, name)));
         Ok(QueryOrderingFacts {
             temporal_identity: identity,
             ..QueryOrderingFacts::default()
@@ -238,7 +242,9 @@ fn validate_time(schema: &SchemaRef, name: &str, path: &str) -> Result<()> {
 }
 fn input_path(table: &TableExpr, path: &str) -> Result<()> {
     match &table.0.kind {
-        RelationKind::Input { .. } | RelationKind::InnerJoin { .. } => Ok(()),
+        RelationKind::Input { .. }
+        | RelationKind::InnerJoin { .. }
+        | RelationKind::AsofJoin { .. } => Ok(()),
         RelationKind::Filter { input, .. } | RelationKind::Project { input, .. } => {
             input_path(input, path)
         }
@@ -264,6 +270,9 @@ fn input_path(table: &TableExpr, path: &str) -> Result<()> {
 fn time_source(table: &TableExpr, name: &str) -> Result<bool> {
     match &table.0.kind {
         RelationKind::Input { schema, .. } => Ok(schema.field_with_name(name).is_ok()),
+        RelationKind::AsofJoin { spec, .. } => {
+            Ok(name == format!("{}__{}", spec.left().prefix(), spec.left().event_time()))
+        }
         RelationKind::InnerJoin { ordering, .. } => {
             Ok(ordering.as_ref().is_some_and(|o| o.event_time == name))
         }
@@ -366,21 +375,21 @@ fn mapped_column(columns: &BTreeMap<String, Option<String>>, name: &str) -> Opti
         .find_map(|(out, source)| (source.as_deref() == Some(name)).then(|| out.clone()))
         .or_else(|| columns.contains_key("*").then(|| name.to_owned()))
 }
-fn mapped_identity(
+pub(super) fn mapped_identity(
     identity: &QueryTemporalIdentity,
-    columns: &BTreeMap<String, Option<String>>,
+    column: impl Fn(&str) -> Option<String>,
 ) -> Option<QueryTemporalIdentity> {
     Some(QueryTemporalIdentity {
         entity_by: identity
             .entity_by
             .iter()
-            .map(|n| mapped_column(columns, n))
+            .map(|n| column(n))
             .collect::<Option<_>>()?,
-        event_time: mapped_column(columns, &identity.event_time)?,
+        event_time: column(&identity.event_time)?,
         sequence_by: identity
             .sequence_by
             .iter()
-            .map(|n| mapped_column(columns, n))
+            .map(|n| column(n))
             .collect::<Option<_>>()?,
     })
 }

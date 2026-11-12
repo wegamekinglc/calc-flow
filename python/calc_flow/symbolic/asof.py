@@ -93,13 +93,11 @@ def _node_spec(node: Node) -> AsofJoinSpec:
 
 
 def _operand_facts(value: TableExpr, side: str) -> TableFacts:
-    from calc_flow.symbolic.analyzer import _Analyzer
     from calc_flow.symbolic.expr import TableExpr
-    from calc_flow.symbolic.types import TABLE_FIELD_TYPES
 
     if not isinstance(value, TableExpr):
         raise TypeError(f"{side} must be a calc_flow.TableExpr")
-    analyzer = _Analyzer("stream", frozenset(), TABLE_FIELD_TYPES, False)
+    analyzer = _operand_analyzer(value._node)
     facts = analyzer.table(value._node, side)
     for name, declared in (
         ("event_time", facts.event_time),
@@ -111,6 +109,21 @@ def _operand_facts(value: TableExpr, side: str) -> TableFacts:
                 f"{name} metadata for stream_asof_join"
             )
     return facts
+
+
+def _operand_analyzer(node):
+    from calc_flow.pipeline import Runtime
+    from calc_flow.symbolic.analyzer import _Analyzer
+    from calc_flow.symbolic.lower.sql import _walk_nodes
+    from calc_flow.symbolic.types import TABLE_FIELD_TYPES
+
+    nodes = _walk_nodes(node)
+    declared = frozenset(item.digest for item in nodes if item.op.name == "table_input")
+    analyzer = _Analyzer("stream", declared, TABLE_FIELD_TYPES, False)
+    analyzer._join_sql_paths = {item.digest for item in nodes}
+    if any(item.op.name == "sql" for item in nodes):
+        analyzer._runtime = Runtime()
+    return analyzer
 
 
 def declare_asof(

@@ -1,4 +1,4 @@
-mod asof;
+pub(crate) mod asof;
 
 use std::{
     fs::File,

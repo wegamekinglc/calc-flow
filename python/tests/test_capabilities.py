@@ -143,7 +143,7 @@ def test_empty_runtime_capabilities_are_frozen_and_session_scoped() -> None:
                 ProviderPort("right", "table", required=True),
             ),
             output_ports=(ProviderPort("output", "table", required=True),),
-            modes=("stream",),
+            modes=("batch", "stream"),
             finality="group_final_append_only",
             requires_datafusion=True,
             stateful=True,

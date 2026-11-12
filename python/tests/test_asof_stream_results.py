@@ -131,9 +131,9 @@ def test_asof_stream_tie_selection_does_not_depend_on_batch_or_arrival_order(
     assert output["quote__price"].to_pylist() == [19.0]
 
 
-def test_asof_collect_rejects_batch_even_with_finite_inputs() -> None:
-    with pytest.raises(ValueError, match="unsupported_mode"):
-        _joined().collect({"trades": _rows([105]), "quotes": _rows([100])})
+def test_asof_collect_finalizes_complete_finite_inputs() -> None:
+    result = _joined().collect({"trades": _rows([105]), "quotes": _rows([100])})
+    assert result["quote__time"].cast(pa.int64()).to_pylist() == [100]
 
 
 def test_asof_program_stream_preserves_logical_names_and_shares_state() -> None:

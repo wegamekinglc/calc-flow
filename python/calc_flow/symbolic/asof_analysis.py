@@ -49,13 +49,6 @@ def default_state_layout(capabilities: RuntimeCapabilities) -> int:
 
 
 def _capability(analyzer: _Analyzer, path: str) -> None:
-    if analyzer._mode != "stream":
-        analyzer.issue(
-            path,
-            "unsupported_mode",
-            "stream_asof_join is available only in stream mode",
-        )
-        return
     capabilities = analyzer._capabilities
     if capabilities is None:
         return
@@ -66,7 +59,7 @@ def _capability(analyzer: _Analyzer, path: str) -> None:
     )
     expected = {
         "version": "1",
-        "modes": ("stream",),
+        "modes": ("batch", "stream"),
         "finality": "group_final_append_only",
         "requires_datafusion": True,
         "stateful": True,
@@ -212,6 +205,11 @@ def _input_path(analyzer: _Analyzer, node: Node, path: str) -> None:
         if current.digest in seen:
             continue
         seen.add(current.digest)
+        if _join_boundary(current, analyzer):
+            continue
+        if _row_local_sql(current, analyzer):
+            pending.extend(current.args)
+            continue
         if current.op.name in {"table_input", "stream_join", "stream_asof_join"}:
             continue
         if current.op.name not in _ROW_LOCAL_PRIMITIVES | {
@@ -228,3 +226,20 @@ def _input_path(analyzer: _Analyzer, node: Node, path: str) -> None:
             )
             continue
         pending.extend(current.args)
+
+
+def _join_boundary(node, analyzer):
+    return (
+        node.digest in analyzer._sql_asof_nodes
+        or node.digest in analyzer._sql_join_nodes
+    )
+
+
+def _row_local_sql(node, analyzer):
+    from calc_flow.symbolic.event_window_sql import passthrough
+
+    return (
+        node.op.name == "sql"
+        and node.digest in analyzer._join_sql_paths
+        and passthrough(node) is not None
+    )

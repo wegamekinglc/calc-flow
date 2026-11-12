@@ -422,6 +422,23 @@ impl GatherStop {
         }
     }
 
+    pub(crate) fn from_run(run: &crate::RunContext) -> Self {
+        Self {
+            #[cfg(feature = "benchmark-internals")]
+            trace: crate::benchmark_internals::JoinCpuTraceOwner::default(),
+            #[cfg(feature = "benchmark-internals")]
+            operator: "".into(),
+            run_id: run.run_id().into(),
+            cancellation: run.cancellation().clone(),
+            deadline: run.deadline().copied(),
+            #[cfg(test)]
+            deadline_clock: None,
+            abandoned: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            check_hook: None,
+        }
+    }
+
     #[cfg(feature = "benchmark-internals")]
     pub(crate) fn join_cpu_trace(&self) -> &crate::benchmark_internals::JoinCpuTraceOwner {
         &self.trace

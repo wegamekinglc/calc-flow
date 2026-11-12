@@ -1,4 +1,7 @@
 //! Materialize an already matched ASOF prefix directly from Arrow batches.
+#[cfg(test)]
+use crate::StreamOperatorContext;
+use crate::operator::asof::kernel::KernelContext;
 
 use super::output_plan::{OutputPlan, OutputSide, PositionView, PrefixView, Span};
 #[cfg(test)]
@@ -7,7 +10,7 @@ use crate::runtime::streaming::gather_work::{
     AdmissionFailure, GatherOperatorId, GatherPlan as OwnedGatherPlan, GatherScope, GatherStop,
     RowGather, WorkOutput,
 };
-use crate::{Batch, BatchMetadata, DataFusionConfig, Result, StreamOperatorContext};
+use crate::{Batch, BatchMetadata, DataFusionConfig, Result};
 #[cfg(test)]
 use ahash::RandomState;
 use arrow_data::transform::MutableArrayData;
@@ -195,13 +198,10 @@ impl OutputRuntime {
         schema: &SchemaRef,
         mut workspace: MemoryReservation,
         name: &str,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<(Batch, MemoryReservation)> {
         #[cfg(feature = "benchmark-internals")]
-        let _phase = context
-            .job()
-            .join_cpu_trace()
-            .stage(name, "materialize", owned.len);
+        let _phase = context.trace().stage(name, "materialize", owned.len);
         self.prepare_output(schema, &mut workspace, name, context)
             .await?;
         let requests = column_requests(schema, self.output_columns.as_deref());
@@ -217,18 +217,30 @@ impl OutputRuntime {
             #[cfg(test)]
             worker_probe: self.worker_probe.clone(),
         });
-        let client = context.gather_client(self.operator.clone());
-        let scope = client.scope()?;
-        let output = gather_materialization(&scope, input, workspace, name, context).await?;
+        let output = self.gather_output(input, workspace, name, context).await?;
         let batch = materialize_batch(output.value, schema, rows)?;
         Ok((batch, output.credit))
     }
+    async fn gather_output(
+        &self,
+        input: Arc<MaterializationInput>,
+        workspace: MemoryReservation,
+        name: &str,
+        context: &dyn KernelContext,
+    ) -> Result<WorkOutput<Vec<ArrayRef>>> {
+        if context.stream().is_none() {
+            return finite_materialization(input, workspace, context).await;
+        }
+        let scope = context.gather_client(self.operator.clone()).scope()?;
+        gather_materialization(&scope, input, workspace, name, context).await
+    }
+
     async fn prepare_output(
         &self,
         schema: &SchemaRef,
         workspace: &mut MemoryReservation,
         name: &str,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<()> {
         self.config.validate()?;
         tokio::task::yield_now().await;
@@ -237,11 +249,34 @@ impl OutputRuntime {
     }
 }
 
+async fn finite_materialization(
+    input: Arc<MaterializationInput>,
+    workspace: MemoryReservation,
+    context: &dyn KernelContext,
+) -> Result<WorkOutput<Vec<ArrayRef>>> {
+    let stop = context.stop();
+    let output = tokio::task::spawn_blocking(move || {
+        let columns = (0..input.column_count())
+            .map(|i| input.gather(i, &stop))
+            .collect::<Result<Vec<_>>>()?;
+        Ok::<_, crate::CalcFlowError>(WorkOutput {
+            value: columns,
+            credit: workspace,
+        })
+    })
+    .await
+    .map_err(|error| crate::CalcFlowError::Internal {
+        message: format!("ASOF finite gather: {error}"),
+    })??;
+    context.check_cancelled()?;
+    Ok(output)
+}
+
 fn shared_output(
     owned: &OutputPlan,
     requests: &[ColumnRequest],
     schema: &SchemaRef,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<Option<Batch>> {
     if requests.is_empty() {
         return Ok(Some(materialize_batch(Vec::new(), schema, owned.len)?));
@@ -274,10 +309,10 @@ async fn gather_materialization(
     input: Arc<MaterializationInput>,
     workspace: MemoryReservation,
     name: &str,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<WorkOutput<Vec<ArrayRef>>> {
     let ticket = scope
-        .submit(input, workspace, GatherStop::from_job(context.job()))
+        .submit(input, workspace, context.stop())
         .await
         .map_err(|failure| match failure {
             AdmissionFailure::Budget { stage, source } => super::reason(

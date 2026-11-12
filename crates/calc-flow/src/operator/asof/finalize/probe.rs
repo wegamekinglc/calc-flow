@@ -1,6 +1,9 @@
 use super::{StreamAsofJoinOperator, check_match_progress, checked, retryable, state};
+#[cfg(test)]
+use crate::StreamOperatorContext;
+use crate::operator::asof::kernel::KernelContext;
 use crate::{
-    Result, StreamOperatorContext,
+    Result,
     runtime::streaming::gather_work::{GatherOperatorId, GatherStop, ParallelCpuWork},
 };
 use ahash::RandomState;
@@ -77,8 +80,11 @@ pub(super) struct ProbedRows {
 pub(super) async fn parallel_matches(
     operator: &StreamAsofJoinOperator,
     count: usize,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<Option<ProbedRows>> {
+    if context.stream().is_none() {
+        return Ok(None);
+    }
     let workers = std::thread::available_parallelism()
         .map_or(1, usize::from)
         .min(operator.state.right.len())
@@ -123,7 +129,7 @@ async fn capture(
     operator: &StreamAsofJoinOperator,
     count: usize,
     workers: usize,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<(ProbeWork, MemoryReservation)> {
     let keys = count.min(operator.state.right.len());
     let input_credit = input_credit(operator, count, keys)?;
@@ -165,7 +171,7 @@ async fn capture_run<'a>(
     position: usize,
     work: &mut ProbeWork,
     routes: &mut Routes<'a>,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<()> {
     check_match_progress(position, context).await?;
     if let Some((keys, mut rows)) = run.dictionary_rows(count) {

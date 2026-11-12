@@ -923,6 +923,24 @@ fn _inner_join_query(query: &str, aliases: &Bound<'_, PyList>) -> PyResult<Strin
 }
 
 #[pyfunction]
+fn _asof_join_query(query: &str, aliases: &Bound<'_, PyList>) -> PyResult<String> {
+    let aliases = aliases.extract::<Vec<String>>()?;
+    let description = match calc_flow::sql::asof_join_query(query, &aliases) {
+        Ok(plan) => {
+            serde_json::to_value(plan).map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+        }
+        Err(calc_flow::CalcFlowError::InvalidArgument { field, message }) => {
+            let (code, message) = message
+                .split_once(": ")
+                .unwrap_or(("invalid_literal", &message));
+            serde_json::json!({"error": {"path": field, "code": code, "message": message}})
+        }
+        Err(error) => return Err(crate::error::to_py_err(error)),
+    };
+    serde_json::to_string(&description).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+}
+
+#[pyfunction]
 fn _event_window_query(query: &str, aliases: &Bound<'_, PyList>) -> PyResult<String> {
     let aliases = aliases.extract::<Vec<String>>()?;
     let description = match calc_flow::sql::event_window_query(query, &aliases) {
@@ -981,12 +999,18 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
 fn register_query_planners(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_union_all_queries, module)?)?;
-    module.add_function(wrap_pyfunction!(_inner_join_query, module)?)?;
+    register_join_planners(module)?;
     module.add_function(wrap_pyfunction!(_event_window_query, module)?)?;
     module.add_function(wrap_pyfunction!(_sql_passthrough_columns, module)?)?;
     module.add_function(wrap_pyfunction!(_event_window_schema, module)?)?;
     module.add_function(wrap_pyfunction!(project_json_schema, module)?)?;
     module.add_function(wrap_pyfunction!(validate_project_json, module)?)?;
+    Ok(())
+}
+
+fn register_join_planners(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(_inner_join_query, module)?)?;
+    module.add_function(wrap_pyfunction!(_asof_join_query, module)?)?;
     Ok(())
 }
 

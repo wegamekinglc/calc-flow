@@ -171,8 +171,8 @@ dashes span the full column width, including cell spaces.
   checkpoint lifecycle. `ExpressionOperator`, `SqlOperator`,
   `RollingOperator`, `CrossSectionOperator`, and `UnionOperator` implement both
   lifecycles. Finite union requires table ports with explicit exact schemas and
-  `required=true`. `SnapshotSqlOperator`, `WindowAggregateOperator`,
-  `StreamJoinOperator`, and `StreamAsofJoinOperator` are stream-only. External
+  `required=true`. `WindowAggregateOperator`, `StreamJoinOperator`, and `StreamAsofJoinOperator`
+  also implement finite execution with run-local state. `SnapshotSqlOperator` is stream-only. External
   operators resolve through lifecycle-specific factories in `ProviderRegistry`.
 - `OperatorMetadata: Send + Sync + Any` requires concrete operator types to
   be `'static`. Rolling/cross-section SideOutput exposes required `output`

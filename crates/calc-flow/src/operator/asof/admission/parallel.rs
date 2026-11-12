@@ -1,6 +1,7 @@
 use super::{Admission, StreamAsofJoinOperator, state};
+use crate::operator::asof::kernel::KernelContext;
 use crate::{
-    Result, StreamOperatorContext,
+    Result,
     runtime::streaming::gather_work::{GatherOperatorId, GatherStop, ParallelCpuWork},
 };
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -122,9 +123,9 @@ impl PreparedAdmission {
 pub(in super::super) async fn prepare(
     operator: &StreamAsofJoinOperator,
     admission: &Admission,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<Option<PreparedAdmission>> {
-    let units = (admission.len() / 4_096).min(admission.right_capacities.len());
+    let units = admission_units(admission, context);
     if units < 2 {
         return Ok(None);
     }
@@ -161,7 +162,7 @@ pub(in super::super) async fn prepare(
 fn appends_after_state(
     operator: &StreamAsofJoinOperator,
     admission: &Admission,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<bool> {
     if operator.state.right.is_empty() {
         context.check_cancelled()?;
@@ -177,7 +178,7 @@ fn appends_after_state(
 fn legacy_appends_after_state(
     operator: &StreamAsofJoinOperator,
     admission: &Admission,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<bool> {
     let mut earliest = i64::MAX;
     for (ordinal, (identity, _)) in admission.right_identities().enumerate() {
@@ -210,7 +211,7 @@ fn legacy_appends_after_state(
 fn follows_key_tails(
     operator: &StreamAsofJoinOperator,
     admission: &Admission,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<bool> {
     let mut previous = None;
     for (ordinal, (identity, payload)) in admission.right_identities().enumerate() {
@@ -240,7 +241,7 @@ pub(super) async fn capture(
     operator: &StreamAsofJoinOperator,
     admission: &Admission,
     units: usize,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<(AdmissionWork, Vec<state::RowRef>, MemoryReservation)> {
     let name = &operator.name;
     let scratch = admission.len() as u64 * 128
@@ -323,7 +324,7 @@ fn admission_extents(
 async fn encoding_buffers(
     operator: &StreamAsofJoinOperator,
     admission: &Admission,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<u64> {
     let name = &operator.name;
     let mut buffers = operator.state.encoding_owner_allocation().0;
@@ -347,7 +348,7 @@ async fn encoding_buffers(
 fn column_encoding_buffers(
     operator: &StreamAsofJoinOperator,
     admission: &Admission,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<u64> {
     let mut buffers = operator.state.encoding_owner_allocation().0;
     let mut owners = BTreeSet::new();
@@ -387,7 +388,7 @@ async fn fill_rows(
     admission: &Admission,
     references: &[state::RowRef],
     routes: &[(usize, usize)],
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<()> {
     for (ordinal, (identity, payload)) in admission.right_identities().enumerate() {
         cooperate(ordinal, context).await?;
@@ -406,7 +407,7 @@ async fn fill_rows(
     Ok(())
 }
 
-async fn cooperate(ordinal: usize, context: &StreamOperatorContext<'_>) -> Result<()> {
+async fn cooperate(ordinal: usize, context: &dyn KernelContext) -> Result<()> {
     if ordinal.is_multiple_of(1_024) {
         context.check_cancelled()?;
     }
@@ -414,4 +415,12 @@ async fn cooperate(ordinal: usize, context: &StreamOperatorContext<'_>) -> Resul
         tokio::task::yield_now().await;
     }
     Ok(())
+}
+
+fn admission_units(admission: &Admission, context: &dyn KernelContext) -> usize {
+    if context.stream().is_none() {
+        1
+    } else {
+        (admission.len() / 4_096).min(admission.right_capacities.len())
+    }
 }

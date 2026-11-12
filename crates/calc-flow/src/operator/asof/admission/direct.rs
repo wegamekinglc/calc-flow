@@ -1,12 +1,15 @@
 //! Ordered inline-string left admission without per-row identity descriptors.
+#[cfg(test)]
+use crate::StreamOperatorContext;
+use crate::operator::asof::kernel::KernelContext;
 
 #[cfg(test)]
 use super::identity_tests;
 use super::{
     Admission, AdmissionWorkspace, Arc, Array, AsofJoinSide, Batch, GatherStop, MemoryReservation,
     OwnedCpuWork, PreparedInput, RecordBatch, ReservedIdentities, Result, StreamAsofJoinOperator,
-    StreamOperatorContext, UInt64Array, ValidatedInput, can_share_batch, check_input_cancellation,
-    encode_payload, state, take_column, times,
+    UInt64Array, ValidatedInput, can_share_batch, check_input_cancellation, encode_payload, state,
+    take_column, times,
 };
 use datafusion::arrow::{array::StringArray, datatypes::DataType};
 
@@ -25,7 +28,7 @@ pub(super) fn plan(
     operator: &StreamAsofJoinOperator,
     batch: &Batch,
     input: ValidatedInput,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<Option<IdentityPlan>> {
     #[cfg(test)]
     if identity_tests::columnar::legacy_requested() {
@@ -99,7 +102,7 @@ fn encode_ordered_keys(
     records: &[RecordBatch],
     side: &AsofJoinSide,
     input: ValidatedInput,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<Option<Vec<state::EncodedColumns>>> {
     if !strictly_ordered(records, side, input, context)? {
         return Ok(None);
@@ -122,7 +125,7 @@ pub(super) fn strictly_ordered(
     records: &[RecordBatch],
     side: &AsofJoinSide,
     input: ValidatedInput,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<bool> {
     if let Some(ordered) = context
         .ingress_preparation()
@@ -252,7 +255,7 @@ impl IdentityPlan {
         batch: &Batch,
         input: ValidatedInput,
         identity: ReservedIdentities,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<Admission> {
         debug_assert_eq!(identity.rows, self.rows);
         operator.record_duplicates(0, 0)?;
@@ -288,7 +291,7 @@ impl IdentityPlan {
         operator: &mut StreamAsofJoinOperator,
         batches: &[Arc<state::PayloadBatch>],
         workspace: AdmissionWorkspace,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<PreparedInput> {
         // Inline canonical keys retain the existing 4096-row /128KiB work threshold.
         if self.rows <= 4_096 {

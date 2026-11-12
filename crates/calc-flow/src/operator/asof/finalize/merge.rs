@@ -1,9 +1,10 @@
 //! Merge normalized left positions against one latest payload slot per key.
+use crate::operator::asof::kernel::KernelContext;
 
 use super::{
     OutputPlanBuilder, StreamAsofJoinOperator, check_match_progress, left_run_source, state,
 };
-use crate::{Result, StreamOperatorContext};
+use crate::Result;
 use datafusion::execution::memory_pool::MemoryReservation;
 
 #[cfg(test)]
@@ -37,7 +38,7 @@ fn routes_for_keys<'a>(
     routes: &mut [Option<Route<'a>>],
     time: i64,
     operator: &'a StreamAsofJoinOperator,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<()> {
     for (id, key) in keys.iter().enumerate() {
         if id.is_multiple_of(1_024) {
@@ -117,7 +118,7 @@ pub(super) async fn append_dictionary_run(
         impl Iterator<Item = (i64, usize, state::RowRef)>,
     ),
     operator: &StreamAsofJoinOperator,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
     plan: &mut OutputPlanBuilder<'_>,
     workspace: &mut MemoryReservation,
     index: &mut usize,

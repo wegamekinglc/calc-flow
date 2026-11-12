@@ -1,6 +1,7 @@
 //! Keep retired-owner refunds observable across dropped handler futures.
+use crate::operator::asof::kernel::KernelContext;
 
-use crate::{Result, StreamOperatorContext};
+use crate::Result;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -18,12 +19,15 @@ pub(super) struct Owner(Arc<State>);
 
 pub(super) struct Ticket {
     state: Arc<State>,
-    _job: crate::runtime::streaming::gather_work::RetirementGuard,
+    _job: Option<crate::runtime::streaming::gather_work::RetirementGuard>,
 }
 
 impl Owner {
-    pub fn register(&self, context: &StreamOperatorContext<'_>) -> Result<Ticket> {
-        let job = context.job().gather_owner().retain_retirement()?;
+    pub fn register(&self, context: &dyn KernelContext) -> Result<Ticket> {
+        let job = context
+            .stream()
+            .map(|c| c.job().gather_owner().retain_retirement())
+            .transpose()?;
         self.0.pending.fetch_add(1, Ordering::AcqRel);
         Ok(Ticket {
             state: self.0.clone(),
@@ -31,10 +35,10 @@ impl Owner {
         })
     }
 
-    pub async fn wait(&self, context: &StreamOperatorContext<'_>) -> Result<()> {
+    pub async fn wait(&self, context: &dyn KernelContext) -> Result<()> {
         let stop = async {
             let deadline = async {
-                match context.job().deadline() {
+                match context.deadline() {
                     Some(deadline) => {
                         let delay = (*deadline - chrono::Utc::now())
                             .to_std()
@@ -45,7 +49,7 @@ impl Owner {
                 }
             };
             tokio::select! {
-                () = context.job().cancellation().cancelled() => {},
+                () = context.cancellation().cancelled() => {},
                 () = deadline => {},
             }
         };

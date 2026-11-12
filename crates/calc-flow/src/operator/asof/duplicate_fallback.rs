@@ -3,7 +3,8 @@ use super::{
     admission::{ValidatedInput, times},
     identity_compare,
 };
-use crate::{Batch, Result, StreamOperatorContext};
+use crate::operator::asof::kernel::KernelContext;
+use crate::{Batch, Result};
 use datafusion::arrow::record_batch::RecordBatch;
 
 type InputRow<'a> = (&'a RecordBatch, usize);
@@ -13,7 +14,7 @@ impl StreamAsofJoinOperator {
         &mut self,
         batch: &Batch,
         input: ValidatedInput,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<()> {
         let side = input.side(&self.spec);
         let batches = batch.table_payload()?.batches();
@@ -38,7 +39,7 @@ impl StreamAsofJoinOperator {
         batches: &[RecordBatch],
         current: (usize, usize),
         input: ValidatedInput,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<bool> {
         Ok(
             self.existing_identity((&batches[current.0], current.1), input, context)?
@@ -56,7 +57,7 @@ impl StreamAsofJoinOperator {
         &self,
         row: InputRow<'_>,
         input: ValidatedInput,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<bool> {
         let side = input.side(&self.spec);
         if input.index == 0 {
@@ -70,7 +71,7 @@ impl StreamAsofJoinOperator {
         &self,
         row: InputRow<'_>,
         side: &AsofJoinSide,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<bool> {
         for (time, key, sequence) in self.state.left.unordered_keys() {
             context.check_cancelled()?;
@@ -93,7 +94,7 @@ impl StreamAsofJoinOperator {
         &self,
         row: InputRow<'_>,
         side: &AsofJoinSide,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<bool> {
         for (key, bucket) in &self.state.right {
             context.check_cancelled()?;
@@ -123,7 +124,7 @@ fn prior_identity(
     batch_index: usize,
     row: usize,
     side: &AsofJoinSide,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<bool> {
     let current = (&batches[batch_index], row);
     for (index, previous) in batches[..=batch_index].iter().enumerate() {

@@ -131,7 +131,7 @@ and the [streaming guide](streaming-guide.md).
 ### Bounded backward ASOF Join
 
 `cf.table.stream_asof_join` and `TableExpr.stream_asof_join` declare a native
-stream-only match with required `tolerance` and `limits`, plus optional `keys`,
+backward bounded match in batch or stream mode with required `tolerance` and `limits`, plus optional `keys`,
 `late_policy`, and `prefixes`. Exact non-null event time and sequence are
 inherited from each operand. The result preserves every accepted left row and
 makes right fields nullable; final output waits for strict progress on both

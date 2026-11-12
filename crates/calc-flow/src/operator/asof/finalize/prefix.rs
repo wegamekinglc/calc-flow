@@ -1,4 +1,7 @@
 //! Preserve canonical checkpoints while removing only a finalized left prefix.
+#[cfg(test)]
+use crate::StreamOperatorContext;
+use crate::operator::asof::kernel::KernelContext;
 
 use super::{PreparedOutput, emit_output};
 use crate::operator::asof::{
@@ -8,7 +11,7 @@ use crate::operator::asof::{
     state::{Inventory, LeftPrefix, PreparedLeftDrain, PreparedPayloadRemoval},
 };
 use crate::{
-    Result, StreamCollector, StreamOperatorContext, StreamingFailureReason,
+    Result, StreamCollector, StreamingFailureReason,
     runtime::streaming::gather_work::{GatherStop, OwnedCpuWork},
 };
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -53,7 +56,7 @@ impl StreamAsofJoinOperator {
         &mut self,
         output: PreparedOutput,
         headroom: MemoryReservation,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
         collector: &mut dyn StreamCollector,
     ) -> Result<()> {
         let count = output.prefix.count;
@@ -80,10 +83,7 @@ impl StreamAsofJoinOperator {
         status.state_bytes = inventory.bytes;
         emit_output(output.batch, context, collector).await?;
         #[cfg(feature = "benchmark-internals")]
-        let phase = context
-            .job()
-            .join_cpu_trace()
-            .stage(&self.name, "state_commit", count);
+        let phase = context.trace().stage(&self.name, "state_commit", count);
         // Nothing after sink acceptance can fail or yield before installation.
         self.state
             .commit_prepared_left_prefix(&output.prefix, prepared.drain, prepared.pool);
@@ -116,7 +116,7 @@ impl StreamAsofJoinOperator {
     async fn prepare_prefix_checkpoint(
         &self,
         prefix: &LeftPrefix,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<PreparedPrefix> {
         let (drain, drain_workspace) = self.prepare_left_drain(prefix, context).await?;
         let (length, inventory, _) = self.state.project_capacity_prefix(
@@ -125,28 +125,26 @@ impl StreamAsofJoinOperator {
             &drain,
             &self.name,
         )?;
-        let (journal, credit, retention_bytes, inventory, workspace) =
-            if context.job().checkpointing() {
-                let journal = self.prepare_log_prefix(prefix, &drain)?;
-                let (credit, retention_bytes) = self.prepare_log_retention(
-                    &prefix.owners,
-                    &prefix.batches,
-                    context.job().checkpointing(),
-                )?;
-                let inventory =
-                    self.log_projection(inventory, length, &journal, retention_bytes)?;
-                let workspace = self.reserve_workspace(length)?;
-                (journal, credit, retention_bytes, inventory, workspace)
-            } else {
-                let inventory = Self::index_projection(inventory, length)?;
-                (
-                    crate::operator::asof::checkpoint::index_v3::log::journal::Journal::default(),
-                    None,
-                    0,
-                    inventory,
-                    self.reserve_workspace(0)?,
-                )
-            };
+        let (journal, credit, retention_bytes, inventory, workspace) = if context.checkpointing() {
+            let journal = self.prepare_log_prefix(prefix, &drain)?;
+            let (credit, retention_bytes) = self.prepare_log_retention(
+                &prefix.owners,
+                &prefix.batches,
+                context.checkpointing(),
+            )?;
+            let inventory = self.log_projection(inventory, length, &journal, retention_bytes)?;
+            let workspace = self.reserve_workspace(length)?;
+            (journal, credit, retention_bytes, inventory, workspace)
+        } else {
+            let inventory = Self::index_projection(inventory, length)?;
+            (
+                crate::operator::asof::checkpoint::index_v3::log::journal::Journal::default(),
+                None,
+                0,
+                inventory,
+                self.reserve_workspace(0)?,
+            )
+        };
         let pool = self
             .prepare_pool_compaction(&prefix.batches, context)
             .await?;
@@ -170,7 +168,7 @@ impl StreamAsofJoinOperator {
     async fn prepare_left_drain(
         &self,
         prefix: &LeftPrefix,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<(PreparedLeftDrain, MemoryReservation)> {
         let bytes = self.state.left.drain_workspace_bytes(
             &prefix.batches,

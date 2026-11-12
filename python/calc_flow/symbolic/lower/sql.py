@@ -84,6 +84,7 @@ _TABLE_BOUNDARIES = frozenset(
         "late_rows",
         "attach_columns",
         "stream_join",
+        "stream_asof_join",
     }
 )
 
@@ -188,10 +189,7 @@ class _SQLGraph:
         if node.op.name == "table_input":
             self.schemas[node.digest] = self.analyzer.table(node, "sql.input").schema
             return self.graph.source(node)
-        if (
-            node.op.name == "stream_join"
-            or node.digest in self.analyzer._sql_join_nodes
-        ):
+        if self._is_join(node):
             return self._append_join(node)
         if self._is_event_window(node):
             return self._append_window(node)
@@ -210,10 +208,19 @@ class _SQLGraph:
         self._remember(node, output_id)
         return output_id
 
+    def _is_join(self, node):
+        return (
+            node.op.name in {"stream_join", "stream_asof_join"}
+            or node.digest in self.analyzer._sql_join_nodes
+            or node.digest in self.analyzer._sql_asof_nodes
+        )
+
     def _append_join(self, node):
         from calc_flow.symbolic.lower.strategies import _stream_join_node
 
-        joined = self.analyzer._sql_join_nodes.get(node.digest, node)
+        joined = self.analyzer._sql_asof_nodes.get(
+            node.digest, self.analyzer._sql_join_nodes.get(node.digest, node)
+        )
         parents = [self.table(child) for child in joined.args]
         schemas = [self.schemas[child.digest] for child in joined.args]
         output_id = self.graph.allocate(f"cf_stream_join_{node.digest[:16]}")
@@ -391,6 +398,7 @@ class _SQLGraph:
                     "snapshot_sql",
                     "attach_columns",
                     "stream_join",
+                    "stream_asof_join",
                     "late_output",
                     "late_rows",
                 }
@@ -601,7 +609,10 @@ def lower_sql_program(
     if not _macd_input_boundaries(program) and not any(
         node.op.name
         in {"aggregate", "union_all", "sql", "snapshot_sql", "late_output", "late_rows"}
-        or (analyzer._mode == "batch" and node.op.name == "stream_join")
+        or (
+            analyzer._mode == "batch"
+            and node.op.name in {"stream_join", "stream_asof_join"}
+        )
         for _, value in program.outputs
         for node in _walk_nodes(value._node)
     ):

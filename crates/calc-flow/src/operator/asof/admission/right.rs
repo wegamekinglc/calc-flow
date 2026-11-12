@@ -1,12 +1,13 @@
 //! Append-only right admission with typed columns and batch-local key IDs.
+use crate::operator::asof::kernel::KernelContext;
 
 #[cfg(test)]
 use super::identity_tests;
 use super::{
     Admission, AdmissionRef, AdmissionWorkspace, Array, Batch, InputKeys, LeftOrder, RecordBatch,
-    ReservedIdentities, Result, StreamAsofJoinOperator, StreamOperatorContext,
-    StreamingFailureReason, TimestampMicrosecondArray, UInt64Array, ValidatedInput,
-    admitted_right_capacities, check_input_cancellation, direct, reason, state, times,
+    ReservedIdentities, Result, StreamAsofJoinOperator, StreamingFailureReason,
+    TimestampMicrosecondArray, UInt64Array, ValidatedInput, admitted_right_capacities,
+    check_input_cancellation, direct, reason, state, times,
 };
 
 pub(in super::super) struct RecordColumns {
@@ -29,7 +30,7 @@ pub(super) fn plan(
     operator: &StreamAsofJoinOperator,
     batch: &Batch,
     input: ValidatedInput,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<Option<Plan>> {
     if !eligible(operator, batch, input) {
         return Ok(None);
@@ -66,7 +67,7 @@ fn dictionary_mapping(
     operator: &StreamAsofJoinOperator,
     rows: &state::EncodedBatch,
     keys: &mut InputKeys,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<Vec<u32>> {
     (0..rows.len())
         .map(|id| {
@@ -84,7 +85,7 @@ impl RecordColumns {
         operator: &StreamAsofJoinOperator,
         record: &RecordBatch,
         keys: &mut InputKeys,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<Option<Self>> {
         context.check_cancelled()?;
         let side = operator.spec.right();
@@ -128,7 +129,7 @@ impl RecordColumns {
         operator: &StreamAsofJoinOperator,
         mapping: &[u32],
         keys: &mut InputKeys,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<bool> {
         for (row, id) in self.keys.iter_mut().enumerate() {
             check_input_cancellation(row, context)?;
@@ -174,7 +175,7 @@ impl Plan {
         batch: &Batch,
         input: ValidatedInput,
         identity: ReservedIdentities,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<Admission> {
         operator.record_duplicates(1, 0)?;
         let accepted = operator.check_admission_rows(1, identity.rows as u64)?;

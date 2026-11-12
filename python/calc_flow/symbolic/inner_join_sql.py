@@ -86,9 +86,17 @@ def temporal_sql_paths(program):
     paths = set()
     for _, value in program.outputs:
         for node in _walk_nodes(value._node):
-            if _is_inner_join(node):
+            if _is_inner_join(node) or _is_asof_join(node):
                 paths.update(_ancestor_sql_paths(node))
     return paths
+
+
+def _is_asof_join(node):
+    from calc_flow.symbolic.asof_sql import native_plan as asof_plan
+
+    return node.op.name == "stream_asof_join" or (
+        node.op.name == "sql" and asof_plan(node) is not None
+    )
 
 
 def _is_inner_join(node):
@@ -100,33 +108,38 @@ def _is_inner_join(node):
 def _ancestor_sql_paths(node):
     from calc_flow.symbolic.lower.sql import _walk_nodes
 
-    return {
-        child.digest
-        for arg in node.args
-        for child in _walk_nodes(arg)
-        if child.op.name == "sql"
-    }
+    return {child.digest for arg in node.args for child in _walk_nodes(arg)}
 
 
 def cache_policy(program):
+    from calc_flow.symbolic.asof_sql import native_plan as asof_plan
     from calc_flow.symbolic.lower.sql import _walk_nodes
 
-    return (
+    sqls = [
+        node
+        for _, value in program.outputs
+        for node in _walk_nodes(value._node)
+        if node.op.name == "sql"
+    ]
+    inner = (
         ("finite_inner_join_v1",)
-        if any(
-            node.op.name == "sql" and native_plan(node) is not None
-            for _, value in program.outputs
-            for node in _walk_nodes(value._node)
-        )
+        if any(native_plan(node) is not None for node in sqls)
         else ()
     )
+    asof = (
+        ("finite_asof_join_v1",)
+        if any(asof_plan(node) is not None for node in sqls)
+        else ()
+    )
+    return (*inner, *asof)
 
 
 def time_is_original(node, name, analyzer):
     from calc_flow.symbolic.event_window_sql import time_is_input
 
-    if node.digest in analyzer._sql_join_nodes:
-        node = analyzer._sql_join_nodes[node.digest]
+    node = analyzer._sql_asof_nodes.get(
+        node.digest, analyzer._sql_join_nodes.get(node.digest, node)
+    )
     if node.op.name == "stream_join":
         return (
             node.attr("output_event_time").value == name
@@ -174,3 +187,34 @@ def _derived_time_is_original(node, name, analyzer):
     return value.op.name == "column_ref" and time_is_original(
         value.args[0], value.attr("name").value, analyzer
     )
+
+
+def projected_facts(node, child, output):
+    from dataclasses import replace
+
+    from calc_flow.symbolic.analyzer import _cstr_seq
+
+    base = node.args[0]
+    if base.op.name != "with_columns":
+        return output
+    expressions = dict(zip(_cstr_seq(base.attr("names")), base.args[1:]))
+    columns = {
+        name: _projected_column(name, expressions, base.args[0])
+        for name in _cstr_seq(node.attr("columns"))
+    }
+    identity = _passthrough_identity(
+        child, {name: source for name, source in columns.items() if source is not None}
+    )
+    if identity is None:
+        return output
+    event, entity, sequence = identity
+    return replace(output, event_time=event, entity_by=entity, sequence_by=sequence)
+
+
+def _projected_column(name, expressions, target):
+    expression = expressions.get(name)
+    if expression is None:
+        return name
+    if expression.op.name == "column_ref" and expression.args[0] == target:
+        return expression.attr("name").value
+    return None
