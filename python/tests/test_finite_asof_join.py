@@ -100,14 +100,15 @@ def test_same_finite_asof_plan_empty_inputs_and_failure_retry(sql):
         "reuse", mode="batch", outputs={"match": joined(source("a"), source("b"), sql)}
     )
     runtime = cf.Runtime()
-    plan = p.compile_batch(runtime)
+    plan: cf.BatchExecutionPlan = p.compile_batch(runtime)
 
     def execute(left, right):
-        result = plan.execute(
+        result = cf.BatchExecutionPlan.execute(
+            plan,
             inputs={
                 "a.input": cf.Batch.from_pyarrow(left),
                 "b.input": cf.Batch.from_pyarrow(right),
-            }
+            },
         )
         return next(iter(result.outputs.values())).to_pyarrow()
 
@@ -161,14 +162,15 @@ def test_asof_mixed_sharing_nested_export(sql):
         )
         == 2
     )
-    plan = cf.Runtime().compile_batch_project(
+    plan: cf.BatchExecutionPlan = cf.Runtime().compile_batch_project(
         cf.ProjectDocument.model_validate(doc).model_dump_json()
     )
-    out = plan.execute(
+    out = cf.BatchExecutionPlan.execute(
+        plan,
         inputs={
             f"{name}.input": cf.Batch.from_pyarrow(value)
             for name, value in inputs.items()
-        }
+        },
     )
     for name, value in out.outputs.items():
         assert value.to_pyarrow().equals(result[name.split(".")[0]])
@@ -419,23 +421,25 @@ def test_null_identity_is_rejected_by_arrow_binding_before_execution():
         mode="batch",
         outputs={"match": joined(source("a"), source("b"))},
     )
-    plan = p.compile_batch()
+    plan: cf.BatchExecutionPlan = p.compile_batch()
     key_null = values([10]).set_column(
         0, values([]).schema.field("k"), pa.array([None], type=pa.int64())
     )
     for bad in [key_null, values([None]), values([10], [None])]:
         with pytest.raises(TypeError, match="non-nullable.*null values"):
-            plan.execute(
+            cf.BatchExecutionPlan.execute(
+                plan,
                 inputs={
                     "a.input": cf.Batch.from_pyarrow(bad),
                     "b.input": cf.Batch.from_pyarrow(values([9])),
-                }
+                },
             )
-    result = plan.execute(
+    result = cf.BatchExecutionPlan.execute(
+        plan,
         inputs={
             "a.input": cf.Batch.from_pyarrow(values([10])),
             "b.input": cf.Batch.from_pyarrow(values([])),
-        }
+        },
     )
     assert next(iter(result.outputs.values())).to_pyarrow()[
         "right__seq"

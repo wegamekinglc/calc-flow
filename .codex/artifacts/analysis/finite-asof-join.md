@@ -505,3 +505,118 @@ coordinator. CI reuses only the supplied `318a64df` snapshot: 8 SUCCESS,
 12 IN_PROGRESS, 0 failed, with four workflows unfinished. It is not evidence
 that this follow-up HEAD is green. No new CI read/watch/poll, broad review chain,
 delegation or merge occurred. DAL-518 remains `in_progress`.
+
+## Codacy gate repair — tests and example only
+
+Baseline `45bf88ecc13e2f9cb191718438969bb285f7fc11`. The independent product
+review is **Approve**, with F1 closed. This is a verification/example refactor;
+product sources, public APIs, native inputs, bindings and package/stubs are
+unchanged, so that product approval and the valid product results remain in force.
+The reviewer report is preserved untracked with SHA-256
+`3b092bd1381cacf0ed341e2ea654c68d876c9d51db4ffd4429156f89492838a4`.
+
+The actual RED is Codacy check-run `131193242438`: `action_required`, 12 new
+issues against a zero-new-issues gate. The coordinator's original findings and
+the known check-run annotations were read; no new CI-state poll was needed for
+diagnosis. The increment is restricted to the two Rust rename/alias-chain test
+files, `python/tests/test_finite_asof_join.py`, `examples/finite_asof_join.py`
+and this analysis. Codacy/CI/baseline/ignore configuration is unchanged, and no
+suppression is added.
+
+### Mapping the 12 findings
+
+Seven Rust functions are split into named fixture constructors, field selection,
+identity distortion and common dual-mode rejection checks. Expected values remain
+literal 7/3, and all 22 identity rejection checks remain. The original ordered
+list of five tests in each file is identical after refactoring.
+
+| Function                                                   | Codacy RED complexity | Local GREEN complexity |
+|------------------------------------------------------------|-----------------------|------------------------|
+| nested_alias_chain_through_filter_executes_both_lifecycles | 13                    | 6                      |
+| alias_chain_preserves_complete_composite_sequence          | 9                     | 7                      |
+| distorted                                                  | 10                    | 3                      |
+| alias_chain_cannot_launder_derived_or_incomplete_identity  | 9                     | 7                      |
+| asof_df_rename_asof_executes_in_both_lifecycles            | 9                     | 5                      |
+| df_rename_does_not_prove_incomplete_or_derived_identity    | 9                     | 4                      |
+| additional_aliases_retain_the_original_identity            | 12                    | 5                      |
+
+Lizard 1.23.0 measures **all 29 functions at complexity ≤8**, including new
+helpers. Codacy and local Lizard differ by one on the original `distorted`
+function; the final helper is comfortably below the threshold. The raw local
+before/after inventory is retained in `codacy-complexity-{red,green}.json`.
+
+The example's two warnings are reproduced by Bandit 1.9.4 as B608 and B101.
+It now spells the complete fixed CF_ASOF_JOIN JSON/SQL literal directly. Native
+SQL descriptions from the original and new example are exactly equal, proving
+the same aliases, quoting and full wire configuration. Its independent
+`[10, None]` check now raises an explicit RuntimeError and remains active under
+`python -O`, including a deliberately incorrect output control. Bandit GREEN
+has **0 findings**.
+
+The three Python diagnostics pointed to Arrow batch-port dictionaries passed
+to `plan.execute(inputs=...)`. All four synchronous execution sites in the
+affected test module now identify the exported `cf.BatchExecutionPlan.execute`
+API explicitly and annotate the plan type. They invoke the same synchronous
+method with the original instance and unchanged inputs. Normalizing those API
+qualifications and local type annotations produces an AST identical to the old
+test module: JSON serialization/SQL escaping, parameters, positive/negative
+inputs and every assertion are preserved. All **16 test functions and their
+parametrizations** are unchanged (38 collected cases).
+
+A supplementary Semgrep 1.180.0 `p/python` scan runs 151 rules on exact copies
+of both Python files, outside its default test-file ignore behavior: **0 findings,
+2 files scanned**, both before and after. This local ruleset does **not** reproduce
+the three hosted Codacy diagnostics, so it is not evidence that those hosted
+findings are closed. The new-head hosted check remains the authority for that
+gate; no bypass, method alias or catch-all wrapper is introduced.
+
+### Directed verification
+
+```sh
+cargo test --locked -p calc-flow --test finite_asof_frontend rename::
+cargo clippy --locked -p calc-flow --test finite_asof_frontend -- -D warnings
+cargo fmt --all --check
+PYTHONPATH=target/finite-asof-join/site-f1-chain JAX_PLATFORMS=cpu \
+  $CF_PY -m pytest python/tests/test_finite_asof_join.py -q \
+  -k 'same_finite_asof_plan_empty_inputs_and_failure_retry or asof_mixed_sharing_nested_export or null_identity_is_rejected_by_arrow_binding_before_execution'
+PYTHONPATH=target/finite-asof-join/site-f1-chain $CF_PY examples/finite_asof_join.py
+PYTHONPATH=target/finite-asof-join/site-f1-chain $CF_PY -O examples/finite_asof_join.py
+$CF_PY -m ruff check python/tests/test_finite_asof_join.py examples/finite_asof_join.py
+$CF_PY -m ruff format --check python/tests/test_finite_asof_join.py examples/finite_asof_join.py
+bandit -q examples/finite_asof_join.py
+```
+
+Results: **10 Rust tests**, **5 Python cases** (33 deselected), both example
+executions, Clippy, rustfmt, Ruff check/format and Bandit passed. Additional
+author checks prove identical native SQL descriptions, an unchanged normalized
+Python AST, retained Rust test names and parametrizations, and optimized-mode
+rejection of incorrect example results. Tests were kept green during refactoring;
+the observed hosted lint failures and local complexity/Bandit reproductions are
+the RED evidence. No product behavior was implemented, no assertion or case was
+weakened, and no full suite, performance or native rebuild was run.
+
+### Reused native and updated provenance
+
+`target/finite-asof-join/provenance-codacy.json` records the exact reused native
+build from `45bf88ec` and the current verification sources. All **1643 Rust/Cargo
+files** are checked against that build's manifest: only the two external Rust
+test files differ. All **59 Python/package/stub sources** are unchanged and
+match the imported `site-f1-chain` package exactly. The four changed verification
+files receive separate hashes. The core rlib, native and wheel hashes match the
+previous build; no product/native source input changed.
+
+- Reused native SHA-256:
+  `386732408239bd09e27962299975ab2ee617919d2c4b38c739f993504db5cccd`.
+- Reused wheel SHA-256:
+  `201a8b25b354582351b636a1ba1cea964c676a672155463d07d447d3d01a082c`.
+- Current Rust/package source manifest SHA-256:
+  `3ba5112cb816b0647aa87c046381d4e1b6a742679d6aa2d7d56a82821d91d48b`.
+
+After commit, the recorded sources are checked against Git HEAD and the actual
+delivery commit is recorded in the manifest. Previous product/kernel, identity,
+recovery/terminal and standalone core example results are reused. Author review
+finds only behavior-preserving test organization, clearer batch API calls and
+the requested example guard correction; no fresh product review is requested.
+The single post-push CI snapshot for the delivery HEAD is supplied with the final
+comment as `codacy-ci-snapshot.json`; pending checks do not establish gate success.
+DAL-518 remains `in_progress`; no delegation or merge occurs.

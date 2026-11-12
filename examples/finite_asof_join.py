@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import timedelta
 
 import pyarrow as pa
@@ -27,19 +26,21 @@ def main():
     df = a.stream_asof_join(
         b, tolerance=timedelta(microseconds=2), limits=cf.AsofStateLimits(100, 1048576)
     )
-    side = dict(keys=["k"], event_time="ts", sequence_by=["seq"])
-    config = json.dumps(
-        dict(
-            spec=dict(
-                left=dict(side, prefix="left"),
-                right=dict(side, prefix="right"),
-                tolerance_micros=2,
-                limits=dict(max_state_rows=100, max_state_bytes=1048576),
-                late_policy="error",
-            )
-        )
+    sql = cf.sql(
+        """SELECT * FROM CF_ASOF_JOIN('a', 'b', '{
+            "spec": {
+                "left": {"keys": ["k"], "event_time": "ts",
+                         "sequence_by": ["seq"], "prefix": "left"},
+                "right": {"keys": ["k"], "event_time": "ts",
+                          "sequence_by": ["seq"], "prefix": "right"},
+                "tolerance_micros": 2,
+                "limits": {"max_state_rows": 100, "max_state_bytes": 1048576},
+                "late_policy": "error"
+            }
+        }')""",
+        a=a,
+        b=b,
     )
-    sql = cf.sql(f"SELECT * FROM CF_ASOF_JOIN('a', 'b', '{config}')", a=a, b=b)
 
     def data(times, sequences):
         return pa.Table.from_arrays(
@@ -55,7 +56,10 @@ def main():
     for table in p.collect(
         {"a": data([10, 20], [1, 2]), "b": data([8, 9, 9], [1, 2, 10])}
     ).values():
-        assert table["right__seq"].to_pylist() == [10, None]
+        if table["right__seq"].to_pylist() != [10, None]:
+            raise RuntimeError(
+                "ASOF result differs from the expected typed predecessor"
+            )
     print("DataFrame and SQL ASOF: typed tie selects 10; unmatched row remains")
 
 

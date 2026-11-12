@@ -1,7 +1,7 @@
 use super::{fixture, source, stream, values};
 use calc_flow::{
-    AsofJoinSide, CompileMode, CompileOptions, InputOptions, Program, Result, StreamAsofJoinSpec,
-    TableExpr, UdfRegistry, table_input,
+    AsofJoinSide, ColumnExpr, CompileMode, CompileOptions, InputOptions, NamedExpr, Program,
+    Result, StreamAsofJoinSpec, TableExpr, UdfRegistry, table_input,
 };
 use std::collections::BTreeMap;
 
@@ -37,6 +37,25 @@ fn spec(prefix: &str) -> Result<StreamAsofJoinSpec> {
 fn program(outputs: BTreeMap<String, TableExpr>) -> Result<Program> {
     Program::new("df_identity_rename", CompileMode::Batch, outputs)
 }
+fn first_asof() -> Result<TableExpr> {
+    source("a")?.asof_join(&source("b")?, super::asof_support::spec(2))
+}
+fn join_alias(input: &TableExpr, right: &str, prefix: &str) -> Result<TableExpr> {
+    input.asof_join(&source(right)?, spec(prefix)?)
+}
+fn nested_inputs() -> BTreeMap<String, calc_flow::Batch> {
+    let mut inputs = fixture();
+    inputs.insert("c".into(), super::asof_support::batch(&[("A", 8, 3, 3)]));
+    inputs
+}
+fn select_names(input: &TableExpr, names: &[&str]) -> Result<TableExpr> {
+    input.select(
+        names
+            .iter()
+            .map(|name| input.column(name)?.alias(name))
+            .collect::<Result<_>>()?,
+    )
+}
 
 #[tokio::test]
 async fn source_df_rename_asof_executes_in_both_lifecycles() -> Result<()> {
@@ -52,17 +71,15 @@ async fn source_df_rename_asof_executes_in_both_lifecycles() -> Result<()> {
 
 #[tokio::test]
 async fn asof_df_rename_asof_executes_in_both_lifecycles() -> Result<()> {
-    let first = source("a")?.asof_join(&source("b")?, super::asof_support::spec(2))?;
+    let first = first_asof()?;
     let post = renamed(&first, "left__", "next_")?;
-    let second = post.asof_join(&source("c")?, spec("next_")?)?;
-    let mut inputs = fixture();
-    inputs.insert("c".into(), super::asof_support::batch(&[("A", 8, 3, 3)]));
+    let second = join_alias(&post, "c", "next_")?;
     verify(
         program(BTreeMap::from([
             ("first".into(), first),
             ("second".into(), second),
         ]))?,
-        inputs,
+        nested_inputs(),
         BTreeMap::from([
             ("first".into(), vec![Some(7)]),
             ("second".into(), vec![Some(3)]),
@@ -107,20 +124,24 @@ async fn df_rename_does_not_prove_incomplete_or_derived_identity() -> Result<()>
         "cast_time",
         "rewrite_sequence",
     ] {
-        let projected = invalid_projection(missing)?;
-        let joined = projected.asof_join(&source("b")?, spec("df_")?)?;
-        let p = program(BTreeMap::from([("out".into(), joined)]))?;
-        for mode in [CompileMode::Batch, CompileMode::Stream] {
-            let error = p
-                .for_mode(mode)?
-                .collect_schema(&UdfRegistry::new().snapshot())
-                .await
-                .unwrap_err();
-            assert!(
-                error.to_string().contains("ordering_required"),
-                "{missing} {mode:?}: {error}"
-            );
-        }
+        rejects(invalid_projection(missing)?, missing).await?;
+    }
+    Ok(())
+}
+
+async fn rejects(left: TableExpr, case: &str) -> Result<()> {
+    let joined = join_alias(&left, "b", "df_")?;
+    let p = program(BTreeMap::from([("out".into(), joined)]))?;
+    for mode in [CompileMode::Batch, CompileMode::Stream] {
+        let error = p
+            .for_mode(mode)?
+            .collect_schema(&UdfRegistry::new().snapshot())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("ordering_required"),
+            "{case} {mode:?}: {error}"
+        );
     }
     Ok(())
 }
@@ -146,22 +167,29 @@ fn identity_source(missing: &str) -> Result<TableExpr> {
 }
 fn invalid_projection(kind: &str) -> Result<TableExpr> {
     let a = identity_source(kind)?;
-    let columns = ["key", "time", "sequence"].map(|name| {
-        let column = a.column(name)?;
-        let column = match (kind, name) {
-            ("cast_key", "key") | ("cast_time", "time") => column.cast(
-                super::asof_support::schema()
-                    .field_with_name(name)
-                    .unwrap()
-                    .data_type()
-                    .clone(),
-            )?,
-            ("rewrite_sequence", "sequence") => column + calc_flow::lit(1_i64)?,
-            _ => column,
-        };
-        column.alias(&format!("df_{name}"))
-    });
-    a.select(columns.into_iter().collect::<Result<_>>()?)
+    a.select(identity_columns(&a, "", kind)?)
+}
+fn identity_columns(input: &TableExpr, from: &str, kind: &str) -> Result<Vec<NamedExpr>> {
+    ["key", "time", "sequence"]
+        .map(|name| {
+            let column = input.column(&format!("{from}{name}"))?;
+            changed_identity(column, name, kind)?.alias(&format!("df_{name}"))
+        })
+        .into_iter()
+        .collect()
+}
+fn changed_identity(column: ColumnExpr, name: &str, kind: &str) -> Result<ColumnExpr> {
+    match (kind, name) {
+        ("cast_key", "key") | ("cast_time", "time") => column.cast(
+            super::asof_support::schema()
+                .field_with_name(name)
+                .unwrap()
+                .data_type()
+                .clone(),
+        ),
+        ("rewrite_sequence", "sequence") => Ok(column + calc_flow::lit(1_i64)?),
+        _ => Ok(column),
+    }
 }
 
 #[tokio::test]
@@ -193,14 +221,14 @@ async fn ordinary_df_and_sql_renames_do_not_gain_temporal_proof() -> Result<()> 
     Ok(())
 }
 
-#[tokio::test]
-async fn additional_aliases_retain_the_original_identity() -> Result<()> {
+fn retained_aliases() -> Result<(TableExpr, TableExpr)> {
     let a = source("a")?;
     let aliases =
         ["key", "time", "sequence"].map(|name| a.column(name)?.alias(&format!("aaa_{name}")));
     let appended = a.with_columns(aliases.into_iter().collect::<Result<_>>()?)?;
-    let selected = appended.select(
-        [
+    let selected = select_names(
+        &appended,
+        &[
             "aaa_key",
             "aaa_time",
             "aaa_sequence",
@@ -208,19 +236,17 @@ async fn additional_aliases_retain_the_original_identity() -> Result<()> {
             "time",
             "sequence",
             "value",
-        ]
-        .map(|name| appended.column(name)?.alias(name))
-        .into_iter()
-        .collect::<Result<_>>()?,
+        ],
     )?;
+    Ok((appended, selected))
+}
+
+#[tokio::test]
+async fn additional_aliases_retain_the_original_identity() -> Result<()> {
+    let (appended, selected) = retained_aliases()?;
     let outputs = [("appended", appended), ("selected", selected)]
         .into_iter()
-        .map(|(name, input)| {
-            Ok((
-                name.into(),
-                input.asof_join(&source("b")?, super::asof_support::spec(2))?,
-            ))
-        })
+        .map(|(name, input)| Ok((name.into(), join_alias(&input, "b", "")?)))
         .collect::<Result<_>>()?;
     verify(
         program(outputs)?,
