@@ -133,6 +133,8 @@ def time_is_original(node, name, analyzer):
             if node.op.version >= 2
             else False
         )
+    if node.op.name == "stream_asof_join":
+        return _asof_time_is_original(node, name, analyzer)
     if node.op.name == "sql":
         return _sql_time_is_original(node, name, analyzer)
     if node.op.name in {"project", "filter"}:
@@ -140,6 +142,16 @@ def time_is_original(node, name, analyzer):
     if node.op.name == "with_columns":
         return _derived_time_is_original(node, name, analyzer)
     return time_is_input(node, name)
+
+
+def _asof_time_is_original(node, name, analyzer):
+    """Recognize the declared output time of an already validated ASOF node."""
+    facts = analyzer._table_cache.get(node.digest)
+    return (
+        facts is not None
+        and node.digest not in analyzer._invalid_table_nodes
+        and facts.event_time == name
+    )
 
 
 def _sql_time_is_original(node, name, analyzer):

@@ -297,3 +297,80 @@ The final repair commit and one nonblocking new-head CI snapshot are delivered
 in the triggering issue thread. Hosted pending checks are not green evidence;
 there is no poll, merge or delegation. DAL-517 remains in_progress for the
 coordinator's independent tester then reviewer handoff.
+
+## Reviewer F1 repair: ASOF output time in inner stream composition
+
+Repair base: `ff4e64f69b4b5c5888337c4316efd2d29568bfd3`, on the same
+branch and PR #601. The untracked reviewer report is preserved byte-for-byte
+(SHA-256 `3a8c270d98fd64d86f8b3efab419a98a24d69410e069412ec322bdc0f6bb2f91`).
+
+`inner_join_sql.time_is_original` now recognizes `stream_asof_join` through
+its cached, already validated TableFacts. Only the declared ASOF output event
+time qualifies; a missing analysis or invalid node/operand does not. The
+existing project/filter and pure-rename recursion can consequently reach this
+proof. No caller, ASOF declaration/lowerer, stream_join @1/@2 identity, native
+code or mode admission changed. Batch ASOF remains unsupported; DAL-518 is
+outside this repair.
+
+`test_symbolic_stream_asof_join.py` adds the six reviewer probes as permanent
+regressions: ASOF at the left/right inner ingress, direct or through a
+projection/filter retaining all ordering fields. Each checks one ASOF and one
+inner native node, compiles the stream graph, and rejects explicit batch
+lowering with unsupported_mode. Two additional cases reject a SQL time shift
+at each ingress. All pre-existing tests and assertions are unchanged.
+
+RED reuses the reviewer's existing bidirectional regression result:
+**1 failed, 2 passed, 70 deselected**. The new valid fixtures, before the
+production repair, give **6 failed, 2 passed, 73 deselected** with this command:
+
+```sh
+PYTHONPATH=target/finite-inner-join/site "$CF_PY" -m pytest \
+  python/tests/test_symbolic_stream_asof_join.py \
+  -k 'inner_consumer_accepts_verified_asof_time or inner_consumer_rejects_rewritten_asof_time' \
+  -q -W error
+```
+
+The six failures are precisely the selected ingress's ordering_required;
+the two time-shift rejection cases already pass. GREEN uses the same interpreter
+and private site described above, after overlaying the current Python source:
+
+```sh
+PYTHONPATH=target/finite-inner-join/site "$CF_PY" -m pytest \
+  python/tests/test_symbolic_stream_asof_join.py \
+  -k 'asof_and_inner_can_lower_in_both_directions or inner_consumer_cannot_reinterpret_asof_output_event_time or inner_consumer_accepts_verified_asof_time or inner_consumer_rejects_rewritten_asof_time or asof_analysis_rejects_batch_and_wrong_temporal_type' \
+  -q -W error
+PYTHONPATH=target/finite-inner-join/site "$CF_PY" -m pytest \
+  python/tests/test_finite_inner_join.py \
+  -k 'four_surface_join_fixture or conditional_eof or mixed_join_sharing or three_source_nested or public_nullable_time or time_rewrite or latest_snapshot' \
+  -q -W error
+PYTHONPATH=target/finite-inner-join/site "$CF_PY" -m pytest \
+  python/tests/test_symbolic_stream_join.py \
+  -k 'declaration_is_immutable or admits_batch_and_rejects_missing_ordering or requires_ordering_for_nested or direct_root' \
+  -q -W error
+```
+
+Results respectively: **12 passed / 69 deselected**, **13 passed / 12 deselected**,
+and **4 passed / 13 deselected**. This preserves wrong-ASOF-time, rewritten-time,
+missing-ordering, nullable-time, finite EOF/latest proof, nested sharing and old
+@1 topology checks. Earlier Rust, Python, recovery and independent acceptance
+evidence remains valid and is not relabelled as a fresh run.
+
+Changed-file Ruff check/format, `git diff --check`, and
+`python scripts/verify_complexity_gates.py` pass. Both installed Lizard 1.23.0
+and `uvx --from lizard==1.26.0 lizard -C 8 -w` pass on the two changed Python
+files. `time_is_original` has CCN 8, its ASOF helper 3; all added test functions
+and helpers are at most 6. No gate, baseline or ignore rule changed.
+
+No Rust/native rebuild is needed for this Python-only change. The **1144**
+recorded Rust/Cargo source and manifest hashes still match the existing native
+build. All **58** Python/stub files loaded from this checkout's private site
+match current source; only inner_join_sql.py differs from that build's Python
+manifest. Native SHA-256 remains
+`2a6d537354830e3d1dc993ac16f73a7e5359cf10bd1352b4f82c9659b186e4a7`.
+`target/finite-inner-join/provenance-f1.json` records current commit, paths and
+hashes independently of the preserved earlier provenance.
+
+The issue handoff records the repair SHA and one nonblocking new-head CI
+snapshot. Pending hosted checks remain outstanding; no polling, full suite,
+coverage, performance, delegation or merge was added. DAL-517 stays in_progress
+for the coordinator's original reviewer to recheck F1 and its direct impact.
