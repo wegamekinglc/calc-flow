@@ -198,7 +198,11 @@ fn next_run_pair(
 impl Iterator for Cursor<'_> {
     type Item = MatchedPair;
 
-    #[inline]
+    #[expect(
+        clippy::inline_always,
+        reason = "release gather loops otherwise call this once per matched pair"
+    )]
+    #[inline(always)]
     fn next(&mut self) -> Option<MatchedPair> {
         let index = self.index;
         let pair = match &self.view {
