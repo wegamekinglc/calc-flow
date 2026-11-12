@@ -134,6 +134,7 @@ impl RollingOperator {
         &mut self,
         records: Vec<RecordBatch>,
         last_identity: Option<Vec<u8>>,
+        original_charge: super::budget::StateCharge,
         error: super::CalcFlowError,
         node: &str,
         observer: Option<&RollingMetricsRecorder>,
@@ -142,6 +143,10 @@ impl RollingOperator {
             .owned_mut()?
             .ordered
             .restore_front(records, last_identity);
+        if self.state.deferred_history {
+            self.state.owned_mut()?.charge = original_charge;
+            return Err(error);
+        }
         if let Ok(charge) = super::budget::full_state_charge_observed(
             &self.state.buffer,
             &self.state.ordered,
@@ -349,23 +354,42 @@ impl RollingOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedOrderedOutput> {
         let observer = context.rolling_metrics();
+        let can_defer = self.state.typed_kernel_state.is_none()
+            && self.state.histories.by_entity.is_empty()
+            && !context.job().checkpointing()
+            && self.compiled.kernel_plan.supports_deferred_history();
         self.ensure_ordered_kernel_state(input, context.operator_id(), observer)?;
         let mut update = self.prepare_ordered_update(input, context).await?;
-        let touched = {
-            let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
-            retained_histories(
-                input,
-                &update,
-                &self.state.histories,
-                &self.compiled,
+        let defer_history = self.state.deferred_history || can_defer;
+        let (touched, deferred_charge) = if defer_history {
+            let charge = update.charge_change(
+                self.state
+                    .typed_kernel_state
+                    .as_deref()
+                    .expect("state initialized above"),
                 context.operator_id(),
-                observer,
-            )?
+            )?;
+            (Vec::new(), Some(charge))
+        } else {
+            let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
+            (
+                retained_histories(
+                    input,
+                    &update,
+                    &self.state.histories,
+                    &self.compiled,
+                    context.operator_id(),
+                    observer,
+                )?,
+                None,
+            )
         };
         let (batches, next_sequence) = self.ordered_output_chunks(input, &mut update, context)?;
         Ok(PreparedOrderedOutput {
             update,
             touched,
+            deferred_charge,
+            defer_history,
             batches,
             next_sequence,
         })
@@ -482,6 +506,10 @@ impl RollingOperator {
             )
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "ordered emission keeps preparation, output, and rollback in one transaction"
+    )]
     pub(super) async fn emit_ordered(
         &mut self,
         records: Vec<RecordBatch>,
@@ -489,6 +517,7 @@ impl RollingOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        let original_charge = self.state.charge;
         let observer = context.rolling_metrics();
         let removed = match super::budget::ordered_buffer_charge(
             records.iter(),
@@ -500,6 +529,7 @@ impl RollingOperator {
                 return self.restore_ordered_failure(
                     records,
                     last_identity,
+                    original_charge,
                     internal_error("ordered rolling state has unsupported state charge"),
                     context.operator_id(),
                     observer,
@@ -509,6 +539,7 @@ impl RollingOperator {
                 return self.restore_ordered_failure(
                     records,
                     last_identity,
+                    original_charge,
                     error,
                     context.operator_id(),
                     observer,
@@ -526,6 +557,7 @@ impl RollingOperator {
                 return self.restore_ordered_failure(
                     records,
                     last_identity,
+                    original_charge,
                     error,
                     context.operator_id(),
                     observer,
@@ -539,6 +571,7 @@ impl RollingOperator {
                 return self.restore_ordered_failure(
                     records,
                     last_identity,
+                    original_charge,
                     error,
                     context.operator_id(),
                     observer,
@@ -556,6 +589,7 @@ impl RollingOperator {
                 return self.restore_ordered_failure(
                     records,
                     last_identity,
+                    original_charge,
                     error,
                     context.operator_id(),
                     observer,
@@ -565,7 +599,19 @@ impl RollingOperator {
         let state = self.state.owned_mut()?;
         state.charge = current_charge;
         for batch in std::mem::take(&mut prepared.batches) {
-            output.emit("output", batch).await?;
+            if let Err(error) = output.emit("output", batch).await {
+                if prepared.defer_history || self.state.deferred_history {
+                    return self.restore_ordered_failure(
+                        records,
+                        last_identity,
+                        original_charge,
+                        error,
+                        context.operator_id(),
+                        observer,
+                    );
+                }
+                return Err(error);
+            }
         }
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
         prepared.commit(state);
@@ -589,6 +635,8 @@ fn combine_ordered_records(records: &[RecordBatch], node_id: &str) -> Result<Opt
 struct PreparedOrderedOutput {
     update: StreamKernelUpdate,
     touched: Vec<RetainedHistoryAppend>,
+    deferred_charge: Option<(super::budget::StateCharge, super::budget::StateCharge)>,
+    defer_history: bool,
     batches: Vec<Batch>,
     next_sequence: u64,
 }
@@ -601,6 +649,9 @@ impl PreparedOrderedOutput {
         node: &str,
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<super::budget::StateCharge> {
+        if let Some((old, new)) = self.deferred_charge {
+            return current.checked_sub(old)?.checked_add(new, node);
+        }
         let mut work = RollingWorkBatch::new(observer);
         let mut old = super::budget::StateCharge::default();
         let mut new = super::budget::StateCharge::default();
@@ -624,6 +675,7 @@ impl PreparedOrderedOutput {
                 .expect("state initialized above"),
         );
         state.next_output_sequence = self.next_sequence;
+        state.deferred_history |= self.defer_history;
     }
 }
 

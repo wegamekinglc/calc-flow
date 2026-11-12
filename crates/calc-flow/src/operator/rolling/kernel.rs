@@ -25,6 +25,7 @@ use datafusion::arrow::{
 };
 use sha2::{Digest, Sha256};
 
+use super::budget::StateCharge;
 use super::{
     CompiledAggregate, CompiledDifference, CompiledEvaluation, CompiledEwma, CompiledFloatReadout,
     CompiledFrame, CompiledKeyColumn, CompiledPairAggregate, CompiledRollingOutput,
@@ -489,6 +490,25 @@ impl StreamKernelUpdate {
             .collect()
     }
 
+    pub(super) fn charge_change(
+        &self,
+        base: &RollingKernelState,
+        node_id: &str,
+    ) -> Result<(StateCharge, StateCharge)> {
+        let mut old = StateCharge::default();
+        let mut new = StateCharge::default();
+        for (key, &index) in &self.execution.state.entities {
+            let entity = &self.execution.state.states[index];
+            let next = entity.charge(key.len(), node_id)?;
+            new = new.checked_add(next, node_id)?;
+            if let Some(&base_index) = base.entities.get(key) {
+                let previous = base.states[base_index].charge(key.len(), node_id)?;
+                old = old.checked_add(previous, node_id)?;
+            }
+        }
+        Ok((old, new))
+    }
+
     pub(super) fn commit(self, base: &mut RollingKernelState) {
         let local = self.execution.state;
         let mut keys = vec![Vec::new(); local.states.len()];
@@ -519,6 +539,15 @@ pub(super) struct TypedStreamTransition {
 }
 
 impl TypedStreamTransition {
+    pub(super) fn charge_change(
+        &self,
+        current: &RollingKernelState,
+        node_id: &str,
+    ) -> Result<(StateCharge, StateCharge)> {
+        self.update
+            .charge_change(self.restored.as_ref().unwrap_or(current), node_id)
+    }
+
     /// An owned `prior` was reconstructed for this update and becomes resident.
     pub(super) fn new(prior: Cow<'_, RollingKernelState>, update: StreamKernelUpdate) -> Self {
         let restored = match prior {
@@ -898,6 +927,16 @@ impl RollingKernelPlan {
 
     pub(super) const fn supports_typed_transition(&self) -> bool {
         matches!(self.selection, KernelSelection::OrderedPrimitive)
+    }
+
+    pub(super) fn supports_deferred_history(&self) -> bool {
+        self.supports_typed_transition()
+            && self.decay_pool.is_none()
+            && !self.groups.is_empty()
+            && self
+                .groups
+                .iter()
+                .all(|group| matches!(group, TypedGroupPlan::Numeric { .. }))
     }
 
     pub(super) fn typed_group_count(&self) -> usize {
@@ -1579,6 +1618,16 @@ impl RollingKernelState {
                 &self.last_identity
             )
         )
+    }
+
+    #[cfg(test)]
+    pub(super) fn total_charge_for_test(&self, node_id: &str) -> Result<StateCharge> {
+        let mut total = StateCharge::default();
+        for (key, &index) in &self.entities {
+            let charge = self.states[index].charge(key.len(), node_id)?;
+            total = total.checked_add(charge, node_id)?;
+        }
+        Ok(total)
     }
 
     #[cfg(test)]
@@ -2564,6 +2613,28 @@ impl TypedEntityState {
                 .sum::<usize>()
             + self.shared_rows.as_ref().map_or(0, |tape| tape.bytes())
     }
+
+    fn charge(&self, key_bytes: usize, node_id: &str) -> Result<StateCharge> {
+        let rows = self.shared_rows.as_ref().map_or_else(
+            || {
+                self.groups
+                    .iter()
+                    .map(TypedWindowState::retained_rows)
+                    .sum::<usize>()
+            },
+            |tape| tape.len(),
+        );
+        let bytes = self
+            .estimated_bytes()
+            .saturating_add(key_bytes)
+            .saturating_add(size_of::<Arc<Self>>());
+        Ok(StateCharge {
+            rows: u64::try_from(rows)
+                .map_err(|_| operator_error(node_id, "typed state row charge overflowed"))?,
+            bytes: u64::try_from(bytes)
+                .map_err(|_| operator_error(node_id, "typed state byte charge overflowed"))?,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2727,6 +2798,16 @@ impl TypedWindowState {
                 size_of::<TypedScanState>().saturating_add(state.scan.estimated_bytes())
             }
             Self::Decay(state) => state.as_ref().map_or(0, |state| state.bytes()),
+        }
+    }
+
+    fn retained_rows(&self) -> usize {
+        match self {
+            Self::Numeric(state) => state.samples.len(),
+            Self::Exact(state) => state.samples.len(),
+            Self::Extrema(state) => state.values.len(),
+            Self::Pair(state) => state.samples.len(),
+            Self::Cumulative(_) | Self::Ewma(_) | Self::Scan(_) | Self::Decay(_) => 0,
         }
     }
 }

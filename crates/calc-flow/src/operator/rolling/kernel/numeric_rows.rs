@@ -170,6 +170,10 @@ impl RowsTape {
     pub(super) fn bytes(&self) -> usize {
         self.credit.size()
     }
+
+    pub(super) fn len(&self) -> usize {
+        self.rows.len()
+    }
 }
 
 impl TypedEntityState {

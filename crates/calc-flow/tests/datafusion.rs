@@ -4,7 +4,7 @@ use calc_flow::{
     Batch, BatchMetadata, CalcFlowError, DataFusionConfig, DataFusionRuntime, ExternalPayload,
 };
 use datafusion::arrow::{
-    array::{Float64Array, Int64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
+    array::{Array, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
     compute::concat_batches,
     datatypes::{DataType, Field, Schema, TimeUnit},
     ipc::reader::FileReader,
@@ -454,6 +454,180 @@ async fn sorted_sql_rolling_preserves_null_partitions_peers_and_batch_boundaries
 }
 
 #[tokio::test]
+async fn sql_sum_range_rewrite_matches_fallback_for_peers_and_boundaries() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("target_id", DataType::Utf8, false),
+        Field::new(
+            "event_time",
+            DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC"))),
+            false,
+        ),
+        Field::new("seq", DataType::Int64, false),
+        Field::new("value", DataType::Float64, true),
+    ]));
+    let rows = [
+        (4, "a", 60_000_000, Some(4.0)),
+        (0, "a", 0, Some(1.0)),
+        (6, "a", 60_000_001, None),
+        (2, "a", 59_999_999, Some(2.0)),
+        (7, "a", 120_000_000, Some(16.0)),
+        (1, "b", 0, Some(10.0)),
+        (5, "b", 60_000_001, Some(20.0)),
+        (3, "a", 60_000_000, Some(8.0)),
+    ];
+    let input = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from_iter_values(rows.iter().map(|row| row.1))),
+            Arc::new(
+                TimestampMicrosecondArray::from_iter_values(rows.iter().map(|row| row.2))
+                    .with_timezone("UTC"),
+            ),
+            Arc::new(Int64Array::from_iter_values(rows.iter().map(|row| row.0))),
+            Arc::new(rows.iter().map(|row| row.3).collect::<Float64Array>()),
+        ],
+    )
+    .unwrap();
+    let tables = BTreeMap::from([(
+        "input".to_owned(),
+        Batch::table(vec![input], BatchMetadata::default()).unwrap(),
+    )]);
+    let query = "SELECT target_id, event_time, seq, value, \
+        SUM(value) OVER (PARTITION BY target_id ORDER BY event_time \
+        RANGE BETWEEN INTERVAL '59999999 microseconds' PRECEDING AND CURRENT ROW) AS sum_60s \
+        FROM input ORDER BY seq";
+    let fallback = DataFusionRuntime::new(DataFusionConfig {
+        batch_size: 1,
+        target_partitions: 1,
+        enable_rolling_rewrite: false,
+        ..DataFusionConfig::default()
+    })
+    .unwrap();
+    let expected = fallback.sql(query, &tables, None).await.unwrap();
+    let expected = expected.table_payload().unwrap();
+    let expected = concat_batches(expected.schema(), expected.batches()).unwrap();
+    for partitions in [1, 4] {
+        let rewritten = DataFusionRuntime::new(DataFusionConfig {
+            batch_size: 1,
+            target_partitions: partitions,
+            min_rows_per_partition: 1,
+            ..DataFusionConfig::default()
+        })
+        .unwrap();
+        let actual = rewritten.sql(query, &tables, None).await.unwrap();
+        let actual = actual.table_payload().unwrap();
+        let actual = concat_batches(actual.schema(), actual.batches()).unwrap();
+        assert_eq!(actual.schema(), expected.schema());
+        assert_eq!(actual, expected);
+        for metric in rewritten.metrics() {
+            assert_eq!(metric.rolling_candidate_windows, 1);
+            assert_eq!(metric.rolling_rewritten_windows, 1);
+            assert!(metric.rolling_fallback_reasons.is_empty());
+            assert!(metric.physical_plan.contains("CalcFlowRollingExec"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn sql_sum_range_matches_vectorized_reduction_and_nonfinite_expiry() {
+    async fn check(rows: &[(i64, Option<f64>)], preceding_micros: i64) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("target_id", DataType::Utf8, false),
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC"))),
+                false,
+            ),
+            Field::new("seq", DataType::Int64, false),
+            Field::new("value", DataType::Float64, true),
+        ]));
+        let input = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from_iter_values(rows.iter().map(|_| "a"))),
+                Arc::new(
+                    TimestampMicrosecondArray::from_iter_values(rows.iter().map(|row| row.0))
+                        .with_timezone("UTC"),
+                ),
+                Arc::new(Int64Array::from_iter_values(
+                    (0..rows.len()).map(|index| i64::try_from(index).expect("test row fits i64")),
+                )),
+                Arc::new(rows.iter().map(|row| row.1).collect::<Float64Array>()),
+            ],
+        )
+        .unwrap();
+        let tables = BTreeMap::from([(
+            "input".to_owned(),
+            Batch::table(vec![input], BatchMetadata::default()).unwrap(),
+        )]);
+        let query = format!(
+            "SELECT target_id, event_time, seq, value, SUM(value) OVER \
+             (PARTITION BY target_id ORDER BY event_time RANGE BETWEEN INTERVAL \
+             '{preceding_micros} microseconds' PRECEDING AND CURRENT ROW) AS sum_60s \
+             FROM input ORDER BY seq"
+        );
+        let fallback = DataFusionRuntime::new(DataFusionConfig {
+            enable_rolling_rewrite: false,
+            target_partitions: 1,
+            ..DataFusionConfig::default()
+        })
+        .unwrap();
+        let expected = fallback.sql(&query, &tables, None).await.unwrap();
+        let expected = expected.table_payload().unwrap();
+        let expected = concat_batches(expected.schema(), expected.batches()).unwrap();
+        let rewritten = DataFusionRuntime::new(DataFusionConfig {
+            target_partitions: 4,
+            min_rows_per_partition: 1,
+            ..DataFusionConfig::default()
+        })
+        .unwrap();
+        let actual = rewritten.sql(&query, &tables, None).await.unwrap();
+        let actual = actual.table_payload().unwrap();
+        let actual = concat_batches(actual.schema(), actual.batches()).unwrap();
+        assert_eq!(
+            actual.project(&[0, 1, 2, 3]).unwrap(),
+            expected.project(&[0, 1, 2, 3]).unwrap()
+        );
+        let actual = actual
+            .column(4)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let expected = expected
+            .column(4)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        for row in 0..actual.len() {
+            assert_eq!(
+                actual.is_null(row),
+                expected.is_null(row),
+                "null mismatch at {row}"
+            );
+            if actual.is_valid(row) {
+                assert_eq!(
+                    actual.value(row).to_bits(),
+                    expected.value(row).to_bits(),
+                    "bits at {row}"
+                );
+            }
+        }
+        assert_eq!(rewritten.metrics()[0].rolling_rewritten_windows, 1);
+    }
+    check(
+        &[
+            (0, Some(1e16)),
+            (0, Some(1.0)),
+            (0, Some(-1e16)),
+            (0, Some(1.0)),
+        ],
+        10,
+    )
+    .await;
+    check(&[(0, Some(f64::INFINITY)), (11, None), (12, Some(5.0))], 10).await;
+}
+
+#[tokio::test]
 async fn unsupported_sql_window_stays_on_the_datafusion_fallback() {
     let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
     let tables = BTreeMap::from([("input".to_owned(), rolling_input())]);
@@ -474,7 +648,7 @@ async fn unsupported_sql_window_stays_on_the_datafusion_fallback() {
     assert_eq!(metrics[0].rolling_rewritten_windows, 0);
     assert_eq!(
         metrics[0].rolling_fallback_reasons,
-        ["window_aggregate_is_not_avg"]
+        ["window_frame_is_not_bounded_range_to_current_row"]
     );
     assert!(!metrics[0].physical_plan.contains("CalcFlowRollingExec"));
 }

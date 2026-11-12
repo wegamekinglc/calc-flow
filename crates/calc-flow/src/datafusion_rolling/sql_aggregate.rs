@@ -123,6 +123,8 @@ fn window_rows(
 ) -> Option<usize> {
     let rows = usize::try_from(window.rows).ok()?;
     if rows == 0
+        || window.is_sum
+        || window.duration_micros.is_some()
         || i64::try_from(rows).is_err()
         || schema.field(window.input_index).data_type() != &DataType::Float64
         || (window.is_count && !has_mean_window(window, windows))
@@ -254,6 +256,7 @@ impl SqlRollingKernel {
             .sum::<usize>()
             + last_key.as_ref().map_or(0, Vec::len);
         Ok(RollingExecutionBatch {
+            input: input.clone(),
             columns,
             metrics: DataFusionRollingMetrics {
                 input_validation_ns,
@@ -450,12 +453,16 @@ mod tests {
                     output_name: "mean".to_owned(),
                     rows: 20,
                     is_count: false,
+                    is_sum: false,
+                    duration_micros: None,
                 },
                 DataFusionRollingWindow {
                     input_index: 3,
                     output_name: "count".to_owned(),
                     rows: 20,
                     is_count: true,
+                    is_sum: false,
+                    duration_micros: None,
                 },
             ],
         )

@@ -142,14 +142,15 @@ impl RollingNumericalProfile {
     }
 }
 
-/// One SQL AVG/COUNT window accepted by the crate-private `DataFusion` rolling
-/// physical planner.
+/// One SQL rolling window accepted by the crate-private `DataFusion` physical planner.
 #[derive(Clone, Debug)]
 pub(crate) struct DataFusionRollingWindow {
     pub input_index: usize,
     pub output_name: String,
     pub rows: u64,
     pub is_count: bool,
+    pub is_sum: bool,
+    pub duration_micros: Option<u64>,
 }
 
 /// Immutable typed rolling plan shared with `CalcFlowRollingExec`.
@@ -193,7 +194,9 @@ impl DataFusionRollingKernel {
         windows: &[DataFusionRollingWindow],
     ) -> Option<Self> {
         if windows.is_empty()
-            || windows.iter().any(|window| window.is_count)
+            || windows
+                .iter()
+                .any(|window| window.is_count || window.is_sum || window.duration_micros.is_some())
             || !kernel::supports_datafusion_primitive("mean")
         {
             return None;
@@ -1660,6 +1663,7 @@ struct RollingStreamState {
     operator_id: Option<String>,
     last_checkpoint_epoch: Option<Epoch>,
     typed_kernel_state: Option<Box<RollingKernelState>>,
+    deferred_history: bool,
     charge: StateCharge,
 }
 
@@ -1941,6 +1945,7 @@ impl RollingOperator {
         &self,
         rows: &[BufferedRow],
         touched: &mut PreparedHistoryUpdate,
+        typed_change: Option<(StateCharge, StateCharge)>,
         node: &str,
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<(StateCharge, StateCharge)> {
@@ -1950,9 +1955,12 @@ impl RollingOperator {
             .checked_sub(budget::buffered_charge(rows.iter(), node)?)?;
         let (old_histories, new_histories) =
             touched.changed_charge_observed(&self.state.histories, node, observer)?;
-        let next = current
+        let mut next = current
             .checked_sub(old_histories)?
             .checked_add(new_histories, node)?;
+        if let Some((old_typed, new_typed)) = typed_change {
+            next = next.checked_sub(old_typed)?.checked_add(new_typed, node)?;
+        }
         self.check_state_budget(next, node)?;
         Ok((current, next))
     }
@@ -1988,6 +1996,12 @@ impl RollingOperator {
             self.state.late_output_failed || self.indicator_late_failed,
             context.operator_id(),
         )?;
+        if self.state.deferred_history && context.job().checkpointing() {
+            return Err(operator_error(
+                context.operator_id(),
+                "checkpointing cannot be enabled after deferred rolling history was installed",
+            ));
+        }
         if self
             .state
             .pipeline_fingerprint
@@ -2124,6 +2138,9 @@ impl RollingOperator {
                 .buffer
                 .insert(row.identity.clone(), row);
         }
+        if self.state.deferred_history {
+            return Ok(());
+        }
         if let Ok(charge) = budget::full_state_charge_observed(
             &self.state.buffer,
             &self.state.ordered,
@@ -2186,9 +2203,21 @@ impl RollingOperator {
                 PreparedHistoryUpdate::Replace(computed.touched),
             )
         };
+        let typed_change = if self.state.deferred_history {
+            let next = next_kernel_state.as_ref().ok_or_else(|| {
+                internal_error("deferred general rolling update is missing its typed transition")
+            })?;
+            let current = self.state.typed_kernel_state.as_deref().ok_or_else(|| {
+                internal_error("deferred general rolling update is missing its resident state")
+            })?;
+            Some(next.charge_change(current, context.operator_id())?)
+        } else {
+            None
+        };
         let (current_charge, next_charge) = match self.projected_rows_charge(
             &rows,
             &mut touched,
+            typed_change,
             context.operator_id(),
             observer,
         ) {

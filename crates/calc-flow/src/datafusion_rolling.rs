@@ -15,7 +15,7 @@ use datafusion::{
         context::QueryPlanner,
         memory_pool::{MemoryConsumer, MemoryReservation},
     },
-    functions_aggregate::{average::Avg, count::Count as CountAggregate},
+    functions_aggregate::{average::Avg, count::Count as CountAggregate, sum::Sum},
     logical_expr::{
         Expr, LogicalPlan, WindowFrameBound, WindowFrameUnits, WindowFunctionDefinition,
         expr::{WindowFunction, WindowFunctionParams},
@@ -50,7 +50,9 @@ mod argmax;
 #[cfg(test)]
 mod shared_rows_tests;
 mod sql_aggregate;
+mod sql_sum_range;
 use sql_aggregate::{SqlRollingKernel, SqlRollingState};
+use sql_sum_range::{SqlSumRangeKernel, SqlSumRangeState};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RollingRewriteAuditSnapshot {
@@ -153,7 +155,7 @@ fn inspect_logical_node(plan: &LogicalPlan, audit: &mut RollingRewriteAuditSnaps
             audit.candidate_windows += 1;
             audit.contains_count |= logical_window_function(expression)
                 .and_then(inspect_logical_aggregate)
-                .is_ok_and(|is_count| is_count);
+                .is_ok_and(|aggregate| aggregate == AggregateKind::Count);
             if let Err(reason) = inspect_logical_window(expression) {
                 audit.fallback_reasons.push(reason.to_owned());
             }
@@ -164,10 +166,17 @@ fn inspect_logical_node(plan: &LogicalPlan, audit: &mut RollingRewriteAuditSnaps
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AggregateKind {
+    Average,
+    Count,
+    Sum,
+}
+
 fn inspect_logical_window(expression: &Expr) -> Result<(), &'static str> {
     let window = logical_window_function(expression)?;
-    let is_count = inspect_logical_aggregate(window)?;
-    inspect_logical_parameters(&window.params, is_count)
+    let aggregate = inspect_logical_aggregate(window)?;
+    inspect_logical_parameters(&window.params, aggregate)
 }
 
 fn logical_window_function(expression: &Expr) -> Result<&WindowFunction, &'static str> {
@@ -181,29 +190,33 @@ fn logical_window_function(expression: &Expr) -> Result<&WindowFunction, &'stati
     Ok(window)
 }
 
-fn inspect_logical_aggregate(window: &WindowFunction) -> Result<bool, &'static str> {
+fn inspect_logical_aggregate(window: &WindowFunction) -> Result<AggregateKind, &'static str> {
     let WindowFunctionDefinition::AggregateUDF(function) = &window.fun else {
         return Err("window_function_is_not_an_aggregate");
     };
     if function.inner().downcast_ref::<Avg>().is_some() {
-        return Ok(false);
+        return Ok(AggregateKind::Average);
     }
     if function.inner().downcast_ref::<CountAggregate>().is_some() {
-        return Ok(true);
+        return Ok(AggregateKind::Count);
     }
-    Err("window_aggregate_is_not_avg")
+    if function.inner().downcast_ref::<Sum>().is_some() {
+        return Ok(AggregateKind::Sum);
+    }
+    Err("window_aggregate_is_not_avg_count_or_sum")
 }
 
 fn inspect_logical_parameters(
     parameters: &WindowFunctionParams,
-    is_count: bool,
+    aggregate: AggregateKind,
 ) -> Result<(), &'static str> {
-    if !logical_argument_supported(parameters, is_count) {
-        return Err(if is_count {
-            "count_argument_is_not_one_column"
-        } else {
-            "avg_argument_is_not_one_column"
-        });
+    if !logical_argument_supported(parameters, aggregate) {
+        let reason = match aggregate {
+            AggregateKind::Average => "avg_argument_is_not_one_column",
+            AggregateKind::Count => "count_argument_is_not_one_column",
+            AggregateKind::Sum => "sum_argument_is_not_one_column",
+        };
+        return Err(reason);
     }
     if !logical_partition_supported(parameters) {
         return Err("partition_keys_are_not_simple_columns");
@@ -212,22 +225,29 @@ fn inspect_logical_parameters(
         return Err("ordering_is_not_simple_ascending_columns");
     }
     if !logical_options_supported(parameters) {
-        return Err(if is_count {
-            "count_filter_distinct_or_null_treatment_is_not_supported"
-        } else {
-            "avg_filter_distinct_or_null_treatment_is_not_supported"
-        });
+        let reason = match aggregate {
+            AggregateKind::Average => "avg_filter_distinct_or_null_treatment_is_not_supported",
+            AggregateKind::Count => "count_filter_distinct_or_null_treatment_is_not_supported",
+            AggregateKind::Sum => "sum_filter_distinct_or_null_treatment_is_not_supported",
+        };
+        return Err(reason);
     }
-    if !logical_frame_supported(parameters) {
-        return Err("window_frame_is_not_bounded_rows_to_current_row");
+    if !logical_frame_supported(parameters, aggregate) {
+        return Err(if aggregate == AggregateKind::Sum {
+            "window_frame_is_not_bounded_range_to_current_row"
+        } else {
+            "window_frame_is_not_bounded_rows_to_current_row"
+        });
     }
     Ok(())
 }
 
-fn logical_argument_supported(parameters: &WindowFunctionParams, is_count: bool) -> bool {
+fn logical_argument_supported(parameters: &WindowFunctionParams, aggregate: AggregateKind) -> bool {
     match parameters.args.as_slice() {
         [Expr::Column(_)] => true,
-        [Expr::Literal(value, _)] if is_count => count_literal_supported(value),
+        [Expr::Literal(value, _)] if aggregate == AggregateKind::Count => {
+            count_literal_supported(value)
+        }
         _ => false,
     }
 }
@@ -259,12 +279,18 @@ fn logical_options_supported(parameters: &WindowFunctionParams) -> bool {
     parameters.filter.is_none() && !parameters.distinct && parameters.null_treatment.is_none()
 }
 
-fn logical_frame_supported(parameters: &WindowFunctionParams) -> bool {
+fn logical_frame_supported(parameters: &WindowFunctionParams, aggregate: AggregateKind) -> bool {
+    if !matches!(
+        parameters.window_frame.end_bound,
+        WindowFrameBound::CurrentRow
+    ) {
+        return false;
+    }
+    if aggregate == AggregateKind::Sum {
+        return parameters.window_frame.units == WindowFrameUnits::Range
+            && bounded_preceding_range(&parameters.window_frame.start_bound).is_some();
+    }
     parameters.window_frame.units == WindowFrameUnits::Rows
-        && matches!(
-            parameters.window_frame.end_bound,
-            WindowFrameBound::CurrentRow
-        )
         && bounded_preceding_rows(&parameters.window_frame.start_bound).is_some()
 }
 
@@ -276,18 +302,47 @@ fn bounded_preceding_rows(bound: &WindowFrameBound) -> Option<u64> {
     }
 }
 
+fn bounded_preceding_range(bound: &WindowFrameBound) -> Option<u64> {
+    match bound {
+        WindowFrameBound::Preceding(ScalarValue::IntervalMonthDayNano(Some(value)))
+            if value.months == 0 && value.days == 0 && value.nanoseconds > 0 =>
+        {
+            u64::try_from(value.nanoseconds)
+                .ok()
+                .filter(|nanos| nanos % 1_000 == 0)
+                .map(|nanos| nanos / 1_000)
+        }
+        WindowFrameBound::Preceding(ScalarValue::IntervalDayTime(Some(value)))
+            if value.days == 0 && value.milliseconds > 0 =>
+        {
+            u64::try_from(value.milliseconds)
+                .ok()
+                .and_then(|millis| millis.checked_mul(1_000))
+        }
+        WindowFrameBound::Preceding(ScalarValue::DurationMicrosecond(Some(micros)))
+            if *micros > 0 =>
+        {
+            u64::try_from(*micros).ok()
+        }
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug)]
 enum RollingExecutionKernel {
     Shared(DataFusionRollingKernel),
     Sql(SqlRollingKernel),
+    SqlSumRange(SqlSumRangeKernel),
 }
 
 enum RollingExecutionState {
     Shared(DataFusionRollingState),
     Sql(SqlRollingState),
+    SqlSumRange(SqlSumRangeState),
 }
 
 struct RollingExecutionBatch {
+    input: RecordBatch,
     columns: Vec<datafusion::arrow::array::ArrayRef>,
     state: RollingExecutionState,
     metrics: DataFusionRollingMetrics,
@@ -301,6 +356,9 @@ impl RollingExecutionKernel {
         windows: &[DataFusionRollingWindow],
         sql_compatibility: bool,
     ) -> Option<Self> {
+        if let Some(kernel) = SqlSumRangeKernel::compile(schema, partitions, order, windows) {
+            return Some(Self::SqlSumRange(kernel));
+        }
         if sql_compatibility {
             SqlRollingKernel::compile(schema, partitions, order, windows).map(Self::Sql)
         } else {
@@ -312,6 +370,7 @@ impl RollingExecutionKernel {
         match self {
             Self::Shared(_) => RollingExecutionState::Shared(DataFusionRollingState::default()),
             Self::Sql(_) => RollingExecutionState::Sql(SqlRollingState::default()),
+            Self::SqlSumRange(_) => RollingExecutionState::SqlSumRange(SqlSumRangeState::default()),
         }
     }
 
@@ -319,6 +378,7 @@ impl RollingExecutionKernel {
         match self {
             Self::Shared(kernel) => kernel.fingerprint(),
             Self::Sql(kernel) => kernel.fingerprint(),
+            Self::SqlSumRange(kernel) => kernel.fingerprint(),
         }
     }
 
@@ -326,6 +386,7 @@ impl RollingExecutionKernel {
         match self {
             Self::Shared(kernel) => kernel.estimated_state_bytes_per_entity(),
             Self::Sql(kernel) => kernel.estimated_state_bytes_per_entity(),
+            Self::SqlSumRange(_) => SqlSumRangeKernel::estimated_state_bytes_per_entity(),
         }
     }
 
@@ -338,6 +399,7 @@ impl RollingExecutionKernel {
             (Self::Shared(kernel), RollingExecutionState::Shared(state)) => {
                 let result = kernel.update_and_fill_owned(state, input)?;
                 Ok(RollingExecutionBatch {
+                    input: input.clone(),
                     columns: result.columns,
                     state: RollingExecutionState::Shared(result.state),
                     metrics: result.metrics,
@@ -345,6 +407,32 @@ impl RollingExecutionKernel {
             }
             (Self::Sql(kernel), RollingExecutionState::Sql(state)) => {
                 kernel.update_and_fill(&state, input)
+            }
+            (Self::SqlSumRange(kernel), RollingExecutionState::SqlSumRange(state)) => {
+                kernel.update_and_fill(state, input)
+            }
+            _ => Err(crate::CalcFlowError::Internal {
+                message: "SQL rolling state does not match the physical kernel".to_owned(),
+            }),
+        }
+    }
+
+    fn finish_owned(
+        &self,
+        state: RollingExecutionState,
+        input: &RecordBatch,
+    ) -> crate::Result<Option<RollingExecutionBatch>> {
+        match (self, state) {
+            (Self::SqlSumRange(kernel), RollingExecutionState::SqlSumRange(state)) => {
+                kernel.finish(state, input)
+            }
+            (Self::Shared(_), RollingExecutionState::Shared(state)) => {
+                let _ = state;
+                Ok(None)
+            }
+            (Self::Sql(_), RollingExecutionState::Sql(state)) => {
+                let _ = state;
+                Ok(None)
             }
             _ => Err(crate::CalcFlowError::Internal {
                 message: "SQL rolling state does not match the physical kernel".to_owned(),
@@ -468,23 +556,30 @@ fn physical_window(
     else {
         return Ok(None);
     };
-    let Some(is_count) = physical_aggregate_supported(sliding) else {
+    let Some(aggregate) = physical_aggregate_supported(sliding) else {
         return Ok(None);
     };
     let Some(input_index) = physical_window_input(expression)
-        .or_else(|| count_literal_input(expression, parent, is_count))
+        .or_else(|| count_literal_input(expression, parent, aggregate))
     else {
         return Ok(None);
     };
-    let Some(rows) = physical_window_rows(expression) else {
-        return Ok(None);
+    let (rows, duration_micros) = if aggregate == AggregateKind::Sum {
+        (None, physical_window_range(expression))
+    } else {
+        (physical_window_rows(expression), None)
     };
+    if rows.is_none() && duration_micros.is_none() {
+        return Ok(None);
+    }
     let field = expression.field()?;
     Ok(Some(DataFusionRollingWindow {
         input_index,
         output_name: field.name().to_owned(),
-        rows,
-        is_count,
+        rows: rows.unwrap_or(0),
+        is_count: aggregate == AggregateKind::Count,
+        is_sum: aggregate == AggregateKind::Sum,
+        duration_micros,
     }))
 }
 
@@ -497,27 +592,35 @@ fn physical_window_order_matches(
         && physical_order_columns(expression.order_by()).as_deref() == Some(order_indices)
 }
 
-fn physical_aggregate_supported(expression: &SlidingAggregateWindowExpr) -> Option<bool> {
+fn physical_aggregate_supported(expression: &SlidingAggregateWindowExpr) -> Option<AggregateKind> {
     let aggregate = expression.get_aggregate_expr();
     if aggregate.is_distinct() || aggregate.ignore_nulls() || !aggregate.order_bys().is_empty() {
         return None;
     }
     if aggregate.fun().inner().downcast_ref::<Avg>().is_some() {
-        return Some(false);
+        return Some(AggregateKind::Average);
+    }
+    if aggregate
+        .fun()
+        .inner()
+        .downcast_ref::<CountAggregate>()
+        .is_some()
+    {
+        return Some(AggregateKind::Count);
     }
     aggregate
         .fun()
         .inner()
-        .downcast_ref::<CountAggregate>()
-        .map(|_| true)
+        .downcast_ref::<Sum>()
+        .map(|_| AggregateKind::Sum)
 }
 
 fn count_literal_input(
     expression: &dyn WindowExpr,
     parent: &BoundedWindowAggExec,
-    is_count: bool,
+    aggregate: AggregateKind,
 ) -> Option<usize> {
-    if !is_count {
+    if aggregate != AggregateKind::Count {
         return None;
     }
     let arguments = expression.expressions();
@@ -531,7 +634,7 @@ fn count_literal_input(
         let sliding = candidate
             .as_any()
             .downcast_ref::<SlidingAggregateWindowExpr>()?;
-        if physical_aggregate_supported(sliding) != Some(false)
+        if physical_aggregate_supported(sliding) != Some(AggregateKind::Average)
             || candidate.get_window_frame() != expression.get_window_frame()
         {
             return None;
@@ -557,6 +660,16 @@ fn physical_window_rows(expression: &dyn WindowExpr) -> Option<u64> {
         return None;
     }
     bounded_preceding_rows(&frame.start_bound)
+}
+
+fn physical_window_range(expression: &dyn WindowExpr) -> Option<u64> {
+    let frame = expression.get_window_frame();
+    if frame.units != WindowFrameUnits::Range
+        || !matches!(frame.end_bound, WindowFrameBound::CurrentRow)
+    {
+        return None;
+    }
+    bounded_preceding_range(&frame.start_bound)
 }
 
 fn physical_columns(expressions: &[Arc<dyn PhysicalExpr>]) -> Option<Vec<usize>> {
@@ -670,10 +783,12 @@ impl ExecutionPlan for CalcFlowRollingExec {
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let input = self.input.execute(partition, Arc::clone(&context))?;
+        let input_schema = input.schema();
         let reservation = MemoryConsumer::new(format!("CalcFlowRollingExec[{partition}]"))
             .register(context.memory_pool());
         let state = RollingStream {
             input,
+            input_schema,
             schema: Arc::clone(&self.schema),
             kernel: self.kernel.clone(),
             state: self.kernel.initial_state(),
@@ -682,23 +797,27 @@ impl ExecutionPlan for CalcFlowRollingExec {
         };
         let schema = Arc::clone(&self.schema);
         let output = stream::try_unfold(state, |mut stream| async move {
-            let Some(batch) = stream.input.next().await.transpose()? else {
-                stream.metrics.baseline.done();
-                return Ok(None);
+            let metrics = stream.metrics.clone();
+            let timer = metrics.baseline.elapsed_compute().timer();
+            let state = std::mem::replace(&mut stream.state, stream.kernel.initial_state());
+            let transition = if let Some(batch) = stream.input.next().await.transpose()? {
+                stream
+                    .kernel
+                    .update_and_fill_owned(state, &batch)
+                    .map_err(|error| calc_flow_execution_error(&error))?
+            } else {
+                let empty = RecordBatch::new_empty(stream.input_schema.clone());
+                let Some(transition) = stream
+                    .kernel
+                    .finish_owned(state, &empty)
+                    .map_err(|error| calc_flow_execution_error(&error))?
+                else {
+                    stream.metrics.baseline.done();
+                    return Ok(None);
+                };
+                transition
             };
-            let timer = stream.metrics.baseline.elapsed_compute().timer();
-            let transition = stream
-                .kernel
-                .update_and_fill_owned(stream.state, &batch)
-                .map_err(|error| calc_flow_execution_error(&error))?;
-            stream
-                .reservation
-                .try_resize(transition.metrics.state_bytes)?;
-            stream.metrics.record(transition.metrics);
-            stream.state = transition.state;
-            let mut columns = batch.columns().to_vec();
-            columns.extend(transition.columns);
-            let output = RecordBatch::try_new(Arc::clone(&stream.schema), columns)?;
+            let output = stream.apply(transition)?;
             stream.metrics.baseline.record_output(output.num_rows());
             timer.done();
             Ok(Some((output, stream)))
@@ -721,11 +840,24 @@ impl ExecutionPlan for CalcFlowRollingExec {
 
 struct RollingStream {
     input: SendableRecordBatchStream,
+    input_schema: SchemaRef,
     schema: SchemaRef,
     kernel: RollingExecutionKernel,
     state: RollingExecutionState,
     reservation: MemoryReservation,
     metrics: RollingPartitionMetrics,
+}
+
+impl RollingStream {
+    fn apply(&mut self, transition: RollingExecutionBatch) -> DataFusionResult<RecordBatch> {
+        self.reservation
+            .try_resize(transition.metrics.state_bytes)?;
+        self.metrics.record(transition.metrics);
+        self.state = transition.state;
+        let mut columns = transition.input.columns().to_vec();
+        columns.extend(transition.columns);
+        Ok(RecordBatch::try_new(Arc::clone(&self.schema), columns)?)
+    }
 }
 
 #[derive(Clone)]
