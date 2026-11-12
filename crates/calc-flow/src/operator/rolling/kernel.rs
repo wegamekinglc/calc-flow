@@ -356,12 +356,30 @@ impl DirectSequences<'_> {
 
 impl<'a> DirectOrderColumns<'a> {
     fn new(plan: &RollingKernelPlan, input: &'a RecordBatch) -> Option<Self> {
-        let [time, entity, sequence] = *plan.order_columns.as_slice() else {
+        // A repeated column cannot break a tie left by its first occurrence.
+        // Only the comparison view changes; encoded boundaries keep the plan.
+        let mut columns = plan
+            .order_columns
+            .iter()
+            .enumerate()
+            .filter_map(|(position, &index)| {
+                (!plan.order_columns[..position].contains(&index)).then_some(index)
+            });
+        let (Some(time), Some(entity), Some(sequence), None) = (
+            columns.next(),
+            columns.next(),
+            columns.next(),
+            columns.next(),
+        ) else {
             return None;
         };
         if time != plan.event_time_index
             || plan.partition_columns != [entity]
-            || plan.sequence_columns != [sequence]
+            || !plan.sequence_columns.contains(&sequence)
+            || plan
+                .sequence_columns
+                .iter()
+                .any(|index| ![time, entity, sequence].contains(index))
         {
             return None;
         }
@@ -4558,6 +4576,85 @@ mod tests {
     }
 
     #[test]
+    fn redundant_stream_order_columns_do_not_encode_every_row() {
+        let rows = (0_i64..4096)
+            .map(|row| {
+                (
+                    row / 2,
+                    Some(["alpha", "beta"][usize::try_from(row % 2).unwrap()]),
+                    row - 2048,
+                )
+            })
+            .collect::<Vec<_>>();
+        let input = signed_order_rows(&rows);
+        let plan = RollingKernelPlan {
+            order_columns: vec![0, 2, 0, 1],
+            sequence_columns: vec![0, 1],
+            ..stream_order_plan()
+        };
+        assert_order_parity(&plan, &input);
+        let measured = allocation_counter::measure(|| {
+            assert!(
+                plan.ordered_stream_bounds(&input, "r", None)
+                    .unwrap()
+                    .is_some()
+            );
+        });
+        assert!(measured.bytes_total < 4096, "{measured:?}");
+    }
+
+    fn redundant_stream_order_plans() -> [RollingKernelPlan; 3] {
+        [
+            (vec![0, 2, 0, 1], vec![0, 1]),
+            (vec![0, 2, 1, 1], vec![1]),
+            (vec![0, 2, 0, 2, 1], vec![0, 2, 1]),
+        ]
+        .map(|(order_columns, sequence_columns)| RollingKernelPlan {
+            order_columns,
+            sequence_columns,
+            ..stream_order_plan()
+        })
+    }
+
+    #[test]
+    fn redundant_stream_order_preserves_encoded_cross_batch_bounds() {
+        let first = signed_order_rows(&[(1, Some("a"), i64::MIN)]);
+        let next = signed_order_rows(&[(1, Some("a"), -1), (1, Some("a"), 0)]);
+        for plan in redundant_stream_order_plans() {
+            let (_, prior) = plan
+                .ordered_stream_bounds(&first, "r", None)
+                .unwrap()
+                .unwrap();
+            let CanonicalOrder::Proven(bounds) = plan
+                .canonical_order_bounds(&next, Some(&prior), "r")
+                .unwrap()
+            else {
+                panic!("ordered continuation must remain proven")
+            };
+            assert_eq!(bounds, encoded_order_bounds(&plan, &next).unwrap());
+            assert!(
+                plan.canonical_order_bounds(&first, Some(&prior), "r")
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn fourth_unique_stream_order_column_retains_encoded_fallback() {
+        let input = signed_order_rows(&[(1, Some("a"), -1), (1, Some("a"), -1)]);
+        let mut columns = input.columns().to_vec();
+        columns[3] = Arc::new(Float64Array::from(vec![2.0, 1.0]));
+        let input = RecordBatch::try_new(input.schema(), columns).unwrap();
+        let plan = RollingKernelPlan {
+            order_columns: vec![0, 2, 0, 1, 3],
+            sequence_columns: vec![0, 1, 3],
+            ..stream_order_plan()
+        };
+        assert_order_parity(&plan, &input);
+        assert!(DirectOrderColumns::new(&plan, &input).is_none());
+    }
+
+    #[test]
     fn signed_stream_order_proof_matches_row_encoding_at_boundaries() {
         let plan = stream_order_plan();
         let cases: [&[(i64, Option<&str>, i64)]; 8] = [
@@ -4581,6 +4678,9 @@ mod tests {
         ];
         for rows in cases {
             assert_order_parity(&plan, &signed_order_rows(rows));
+            for redundant in redundant_stream_order_plans() {
+                assert_order_parity(&redundant, &signed_order_rows(rows));
+            }
         }
     }
 
@@ -4609,6 +4709,9 @@ mod tests {
                 rows.sort_unstable();
             }
             assert_order_parity(&stream_order_plan(), &signed_order_rows(&rows));
+            for plan in redundant_stream_order_plans() {
+                assert_order_parity(&plan, &signed_order_rows(&rows));
+            }
         }
     }
 
@@ -4664,6 +4767,9 @@ mod tests {
             let input = order_rows(&rows);
             assert_order_parity(&stream_order_plan(), &input);
             assert_order_parity(&numeric_plan(RollingNumericalProfile::StableV1), &input);
+            for plan in redundant_stream_order_plans() {
+                assert_order_parity(&plan, &input);
+            }
         }
     }
 
@@ -4875,6 +4981,48 @@ mod tests {
         });
         assert_eq!(resident.accumulator.mean.to_bits(), 22.5_f64.to_bits());
         assert_eq!(measured.count_total, 1, "{measured:?}");
+    }
+
+    #[test]
+    fn empty_duration_clone_does_not_allocate() {
+        let resident = Float64NumericState::new(TypedFrame::Duration(20), 4096);
+        let measured = allocation_counter::measure(|| {
+            let copied = resident.clone();
+            assert!(copied.samples.values.is_empty());
+        });
+        assert_eq!(measured.count_total, 0, "{measured:?}");
+    }
+
+    #[test]
+    fn duration_clone_releases_unused_burst_capacity() {
+        let mut resident = Float64NumericState::new(TypedFrame::Duration(20), 4096);
+        for count in 1..=4096_u64 {
+            resident
+                .update(
+                    0,
+                    Some(1.0),
+                    RollingNumericalProfile::StableV1,
+                    count,
+                    "rolling",
+                )
+                .unwrap();
+        }
+        resident
+            .update(
+                1000,
+                Some(2.0),
+                RollingNumericalProfile::StableV1,
+                4097,
+                "rolling",
+            )
+            .unwrap();
+        let copied = resident.clone();
+        assert_eq!(copied.samples.len(), 1);
+        assert!(copied.samples.values.capacity() < resident.samples.values.capacity() / 2);
+        assert_eq!(
+            copied.accumulator.mean.to_bits(),
+            resident.accumulator.mean.to_bits()
+        );
     }
 
     #[test]
