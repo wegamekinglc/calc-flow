@@ -4468,6 +4468,8 @@ mod tests {
         plan: &RollingKernelPlan,
         input: &RecordBatch,
     ) -> std::result::Result<Option<OrderBounds>, String> {
+        plan.validate_required_values(input, "r")
+            .map_err(|error| error.to_string())?;
         let rows = encode_rows(input, &plan.order_columns, "r").unwrap();
         for row in 1..input.num_rows() {
             match rows.row(row - 1).cmp(&rows.row(row)) {
