@@ -1290,13 +1290,7 @@ class _Analyzer:
         self, node: Node, path: str, /, *, role: str | None = None
     ) -> TableFacts:
         role = role or f"{path}.stream_join"
-        for side, operand in zip(("left", "right"), node.args, strict=True):
-            if _contains_event_window(operand):
-                self.issue(
-                    f"{role}.{side}",
-                    "capability_mismatch",
-                    "stream joins after an event window are not supported",
-                )
+        self._check_join_window_inputs(node, role)
         left = self.table(node.args[0], f"{role}.left")
         right = self.table(node.args[1], f"{role}.right")
         self._stream_join_side(
@@ -1321,17 +1315,7 @@ class _Analyzer:
             _cstr_or_none(node.attr("right_event_time")),
             f"{role}.right_event_time",
         )
-        from calc_flow.symbolic.inner_join_sql import time_is_original
-
-        for side, operand in zip(("left", "right"), node.args, strict=True):
-            if not time_is_original(
-                operand, _cstr_or_none(node.attr(f"{side}_event_time")), self
-            ):
-                self.issue(
-                    f"{role}.{side}_event_time",
-                    "ordering_required",
-                    "join time must be an unchanged input column or pure rename",
-                )
+        self._check_join_time_sources(node, role)
         self._stream_join_keys(node, left, right, role)
         left_prefix = _cstr_or_none(node.attr("left_prefix")) or "left"
         right_prefix = _cstr_or_none(node.attr("right_prefix")) or "right"
@@ -1365,6 +1349,28 @@ class _Analyzer:
             output_entity_by,
             output_sequence_by,
         )
+
+    def _check_join_window_inputs(self, node, role):
+        for side, operand in zip(("left", "right"), node.args, strict=True):
+            if _contains_event_window(operand):
+                self.issue(
+                    f"{role}.{side}",
+                    "capability_mismatch",
+                    "stream joins after an event window are not supported",
+                )
+
+    def _check_join_time_sources(self, node, role):
+        from calc_flow.symbolic.inner_join_sql import time_is_original
+
+        for side, operand in zip(("left", "right"), node.args, strict=True):
+            if not time_is_original(
+                operand, _cstr_or_none(node.attr(f"{side}_event_time")), self
+            ):
+                self.issue(
+                    f"{role}.{side}_event_time",
+                    "ordering_required",
+                    "join time must be an unchanged input column or pure rename",
+                )
 
     def _stream_join_side(
         self,

@@ -154,6 +154,10 @@ async fn complete_batch_limits_failure_retry_schema_and_cancellation() -> Result
         )
         .await?;
     assert_eq!(result.outputs["output"].num_rows(), 0);
+    assert_stateless_plan(&plan).await
+}
+
+async fn assert_stateless_plan(plan: &calc_flow::BatchExecutionPlan) -> Result<()> {
     assert!(
         plan.snapshot()
             .await?

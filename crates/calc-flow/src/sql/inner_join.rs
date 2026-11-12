@@ -3,8 +3,8 @@ use crate::{Result, StreamJoinSpec, dataframe::invalid};
 use datafusion::sql::{
     parser::Statement as DFStatement,
     sqlparser::ast::{
-        Expr, FunctionArg, FunctionArgExpr, ObjectName, Query, SelectItem, SetExpr, Statement,
-        TableFactor, Value, Visit, Visitor,
+        Expr, FunctionArg, FunctionArgExpr, ObjectName, Query, Select, SelectItem, SetExpr,
+        Statement, TableFactor, Value, Visit, Visitor,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -89,6 +89,12 @@ fn parse(query: &Query, aliases: &[String]) -> Result<InnerJoinQuery> {
     let SetExpr::Select(select) = query.body.as_ref() else {
         return Err(error("one top-level SELECT * required"));
     };
+    let args = join_arguments(select)?;
+    validate_shape(query, select)?;
+    configuration(args, aliases)
+}
+
+fn join_arguments(select: &Select) -> Result<&[FunctionArg]> {
     let [from] = select.from.as_slice() else {
         return Err(error("one FROM required"));
     };
@@ -109,18 +115,24 @@ fn parse(query: &Query, aliases: &[String]) -> Result<InnerJoinQuery> {
             "unaliased CF_INNER_JOIN(left, right, configuration) required",
         ));
     };
-    if !from.joins.is_empty()
-        || name.0.len() != 1
-        || !named(name)
-        || !with_hints.is_empty()
-        || !partitions.is_empty()
-        || !index_hints.is_empty()
-        || args.settings.is_some()
-    {
+    let allowed = [
+        from.joins.is_empty(),
+        name.0.len() == 1,
+        named(name),
+        with_hints.is_empty(),
+        partitions.is_empty(),
+        index_hints.is_empty(),
+        args.settings.is_none(),
+    ];
+    if !allowed.into_iter().all(std::convert::identity) {
         return Err(error(
             "FROM modifiers and qualified function names are unsupported",
         ));
     }
+    Ok(&args.args)
+}
+
+fn validate_shape(query: &Query, select: &Select) -> Result<()> {
     if !matches!(select.projection.as_slice(), [SelectItem::Wildcard(_)]) {
         return Err(error(
             "exactly SELECT * required; use a separate row-local relation for projections",
@@ -146,7 +158,7 @@ fn parse(query: &Query, aliases: &[String]) -> Result<InnerJoinQuery> {
             "only SELECT * FROM CF_INNER_JOIN is supported; no clauses or modifiers",
         ));
     }
-    configuration(&args.args, aliases)
+    Ok(())
 }
 fn string(arg: &FunctionArg) -> Result<String> {
     if let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))) = arg
@@ -159,24 +171,44 @@ fn string(arg: &FunctionArg) -> Result<String> {
     ))
 }
 fn configuration(args: &[FunctionArg], aliases: &[String]) -> Result<InnerJoinQuery> {
+    let (left_alias, right_alias, config) = arguments(args)?;
+    validate_aliases(&left_alias, &right_alias, aliases)?;
+    let text = string(config)?;
+    let config = read_configuration(&text)?;
+    Ok(InnerJoinQuery {
+        left_alias,
+        right_alias,
+        spec: config.spec,
+        output_ordering: config.output_ordering,
+    })
+}
+
+fn arguments(args: &[FunctionArg]) -> Result<(String, String, &FunctionArg)> {
     let [left, right, config] = args else {
         return Err(error("three arguments required"));
     };
-    let left_alias = string(left)?;
-    let right_alias = string(right)?;
-    let used = std::collections::BTreeSet::from([left_alias.clone(), right_alias.clone()]);
+    Ok((string(left)?, string(right)?, config))
+}
+fn validate_aliases(left: &str, right: &str, aliases: &[String]) -> Result<()> {
+    let used = std::collections::BTreeSet::from([left.to_owned(), right.to_owned()]);
     if aliases.len() != 2 || used.len() != 2 || used != aliases.iter().cloned().collect() {
         return Err(error(
             "exactly the two distinct referenced aliases must be supplied",
         ));
     }
-    let text = string(config)?;
+    Ok(())
+}
+fn read_configuration(text: &str) -> Result<Config> {
     let raw: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| invalid("sql.inner_join", "invalid_literal", e))?;
+        serde_json::from_str(text).map_err(|e| invalid("sql.inner_join", "invalid_literal", e))?;
     validate_numbers(&raw)?;
     let config: Config = serde_json::from_value(raw)
         .map_err(|e| invalid("sql.inner_join.configuration", "invalid_literal", e))?;
-    if let Some(order) = &config.output_ordering
+    validate_ordering(config.output_ordering.as_ref())?;
+    Ok(config)
+}
+fn validate_ordering(order: Option<&JoinOutputOrdering>) -> Result<()> {
+    if let Some(order) = order
         && (order.entity_by.is_empty()
             || order.event_time.is_empty()
             || order.sequence_by.is_empty())
@@ -187,12 +219,7 @@ fn configuration(args: &[FunctionArg], aliases: &[String]) -> Result<InnerJoinQu
             "all three ordering fields must be nonempty",
         ));
     }
-    Ok(InnerJoinQuery {
-        left_alias,
-        right_alias,
-        spec: config.spec,
-        output_ordering: config.output_ordering,
-    })
+    Ok(())
 }
 
 fn validate_numbers(raw: &serde_json::Value) -> Result<()> {

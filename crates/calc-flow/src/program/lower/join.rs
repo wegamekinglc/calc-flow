@@ -54,59 +54,12 @@ impl Lowered {
         .into_iter()
         .enumerate()
         {
-            input_path(&inputs[index], &format!("{path}.{side}"))?;
-            validate_time(schemas[index], time, &format!("{path}.{side}_event_time"))?;
-            if !time_source(&inputs[index], time)? {
-                return Err(invalid(
-                    &format!("{path}.{side}_event_time"),
-                    "ordering_required",
-                    "join time must be an unchanged input column or pure rename",
-                ));
-            }
-            let identity = self.orderings[&inputs[index].0.id]
-                .temporal_identity
-                .as_ref();
-            if identity.is_none() {
-                return Err(invalid(
-                    &format!("{path}.{side}"),
-                    "ordering_required",
-                    "join input requires entity, event time and complete sequence identity",
-                ));
-            }
-            validate_identity(
-                schemas[index],
-                identity.expect("checked identity"),
-                &format!("{path}.{side}"),
-            )?;
             let keys = if index == 0 {
                 spec.left_keys()
             } else {
                 spec.right_keys()
             };
-            for (key_index, key) in keys.iter().enumerate() {
-                let field = schemas[index].field_with_name(key).map_err(|e| {
-                    invalid(
-                        &format!("{path}.{side}_keys[{key_index}]"),
-                        "unresolved_type",
-                        e,
-                    )
-                })?;
-                if matches!(field.data_type(), DataType::Timestamp(unit, _) if *unit != TimeUnit::Microsecond)
-                {
-                    return Err(invalid(
-                        &format!("{path}.{side}_keys[{key_index}]"),
-                        "unsupported_type",
-                        "public timestamp equality keys require microseconds",
-                    ));
-                }
-            }
-            if contains_join(&inputs[index]) && identity.is_some_and(|i| i.event_time != time) {
-                return Err(invalid(
-                    &format!("{path}.{side}_event_time"),
-                    "ordering_required",
-                    "nested join event time must match the declared post-join time",
-                ));
-            }
+            self.validate_join_side(&inputs[index], schemas[index], side, time, keys, path)?;
         }
         let operator = StreamJoinOperator::new(
             &node_id(table),
@@ -141,6 +94,32 @@ impl Lowered {
             },
         })
     }
+    fn validate_join_side(
+        &self,
+        input: &TableExpr,
+        schema: &SchemaRef,
+        side: &str,
+        time: &str,
+        keys: &[String],
+        path: &str,
+    ) -> Result<()> {
+        validate_input_time(input, schema, time, side, path)?;
+        let side_path = format!("{path}.{side}");
+        let identity = self.orderings[&input.0.id]
+            .temporal_identity
+            .as_ref()
+            .ok_or_else(|| {
+                invalid(
+                    &side_path,
+                    "ordering_required",
+                    "join input requires entity, event time and complete sequence identity",
+                )
+            })?;
+        validate_identity(schema, identity, &side_path)?;
+        validate_public_keys(schema, keys, &format!("{path}.{side}_keys"))?;
+        validate_nested_time(input, identity, time, &format!("{path}.{side}_event_time"))
+    }
+
     fn join_ordering(
         &self,
         inputs: &[TableExpr; 2],
@@ -220,36 +199,25 @@ impl Lowered {
             return Ok(QueryOrderingFacts::default());
         }
         let (alias, input) = tables.first_key_value().expect("one input");
+        self.join_passthrough_ordering(query, alias, input)
+    }
+
+    fn join_passthrough_ordering(
+        &self,
+        query: &str,
+        alias: &str,
+        input: &TableExpr,
+    ) -> Result<QueryOrderingFacts> {
         let Some(columns) = crate::sql::sql_passthrough_columns(query, alias)? else {
             return Ok(QueryOrderingFacts::default());
         };
-        let Some(identity) = self.orderings[&input.0.id].temporal_identity.as_ref() else {
-            return Ok(QueryOrderingFacts::default());
-        };
-        let map = |name: &str| {
-            columns
-                .iter()
-                .find_map(|(out, source)| (source.as_deref() == Some(name)).then(|| out.clone()))
-                .or_else(|| columns.contains_key("*").then(|| name.to_owned()))
-        };
-        let identity = (|| {
-            Some(QueryTemporalIdentity {
-                entity_by: identity
-                    .entity_by
-                    .iter()
-                    .map(|n| map(n))
-                    .collect::<Option<_>>()?,
-                event_time: map(&identity.event_time)?,
-                sequence_by: identity
-                    .sequence_by
-                    .iter()
-                    .map(|n| map(n))
-                    .collect::<Option<_>>()?,
-            })
-        })();
+        let identity = self.orderings[&input.0.id]
+            .temporal_identity
+            .as_ref()
+            .and_then(|identity| mapped_identity(identity, &columns));
         Ok(QueryOrderingFacts {
             temporal_identity: identity,
-            ..Default::default()
+            ..QueryOrderingFacts::default()
         })
     }
 }
@@ -304,23 +272,9 @@ fn time_source(table: &TableExpr, name: &str) -> Result<bool> {
             input,
             columns,
             append,
-        } => match columns.iter().find(|c| c.name == name) {
-            Some(c) => match c.value.0.as_ref() {
-                crate::dataframe::Scalar::Column { name, .. } => time_source(input, name),
-                _ => Ok(false),
-            },
-            None => Ok(*append && time_source(input, name)?),
-        },
+        } => projected_time_source(input, columns, *append, name),
         RelationKind::Sql { query, tables } if tables.len() == 1 => {
-            let (alias, input) = tables.first_key_value().expect("one input");
-            let Some(columns) = crate::sql::sql_passthrough_columns(query, alias)? else {
-                return Ok(false);
-            };
-            match columns.get(name) {
-                Some(Some(source)) => time_source(input, source),
-                None if columns.contains_key("*") => time_source(input, name),
-                _ => Ok(false),
-            }
+            sql_time_source(query, tables, name)
         }
         _ => Ok(false),
     }
@@ -353,4 +307,105 @@ fn validate_identity(
         }
     }
     Ok(())
+}
+
+fn validate_input_time(
+    input: &TableExpr,
+    schema: &SchemaRef,
+    time: &str,
+    side: &str,
+    path: &str,
+) -> Result<()> {
+    input_path(input, &format!("{path}.{side}"))?;
+    let time_path = format!("{path}.{side}_event_time");
+    validate_time(schema, time, &time_path)?;
+    if !time_source(input, time)? {
+        return Err(invalid(
+            &time_path,
+            "ordering_required",
+            "join time must be an unchanged input column or pure rename",
+        ));
+    }
+    Ok(())
+}
+fn validate_nested_time(
+    input: &TableExpr,
+    identity: &QueryTemporalIdentity,
+    time: &str,
+    path: &str,
+) -> Result<()> {
+    if contains_join(input) && identity.event_time != time {
+        return Err(invalid(
+            path,
+            "ordering_required",
+            "nested join event time must match the declared post-join time",
+        ));
+    }
+    Ok(())
+}
+fn validate_public_keys(schema: &SchemaRef, keys: &[String], path: &str) -> Result<()> {
+    for (index, key) in keys.iter().enumerate() {
+        let field_path = format!("{path}[{index}]");
+        let field = schema
+            .field_with_name(key)
+            .map_err(|e| invalid(&field_path, "unresolved_type", e))?;
+        if matches!(field.data_type(), DataType::Timestamp(unit, _) if *unit != TimeUnit::Microsecond)
+        {
+            return Err(invalid(
+                &field_path,
+                "unsupported_type",
+                "public timestamp equality keys require microseconds",
+            ));
+        }
+    }
+    Ok(())
+}
+fn mapped_column(columns: &BTreeMap<String, Option<String>>, name: &str) -> Option<String> {
+    columns
+        .iter()
+        .find_map(|(out, source)| (source.as_deref() == Some(name)).then(|| out.clone()))
+        .or_else(|| columns.contains_key("*").then(|| name.to_owned()))
+}
+fn mapped_identity(
+    identity: &QueryTemporalIdentity,
+    columns: &BTreeMap<String, Option<String>>,
+) -> Option<QueryTemporalIdentity> {
+    Some(QueryTemporalIdentity {
+        entity_by: identity
+            .entity_by
+            .iter()
+            .map(|n| mapped_column(columns, n))
+            .collect::<Option<_>>()?,
+        event_time: mapped_column(columns, &identity.event_time)?,
+        sequence_by: identity
+            .sequence_by
+            .iter()
+            .map(|n| mapped_column(columns, n))
+            .collect::<Option<_>>()?,
+    })
+}
+fn projected_time_source(
+    input: &TableExpr,
+    columns: &[crate::NamedExpr],
+    append: bool,
+    name: &str,
+) -> Result<bool> {
+    match columns.iter().find(|c| c.name == name) {
+        Some(c) => match c.value.0.as_ref() {
+            crate::dataframe::Scalar::Column { name, .. } => time_source(input, name),
+            _ => Ok(false),
+        },
+        None => Ok(append && time_source(input, name)?),
+    }
+}
+fn sql_time_source(query: &str, tables: &BTreeMap<String, TableExpr>, name: &str) -> Result<bool> {
+    let (alias, input) = tables.first_key_value().expect("one input");
+    let Some(columns) = crate::sql::sql_passthrough_columns(query, alias)? else {
+        return Ok(false);
+    };
+    match columns.get(name) {
+        Some(Some(source)) => time_source(input, source),
+        None if columns.contains_key("*") => time_source(input, name),
+        _ => Ok(false),
+    }
 }

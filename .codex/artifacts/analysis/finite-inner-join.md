@@ -91,7 +91,7 @@ tests the existing empty-source contract. The old stream-only test assertion
 was replaced with batch admission; its opposite-engine guard and missing stream
 ordering assertions remain intact.
 
-## Final verification and provenance
+## Initial verification and provenance at 5d01defd
 
 The interpreter is the existing managed CPython 3.13 development environment.
 `PYTHONPATH=target/finite-inner-join/site` loads the native and Python package
@@ -186,3 +186,114 @@ test and reviewer acceptance are still independent. One main PR is authorized;
 its exact commit/URL and one nonblocking CI snapshot are returned in the issue
 comment. Pending does not authorize merge. No delegation or merge is performed;
 DAL-517 remains in_progress until the coordinator completes acceptance/merge.
+
+
+## Codacy and cfg(test) repair after 5d01defd
+
+This increment stays on the same branch, checkout and PR #601. The earlier
+64 distinct Rust / 303 Python results and native hash above remain evidence
+for the initial implementation; they are not relabelled as a fresh full run.
+This repair changes private decomposition and explicit example/test data, with
+no API, spec, schema, state version, identity or checkpoint-format change.
+
+The triggering check run `131029310005` reported 20 annotations: 16 complexity
+findings (12 Rust, 4 Python), one example SQL construction warning, one example
+assert warning, and two test execute-input warnings. The annotation list was
+read once through the GitHub API and saved in `codacy-annotations.json`.
+Lizard reproduced all 16 complexity failures before refactoring. Rust `?`
+paths contribute to CCN. Local versions 1.23.0 and pinned 1.26.0 count some Rust
+constructs differently; both now verify every reported function and every
+extracted helper at CCN <= 8. Unchanged pre-existing analyzer warnings remain
+unchanged. No threshold, baseline, ignore, lint allowance or tool configuration
+was changed.
+
+- `operator/join/finite.rs`: separate full-envelope validation/admission,
+  equality probe, pair ordering, output collection and record/block admission.
+  One run-owned FiniteAdmission retains rows, row ID and total logical bytes
+  across all RecordBatches. Match limits remain per complete Batch; NULL/error
+  classification, counter advancement, cancellation checks and gather order stay
+  in their original order. Moving owned admitted payloads avoids an unnecessary
+  clone and adds no persistent state.
+- `program/lower/join.rs`: separate side/time/key validation, SQL identity
+  mapping, and project/SQL time-source proofs; preserve diagnostic paths and
+  nested ordering checks.
+- `sql/inner_join.rs`: separate AST FROM/shape checks, argument decoding,
+  alias validation, strict JSON configuration and output-ordering validation.
+  Alias errors still precede third-argument/configuration errors.
+- Rust example and the two focused Rust integration files: extract declaration,
+  input, execution and assertion helpers. Every original pair/count/schema,
+  failure/retry and restore assertion remains. The original stricter budgets
+  on nested/invalid fixtures are retained.
+- Python analyzer and inner_join_sql: extract path/time and passthrough mapping
+  helpers while preserving issue order and existing declaration bytes.
+- Python example/tests: replace formatted SQL with fixed complete SQL/JSON
+  literals, and use explicit a.input/b.input Batch mappings with physical-name
+  assertions. All SQL configurations, negative cases, multiset and cache checks
+  remain. The example uses a RuntimeError oracle, which also runs under python -O.
+
+One bounded failure snapshot of the original head additionally found Linux
+`Rust core parity` job `131028901868` and Windows `Clippy (Windows cfg parity)`
+job `131028884352` failing the same items_after_test_module lint. Their completed
+job logs were read directly, without waiting for the remaining jobs. Local RED:
+
+```sh
+cargo clippy --locked -p calc-flow --lib --tests -- -D warnings
+```
+
+It failed at `operator/join/admitted.rs` with the same lint. The Vec adapter and
+its import were moved before the cfg(test) fixtures; its implementation body
+is byte-for-byte unchanged. The same command is GREEN. This expands compilation
+only to reproduce the observed CI error; it does not run the full Rust suite or
+claim Windows execution. The other targeted Clippy command from the initial
+verification, including the new example, also passes after the repair.
+
+Final affected-scope verification, with the original shared artifact cache and
+managed interpreter described above:
+
+```sh
+cargo test --locked -p calc-flow --test finite_inner_join --test finite_inner_frontend
+python -m pytest python/tests/test_finite_inner_join.py \
+  python/tests/test_symbolic_stream_join.py \
+  python/tests/test_symbolic_stream_join_acceptance.py \
+  python/tests/test_symbolic_relational_dag.py \
+  python/tests/test_symbolic_relational_dag_acceptance.py -q -W error
+python -m pytest python/tests/test_finite_event_window.py \
+  -k ordinary_sql_query_error -q -W error
+cargo run --locked -p calc-flow --example finite_inner_join
+python -O examples/finite_inner_join.py
+```
+
+Results: **6 Rust tests**, **75 Python tests**, plus **6 ordinary-SQL diagnostic
+cases** pass. The two examples run successfully. This includes actual stream
+jobs, original @1/@2 identity fixtures, nested owner sharing and real managed
+restart/next-input equivalence. No assertions were weakened and no full suite,
+coverage, performance or Windows run was added.
+
+Changed-file Rustfmt/Ruff checks, the unchanged complexity ratchet, and whitespace
+checks pass. Pinned Lizard 1.26.0 and installed 1.23.0 both verify the repair;
+`complexity-green.json` records function comparisons against 5d01defd. The
+existing Bandit 1.9.4 reports no example findings. This additional local scan
+passes with **0 findings, 0 errors, 200 applicable rules on 2 files**:
+
+```sh
+semgrep scan --config=p/python --config=p/security-audit --metrics=off \
+  --disable-version-check --error python/tests/test_finite_inner_join.py \
+  examples/finite_inner_join.py
+```
+
+Semgrep is 1.180.0; this local rule set is not represented as a hosted Codacy
+verdict. The new head still requires the normal hosted gate.
+
+Native was rebuilt after the final Rust declaration-order change using the
+recorded maturin command, then the exact current Python tree was overlaid.
+All 58 loaded Python/stub files match the checkout byte-for-byte. The new native
+SHA-256 is `2a6d537354830e3d1dc993ac16f73a7e5359cf10bd1352b4f82c9659b186e4a7`;
+the original hash `267ebcec042b0d681d0c24af55bceceb4c488aaae53b9325aac4d23ac55ff293`
+is preserved above and in the original source manifest. The new independent
+`provenance-codacy.json` records both hashes, loaded paths and the current Rust,
+Cargo and Python source hashes. All final Python checks use this new native.
+
+The final repair commit and one nonblocking new-head CI snapshot are delivered
+in the triggering issue thread. Hosted pending checks are not green evidence;
+there is no poll, merge or delegation. DAL-517 remains in_progress for the
+coordinator's independent tester then reviewer handoff.

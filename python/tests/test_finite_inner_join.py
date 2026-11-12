@@ -8,6 +8,40 @@ import pytest
 
 import calc_flow as cf
 
+JOIN_QUERY = """SELECT * FROM CF_INNER_JOIN('a', 'b', '{
+    "spec": {
+        "join_type": "inner", "left_keys": ["k"], "right_keys": ["k"],
+        "left_event_time": "ts", "right_event_time": "ts",
+        "bounds": {"before_micros": 2, "after_micros": 3},
+        "limits": {"max_state_rows_per_side": 100,
+            "max_state_bytes_per_side": 1048576, "max_matches_per_input_batch": 1000}
+    }
+}')"""
+
+
+ORDERED_JOIN_QUERY = """SELECT * FROM CF_INNER_JOIN('a', 'b', '{
+    "spec": {
+        "join_type": "inner", "left_keys": ["k"], "right_keys": ["k"],
+        "left_event_time": "ts", "right_event_time": "ts",
+        "bounds": {"before_micros": 2, "after_micros": 3},
+        "limits": {"max_state_rows_per_side": 100,
+            "max_state_bytes_per_side": 1048576, "max_matches_per_input_batch": 1000}
+    },
+    "output_ordering": {"entity_by": ["left__k"], "event_time": "left__ts",
+        "sequence_by": ["left__seq", "right__seq"]}
+}')"""
+
+
+NESTED_JOIN_QUERY = """SELECT * FROM CF_INNER_JOIN('a', 'b', '{
+    "spec": {
+        "join_type": "inner", "left_keys": ["left__k"], "right_keys": ["k"],
+        "left_event_time": "left__ts", "right_event_time": "ts",
+        "bounds": {"before_micros": 0, "after_micros": 0},
+        "limits": {"max_state_rows_per_side": 100,
+            "max_state_bytes_per_side": 1048576, "max_matches_per_input_batch": 1000}
+    }
+}')"""
+
 
 def source(name):
     return cf.table_input(
@@ -42,30 +76,14 @@ def values(times):
 
 
 def join(a, b, sql=False, ordering=False):
-    spec = dict(
-        join_type="inner",
-        left_keys=["k"],
-        right_keys=["k"],
-        left_event_time="ts",
-        right_event_time="ts",
-        bounds=dict(before_micros=2, after_micros=3),
-        limits=dict(
-            max_state_rows_per_side=100,
-            max_state_bytes_per_side=1048576,
-            max_matches_per_input_batch=1000,
-        ),
-    )
     order = dict(
         entity_by=["left__k"],
         event_time="left__ts",
         sequence_by=["left__seq", "right__seq"],
     )
     if sql:
-        config = dict(spec=spec)
-        if ordering:
-            config["output_ordering"] = order
-        literal = json.dumps(config).replace("'", "''")
-        return cf.sql(f"SELECT * FROM CF_INNER_JOIN('a', 'b', '{literal}')", a=a, b=b)
+        query = ORDERED_JOIN_QUERY if ordering else JOIN_QUERY
+        return cf.sql(query, a=a, b=b)
     return cf.table.stream_join(
         a,
         b,
@@ -147,11 +165,14 @@ def test_same_finite_plan_and_runtime_cache_are_isolated(sql):
     plan = p.compile_batch(runtime)
 
     def execute(left, right):
-        inputs = {
-            name: cf.Batch.from_pyarrow(left if name.split(".")[0] == "a" else right)
-            for name in plan.external_inputs
-        }
-        return next(iter(plan.execute(inputs=inputs).outputs.values())).to_pyarrow()
+        assert plan.external_inputs == ("a.input", "b.input")
+        result = plan.execute(
+            inputs={
+                "a.input": cf.Batch.from_pyarrow(left),
+                "b.input": cf.Batch.from_pyarrow(right),
+            }
+        )
+        return next(iter(result.outputs.values())).to_pyarrow()
 
     for left, right, expected in [
         ([10, 10], [8, 8, 13], 6),
@@ -194,13 +215,13 @@ def test_mixed_join_sharing_and_independent_branches(sql):
     reloaded = cf.Runtime().compile_batch_project(
         cf.ProjectDocument.model_validate(doc).model_dump_json()
     )
-    physical = {
-        name: cf.Batch.from_pyarrow(
-            values([10, 10]) if name.split(".")[0] == "a" else values([8, 8, 13])
-        )
-        for name in reloaded.external_inputs
-    }
-    restored = reloaded.execute(inputs=physical)
+    assert reloaded.external_inputs == ("a.input", "b.input")
+    restored = reloaded.execute(
+        inputs={
+            "a.input": cf.Batch.from_pyarrow(values([10, 10])),
+            "b.input": cf.Batch.from_pyarrow(values([8, 8, 13])),
+        }
+    )
     for name, output in restored.outputs.items():
         expected = result[name.split(".")[0]]
         actual = output.to_pyarrow()
@@ -214,25 +235,7 @@ def test_three_source_nested_join(sql):
     a, b, c = source("a"), source("b"), source("c")
     first = join(a, b, sql, ordering=True).sql("SELECT * FROM input")
     if sql:
-        config = dict(
-            spec=dict(
-                join_type="inner",
-                left_keys=["left__k"],
-                right_keys=["k"],
-                left_event_time="left__ts",
-                right_event_time="ts",
-                bounds=dict(before_micros=0, after_micros=0),
-                limits=dict(
-                    max_state_rows_per_side=100,
-                    max_state_bytes_per_side=1048576,
-                    max_matches_per_input_batch=1000,
-                ),
-            )
-        )
-        literal = json.dumps(config).replace("'", "''")
-        second = cf.sql(
-            f"SELECT * FROM CF_INNER_JOIN('a', 'b', '{literal}')", a=first, b=c
-        )
+        second = cf.sql(NESTED_JOIN_QUERY, a=first, b=c)
     else:
         second = cf.table.stream_join(
             first,

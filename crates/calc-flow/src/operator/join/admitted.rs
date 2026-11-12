@@ -1,4 +1,4 @@
-use super::{StreamJoinOperator, columnar::RowPayload, operator_error};
+use super::{AdmittedRow, StreamJoinOperator, columnar::RowPayload, operator_error};
 use crate::{Batch, EventTime, Result, batch::TableBatch};
 use datafusion::arrow::{array::ArrayRef, datatypes::SchemaRef, record_batch::RecordBatch};
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -934,6 +934,30 @@ impl<'a> Iterator for GroupIter<'a> {
     }
 }
 
+impl AdmittedRows for Vec<AdmittedRow> {
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+    fn row(&self, index: usize) -> AdmittedRef<'_> {
+        let row = &self[index];
+        AdmittedRef {
+            record: (&row.record).into(),
+            event_time: row.event_time,
+            row_id: row.row_id,
+            retain: row.retain,
+        }
+    }
+    fn group_end(&self, start: usize) -> usize {
+        let columns = self[start].record.columns();
+        (start + 1..self.len())
+            .find(|&index| !std::ptr::eq(columns, self[index].record.columns()))
+            .unwrap_or(self.len())
+    }
+    fn source_index(&self, index: usize) -> usize {
+        index
+    }
+}
+
 #[cfg(test)]
 mod fixtures {
     use super::super::AdmittedRow;
@@ -997,30 +1021,5 @@ mod fixtures {
             batch.total_records = batch.current;
             batch
         }
-    }
-}
-
-use super::AdmittedRow;
-impl AdmittedRows for Vec<AdmittedRow> {
-    fn len(&self) -> usize {
-        Vec::len(self)
-    }
-    fn row(&self, index: usize) -> AdmittedRef<'_> {
-        let row = &self[index];
-        AdmittedRef {
-            record: (&row.record).into(),
-            event_time: row.event_time,
-            row_id: row.row_id,
-            retain: row.retain,
-        }
-    }
-    fn group_end(&self, start: usize) -> usize {
-        let columns = self[start].record.columns();
-        (start + 1..self.len())
-            .find(|&index| !std::ptr::eq(columns, self[index].record.columns()))
-            .unwrap_or(self.len())
-    }
-    fn source_index(&self, index: usize) -> usize {
-        index
     }
 }

@@ -36,80 +36,110 @@ impl StreamJoinOperator {
             self.input_schema(1).clone(),
             self.spec.clone(),
         )?;
+        let (left, right) = scratch.finite_inputs(inputs, run).await?;
+        let pairs = scratch.finite_matches(&left, &right, run, runtime).await?;
+        scratch.finite_output(&left, &right, &pairs, run).await
+    }
+
+    async fn finite_inputs(
+        &mut self,
+        inputs: &BTreeMap<String, Batch>,
+        run: &RunContext,
+    ) -> Result<(Vec<StoredRow>, Vec<AdmittedRow>)> {
         let left = required(inputs, "left", &self.name)?;
         let right = required(inputs, "right", &self.name)?;
-        scratch.begin_batch("left", left)?;
-        scratch.begin_batch("right", right)?;
-        let left = scratch.finite_rows("left", left, run).await?;
-        let right = scratch.finite_rows("right", right, run).await?;
-        let plan = scratch.side_plan("right")?;
-        let admitted: Vec<AdmittedRow> = right
-            .iter()
+        self.begin_batch("left", left)?;
+        self.begin_batch("right", right)?;
+        let left = self.finite_rows("left", left, run).await?;
+        let right = self.finite_rows("right", right, run).await?;
+        let admitted = right
+            .into_iter()
             .map(|row| AdmittedRow {
-                record: row.record.clone(),
+                record: row.record,
                 event_time: row.event_time,
                 row_id: row.row_id,
                 retain: true,
             })
             .collect();
-        let pairs = if left.is_empty() || right.is_empty() {
-            Vec::new()
-        } else {
-            let keys = state_key_batch(
-                &left,
-                &scratch.compiled,
-                &plan,
-                Some(scratch.input_schema(0)),
-            )?;
-            let probe =
-                probe_key_batch(&admitted, &plan.key_indices, Some(scratch.input_schema(1)))?;
-            let tables = equality_tables(probe, keys)?;
-            let result = finite_query(
-                runtime,
-                &scratch.compiled.equality_query,
-                &tables,
-                &scratch.name,
-                run,
-            )
+        Ok((left, admitted))
+    }
+
+    async fn finite_matches(
+        &self,
+        left: &Vec<StoredRow>,
+        right: &Vec<AdmittedRow>,
+        run: &RunContext,
+        runtime: &crate::DataFusionRuntime,
+    ) -> Result<Vec<super::MatchedPair>> {
+        if left.is_empty() || right.is_empty() {
+            return Ok(Vec::new());
+        }
+        let plan = self.side_plan("right")?;
+        let equal = self
+            .finite_equal_pairs(left, right, &plan, run, runtime)
             .await?;
-            let equal = decode_key_pairs(&result)?;
-            filter_and_order_pairs(&scratch.spec.bounds, &plan, &admitted, &left, equal)
-        };
+        Ok(filter_and_order_pairs(
+            &self.spec.bounds,
+            &plan,
+            right,
+            left,
+            equal,
+        ))
+    }
+
+    async fn finite_equal_pairs(
+        &self,
+        left: &Vec<StoredRow>,
+        right: &Vec<AdmittedRow>,
+        plan: &super::SidePlan,
+        run: &RunContext,
+        runtime: &crate::DataFusionRuntime,
+    ) -> Result<Vec<(u64, u64)>> {
+        let keys = state_key_batch(left, &self.compiled, plan, Some(self.input_schema(0)))?;
+        let probe = probe_key_batch(right, &plan.key_indices, Some(self.input_schema(1)))?;
+        let tables = equality_tables(probe, keys)?;
+        let result = finite_query(
+            runtime,
+            &self.compiled.equality_query,
+            &tables,
+            &self.name,
+            run,
+        )
+        .await?;
+        decode_key_pairs(&result)
+    }
+
+    async fn finite_output(
+        &self,
+        left: &Vec<StoredRow>,
+        right: &Vec<AdmittedRow>,
+        pairs: &Vec<super::MatchedPair>,
+        run: &RunContext,
+    ) -> Result<BTreeMap<String, Batch>> {
         enforce_match_limit(
             pairs.len(),
             &mut 0,
-            scratch.spec.limits.max_matches_per_input_batch,
-            &scratch.name,
+            self.spec.limits.max_matches_per_input_batch,
+            &self.name,
         )?;
         run.check_cancelled()?;
-        let schema = scratch.output_ports[0]
-            .schema()
-            .expect("compiled join schema");
-        let records = if pairs.is_empty() {
-            vec![RecordBatch::new_empty(schema.clone())]
-        } else {
-            let output = materialization::JoinOutput {
-                schema,
-                projection: None,
-                admitted: &admitted,
-                opposite: &left,
-                matched: &pairs,
-                incoming_is_left: false,
-                operator_id: &scratch.name,
-                admitted_charges: None,
-            };
-            let mut records = Vec::new();
-            for start in (0..pairs.len()).step_by(8192) {
-                run.check_cancelled()?;
-                records.push(output.materialize(start..(start + 8192).min(pairs.len()))?);
-                tokio::task::yield_now().await;
-            }
-            records
+        let schema = self.output_ports[0].schema().expect("compiled join schema");
+        let output = materialization::JoinOutput {
+            schema,
+            projection: None,
+            admitted: right,
+            opposite: left,
+            matched: pairs,
+            incoming_is_left: false,
+            operator_id: &self.name,
+            admitted_charges: None,
         };
+        let records = finite_records(&output, pairs.len(), schema, run).await?;
         run.check_cancelled()?;
+        let metadata = BatchMetadata::new(&self.name, 0, BTreeMap::new())?;
         Ok(BTreeMap::from([(
             "output".into(),
-            Batch::table(records, BatchMetadata::new(&self.name, 0, BTreeMap::new())?)?,
+            Batch::table(records, metadata)?,
         )]))
     }
 }
@@ -128,49 +158,132 @@ impl StreamJoinOperator {
         run: &RunContext,
     ) -> Result<Vec<StoredRow>> {
         let plan = self.side_plan(side)?;
-        let mut rows = Vec::new();
-        let mut row_id = 0_u64;
-        let mut bytes = 0_u64;
+        let mut admission = FiniteAdmission::default();
         for record in batch.table_payload()?.batches() {
-            let times = BatchEventTimes::new(
-                record.column(plan.event_time_index).as_ref(),
-                &self.name,
-                side,
-            )?;
-            for start in (0..record.num_rows()).step_by(64) {
-                run.check_cancelled()?;
-                let length = (record.num_rows() - start).min(64);
-                let mask =
-                    admission_masks::AdmissionMasks::finite(record, &plan, &times, start, length);
-                for offset in 0..length {
-                    let identity = row_id;
-                    row_id = row_id
-                        .checked_add(1)
-                        .ok_or_else(|| counter_overflow(&self.name, "row id"))?;
-                    if let RowAdmission::Admitted(event_time) = mask.at(offset, &self.name, side)? {
-                        let physical = start + offset;
-                        let key = encode_join_key_v1(record, physical, &plan.key_indices)?;
-                        let charge =
-                            state_row_charge_with_key(record, physical, key.len(), &self.name)?;
-                        bytes = bytes
-                            .checked_add(charge)
-                            .ok_or_else(|| counter_overflow(&self.name, "state bytes"))?;
-                        self.validate_state_totals(plan.incoming_is_left, rows.len() + 1, bytes)?;
-                        rows.push(StoredRow {
-                            record: columnar::RowPayload::from(record.clone())
-                                .with_offset(physical),
-                            event_time,
-                            row_id: identity,
-                            charge,
-                            encoded_key: Arc::new(key.into()),
-                        });
-                    }
-                }
-                tokio::task::yield_now().await;
+            self.finite_record(side, record, &plan, run, &mut admission)
+                .await?;
+        }
+        Ok(admission.rows)
+    }
+
+    async fn finite_record(
+        &mut self,
+        side: &str,
+        record: &RecordBatch,
+        plan: &super::SidePlan,
+        run: &RunContext,
+        admission: &mut FiniteAdmission,
+    ) -> Result<()> {
+        let times = BatchEventTimes::new(
+            record.column(plan.event_time_index).as_ref(),
+            &self.name,
+            side,
+        )?;
+        for start in (0..record.num_rows()).step_by(64) {
+            run.check_cancelled()?;
+            let length = (record.num_rows() - start).min(64);
+            let mask = admission_masks::AdmissionMasks::finite(record, plan, &times, start, length);
+            self.finite_block(side, record, plan, start..start + length, &mask, admission)?;
+            tokio::task::yield_now().await;
+        }
+        Ok(())
+    }
+
+    fn finite_block(
+        &mut self,
+        side: &str,
+        record: &RecordBatch,
+        plan: &super::SidePlan,
+        range: std::ops::Range<usize>,
+        mask: &admission_masks::AdmissionMasks,
+        admission: &mut FiniteAdmission,
+    ) -> Result<()> {
+        for offset in 0..range.len() {
+            let identity = admission.row_id;
+            admission.row_id = admission
+                .row_id
+                .checked_add(1)
+                .ok_or_else(|| counter_overflow(&self.name, "row id"))?;
+            if let RowAdmission::Admitted(event_time) = mask.at(offset, &self.name, side)? {
+                self.finite_retain_row(
+                    record,
+                    plan,
+                    range.start + offset,
+                    identity,
+                    event_time,
+                    admission,
+                )?;
             }
         }
-        Ok(rows)
+        Ok(())
     }
+
+    fn finite_retain_row(
+        &mut self,
+        record: &RecordBatch,
+        plan: &super::SidePlan,
+        physical: usize,
+        identity: u64,
+        event_time: crate::EventTime,
+        admission: &mut FiniteAdmission,
+    ) -> Result<()> {
+        let row = self.finite_stored_row(record, plan, physical, identity, event_time)?;
+        admission.bytes = admission
+            .bytes
+            .checked_add(row.charge)
+            .ok_or_else(|| counter_overflow(&self.name, "state bytes"))?;
+        self.validate_state_totals(
+            plan.incoming_is_left,
+            admission.rows.len() + 1,
+            admission.bytes,
+        )?;
+        admission.rows.push(row);
+        Ok(())
+    }
+
+    fn finite_stored_row(
+        &self,
+        record: &RecordBatch,
+        plan: &super::SidePlan,
+        physical: usize,
+        row_id: u64,
+        event_time: crate::EventTime,
+    ) -> Result<StoredRow> {
+        let key = encode_join_key_v1(record, physical, &plan.key_indices)?;
+        let charge = state_row_charge_with_key(record, physical, key.len(), &self.name)?;
+        Ok(StoredRow {
+            record: columnar::RowPayload::from(record.clone()).with_offset(physical),
+            event_time,
+            row_id,
+            charge,
+            encoded_key: Arc::new(key.into()),
+        })
+    }
+}
+
+#[derive(Default)]
+struct FiniteAdmission {
+    row_id: u64,
+    bytes: u64,
+    rows: Vec<StoredRow>,
+}
+
+async fn finite_records(
+    output: &materialization::JoinOutput<'_>,
+    count: usize,
+    schema: &datafusion::arrow::datatypes::SchemaRef,
+    run: &RunContext,
+) -> Result<Vec<RecordBatch>> {
+    if count == 0 {
+        return Ok(vec![RecordBatch::new_empty(schema.clone())]);
+    }
+    let mut records = Vec::new();
+    for start in (0..count).step_by(8192) {
+        run.check_cancelled()?;
+        records.push(output.materialize(start..(start + 8192).min(count))?);
+        tokio::task::yield_now().await;
+    }
+    Ok(records)
 }
 
 async fn finite_query(

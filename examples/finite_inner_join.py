@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
-import json
 from datetime import timedelta
 
 import pyarrow as pa
 
 import calc_flow as cf
+
+JOIN_QUERY = """SELECT * FROM CF_INNER_JOIN('a', 'b', '{
+    "spec": {
+        "join_type": "inner", "left_keys": ["k"], "right_keys": ["k"],
+        "left_event_time": "ts", "right_event_time": "ts",
+        "bounds": {"before_micros": 2, "after_micros": 3},
+        "limits": {"max_state_rows_per_side": 100,
+            "max_state_bytes_per_side": 1048576, "max_matches_per_input_batch": 1000}
+    }
+}')"""
 
 
 def main():
@@ -34,23 +43,7 @@ def main():
         bounds=cf.JoinTimeBounds(timedelta(microseconds=2), timedelta(microseconds=3)),
         limits=cf.JoinStateLimits(100, 1048576, 1000),
     )
-    config = {
-        "spec": {
-            "join_type": "inner",
-            "left_keys": ["k"],
-            "right_keys": ["k"],
-            "left_event_time": "ts",
-            "right_event_time": "ts",
-            "bounds": {"before_micros": 2, "after_micros": 3},
-            "limits": {
-                "max_state_rows_per_side": 100,
-                "max_state_bytes_per_side": 1048576,
-                "max_matches_per_input_batch": 1000,
-            },
-        }
-    }
-    literal = json.dumps(config).replace("'", "''")
-    sql = cf.sql(f"SELECT * FROM CF_INNER_JOIN('a', 'b', '{literal}')", a=a, b=b)
+    sql = cf.sql(JOIN_QUERY, a=a, b=b)
     program = cf.Program("pairs", mode="batch", outputs={"df": df, "sql": sql})
 
     def data(times):
@@ -67,12 +60,11 @@ def main():
     for result in program.collect(
         {"a": data([10, 10]), "b": data([7, 8, 8, 13, 14])}
     ).values():
-        assert (
-            sorted(
-                zip(result["left__seq"].to_pylist(), result["right__seq"].to_pylist())
-            )
-            == expected
+        actual = sorted(
+            zip(result["left__seq"].to_pylist(), result["right__seq"].to_pylist())
         )
+        if actual != expected:
+            raise RuntimeError("finite inner join pair oracle mismatch")
     program.for_mode("stream").compile_stream()
     print("DataFrame and SQL six-pair oracles passed; both lifecycles compile")
 
