@@ -48,7 +48,7 @@ def runtime(monkeypatch):
         inner,
         kind="stream_asof_join",
         version="1",
-        modes=("stream",),
+        modes=("batch", "stream"),
         finality="group_final_append_only",
         requires_datafusion=True,
         stateful=True,
@@ -173,11 +173,11 @@ def test_asof_analysis_rejects_nullable_or_mismatched_keys(runtime) -> None:
     )
 
 
-def test_asof_analysis_rejects_batch_and_wrong_temporal_type(runtime) -> None:
+def test_asof_analysis_accepts_batch_and_rejects_wrong_temporal_type(runtime) -> None:
     batch = cf.Program(
         "batch", engine="streaming", outputs={"matched": _join()}
     ).analyze(runtime, mode="batch")
-    assert any(issue.code == "unsupported_mode" for issue in batch.issues)
+    assert batch.issues == ()
     bad = cf.table_input(
         "trades",
         schema=[
@@ -202,7 +202,7 @@ def test_asof_analysis_rejects_batch_and_wrong_temporal_type(runtime) -> None:
     "changes",
     [
         {"version": "2"},
-        {"modes": ("batch", "stream")},
+        {"modes": ("stream",)},
         {"finality": "unproven"},
         {"requires_datafusion": False},
         {"stateful": False},
@@ -417,8 +417,14 @@ def test_inner_consumer_accepts_verified_asof_time(runtime, asof_side, relay):
     assert kinds.count("stream_asof_join") == 1
     assert kinds.count("stream_join") == 1
     program.compile_stream(runtime)
-    with pytest.raises(cf.CompileError, match="unsupported_mode"):
-        lower_program_document(program, runtime, "batch")
+    finite = lower_program_document(program, runtime, "batch")
+    assert (
+        sum(
+            n["operator"]["kind"] == "stream_asof_join"
+            for n in finite["graph"]["nodes"]
+        )
+        == 1
+    )
 
 
 @pytest.mark.parametrize("asof_side", ["left", "right"])
@@ -509,14 +515,18 @@ def test_asof_rejects_event_window_chains_but_accepts_independent_branch(
     assert kinds.count("window") == 1
 
 
-def test_asof_sql_output_does_not_regain_temporal_metadata(runtime) -> None:
+def test_asof_join_local_sql_identity_survives_proven_passthrough(runtime) -> None:
     sql = _join().sql("SELECT left__symbol, left__time, left__sequence FROM input")
     result = cf.Program("sql", engine="streaming", outputs={"result": sql}).analyze(
         runtime, mode="stream"
     )
     assert result.issues == ()
+    nested = _join(sql)
+    program = cf.Program("nested_sql", mode="stream", outputs={"match": nested})
+    assert program.analyze(runtime).issues == ()
+    dropped = _join().sql("SELECT left__symbol FROM input")
     with pytest.raises(ValueError, match="event_time"):
-        _join(sql)
+        _join(dropped)
 
 
 def test_asof_cross_section_compiles_after_finality_boundary(runtime) -> None:
@@ -786,7 +796,7 @@ def test_asof_builtin_capability_is_an_independent_complete_contract() -> None:
             {"name": "right", "kind": "table", "required": True},
         ),
         "output_ports": ({"name": "output", "kind": "table", "required": True},),
-        "modes": ("stream",),
+        "modes": ("batch", "stream"),
         "finality": "group_final_append_only",
         "requires_datafusion": True,
         "stateful": True,

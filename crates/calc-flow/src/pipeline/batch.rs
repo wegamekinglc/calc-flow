@@ -28,6 +28,7 @@ pub(crate) enum CompiledBatchOperator {
     Union(crate::UnionOperator),
     Window(crate::WindowAggregateOperator),
     Join(Box<crate::StreamJoinOperator>),
+    Asof(Box<crate::StreamAsofJoinOperator>),
     Rolling(crate::RollingOperator),
     CrossSection(crate::CrossSectionOperator),
 }
@@ -41,14 +42,13 @@ impl CompiledBatchOperator {
                 operator.validate_batch()?;
                 Ok(Self::Union(operator))
             }
+            NodeOperator::StreamAsofJoin(operator) => Ok(Self::Asof(operator)),
             NodeOperator::StreamJoin(operator) => Ok(Self::Join(operator)),
             NodeOperator::Window(operator) => Ok(Self::Window(operator)),
             NodeOperator::Rolling(operator) => Ok(Self::Rolling(operator)),
             NodeOperator::CrossSection(operator) => Ok(Self::CrossSection(operator)),
             NodeOperator::Batch(operator) => Ok(Self::External(operator)),
-            NodeOperator::SnapshotSql(_)
-            | NodeOperator::StreamAsofJoin(_)
-            | NodeOperator::Stream(_) => Err(CalcFlowError::Compile {
+            NodeOperator::SnapshotSql(_) | NodeOperator::Stream(_) => Err(CalcFlowError::Compile {
                 message: format!(
                     "node {:?} is stream-only; batch graphs compose multi-input logic through SQL aliases",
                     definition.node_id
@@ -64,6 +64,7 @@ impl CompiledBatchOperator {
             | Self::Sql(_)
             | Self::Rolling(_)
             | Self::CrossSection(_)
+            | Self::Asof(_)
             | Self::Join(_)
             | Self::Window(_)
             | Self::Union(_) => Ok(Value::Null),
@@ -77,6 +78,7 @@ impl CompiledBatchOperator {
             | Self::Sql(_)
             | Self::Rolling(_)
             | Self::CrossSection(_)
+            | Self::Asof(_)
             | Self::Join(_)
             | Self::Window(_)
             | Self::Union(_)
@@ -88,6 +90,7 @@ impl CompiledBatchOperator {
             | Self::Sql(_)
             | Self::Rolling(_)
             | Self::CrossSection(_)
+            | Self::Asof(_)
             | Self::Join(_)
             | Self::Window(_)
             | Self::Union(_) => Err(CalcFlowError::Format {
@@ -103,6 +106,7 @@ impl CompiledBatchOperator {
             | Self::Sql(_)
             | Self::Rolling(_)
             | Self::CrossSection(_)
+            | Self::Asof(_)
             | Self::Join(_)
             | Self::Window(_)
             | Self::Union(_) => Ok(()),
@@ -117,6 +121,11 @@ impl CompiledBatchOperator {
     ) -> Result<BTreeMap<String, Batch>> {
         match self {
             Self::External(operator) => {
+                operator
+                    .process(inputs, &BatchOperatorContext { run })
+                    .await
+            }
+            Self::Asof(operator) => {
                 operator
                     .process(inputs, &BatchOperatorContext { run })
                     .await
@@ -268,9 +277,7 @@ struct PlanTransaction<'a> {
 fn validate_finite_node(node_id: &str, operator: &NodeOperator) -> Result<()> {
     match operator {
         NodeOperator::Union(union) => union.validate_batch(),
-        NodeOperator::SnapshotSql(_)
-        | NodeOperator::StreamAsofJoin(_)
-        | NodeOperator::Stream(_) => Err(CalcFlowError::Compile {
+        NodeOperator::SnapshotSql(_) | NodeOperator::Stream(_) => Err(CalcFlowError::Compile {
             message: format!(
                 "node {node_id:?} is stream-only; batch graphs compose multi-input logic through SQL aliases"
             ),

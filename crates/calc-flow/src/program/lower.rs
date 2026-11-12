@@ -14,6 +14,7 @@ use datafusion::arrow::datatypes::SchemaRef;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod asof;
 mod join;
 mod union;
 mod window;
@@ -47,6 +48,21 @@ fn endpoint(table: &TableExpr, port: &str) -> PortEndpoint {
 }
 pub(super) fn children(table: &TableExpr, path: &str) -> Vec<(String, TableExpr, String)> {
     match &table.0.kind {
+        RelationKind::AsofJoin { inputs, sql, .. } => inputs
+            .iter()
+            .enumerate()
+            .map(|(i, input)| {
+                let side = if i == 0 { "left" } else { "right" };
+                (
+                    side.into(),
+                    input.clone(),
+                    format!(
+                        "{path}.{}.{side}",
+                        if *sql { "sql.asof_join" } else { "asof_join" }
+                    ),
+                )
+            })
+            .collect(),
         RelationKind::InnerJoin { inputs, sql, .. } => inputs
             .iter()
             .enumerate()
@@ -326,6 +342,15 @@ impl Lowered {
     }
     async fn prepare(&self, table: &TableExpr, path: &str) -> Result<Prepared> {
         match &table.0.kind {
+            RelationKind::AsofJoin { inputs, spec, sql } => self.prepare_asof(
+                table,
+                inputs,
+                spec,
+                &format!(
+                    "{path}.{}",
+                    if *sql { "sql.asof_join" } else { "asof_join" }
+                ),
+            ),
             RelationKind::InnerJoin {
                 inputs,
                 spec,
@@ -598,6 +623,7 @@ fn native_edge(edge: &EdgeSpec) -> Result<Edge> {
 }
 fn relation_kind(table: &TableExpr) -> (&'static str, Option<String>) {
     match &table.0.kind {
+        RelationKind::AsofJoin { .. } => ("stream_asof_join", None),
         RelationKind::InnerJoin { .. } => ("stream_join", None),
         RelationKind::Window { .. } => ("window", None),
         RelationKind::Union { .. } => ("union", None),
@@ -727,6 +753,13 @@ fn node_operator(node: &NodeSpec, schemas: &PlannedPorts) -> Result<NodeOperator
     let inputs = schemas.inputs()?;
     let output = exact_port("output", &schemas.output)?;
     match &node.operator {
+        OperatorSpec::StreamAsofJoin { spec } => Ok(crate::StreamAsofJoinOperator::new(
+            &node.id,
+            inputs[0].schema().expect("exact left").clone(),
+            inputs[1].schema().expect("exact right").clone(),
+            spec.clone(),
+        )?
+        .into()),
         OperatorSpec::StreamJoin { spec } => Ok(crate::StreamJoinOperator::new(
             &node.id,
             inputs[0].schema().expect("exact left").clone(),

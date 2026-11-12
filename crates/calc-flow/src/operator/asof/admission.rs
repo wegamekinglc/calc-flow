@@ -4,8 +4,11 @@ use super::{
     state::{self, AdmissionRef, LeftOrder},
     workspace::ReservedIdentities,
 };
+#[cfg(test)]
+use crate::StreamOperatorContext;
+use crate::operator::asof::kernel::KernelContext;
 use crate::{
-    Batch, Result, StreamOperatorContext, StreamingFailureReason,
+    Batch, Result, StreamingFailureReason,
     runtime::streaming::gather_work::{GatherStop, OwnedCpuWork},
 };
 use ahash::RandomState;
@@ -521,7 +524,7 @@ impl StreamAsofJoinOperator {
         &mut self,
         input: ValidatedInput,
         batch: &Batch,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<Admission> {
         let identity_workspace = self
             .reserve_admission_identities(batch, input, context)
@@ -596,7 +599,7 @@ impl StreamAsofJoinOperator {
         input: ValidatedInput,
         batch: &Batch,
         identity_workspace: ReservedIdentities,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<Admission> {
         let InputIdentities {
             rows,
@@ -648,7 +651,7 @@ impl StreamAsofJoinOperator {
         batch: &'a Batch,
         input: ValidatedInput,
         capacity: usize,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<InputIdentities<'a>> {
         match self.admission_identities(batch.table_payload()?.batches(), input, capacity, context)
         {
@@ -676,7 +679,7 @@ impl StreamAsofJoinOperator {
         batches: &[Arc<state::PayloadBatch>],
         workspace: AdmissionWorkspace,
         side: usize,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
         columnar: bool,
     ) -> Result<PreparedInput> {
         if side != 0 {
@@ -757,7 +760,7 @@ impl StreamAsofJoinOperator {
         &mut self,
         batch: &Batch,
         input: ValidatedInput,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<ReservedIdentities> {
         match self.identity_workspace(batch, input) {
             Ok(reservation) => Ok(reservation),
@@ -825,7 +828,7 @@ impl StreamAsofJoinOperator {
         batches: &'a [RecordBatch],
         input: ValidatedInput,
         capacity: usize,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<InputIdentities<'a>> {
         let side = input.side(&self.spec);
         let mut keys = InputKeys::default();
@@ -865,7 +868,7 @@ impl StreamAsofJoinOperator {
     }
 }
 
-fn check_input_cancellation(row: usize, context: &StreamOperatorContext<'_>) -> Result<()> {
+fn check_input_cancellation(row: usize, context: &dyn KernelContext) -> Result<()> {
     if row.is_multiple_of(1_024) {
         context.check_cancelled()?;
     }
@@ -891,7 +894,7 @@ fn count_duplicate_identities<'a>(
     state: &state::State,
     side: usize,
     identities: impl ExactSizeIterator<Item = &'a LeftOrder> + Clone,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<u64> {
     inspect_duplicate_identities(state, side, identities, context).map(|(duplicates, _)| duplicates)
 }
@@ -906,7 +909,7 @@ fn inspect_duplicate_identities<'a>(
     state: &state::State,
     side: usize,
     identities: impl ExactSizeIterator<Item = &'a LeftOrder> + Clone,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<(u64, bool)> {
     let DuplicateProbes {
         skip_resident,
@@ -962,7 +965,7 @@ fn prepare_duplicate_probes<'a>(
     state: &state::State,
     side: usize,
     identities: &(impl ExactSizeIterator<Item = &'a LeftOrder> + Clone),
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<DuplicateProbes> {
     let (sorted, duplicates) = if side == 0 {
         let duplicates = sorted_left_duplicate_count((*identities).clone(), context)?;
@@ -986,7 +989,7 @@ fn prepare_duplicate_probes<'a>(
 
 fn sorted_left_duplicate_count<'a>(
     identities: impl Iterator<Item = &'a LeftOrder>,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<Option<u64>> {
     use std::cmp::Ordering;
 
@@ -1010,7 +1013,7 @@ fn unordered_identities_are_after_state<'a>(
     state: &state::State,
     side: usize,
     identities: impl ExactSizeIterator<Item = &'a LeftOrder>,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<bool> {
     let empty = if side == 0 {
         state.left.is_empty()
@@ -1035,7 +1038,7 @@ fn unordered_identities_are_after_state<'a>(
 fn earliest_identity<'a>(
     identities: impl Iterator<Item = &'a LeftOrder>,
     side: usize,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<Option<&'a LeftOrder>> {
     let mut earliest = None;
     for (position, identity) in identities.enumerate() {
@@ -1072,7 +1075,7 @@ fn repeated_identity(
 
 fn identities_are_sorted<'a>(
     identities: impl Iterator<Item = &'a LeftOrder>,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<bool> {
     let mut previous = None;
     for (position, identity) in identities.enumerate() {
@@ -2297,7 +2300,7 @@ mod identity_tests {
         assert_left_append_scan_bound(&context);
     }
 
-    fn assert_left_duplicate_semantics(context: &StreamOperatorContext<'_>) {
+    fn assert_left_duplicate_semantics(context: &dyn KernelContext) {
         let key = state::Encoding::from_slice(&[1]);
         let sequence = state::Encoding::from_slice(&[2]);
         let identity = |time| (time, key.clone(), sequence.clone());
@@ -2341,7 +2344,7 @@ mod identity_tests {
         }
     }
 
-    fn assert_left_append_scan_bound(context: &StreamOperatorContext<'_>) {
+    fn assert_left_append_scan_bound(context: &dyn KernelContext) {
         use std::{cell::Cell, rc::Rc};
 
         let key = state::Encoding::from_slice(&[1]);

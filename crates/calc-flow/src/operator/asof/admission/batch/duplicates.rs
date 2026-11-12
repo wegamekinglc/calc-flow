@@ -3,9 +3,9 @@
 #[cfg(test)]
 use super::WORK;
 use super::{
-    Columns, InputKeys, Ordering, Result, StreamAsofJoinOperator, StreamOperatorContext,
-    check_input_cancellation, state,
+    Columns, InputKeys, Ordering, Result, StreamAsofJoinOperator, check_input_cancellation, state,
 };
+use crate::operator::asof::kernel::KernelContext;
 use datafusion::execution::memory_pool::MemoryReservation;
 
 impl Columns {
@@ -15,7 +15,7 @@ impl Columns {
         side: usize,
         keys: &InputKeys,
         ranks: &[u32],
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<u64> {
         let mut sorted = self.order.clone();
         let compare = |a: &(usize, u32), b: &(usize, u32)| {
@@ -39,7 +39,7 @@ impl Columns {
         &self,
         operator: &StreamAsofJoinOperator,
         keys: &InputKeys,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<u64> {
         let skip_resident = self.order.first().is_none_or(|&first| {
             operator
@@ -59,7 +59,7 @@ impl Columns {
         operator: &StreamAsofJoinOperator,
         keys: &InputKeys,
         skip_resident: bool,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<u64> {
         let mut resident = (!skip_resident)
             .then(|| operator.state.left.iter())
@@ -119,7 +119,7 @@ impl Columns {
         operator: &StreamAsofJoinOperator,
         side: usize,
         keys: &InputKeys,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<u64> {
         let skip_resident = self.order.first().is_none_or(|&(batch, row)| {
             let record = &self.records[batch];
@@ -159,7 +159,7 @@ impl Columns {
         Ok(duplicates)
     }
 
-    fn group_keys(&mut self, keys: &InputKeys, context: &StreamOperatorContext<'_>) -> Result<()> {
+    fn group_keys(&mut self, keys: &InputKeys, context: &dyn KernelContext) -> Result<()> {
         self.key_rows = keys
             .values
             .iter()
@@ -176,7 +176,7 @@ impl Columns {
         &self,
         operator: &StreamAsofJoinOperator,
         keys: &InputKeys,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<u64> {
         self.key_rows
             .iter()
@@ -196,7 +196,7 @@ impl Columns {
         &self,
         key: usize,
         bucket: Option<&state::RightBucket>,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<u64> {
         context.check_cancelled()?;
         let mut resident = bucket
@@ -273,7 +273,7 @@ impl Columns {
         &self,
         operator: &StreamAsofJoinOperator,
         keys: &[(state::Encoding, usize)],
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<bool> {
         for (id, (key, _)) in keys.iter().enumerate() {
             check_input_cancellation(id, context)?;

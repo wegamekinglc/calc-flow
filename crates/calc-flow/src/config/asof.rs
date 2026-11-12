@@ -15,13 +15,8 @@ pub(super) fn build_node(
     inputs: &[Port],
     outputs: &[Port],
     spec: &StreamAsofJoinSpec,
-    mode: CompileMode,
+    _mode: CompileMode,
 ) -> Result<NodeOperator> {
-    if mode != CompileMode::Stream {
-        return Err(CalcFlowError::Compile {
-            message: "stream_asof_join is available only in stream mode".into(),
-        });
-    }
     let [left, right] = inputs else {
         return Err(invalid_ports());
     };
@@ -52,17 +47,10 @@ pub(super) fn validate_node(
     node: &NodeSpec,
     index: usize,
     spec: &StreamAsofJoinSpec,
-    mode: CompileMode,
+    _mode: CompileMode,
     base: &str,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    if mode != CompileMode::Stream {
-        issues.push(issue(
-            base,
-            "unsupported_mode",
-            "stream_asof_join is available only in stream mode",
-        ));
-    }
     if !stream_join_inputs_valid(node) {
         issues.push(issue(
             format!("graph.nodes[{index}].input_ports"),

@@ -646,6 +646,7 @@ class _Analyzer:
         self._union_plans: dict[str, object] = {}
         self._sql_window_nodes: dict[str, Node] = {}
         self._sql_join_nodes: dict[str, Node] = {}
+        self._sql_asof_nodes: dict[str, Node] = {}
         self._join_sql_paths: set[str] = set()
         self._issues: list[AnalysisIssue] = []
         self._table_cache: dict[str, TableFacts] = {}
@@ -973,18 +974,46 @@ class _Analyzer:
                     "event window outputs require deterministic row-local SQL",
                 )
         if node.op.name == "sql":
-            joined = self._sql_inner_join(node, path)
-            if joined is not None:
-                return joined
-            window = self._sql_window(node, path)
-            if window is not None:
-                return window
+            native = self._sql_native_relation(node, path)
+            if native is not None:
+                return native
         union = self._maybe_sql_union(node, inputs, path)
         if union is not None:
             return replace(empty, schema=union)
         if self._issues or self._sql_mode_rejected(node, path) or self._runtime is None:
             return empty
         return self._planned_sql_table(node, inputs, path, empty)
+
+    def _sql_native_relation(self, node, path):
+        for parse in (self._sql_asof_join, self._sql_inner_join, self._sql_window):
+            relation = parse(node, path)
+            if relation is not None:
+                return relation
+        return None
+
+    def _sql_asof_join(self, node, path):
+        from calc_flow.symbolic.asof import analyze_asof
+        from calc_flow.symbolic.asof_sql import join_node, native_plan
+
+        plan = native_plan(node)
+        if plan is None:
+            return None
+        if "error" in plan:
+            item = plan["error"]
+            self.issue(f"{path}.{item['path']}", item["code"], item["message"])
+            return TableFacts(
+                (),
+                _SQLRowOrigin(node.digest),
+                frozenset({"stream_asof_join"}),
+                None,
+                (),
+                (),
+            )
+        joined = join_node(node, plan)
+        self._sql_asof_nodes[node.digest] = joined
+        facts = analyze_asof(self, joined, f"{path}.sql.asof_join")
+        self._table_cache[joined.digest] = facts
+        return facts
 
     def _sql_inner_join(self, node, path):
         from calc_flow.symbolic.inner_join_sql import join_node, native_plan
@@ -1157,7 +1186,7 @@ class _Analyzer:
             else:
                 projected.append(field)
         retained = frozenset(columns)
-        return TableFacts(
+        result = TableFacts(
             tuple(projected),
             child.lineage,
             child.state,
@@ -1165,6 +1194,12 @@ class _Analyzer:
             child.entity_by if set(child.entity_by) <= retained else (),
             child.sequence_by if set(child.sequence_by) <= retained else (),
         )
+
+        if node.digest in self._join_sql_paths:
+            from calc_flow.symbolic.inner_join_sql import projected_facts
+
+            return projected_facts(node, child, result)
+        return result
 
     def _filter_table(self, node: Node, path: str, /) -> TableFacts:
         child = self.table(node.args[0], f"{path}.filter.value")

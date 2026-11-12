@@ -45,7 +45,7 @@ editors or validating stored declarations:
 | rolling `ts`              | yes               | yes                          | source/alias/row-local operands and earlier rolling results           |
 | cross-section `cs`        | yes               | yes                          | staged values; event time and partitions resolve to inputs or aliases |
 | relational stream joins   | yes               | stream only                  | independent/nested native joins with proved post-join ordering        |
-| backward ASOF joins       | yes               | stream only                  | strict final left preservation; typed identity and bounded state      |
+| backward ASOF joins       | yes               | batch and stream             | strict final left preservation; typed identity and bounded state      |
 | NumPy/JAX matrix          | yes               | exact supported shape        | one static `weights` parameter and one allowlisted matmul             |
 | event `window`            | yes               | batch/stream with aggregates | fixed UTC tumbling/hopping; stateless table work on either side       |
 | native table-array bridge | yes               | batch and stream             | row-preserving work; at most one static-RHS matmul per table stage    |

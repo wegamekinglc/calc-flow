@@ -1,10 +1,10 @@
 //! General batch admission. IDs identify keys; ranks order their canonical bytes.
+use crate::operator::asof::kernel::KernelContext;
 
 use super::{
     Admission, AdmissionRef, AdmissionWorkspace, Arc, Batch, InputKeys, LeftOrder, RecordBatch,
-    ReservedIdentities, Result, StreamAsofJoinOperator, StreamOperatorContext, UInt64Array,
-    ValidatedInput, can_share_batch, check_input_cancellation, encode_payload, state, take_column,
-    times,
+    ReservedIdentities, Result, StreamAsofJoinOperator, UInt64Array, ValidatedInput,
+    can_share_batch, check_input_cancellation, encode_payload, state, take_column, times,
 };
 use datafusion::arrow::{
     array::{Array, TimestampMicrosecondArray},
@@ -122,7 +122,7 @@ pub(super) fn plan(
     operator: &StreamAsofJoinOperator,
     batch: &Batch,
     input: ValidatedInput,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<Option<Plan>> {
     #[cfg(test)]
     if super::identity_tests::columnar::legacy_requested() {
@@ -150,7 +150,7 @@ fn prepare_records(
     batch: &Batch,
     input: ValidatedInput,
     keys: &mut InputKeys,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<Vec<Record>> {
     let mut records = Vec::new();
     for (source, record) in batch.table_payload()?.batches().iter().enumerate() {
@@ -180,7 +180,7 @@ impl Record {
         source: usize,
         input: ValidatedInput,
         keys: &mut InputKeys,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<Option<Self>> {
         let side = input.side(&operator.spec);
         let selection = input.watermark.map(|_| {
@@ -302,7 +302,7 @@ fn key_ids(
     encoded: &state::EncodedColumns,
     count: usize,
     keys: &mut InputKeys,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<Vec<u32>> {
     if let state::EncodedColumns::StringKeys { rows, ids } = encoded {
         let mapping = (0..rows.len())
@@ -481,7 +481,7 @@ impl Columns {
         operator: &StreamAsofJoinOperator,
         batch: &Batch,
         input: ValidatedInput,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<Vec<Arc<state::PayloadBatch>>> {
         let mut batches = Vec::with_capacity(self.records.len());
         let retained = operator
@@ -554,7 +554,7 @@ impl Columns {
             .collect()
     }
 
-    fn prove_order(&mut self, ranks: &[u32], context: &StreamOperatorContext<'_>) -> Result<()> {
+    fn prove_order(&mut self, ranks: &[u32], context: &dyn KernelContext) -> Result<()> {
         for (batch, record) in self.records.iter_mut().enumerate() {
             context.check_cancelled()?;
             let count = u32::try_from(record.keys.len()).expect("validated ASOF row range");
@@ -615,7 +615,7 @@ impl Plan {
         batch: &Batch,
         input: ValidatedInput,
         identity: ReservedIdentities,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<Admission> {
         operator.record_duplicates(input.index, self.duplicates)?;
         let accepted = operator.check_admission_rows(input.index, identity.rows as u64)?;
@@ -664,7 +664,7 @@ impl Plan {
         operator: &mut StreamAsofJoinOperator,
         batches: &[Arc<state::PayloadBatch>],
         workspace: AdmissionWorkspace,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<super::PreparedInput> {
         let kind = operator.state.sequence_kinds[0];
         if self.columns.can_prepare_inline(&self.keys) {

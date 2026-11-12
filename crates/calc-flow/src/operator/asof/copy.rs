@@ -1,11 +1,14 @@
 //! Copy shared right columns on blocking workers before the commit boundary.
 //! The reservation owns both immutable inputs and replacements until release.
+#[cfg(test)]
+use crate::StreamOperatorContext;
+use crate::operator::asof::kernel::KernelContext;
 
 use super::{
     StreamAsofJoinOperator, checked,
     state::{BatchKey, Encoding, PayloadRemoval, PreparedPayloadRemoval, RightBucket, RightState},
 };
-use crate::{CalcFlowError, Result, StreamOperatorContext};
+use crate::{CalcFlowError, Result};
 use datafusion::execution::memory_pool::MemoryReservation;
 use std::sync::Arc;
 
@@ -63,7 +66,7 @@ impl StreamAsofJoinOperator {
     pub(super) async fn prepare_pool_compaction(
         &self,
         removals: &std::collections::BTreeMap<BatchKey, usize>,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<PreparedPayloadRemoval> {
         let layout = self.state.batches.project_remove(removals, &self.name)?;
         if !layout.replace {
@@ -84,7 +87,7 @@ impl StreamAsofJoinOperator {
         removals: &std::collections::BTreeMap<BatchKey, usize>,
         layout: &PayloadRemoval,
         workspace: MemoryReservation,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<PreparedPayloadRemoval> {
         let mut prepared = PreparedPayloadRemoval::capture(
             &self.state.batches,
@@ -106,7 +109,7 @@ impl StreamAsofJoinOperator {
         removals: &std::collections::BTreeMap<BatchKey, usize>,
         replacement_bytes: u64,
         count: usize,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<u64> {
         let descriptors = pool_descriptor_bytes(count, &self.name)?;
         let mut bytes = checked(
@@ -129,7 +132,7 @@ impl StreamAsofJoinOperator {
     pub(super) async fn prepare_right_admission_copies(
         &self,
         additions: &[(Encoding, usize)],
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<PreparedRightCopies> {
         self.prepare_right_copies(
             self.state.right.shared_admission_buckets(additions),
@@ -141,7 +144,7 @@ impl StreamAsofJoinOperator {
     pub(super) async fn prepare_right_eviction_copies(
         &self,
         selected: &[u32],
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<PreparedRightCopies> {
         self.prepare_right_copies(self.state.right.shared_eviction_buckets(selected), context)
             .await
@@ -150,7 +153,7 @@ impl StreamAsofJoinOperator {
     async fn prepare_right_copies<'a>(
         &self,
         selected: impl Iterator<Item = (u32, &'a Arc<RightBucket>)> + Clone,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<PreparedRightCopies> {
         let (count, bytes) = copy_extent(selected.clone(), &self.name)?;
         if count == 0 {
@@ -205,7 +208,7 @@ impl StreamAsofJoinOperator {
     async fn right_copy_buffer_bytes<'a>(
         &self,
         selected: impl Iterator<Item = (u32, &'a Arc<RightBucket>)> + Clone,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<u64> {
         // The global owner count bounds address-set scratch, but unrelated
         // buffers are not retained by a right-column copy and need no lease.
@@ -254,7 +257,7 @@ fn retain_encoding_buffer(
 async fn populate_pool(
     mut prepared: PreparedPayloadRemoval,
     layout: PayloadRemoval,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<PreparedPayloadRemoval> {
     context.check_cancelled()?;
     let worker = tokio::task::spawn_blocking(move || {
@@ -263,7 +266,7 @@ async fn populate_pool(
     });
     let prepared = tokio::select! {
         result = worker => result.map_err(|error| CalcFlowError::Internal { message: format!("ASOF pool compaction task failed: {error}") })?,
-        () = context.job().cancellation().cancelled() => {
+        () = context.cancellation().cancelled() => {
         context.check_cancelled()?;
         unreachable!("cancelled ASOF pool compaction")
         }
@@ -275,7 +278,7 @@ async fn populate_pool(
 async fn capture_right_buckets<'a>(
     selected: impl Iterator<Item = (u32, &'a Arc<RightBucket>)>,
     count: usize,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<Buckets> {
     let mut originals = Vec::with_capacity(count);
     for (ordinal, (id, bucket)) in selected.enumerate() {
@@ -292,18 +295,18 @@ async fn capture_right_buckets<'a>(
 
 async fn copy_right_buckets(
     prepared: PreparedRightCopies,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<PreparedRightCopies> {
-    let cancellation = context.job().cancellation().clone();
-    let run_id = context.job().job_id();
-    let deadline = context.job().deadline().copied();
+    let cancellation = context.cancellation().clone();
+    let run_id = context.run_id();
+    let deadline = context.deadline().copied();
     context.check_cancelled()?;
     let worker = copy_worker(prepared, move || {
         if cancellation.is_cancelled()
             || deadline.is_some_and(|deadline| chrono::Utc::now() >= deadline)
         {
             Err(CalcFlowError::Cancelled {
-                run_id: run_id.to_string(),
+                run_id: run_id.clone(),
             })
         } else {
             Ok(())
@@ -311,7 +314,7 @@ async fn copy_right_buckets(
     });
     let prepared = tokio::select! {
         result = worker => result?,
-        () = context.job().cancellation().cancelled() => {
+        () = context.cancellation().cancelled() => {
         context.check_cancelled()?;
         unreachable!("cancelled ASOF right column copy")
         }
@@ -320,7 +323,7 @@ async fn copy_right_buckets(
     Ok(prepared)
 }
 
-async fn cooperate(ordinal: usize, context: &StreamOperatorContext<'_>) -> Result<()> {
+async fn cooperate(ordinal: usize, context: &dyn KernelContext) -> Result<()> {
     if ordinal.is_multiple_of(256) {
         context.check_cancelled()?;
     }

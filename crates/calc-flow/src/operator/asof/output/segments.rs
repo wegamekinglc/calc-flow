@@ -2,8 +2,11 @@ use super::{
     ColumnRequest, GatherPlan, OutputRuntime, column_requests, materialize_batch,
     materialize_column,
 };
+#[cfg(test)]
+use crate::StreamOperatorContext;
+use crate::operator::asof::kernel::KernelContext;
 use crate::{
-    Batch, Result, StreamOperatorContext,
+    Batch, Result,
     operator::asof::output_plan::{FragmentCredits, OutputPlan},
     runtime::streaming::gather_work::{
         AdmissionFailure, GatherPlan as OwnedGatherPlan, GatherStop, RowGather,
@@ -233,14 +236,11 @@ impl OutputRuntime {
         schema: &SchemaRef,
         mut workspace: MemoryReservation,
         name: &str,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
     ) -> Result<(Batch, MemoryReservation)> {
         let rows = plans.iter().map(|plan| plan.len).sum();
         #[cfg(feature = "benchmark-internals")]
-        let _phase = context
-            .job()
-            .join_cpu_trace()
-            .stage(name, "materialize", rows);
+        let _phase = context.trace().stage(name, "materialize", rows);
         self.prepare_output(schema, &mut workspace, name, context)
             .await?;
         let requests = column_requests(schema, self.output_columns.as_deref());
@@ -270,7 +270,7 @@ impl OutputRuntime {
         });
         let scope = context.gather_client(self.operator.clone()).scope()?;
         let ticket = scope
-            .submit(input, workspace, GatherStop::from_job(context.job()))
+            .submit(input, workspace, context.stop())
             .await
             .map_err(|failure| gather_error(name, failure))?;
         let output = ticket.finish().await?;

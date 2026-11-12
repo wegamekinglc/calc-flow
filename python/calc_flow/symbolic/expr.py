@@ -688,8 +688,8 @@ class TableExpr(Expr[object]):
         """Attach the latest historical right row after both inputs finalize.
 
         Accepts the same ``keys``, ``late_policy`` and ``prefixes`` options as
-        ``cf.table.stream_asof_join``. Use ``stream`` to execute this declaration;
-        finite ``collect`` and ``compute`` do not provide batch ASOF semantics.
+        ``cf.table.stream_asof_join``. ``collect`` consumes complete finite inputs;
+        ``stream`` retains candidates until both input frontiers close.
         """
         from calc_flow.symbolic.asof import _AsofOptions, declare_asof
 

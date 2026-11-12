@@ -1,9 +1,9 @@
 use super::StreamAsofJoinOperator;
+use crate::operator::asof::kernel::KernelContext;
 use crate::{
-    Result, StreamOperatorContext,
+    Result,
     runtime::streaming::gather_work::{
-        AdmissionFailure, GatherOperatorId, GatherScope, GatherStop, OwnedCpuWork, ParallelCpuWork,
-        WorkOutput,
+        AdmissionFailure, GatherOperatorId, GatherScope, OwnedCpuWork, ParallelCpuWork, WorkOutput,
     },
 };
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -13,14 +13,25 @@ impl StreamAsofJoinOperator {
     pub(super) async fn run_cpu_work<W: OwnedCpuWork>(
         &self,
         work: W,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn KernelContext,
+    ) -> Result<W::Output> {
+        if context.stream().is_none() {
+            return finite_work(self, work, context).await;
+        }
+        self.run_stream_work(work, context).await
+    }
+
+    async fn run_stream_work<W: OwnedCpuWork>(
+        &self,
+        work: W,
+        context: &dyn KernelContext,
     ) -> Result<W::Output> {
         context.check_cancelled()?;
         let credit = self.cpu_work_credit(size_of::<W>())?;
         let operator = GatherOperatorId::new(Arc::from(self.name.as_str()));
         let scope = context.gather_client(operator).scope()?;
         let ticket = scope
-            .submit_work(work, credit, GatherStop::from_job(context.job()))
+            .submit_work(work, credit, context.stop())
             .await
             .map_err(|failure| match failure {
                 AdmissionFailure::Budget { .. } => super::reason(
@@ -48,10 +59,10 @@ pub(super) async fn finish_parallel_work<W: ParallelCpuWork>(
     work: W,
     credit: MemoryReservation,
     scope: &GatherScope,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<Option<WorkOutput<Vec<W::Output>>>> {
     let ticket = match scope
-        .submit_parallel_work(Arc::new(work), credit, GatherStop::from_job(context.job()))
+        .submit_parallel_work(Arc::new(work), credit, context.stop())
         .await
     {
         Ok(ticket) => ticket,
@@ -61,4 +72,24 @@ pub(super) async fn finish_parallel_work<W: ParallelCpuWork>(
     let output = ticket.finish().await?;
     context.check_cancelled()?;
     Ok(Some(output))
+}
+
+async fn finite_work<W: OwnedCpuWork>(
+    operator: &StreamAsofJoinOperator,
+    work: W,
+    context: &dyn KernelContext,
+) -> Result<W::Output> {
+    context.check_cancelled()?;
+    let credit = operator.cpu_work_credit(size_of::<W>())?;
+    let stop = context.stop();
+    let output = tokio::task::spawn_blocking(move || {
+        let _credit = credit;
+        work.run(&stop)
+    })
+    .await
+    .map_err(|error| crate::CalcFlowError::Internal {
+        message: format!("ASOF finite worker: {error}"),
+    })??;
+    context.check_cancelled()?;
+    Ok(output)
 }

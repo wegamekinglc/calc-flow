@@ -73,6 +73,11 @@ pub(crate) struct Relation {
 }
 #[derive(Debug)]
 pub(crate) enum RelationKind {
+    AsofJoin {
+        inputs: [TableExpr; 2],
+        spec: crate::StreamAsofJoinSpec,
+        sql: bool,
+    },
     InnerJoin {
         inputs: [TableExpr; 2],
         spec: crate::StreamJoinSpec,
@@ -359,6 +364,7 @@ impl TableExpr {
                 input.lineage()
             }
             RelationKind::Input { .. }
+            | RelationKind::AsofJoin { .. }
             | RelationKind::InnerJoin { .. }
             | RelationKind::Window { .. }
             | RelationKind::Union { .. }
@@ -408,7 +414,9 @@ impl TableExpr {
                     .chain(spec.aggregates.iter().map(|a| a.output.clone()))
                     .collect(),
             ),
-            RelationKind::Sql { .. } | RelationKind::InnerJoin { .. } => None,
+            RelationKind::Sql { .. }
+            | RelationKind::AsofJoin { .. }
+            | RelationKind::InnerJoin { .. } => None,
         }
     }
     /// References a field from this row lineage.
@@ -966,5 +974,46 @@ impl TableExpr {
                 sql,
             },
         })))
+    }
+}
+
+impl TableExpr {
+    /// Declares a backward, bounded, left-preserving ASOF relation.
+    /// Finite execution admits both complete inputs before selecting one right row
+    /// per left identity. Streaming waits for both input frontiers or normal EOF.
+    ///
+    /// # Errors
+    /// Invalid schemas, temporal identity or unsupported ancestors fail at compilation.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use calc_flow::{TableExpr, StreamAsofJoinSpec, Result};
+    /// fn historical(left: &TableExpr, right: &TableExpr, spec: StreamAsofJoinSpec) -> Result<TableExpr> {
+    ///     left.asof_join(right, spec)
+    /// }
+    /// ```
+    pub fn asof_join(&self, right: &TableExpr, spec: crate::StreamAsofJoinSpec) -> Result<Self> {
+        Ok(self.asof_join_relation(right, spec, false))
+    }
+    pub(crate) fn asof_join_relation(
+        &self,
+        right: &TableExpr,
+        spec: crate::StreamAsofJoinSpec,
+        sql: bool,
+    ) -> Self {
+        let id = digest(&json!([
+            if sql { "sql.asof_join" } else { "asof_join" },
+            self.0.id,
+            right.0.id,
+            spec
+        ]));
+        Self(Arc::new(Relation {
+            id,
+            kind: RelationKind::AsofJoin {
+                inputs: [self.clone(), right.clone()],
+                spec,
+                sql,
+            },
+        }))
     }
 }

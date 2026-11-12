@@ -6,8 +6,10 @@ mod copy;
 mod cpu;
 mod duplicate_fallback;
 mod finalize;
+mod finite;
 mod identity;
 mod identity_compare;
+mod kernel;
 mod metadata;
 mod output;
 mod output_plan;
@@ -57,7 +59,7 @@ impl SweepStamp {
     }
 }
 
-/// Stream-only nearest historical match, finalized after both input frontiers.
+/// Nearest historical match over complete finite inputs or closed stream frontiers.
 pub struct StreamAsofJoinOperator {
     name: String,
     spec: StreamAsofJoinSpec,
@@ -95,14 +97,12 @@ impl StreamAsofJoinOperator {
         &mut self,
         ingress: &str,
         batch: &Batch,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn kernel::KernelContext,
     ) -> Result<()> {
         #[cfg(feature = "benchmark-internals")]
-        let _phase =
-            context
-                .job()
-                .join_cpu_trace()
-                .stage(&self.name, "admission", batch.num_rows());
+        let _phase = context
+            .trace()
+            .stage(&self.name, "admission", batch.num_rows());
         let prepared = match context.ingress_preparation() {
             Some(preparation) => {
                 let facts = preparation.asof().await;
@@ -128,14 +128,12 @@ impl StreamAsofJoinOperator {
         ingress: &str,
         mut admission: admission::Admission,
         validated: admission::ValidatedInput,
-        context: &StreamOperatorContext<'_>,
+        context: &dyn kernel::KernelContext,
     ) -> Result<()> {
         #[cfg(feature = "benchmark-internals")]
-        let _phase =
-            context
-                .job()
-                .join_cpu_trace()
-                .stage(&self.name, "state_install", admission.len());
+        let _phase = context
+            .trace()
+            .stage(&self.name, "state_install", admission.len());
         let staging_workspace = self.reserve_admission_staging(&admission)?;
         let (index_len, projected, owners) = self.checked_capacity_admission(&admission)?;
         let journal = self
@@ -145,7 +143,7 @@ impl StreamAsofJoinOperator {
             .prepare_log_retention(
                 &std::collections::BTreeMap::default(),
                 &std::collections::BTreeMap::default(),
-                context.job().checkpointing(),
+                context.checkpointing(),
             )
             .map_err(|error| self.attempt_error(error))?;
         let projected = self
@@ -155,7 +153,7 @@ impl StreamAsofJoinOperator {
             .admitted_status(validated.index, admission.len(), &projected)
             .map_err(|error| self.attempt_error(error))?;
         let index_workspace = self
-            .reserve_workspace(if context.job().checkpointing() {
+            .reserve_workspace(if context.checkpointing() {
                 index_len
             } else {
                 0

@@ -140,6 +140,10 @@ impl RunContext {
         Ok(())
     }
 
+    pub(crate) fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+
     pub fn run_id(&self) -> &str {
         &self.run_id
     }

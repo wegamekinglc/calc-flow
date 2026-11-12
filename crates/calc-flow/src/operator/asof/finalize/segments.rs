@@ -1,4 +1,7 @@
 //! Prepare contiguous columnar prefixes without rewriting fragment-local references.
+#[cfg(test)]
+use crate::StreamOperatorContext;
+use crate::operator::asof::kernel::KernelContext;
 
 use super::{StreamAsofJoinOperator, checked, retryable, state};
 use crate::operator::asof::{
@@ -6,7 +9,7 @@ use crate::operator::asof::{
     state::PayloadView,
 };
 use crate::{
-    Result, StreamOperatorContext,
+    Result,
     runtime::streaming::gather_work::{GatherOperatorId, GatherStop, ParallelCpuWork},
 };
 use ahash::RandomState;
@@ -289,13 +292,9 @@ pub(super) async fn prepare(
     operator: &StreamAsofJoinOperator,
     count: usize,
     prefix_credit: Arc<MemoryReservation>,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<Option<Prepared>> {
-    let workers = context
-        .job()
-        .gather_owner()
-        .parallelism()
-        .min(count / 16_384);
+    let workers = context.parallelism().min(count / 16_384);
     if workers < 2 {
         #[cfg(feature = "benchmark-internals")]
         note(
@@ -380,7 +379,7 @@ fn assemble(
     output: crate::runtime::streaming::gather_work::WorkOutput<Vec<Result<Fragment>>>,
     input_credit: Arc<MemoryReservation>,
     count: usize,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<Option<Prepared>> {
     #[cfg(not(feature = "benchmark-internals"))]
     let _ = (count, context);
@@ -408,10 +407,7 @@ fn assemble(
         return Ok(None);
     }
     #[cfg(feature = "benchmark-internals")]
-    let _phase = context
-        .job()
-        .join_cpu_trace()
-        .stage(&operator.name, "assembly", count);
+    let _phase = context.trace().stage(&operator.name, "assembly", count);
     let mut plans = Vec::with_capacity(fragments.len());
     let mut credits = Vec::with_capacity(fragments.len() + 1);
     credits.push(output.credit);
@@ -434,7 +430,7 @@ fn assemble(
 
 #[cfg(feature = "benchmark-internals")]
 fn note(
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
     name: &str,
     reason: &'static str,
     rows: usize,
@@ -442,8 +438,7 @@ fn note(
     bytes: usize,
 ) {
     context
-        .job()
-        .join_cpu_trace()
+        .trace()
         .note(name, "probe_selection", reason, rows, units, bytes);
 }
 
@@ -475,7 +470,7 @@ async fn capture(
     count: usize,
     workers: usize,
     prefix_credit: Arc<MemoryReservation>,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<Option<Work>> {
     if !operator.state.left.legacy.is_empty() {
         return Ok(None);
@@ -540,7 +535,7 @@ async fn capture_units(
     count: usize,
     workers: usize,
     credit: &mut MemoryReservation,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<Vec<Vec<state::OwnedOutputRun>>> {
     let mut units: Vec<Vec<state::OwnedOutputRun>> = (0..workers).map(|_| Vec::new()).collect();
     let width = count.div_ceil(workers);
@@ -570,7 +565,7 @@ async fn capture_units(
 async fn capture_payloads(
     operator: &StreamAsofJoinOperator,
     credit: &mut MemoryReservation,
-    context: &StreamOperatorContext<'_>,
+    context: &dyn KernelContext,
 ) -> Result<Payloads> {
     let mut payloads = Payloads::default();
     for (index, (handle, payload, _)) in operator

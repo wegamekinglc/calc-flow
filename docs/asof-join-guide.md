@@ -7,9 +7,9 @@ value to each left-side event with the same key. Each accepted left row
 produces one final result after both inputs establish event-time completeness.
 An unmatched left row is preserved with null right-side fields.
 
-ASOF is a stream-only operation with finite backward tolerance. It does not
-provide forward/nearest matching, unbounded history, dynamic database lookup,
-general outer joins, updates, retractions, or batch ASOF execution.
+ASOF supports finite batch and stateful stream execution with bounded backward
+tolerance. It does not provide forward/nearest matching, unbounded history, dynamic database lookup,
+general outer joins, updates, or retractions.
 
 ## Declare and run
 
@@ -77,10 +77,56 @@ example these are `trades` and `quotes`; each has a
 result is available. After they advance to 122, the two trades produce
 `quote__price = [10.2, None]`. The example requires no external service.
 
-`collect`, `compute`, and batch compilation reject ASOF. Explicit runner
+`collect`, `compute`, and batch compilation consume one complete history per
+input. The compiled plan owns no candidates between executions. Explicit runner
 bindings and exported projects use the plan's physical binding names; see
 [stream ownership](python-api.md#streaming-results) and
 [project export](projects-guide.md#export-expressions-and-retain-the-right-names).
+
+## Complete finite inputs and SQL
+
+Run [finite_asof_join.py](../examples/finite_asof_join.py) or the independent
+[Rust core example](../crates/calc-flow/examples/finite_asof_join.rs). Python
+keeps the existing `stream_asof_join` name for both lifecycles; Rust uses
+`left.asof_join(&right, spec)` with the existing `StreamAsofJoinSpec`.
+
+Both languages also accept the narrow SQL dialect:
+
+```sql
+SELECT * FROM CF_ASOF_JOIN('a', 'b', '<configuration JSON>')
+```
+
+Bind exactly the two distinct aliases. The strict configuration object contains
+only `spec`: `left` and `right` each require `keys`, `event_time`, `sequence_by`,
+and `prefix`; also require `tolerance_micros`, `limits.max_state_rows`,
+`limits.max_state_bytes`, and `late_policy`. Tolerance is a nonnegative exact
+JSON-safe integer; both limits are positive exact JSON-safe integers. All
+objects reject unknown fields. Clauses, projections, modifiers, CTEs and nested
+SQL text are outside this dialect. Compose separate row-local relations instead.
+Ordinary SQL retains its existing support domain.
+
+Finite execution validates both envelopes and admits the complete left then
+right history, across all RecordBatches, before finalization. Both sides share
+the existing total state budget. No early eviction or fabricated watermark can
+skip duplicates, identity checks, or budget charges. Empty right inputs produce
+one unmatched row per left identity; empty left inputs preserve the full typed
+output schema. Each execute owns fresh state, including after an error or
+cancellation, and requires no reset. Finite plans do not resume stream checkpoints.
+
+Shared declarations have one owner per job or finite execute. Nested ASOF and
+inner↔ASOF paths require unchanged or purely renamed temporal identity. ASOF
+uses the prefixed left keys, time and sequence; nullable right identity fields
+cannot establish the next join's identity. A nested inner join still needs its
+complete canonical pair ordering. Export uses the same project-v3 native ASOF
+node and physical bindings; logical Python input names are not serialized.
+
+Revision 7 analysis can prove `final_relation / accepted_history /
+all_sources_eof / unordered` conditionally: both runs must succeed over the same
+complete accepted history, within their own budgets, with no stream late discard.
+Compare all append outputs at EOF against the finite relation. Stream intermediate
+events and chunk boundaries need not match. Explicit latest semantics reject
+snapshot inputs at either stream ingress before opening sources; legacy append
+and existing checkpoint identities remain unchanged.
 
 ## Selection and exact input types
 
@@ -261,7 +307,7 @@ the compact indices checks cancellation in bounded blocks and uses the existing
 workspace reservation. The async owner uses the original tuple layout when its
 bounded source check cannot establish a single right source, so it does not
 convert a growing prefix on the executor. This is
-the stream-only ASOF operator's output assembly; DataFusion remains the SQL and
+the ASOF operator's output assembly; DataFusion remains the SQL and
 table-expression engine. Python only declares and lowers
 the graph. Admission retains each accepted payload batch and charges an upper
 bound for its canonical IPC size before encoding. Native checkpoint preparation

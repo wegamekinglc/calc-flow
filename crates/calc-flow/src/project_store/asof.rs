@@ -240,3 +240,15 @@ fn validate_side_pairs(spec: &Map<String, Value>, base: &str, issues: &mut Vec<V
         ));
     }
 }
+
+// SQL and project import share the same field-level wire validator.
+pub(crate) fn configuration_issues(config: &Value, base: &str) -> Vec<ValidationIssue> {
+    let mut issues = Vec::new();
+    check_object(Some(config), base, &["spec"], &mut issues);
+    let mut operator = config.clone();
+    if let Some(object) = operator.as_object_mut() {
+        object.insert("kind".into(), Value::String("stream_asof_join".into()));
+    }
+    validate_operator(&operator, base, &mut issues);
+    issues
+}

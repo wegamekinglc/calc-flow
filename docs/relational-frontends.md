@@ -384,10 +384,29 @@ Join paths do not yet include union/window/aggregate combinations; those may
 remain independent output branches. Outer, semi, anti, cross and replacement
 joins are outside this contract.
 
-Revision 6 analysis conditionally proves `final_relation / accepted_history /
+Revision 7 analysis conditionally proves `final_relation / accepted_history /
 all_sources_eof / unordered`: both executions must succeed within their budget,
 and stream candidates must coexist without late/progress discards. Compare the
 multiset of all append pair outputs, not only the last chunk. Global ordering and
 non-EOF cuts remain unproved. Explicit latest semantics reject snapshot inputs
 at either stream ingress before source/resource acquisition; legacy append
 semantics and old stream checkpoint identities remain unchanged.
+
+
+## Bounded backward ASOF
+
+Rust DataFrame `a.asof_join(&b, spec)`, Python
+`a.stream_asof_join(b, tolerance=..., limits=...)`, and both SQL frontends with
+`SELECT * FROM CF_ASOF_JOIN('a', 'b', '<JSON>')` lower to the native
+`stream_asof_join` node in batch and stream modes. SQL accepts exactly the two
+bound aliases and a strict object containing the full ASOF `spec`; filters,
+projections and nested joins compose as separate declarations.
+
+Each finite execute admits both complete inputs before choosing the greatest
+eligible `(right_time, typed_sequence_tuple)`. Unmatched left rows retain nullable
+right fields. State limits cover both sides together, across every RecordBatch;
+cached plans start fresh without reset. Stream still waits for both watermarks
+strictly beyond a left time, or normal EOF, and preserves cross-batch state and
+checkpoint identity. See [ASOF contracts and limits](asof-join-guide.md), the
+[Python example](../examples/finite_asof_join.py), and
+[Rust example](../crates/calc-flow/examples/finite_asof_join.rs).

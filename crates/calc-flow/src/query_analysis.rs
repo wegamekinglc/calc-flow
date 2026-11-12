@@ -483,7 +483,7 @@ pub(crate) fn analyze_graph(graph: DeclarationGraph) -> Result<QueryAnalysis> {
         .map(|_| conjunction(diagnostics.iter().map(|issue| issue.status)));
     Ok(QueryAnalysis {
         schema_version: 2,
-        analysis_revision: 6,
+        analysis_revision: 7,
         update_semantics,
         request: options.portability,
         portability,
@@ -732,7 +732,10 @@ fn analyze_edges(
             &stream,
             consumption,
             proofs[&edge.target_path].1
-                || matches!(target_kind.as_str(), "union" | "stream_join")
+                || matches!(
+                    target_kind.as_str(),
+                    "union" | "stream_join" | "stream_asof_join"
+                )
                 || window_kind(target_kind),
         ) {
             stream.support = SupportStatus::Unsupported;
@@ -912,12 +915,12 @@ fn batch_facts(
     } else {
         support
     });
-    if window_kind(&node.kind) || node.kind == "stream_join" {
+    if window_kind(&node.kind) || matches!(node.kind.as_str(), "stream_join" | "stream_asof_join") {
         batch.support = node.batch_support.unwrap_or(SupportStatus::Supported);
         batch.reason =
             "one finite execute finalizes every nonempty window of its complete input".into();
     }
-    if node.kind == "stream_join" {
+    if matches!(node.kind.as_str(), "stream_join" | "stream_asof_join") {
         batch.history = HistoryScope::CurrentBatch;
         batch.update = UpdateKind::Append;
         batch.finality = QueryFinality::PerBatch;
@@ -1073,7 +1076,7 @@ fn window_kind(kind: &str) -> bool {
 }
 
 fn stream_only_kind(kind: &str) -> bool {
-    matches!(kind, "snapshot_sql" | "stream_asof_join" | "stream_only")
+    matches!(kind, "snapshot_sql" | "stream_only")
 }
 
 fn stream_facts(node: &Declaration, class: Classification) -> QueryModeFacts {
@@ -1088,7 +1091,10 @@ fn stream_facts(node: &Declaration, class: Classification) -> QueryModeFacts {
     let stream_only = stream_only_kind(&node.kind);
     if stream_only
         || window_kind(&node.kind)
-        || matches!(node.kind.as_str(), "union" | "stream_join")
+        || matches!(
+            node.kind.as_str(),
+            "union" | "stream_join" | "stream_asof_join"
+        )
     {
         support = SupportStatus::Supported;
         (history, update, finality) = match node.kind.as_str() {
@@ -1115,7 +1121,7 @@ fn stream_facts(node: &Declaration, class: Classification) -> QueryModeFacts {
             "stream_asof_join" => (
                 HistoryScope::AcceptedHistory,
                 UpdateKind::Append,
-                QueryFinality::Unknown,
+                QueryFinality::GroupFinal,
             ),
             _ => (
                 HistoryScope::Unknown,
@@ -1130,8 +1136,15 @@ fn stream_facts(node: &Declaration, class: Classification) -> QueryModeFacts {
         update,
         finality,
         ordering,
-        reason: history_reason(history).into(),
+        reason: stream_reason(&node.kind, history),
     }
+}
+
+fn stream_reason(kind: &str, history: HistoryScope) -> String {
+    if kind == "stream_asof_join" {
+        return "one append-final result per accepted left identity after both frontiers or normal EOF".into();
+    }
+    history_reason(history).into()
 }
 
 fn ordinary_lifecycle(aggregate: bool, proof: sql::Proof) -> (UpdateKind, QueryFinality) {
@@ -1225,7 +1238,7 @@ fn obligations(
     diagnostics: &mut Vec<QueryDiagnostic>,
 ) {
     record_unknown_support(node, facts, diagnostics);
-    if node.kind == "stream_join" {
+    if matches!(node.kind.as_str(), "stream_join" | "stream_asof_join") {
         if request.comparison != Comparison::FinalRelation
             || request.cutoff != ComparisonCutoff::AllSourcesEof
             || request.history != HistoryScope::AcceptedHistory
@@ -1235,7 +1248,7 @@ fn obligations(
                 &format!("{}.stream.finality", node.path),
                 "finality_unproven",
                 SupportStatus::Unknown,
-                "inner join equivalence requires complete H, coexisting candidates, no late/progress discards, and all_sources_eof",
+                "bounded join equivalence requires complete H, coexisting candidates, no late/progress discards, and all_sources_eof",
             );
         }
         return;

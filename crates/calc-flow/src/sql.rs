@@ -1,5 +1,8 @@
 //! Read-only SQL relations composable with typed `DataFrame` declarations.
 
+mod asof_join;
+#[doc(hidden)]
+pub use asof_join::{AsofJoinQuery, asof_join_query};
 mod inner_join;
 pub use inner_join::JoinOutputOrdering;
 #[doc(hidden)]
@@ -20,6 +23,28 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
+
+fn joined_relation(query: &str, tables: &BTreeMap<String, TableExpr>) -> Result<Option<TableExpr>> {
+    let aliases = tables.keys().cloned().collect::<Vec<_>>();
+    if let Some(plan) = asof_join_query(query, &aliases)? {
+        return Ok(Some(tables[&plan.left_alias].asof_join_relation(
+            &tables[&plan.right_alias],
+            plan.spec,
+            true,
+        )));
+    }
+    if let Some(plan) = inner_join_query(query, &aliases)? {
+        return tables[&plan.left_alias]
+            .inner_join_relation(
+                &tables[&plan.right_alias],
+                plan.spec,
+                plan.output_ordering,
+                true,
+            )
+            .map(Some);
+    }
+    Ok(None)
+}
 
 /// Declares one read-only SELECT/CTE with explicit, uniquely normalized aliases.
 ///
@@ -45,13 +70,8 @@ pub fn sql(query: &str, tables: BTreeMap<String, TableExpr>) -> Result<TableExpr
             ));
         }
     }
-    if let Some(plan) = inner_join_query(query, &tables.keys().cloned().collect::<Vec<_>>())? {
-        return tables[&plan.left_alias].inner_join_relation(
-            &tables[&plan.right_alias],
-            plan.spec,
-            plan.output_ordering,
-            true,
-        );
+    if let Some(relation) = joined_relation(query, &tables)? {
+        return Ok(relation);
     }
     if let Some(plan) = event_window_query(query, &tables.keys().cloned().collect::<Vec<_>>())? {
         return tables[&plan.alias].window_relation(plan.spec, true);

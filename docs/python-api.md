@@ -512,7 +512,10 @@ and `AsofJoinSpec(left, right, tolerance, limits, late_policy="error")` support
 explicit graph declarations. The advanced method is
 `PipelineBuilder.stream_asof_join(name, *, left_schema, right_schema, spec)`;
 its schema arguments are `ArrowFieldSpec` sequences. Both declaration paths
-lower to the same native operator. Batch execution and collection reject ASOF.
+lower to the same native operator. Batch execution and collection admit both
+complete inputs before finalization and keep each execute independent. The same
+relation also supports stateful streaming and the narrow `CF_ASOF_JOIN` SQL
+dialect; see the [finite ASOF example](../examples/finite_asof_join.py).
 
 ## Choosing an integration API
 
