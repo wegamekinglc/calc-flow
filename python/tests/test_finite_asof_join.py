@@ -44,16 +44,18 @@ def values(times, sequences=None):
 
 
 def query():
-    side = dict(keys=["k"], event_time="ts", sequence_by=["seq"])
-    spec = dict(
-        left=dict(side, prefix="left"),
-        right=dict(side, prefix="right"),
-        tolerance_micros=2,
-        limits=dict(max_state_rows=100, max_state_bytes=1048576),
-        late_policy="error",
+    return (
+        "SELECT * FROM CF_ASOF_JOIN('a', 'b', '"
+        '{"spec": {'
+        '"left": {"keys": ["k"], "event_time": "ts", '
+        '"sequence_by": ["seq"], "prefix": "left"}, '
+        '"right": {"keys": ["k"], "event_time": "ts", '
+        '"sequence_by": ["seq"], "prefix": "right"}, '
+        '"tolerance_micros": 2, '
+        '"limits": {"max_state_rows": 100, "max_state_bytes": 1048576}, '
+        '"late_policy": "error"}}'
+        "')"
     )
-    literal = json.dumps(dict(spec=spec)).replace("'", "''")
-    return f"SELECT * FROM CF_ASOF_JOIN('a', 'b', '{literal}')"
 
 
 def joined(a, b, sql=False):

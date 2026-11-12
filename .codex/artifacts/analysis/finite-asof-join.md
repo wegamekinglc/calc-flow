@@ -620,3 +620,112 @@ the requested example guard correction; no fresh product review is requested.
 The single post-push CI snapshot for the delivery HEAD is supplied with the final
 comment as `codacy-ci-snapshot.json`; pending checks do not establish gate success.
 DAL-518 remains `in_progress`; no delegation or merge occurs.
+
+## Remaining Codacy SQL diagnostics — identify and remove the source
+
+Baseline `cc2a034d224ccf3c9fd1b182c2bb396dfb3044e5`; failed check-run
+`131208415113` reports three new findings at Python test lines 106/168/430.
+The other nine findings are gone. Product **Approve / F1 closed** remains valid.
+This increment changes only the test module's fixed `query()` fixture and this
+analysis. No product, Rust, example, binding, gate or ignore configuration changes.
+The reviewer report remains untracked and unchanged, SHA-256
+`3b092bd1381cacf0ed341e2ea654c68d876c9d51db4ffd4429156f89492838a4`.
+
+### Actual rule and trigger
+
+The public [Codacy issue API](https://app.codacy.com/api/v3/analysis/organizations/gh/wegamekinglc/repositories/calc-flow/pull-requests/602/issues)
+identifies all three as **`Semgrep_python_sql_rule-hardcoded-sql-expression`**, from
+**Opengrep**. Its [GitLab rule](https://gitlab.com/gitlab-org/security-products/sast-rules/-/blob/main/python/sql/rule-hardcoded-sql-expression.yml)
+tracks SQL string-building sources to an `execute` call. The published
+[Codacy wrapper command](https://github.com/codacy/codacy-opengrep/blob/main/internal/tool/command.go)
+enables **`--taint-intrafile`**; its
+[Dockerfile](https://github.com/codacy/codacy-opengrep/blob/main/Dockerfile)
+defaults to Opengrep **1.33.1**. The previous generic scan and API qualification
+did not address this cross-function source. The hosted binary/bundle revision
+is not exposed by the issue metadata; the local reproduction uses that published
+default and the unmodified upstream rule snapshot.
+
+Opengrep with that rule/flag reproduces all three hosted positions and an
+additional same-source valid retry at line 437. Every trace starts at the
+`query()` f-string on line 56, through `joined`, then `Program`/`p`, `plan`,
+and `execute`; the export path additionally crosses `first` and `doc`. The source
+is **not Arrow batch data**. The rule carries constructed SQL text through these
+objects and treats the batch API as an execution sink. The bad-Arrow test still
+fails at Batch conversion before executing a plan, as its original assertion
+requires.
+
+The rule snapshot SHA-256 is
+`0b3efb24d1e631ba2704bf2af3edef7a173990f12f46b107b9128b9ec0ce2323`;
+the local Opengrep binary SHA-256 is
+`46e8133cc490f9f50518061590ce2f6be5a08afaeda034471c0ceda4b3899808`.
+The wrapper command file's Git blob is
+`590db82e77a665276ce5ba08283ea535ab93d6dc`. Rule/source/trace evidence is retained
+in `target/finite-asof-join/codacy-specific-rule-evidence.json` and the three
+`codacy-opengrep-{red,green,control}.json` reports.
+
+### Minimal correction and preservation checks
+
+`query()` has no arguments and always emits the same complete configuration.
+It now returns that complete SQL fixture as one compile-time constant, expressed
+with adjacent string literals. Unnecessary interpolation is removed at the
+actual taint source. Execution methods, data binding, lifecycle and assertions
+are untouched; no call is hidden or replaced and no sanitizer/suppression is added.
+
+The original and new query outputs are **byte-identical**, SHA-256
+`38cfe1a993c7757953b1393936cbcefd802cd6533e1e87623125b8ef384b2423`.
+Native `_asof_join_query` descriptions are exactly equal. Replacing only the
+new `query()` AST with its original node makes the complete module AST identical
+to baseline. This preserves original JSON/SQL quoting, all dynamic invalid-config
+serialization/escaping, test parameters, independent expected values, same-plan
+reuse/duplicate failure/retry, project reload and all bad-Arrow checks. No case
+or assertion was removed, including the post-error valid execution.
+
+### Specific-rule RED/GREEN and affected execution
+
+The same unmodified rule is used for both runs; GREEN scans the actual repository
+test file, confirmed in the JSON `paths.scanned`. The baseline copy is byte-equal
+to `cc2a034d` source. The local command uses the wrapper's timeout/size/memory flags:
+
+```sh
+OPENGREP=target/finite-asof-join/tools/opengrep_manylinux_x86
+RULE=target/finite-asof-join/codacy-hardcoded-sql-expression.yml
+$OPENGREP scan --config "$RULE" --taint-intrafile --dataflow-traces \
+  --no-git-ignore --no-rewrite-rule-ids --timeout 10 --timeout-threshold 5 \
+  --max-target-bytes 150000 --max-memory 5000 -j 2 --json \
+  --output target/finite-asof-join/codacy-opengrep-green.json \
+  python/tests/test_finite_asof_join.py
+PYTHONPATH=target/finite-asof-join/site-f1-chain JAX_PLATFORMS=cpu \
+  $CF_PY -m pytest python/tests/test_finite_asof_join.py -q \
+  -k 'finite_asof_four_cells or same_finite_asof_plan_empty_inputs_and_failure_retry or asof_mixed_sharing_nested_export or sql_asof or asof_sql_missing_alias or null_identity_is_rejected_by_arrow_binding_before_execution'
+$CF_PY -m ruff check python/tests/test_finite_asof_join.py
+$CF_PY -m ruff format --check python/tests/test_finite_asof_join.py
+```
+
+Results: specific-rule **RED 4 → GREEN 0**, no analyzer errors, one actual test
+file scanned. A separate control with genuine SQL interpolation still reports
+**1 finding**, while its parameterized-query counterpart reports **0**, proving
+the rule remains active. Hosted RED is three; the local four includes the extra
+retry sink, so the counts are not presented as identical hosted runs. Functional
+checks pass **24 cases, 14 deselected**, covering execution and the raw numeric,
+shape and alias-path negatives; Ruff check/format pass. This is a focused module
+selection, not a full suite or performance run. Native/product/Rust results are
+reused without rebuilding or repeating unaffected checks.
+
+### Provenance and handoff
+
+`provenance-codacy-remaining.json` records that all **1643 Rust/Cargo** and **59
+Python/package/stub** sources match the preceding delivery; the imported private
+package's 59 files and native/wheel/core hashes also match. Only the Python test
+changes among the four verification files. The native build remains
+`45bf88ecc13e2f9cb191718438969bb285f7fc11`, with native SHA-256
+`386732408239bd09e27962299975ab2ee617919d2c4b38c739f993504db5cccd`.
+The product source-manifest SHA-256 remains
+`3ba5112cb816b0647aa87c046381d4e1b6a742679d6aa2d7d56a82821d91d48b`;
+the updated test receives its own verification hash. Final delivery sources are
+checked against Git HEAD and recorded after commit.
+
+The final comment supplies one post-push snapshot for the new HEAD, retained as
+`codacy-remaining-ci-snapshot.json`. Exact-rule local GREEN and controls are new
+evidence; the new hosted check's actual status is reported separately, and pending
+is not claimed as closure or all-green CI. Product approval continues unchanged.
+DAL-518 stays `in_progress`, with no delegation, merge, full tests or performance.
