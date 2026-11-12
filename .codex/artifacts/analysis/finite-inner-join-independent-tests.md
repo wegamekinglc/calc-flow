@@ -153,3 +153,112 @@ remain outstanding; a prior pending CI snapshot is not green evidence.
 
 No delegation or merge. DAL-517 remains `in_progress`; the coordinator arranges
 the focused reviewer handoff on the published head.
+
+## Windows CI test portability repair
+
+Repair base: `f5a513ae1ea39980ef9c5f912f0054faaa047767`.
+Last product change remains `4fb53afb5fd5800aedde79a8791d469c65f80af6`.
+This increment changes only the independent Python test file and this report.
+The untracked reviewer report is preserved, SHA-256
+`e8db9ce71a86b1fd57bb3629707a04c0d37fecf19e949e0978ebf0404b98b155`.
+The coordinator's existing product/F1 Approve remains applicable.
+
+The coordinator supplied completed Windows Python job
+[131072593429 / run 43185773099](https://github.com/wegamekinglc/calc-flow/actions/runs/43185773099/job/131072593429):
+2914 passed / 16 failed / 5 skipped. All 16 failures were in this file.
+A focused local RED reproduced the same first failure at the old line 186:
+the immutability snapshot's whole-table `to_pylist()` tries to convert
+`timestamp[us, UTC]` into Python datetimes and cannot resolve UTC without
+system zoneinfo or the optional tzdata package. This is a test portability
+defect; no product behavior or dependency needs changing.
+
+Five whole-table conversion sites were audited: both input snapshots,
+stream result accumulation, batch collection and cached-plan output.
+Input snapshots now serialize the complete Arrow table into detached IPC bytes,
+covering schema, metadata, values and NULLs without converting timestamps.
+Output extraction first asserts the complete independently declared schema
+including field order, type, nullability and metadata, then selects the UInt64
+ID columns needed by the literal pair/triple oracles before `to_pylist()`.
+There is now exactly one such call, after that integer-only projection.
+The real input timestamps retain `us` precision and `UTC` timezone.
+
+The six pairs, negative/zero boundaries, NULL keys, duplicates, complete match
+budget, empty-side and warm-cache retries, twelve literal nested triples,
+distinct-owner node count and source start/read counters remain unchanged.
+The existing nullable-time rejection cases are unchanged. No tests are added
+or skipped, and no assertion is weakened. Schema checks now also cover cached
+typed-empty outputs and every emitted nested/fan-out table.
+
+### Targeted RED and GREEN
+
+Commands use the previously recorded `CF_PY` interpreter and private candidate
+site. The environment has PyArrow 24.0.0 and neither tzdata nor pytz installed.
+
+```sh
+PYTHONTZPATH='' PYTHONPATH=target/finite-inner-join/site "$CF_PY" -m pytest \
+  python/tests/test_finite_inner_join_independent.py -q -W error \
+  -k 'six_pairs_null_keys and batch and dataframe'
+```
+
+Before repair: **1 failed / 23 deselected**, with
+`ModuleNotFoundError: tzdata` followed by `ZoneInfoNotFoundError: UTC`.
+After repair: **1 passed / 23 deselected**.
+
+The complete file was then run in a fresh process with system timezone
+search disabled. The executed `-c` body explicitly verifies that even a direct
+Arrow UTC scalar conversion still fails; no timezone API is patched or faked:
+
+```sh
+PYTHONTZPATH='' PYTHONPATH=target/finite-inner-join/site "$CF_PY" -c '
+import importlib.util
+import sys
+import zoneinfo
+import pyarrow as pa
+import pytest
+
+assert zoneinfo.TZPATH == ()
+assert importlib.util.find_spec("tzdata") is None
+assert importlib.util.find_spec("pytz") is None
+zoneinfo.ZoneInfo.clear_cache()
+for probe in (
+    lambda: zoneinfo.ZoneInfo("UTC"),
+    lambda: pa.array([10], type=pa.timestamp("us", tz="UTC")).to_pylist(),
+):
+    try:
+        probe()
+    except zoneinfo.ZoneInfoNotFoundError:
+        pass
+    else:
+        raise AssertionError("UTC unexpectedly resolves without timezone data")
+print("Isolation verified: TZPATH=(), no tzdata/pytz; UTC and timestamp scalar conversion fail")
+sys.exit(pytest.main(["python/tests/test_finite_inner_join_independent.py", "-q", "-W", "error"]))
+'
+PYTHONPATH=target/finite-inner-join/site "$CF_PY" -m pytest \
+  python/tests/test_finite_inner_join_independent.py -q -W error
+"$CF_PY" -m ruff check python/tests/test_finite_inner_join_independent.py
+"$CF_PY" -m ruff format --check python/tests/test_finite_inner_join_independent.py
+lizard -C 8 -w python/tests/test_finite_inner_join_independent.py
+uvx --offline --from lizard==1.26.0 lizard -C 8 -w python/tests/test_finite_inner_join_independent.py
+"$CF_PY" scripts/verify_complexity_gates.py
+git diff --check
+```
+
+Results: **24 passed** in the isolated process, **24 passed** normally.
+Changed-file Ruff/format, both Lizard versions and the complexity ratchet pass.
+No baseline, ignore, dependency, workflow or platform-specific skip was added.
+The existing tests are repaired; no new tests or product repairs are included.
+
+Before testing, rechecked `provenance-config-ci.json`: all 1202 recorded
+source hashes, 58 loaded Python/stub files, interpreter and imported paths
+match. The 1144 native source files and native SHA-256 remain unchanged:
+`2a6d537354830e3d1dc993ac16f73a7e5359cf10bd1352b4f82c9659b186e4a7`.
+No native rebuild or Rust, full-suite, coverage or performance rerun was needed.
+Earlier valid implementation, recovery, examples and independent Rust evidence
+are reused. Local captures are `windows-tz-red.log`,
+`windows-tz-isolated-green.log`, `windows-tz-normal-green.log` and
+`windows-tz-static.log` under `target/finite-inner-join/independent/`.
+
+This proves the failing timezone-data condition in a Linux process, not a
+completed Windows CI rerun. The pushed SHA and one nonblocking current-head CI
+snapshot are delivered in the issue handoff. No delegation or merge;
+DAL-517 remains `in_progress`.

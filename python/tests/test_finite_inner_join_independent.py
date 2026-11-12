@@ -71,14 +71,18 @@ def _source(name, *, nullable_key=False, nullable_time=False):
     )
 
 
-def _values(rows, *, nullable_key=False):
-    schema = pa.schema(
+def _schema(*, nullable_key=False):
+    return pa.schema(
         [
             pa.field("k", pa.int64(), nullable_key),
             pa.field("ts", pa.timestamp("us", tz="UTC"), False),
             pa.field("id", pa.uint64(), False),
         ]
     )
+
+
+def _values(rows, *, nullable_key=False):
+    schema = _schema(nullable_key=nullable_key)
     table = pa.Table.from_arrays(
         [
             pa.array([row[i] for row in rows], type=field.type)
@@ -87,6 +91,29 @@ def _values(rows, *, nullable_key=False):
         schema=schema,
     )
     return pa.Table.from_batches(table.to_batches(max_chunksize=2), schema=schema)
+
+
+def _join_schema(left, right):
+    return pa.schema(
+        [
+            pa.field(f"{prefix}__{field.name}", field.type, field.nullable)
+            for prefix, schema in (("left", left), ("right", right))
+            for field in schema
+        ]
+    )
+
+
+def _snapshot(table):
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    return sink.getvalue().to_pybytes()
+
+
+def _oracle_rows(table, expected_schema):
+    assert table.schema.equals(expected_schema, check_metadata=True)
+    columns = [field.name for field in expected_schema if field.type == pa.uint64()]
+    return table.select(columns).to_pylist()
 
 
 def _join(a, b, sql, kind="closed"):
@@ -119,7 +146,7 @@ def _join(a, b, sql, kind="closed"):
     )
 
 
-async def _stream_rows(program, tables):
+async def _stream_rows(program, tables, schemas):
     opened, read = Counter(), Counter()
     rows = {name: [] for name, _ in program.outputs}
 
@@ -134,16 +161,17 @@ async def _stream_rows(program, tables):
         watermarks={name: cf.DisabledWatermarks() for name in tables},
     ) as stream:
         async for event in stream:
-            rows[event.name].extend(event.table.to_pylist())
+            rows[event.name].extend(_oracle_rows(event.table, schemas[event.name]))
     return rows, opened, read
 
 
-def _run(program, tables, mode):
+def _run(program, tables, mode, schemas):
     if mode == "batch":
         return {
-            name: table.to_pylist() for name, table in program.collect(tables).items()
+            name: _oracle_rows(table, schemas[name])
+            for name, table in program.collect(tables).items()
         }
-    return asyncio.run(_stream_rows(program, tables))[0]
+    return asyncio.run(_stream_rows(program, tables, schemas))[0]
 
 
 @pytest.mark.parametrize("sql", [False, True], ids=["dataframe", "sql"])
@@ -183,10 +211,13 @@ def test_public_terminal_pairs_match_literal_oracle(sql, mode, case):
         "a": _values(left, nullable_key=True),
         "b": _values(right, nullable_key=True),
     }
-    before = {name: table.to_pylist() for name, table in tables.items()}
-    result = _run(program, tables, mode)["pairs"]
+    before = {name: _snapshot(table) for name, table in tables.items()}
+    schema = _schema(nullable_key=True)
+    result = _run(program, tables, mode, {"pairs": _join_schema(schema, schema)})[
+        "pairs"
+    ]
     assert sorted((row["left__id"], row["right__id"]) for row in result) == expected
-    assert {name: table.to_pylist() for name, table in tables.items()} == before
+    assert {name: _snapshot(table) for name, table in tables.items()} == before
 
 
 def _cached_pairs(plan, left, right):
@@ -198,7 +229,10 @@ def _cached_pairs(plan, left, right):
         }
     )
     assert len(result.outputs) == 1
-    rows = next(iter(result.outputs.values())).to_pyarrow().to_pylist()
+    schema = _schema()
+    rows = _oracle_rows(
+        next(iter(result.outputs.values())).to_pyarrow(), _join_schema(schema, schema)
+    )
     return sorted((row["left__id"], row["right__id"]) for row in rows)
 
 
@@ -269,6 +303,20 @@ def _assert_nested_rows(rows):
     assert sorted(row["source_id"] for row in rows["outside"]) == [1, 2]
 
 
+def _nested_schemas():
+    source = _schema()
+    first = _join_schema(source, source)
+    return {
+        "first": first,
+        "fan": pa.schema(
+            [pa.field("lid", pa.uint64(), False), pa.field("rid", pa.uint64(), False)]
+        ),
+        "nested": _join_schema(first, source),
+        "independent": first,
+        "outside": pa.schema([pa.field("source_id", pa.uint64(), False)]),
+    }
+
+
 @pytest.mark.parametrize("sql", [False, True], ids=["dataframe", "sql"])
 def test_three_source_nested_fanout_has_exact_triples_and_single_source_reads(sql):
     program = _nested_program(sql, "batch")
@@ -283,9 +331,10 @@ def test_three_source_nested_fanout_has_exact_triples_and_single_source_reads(sq
         if node["operator"]["kind"] == "stream_join"
     ]
     assert len(joins) == 3
-    _assert_nested_rows(_run(program, tables, "batch"))
+    schemas = _nested_schemas()
+    _assert_nested_rows(_run(program, tables, "batch", schemas))
     streamed = program.for_mode("stream")
-    rows, opened, read = asyncio.run(_stream_rows(streamed, tables))
+    rows, opened, read = asyncio.run(_stream_rows(streamed, tables, schemas))
     _assert_nested_rows(rows)
     assert opened == Counter(a=1, b=1, c=1)
     assert read == Counter(a=1, b=2, c=2)
