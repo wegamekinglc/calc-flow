@@ -691,3 +691,153 @@ compiled lib test and its explicit Python source-path assertion. Existing
 product/dependency Approve and effective product evidence remain applicable.
 The final reply records the sole post-push nonblocking snapshot. No renewed
 product review, merge, polling or delegation; DAL-521 stays in_progress.
+
+## Python coverage comparison follow-up
+
+This test-only correction starts at complete HEAD
+`8f04a59618dd782276567e25bc3f045898a8f0b1`, on the existing PR #607 branch
+`agent/dal-orchestrator/4d5e854a24b7`. Scope is
+`python/tests/test_bounded_analytic_over_contracts.py` and this evidence only.
+The repository's actual cf-tester, AGENTS.md and code-style contracts apply;
+the unrelated DAL/C++ reference files are absent here. Existing OVER/F1 and
+dependency approvals and effective product verification are retained.
+
+### Measured failure and comparison source
+
+The reported failing commit status is `58846037369`, Coveralls - python,
+"Coverage decreased (-0.1%) to 96.046%", linked to
+[Python job 191489860](https://coveralls.io/jobs/191489860).
+Read-only GitHub artifact downloads provide the actual line data:
+
+- [Linux CI run 43438875493](https://github.com/wegamekinglc/calc-flow/actions/runs/43438875493),
+  head 8f04a596, `python-coverage` artifact **14046426372** and
+  `coverage-baseline` artifact **14044326755**.
+- The latter records base `35ff239f7b054b640d120f02925c0113159a8cd3`,
+  origin `default_complete_flags`, empty `compare_sha` (no forced SHA override),
+  and the Python flag's exact **96.17048549911873%**, report **191474031**.
+  This is the complete main Python flag baseline, not combined Rust/Python
+  coverage or the repository's 90% absolute floor.
+- The baseline's [Linux run 43400009433](https://github.com/wegamekinglc/calc-flow/actions/runs/43400009433)
+  `python-coverage` artifact **14025284009** supplies its numerator/denominator.
+  Both Python jobs' public `.json` summaries confirm the percentages. The
+  human-readable job pages return HTTP 403 from this environment; the XML and
+  baseline provenance remain accessible.
+
+| Measurement                                     | Covered | Executable | Percent           |
+|-------------------------------------------------|---------|------------|-------------------|
+| Main Python baseline, 35ff239f                  | 12004   | 12482      | 96.17048549911873 |
+| Failing-head Python CI, 8f04a596                | 12266   | 12771      | 96.04572860386814 |
+| Failing-head CI, symbolic/over.py               | 208     | 235        | 88.51063829787235 |
+| Focused OVER modules, current source            | 234     | 235        | 99.57446808510639 |
+| CI union focused hits (conditional lower bound) | 12294   | 12771      | 96.26497533474277 |
+
+The final row is an additive line-set calculation, **not a fresh complete-suite
+measurement or a Coveralls success claim**. Normalize filenames to their
+`calc_flow/` suffix, intersect focused executed lines with each CI XML class's
+executable lines, and count only previously zero-hit entries. New tests add no
+package source or executable lines. There are 28 additional hits: 26 in
+over.py and two in the shared SQL DISTINCT-presence detector reached by query
+graph analysis. Even
+using only the 26 OVER hits gives 12292/12771 = 96.24931485396601%, above the
+recorded baseline, provided existing CI hits remain covered. A fresh CI run
+still decides the comparison gate. A local complete-suite recomputation is
+unnecessary, so the conditional one-run full-coverage authorization is unused.
+
+The exact formerly missed over.py lines now reached are
+17, 20, 24, 45, 47, 120, 141, 150, 152, 201, 228, 244, 263, 277, 280, 291,
+332, 347, 348, 353, 368, 441, 457, 458, 459 and 460. The remaining missed line
+377 is the defensive absent-capability-snapshot return. Tests remove the
+advertised operator or its policy layout through the public Runtime capability
+surface; they do not fabricate an impossible internal analyzer solely to hit it.
+
+### Behavior protected and commands
+
+33 new cases protect malformed/disjoint/duplicate column roles, mandatory
+history/frame/function factories, typed budget/window/expression declarations,
+uint32 ROWS boundaries, current-row-only SUM, descending NULL/tie ordering,
+LAG respecting NULLs, caller-list capture, frozen declarations and unchanged
+Arrow inputs/fanout. The four-row numeric expectation is independently written:
+sequence [40,10,20,30], LAG [NULL,NULL,2,2], current SUM [NULL,2,2,1].
+
+DataFrame and SQL tests distinguish a rejected computed sequence from an
+admitted pure rename, check both modes' diagnostic paths/codes/statuses,
+preserve declared total ordering through projection and strict portability,
+and execute a separate three-row expectation [20,10,30]/ROW_NUMBER [1,2,3].
+Native schema errors preserve the analytic operand path. Capability tests reject
+absent OVER or Drop layout2 while admitting Error with layout1. SQL explain,
+export, stable compile fingerprints and rejected global lateness overrides keep
+the local policy intact. All expectations are literals or independent tables;
+no product descriptors generate expected values.
+
+Execution reuses the managed interpreter recorded in
+`target/bounded-analytic-over-pyo3-test-binary.json` (CPython 3.13.9), with
+PyArrow 24.0.0, coverage 7.17.3 and pytest 9.2.0. In the commands below,
+`over_dev_python` is that JSON's `python` value. Exact executed arguments:
+
+```sh
+COVERAGE_FILE=target/bounded-analytic-over-coverage/existing.coverage \
+  COVERAGE_CORE=sysmon PYTHONPATH=target/quinn-installed \
+  "$over_dev_python" -m coverage run -m pytest -q -p no:benchmark \
+  python/tests/test_bounded_analytic_over.py
+
+COVERAGE_FILE=target/bounded-analytic-over-coverage/targeted.coverage \
+  COVERAGE_CORE=sysmon PYTHONPATH=target/quinn-installed \
+  "$over_dev_python" -m coverage run -m pytest -q -p no:benchmark \
+  python/tests/test_bounded_analytic_over.py \
+  python/tests/test_bounded_analytic_over_contracts.py
+
+"$over_dev_python" -m ruff check python/tests/test_bounded_analytic_over_contracts.py
+"$over_dev_python" -m ruff format --check python/tests/test_bounded_analytic_over_contracts.py
+"$over_dev_python" -m lizard -C 8 -w python/tests/test_bounded_analytic_over_contracts.py
+git diff --check
+```
+
+Existing tests: **19 passed**. Final focused run: **52 passed in 2.56s**, exit 0.
+Ruff, format and CCN<=8 checks pass. Coverage data are read through the coverage
+API for the line-set comparison; the full-suite coverage gate/config is not
+overridden. This change authors tests for existing behavior and makes no behavior
+repair, so no manufactured product RED/GREEN is claimed. Initial test iteration
+corrected Arrow `select`'s list argument and an unjustified stream-plan object
+identity assertion; the public fingerprint assertion is retained instead.
+
+### Separate SQL analysis diagnostic observation
+
+An initial sequence fixture using UInt64 `seq+1` encountered an additional
+diagnostic limitation. It also reproduces without OVER:
+
+```python
+import calc_flow as cf
+import pyarrow as pa
+
+source = cf.table_input("events", schema=pa.schema([
+    pa.field("seq", pa.uint64(), nullable=False),
+]))
+out = source.sql("SELECT seq+1 AS seq FROM input")
+cf.Program("unsigned", mode="batch", outputs={"out": out}).analyze()
+```
+
+Observed: ConfigError, `invalid port.schema.data_type: unsupported Arrow type
+"decimal128(21, 0)"`, from `_analyze_query_graph`. Unsigned arithmetic promotes
+to Decimal; no structured unsupported query report is returned. The OVER test
+uses `CAST(seq AS BIGINT)+1`, which remains in the admitted integer dtype domain
+and verifies the intended sequence-origin rejection. This observation is handed
+back for product triage; regression origin is not established here. No product
+fix, failing committed test or new issue/dispatch is added.
+
+### Provenance and delivery limits
+
+All 62 loaded Python/stub files under `target/quinn-installed` match current
+source byte-for-byte. Reused native SHA256:
+`3a6819c1a784d8c984c3942deb2d1e9fd9f78dc82b46e2331c1caca73f2e62c1`.
+1508/1509 entries in the accepted Quinn build-input manifest still match;
+the sole difference is the already accepted cfg(test) expectation in error.rs.
+Its entire production prefix is unchanged from c9332d27. This is reuse of that
+accepted artifact, not a claim to have rebuilt a wheel at the new HEAD.
+
+Product/schema/API/dependency/gate/baseline/exclusion bytes remain unchanged.
+The original untracked reviewer report is untouched, SHA256
+`0c571184b9d65b278f731705b31e06e6b038873b313839409ab35103efb5fc48`.
+No native rebuild, Rust/full Python/cross-platform/performance matrix, merge or
+delegation occurs. The final reply binds the pushed complete HEAD and sole
+post-push nonblocking snapshot. Existing checks wakeup remains coordinator-owned;
+DAL-521 stays in_progress pending focused test/evidence review and CI.
