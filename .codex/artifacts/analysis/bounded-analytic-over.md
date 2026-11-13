@@ -630,3 +630,64 @@ regression/coverage/performance or dependency cleanup is performed. The new
 dependency increment still awaits the coordinator's focused review and required
 CI; the final issue comment records the sole post-push snapshot. No polling,
 merge or delegation; DAL-521 stays in_progress.
+
+## PyO3 immutable-report expectation follow-up
+
+Base `c9332d27dd501e056afd59740b1bc1c05a2e8cae` has independent product and
+dependency Approve. The coordinator supplied the actual Windows Rust tests
+failure from job `131909302860`, run `43432442171`: the PyO3 test program had
+147 passed / 1 failed because query_portability_errors_keep_the_immutable_report
+still expected analysis revision 10 rather than the frozen 11. Those Windows
+counts are CI evidence, not a local full-suite rerun.
+
+The local reproduction uses the same configured dev interpreter as previous
+builds: CPython 3.13.9, NumPy 2.5.4, PyArrow 24.0.0, with PYO3_PYTHON pointing
+to that interpreter. It compiles only the default-feature calc_flow_python lib
+test program, then runs exactly the named test serially. The repository harness
+helpers provide the interpreter's loader path and runtime-only 300s timeout;
+the harness's full-matrix entry point is not invoked.
+
+```sh
+cargo test --locked -p calc-flow-python --lib --no-run --message-format=json
+<discovered-lib-test> error::tests::query_portability_errors_keep_the_immutable_report \
+  --exact --test-threads=1
+```
+
+RED: exit 101, 1 failed / 136 filtered, at error.rs:393 with left 11 / right 10.
+The only test edit replaces the literal expected revision 10 with literal 11.
+No implementation value is used to derive the expectation. GREEN: the same
+commands compile successfully and exit 0, 1 passed / 136 filtered. The
+schema_version=2, exception type, portability, node path, immutable mutation
+rejection and all other original assertions remain unchanged.
+
+The existing test inserts the current checkout's python directory, registers
+the current test program's crate::calc_flow_python native module in memory and
+asserts the imported query_analysis.py canonical path equals that source.
+That unchanged assertion passes; the check does not depend on an older wheel
+or another checkout's Python package. Only the shared dev environment and
+compatible Cargo cache are reused.
+
+```sh
+rustfmt --edition 2024 --check crates/calc-flow-python/src/error.rs
+cargo clippy --locked -p calc-flow-python --lib --tests -- -D warnings
+```
+
+Both pass, with the same PYO3_PYTHON. Whitespace checks pass. No full Rust/Python
+matrix, coverage, native-wheel rebuild or policy rerun is performed.
+
+The error.rs diff is exactly one literal replacement inside its cfg(test)
+module. The complete prefix before that module is byte-identical to c9332d27,
+SHA256 `f836b5f77ab7710597f2aa93e90e377093d722b7ea70ec1a6f9a03a04e455a9c`.
+All other product/schema/API/gate/dependency bytes are unchanged; the original
+reviewer report remains untracked and untouched, SHA256
+`0c571184b9d65b278f731705b31e06e6b038873b313839409ab35103efb5fc48`.
+
+Only this test expectation and this direct evidence change. Prior exact-file
+build manifests remain bound to their original revisions; the whole error.rs
+file hash changes because of the test literal, while shipped non-test code is
+unchanged. The previous wheel is left as its c9332d27 build artifact, not
+relabeled as a new-head build. Current-source verification here is the freshly
+compiled lib test and its explicit Python source-path assertion. Existing
+product/dependency Approve and effective product evidence remain applicable.
+The final reply records the sole post-push nonblocking snapshot. No renewed
+product review, merge, polling or delegation; DAL-521 stays in_progress.
