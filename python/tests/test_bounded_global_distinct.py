@@ -492,8 +492,12 @@ def test_supported_scalar_keys_copy_slices_and_preserve_null_tuple_and_schema():
         {"events": raw}
     )["out"]
     assert result.schema == schema
-    rows = {tuple(row[name] for name in names) for row in result.to_pylist()}
-    assert rows == {tuple(values), (None,) * 15}
+    # UTC epoch microseconds do not require a host timezone database.
+    comparable = result.set_column(
+        len(names) - 1, names[-1], result[names[-1]].cast(pa.int64())
+    )
+    rows = {tuple(row[name] for name in names) for row in comparable.to_pylist()}
+    assert rows == {(*values[:-1], 0), (None,) * 15}
 
 
 @_sync
