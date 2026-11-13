@@ -544,3 +544,8 @@ dev Linux, not a release/manylinux artifact.
 
 Commit mapping for this follow-up is appended after the fix commit. Only this
 analysis record changes in that mapping commit; review report remains unstaged.
+
+Follow-up fix commit: `31dbcb9118951bea35c9a915d2622cd52f057ec2`. All final follow-up results and the
+source/native/wheel fingerprints above apply to this product tree. The next
+commit only adds this mapping. The fixed reviewer report remains unchanged
+and unstaged; coordinator/reviewer incremental acceptance is still pending.
