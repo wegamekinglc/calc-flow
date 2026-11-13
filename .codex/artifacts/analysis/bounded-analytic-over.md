@@ -502,3 +502,131 @@ No full suite, coverage, performance, Rust/native rebuild or renewed product
 review is performed. The final comment records the single nonblocking new-head
 snapshot; required checks are not assumed green. No polling, merge or
 delegation; DAL-521 stays in_progress.
+
+## Quinn UDP audit follow-up
+
+This increment starts from `f40ce732a4e6729d5bbbd28ecb37355d3c92edbe` and
+addresses Rust dependency policy job `131897529863`, run `43428911384`.
+Cargo-audit 0.22.2 reproduces RUSTSEC-2026-0538 on locked quinn-udp 0.5.15:
+the receive fallback may spin after a truncated datagram. The original command
+exits 1 with one vulnerability and the two existing allowed warnings.
+
+```sh
+cargo audit --ignore RUSTSEC-2026-0176 --ignore RUSTSEC-2026-0177 \
+  --ignore RUSTSEC-2026-0235
+```
+
+The [maintainer advisory](https://github.com/quinn-rs/quinn/security/advisories/GHSA-6pp4-4cxf-xf88)
+and [0.5.16 release](https://github.com/quinn-rs/quinn/releases/tag/quinn-udp-0.5.16)
+confirm the compatible patched branch. The locked path is
+calc-flow-connectors (HTTP/ClickHouse) → reqwest 0.13.4 → optional
+quinn 0.11.11 → quinn-udp 0.5.x. Quinn's udp requirement is `0.5`, so 0.5.16
+requires no manifest/API change. The published patch requires Rust 1.85, within
+the repository's Rust 1.94.0 toolchain.
+
+### Minimal lock correction
+
+```sh
+cargo update -p quinn-udp@0.5.15 --precise 0.5.16
+```
+
+Only quinn-udp's version and registry checksum change in the delivered lock:
+0.5.15 → 0.5.16, checksum
+`af66907df18639dcf4db56ca65490cabc4b27a97dbadd96f2926cca73298f016`.
+The checksum matches the downloaded registry .crate archive. All 490 package
+records remain, and all dependency edges and every other package are identical
+to the base. No constraints, advisory ignores, policies or product source change.
+
+Cargo's initial update also selected an older already-locked windows-sys for
+five unrelated package edges and the UDP edge. Those incidental choices were
+removed. The patch's `>=0.52, <=0.61` constraint permits keeping the original
+windows-sys 0.61.2; locked resolution, both policy commands and builds below
+accept the minimized result. The delivered diff is exactly two replaced lines.
+
+### Final policy and compatibility verification
+
+- The original audit command above exits 0. RUSTSEC-2026-0538 is absent;
+  unchanged rustix 1.1.4 (unsound) and chacha20 0.10.1 (yanked) remain the two
+  allowed warnings. No new ignore was introduced. Advisory DB HEAD recorded
+  at validation: `4ef2df8e806a65e2f1ecc14f56f51249062b23d6`.
+- `cargo deny --locked check` (0.20.2): exit 0, advisories/bans/licenses/sources
+  all ok; existing policy warnings remain warnings.
+- `cargo metadata --locked --all-features --filter-platform x86_64-unknown-linux-gnu --format-version 1`:
+  exit 0 with the minimized lock.
+- `cargo check --locked -p calc-flow-connectors --no-default-features --features http,clickhouse`:
+  exit 0. It checks reqwest 0.13.4 and the actual parent connector path. This
+  feature subset reports two dead_code warnings in unchanged options.rs
+  (required_str/bool_option); they are not suppressed or changed.
+- The isolated exact-version compatibility check below exits 0 and actually
+  compiles quinn-udp 0.5.16 with quinn 0.11.11 / quinn-proto 0.11.19. All 74
+  dependency versions selected by this check occur in the final project lock.
+
+The rooted `cargo tree --locked --workspace --all-features --target all` has
+no active Quinn chain: current workspace features do not enable reqwest HTTP/3.
+Cargo metadata's resolver inventory nevertheless contains optional Quinn nodes;
+inventory membership alone is not evidence of an active compilation path. No
+new product feature is enabled for verification.
+
+For the isolated check, a temporary package under ignored target/quinn-compat
+uses an empty `[workspace]` and these two dependencies:
+
+```toml
+quinn = { version = "=0.11.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
+quinn-udp = { version = "=0.5.16", default-features = false, features = ["tracing"] }
+```
+
+Its main function type-checks the reexport identity:
+
+```rust
+let same_type: fn(quinn_udp::RecvMeta) -> quinn::udp::RecvMeta = |meta| meta;
+let _ = same_type;
+```
+
+The final project lock is copied into the temporary package, metadata resolves
+its private root offline, and its selected versions are compared with the
+project lock before running:
+
+```sh
+cargo check --locked --offline --manifest-path target/quinn-compat/Cargo.toml
+```
+
+This is a compatibility compile, not a UDP truncation/runtime test or a new
+product/example target. No macOS/Windows runtime scenario is run locally.
+
+### New-lock native evidence
+
+Previous exact-source/lock manifest hashes do not describe this new lock.
+The old native and unchanged OVER checks remain historical behavior evidence;
+they are not presented as builds or execution of the patched UDP dependency.
+
+A fresh locked dev build is completed using the new Cargo.lock:
+`maturin build --locked --profile dev --interpreter <dev-python> --out target/quinn-wheels`.
+Unchanged active-crate build cache is reused. The wheel is extracted into the
+separate target/quinn-installed directory before execution, leaving previous
+native artifacts untouched. All 62 packaged Python/stub files match source.
+
+- Current 1509-input path/hash map SHA256:
+  `37ead21c72216a03de3a8c1ebafe229569e5199a45286d9a9dff0aae744d3f56`.
+- New Cargo.lock SHA256:
+  `39d9db9ca21a5d8c9031e62c9f2c9c075224a7495de4eeb756e79b46dbf05044`.
+- New wheel SHA256:
+  `9fefc5faccfd168e0d50954aa87d74ab79b449f21982c5887b201a279560008f`.
+- Native SHA256 is still
+  `3a6819c1a784d8c984c3942deb2d1e9fd9f78dc82b46e2331c1caca73f2e62c1`:
+  Quinn is not active in this default wheel. The equal binary hash is not a
+  claim that the wheel compiled/exercised the patched UDP path; the separate
+  compatibility compile above does compile that new dependency.
+
+With PYTHONPATH=target/quinn-installed, the focused native-backed tests
+test_over_appends_columns_and_collects_checked_rows and
+test_over_nine_public_frontends_and_real_native_watermarks pass: 3 tests,
+covering DataFrame/SQL and real stream watermarks on the newly packaged build.
+This Linux CPython 3.13.9/PyArrow 24.0.0 wheel is local validation only; its
+linux_x86_64 platform-tag warning is unchanged and it is not a release artifact.
+
+Only Cargo.lock and this evidence report change. The approved OVER/F1 product
+source and original untracked reviewer report are preserved. No unrelated full
+regression/coverage/performance or dependency cleanup is performed. The new
+dependency increment still awaits the coordinator's focused review and required
+CI; the final issue comment records the sole post-push snapshot. No polling,
+merge or delegation; DAL-521 stays in_progress.
