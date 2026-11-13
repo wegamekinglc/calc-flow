@@ -313,6 +313,8 @@ mod tests {
             output_name: format!("mean{rows}"),
             rows,
             is_count: false,
+            is_sum: false,
+            duration_micros: None,
         });
         let kernel =
             DataFusionRollingKernel::compile(input.schema().as_ref(), &[2], &[0, 1], &windows)
@@ -335,6 +337,8 @@ mod tests {
             output_name: format!("mean{rows}"),
             rows,
             is_count: false,
+            is_sum: false,
+            duration_micros: None,
         });
         DataFusionRollingKernel::compile(input.schema().as_ref(), &[2], &[0, 1], &windows).unwrap()
     }
@@ -521,6 +525,8 @@ mod tests {
                 output_name: "mean".to_owned(),
                 rows: 2,
                 is_count: false,
+                is_sum: false,
+                duration_micros: None,
             }],
         )
         .unwrap();

@@ -47,6 +47,7 @@ pub(in super::super) fn clone_state(
         operator_id: state.operator_id.clone(),
         last_checkpoint_epoch: state.last_checkpoint_epoch,
         typed_kernel_state: None,
+        deferred_history: false,
         charge: state.charge,
     })
 }

@@ -23,6 +23,7 @@ pub(super) fn candidate(
         operator_id: metadata.operator_id,
         last_checkpoint_epoch: Some(metadata.epoch),
         typed_kernel_state: None,
+        deferred_history: false,
         charge: crate::operator::rolling::budget::StateCharge::default(),
     }
 }
