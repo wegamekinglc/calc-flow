@@ -80,7 +80,7 @@ pub(super) fn invalid_times(
         .collect()
 }
 
-fn time_is_input<'a>(
+pub(super) fn time_is_input<'a>(
     mut path: &'a str,
     time: &str,
     nodes: &BTreeMap<&str, &super::Declaration>,
@@ -116,7 +116,7 @@ fn time_is_input<'a>(
     false
 }
 
-fn walk<'a>(
+pub(super) fn walk<'a>(
     path: &'a str,
     upstream: bool,
     facts: &BTreeMap<String, QueryNodeFacts>,

@@ -118,6 +118,16 @@ complete replacements with an explicit state budget, as described below. General
 joins, wider portable Arrow types, and comprehensive Polars compatibility remain
 outside this scope.
 
+## Explicit complete-history ordering
+
+Rust/Python DataFrame `sort` and `top_k` take `SortKey` comparators and an
+explicit `SortSpec` with a mandatory `StateBudget`. Rust/Python SQL use
+`CF_ORDER_BOUNDED` or `CF_ORDER_WINDOW` with ORDER BY and optional LIMIT/OFFSET.
+Both lower to one native finalizer; ordinary SQL keeps its per-batch behavior.
+Stable ties and top-k membership require explicit reproducible sequence fields
+validated unique over the whole H. See [ordering, closure, budgets and
+examples](bounded-global-ordering.md).
+
 ## Explicit final DISTINCT
 
 | Frontend | Declaration | Batch | Stream |

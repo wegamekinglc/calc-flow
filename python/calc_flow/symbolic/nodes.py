@@ -344,6 +344,7 @@ _PRIMITIVES: dict[str, PrimitiveSpec] = {
     "aggregate": PrimitiveSpec(
         frozenset({"query", "aliases", "group_by", "reducers"}), CMap(())
     ),
+    "bounded_order": PrimitiveSpec(frozenset({"by", "fetch", "spec"}), CMap(())),
     "distinct": PrimitiveSpec(frozenset({"columns", "spec"}), CMap(())),
     "union_all": PrimitiveSpec(frozenset(), CMap(())),
     "sql": PrimitiveSpec(frozenset({"query", "aliases"}), CMap(())),

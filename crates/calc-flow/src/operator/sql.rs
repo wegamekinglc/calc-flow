@@ -66,6 +66,7 @@ pub struct SqlOperator {
     udfs: Vec<UdfReference>,
     input_ports: Vec<Port>,
     output_ports: [Port; 1],
+    ordered_input: bool,
     stream_state: StreamRuntimeState,
     stream_aggregate: bool,
     retained: Option<RetainedSqlInput>,
@@ -354,6 +355,7 @@ impl Clone for SqlOperator {
             udfs: self.udfs.clone(),
             input_ports: self.input_ports.clone(),
             output_ports: self.output_ports.clone(),
+            ordered_input: self.ordered_input,
             stream_state: self.stream_state.clone(),
             stream_aggregate: self.stream_aggregate,
             retained: None,
@@ -388,6 +390,10 @@ impl fmt::Debug for SqlOperator {
 }
 
 impl SqlOperator {
+    pub(crate) fn preserve_input_order(&mut self) {
+        self.ordered_input = true;
+    }
+
     pub(crate) fn enable_replacement(&mut self) -> Result<()> {
         self.replacement = Some(Box::new(super::SnapshotSqlOperator::for_single_alias(
             self.clone(),
@@ -446,6 +452,7 @@ impl SqlOperator {
             udfs,
             input_ports,
             output_ports: [table_port("output")?],
+            ordered_input: false,
             stream_state: StreamRuntimeState::new(),
             stream_aggregate,
             retained: None,
@@ -543,6 +550,11 @@ impl SqlOperator {
         udfs: UdfRegistrySnapshot,
         selected_udfs: Vec<UdfReference>,
     ) {
+        let config = if self.ordered_input {
+            crate::pipeline::order::serial_config(config)
+        } else {
+            config
+        };
         if let Some(operator) = &mut self.replacement {
             operator.set_stream_resources(config, udfs.clone(), selected_udfs.clone());
         }
@@ -1315,9 +1327,15 @@ impl SqlOperator {
     ) -> Result<BTreeMap<String, Batch>> {
         run.check_cancelled()?;
         let tables = self.collect_tables(inputs, run.node_id())?;
-        let output = datafusion
-            .sql_validated(&self.validated, &tables, run.node_id())
-            .await?;
+        let output = if self.ordered_input {
+            datafusion
+                .sql_ordered(&self.validated, &tables, run.node_id())
+                .await?
+        } else {
+            datafusion
+                .sql_validated(&self.validated, &tables, run.node_id())
+                .await?
+        };
         run.check_cancelled()?;
         Ok(BTreeMap::from([("output".into(), output)]))
     }

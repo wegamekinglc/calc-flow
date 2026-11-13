@@ -40,6 +40,7 @@ pub struct ExpressionOperator {
     udfs: Vec<UdfReference>,
     input_ports: [Port; 1],
     output_ports: [Port; 1],
+    ordered_input: bool,
     stream_state: StreamRuntimeState,
 }
 
@@ -57,6 +58,7 @@ impl Clone for ExpressionOperator {
             udfs: self.udfs.clone(),
             input_ports: self.input_ports.clone(),
             output_ports: self.output_ports.clone(),
+            ordered_input: self.ordered_input,
             stream_state: self.stream_state.clone(),
         }
     }
@@ -79,6 +81,10 @@ impl fmt::Debug for ExpressionOperator {
 }
 
 impl ExpressionOperator {
+    pub(crate) fn preserve_input_order(&mut self) {
+        self.ordered_input = true;
+    }
+
     /// Creates a `DataFusion` expression or projection operator.
     ///
     /// A non-empty `expression` and a non-empty `select` list are the two
@@ -126,6 +132,7 @@ impl ExpressionOperator {
             udfs,
             input_ports: [table_port("input")?],
             output_ports: [table_port("output")?],
+            ordered_input: false,
             stream_state: StreamRuntimeState::new(),
         })
     }
@@ -261,6 +268,11 @@ impl ExpressionOperator {
         udfs: UdfRegistrySnapshot,
         selected_udfs: Vec<UdfReference>,
     ) {
+        let config = if self.ordered_input {
+            crate::pipeline::order::serial_config(config)
+        } else {
+            config
+        };
         self.stream_state.set_resources(config, udfs, selected_udfs);
     }
 
@@ -278,9 +290,15 @@ impl ExpressionOperator {
         run.check_cancelled()?;
         let input = required_input(inputs, "input", self.name(), run.node_id())?;
         let tables = BTreeMap::from([("input".into(), input.clone())]);
-        let output = datafusion
-            .sql_validated(&self.query, &tables, run.node_id())
-            .await?;
+        let output = if self.ordered_input {
+            datafusion
+                .sql_ordered(&self.query, &tables, run.node_id())
+                .await?
+        } else {
+            datafusion
+                .sql_validated(&self.query, &tables, run.node_id())
+                .await?
+        };
         run.check_cancelled()?;
         Ok(BTreeMap::from([("output".into(), output)]))
     }

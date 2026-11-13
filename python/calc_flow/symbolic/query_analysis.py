@@ -246,7 +246,17 @@ def _node_from_dict(node):
 
 def _wire_semantics(value: dict) -> UpdateSemantics:
     version = (value["schema_version"], value["analysis_revision"])
-    if version not in ((1, 1), (2, 2), (2, 3), (2, 4), (2, 5), (2, 6), (2, 7), (2, 9)):
+    if version not in (
+        (1, 1),
+        (2, 2),
+        (2, 3),
+        (2, 4),
+        (2, 5),
+        (2, 6),
+        (2, 7),
+        (2, 9),
+        (2, 10),
+    ):
         raise ValueError("query_analysis: unsupported revision")
     semantics = (
         value.get("update_semantics", "legacy_append")
@@ -372,6 +382,8 @@ def _named_roles(node):
     from calc_flow.symbolic.analyzer import _cstr_seq
 
     name = node.op.name
+    if name == "bounded_order":
+        return (".sort.value",)
     if name == "aggregate":
         return (".aggregate.value",)
     if name in ("sql", "snapshot_sql"):
@@ -440,7 +452,13 @@ def _issue_diagnostic(issue, mode, paths, legacy_paths):
     )
     window_issue = any(
         role in issue.path
-        for role in (".sql.window", ".window_tumbling", ".window_hopping", ".distinct")
+        for role in (
+            ".sql.window",
+            ".window_tumbling",
+            ".window_hopping",
+            ".distinct",
+            ".sort",
+        )
     )
     status = (
         "unknown"
@@ -513,14 +531,22 @@ def _query_identity(facts):
     )
 
 
+def order_descriptor(node):
+    if node.op.name != "bounded_order":
+        return None
+    return {key: json.loads(node.attr(key).value) for key in ("by", "fetch", "spec")}
+
+
 def _declaration(node, path, facts, statuses):
     from calc_flow.symbolic.nodes import CStr
+    from calc_flow.symbolic.order import projection_query
 
     query = node.attr("query")
     return dict(
         path=path,
         kind="union" if node.op.name == "union_all" else node.op.name,
-        query=query.value if isinstance(query, CStr) else None,
+        query=query.value if isinstance(query, CStr) else projection_query(node),
+        order=order_descriptor(node),
         distinct_spec=json.loads(node.attr("spec").value)
         if node.op.name == "distinct"
         else None,
@@ -594,6 +620,12 @@ def _native_relation_kinds(graph, paths, analyzers):
         for key in getattr(analyzer, attribute)
         if key in paths
     }
+    orders = {
+        paths[key]: order_descriptor(node)
+        for analyzer in analyzers
+        for key, node in analyzer._sql_order_nodes.items()
+        if key in paths
+    }
     distincts = {
         paths[key]: json.loads(node.attr("spec").value)
         for analyzer in analyzers
@@ -610,6 +642,13 @@ def _native_relation_kinds(graph, paths, analyzers):
                 "distinct_spec": distincts[node["path"]],
             }
             if node["path"] in distincts
+            else {
+                **node,
+                "kind": "bounded_order",
+                "query": None,
+                "order": orders[node["path"]],
+            }
+            if node["path"] in orders
             else {**node, "kind": kinds[node["path"]], "query": None}
             if node["path"] in kinds
             else node
@@ -626,12 +665,12 @@ def _gate(program, runtime, request):
     report = program.analyze(
         runtime, options=AnalysisOptions(portability=request)
     ).query
-    if (report.schema_version, report.analysis_revision) != (2, 9):
+    if (report.schema_version, report.analysis_revision) != (2, 10):
         from calc_flow.errors import CompileError
 
         error = CompileError(
             "Program.portability: finality_unproven: strict compilation requires "
-            "matching r9 analysis"
+            "matching r10 analysis"
         )
         error.query_analysis = report
         raise error
@@ -648,7 +687,7 @@ def _gate_latest(program, runtime):
     report = program.analyze(runtime).query
     if (report.schema_version, report.analysis_revision, report.update_semantics) != (
         2,
-        9,
+        10,
         "latest_relation",
     ):
         error = CompileError(

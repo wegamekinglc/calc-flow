@@ -23,6 +23,7 @@ from calc_flow.symbolic.expr import (
 )
 from calc_flow.symbolic.late_output import LateOutputs, with_late_output
 from calc_flow.symbolic.ops import cs, linalg, row, table, ts, window
+from calc_flow.symbolic.order import SortKey, SortSpec
 from calc_flow.symbolic.program import FeatureSet, Program
 from calc_flow.symbolic.query_analysis import (
     AnalysisOptions,
@@ -63,6 +64,8 @@ from calc_flow.symbolic.windows import (
 )
 
 __all__ = [
+    "SortKey",
+    "SortSpec",
     "DistinctSpec",
     "CompileMode",
     "AnalysisOptions",

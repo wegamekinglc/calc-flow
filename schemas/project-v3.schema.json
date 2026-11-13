@@ -1380,6 +1380,36 @@
       "oneOf": [
         {
           "additionalProperties": false,
+          "description": "Final ordering over an explicit finite history domain.",
+          "properties": {
+            "by": {
+              "items": {
+                "$ref": "#/$defs/SortKey"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "fetch": {
+              "$ref": "#/$defs/OrderFetch"
+            },
+            "kind": {
+              "const": "bounded_order",
+              "type": "string"
+            },
+            "spec": {
+              "$ref": "#/$defs/SortSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "by",
+            "fetch",
+            "spec"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "description": "Final DISTINCT over an explicit finite history domain.",
           "properties": {
             "columns": {
@@ -1638,6 +1668,14 @@
           ],
           "type": "object"
         }
+      ]
+    },
+    "OrderFetch": {
+      "maximum": 4294967295,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
       ]
     },
     "PipelineSpec": {
@@ -3572,6 +3610,26 @@
         }
       ]
     },
+    "SortBudget": {
+      "additionalProperties": false,
+      "properties": {
+        "max_bytes": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_rows": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_rows",
+        "max_bytes"
+      ],
+      "type": "object"
+    },
     "SortDirection": {
       "description": "Sort direction of an order-statistic output (SCE-00 D6).",
       "oneOf": [
@@ -3584,6 +3642,233 @@
           "const": "descending",
           "description": "Largest measured value first.",
           "type": "string"
+        }
+      ]
+    },
+    "SortHistory": {
+      "description": "The complete finite domain accepted by a final ordering node.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A fixed finite source cut, finalized at normal EOF.",
+          "properties": {
+            "kind": {
+              "const": "bounded_source",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "One fixed UTC half-open interval.",
+          "properties": {
+            "end_micros": {
+              "description": "Exclusive microsecond coordinate.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "event_time_column": {
+              "description": "Original or purely renamed input timestamp.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "closed_window",
+              "type": "string"
+            },
+            "start_micros": {
+              "description": "Inclusive microsecond coordinate.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "event_time_column",
+            "start_micros",
+            "end_micros"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SortIngressPolicy": {
+      "enum": [
+        "copy_visible_v2"
+      ],
+      "type": "string"
+    },
+    "SortKey": {
+      "additionalProperties": false,
+      "description": "One direct column comparator. NULL rows are retained.",
+      "properties": {
+        "column": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "direction": {
+          "$ref": "#/$defs/SortDirection"
+        },
+        "nulls": {
+          "$ref": "#/$defs/SortNulls"
+        }
+      },
+      "required": [
+        "column",
+        "direction",
+        "nulls"
+      ],
+      "type": "object"
+    },
+    "SortLatePolicy": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "error"
+            },
+            "scope": {
+              "const": "envelope"
+            }
+          },
+          "required": [
+            "kind",
+            "scope"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "drop"
+            },
+            "metrics_version": {
+              "const": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "metrics_version"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SortNulls": {
+      "enum": [
+        "first",
+        "last"
+      ],
+      "type": "string"
+    },
+    "SortSequenceColumns": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "SortSpec": {
+      "additionalProperties": false,
+      "description": "Explicit complete-history ordering with a mandatory node-owned peak budget.",
+      "if": {
+        "properties": {
+          "history": {
+            "properties": {
+              "kind": {
+                "const": "bounded_source"
+              }
+            }
+          }
+        }
+      },
+      "properties": {
+        "history": {
+          "$ref": "#/$defs/SortHistory"
+        },
+        "ingress_policy": {
+          "$ref": "#/$defs/SortIngressPolicy"
+        },
+        "late_policy": {
+          "$ref": "#/$defs/SortLatePolicy"
+        },
+        "offset": {
+          "format": "uint64",
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state_budget": {
+          "$ref": "#/$defs/SortBudget"
+        },
+        "ties": {
+          "$ref": "#/$defs/SortTies"
+        }
+      },
+      "required": [
+        "ingress_policy",
+        "history",
+        "state_budget",
+        "offset",
+        "ties",
+        "late_policy"
+      ],
+      "then": {
+        "properties": {
+          "late_policy": {
+            "properties": {
+              "kind": {
+                "const": "error"
+              }
+            }
+          }
+        }
+      },
+      "type": "object"
+    },
+    "SortTies": {
+      "description": "Explicit ordering of equal primary keys.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Only primary-key order is promised; boundary membership is unspecified.",
+          "properties": {
+            "kind": {
+              "const": "unspecified",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Reproducible input fields, checked unique over the whole accepted history.",
+          "properties": {
+            "columns": {
+              "$ref": "#/$defs/SortSequenceColumns",
+              "description": "Original nonnullable fields checked unique over H."
+            },
+            "kind": {
+              "const": "sequence",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "columns"
+          ],
+          "type": "object"
         }
       ]
     },

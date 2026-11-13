@@ -619,10 +619,12 @@ def _check_stateful_lowering(
     late_policy: str,
 ) -> None:
     from calc_flow.symbolic.distinct import check_lateness
+    from calc_flow.symbolic.order import check_lateness as check_order_lateness
 
     needs_rolling = _program_needs_rolling(program)
     needs_cross_section = _program_needs_cross_section(program)
     check_lateness(program, mode_value, late_policy, allowed_lateness_micros)
+    check_order_lateness(program, mode_value, late_policy, allowed_lateness_micros)
     if _program_needs_stream_join(program):
         _check_stream_join_capability(program, capabilities, mode_value)
     if needs_rolling or needs_cross_section:
@@ -701,7 +703,15 @@ def _pin_update_semantics(document, runtime):
 def _can_pin_update_graph(graph):
     return all(
         node["operator"]["kind"]
-        in {"expression", "sql", "snapshot_sql", "union", "window", "distinct"}
+        in {
+            "expression",
+            "sql",
+            "snapshot_sql",
+            "union",
+            "window",
+            "bounded_order",
+            "distinct",
+        }
         and not node["operator"].get("udfs")
         for node in graph["nodes"]
     )
@@ -829,19 +839,30 @@ def compile_program_batch(program: Program, runtime: object, /) -> BatchExecutio
     from calc_flow.symbolic.distinct import cache_policy as distinct_cache_policy
     from calc_flow.symbolic.event_window_sql import cache_policy as window_cache_policy
     from calc_flow.symbolic.inner_join_sql import cache_policy as join_cache_policy
+    from calc_flow.symbolic.order import cache_policy as order_cache_policy
     from calc_flow.symbolic.union import cache_policy
 
+    document = (
+        _lower_program_document(program, selected, "batch")
+        if order_cache_policy(program)
+        else None
+    )
     key = (
         *_preparation_key(program, "batch", 0, "error"),
         *cache_policy(program, selected),
         *window_cache_policy(program),
         *distinct_cache_policy(program),
+        *order_cache_policy(program),
         *join_cache_policy(program),
     )
     return selected._cached_symbolic_compile(
         key,
         lambda: selected.compile_batch_project(
-            _canonical(_lower_program_document(program, selected, "batch"))
+            _canonical(
+                document
+                if document is not None
+                else _lower_program_document(program, selected, "batch")
+            )
         ),
     )  # type: ignore[return-value]
 
@@ -859,19 +880,34 @@ def compile_program_stream(
     from calc_flow.symbolic.distinct import cache_policy as distinct_cache_policy
     from calc_flow.symbolic.event_window_sql import cache_policy as window_cache_policy
     from calc_flow.symbolic.inner_join_sql import cache_policy as join_cache_policy
+    from calc_flow.symbolic.order import cache_policy as order_cache_policy
     from calc_flow.symbolic.union import cache_policy
 
+    document = (
+        _lower_program_document(
+            program,
+            selected,
+            "stream",
+            allowed_lateness_micros=allowed_lateness_micros,
+            late_policy=late_policy,
+        )
+        if order_cache_policy(program)
+        else None
+    )
     key = (
         *_preparation_key(program, "stream", allowed_lateness_micros, late_policy),
         *cache_policy(program, selected),
         *window_cache_policy(program),
         *distinct_cache_policy(program),
+        *order_cache_policy(program),
         *join_cache_policy(program),
     )
     return selected._compile_symbolic_stream(
         key,
         lambda: _canonical(
-            _lower_program_document(
+            document
+            if document is not None
+            else _lower_program_document(
                 program,
                 selected,
                 "stream",

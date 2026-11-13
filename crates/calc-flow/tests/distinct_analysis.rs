@@ -91,7 +91,7 @@ async fn test_window_analysis_proves_only_original_or_pure_renamed_time() {
 }
 
 #[tokio::test]
-async fn test_distinct_analysis_r9_exposes_conditional_finality_and_owned_peak() {
+async fn test_distinct_analysis_r10_exposes_conditional_finality_and_owned_peak() {
     let input = table_input(
         "events",
         Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)])),
@@ -124,7 +124,7 @@ async fn test_distinct_analysis_r9_exposes_conditional_finality_and_owned_peak()
         .analyze(&UdfRegistry::new().snapshot(), &options)
         .await
         .unwrap();
-    assert_eq!(report.analysis_revision, 9);
+    assert_eq!(report.analysis_revision, 10);
     let node = report
         .nodes
         .iter()

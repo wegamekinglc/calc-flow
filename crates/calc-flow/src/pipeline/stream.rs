@@ -182,6 +182,7 @@ pub(crate) enum CompiledStreamOperator {
     Expression(crate::ExpressionOperator),
     Sql(crate::SqlOperator),
     SnapshotSql(crate::SnapshotSqlOperator),
+    BoundedOrder(crate::BoundedOrderOperator),
     Distinct(crate::DistinctOperator),
     CheckpointLoan,
     Union(UnionOperator),
@@ -440,6 +441,7 @@ impl CompiledStreamOperator {
             | Self::Expression(_)
             | Self::Sql(_)
             | Self::SnapshotSql(_)
+            | Self::BoundedOrder(_)
             | Self::Distinct(_)
             | Self::Union(_)
             | Self::Window(_)
@@ -464,6 +466,7 @@ impl CompiledStreamOperator {
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::SnapshotSql(operator) => operator.on_ingress_progress(ingress, context).await,
+            Self::BoundedOrder(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::Distinct(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::Union(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::Window(operator) => operator.on_ingress_progress(ingress, context).await,
@@ -510,6 +513,12 @@ impl CompiledStreamOperator {
                 }
                 Ok(Self::SnapshotSql(operator))
             }
+            NodeOperator::BoundedOrder(mut operator) => {
+                if let Some(table) = table {
+                    operator.set_datafusion_config(table.config);
+                }
+                Ok(Self::BoundedOrder(operator))
+            }
             NodeOperator::Distinct(mut operator) => {
                 if let Some(table) = table {
                     operator.set_datafusion_config(table.config);
@@ -549,6 +558,7 @@ impl CompiledStreamOperator {
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.reset(),
             Self::SnapshotSql(operator) => operator.reset(),
+            Self::BoundedOrder(operator) => operator.reset(),
             Self::Distinct(operator) => operator.reset(),
             Self::Union(operator) => operator.reset(),
             Self::Window(operator) => operator.reset(),
@@ -569,6 +579,7 @@ impl CompiledStreamOperator {
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.prepare_checkpoint_async(context).await,
             Self::SnapshotSql(operator) => operator.prepare_checkpoint_async(context).await,
+            Self::BoundedOrder(operator) => operator.prepare_checkpoint_async(context).await,
             Self::Distinct(operator) => operator.prepare_checkpoint_async(context).await,
             Self::Union(operator) => operator.prepare_checkpoint_async(context).await,
             Self::Window(operator) => operator.prepare_checkpoint_async(context).await,
@@ -593,6 +604,7 @@ impl CompiledStreamOperator {
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.checkpoint(epoch),
             Self::SnapshotSql(operator) => operator.checkpoint(epoch),
+            Self::BoundedOrder(operator) => operator.checkpoint(epoch),
             Self::Distinct(operator) => operator.checkpoint(epoch),
             Self::Union(operator) => operator.checkpoint(epoch),
             Self::Window(operator) => operator.checkpoint(epoch),
@@ -614,6 +626,7 @@ impl CompiledStreamOperator {
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.restore(snapshot),
             Self::SnapshotSql(operator) => operator.restore(snapshot),
+            Self::BoundedOrder(operator) => operator.restore(snapshot),
             Self::Distinct(operator) => operator.restore(snapshot),
             Self::Union(operator) => operator.restore(snapshot),
             Self::Window(operator) => operator.restore(snapshot),
@@ -631,6 +644,7 @@ impl CompiledStreamOperator {
     ) -> Result<()> {
         match self {
             Self::External(operator) => operator.restore_async(snapshot, context).await,
+            Self::BoundedOrder(operator) => operator.restore_async(snapshot, context).await,
             Self::Distinct(operator) => operator.restore_async(snapshot, context).await,
             Self::Rolling(operator)
                 if matches!(
@@ -678,6 +692,9 @@ impl CompiledStreamOperator {
             Self::SnapshotSql(operator) => {
                 operator.process_data(ingress, batch, context, output).await
             }
+            Self::BoundedOrder(operator) => {
+                operator.process_data(ingress, batch, context, output).await
+            }
             Self::Distinct(operator) => {
                 operator.process_data(ingress, batch, context, output).await
             }
@@ -708,6 +725,7 @@ impl CompiledStreamOperator {
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.on_watermark(watermark, context, output).await,
             Self::SnapshotSql(operator) => operator.on_watermark(watermark, context, output).await,
+            Self::BoundedOrder(operator) => operator.on_watermark(watermark, context, output).await,
             Self::Distinct(operator) => operator.on_watermark(watermark, context, output).await,
             Self::Union(operator) => operator.on_watermark(watermark, context, output).await,
             Self::Window(operator) => operator.on_watermark(watermark, context, output).await,
@@ -730,6 +748,7 @@ impl CompiledStreamOperator {
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.on_end(context, output).await,
             Self::SnapshotSql(operator) => operator.on_end(context, output).await,
+            Self::BoundedOrder(operator) => operator.on_end(context, output).await,
             Self::Distinct(operator) => operator.on_end(context, output).await,
             Self::Union(operator) => operator.on_end(context, output).await,
             Self::Window(operator) => operator.on_end(context, output).await,
@@ -747,6 +766,7 @@ impl CompiledStreamOperator {
             Self::SnapshotSql(operator) => operator.stream_runtime_initialized(),
             Self::StreamJoin(operator) => operator.stream_runtime_initialized(),
             Self::CheckpointLoan
+            | Self::BoundedOrder(_)
             | Self::Distinct(_)
             | Self::StreamAsofJoin(_)
             | Self::External(_)
@@ -817,6 +837,7 @@ impl PipelineBuilder {
         udfs: &UdfRegistrySnapshot,
         requirements: &StreamRequirements,
     ) -> Result<StreamExecutionPlan> {
+        super::order::prepare(&mut self);
         for id in super::analysis::replacement_nodes(&self)? {
             let node = self.nodes.get_mut(&id).expect("proved node");
             if let NodeOperator::Sql(operator) = &mut node.operator {
@@ -996,6 +1017,7 @@ fn validate_stream_node(node_id: &str, operator: &NodeOperator) -> Result<()> {
         }
         NodeOperator::Expression(_)
         | NodeOperator::Union(_)
+        | NodeOperator::BoundedOrder(_)
         | NodeOperator::Distinct(_)
         | NodeOperator::Window(_)
         | NodeOperator::Rolling(_)
@@ -1083,6 +1105,17 @@ fn validate_external_provider_lifecycles(
         .values()
         .any(|guarantee| *guarantee == DeliveryGuarantee::ExactlyOnce);
     for (node_id, node) in nodes {
+        if let NodeOperator::BoundedOrder(operator) = &node.operator
+            && exactly_once
+            && !operator.lifecycle().is_exactly_once_safe()
+        {
+            return Err(CalcFlowError::Compile {
+                message: format!(
+                    "node {node_id:?} bounded_order ties are unspecified; deterministic replay requires explicit sequence_by with whole-H uniqueness"
+                ),
+            });
+        }
+
         let NodeOperator::Stream(operator) = &node.operator else {
             continue;
         };
