@@ -461,6 +461,7 @@ def _issue_diagnostic(issue, mode, paths, legacy_paths):
             ".window_hopping",
             ".distinct",
             ".sort",
+            ".over",
         )
     )
     status = (

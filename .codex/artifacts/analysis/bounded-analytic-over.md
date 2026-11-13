@@ -379,3 +379,82 @@ is performed. This focused local rule pass is not a claim that new-head Codacy
 or all CI has passed. The final reply records the single nonblocking post-push
 snapshot; review remains pending, no merge/delegation is performed, and DAL-521
 stays in_progress.
+
+## Independent review F1 correction
+
+This increment addresses only F1 from the completed independent review of
+`2c1ea159f2db15a73c22b0cb1f62509499b5f63b`. The review report is preserved
+byte-for-byte and left untracked, with SHA256
+`c524f3aa5df760cc50f61d2432f1de61d27e0378c98d22f3abc058f742f2209f`.
+It is not rewritten into an approval or included in this correction's commit.
+
+The classifier in `symbolic/query_analysis.py::_issue_diagnostic` omitted the
+OVER role from the existing definitive capability-rejection roles. Adding
+`.over` to that tuple fixes both the public query diagnostics and the output
+node's batch/stream support. The generic capability-mismatch fallback and all
+native source/cut proof rules are unchanged. No public contract is expanded.
+
+### Focused RED and GREEN
+
+Three public regressions declare RANK, SUM without ROWS, and ROW_NUMBER/LAG
+with mixed orders. Before the production change, this command exits 1:
+
+```sh
+PYTHONPATH=target/bounded-analytic-over-f1-python <dev-python> -m pytest \
+  python/tests/test_bounded_analytic_over.py -q -k known_rejections
+```
+
+RED: 3 failed, 16 deselected. Each fails at the expected assertion:
+`{'unknown'} != {'unsupported'}`, reproducing F1 through `Program.analyze().query`.
+After the one-line role correction, GREEN: 3 passed, 16 deselected. Each case
+checks both lifecycle diagnostic paths and capability_mismatch codes, both
+output-node supports, ordinary batch/stream compile rejection, and strict
+batch/stream entry rejection with input wrapping/source iteration counters zero.
+
+A first GREEN attempt passed the analysis assertions but reached a test-harness
+AttributeError: the package exports `compute` as a function. The read-spy helper
+was corrected to explicitly import the module through importlib; no expectation
+was weakened, and this setup error is not a second product finding.
+
+Neighboring unknown/closure checks run through the same staged source:
+
+```sh
+PYTHONPATH=target/bounded-analytic-over-f1-python <dev-python> -m pytest -q \
+  python/tests/test_bounded_analytic_over.py::test_over_unknown_source_is_rejected_before_iterator_and_root \
+  python/tests/test_finite_event_window.py::test_window_analysis_proves_conditional_eof_and_leaves_prefix_unknown \
+  python/tests/test_query_history_portability.py::test_unproved_selection_is_not_granted_or_given_an_invented_counterexample \
+  python/tests/test_query_history_portability.py::test_unknown_upstream_updates_are_not_defaulted_to_append
+```
+
+Result: 5 passed. Missing concrete window-cut evidence and unproved SQL remain
+unknown; unknown-source OVER still rejects before iterator acquisition and
+temporary-root creation. These results are separate from the three F1 cases.
+
+Ruff check and format checks pass on the changed mapping/test. A whole-module
+`lizard -C 8` probe exits 1 on two pre-existing functions: _named_roles (11) and
+_native_relation_kinds (16). AST source comparison proves both untouched, and
+all module function CCNs are identical to the reviewed baseline. The changed
+_issue_diagnostic remains CCN 8; the new public test is 8 and its helper is 2
+(nested helpers 1). Focused complexity assertions and whitespace checks pass.
+No baseline, gate, suppression or unrelated function is changed to clear F1.
+
+### Tested mapping/native provenance
+
+The test package under `target/bounded-analytic-over-f1-python` contains copies
+of all 62 current source Python/stub files and a link to the accepted native
+library. Every copied file was compared byte-for-byte with source. Imported
+query_analysis resolves to this staged package; its file matches the corrected
+source and its loaded _issue_diagnostic includes the new role.
+
+- Corrected query_analysis SHA256:
+  `26867bc79de9ae3bcdc9f4a68f116d574928e0cb1cdd1d7927cf2948b69c7a19`.
+- Imported native SHA256 remains:
+  `3a6819c1a784d8c984c3942deb2d1e9fd9f78dc82b46e2331c1caca73f2e62c1`.
+- Of the 1509 accepted build-input entries, only this pure Python mapping
+  changes; the other 1508, including Rust/PyO3/manifests, remain identical.
+
+No native rebuild or Rust, full regression, coverage or performance rerun is
+performed. The prior valid evidence is reused. The full independent review
+remains complete, with only F1/direct impact requiring reviewer recheck; this
+report does not grant that acceptance. The final issue reply records the single
+post-push nonblocking CI snapshot. No merge/delegation; DAL-521 stays in_progress.

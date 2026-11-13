@@ -9,6 +9,96 @@ import pytest
 import calc_flow as cf
 
 
+@pytest.mark.parametrize(
+    "query,suffix",
+    [
+        (
+            "SELECT *, RANK() OVER (ORDER BY v,seq) AS rn "
+            "FROM CF_OVER_BOUNDED('a',10,8388608,ARRAY['seq'])",
+            ".expressions[0]",
+        ),
+        (
+            "SELECT *, SUM(v) OVER (ORDER BY v,seq) AS total "
+            "FROM CF_OVER_BOUNDED('a',10,8388608,ARRAY['seq'])",
+            ".expressions[0].frame",
+        ),
+        (
+            "SELECT *, ROW_NUMBER() OVER (ORDER BY v,seq) AS rn, "
+            "LAG(v,1) OVER (ORDER BY v DESC,seq) AS prev "
+            "FROM CF_OVER_BOUNDED('a',10,8388608,ARRAY['seq'])",
+            ".expressions[1].order",
+        ),
+    ],
+    ids=["rank", "missing_rows", "mixed_order"],
+)
+def test_over_known_rejections_have_unsupported_public_analysis(
+    query, suffix, monkeypatch
+):
+    import pyarrow as pa
+
+    schema = pa.schema(
+        [pa.field("v", pa.int64()), pa.field("seq", pa.uint64(), nullable=False)]
+    )
+    source = cf.table_input("a", schema=schema)
+    program = cf.Program(
+        "rejected", mode="batch", outputs={"out": cf.sql(query, a=source)}
+    )
+    report = program.analyze().query
+    diagnostics = [issue for issue in report.diagnostics if ".sql.over" in issue.path]
+    assert {issue.path for issue in diagnostics} == {
+        f"outputs.out.batch.sql.over{suffix}",
+        f"outputs.out.stream.sql.over{suffix}",
+    }
+    assert {issue.code for issue in diagnostics} == {"capability_mismatch"}
+    assert {issue.status for issue in diagnostics} == {"unsupported"}
+    output = next(node for node in report.nodes if node.path == "outputs.out")
+    assert (output.batch.support, output.stream.support) == (
+        "unsupported",
+        "unsupported",
+    )
+    _assert_over_rejected_before_rows(program, monkeypatch)
+
+
+def _assert_over_rejected_before_rows(program, monkeypatch):
+    import asyncio
+    import importlib
+
+    compute = importlib.import_module("calc_flow.compute")
+
+    streaming = program.for_mode("stream")
+    for compile_plan in (program.compile_batch, streaming.compile_stream):
+        with pytest.raises(cf.CompileError):
+            compile_plan()
+
+    reads = []
+
+    def forbid_rows(*args, **kwargs):
+        reads.append("batch")
+        raise AssertionError("input wrapped before strict rejection")
+
+    class Unread:
+        def __aiter__(self):
+            reads.append("stream")
+            raise AssertionError("source iterated before strict rejection")
+
+    request = cf.PortabilityRequest(
+        comparison="final_relation",
+        history="accepted_history",
+        cutoff="all_sources_eof",
+    )
+    monkeypatch.setattr(compute, "_collect_batches", forbid_rows)
+    with pytest.raises(cf.CompileError):
+        program.collect({"a": object()}, portability=request)
+
+    async def run():
+        with pytest.raises(cf.CompileError):
+            async with streaming.stream({"a": Unread()}, portability=request):
+                raise AssertionError("strict stream started")
+
+    asyncio.run(run())
+    assert reads == []
+
+
 def test_example_rejects_incorrect_batch_even_with_optimized_python():
     script = """
 import asyncio
