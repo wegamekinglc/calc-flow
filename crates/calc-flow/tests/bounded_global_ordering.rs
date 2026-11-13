@@ -274,9 +274,11 @@ async fn test_order_millisecond_window_copies_and_checkpoints_late_drop() -> Res
             )?],
             Some(1),
             SortSpec::closed_window(
-                "ts",
-                EventTime::from_micros(0),
-                EventTime::from_micros(10_000),
+                calc_flow::SortWindow::new(
+                    "ts",
+                    EventTime::from_micros(0),
+                    EventTime::from_micros(10_000),
+                )?,
                 StateBudget::new(2, 8 << 20)?,
             )?
             .with_late_policy(LatePolicySpec::Drop { metrics_version: 1 })?,

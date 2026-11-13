@@ -349,3 +349,198 @@ commit records this mapping only; it does not change or rebuild the product.
 The checkout had no configured Git author, so the first commit attempt failed
 without creating a commit. Successful commits use per-command identity from
 this run's explicit On Behalf Of metadata; no persistent Git identity was set.
+
+
+## SortWindow v2 and independent review follow-up
+
+This follow-up starts at `ccda5564809b36e222f4b084ec39cdc20d1b3116`
+in the same checkout/branch/environment/PR606. The issue/comment delta was read.
+The frozen v2 API note is accepted byte for byte with SHA256
+`b4a087ef52cb9b3a43803666e13365dfce544205a6af8c97b88cb34dd8758624`.
+The original reviewer report is read-only/untracked, SHA256
+`43607ee122c093691d89210144a9eba40d4ebdf5a609f032ba2be5c38c176022`;
+it is not edited or staged. The coordinator's supplementary message assigns
+F1-F3 in the same run; the original v2 work continues alongside these fixes.
+
+The v2 design is a validated immutable host SortWindow containing only the
+column/start/end, flattened into the existing SortHistory. There is no wire
+wrapper, native Python method, old-signature parser, new schema field,
+capability, layout/accounting version or analysis revision. Rust native wire
+imports map construction errors back to sort.spec.history. Public host value
+errors use the frozen SortWindow/sort_window paths. Existing SQL syntax and
+seams/stubs need no signature change. Root/symbolic exports and direct call
+sites are synchronized; historical initial-note/analysis references stay history.
+
+### v2 RED and GREEN
+
+- `cargo test --locked -p calc-flow --test sort_window`: initial exit101 for
+  missing SortWindow and the four-argument closed_window. Two unrelated serde
+  test error conversions were corrected before repeating this valid RED.
+  After implementation: exit0,2 passed, including canonical literal equality,
+  serde round-trip, i64 endpoints and native error-path preservation.
+- `target/venv/bin/python -m pytest -q python/tests/test_sort_window.py::test_sort_window_is_public_frozen_and_explicitly_typed`:
+  exit1, missing public SortWindow. Rebuilt/reinstalled v2 wheel then the
+  19-case focused new API/export/stub/local-policy command passed. The complete
+  directly affected Python subset later passed28 cases on the fixes' native.
+- `target/venv/bin/python scripts/verify_complexity_gates.py`: before changes
+  exit1, the original PLR0913 7>5 finding; after changes exit0,
+  `complexity ratchet holds`. No threshold, baseline, configuration or
+  suppression change. Real explicit signatures are SortWindow3 and
+  closed_window5 non-receiver parameters.
+- `cargo test --locked -p calc-flow --test project_v3 && cargo test --locked -p calc-flow --doc SortWindow`:
+  exit0,3 contract tests and1 new public example passed. The unchanged contract
+  checks are reused after the review repairs, which touch no schema types.
+
+### Canonical bytes, cache and old checkpoint evidence
+
+Before editing product code, the installed ccda5564 product (native hash
+recorded above) produced `target/dal520-v2-baseline.json`, SHA256
+`c2993c8f6c0cf217b3905681830f50ac5e46005a366b417f02636c04b50ea29b`.
+Two independent Error/Drop configurations use ts:[-10,10), rows1000/bytes8388608,
+offset1, sequence[seq], x ASC/NULL last/fetch1. The committed tests contain
+independent flat literal expectations and the captured project/program/plan/
+preparation-key digests; no expectation is recomputed from the new constructor.
+Both host/SQL native operator descriptors are compared byte for byte. A warm
+batch preparation returns the same cached plan for separately constructed equal
+windows. The tag stays bounded_order_v1/copy_visible_v2/order_accounting1/analysis10.
+
+Old stream plan fingerprints preserved:
+
+- Error: `e6e74846373d400add03aea21a7ff4471c1c614abad6f2ec710d3a9d87e3d75a`.
+- Drop: `0cd303ee9e2092295928bf912551a1cbeaa5cad5a1bab35f0a18977df1f26db0`.
+
+`target/venv/bin/python target/dal520_v2_recovery.py capture` ran against the
+original installed ccda5564 product before implementation. Each replayable
+bounded source delivered the first row, paused, persisted epoch1, and was
+cancelled/awaited: opened[0], no final. An initial instrumentation print tried
+to read a consumed plan; it was corrected before the complete two-policy
+capture, using a fresh root. That harness error is not a product RED.
+
+After the v2 wheel, `... dal520_v2_recovery.py resume` passed Error/Drop:
+opened[1], exactly one final x=[3]/seq=[10]. For the final repair wheel,
+untouched original epoch1 manifests/segments were copied byte for byte into a
+fresh root, omitting later epoch2 from the earlier successful trial. The copy
+was hashed/compared, with no JSON/IPC/checksum or identity rewriting. The same
+resume command on the repaired native again passed both cases: identical plan
+fingerprints, opened[1], exactly one final. The attached recovery harness makes
+capture/resume phases explicit; it is not a public compatibility parser.
+
+### Independent review regressions and changes
+
+F1/F2 RED: `cargo test --locked -p calc-flow --test order_review` exited101,
+2 failed. After fixing a test-only TableBatch row-count accessor, the public
+plan cancellation case reproduced workspace required11281208 > limit11262843,
+and the one-MiB name was incorrectly accepted under40000. The F1 fixture uses
+200000 rows solely to keep a real blocking worker alive during cancellation;
+it is one correctness counterexample, not a performance workload.
+
+F1 fix: each finite process creates a fresh bounded participating quota and
+reserves its declaration role there before input/sequence/final work. That
+run's history/workspace/declaration owners travel into the blocking work; no
+old pool is reset, refunded or transferred to a later execute. Stream keeps
+its own state pool. A deterministic owner test retains old work at53817 bytes,
+runs a separate finite execution, asserts those53817 bytes remain charged,
+then drops the actual old work and checks release to0. The public test drops
+the pending execute and immediately reuses the same compiled plan for[9].
+
+F2 fix: before name allocation, checked declaration credit includes len(name)
+plus256 bytes for its owned descriptor/reservation representation. The name
+is an owned Arc<str>, shared with gather identity instead of cloning its bytes.
+GatherOperatorId carries the shared reservation owner; it drops that owner
+last, after its name references. A unit test drops the operator with gather
+identity still alive and observes unchanged charge until the identity drops.
+The one-column long-name constructor succeeds at1074448 and fails at1074447;
+40000 is rejected before target copy. This is a known name allocation, not an
+external-ingress/RSS inference.
+
+These fixes add exactly261 bytes for the five-character fixture name. Existing
+strict B/B-1 boundaries become finite/output63099/63098, capture432937/432936,
+restore466551/466550, sequence56277/56276. The independent original payload
+bounds stay the same; assertions and gates are preserved. The F1 fixture budget
+is the reviewer's11262582 payload peak plus the same261-byte name role; the
+old implementation still failed at that slightly adjusted total in RED.
+A private finite test now observes the actual per-run pool, not the persistent
+stream/declaration pool. Its result is explicitly dropped before asserting a
+zero balance; the first stale test executable correctly kept9282 bytes charged
+while its OwnedBatch result was still alive.
+
+F3 RED: `cargo test --locked -p calc-flow --test order_analysis typed` exited101,
+2 failed: arithmetic seq+1 AS qseq was Supported, retained comparator projection
+was Unknown. The fix records ExpressionOperator's real native query text in
+Rust typed projection/filter declarations. Sequence origin and post-comparator
+mapping therefore reuse the same native AST authority as compilation and SQL.
+The derived/new-name sequence is Unsupported; pure rename is Supported.
+Post-projection retaining/renaming all keys is Supported; removed or computed
+keys are Unknown, and strict compilation agrees. One initial computed-column
+fixture attempted replacing x, prohibited by the existing typed API; it was
+corrected to the legal new-name computed_x case, without weakening its order
+expectation. Final order_analysis5 plus adjacent distinct_analysis2 pass.
+
+The public F1/F2 regression then passed2 cases. The directly affected sort,
+window closure, recovery/ownership/atomicity regression set passed16 cases.
+Final command/build ledger follows after collecting the remaining checks.
+
+
+### Final follow-up verification ledger
+
+```sh
+cargo test --locked -p calc-flow --test order_review --test sort_window --test bounded_global_ordering --test order_closure
+# exit0: 16 passed (2+2+10+2)
+cargo test --locked -p calc-flow --test order_analysis --test distinct_analysis
+# exit0: 7 passed (5+2)
+cargo test --locked -p calc-flow --lib operator::order::tests -- --test-threads=1
+# exit0: 7 passed; all exact B/B-1 and both owner-lifetime tests
+cargo test --locked -p calc-flow --lib runtime::streaming::gather_work::tests::cleanup -- --test-threads=1
+# exit0: 6 passed; existing funding/retirement/drain guards
+cargo clippy --locked -p calc-flow --lib --test sort_window --test order_review --test bounded_global_ordering --test order_closure --test order_analysis -- -D warnings
+# exit0 after correcting used-underscore bindings and two unnecessary test struct updates
+JAX_PLATFORMS=cpu target/venv/bin/python -m pytest -q python/tests/test_sort_window.py python/tests/test_bounded_global_ordering.py python/tests/test_native_stub.py python/tests/test_symbolic_expr.py::test_public_surface_is_the_frozen_export_list
+# exit0: 28 passed on the final matching native
+ target/venv/bin/python target/dal520_v2_recovery.py resume
+# exit0: both old epoch1 Error/Drop states restored, cursor1, one final
+ target/venv/bin/python scripts/verify_complexity_gates.py
+# exit0: complexity ratchet holds (actual original command)
+```
+
+`cargo fmt --all --check`, ordinary Ruff check/format on package and changed
+tests, and `git diff --check` pass. The schema artifact, native seam/stub,
+complexity script/baseline and pyproject configuration have zero diff from
+ccda5564. The final native schema equals the committed artifact as parsed JSON.
+The earlier three project-contract tests and one SortWindow doctest remain
+valid; the post-review changes do not change their schema/signature inputs.
+Other original 148 Python / 211 Rust results are history, not claimed reruns.
+No full matrix, coverage, release or performance verification was started.
+
+The frozen reviewer report still says Request Changes for its fixed old HEAD;
+these local fixes do not replace the coordinator's required incremental
+independent review. No new unresolved local blocker, API deviation, new branch,
+new environment, delegation, merge or issue-status change is introduced.
+
+Final build/reinstall commands (same reused checkout/venv):
+
+```sh
+PYO3_PYTHON="$PWD/target/venv/bin/python" target/venv/bin/maturin build --locked --profile dev --out target/wheels
+uv pip install --python target/venv/bin/python --reinstall --no-deps target/wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl
+```
+
+Both exit0. The last build completed after source edits; all62 installed
+package/stub/native entries equal the final wheel, and repository .py/.pyi
+files equal installation bytes. The source fingerprint uses the same1208-file
+NUL-delimited scheme as the original delivery. The wheel is local CPython3.13.9
+dev Linux, not a release/manylinux artifact.
+
+```json
+{
+  "base_head": "ccda5564809b36e222f4b084ec39cdc20d1b3116",
+  "source_sha256": "a21330654ecfa5dad27f52f5a27fb81c3ee2e29884217aa61e3da9377975e144",
+  "source_file_count": 1208,
+  "wheel_sha256": "8eca9c319f61b51d48e463bcf2cab088ed92021a885fec58811b1a1554953aa5",
+  "native_sha256": "bd2fed8ff0b53fd1a594333749fd6e734af5c477e42b32ec8a9e16e45d0cd5e4",
+  "matched_archive_files": 62,
+  "python": "3.13.9",
+  "schema_matches_committed": true
+}
+```
+
+Commit mapping for this follow-up is appended after the fix commit. Only this
+analysis record changes in that mapping commit; review report remains unstaged.

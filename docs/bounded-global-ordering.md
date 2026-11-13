@@ -46,8 +46,9 @@ SELECT * FROM CF_ORDER_BOUNDED('a', 1000, 8388608, ARRAY['seq'])
 ORDER BY x ASC NULLS LAST LIMIT 1
 ```
 
-The sequence ARRAY is optional. A window declaration uses
-`SortSpec.closed_window("ts", start_micros=0, end_micros=10,
+The sequence ARRAY is optional. The immutable `SortWindow` validates the time
+column and signed 64-bit boundaries at construction. A window declaration uses
+`SortSpec.closed_window(SortWindow("ts", start_micros=0, end_micros=10),
 state_budget=budget, sequence_by=["seq"], late_policy="drop")`, or:
 
 ```sql
@@ -87,11 +88,13 @@ at most 4294967295; byte budgets are positive JSON-safe integers.
 
 The implementation retains full H, including rows outside the final top-k.
 This is not O(k) storage. The byte limit covers the node-owned participating
-peak: copied input/schema/metadata, candidates, sequence validation, sorting,
+peak: copied input/schema/metadata and declaration names, candidates, sequence validation, sorting,
 compact output and live captures/restore work. Raw ingress is borrowed only
 during synchronous copying; unknown external backing during that loan, other
 graph owners and process RSS are outside this quota. Work is reserved before
 target allocation. Even a tiny final result can fail the peak budget.
+Each finite execute owns a fresh quota; cancelled work keeps its reservations
+until its actual owners retire, so it cannot consume the next execute's quota.
 
 See the independent [Python example](../examples/bounded_global_ordering.py)
 and [Rust core example](../crates/calc-flow/examples/bounded_global_ordering.rs).

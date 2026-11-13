@@ -13,6 +13,38 @@ from calc_flow.symbolic.nodes import CStr, build
 
 
 @dataclass(frozen=True, slots=True, init=False)
+class SortWindow:
+    """A fixed UTC [start,end) interval; closure still requires native progress."""
+
+    event_time: str
+    start_micros: int
+    end_micros: int
+
+    def __init__(
+        self, event_time: str, /, *, start_micros: int, end_micros: int
+    ) -> None:
+        if not isinstance(event_time, str):
+            raise TypeError("SortWindow.event_time must be a string")
+        if not event_time:
+            raise ValueError("SortWindow.event_time must be a nonempty string")
+        start = _window_bound(start_micros, "SortWindow.start_micros")
+        end = _window_bound(end_micros, "SortWindow.end_micros")
+        if start >= end:
+            raise ValueError("SortWindow.end_micros must be greater than start_micros")
+        object.__setattr__(self, "event_time", event_time)
+        object.__setattr__(self, "start_micros", start)
+        object.__setattr__(self, "end_micros", end)
+
+
+def _window_bound(value: int, path: str) -> int:
+    if type(value) is not int:
+        raise TypeError(f"{path} must be an int of signed 64-bit microseconds")
+    if not -(1 << 63) <= value < (1 << 63):
+        raise ValueError(f"{path} must fit signed 64-bit microseconds")
+    return value
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class SortKey:
     """A direct column comparator; NULLs default to ASC last / DESC first."""
 
@@ -71,24 +103,26 @@ class SortSpec:
     @classmethod
     def closed_window(
         cls,
-        event_time: str,
+        window: SortWindow,
         /,
         *,
-        start_micros: int,
-        end_micros: int,
         state_budget: StateBudget,
         offset: int = 0,
         sequence_by: Sequence[str] = (),
         late_policy: Literal["error", "drop"] = "error",
     ) -> SortSpec:
         """Select [start,end); a proved watermark or normal EOF closes H."""
-        validate_window(event_time, start_micros, end_micros, late_policy)
+        if not isinstance(window, SortWindow):
+            raise TypeError("SortSpec.closed_window.window must be a SortWindow")
+        validate_window(
+            window.event_time, window.start_micros, window.end_micros, late_policy
+        )
         return cls._create(
             dict(
                 kind="closed_window",
-                event_time_column=event_time,
-                start_micros=start_micros,
-                end_micros=end_micros,
+                event_time_column=window.event_time,
+                start_micros=window.start_micros,
+                end_micros=window.end_micros,
             ),
             state_budget,
             offset,

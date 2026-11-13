@@ -1,6 +1,8 @@
 # Bounded Global Ordering / Top-k — API Note
 
-状态：DAL-520 / S3-2 / G3，2026-11-13，**公共选择已冻结，可交 implementer**。本轮只交付设计；以下新增签名、方言、状态与证明规则尚未实现，不能用本文作为产品通过证据。
+状态：DAL-520 / S3-2 / G3，2026-11-13，**局部修订 v2：SortWindow 聚合固定区间参数，可交 implementer**。本文 Rust/Python 的 `SortSpec.closed_window` 签名已替换为 v2，取代初版附件 `01a1d2ee-57dd-756f-94b8-2b3f9469d7f7` 的对应签名；新增 SortWindow，具体迁移见文末修订。本轮只交付设计，产品仍待应用此修订；其余冻结行为和支持域不变，不把文档自检当作产品通过证据。
+
+本次局部核对基线为 PR #606 HEAD `ccda5564809b36e222f4b084ec39cdc20d1b3116`，仍复用原分支；初始工作树干净。触发线程 `01a1d35b-5671-7c90-9ab6-652487e368dd` 要求只解决已复现 PLR0913；下面原 G3 调研基线/源码证据保留历史含义，未重新审查全部实现或 CI。
 
 核对基线：`b29b7a9a164a79c85cbf92f8bf1683a1704c0f3f`，分支 `agent/dal-orchestrator/c9c0751ee030`，HEAD 与本地 origin/main 一致，开始时工作树干净。交接及父讨论确认前序 PR #605 已合并；本轮未重新查询远端 CI。依据为 DAL-520 当前描述、触发线程 `01a1d2e0-0fff-7a98-892e-577022fe014d`、父 DAL-498 的四单元/生命周期讨论，以及经 Multica CLI 下载读取的开发计划 v2 附件 `01a1bc0b-3060-7c9d-ad57-b23a24daca58`（S3、A05/A06/A08/A09、C03/C13、L01–L03）。
 
@@ -37,7 +39,7 @@ Rust/Python 用户都能从公开 DataFrame 和 SQL 接口声明有限排序或 
 
 ## Frozen Rust and Python DataFrame surface
 
-新增 crate-root 导出 `SortKey`、`SortSpec`、`SortHistory`、`SortTies`。配置为 owned、不可变使用、严格 serde/JsonSchema 数据；私有字段只读，不含 rows、callbacks、Source 或 runtime。复用已有 `SortDirection` 与 `NullPlacement`，但排序只接纳 First/Last，拒绝 Exclude（排序不丢 NULL 行）。不改这些旧枚举的含义。
+新增 crate-root 导出 `SortKey`、`SortSpec`、`SortHistory`、`SortTies`，v2 追加 `SortWindow`。前四者仍为 owned、不可变使用、严格 serde/JsonSchema 配置；SortWindow 是经过验证的不可变宿主值，构造后投影到原有 SortHistory::ClosedWindow，不增加 wire 包装或字段。私有字段只读，不含 rows、callbacks、Source 或 runtime。复用已有 `SortDirection` 与 `NullPlacement`，但排序只接纳 First/Last，拒绝 Exclude（排序不丢 NULL 行）。不改这些旧枚举的含义。
 
 ```rust
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -54,6 +56,14 @@ pub enum SortTies {
     Unspecified,
     Sequence { columns: Vec<String> },
 }
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SortWindow { /* private: event_time_column, start, end */ }
+impl SortWindow {
+    pub fn new(event_time_column: &str, start: EventTime, end: EventTime) -> Result<Self>;
+    pub fn event_time_column(&self) -> &str;
+    pub fn start(&self) -> EventTime;
+    pub fn end(&self) -> EventTime;
+}
 pub struct SortKey { /* private: column, direction, nulls */ }
 impl SortKey {
     pub fn new(column: &str, direction: SortDirection, nulls: NullPlacement) -> Result<Self>;
@@ -64,10 +74,7 @@ impl SortKey {
 pub struct SortSpec { /* private fields; no Default */ }
 impl SortSpec {
     pub fn bounded_source(state_budget: StateBudget) -> Result<Self>;
-    pub fn closed_window(
-        event_time_column: &str, start: EventTime, end: EventTime,
-        state_budget: StateBudget,
-    ) -> Result<Self>;
+    pub fn closed_window(window: SortWindow, state_budget: StateBudget) -> Result<Self>;
     pub fn with_offset(self, offset: u64) -> Result<Self>;
     pub fn with_sequence_by(self, columns: Vec<String>) -> Result<Self>;
     pub fn with_late_policy(self, policy: LatePolicySpec) -> Result<Self>;
@@ -85,9 +92,18 @@ impl TableExpr {
 
 `sort` 保留全部输入列和重复行，按 by 字典序排序后跳过 offset。`top_k` 在完全相同顺序中跳过 offset，再取至多 k 行；**top 是这个顺序的前 k 行**，不是隐式最大值。要最大值优先须明确 Descending；不另加 largest/reverse/n 同义入口。返回全新 TableExpr，不执行数据或修改原图。排序表达式、输出列选择和改名用前后已有 select/with_columns；by 非空、列名非空且唯一，全部属于本节点输入，不接受跨 lineage ColumnExpr。
 
-Python 从 `calc_flow` 与 `calc_flow.symbolic` 导出 SortKey/SortSpec，沿现有兼容 frozen/slots 数据模型，不提高 Python 3.9 下限。复制调用者的 by/sequence_by 序列，不允许 str/bytes 冒充序列。没有公开任意 wire 字段构造器。
+Python 从 `calc_flow` 与 `calc_flow.symbolic` 导出 SortKey/SortSpec/SortWindow，沿现有兼容 frozen/slots 数据模型，不提高 Python 3.9 下限。SortWindow 有只读 event_time/start_micros/end_micros 字段及下列显式构造器；复制调用者的 by/sequence_by 序列，不允许 str/bytes 冒充序列。没有公开任意 wire 字段构造器。
 
 ```python
+class SortWindow:
+    event_time: str
+    start_micros: int
+    end_micros: int
+
+    def __init__(
+        self, event_time: str, /, *, start_micros: int, end_micros: int,
+    ) -> None: ...
+
 class SortKey:
     def __init__(
         self, column: str, /, *, descending: bool = False,
@@ -102,8 +118,7 @@ class SortSpec:
     ) -> SortSpec: ...
     @classmethod
     def closed_window(
-        cls, event_time: str, /, *, start_micros: int, end_micros: int,
-        state_budget: StateBudget, offset: int = 0,
+        cls, window: SortWindow, /, *, state_budget: StateBudget, offset: int = 0,
         sequence_by: Sequence[str] = (),
         late_policy: Literal["error", "drop"] = "error",
     ) -> SortSpec: ...
@@ -116,6 +131,8 @@ class TableExpr:
 ```
 
 Python nulls=None 在构造时解析为 ASC→last、DESC→first，匹配当前 native SQL 默认；wire 只保存显式 first/last。Rust 构造器要求明确两值。Python descending 必须是真 bool；k/offset/budget/time 必须是真 int，拒绝 bool/float。空 sequence_by 表示 Unspecified；Rust with_sequence_by 要求非空，避免把“请求稳定但忘传列”规范成 unspecified。重复配置调用返回新 spec，合法最后一次值替换该项；不修改共享副本。
+
+SortWindow::new / SortWindow 构造时验证原有非空时间列、i64 微秒 start<end（负时间合法）。SortSpec.closed_window 只接纳真正 SortWindow，维持 state_budget 必选，offset/sequence_by/late_policy 的默认和约束不变；完整配置仍在原生规划/导入边界验证。SortWindow 只声明一个等待真实闭合的区间，没有几何、聚合、预算、late policy、行或运行状态，不证明未来已经闭合。不得把新的值对象换成任意 dict、匿名 tuple、动态 kwargs 或由调用者提供的 wire 字符串。
 
 ## Four units: SQL spelling and shared lowering
 
@@ -362,3 +379,66 @@ Python 新例放 `examples/bounded_global_ordering.py`，不移动/替换 DISTIN
 实现范围为四单元公开配置/声明/AST/schema seam、共享native节点/内核、强制路径/绑定准入、owned budget/late事务、capture/restore/inventory、analysis r10/cache/export/schema/stub，以及必要docs/examples和上述定向验证。由协调器接续 implementer → reviewer 独立主审 → 修正并满足门禁后合并；本轮不扩派 spec/critic/tester/性能/独立文档阶段。DAL-520 继续 in_progress，API note 完成不等于本 issue 的 PR 已合并。
 
 本文只做必要源码核对及文档自检：指定文件独占修改、链接/源码位置、围栏/表格/参数顺序、Python种子语法、JSON身份与边界/事务一致性；未运行产品测试、native build、性能或CI，不声称新产品行为已验证。本轮不改产品、提交/推送、建PR或扩派。
+
+## 局部修订 v2：SortWindow 与参数数量门禁（2026-11-13）
+
+**本节与上方已经更新的签名共同取代初版 closed_window 调用形状；只重组宿主参数。** 固定参考为 PR #606 HEAD `ccda5564809b36e222f4b084ec39cdc20d1b3116`。reviewer 按该提交审查初版 note，本工作副本的修订不回写其固定审查输入。
+
+必要核对：`python/calc_flow/symbolic/order.py:72` 的 classmethod 有7个非 cls 参数：event_time、start_micros、end_micros、state_budget、offset、sequence_by、late_policy。`scripts/verify_complexity_gates.py:75` 显式选择包含 PLR0913 的复杂度规则，并与原 baseline 比较；`pyproject.toml:90` 的普通 Ruff select 并未涵盖该规则，所以普通 Ruff 通过不代表此门禁通过。本轮以该 checkout 的 `target/venv/bin/python -m ruff check --select PLR0913 --output-format json python/calc_flow/symbolic/order.py` 定向确认唯一 finding 为 `Too many arguments in function definition (7 > 5)`，与 analysis 的已有复现一致；未重跑全仓复杂度扫描或产品测试。
+
+Rust 当前 `crates/calc-flow/src/operator/order/spec.rs:184` 的四参数构造器与 `sql/order.rs:221` 的调用、Python 窗口测试 `python/tests/test_bounded_global_ordering.py:182`、公开指南 `docs/bounded-global-ordering.md:50` 均仍是初版形状。已核对 Rust `operator/window.rs:117` 的 WindowSpec 是带 geometry/group_by/aggregates 的窗口聚合配置，Python `symbolic/windows.py` 的 RowFrame/DurationFrame/EventTimeBucket 也不是一个任意 `[start,end)` 区间；复用它们会混入不适用的语义。SortHistory 是严格 wire enum，直接拿它作为宿主参数则会允许传 BoundedSource 给 closed_window；不选这种需再拒绝错误 variant 的入口。
+
+因此新增**排序专用、具名、不可变的 SortWindow**，只聚合时间列及两个边界。在根包/所属模块导出，实际持久化仍展平为原 SortHistory::ClosedWindow。Rust 消费一个 owned SortWindow 与预算；Python 的 window 保留唯一必选位置参数，预算继续是必选 keyword。两端精确签名以上方为准，没有并行旧签名、兼容解析分支、deprecated alias、动态参数或隐藏参数。
+
+Python 入口的5个非 cls 参数现在为 window、state_budget、offset、sequence_by、late_policy；SortWindow 构造器有3个非 self 参数。Rust 的 SortWindow::new 为3参数，SortSpec::closed_window 为2参数。可选 offset/sequence/late 的含义、默认值及必选预算均完整保留；不是通过删除配置选项来降低计数。Python 仍采用现有兼容 `_compat.dataclass(frozen=True, slots=True, init=False)` 加显式构造器，不使用 functools、`__signature__`、`*args`/`**kwargs` 或手写 Stub 隐藏真实调用形状。
+
+### 调用及迁移映射
+
+初版 Python `SortSpec.closed_window("ts", start_micros=0, end_micros=10, state_budget=budget, offset=1, sequence_by=["seq"], late_policy="drop")` 只将前三个窗口参数聚合为下面的 SortWindow；其余调用参数原样保留：
+
+```python
+import calc_flow as cf
+
+window = cf.SortWindow("ts", start_micros=0, end_micros=10)
+spec = cf.SortSpec.closed_window(
+    window,
+    state_budget=cf.StateBudget(1000, 8 << 20),
+    offset=1,
+    sequence_by=["seq"],
+    late_policy="drop",
+)
+```
+
+典型默认调用可内联为 `cf.SortSpec.closed_window(cf.SortWindow("ts", start_micros=0, end_micros=10), state_budget=budget)`；没有新增执行/关闭步骤。复用同一 window 构造两个 spec 不共享运行状态。bounded_source、SortKey、sort/top_k 的签名及主示例无需迁移。
+
+初版 Rust `SortSpec::closed_window("ts", start, end, budget)?` 替换为 `SortSpec::closed_window(SortWindow::new("ts", start, end)?, budget)?`，后续不可变配置链保持：
+
+```rust
+use calc_flow::{EventTime, LatePolicySpec, Result, SortSpec, SortWindow, StateBudget};
+
+fn selected_window() -> Result<SortSpec> {
+    let window = SortWindow::new(
+        "ts", EventTime::from_micros(0), EventTime::from_micros(10),
+    )?;
+    SortSpec::closed_window(window, StateBudget::new(1000, 8 << 20)?)?
+        .with_offset(1)?
+        .with_sequence_by(vec!["seq".into()])?
+        .with_late_policy(LatePolicySpec::Drop { metrics_version: 1 })
+}
+```
+
+这里的两种 spec 都仍对应原 SQL `CF_ORDER_WINDOW('a', 'ts', 0, 10, 1000, 8388608, 'drop', ARRAY['seq'])`，OFFSET 1 继续在 SQL clause 中表达。Rust SQL parser/严格 spec 反序列化只需先把原三个窗口字段经 SortWindow::new 验证，再调用新构造器；Python 也从值对象读取同三个字段。SQL 方言、参数数目/默认、native 描述 seam 和 PyO3 接收的 spec wire 不变，不把 SortWindow 作为新的 SQL 参数或原生运行对象。
+
+### 验证、身份与实施范围
+
+SortWindow 保存 copied/owned 的时间列名和精确 i64 微秒边界；构造时检查非空、start<end、Python bool/float/越界拒绝，允许负时间。这沿用原窗口值域，不检查数据 schema 或宣称已水位闭合。错误采用原层次：Python 类型错误 TypeError、值域错误 ValueError，Rust InvalidArgument；新值对象参数准确定位 `SortWindow.event_time|start_micros|end_micros`（Rust 对应 `sort_window.event_time_column|start|end`），说明约束。SortSpec.closed_window 传非 SortWindow 定位 window 并给出 `window must be a SortWindow`；原生项目/SQL 的错误继续定位原 `sort.spec.history` / `.sql.order` 路径，不暴露宿主 wrapper。预算、late policy 和 schema/时间来源的验证仍归原各自边界。
+
+相同参数构成的完整 spec 必须生成**相同 canonical wire/config 字节**：原 history.kind/event_time_column/start_micros/end_micros，以及 state_budget/offset/ties/late_policy/ingress_policy 均不变。SortWindow 不是 graph 节点，不进入 declaration bytes、cache key 或 checkpoint；不增加 JSON schema 字段、project/state/accounting/layout 版本、capability 或 analysis revision。不是拿对象的 repr/identity/hash 替代原字段。此要求同时覆盖 SQL 与 DF，保证纯签名重组不导致相同语义换恢复身份。初版接口尚未发布，直接替换调用，无须保留旧调用方式或引入运行期迁移；已有合法项目/checkpoint 继续按原严格合同处理。
+
+由实现者更新 SortWindow 的 Rust/Python 导出/公开类型说明、两个构造器、Rust SQL 与 spec 反序列化调用，以及直接受影响的测试、指南、rustdoc/示例。已定位的调用还包括 `crates/calc-flow/tests/order_closure.rs:64,111` 和 `order_analysis.rs:150`；只做机械迁移，不重新决定闭合/迟到/sequence/类型/预算/排序/输出/恢复规则。Python `_native.pyi` 仅在现有 seam 类型确受影响时同步，不为纯 Python 值对象添加多余 native 方法；普通 package 公共类型须可发现且正确标注。
+
+所需直接验证：新签名（包括实际 `__init__`/classmethod）用现有 Ruff 复杂度规则通过；SortWindow 的 frozen/参数类型/边界和新嵌套调用，Error/Drop 各一个原 fixture；相同完整 spec 的 canonical JSON/native config/导出字节与初版独立预期一致；对应 Rust 新构造/SQL deserialize 调用编译。随后实现者运行原 `scripts/verify_complexity_gates.py` 确认真实门禁消除此增量。无需重跑已匹配提交的全部排序/恢复矩阵；若实现修改超出参数重组，再补直接影响的验证。
+
+本轮仅修改此 note，文档自检包括所有 Python 围栏 AST、替代签名的真实参数计数、以仓库配置和固定 Ruff 对签名片段执行 stdin 复杂度检查、迁移字段/默认对应、相对链接/空白和 diff 范围。**片段检查通过不代表产品门禁已修复**；工作副本产品仍是初版，须由实现者应用并复验。未修改产品/门禁阈值/baseline/suppression，未做全仓扫描、native build、提交/推送或扩派。
+
+本项局部决定已定，无待用户选择或新增未决问题；交协调器与并行固定提交 review 的结果汇总后，安排实现者在同一 PR #606 应用。DAL-520 保持 in_progress。

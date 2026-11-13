@@ -80,6 +80,7 @@ def test_public_surface_is_the_frozen_export_list() -> None:
     assert symbolic.__all__ == [
         "SortKey",
         "SortSpec",
+        "SortWindow",
         "DistinctSpec",
         "CompileMode",
         "AnalysisOptions",

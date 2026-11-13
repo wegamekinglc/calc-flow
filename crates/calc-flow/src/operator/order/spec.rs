@@ -5,6 +5,75 @@ use crate::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// A validated fixed UTC interval, flattened into a sorting history declaration.
+///
+/// ```
+/// use calc_flow::{EventTime, SortSpec, SortWindow, StateBudget};
+/// let window = SortWindow::new("ts", EventTime::from_micros(-10), EventTime::from_micros(10))?;
+/// let spec = SortSpec::closed_window(window, StateBudget::new(1000, 8 << 20)?)?;
+/// # Ok::<(), calc_flow::CalcFlowError>(())
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SortWindow {
+    event_time_column: String,
+    start: crate::EventTime,
+    end: crate::EventTime,
+}
+impl SortWindow {
+    /// Declares the half-open interval `[start, end)` without closing it.
+    /// # Errors
+    /// Rejects an empty column or an end at or before start.
+    pub fn new(column: &str, start: crate::EventTime, end: crate::EventTime) -> Result<Self> {
+        if column.is_empty() {
+            return Err(invalid(
+                "sort_window.event_time_column",
+                "invalid_literal",
+                "requires a nonempty timestamp column",
+            ));
+        }
+        if start >= end {
+            return Err(invalid(
+                "sort_window.end",
+                "invalid_literal",
+                "end must be greater than start",
+            ));
+        }
+        Ok(Self {
+            event_time_column: column.into(),
+            start,
+            end,
+        })
+    }
+    /// Original or purely renamed input timestamp column.
+    pub fn event_time_column(&self) -> &str {
+        &self.event_time_column
+    }
+    /// Inclusive microsecond coordinate.
+    pub const fn start(&self) -> crate::EventTime {
+        self.start
+    }
+    /// Exclusive microsecond coordinate.
+    pub const fn end(&self) -> crate::EventTime {
+        self.end
+    }
+
+    pub(crate) fn from_history(
+        column: &str,
+        start: crate::EventTime,
+        end: crate::EventTime,
+    ) -> Result<Self> {
+        Self::new(column, start, end).map_err(|error| match error {
+            crate::CalcFlowError::InvalidArgument { message, .. } => {
+                crate::CalcFlowError::InvalidArgument {
+                    field: "sort.spec.history".into(),
+                    message,
+                }
+            }
+            other => other,
+        })
+    }
+}
+
 /// The complete finite domain accepted by a final ordering node.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -141,9 +210,11 @@ impl TryFrom<Wire> for SortSpec {
                 start_micros,
                 end_micros,
             } => Self::closed_window(
-                &event_time_column,
-                crate::EventTime::from_micros(start_micros),
-                crate::EventTime::from_micros(end_micros),
+                SortWindow::from_history(
+                    &event_time_column,
+                    crate::EventTime::from_micros(start_micros),
+                    crate::EventTime::from_micros(end_micros),
+                )?,
                 w.state_budget,
             )?,
         }
@@ -180,25 +251,13 @@ impl SortSpec {
     }
     /// Selects one UTC half-open window, finalized at watermark or normal EOF.
     /// # Errors
-    /// Requires a nonempty time column, start < end and a `UInt32` row budget.
-    pub fn closed_window(
-        column: &str,
-        start: crate::EventTime,
-        end: crate::EventTime,
-        budget: StateBudget,
-    ) -> Result<Self> {
-        if column.is_empty() || start >= end {
-            return Err(invalid(
-                "sort.spec.history",
-                "invalid_literal",
-                "closed window requires a nonempty timestamp and start < end",
-            ));
-        }
+    /// Rejects row budgets larger than `UInt32` indices can address.
+    pub fn closed_window(window: SortWindow, budget: StateBudget) -> Result<Self> {
         Ok(Self {
             history: SortHistory::ClosedWindow {
-                event_time_column: column.into(),
-                start_micros: start.as_micros(),
-                end_micros: end.as_micros(),
+                event_time_column: window.event_time_column,
+                start_micros: window.start.as_micros(),
+                end_micros: window.end.as_micros(),
             },
             ..Self::bounded_source(budget)?
         })

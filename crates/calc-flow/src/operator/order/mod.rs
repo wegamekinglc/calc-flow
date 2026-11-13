@@ -21,11 +21,11 @@ mod spec;
 mod tests;
 mod work;
 pub(crate) use spec::validate_fetch;
-pub use spec::{SortHistory, SortKey, SortSpec, SortTies};
+pub use spec::{SortHistory, SortKey, SortSpec, SortTies, SortWindow};
 
 /// Complete-history ordering with copied inputs and a node-owned peak budget.
 pub struct BoundedOrderOperator {
-    name: String,
+    name: Arc<str>,
     by: Vec<SortKey>,
     fetch: Option<u64>,
     spec: SortSpec,
@@ -34,7 +34,7 @@ pub struct BoundedOrderOperator {
     input: [Port; 1],
     output: [Port; 1],
     pool: Arc<OwnedStatePool>,
-    _declaration: MemoryReservation,
+    declaration: Arc<MemoryReservation>,
     stream: Option<StreamState>,
     config: crate::DataFusionConfig,
 }
@@ -106,16 +106,11 @@ impl BoundedOrderOperator {
                 ));
             }
         }
-        let pool = Arc::new(OwnedStatePool::new(
-            Arc::new(UnboundedMemoryPool::default()),
-            "bounded_order copy_visible_v2 owned peak",
-            "bounded_order max_bytes",
-        ));
-        pool.set_limit(Some(spec.state_budget().max_bytes()))
-            .map_err(owned::error)?;
+        let pool = state_pool(spec.state_budget().max_bytes())?;
         let erased: Arc<dyn MemoryPool> = pool.clone();
         let bound = owned::add(owned::mul(owned::schema_quote(&schema)?, 4)?, 4096)?;
-        let declaration = owned::reserve(&erased, bound, "declaration schema/metadata")?;
+        let bound = owned::add(bound, owned::add(name.len(), 256)?)?;
+        let declaration = owned::reserve(&erased, bound, "declaration schema/metadata/name")?;
         let fresh_by = by.clone();
         drop(by);
         let by = fresh_by;
@@ -151,7 +146,7 @@ impl BoundedOrderOperator {
                 Some(schema),
             )?],
             pool,
-            _declaration: declaration,
+            declaration: Arc::new(declaration),
             stream: None,
             config: crate::DataFusionConfig::default(),
         })
@@ -267,9 +262,29 @@ impl BoundedOrderOperator {
         state.capture = None;
         Ok(())
     }
+    fn finite_pool(&self) -> Result<(Arc<OwnedStatePool>, MemoryReservation)> {
+        let pool = state_pool(self.spec.state_budget().max_bytes())?;
+        let erased: Arc<dyn MemoryPool> = pool.clone();
+        let declaration = owned::reserve(&erased, self.declaration.size(), "finite declaration")?;
+        Ok((pool, declaration))
+    }
+    async fn finite(
+        &self,
+        input: &Batch,
+        run: &crate::RunContext,
+        pool: Arc<dyn MemoryPool>,
+        declaration: MemoryReservation,
+    ) -> Result<owned::OwnedBatch> {
+        let check = || run.check_cancelled();
+        let history = self.finite_input(input, &pool, &check)?;
+        self.validate_sequence(&history, &pool, &check)?;
+        self.finalize_finite(history, pool, Arc::new(declaration), run)
+            .await
+    }
     fn finite_input(
         &self,
         raw: &Batch,
+        pool: &Arc<dyn MemoryPool>,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<owned::OwnedBatch> {
         self.input[0].validate(raw, "sort.input")?;
@@ -284,9 +299,17 @@ impl BoundedOrderOperator {
                 ),
             ));
         }
-        let pool: Arc<dyn MemoryPool> = self.pool.clone();
-        owned::normalize(raw, &self.columns, &pool, Some(&self.domain), check)
+        owned::normalize(raw, &self.columns, pool, Some(&self.domain), check)
     }
+}
+fn state_pool(limit: u64) -> Result<Arc<OwnedStatePool>> {
+    let pool = Arc::new(OwnedStatePool::new(
+        Arc::new(UnboundedMemoryPool::default()),
+        "bounded_order copy_visible_v2 owned peak",
+        "bounded_order max_bytes",
+    ));
+    pool.set_limit(Some(limit)).map_err(owned::error)?;
+    Ok(pool)
 }
 fn workspace_bound(history: &owned::OwnedBatch, keys: usize) -> Result<usize> {
     work::validate_concat(history)?;
@@ -325,14 +348,11 @@ impl BatchOperator for BoundedOrderOperator {
         inputs: &BTreeMap<String, Batch>,
         context: &BatchOperatorContext<'_>,
     ) -> Result<BTreeMap<String, Batch>> {
-        let check = || context.run.check_cancelled();
         let input = inputs
             .get("input")
             .ok_or_else(|| invalid("sort.input", "invalid_literal", "missing input"))?;
-        let history = self.finite_input(input, &check)?;
-        let pool: Arc<dyn MemoryPool> = self.pool.clone();
-        self.validate_sequence(&history, &pool, &check)?;
-        let result = self.finalize_finite(history, context.run).await?;
+        let (pool, declaration) = self.finite_pool()?;
+        let result = self.finite(input, context.run, pool, declaration).await?;
         Ok(BTreeMap::from([("output".into(), result.batch)]))
     }
 }

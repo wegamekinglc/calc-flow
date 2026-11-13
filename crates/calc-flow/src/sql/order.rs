@@ -1,5 +1,5 @@
 //! AST authority shared by Rust and Python's explicit ordering declarations.
-use crate::{EventTime, Result, SortSpec, StateBudget, dataframe::invalid};
+use crate::{EventTime, Result, SortSpec, SortWindow, StateBudget, dataframe::invalid};
 use datafusion::sql::{
     parser::Statement as DFStatement,
     planner::IdentNormalizer,
@@ -219,9 +219,11 @@ fn sql_budget(args: &[FunctionArg], start: usize) -> Result<StateBudget> {
 }
 fn window_spec(args: &[FunctionArg]) -> Result<SortSpec> {
     SortSpec::closed_window(
-        &string(&args[1])?,
-        EventTime::from_micros(signed(&args[2])?),
-        EventTime::from_micros(signed(&args[3])?),
+        SortWindow::from_history(
+            &string(&args[1])?,
+            EventTime::from_micros(signed(&args[2])?),
+            EventTime::from_micros(signed(&args[3])?),
+        )?,
         sql_budget(args, 4)?,
     )?
     .with_late_policy(late_policy(args.get(6))?)

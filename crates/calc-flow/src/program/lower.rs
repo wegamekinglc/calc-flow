@@ -562,7 +562,7 @@ impl Lowered {
             ordering: self.projection_ordering(table, &schema),
             schema,
             kind: if *append { "with_columns" } else { "project" },
-            query: None,
+            query: Some(operator.query_text().to_owned()),
         })
     }
     async fn prepare_filter(&self, table: &TableExpr, path: &str) -> Result<Prepared> {
@@ -591,7 +591,7 @@ impl Lowered {
             node: expression_node(&id, select, filter, input_schema, &schema),
             schema,
             kind: "filter",
-            query: None,
+            query: Some(operator.query_text().to_owned()),
             ordering: self.orderings[&input.0.id].clone(),
         })
     }

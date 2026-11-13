@@ -57,29 +57,27 @@ async fn test_order_retained_candidate_container_stays_charged() {
 
 #[tokio::test]
 async fn test_order_owned_budget_boundaries() {
-    // x:i64 uses declaration 25616, normalized H 9282; its certified backing
+    // x:i64 uses declaration 25877, normalized H 9282; its certified backing
     // is 1105. Concat/take 2210 + row indices/scratch 64 + control/key roles
-    // 16384 gives workspace 18658; compact output adds 9282 => peak 62838.
-    for (limit, success) in [(62_838, true), (62_837, false)] {
-        let mut op = operator(limit);
+    // 16384 gives workspace 18658; compact output adds 9282 => peak 63099.
+    for (limit, success) in [(63_099, true), (63_098, false)] {
+        let op = operator(limit);
         let input = raw(&op);
         let run = crate::RunContext::new(JsonMap::new(), None, CancellationToken::new()).unwrap();
-        let result = BatchOperator::process(
-            &mut op,
-            &BTreeMap::from([("input".into(), input)]),
-            &BatchOperatorContext { run: &run },
-        )
-        .await;
+        let (pool, declaration) = op.finite_pool().unwrap();
+        let result = op.finite(&input, &run, pool.clone(), declaration).await;
         assert_eq!(
             result.is_ok(),
             success,
             "finite peak {limit}: {:?}",
             result.err()
         );
-        assert!(op.pool.take_peak() <= limit as usize);
-        assert_eq!(op.pool.reserved(), 25_616);
+        assert!(pool.take_peak() <= limit as usize);
+        drop(result);
+        assert_eq!(pool.reserved(), 0);
+        assert_eq!(op.pool.reserved(), 25_877);
     }
-    for (limit, success) in [(432_676, true), (432_675, false)] {
+    for (limit, success) in [(432_937, true), (432_936, false)] {
         let mut op = operator(limit);
         let job = StreamJobContext::new(1, "order", JsonMap::new(), None, CancellationToken::new());
         let context = StreamOperatorContext::new(&job, "order", None);
@@ -99,8 +97,8 @@ async fn test_order_owned_budget_boundaries() {
         assert!(!op.stream.as_ref().unwrap().closed);
     }
     // Six-digit budget identities reduce restore's prepaid control decode by
-    // 32 bytes from the seven-digit probe (466322), giving this exact boundary.
-    for (limit, success) in [(466_290, true), (466_289, false)] {
+    // 32 bytes from the seven-digit probe (466322). The paid name adds 261.
+    for (limit, success) in [(466_551, true), (466_550, false)] {
         let mut source = operator(limit);
         let job = StreamJobContext::new(1, "order", JsonMap::new(), None, CancellationToken::new());
         let context = StreamOperatorContext::new(&job, "order", None);
@@ -129,7 +127,7 @@ async fn test_order_owned_budget_boundaries() {
 
 #[test]
 fn test_order_sequence_workspace_exact_boundary() {
-    for (limit, success) in [(56_016, true), (56_015, false)] {
+    for (limit, success) in [(56_277, true), (56_276, false)] {
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Int64, true),
             Field::new("seq", DataType::Int64, false),
@@ -166,8 +164,8 @@ fn test_order_sequence_workspace_exact_boundary() {
             crate::BatchMetadata::default(),
         )
         .unwrap();
-        let history = op.finite_input(&raw, &|| Ok(())).unwrap();
         let pool: Arc<dyn MemoryPool> = op.pool.clone();
+        let history = op.finite_input(&raw, &pool, &|| Ok(())).unwrap();
         let result = op.validate_sequence(&history, &pool, &|| Ok(()));
         assert_eq!(result.is_ok(), success, "sequence peak {limit}: {result:?}");
         assert!(op.pool.take_peak() <= limit as usize);
@@ -217,4 +215,46 @@ fn test_order_concat_string_offset_preflight_boundaries() {
     assert!(work::validate_string_capacity(&DataType::Utf8, i32::MAX as usize).is_ok());
     assert!(work::validate_string_capacity(&DataType::Utf8, i32::MAX as usize + 1).is_err());
     assert!(work::validate_string_capacity(&DataType::LargeUtf8, i32::MAX as usize + 1).is_ok());
+}
+
+#[tokio::test]
+async fn test_retiring_finite_work_keeps_its_quota_until_the_owner_drops() {
+    let mut op = operator(63_099);
+    let (old_pool, declaration) = op.finite_pool().unwrap();
+    let erased: Arc<dyn MemoryPool> = old_pool.clone();
+    let history = op.finite_input(&raw(&op), &erased, &|| Ok(())).unwrap();
+    let work = op
+        .final_work(history, erased, Arc::new(declaration))
+        .unwrap();
+    assert_eq!(old_pool.reserved(), 53_817);
+    let run = crate::RunContext::new(JsonMap::new(), None, CancellationToken::new()).unwrap();
+    let input = raw(&op);
+    let output = BatchOperator::process(
+        &mut op,
+        &BTreeMap::from([("input".into(), input)]),
+        &BatchOperatorContext { run: &run },
+    )
+    .await
+    .unwrap();
+    assert_eq!(output["output"].num_rows(), 1);
+    assert_eq!(
+        old_pool.reserved(),
+        53_817,
+        "new execution must not reset or refund old worker owners"
+    );
+    drop(work);
+    assert_eq!(old_pool.reserved(), 0);
+}
+
+#[test]
+fn test_gather_name_keeps_its_declaration_lease_after_operator_drop() {
+    let op = operator(8 << 20);
+    let pool = op.pool.clone();
+    let charged = pool.reserved();
+    let identity = crate::runtime::streaming::gather_work::GatherOperatorId::new(op.name.clone())
+        .with_reservation_owner(op.declaration.clone());
+    drop(op);
+    assert_eq!(pool.reserved(), charged);
+    drop(identity);
+    assert_eq!(pool.reserved(), 0);
 }

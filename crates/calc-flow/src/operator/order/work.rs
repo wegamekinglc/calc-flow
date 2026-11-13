@@ -14,7 +14,7 @@ use datafusion::{
 };
 use std::sync::Arc;
 
-struct FinalWork {
+pub(super) struct FinalWork {
     history: owned::OwnedBatch,
     by: Vec<SortKey>,
     ties: SortTies,
@@ -23,6 +23,7 @@ struct FinalWork {
     columns: Vec<String>,
     pool: Arc<dyn MemoryPool>,
     _workspace: MemoryReservation,
+    _declaration: Arc<MemoryReservation>,
 }
 impl FinalWork {
     fn execute(&self, check: &dyn Fn() -> Result<()>) -> Result<owned::OwnedBatch> {
@@ -78,8 +79,12 @@ impl OwnedCpuWork for FinalWork {
     }
 }
 impl BoundedOrderOperator {
-    fn final_work(&self, history: owned::OwnedBatch) -> Result<FinalWork> {
-        let pool: Arc<dyn MemoryPool> = self.pool.clone();
+    pub(super) fn final_work(
+        &self,
+        history: owned::OwnedBatch,
+        pool: Arc<dyn MemoryPool>,
+        declaration: Arc<MemoryReservation>,
+    ) -> Result<FinalWork> {
         let workspace = owned::reserve(
             &pool,
             workspace_bound(&history, self.by.len() + self.columns.len())?,
@@ -94,15 +99,18 @@ impl BoundedOrderOperator {
             columns: self.columns.clone(),
             pool,
             _workspace: workspace,
+            _declaration: declaration,
         })
     }
     pub(super) async fn finalize_finite(
         &self,
         history: owned::OwnedBatch,
+        pool: Arc<dyn MemoryPool>,
+        declaration: Arc<MemoryReservation>,
         run: &RunContext,
     ) -> Result<owned::OwnedBatch> {
         run.check_cancelled()?;
-        let work = self.final_work(history)?;
+        let work = self.final_work(history, pool, declaration)?;
         let stop = GatherStop::from_run(run);
         let output = tokio::task::spawn_blocking(move || work.run(&stop))
             .await
@@ -118,10 +126,13 @@ impl BoundedOrderOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<owned::OwnedBatch> {
         context.check_cancelled()?;
-        let work = self.final_work(history)?;
+        let work = self.final_work(history, self.pool.clone(), self.declaration.clone())?;
         let credit = owned::reserve(&work.pool, 1024, "sort worker control")?;
         let scope = context
-            .gather_client(GatherOperatorId::new(self.name.clone().into()))
+            .gather_client(
+                GatherOperatorId::new(self.name.clone())
+                    .with_reservation_owner(self.declaration.clone()),
+            )
             .scope()?;
         let ticket = scope
             .submit_work(work, credit, GatherStop::from_job(context.job()))

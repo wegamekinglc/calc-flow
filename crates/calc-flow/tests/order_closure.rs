@@ -62,9 +62,8 @@ async fn test_order_window_rejects_unknown_source_without_closure_before_open() 
             1,
             vec![SortKey::new("q", SortDirection::Ascending, NullPlacement::Last).unwrap()],
             SortSpec::closed_window(
-                "ts",
-                EventTime::from_micros(0),
-                EventTime::from_micros(10),
+                SortWindow::new("ts", EventTime::from_micros(0), EventTime::from_micros(10))
+                    .unwrap(),
                 StateBudget::new(2, 8 << 20).unwrap(),
             )
             .unwrap(),
@@ -109,9 +108,7 @@ fn test_order_window_requires_a_real_timestamp_column_at_declaration() {
     let exact = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)]));
     for time in ["missing", "x"] {
         let spec = SortSpec::closed_window(
-            time,
-            EventTime::from_micros(0),
-            EventTime::from_micros(10),
+            SortWindow::new(time, EventTime::from_micros(0), EventTime::from_micros(10)).unwrap(),
             StateBudget::new(2, 8 << 20).unwrap(),
         )
         .unwrap();

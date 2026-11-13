@@ -180,9 +180,7 @@ def test_sort_local_late_policy_rejects_unused_global_override():
     out = t.sort(
         [cf.SortKey("x")],
         spec=cf.SortSpec.closed_window(
-            "ts",
-            start_micros=0,
-            end_micros=10,
+            cf.SortWindow("ts", start_micros=0, end_micros=10),
             state_budget=cf.StateBudget(2, 8 << 20),
             late_policy="drop",
         ),

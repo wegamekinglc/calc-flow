@@ -6,7 +6,7 @@ mod checkpoint;
 mod cross_section;
 mod distinct;
 pub(crate) mod order;
-pub use order::{BoundedOrderOperator, SortHistory, SortKey, SortSpec, SortTies};
+pub use order::{BoundedOrderOperator, SortHistory, SortKey, SortSpec, SortTies, SortWindow};
 mod expression;
 pub use distinct::{DistinctHistory, DistinctOperator, DistinctSpec};
 pub(crate) mod ingress;

@@ -148,9 +148,11 @@ async fn test_order_closed_window_comparison_requires_one_interval() -> Result<(
     let mut outputs = BTreeMap::new();
     for end in [10, 20] {
         let spec = SortSpec::closed_window(
-            "ts",
-            EventTime::from_micros(0),
-            EventTime::from_micros(end),
+            calc_flow::SortWindow::new(
+                "ts",
+                EventTime::from_micros(0),
+                EventTime::from_micros(end),
+            )?,
             StateBudget::new(10, 8 << 20)?,
         )?
         .with_sequence_by(vec!["seq".into()])?;
@@ -192,5 +194,140 @@ async fn test_order_closed_window_comparison_requires_one_interval() -> Result<(
             .iter()
             .any(|d| d.path == "options.portability.cutoff")
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_typed_projection_sequence_origin_agrees_with_strict_compile() -> Result<()> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Int64, true),
+        Field::new("seq", DataType::Int64, false),
+    ]));
+    let t = table_input("events", schema, InputOptions::default())?;
+    for derived in [false, true] {
+        let sequence = if derived {
+            t.column("seq")? + calc_flow::lit(1_i64)?
+        } else {
+            t.column("seq")?
+        };
+        let projected = t.select(vec![t.column("x")?.alias("x")?, sequence.alias("qseq")?])?;
+        let out = projected.sort(
+            vec![SortKey::new(
+                "x",
+                SortDirection::Ascending,
+                NullPlacement::Last,
+            )?],
+            SortSpec::bounded_source(StateBudget::new(10, 8 << 20)?)?
+                .with_sequence_by(vec!["qseq".into()])?,
+        )?;
+        let p = Program::new(
+            "typed_origin",
+            CompileMode::Batch,
+            BTreeMap::from([("out".into(), out)]),
+        )?;
+        let request = PortabilityRequest::new(
+            Comparison::FinalRelation,
+            HistoryScope::AcceptedHistory,
+            ComparisonCutoff::AllSourcesEof,
+        )?
+        .with_ordering(ComparisonOrdering::Declared);
+        let report = p
+            .analyze(
+                &UdfRegistry::new().snapshot(),
+                &AnalysisOptions {
+                    portability: Some(request.clone()),
+                },
+            )
+            .await?;
+        assert_eq!(
+            report.portability,
+            Some(if derived {
+                SupportStatus::Unsupported
+            } else {
+                SupportStatus::Supported
+            }),
+            "derived={derived}: {report:?}"
+        );
+        let compiled = p
+            .compile_batch(
+                &UdfRegistry::new().snapshot(),
+                &calc_flow::CompileOptions {
+                    portability: Some(request),
+                },
+            )
+            .await;
+        assert_eq!(compiled.is_ok(), !derived);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_typed_post_projection_preserves_only_original_comparator_fields() -> Result<()> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Int64, true),
+        Field::new("seq", DataType::Int64, false),
+    ]));
+    let t = table_input("events", schema, InputOptions::default())?;
+    let sorted = t.sort(
+        vec![SortKey::new(
+            "x",
+            SortDirection::Ascending,
+            NullPlacement::Last,
+        )?],
+        SortSpec::bounded_source(StateBudget::new(10, 8 << 20)?)?
+            .with_sequence_by(vec!["seq".into()])?,
+    )?;
+    for (index, columns) in [
+        vec![
+            sorted.column("x")?.alias("x")?,
+            sorted.column("seq")?.alias("qseq")?,
+        ],
+        vec![sorted.column("x")?.alias("x")?],
+        vec![
+            (sorted.column("x")? + calc_flow::lit(1_i64)?).alias("computed_x")?,
+            sorted.column("seq")?.alias("seq")?,
+        ],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let expected = if index == 0 {
+            SupportStatus::Supported
+        } else {
+            SupportStatus::Unknown
+        };
+        let out = sorted.select(columns)?;
+        let p = Program::new(
+            "typed_post",
+            CompileMode::Batch,
+            BTreeMap::from([("out".into(), out)]),
+        )?;
+        let request = PortabilityRequest::new(
+            Comparison::FinalRelation,
+            HistoryScope::AcceptedHistory,
+            ComparisonCutoff::AllSourcesEof,
+        )?
+        .with_ordering(ComparisonOrdering::Declared);
+        let report = p
+            .analyze(
+                &UdfRegistry::new().snapshot(),
+                &AnalysisOptions {
+                    portability: Some(request.clone()),
+                },
+            )
+            .await?;
+        assert_eq!(report.portability, Some(expected), "{report:?}");
+        assert_eq!(
+            p.compile_batch(
+                &UdfRegistry::new().snapshot(),
+                &calc_flow::CompileOptions {
+                    portability: Some(request),
+                }
+            )
+            .await
+            .is_ok(),
+            expected == SupportStatus::Supported
+        );
+    }
     Ok(())
 }
