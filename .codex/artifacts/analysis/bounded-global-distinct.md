@@ -992,3 +992,105 @@ The final issue handoff records the final pushed HEAD and one necessary CI
 snapshot. Sorting is the only new product behavior for incremental review;
 existing F1/F2 Approve is not represented as review of this later correction.
 No merge/delegation/wakeup changes are made, and DAL-519 stays in_progress.
+
+## UTC scalar-key assertion without host timezone data
+
+Test fix commit: `c838ce45d96b000de2a9062446a88572fb2c8fe0`.
+The actual Windows failure on f398b41b was
+https://github.com/wegamekinglc/calc-flow/actions/runs/43320594922/job/131540233359.
+The downloaded log at 2026-11-12 23:07:52 UTC shows the original UTC schema
+equality passed, then Python materialization failed:
+
+```text
+python/tests/test_bounded_global_distinct.py:495
+rows = {tuple(row[name] for name in names) for row in result.to_pylist()}
+ModuleNotFoundError: No module named 'tzdata'
+zoneinfo._common.ZoneInfoNotFoundError: 'No time zone found with key UTC'
+1 failed, 3006 passed, 5 skipped in 48.71s
+```
+
+Only the existing scalar-key test changes. Its exact Arrow schema equality
+still checks all 15 key types, including timestamp[us] naive and timestamp[us,
+UTC], before any comparison conversion. All input values, nullable columns,
+sliced duplicate input and complete tuple/NULL expectations are preserved.
+For value materialization only, a separate immutable table replaces the UTC
+column with its int64 epoch-microsecond representation. The independent
+expected UTC tick literal is 0, corresponding exactly to the original
+1970-01-01T00:00:00+00:00 input. The original result/schema stays UTC; no cast to
+a naive timestamp, Windows skip, production dependency or gate change is made.
+
+The following exact isolated-process command was run before and after the fix:
+
+```sh
+PYTHONTZPATH='' target/venv/bin/python - <<'PY'
+import sys
+import zoneinfo
+import pytest
+sys.modules['tzdata'] = None
+zoneinfo.ZoneInfo.clear_cache()
+assert zoneinfo.TZPATH == ()
+try:
+    zoneinfo.ZoneInfo('UTC')
+except zoneinfo.ZoneInfoNotFoundError:
+    print('Confirmed missing UTC timezone data: TZPATH=(), tzdata unavailable')
+else:
+    raise AssertionError('UTC timezone data must be unavailable for reproduction')
+raise SystemExit(pytest.main(['-q', 'python/tests/test_bounded_global_distinct.py::test_supported_scalar_keys_copy_slices_and_preserve_null_tuple_and_schema', '--tb=short']))
+PY
+```
+
+This removes both system timezone paths and the optional Python tzdata fallback
+for that process; it does not alter Arrow/native conversion or fake a passing
+result. An explicit ZoneInfo('UTC') probe confirms the missing-data condition.
+RED: exit1, 1 failed in 0.76s, the same ZoneInfoNotFoundError at result.to_pylist
+after schema equality. GREEN: exit0, 1 passed in 0.31s under the identical
+missing-data condition. This is a local Linux reproduction of the Windows
+dependency failure, not a claim that native Windows CI has already passed.
+
+The normal-environment command also passed, exit0 / 1 passed in 0.35s:
+
+```sh
+target/venv/bin/python -m pytest -q python/tests/test_bounded_global_distinct.py::test_supported_scalar_keys_copy_slices_and_preserve_null_tuple_and_schema
+```
+
+A second isolated missing-timezone process used the same TZPATH/fallback/cache
+setup and failing UTC availability probe, then selected the adjacent existing
+naive timestamp DF/SQL window and exact empty/nonnullable final checks:
+
+```python
+pytest.main(['-q', 'python/tests/test_bounded_global_distinct.py::test_window_literal_before_projection_and_real_watermark', 'python/tests/test_bounded_global_distinct.py::test_empty_history_emits_one_exact_nonnullable_final'])
+```
+
+It exited0: 3 passed in 0.41s. Thus four unique targeted cases pass without
+timezone data, with the scalar case also passing in the normal environment.
+No formal test case or full matrix/performance run was added.
+
+Actual scoped lint/format checks all exited0:
+
+```sh
+target/venv/bin/ruff check python/tests/test_bounded_global_distinct.py
+target/venv/bin/ruff format --check python/tests/test_bounded_global_distinct.py
+git diff --check
+```
+
+Ruff check passed; 1 file was already formatted. The existing CPython3.13.9
+Anaconda/PyArrow24/pytest9.2/Ruff0.16 environment was reused. Product source
+tree fingerprint remains
+`2f579edca3a2ba48b884d371b14a772e6edbd167b97bb2d9ea47da807c9314d6`,
+identical to f398b41b. A zipfile/byte comparison again confirms the imported
+native matches the previously rebuilt wheel and the installed capability
+producer matches current source:
+native SHA-256 `c7810be6d86b5c5798c398589f7d812fae571842bef2ba59eb0677768a1758f2`;
+wheel SHA-256 `3d561bedd821ef10acd7a3f21a50316479fcd6c649acecc4894c06ed9e7f7653`.
+There is no core/binding/Python-package change, so that matching build and
+the prior Rust lint/product checks are reused without rebuilding.
+
+The reviewer independently appended its catalog-increment Approve at f398b41b
+during this turn. Its untracked report was never edited or staged by this fix;
+current SHA-256 is
+`d3dc719231ec57c1e6cc31e1583049e651383fd76224a6b4e490f7ea6cd85837`.
+That report covers the earlier catalog increment, not this later UTC test
+correction. Original F1/F2 evidence and review remain preserved. The final
+handoff records the final pushed HEAD and one necessary CI snapshot; pending
+work remains with the existing coordinator wakeup. No merge/delegation/wakeup
+changes are made; DAL-519 remains in_progress.
