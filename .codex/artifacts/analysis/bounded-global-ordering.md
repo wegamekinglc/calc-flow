@@ -821,3 +821,11 @@ The final push/readiness/check snapshot is reported in the issue handoff.
 Pending checks and the required direct review of this refactoring block merge;
 DAL-520 remains in_progress unless a subsequent authorized merge actually
 completes. No required check or review is bypassed.
+
+Gate repair product commit: `d354968339feb8a5d3a696f427c2339ae64ae6ab`.
+All final targeted results and source/core/native/wheel hashes in this section
+apply to that product tree. The following evidence-only commit appends this
+mapping without changing the tested product files. The prior independent
+approval is for ab85af2c; the new helpers/rendering/test refactoring are the
+direct incremental review scope. External Codacy and final-head CI remain
+subject to the actual next snapshot and the existing checks wakeup.
