@@ -255,6 +255,61 @@ async fn native_input_identity_survives_dataframe_but_is_cleared_by_sql() -> cal
     Ok(())
 }
 
+#[tokio::test]
+async fn typed_projection_and_filter_preserve_only_retained_temporal_identity()
+-> calc_flow::Result<()> {
+    let source = ordered_input()?;
+    let projected = source.select(vec![
+        source.column("symbol")?.alias("symbol")?,
+        source.column("ts")?.alias("ts")?,
+        source.column("seq")?.alias("seq")?,
+        source.column("x")?.alias("x")?,
+    ])?;
+    let filtered = projected.filter(projected.column("x")?.gt(lit(0_i64)?))?;
+    let added = source.with_columns(vec![(source.column("x")? + lit(1_i64)?).alias("y")?])?;
+    let dropped = source.select(vec![
+        source.column("symbol")?.alias("symbol")?,
+        source.column("ts")?.alias("ts")?,
+        source.column("x")?.alias("x")?,
+    ])?;
+    let sql = projected.sql("SELECT * FROM input")?;
+    let sql_filtered = sql.filter(sql.column("x")?.gt(lit(0_i64)?))?;
+    for (name, table, retained) in [
+        ("project", projected, true),
+        ("filter", filtered, true),
+        ("with_columns", added, true),
+        ("drop_sequence", dropped, false),
+        ("sql_filter", sql_filtered, false),
+    ] {
+        let p = Program::new(
+            name,
+            CompileMode::Batch,
+            BTreeMap::from([("out".into(), table)]),
+        )?;
+        let report = p
+            .analyze(&UdfRegistry::new().snapshot(), &AnalysisOptions::default())
+            .await?;
+        let out = report
+            .nodes
+            .iter()
+            .find(|n| n.path == "outputs.out")
+            .unwrap();
+        for mode in [&out.batch, &out.stream] {
+            assert_eq!(
+                mode.ordering.temporal_identity.is_some(),
+                retained,
+                "{name}: {report:?}"
+            );
+            if let Some(identity) = &mode.ordering.temporal_identity {
+                assert_eq!(identity.entity_by, vec!["symbol"]);
+                assert_eq!(identity.event_time, "ts");
+                assert_eq!(identity.sequence_by, vec!["seq"]);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn readonly_sql_constructor_keeps_public_query_path() -> calc_flow::Result<()> {
     let source = input("events")?;

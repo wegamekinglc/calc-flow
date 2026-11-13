@@ -549,3 +549,88 @@ Follow-up fix commit: `31dbcb9118951bea35c9a915d2622cd52f057ec2`. All final foll
 source/native/wheel fingerprints above apply to this product tree. The next
 commit only adds this mapping. The fixed reviewer report remains unchanged
 and unstaged; coordinator/reviewer incremental acceptance is still pending.
+
+## F4 incremental identity regression fix
+
+Base: `d1fb0cdc43276445c1ed1240ad95335701e91c14`, same checkout,
+branch and PR606. The incremental reviewer accepted G1/F1/F2/F3 and found
+one regression: the real typed DF query introduced for F3 caused the SQL
+classifier to overwrite the temporal identity already proven during typed
+lowering. This section only covers F4 and its directly affected checks;
+the earlier verification remains scoped to its recorded product trees.
+
+The existing reviewer reproducer was rerun unchanged before the fix:
+
+```sh
+cargo test --locked -p calc-flow --test relational_validation native_input_identity_survives_dataframe_but_is_cleared_by_sql -- --exact --nocapture
+# RED exit101: 0 passed, 1 failed, 14 filtered; line242 expected DF identity Some.
+```
+
+A focused adjacent regression was then added and run before production edits:
+
+```sh
+cargo test --locked -p calc-flow --test relational_validation typed_projection_and_filter_preserve_only_retained_temporal_identity -- --exact --nocapture
+# RED exit101: 0 passed, 1 failed, 15 filtered; typed project lost identity.
+```
+
+`query_analysis::classify` now restores only `temporal_identity` from the
+typed declaration for project/with_columns/filter when the actual query has
+`RowLocal` proof. All other SQL facts and ordering classification keep their
+existing logic. Typed lowering's real AST source and comparator mappings from
+F3 remain unchanged. Ordinary SQL still clears identity, and a later typed
+filter cannot resurrect it. The new test checks both batch and stream facts
+for retained-key projection, filter, with_columns, dropped sequence, and
+SQL followed by filter. Retained identities must have the expected entity,
+event-time and sequence fields. No API/schema/layout/analysis revision or
+complexity gate changes are part of this fix.
+
+Final-source verification:
+
+```sh
+cargo test --locked -p calc-flow --test relational_validation native_input_identity_survives_dataframe_but_is_cleared_by_sql -- --exact --nocapture
+# GREEN exit0: 1 passed, 15 filtered.
+cargo test --locked -p calc-flow --test relational_validation typed_projection_and_filter_preserve_only_retained_temporal_identity -- --exact --nocapture
+# GREEN exit0: 1 passed, 15 filtered; five batch/stream boundary cases.
+cargo test --locked -p calc-flow --test order_analysis typed
+# GREEN exit0: 2 passed, 3 filtered; F3 arithmetic sequence rejection,
+# pure rename admission, retained/renamed versus removed/computed comparator fields,
+# and strict compile agreement.
+cargo clippy --locked -p calc-flow --lib --test relational_validation --test order_analysis -- -D warnings
+# exit0, no warnings.
+cargo fmt --all --check
+# exit0.
+git diff --check
+# exit0.
+```
+
+Cargo rebuilt the core Rust source in this reused checkout; the test binaries
+are `target/debug/deps/relational_validation-1cee3573b1bf334c` and
+`target/debug/deps/order_analysis-305bae3649da4286`. Core build fingerprint
+`calc-flow-c4242eaab5409a3b` records features `[]`. The same1208-file
+source fingerprint scheme described above gives the following final product
+tree provenance (the base SHA identifies the parent, not an unchanged tree):
+
+```json
+{
+  "base_head": "d1fb0cdc43276445c1ed1240ad95335701e91c14",
+  "source_sha256": "00407774fb44bbd1c5524a7d4d1a07df97eefa0072f56768214c132bf324f2bb",
+  "source_file_count": 1208,
+  "rust_artifact": "target/debug/deps/libcalc_flow-c4242eaab5409a3b.rlib",
+  "rust_artifact_sha256": "b9b69039d68f37af4513868fee19f32f634fa65b1e320edef05116594d83d655",
+  "rust_features": "[]"
+}
+```
+
+No Python/native product test was run for F4, and no new wheel is claimed.
+The prior matching Python wheel/native evidence belongs to the d1fb0cdc
+product tree; it is not evidence of testing this identity fix through Python.
+G1/F1/F2 and other unaffected results are reused rather than rerun. No full
+matrix, coverage, performance, merge or delegation was started.
+
+The frozen v2 API note remains byte-identical, SHA256
+`b4a087ef52cb9b3a43803666e13365dfce544205a6af8c97b88cb34dd8758624`.
+The reviewer report remains byte-identical and unstaged, SHA256
+`9f11bcdadbcaebf04ba95cdf88bb9d385c7c6b39a05bae78c1122e4c018c70b4`.
+Only core query analysis, its direct relational regression, and this appended
+evidence are included. F4 independent incremental review remains for the
+coordinator/reviewer; DAL-520 stays in_progress.

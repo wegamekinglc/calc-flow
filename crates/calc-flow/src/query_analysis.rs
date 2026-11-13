@@ -1117,6 +1117,13 @@ fn classify(
             proof = sql.proof;
             aggregate = sql.aggregate;
             ordering = sql.ordering;
+            if matches!(node.kind.as_str(), "project" | "with_columns" | "filter")
+                && proof == sql::Proof::RowLocal
+            {
+                ordering
+                    .temporal_identity
+                    .clone_from(&node.ordering.temporal_identity);
+            }
             support = if schema_known {
                 SupportStatus::Supported
             } else {
