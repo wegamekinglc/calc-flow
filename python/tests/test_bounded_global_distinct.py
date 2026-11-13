@@ -214,7 +214,7 @@ def test_mixed_dag_shared_owner_schema_export_and_r9_analysis():
     )
     assert after.collect_schema() == pa.schema([pa.field("z", pa.int64())])
     report = program.analyze(cf.Runtime()).query
-    assert (report.schema_version, report.analysis_revision) == (2, 10)
+    assert (report.schema_version, report.analysis_revision) == (2, 11)
     document = program.to_project().model_dump()
     assert (
         len(

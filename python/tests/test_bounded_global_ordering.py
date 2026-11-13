@@ -165,7 +165,7 @@ def test_analysis_r10_stable_final_order_and_unproved_selection():
         )
         program = cf.Program("facts", mode="batch", outputs={"out": out})
         report = program.analyze(options=cf.AnalysisOptions(portability=request)).query
-        assert report.analysis_revision == 10
+        assert report.analysis_revision == 11
         assert report.portability == expected
         if expected == "supported":
             program.compile_batch(portability=request)

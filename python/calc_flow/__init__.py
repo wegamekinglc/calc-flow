@@ -131,6 +131,13 @@ from calc_flow.symbolic import (
     window,
     with_late_output,
 )
+from calc_flow.symbolic.over import (
+    AnalyticExpr,
+    OverOrder,
+    OverSpec,
+    OverWindow,
+    RowsFrame,
+)
 from calc_flow.symbolic.query_analysis import (
     AnalysisOptions,
     Comparison,
@@ -163,6 +170,11 @@ ProviderContext = _native.ProviderContext
 RunResult = _native.RunResult
 
 __all__ = [
+    "AnalyticExpr",
+    "OverOrder",
+    "OverSpec",
+    "OverWindow",
+    "RowsFrame",
     "SortKey",
     "SortSpec",
     "SortWindow",

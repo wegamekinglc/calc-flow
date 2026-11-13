@@ -13,6 +13,8 @@ pub(crate) struct OrderDeclaration {
     pub by: Vec<crate::SortKey>,
     pub fetch: Option<u64>,
     pub spec: crate::SortSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analytic: Option<crate::operator::over::Declaration>,
 }
 impl OrderDeclaration {
     pub(super) fn ordering(&self) -> QueryOrderingFacts {
@@ -63,11 +65,20 @@ impl OrderDeclaration {
             update: UpdateKind::Append,
             finality: QueryFinality::GroupFinal,
             ordering: self.ordering(),
-            reason: format!(
-                "bounded_order_v1/copy_visible_v2: same accepted H and cut; full-H candidates, sequence validation, sorting/output/live captures use an owned-only peak budget; borrowed ingress and other owners excluded; {closure}; stable ties require reproducible non-NULL sequence fields checked unique over H; k/offset use UInt32 indices; local policy={:?}, layout={}",
-                self.spec.late_policy(),
-                self.spec.state_layout()
-            ),
+            reason: if let Some(analytic) = &self.analytic {
+                format!(
+                    "bounded_over_v1/copy_visible_v2: complete accepted H; {closure}; reproducible sequence checked non-NULL and globally unique; partition/ROWS functions={:?}; checked integer SUM rejects arithmetic_overflow at every output; owned-only peak includes frame/new columns/sort/output/live captures; local late_policy={:?} layout={}",
+                    analytic.expressions,
+                    self.spec.late_policy(),
+                    self.spec.state_layout()
+                )
+            } else {
+                format!(
+                    "bounded_order_v1/copy_visible_v2: same accepted H and cut; full-H candidates, sequence validation, sorting/output/live captures use an owned-only peak budget; borrowed ingress and other owners excluded; {closure}; stable ties require reproducible non-NULL sequence fields checked unique over H; k/offset use UInt32 indices; local policy={:?}, layout={}",
+                    self.spec.late_policy(),
+                    self.spec.state_layout()
+                )
+            },
         }
     }
     pub(super) fn obligations(
@@ -151,7 +162,7 @@ pub(super) fn validate(
     use std::collections::BTreeSet;
     for (root, _) in proofs
         .iter()
-        .filter(|(_, proof)| proof.2 == "bounded_order")
+        .filter(|(_, proof)| matches!(proof.2.as_str(), "bounded_order" | "bounded_over"))
     {
         let mut sources = BTreeSet::new();
         let valid = distinct::walk(

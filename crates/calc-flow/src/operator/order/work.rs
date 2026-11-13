@@ -21,6 +21,7 @@ pub(super) struct FinalWork {
     offset: u64,
     fetch: Option<u64>,
     columns: Vec<String>,
+    analytic: Option<crate::operator::over::Declaration>,
     pool: Arc<dyn MemoryPool>,
     _workspace: MemoryReservation,
     _declaration: Arc<MemoryReservation>,
@@ -34,6 +35,10 @@ impl FinalWork {
         let input = concat_batches(table.schema(), table.batches()).map_err(owned::error)?;
         let indices = self.sorted_indices(&input)?;
         let batch = take_batch(&input, &indices, check)?;
+        let batch = match &self.analytic {
+            Some(declaration) => crate::operator::over::evaluate(&batch, declaration, check)?,
+            None => batch,
+        };
         owned::normalize(&batch, &self.columns, &pool, None, check)
     }
     fn sorted_indices(&self, input: &RecordBatch) -> Result<datafusion::arrow::array::UInt32Array> {
@@ -79,22 +84,47 @@ impl BoundedOrderOperator {
         pool: Arc<dyn MemoryPool>,
         declaration: Arc<MemoryReservation>,
     ) -> Result<FinalWork> {
-        let workspace = owned::reserve(
-            &pool,
-            workspace_bound(&history, self.by.len() + self.columns.len())?,
-            "sort workspace/output",
-        )?;
+        let base = workspace_bound(&history, self.by.len() + self.columns.len())?;
+        let extra = self
+            .analytic
+            .as_ref()
+            .map(|d| crate::operator::over::workspace_bound(&history, d))
+            .transpose()?
+            .unwrap_or(0);
+        let workspace = owned::reserve(&pool, owned::add(base, extra)?, "sort workspace/output")?;
         Ok(FinalWork {
             history,
             by: self.by.clone(),
             ties: self.spec.ties().clone(),
             offset: self.spec.offset(),
             fetch: self.fetch,
-            columns: self.columns.clone(),
+            columns: self.output[0]
+                .schema()
+                .unwrap()
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .collect(),
+            analytic: self.analytic.clone(),
             pool,
             _workspace: workspace,
             _declaration: declaration,
         })
+    }
+    fn work_failure(&self, failure: AdmissionFailure) -> crate::CalcFlowError {
+        match failure {
+            AdmissionFailure::Budget { stage, source } if self.is_over() => {
+                crate::CalcFlowError::OperatorReason {
+                    node_id: self.name.to_string(),
+                    reason_code: crate::StreamingFailureReason::StateBudgetExceeded,
+                    message: format!(
+                        "state_budget_exceeded: copy_visible_v2 analytic worker {stage}; required allocation rejected, limit={} bytes: {source}",
+                        self.spec.state_budget().max_bytes()
+                    ),
+                }
+            }
+            other => admission_error(other),
+        }
     }
     pub(super) async fn finalize_finite(
         &self,
@@ -121,7 +151,12 @@ impl BoundedOrderOperator {
     ) -> Result<owned::OwnedBatch> {
         context.check_cancelled()?;
         let work = self.final_work(history, self.pool.clone(), self.declaration.clone())?;
-        let credit = owned::reserve(&work.pool, 1024, "sort worker control")?;
+        let role = if self.is_over() {
+            "analytic worker control"
+        } else {
+            "sort worker control"
+        };
+        let credit = owned::reserve(&work.pool, 1024, role)?;
         let scope = context
             .gather_client(
                 GatherOperatorId::new(self.name.clone())
@@ -131,7 +166,7 @@ impl BoundedOrderOperator {
         let ticket = scope
             .submit_work(work, credit, GatherStop::from_job(context.job()))
             .await
-            .map_err(admission_error)?;
+            .map_err(|failure| self.work_failure(failure))?;
         let output = ticket.finish().await?;
         context.check_cancelled()?;
         Ok(output.value)

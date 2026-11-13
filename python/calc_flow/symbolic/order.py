@@ -362,11 +362,12 @@ def _require_capability(analyzer, role, spec):
 def projection_query(node):
     from calc_flow.symbolic.lower.segments import _cstr_seq, _quote_identifier
     from calc_flow.symbolic.lower.sql import _walk_nodes
+    from calc_flow.symbolic.over import native_plan as analytic_plan
 
     if node.op.name != "project" or not any(
-        child.op.name == "bounded_order"
+        child.op.name in {"bounded_order", "bounded_over"}
         or child.op.name == "sql"
-        and native_plan(child) is not None
+        and (native_plan(child) is not None or analytic_plan(child) is not None)
         for child in _walk_nodes(node.args[0])
     ):
         return None

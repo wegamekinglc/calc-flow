@@ -788,7 +788,7 @@ pub(in crate::operator) fn add(a: usize, b: usize) -> Result<usize> {
 pub(in crate::operator) fn mul(a: usize, b: usize) -> Result<usize> {
     a.checked_mul(b).ok_or_else(|| error("accounting overflow"))
 }
-fn align(n: usize) -> Result<usize> {
+pub(in crate::operator) fn align(n: usize) -> Result<usize> {
     let rounded = mul(add(n, 63)? / 64, 64)?;
     if rounded > isize::MAX as usize {
         Err(error("layout exceeds isize"))

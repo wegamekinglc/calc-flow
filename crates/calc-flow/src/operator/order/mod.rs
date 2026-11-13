@@ -15,12 +15,15 @@ use datafusion::{
 use std::{collections::BTreeMap, sync::Arc};
 mod checkpoint;
 mod late;
+#[cfg(test)]
+mod over_tests;
 mod sequence;
 mod spec;
 #[cfg(test)]
 mod tests;
 mod work;
 pub(crate) use spec::validate_fetch;
+pub(in crate::operator) use spec::{SequenceColumnsSchema, SortBudgetSchema, SortLatePolicySchema};
 pub use spec::{SortHistory, SortKey, SortSpec, SortTies, SortWindow};
 
 /// Complete-history ordering with copied inputs and a node-owned peak budget.
@@ -28,6 +31,7 @@ pub struct BoundedOrderOperator {
     name: Arc<str>,
     by: Vec<SortKey>,
     fetch: Option<u64>,
+    analytic: Option<super::over::Declaration>,
     spec: SortSpec,
     domain: crate::DistinctHistory,
     columns: Vec<String>,
@@ -85,6 +89,7 @@ impl BoundedOrderOperator {
             name: name.into(),
             by,
             fetch,
+            analytic: None,
             spec,
             domain,
             columns,
@@ -96,11 +101,79 @@ impl BoundedOrderOperator {
             config: crate::DataFusionConfig::default(),
         })
     }
+    /// Declares the shared bounded analytic evaluator.
+    /// # Errors
+    /// Rejects unsupported schema, names, order, or analytic operands.
+    #[doc(hidden)]
+    pub fn new_over(
+        name: &str,
+        schema: SchemaRef,
+        expressions: Vec<crate::AnalyticExpr>,
+        spec: crate::OverSpec,
+    ) -> Result<Self> {
+        let report = |error| match error {
+            crate::CalcFlowError::OperatorReason { .. } => qualify(name, error),
+            other => super::over::schema::remap(other),
+        };
+        let mut operator = Self::new(name, schema, spec.order().keys()?, None, spec.sort_spec()?)
+            .map_err(report)?;
+        let declaration = super::over::Declaration { spec, expressions };
+        let pool: Arc<dyn MemoryPool> = operator.pool.clone();
+        let extra = super::over::declaration_bound(&declaration)?;
+        let lease = owned::reserve(
+            &pool,
+            owned::add(operator.declaration.size(), extra)?,
+            "analytic declaration/output schema",
+        )
+        .map_err(report)?;
+        operator.declaration = Arc::new(lease);
+        let output_schema = super::over::schema::output_schema(
+            operator.input[0].schema().unwrap(),
+            &declaration.expressions,
+            &declaration.spec,
+        )?;
+        operator.analytic = Some(declaration.clone());
+        operator.output = [Port::with_schema_ref(
+            "output",
+            BatchKind::Table,
+            true,
+            Some(output_schema),
+        )?];
+        Ok(operator)
+    }
+    fn qualify(&self, error: crate::CalcFlowError) -> crate::CalcFlowError {
+        qualify(
+            &self.name,
+            if self.is_over() {
+                super::over::schema::remap(error)
+            } else {
+                error
+            },
+        )
+    }
+    fn analytic_error(&self, error: crate::CalcFlowError) -> crate::CalcFlowError {
+        if self.is_over() {
+            self.qualify(error)
+        } else {
+            error
+        }
+    }
+    pub(crate) fn is_over(&self) -> bool {
+        self.analytic.is_some()
+    }
+    pub(crate) fn state_kind(&self) -> &str {
+        if self.is_over() {
+            "bounded_over_v1"
+        } else {
+            "bounded_order_v1"
+        }
+    }
     pub(crate) fn declaration(&self) -> crate::query_analysis::order::OrderDeclaration {
         crate::query_analysis::order::OrderDeclaration {
             by: self.by.clone(),
             fetch: self.fetch,
             spec: self.spec.clone(),
+            analytic: self.analytic.clone(),
         }
     }
     pub(crate) fn spec(&self) -> &SortSpec {
@@ -114,7 +187,7 @@ impl BoundedOrderOperator {
             let pool = self.pool.clone();
             let erased: Arc<dyn MemoryPool> = pool.clone();
             let control = owned::reserve(&erased, 4096 + self.metric_storage(), "stream control")
-                .map_err(|e| qualify(&self.name, e))?;
+                .map_err(|e| self.qualify(e))?;
             self.stream = Some(StreamState {
                 pool,
                 history: vec![],
@@ -162,7 +235,7 @@ impl BoundedOrderOperator {
         let pool: Arc<dyn MemoryPool> = state.pool.clone();
         let combined = owned::combine(
             &state.history,
-            self.output[0].schema().unwrap(),
+            self.input[0].schema().unwrap(),
             &self.columns,
             &pool,
             &|| context.check_cancelled(),
@@ -374,6 +447,16 @@ impl OperatorMetadata for BoundedOrderOperator {
         &self.output
     }
     fn configuration(&self) -> JsonMap {
+        if let Some(analytic) = &self.analytic {
+            return BTreeMap::from([
+                ("kind".into(), serde_json::json!("bounded_over_v1")),
+                ("spec".into(), serde_json::json!(analytic.spec)),
+                (
+                    "expressions".into(),
+                    serde_json::json!(analytic.expressions),
+                ),
+            ]);
+        }
         BTreeMap::from([
             ("kind".into(), serde_json::json!("bounded_order_v1")),
             ("by".into(), serde_json::json!(self.by)),
@@ -392,8 +475,12 @@ impl BatchOperator for BoundedOrderOperator {
         let input = inputs
             .get("input")
             .ok_or_else(|| invalid("sort.input", "invalid_literal", "missing input"))?;
-        let (pool, declaration) = self.finite_pool()?;
-        let result = self.finite(input, context.run, pool, declaration).await?;
+        let result = async {
+            let (pool, declaration) = self.finite_pool()?;
+            self.finite(input, context.run, pool, declaration).await
+        }
+        .await
+        .map_err(|error| self.analytic_error(error))?;
         Ok(BTreeMap::from([("output".into(), result.batch)]))
     }
 }
@@ -419,14 +506,13 @@ impl StreamOperator for BoundedOrderOperator {
         if ingress != "input" {
             return Err(owned::error("unknown ingress"));
         }
-        self.input[0].validate(&raw, "sort.input")?;
+        self.input[0]
+            .validate(&raw, "sort.input")
+            .map_err(|error| self.analytic_error(error))?;
         if self.stream.as_ref().is_some_and(|state| state.closed) {
-            return self
-                .closed_data(raw, context)
-                .map_err(|e| qualify(&self.name, e));
+            return self.closed_data(raw, context).map_err(|e| self.qualify(e));
         }
-        self.admit_data(raw, context)
-            .map_err(|e| qualify(&self.name, e))
+        self.admit_data(raw, context).map_err(|e| self.qualify(e))
     }
 
     async fn on_watermark(
@@ -440,7 +526,7 @@ impl StreamOperator for BoundedOrderOperator {
         {
             self.close(context, output)
                 .await
-                .map_err(|e| qualify(&self.name, e))?;
+                .map_err(|e| self.qualify(e))?;
         }
         self.ensure_stream()?;
         self.stream.as_mut().unwrap().watermark = Some(watermark);
@@ -454,7 +540,7 @@ impl StreamOperator for BoundedOrderOperator {
     ) -> Result<()> {
         self.close(context, output)
             .await
-            .map_err(|e| qualify(&self.name, e))
+            .map_err(|e| self.qualify(e))
     }
     fn reset(&mut self) -> Result<()> {
         self.stream = None;
@@ -466,7 +552,7 @@ impl StreamOperator for BoundedOrderOperator {
     ) -> Result<()> {
         self.capture_checked(&|| context.check_cancelled())
             .map(|_| ())
-            .map_err(|e| qualify(&self.name, e))
+            .map_err(|e| self.qualify(e))
     }
     async fn restore_async(
         &mut self,
@@ -474,14 +560,13 @@ impl StreamOperator for BoundedOrderOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
         self.restore_with_context(snapshot, context)
-            .map_err(|e| qualify(&self.name, e))
+            .map_err(|e| self.qualify(e))
     }
     fn checkpoint(&mut self, _epoch: crate::Epoch) -> Result<crate::OperatorStateSnapshot> {
-        self.capture().map_err(|e| qualify(&self.name, e))
+        self.capture().map_err(|e| self.qualify(e))
     }
     fn restore(&mut self, snapshot: &crate::OperatorStateSnapshot) -> Result<()> {
-        self.restore_capture(snapshot)
-            .map_err(|e| qualify(&self.name, e))
+        self.restore_capture(snapshot).map_err(|e| self.qualify(e))
     }
 }
 

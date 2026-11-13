@@ -96,7 +96,7 @@ impl BoundedOrderOperator {
         }
         let combined = owned::combine(
             history,
-            self.output[0].schema().unwrap(),
+            self.input[0].schema().unwrap(),
             &self.columns,
             pool,
             check,

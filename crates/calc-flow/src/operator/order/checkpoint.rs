@@ -31,6 +31,8 @@ struct Control {
     accounting_version: u32,
     ingress_policy: String,
     spec: SortSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    analytic: Option<crate::operator::over::Declaration>,
     columns: Vec<String>,
     by: Vec<super::SortKey>,
     fetch: Option<u64>,
@@ -63,9 +65,9 @@ fn schema_digest(schema: &datafusion::arrow::datatypes::SchemaRef) -> String {
         .schema_to_fb(schema);
     hex::encode(Sha256::digest(encoded.finished_data()))
 }
-fn inline(control: &StateSegment, layout: u32) -> JsonMap {
+fn inline(control: &StateSegment, layout: u32, kind: &str) -> JsonMap {
     BTreeMap::from([
-        ("state_kind".into(), json!("bounded_order_v1")),
+        ("state_kind".into(), json!(kind)),
         ("state_layout".into(), json!(layout)),
         ("accounting_version".into(), json!(1)),
         ("ingress_policy".into(), json!("copy_visible_v2")),
@@ -86,7 +88,14 @@ impl BoundedOrderOperator {
     }
     fn descriptor_bound(&self) -> Result<usize> {
         self.input.iter().chain(&self.output).try_fold(
-            16_384 + self.metric_storage() * 4,
+            owned::add(
+                16_384 + self.metric_storage() * 4,
+                self.analytic
+                    .as_ref()
+                    .map(crate::operator::over::declaration_bound)
+                    .transpose()?
+                    .unwrap_or(0),
+            )?,
             |n, p| {
                 owned::add(
                     n,
@@ -123,7 +132,7 @@ impl BoundedOrderOperator {
         )?;
         let history = owned::combine(
             &state.history,
-            self.output[0].schema().unwrap(),
+            self.input[0].schema().unwrap(),
             &self.columns,
             &pool,
             check,
@@ -138,7 +147,7 @@ impl BoundedOrderOperator {
             check,
         )?;
         let snapshot = OperatorStateSnapshot {
-            inline_metadata: inline(&control, self.spec.state_layout()),
+            inline_metadata: inline(&control, self.spec.state_layout(), self.state_kind()),
             segments: BTreeMap::from([
                 ("control".into(), control),
                 ("data".into(), data.segment.clone()),
@@ -158,11 +167,12 @@ impl BoundedOrderOperator {
     ) -> Result<StateSegment> {
         let state = self.stream.as_ref().unwrap();
         let control = Control {
-            state_kind: "bounded_order_v1".into(),
+            state_kind: self.state_kind().into(),
             state_layout: self.spec.state_layout(),
             accounting_version: 1,
             ingress_policy: "copy_visible_v2".into(),
             spec: self.spec.clone(),
+            analytic: self.analytic.clone(),
             columns: self.columns.clone(),
             by: self.by.clone(),
             fetch: self.fetch,
@@ -223,7 +233,7 @@ impl BoundedOrderOperator {
         snapshot: &OperatorStateSnapshot,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<RestoreCandidate> {
-        let segment = validate_snapshot(snapshot, self.spec.state_layout())?;
+        let segment = validate_snapshot(snapshot, self.spec.state_layout(), self.state_kind())?;
         self.ensure_stream()?;
         let pool: Arc<dyn MemoryPool> = self.pool.clone();
         let (control, scratch) = self.read_control(segment, &pool)?;
@@ -278,7 +288,7 @@ impl BoundedOrderOperator {
         validate_ipc(data.bytes(), control.retained_rows, self.columns.len())?;
         let _decode = decode_lease(data, control, pool, self.columns.len())?;
         let (raw, _metadata) =
-            decode_raw(data, meta, self.output[0].schema().unwrap(), pool, check)?;
+            decode_raw(data, meta, self.input[0].schema().unwrap(), pool, check)?;
         if raw.num_rows() != control.retained_rows {
             return Err(mismatch("history row count mismatch"));
         }
@@ -287,13 +297,14 @@ impl BoundedOrderOperator {
         Ok(history)
     }
     fn validate_control(&self, control: &Control) -> Result<()> {
-        validate_header(control, self.spec.state_layout())?;
+        validate_header(control, self.spec.state_layout(), self.state_kind())?;
         self.validate_identity(control)?;
         validate_cut(control)?;
         self.validate_metrics(control)
     }
     fn validate_identity(&self, control: &Control) -> Result<()> {
-        if control.spec != self.spec
+        if control.analytic != self.analytic
+            || control.spec != self.spec
             || control.columns != self.columns
             || control.by != self.by
             || control.fetch != self.fetch
@@ -362,9 +373,13 @@ fn encode_metadata(
     )?;
     metadata::encode(batch.metadata(), lease, check)
 }
-fn validate_snapshot(snapshot: &OperatorStateSnapshot, layout: u32) -> Result<&StateSegment> {
+fn validate_snapshot<'a>(
+    snapshot: &'a OperatorStateSnapshot,
+    layout: u32,
+    kind: &str,
+) -> Result<&'a StateSegment> {
     let control = segment(snapshot, "control")?;
-    if snapshot.segments.len() != 3 || snapshot.inline_metadata != inline(control, layout) {
+    if snapshot.segments.len() != 3 || snapshot.inline_metadata != inline(control, layout, kind) {
         return Err(mismatch(
             "policy/state/layout/accounting/control identity mismatch",
         ));
@@ -464,8 +479,8 @@ fn decode_metadata(
         owned::reserve(pool, 0, "restore metadata")?,
     )
 }
-fn validate_header(c: &Control, layout: u32) -> Result<()> {
-    if c.state_kind != "bounded_order_v1"
+fn validate_header(c: &Control, layout: u32, kind: &str) -> Result<()> {
+    if c.state_kind != kind
         || c.state_layout != layout
         || c.accounting_version != 1
         || c.ingress_policy != "copy_visible_v2"

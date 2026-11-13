@@ -49,6 +49,11 @@ fn endpoint(table: &TableExpr, port: &str) -> PortEndpoint {
 }
 pub(super) fn children(table: &TableExpr, path: &str) -> Vec<(String, TableExpr, String)> {
     match &table.0.kind {
+        RelationKind::Over { input, sql, .. } => vec![(
+            "input".into(),
+            input.clone(),
+            format!("{path}.{}.value", if *sql { "sql.over" } else { "over" }),
+        )],
         RelationKind::Order { input, sql, .. } => vec![(
             "input".into(),
             input.clone(),
@@ -260,12 +265,24 @@ impl Lowered {
         let (kind, query) = relation_kind(table);
         self.declarations.push(Declaration {
             order: match &table.0.kind {
+                RelationKind::Over {
+                    expressions, spec, ..
+                } => Some(crate::query_analysis::order::OrderDeclaration {
+                    by: spec.order().keys().expect("validated order"),
+                    fetch: None,
+                    spec: spec.sort_spec().expect("validated domain"),
+                    analytic: Some(crate::operator::over::Declaration {
+                        spec: spec.clone(),
+                        expressions: expressions.clone(),
+                    }),
+                }),
                 RelationKind::Order {
                     by, fetch, spec, ..
                 } => Some(crate::query_analysis::order::OrderDeclaration {
                     by: by.clone(),
                     fetch: *fetch,
                     spec: spec.clone(),
+                    analytic: None,
                 }),
                 _ => None,
             },
@@ -325,12 +342,24 @@ impl Lowered {
         self.orderings.insert(table.0.id.clone(), ordering.clone());
         self.declarations.push(Declaration {
             order: match &table.0.kind {
+                RelationKind::Over {
+                    expressions, spec, ..
+                } => Some(crate::query_analysis::order::OrderDeclaration {
+                    by: spec.order().keys()?,
+                    fetch: None,
+                    spec: spec.sort_spec()?,
+                    analytic: Some(crate::operator::over::Declaration {
+                        spec: spec.clone(),
+                        expressions: expressions.clone(),
+                    }),
+                }),
                 RelationKind::Order {
                     by, fetch, spec, ..
                 } => Some(crate::query_analysis::order::OrderDeclaration {
                     by: by.clone(),
                     fetch: *fetch,
                     spec: spec.clone(),
+                    analytic: None,
                 }),
                 _ => None,
             },
@@ -384,6 +413,12 @@ impl Lowered {
     }
     async fn prepare(&self, table: &TableExpr, path: &str) -> Result<Prepared> {
         match &table.0.kind {
+            RelationKind::Over {
+                input,
+                expressions,
+                spec,
+                ..
+            } => self.prepare_over(table, input, expressions, spec),
             RelationKind::Order {
                 input,
                 by,
@@ -463,6 +498,41 @@ impl Lowered {
             }
             RelationKind::Sql { .. } => self.prepare_sql(table).await,
         }
+    }
+    fn prepare_over(
+        &self,
+        table: &TableExpr,
+        input: &TableExpr,
+        expressions: &[crate::AnalyticExpr],
+        spec: &crate::OverSpec,
+    ) -> Result<Prepared> {
+        let input_schema = &self.schemas[&input.0.id];
+        let op = crate::BoundedOrderOperator::new_over(
+            &node_id(table),
+            input_schema.clone(),
+            expressions.to_vec(),
+            spec.clone(),
+        )?;
+        let schema = crate::OperatorMetadata::output_ports(&op)[0]
+            .schema()
+            .unwrap()
+            .clone();
+        Ok(Prepared {
+            node: NodeSpec {
+                id: node_id(table),
+                operator: OperatorSpec::BoundedOver {
+                    expressions: expressions.to_vec(),
+                    spec: spec.clone(),
+                },
+                input_ports: vec![port_spec("input", input_schema)],
+                output_ports: vec![port_spec("output", &schema)],
+                position: None,
+            },
+            schema,
+            kind: "bounded_over",
+            query: None,
+            ordering: QueryOrderingFacts::default(),
+        })
     }
     fn prepare_order(
         &self,
@@ -762,6 +832,7 @@ fn native_edge(edge: &EdgeSpec) -> Result<Edge> {
 }
 fn relation_kind(table: &TableExpr) -> (&'static str, Option<String>) {
     match &table.0.kind {
+        RelationKind::Over { .. } => ("bounded_over", None),
         RelationKind::Order { .. } => ("bounded_order", None),
         RelationKind::Distinct { .. } => ("distinct", None),
         RelationKind::AsofJoin { .. } => ("stream_asof_join", None),
@@ -784,7 +855,20 @@ fn schema_diagnostic(
 ) -> crate::QueryDiagnostic {
     let (path, code, message) = match error {
         crate::CalcFlowError::InvalidArgument { field, message } => {
-            argument_error(path, field, message)
+            if let RelationKind::Over { sql, .. } = &table.0.kind {
+                let role = if *sql { "sql.over" } else { "over" };
+                let suffix = field.strip_prefix("over").unwrap_or("");
+                let (code, message) = message
+                    .split_once(": ")
+                    .unwrap_or(("schema_mismatch", &message));
+                (
+                    format!("{path}.{role}{suffix}"),
+                    code.into(),
+                    message.into(),
+                )
+            } else {
+                argument_error(path, field, message)
+            }
         }
         crate::CalcFlowError::DataFusion { message, .. } => {
             native_schema_error(table, path, &message)
@@ -894,6 +978,15 @@ fn node_operator(node: &NodeSpec, schemas: &PlannedPorts) -> Result<NodeOperator
     let inputs = schemas.inputs()?;
     let output = exact_port("output", &schemas.output)?;
     match &node.operator {
+        OperatorSpec::BoundedOver { expressions, spec } => {
+            Ok(crate::BoundedOrderOperator::new_over(
+                &node.id,
+                inputs[0].schema().unwrap().clone(),
+                expressions.clone(),
+                spec.clone(),
+            )?
+            .into())
+        }
         OperatorSpec::BoundedOrder { by, fetch, spec } => Ok(crate::BoundedOrderOperator::new(
             &node.id,
             inputs[0].schema().unwrap().clone(),

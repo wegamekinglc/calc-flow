@@ -124,7 +124,7 @@ async fn test_distinct_analysis_r10_exposes_conditional_finality_and_owned_peak(
         .analyze(&UdfRegistry::new().snapshot(), &options)
         .await
         .unwrap();
-    assert_eq!(report.analysis_revision, 10);
+    assert_eq!(report.analysis_revision, 11);
     let node = report
         .nodes
         .iter()

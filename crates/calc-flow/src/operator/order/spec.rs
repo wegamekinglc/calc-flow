@@ -374,7 +374,7 @@ impl JsonSchema for SortNullsSchema {
         schemars::json_schema!({"type":"string","enum":["first","last"]})
     }
 }
-struct SequenceColumnsSchema;
+pub(in crate::operator) struct SequenceColumnsSchema;
 impl JsonSchema for SequenceColumnsSchema {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "SortSequenceColumns".into()
@@ -383,7 +383,7 @@ impl JsonSchema for SequenceColumnsSchema {
         schemars::json_schema!({"type":"array","minItems":1,"uniqueItems":true,"items":{"type":"string","minLength":1}})
     }
 }
-struct SortBudgetSchema;
+pub(in crate::operator) struct SortBudgetSchema;
 impl JsonSchema for SortBudgetSchema {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "SortBudget".into()
@@ -392,7 +392,7 @@ impl JsonSchema for SortBudgetSchema {
         schemars::json_schema!({"type":"object","additionalProperties":false,"required":["max_rows","max_bytes"],"properties":{"max_rows":{"type":"integer","minimum":1,"maximum":4_294_967_295_u64},"max_bytes":{"type":"integer","minimum":1,"maximum":9_007_199_254_740_991_u64}}})
     }
 }
-struct SortLatePolicySchema;
+pub(in crate::operator) struct SortLatePolicySchema;
 impl JsonSchema for SortLatePolicySchema {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "SortLatePolicy".into()

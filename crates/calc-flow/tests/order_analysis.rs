@@ -58,7 +58,7 @@ async fn test_order_r10_proves_total_order_and_never_unordered_top_k_membership(
             )
             .await
             .unwrap();
-        assert_eq!(report.analysis_revision, 10);
+        assert_eq!(report.analysis_revision, 11);
         assert_eq!(report.portability, Some(expected), "{report:?}");
         let facts = report
             .nodes
