@@ -128,6 +128,7 @@ async fn exported_snapshot_hands_off_to_pgoutput_without_a_gap() {
     assert!(!first_cdc.metadata().attributes().contains_key("snapshot"));
 
     source.close().await.expect("joins the replication worker");
+    wait_for_inactive_slot(&client, "calc_flow_cdc_orders").await;
     client
         .batch_execute(
             "SELECT pg_drop_replication_slot('calc_flow_cdc_orders') \
@@ -138,6 +139,17 @@ async fn exported_snapshot_hands_off_to_pgoutput_without_a_gap() {
         )
         .await
         .expect("cleans CDC artifacts");
+    assert!(
+        client
+            .query_opt(
+                "SELECT slot_name FROM pg_replication_slots WHERE slot_name = $1",
+                &[&"calc_flow_cdc_orders"],
+            )
+            .await
+            .expect("checks CDC slot cleanup")
+            .is_none(),
+        "CDC cleanup retained its replication slot"
+    );
     drop(client);
     connection
         .await
@@ -300,6 +312,26 @@ async fn snapshot_bootstrap_preserves_an_existing_slot() {
         .await
         .expect("connection task joins")
         .expect("connection closes");
+}
+
+async fn wait_for_inactive_slot(client: &tokio_postgres::Client, slot: &str) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let row = client
+                .query_opt(
+                    "SELECT active FROM pg_replication_slots WHERE slot_name = $1",
+                    &[&slot],
+                )
+                .await
+                .expect("queries the closed CDC source's replication slot");
+            if row.is_none_or(|row| !row.get::<_, bool>(0)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("closed CDC replication slot becomes inactive within five seconds");
 }
 
 async fn next_data(source: &mut dyn calc_flow::StreamSource) -> calc_flow::Batch {

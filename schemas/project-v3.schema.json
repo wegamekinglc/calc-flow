@@ -977,6 +977,139 @@
       ],
       "type": "string"
     },
+    "DistinctHistory": {
+      "description": "Complete input domain for final-only DISTINCT.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The fixed finite cut promised by a bounded source.",
+          "properties": {
+            "kind": {
+              "const": "bounded_source",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "One fixed UTC half-open interval, finalized by watermark or normal EOF.",
+          "properties": {
+            "end_micros": {
+              "description": "Exclusive UTC microsecond coordinate.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "event_time_column": {
+              "description": "An unchanged or purely renamed timestamp input column.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "closed_window",
+              "type": "string"
+            },
+            "start_micros": {
+              "description": "Inclusive UTC microsecond coordinate.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "event_time_column",
+            "start_micros",
+            "end_micros"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DistinctLatePolicy": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "error"
+            },
+            "scope": {
+              "const": "envelope"
+            }
+          },
+          "required": [
+            "kind",
+            "scope"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "drop"
+            },
+            "metrics_version": {
+              "const": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "metrics_version"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DistinctSpec": {
+      "additionalProperties": false,
+      "description": "DISTINCT domain and mandatory owned peak limits.\n\nEvery input is copied. Unknown external backing temporarily borrowed during\nsynchronous admission is outside `max_bytes`; retained data is always owned.",
+      "if": {
+        "properties": {
+          "history": {
+            "properties": {
+              "kind": {
+                "const": "bounded_source"
+              }
+            }
+          }
+        }
+      },
+      "properties": {
+        "history": {
+          "$ref": "#/$defs/DistinctHistory"
+        },
+        "ingress_policy": {
+          "$ref": "#/$defs/IngressPolicy"
+        },
+        "late_policy": {
+          "$ref": "#/$defs/DistinctLatePolicy"
+        },
+        "state_budget": {
+          "$ref": "#/$defs/StateBudget"
+        }
+      },
+      "required": [
+        "ingress_policy",
+        "history",
+        "state_budget"
+      ],
+      "then": {
+        "properties": {
+          "late_policy": {
+            "properties": {
+              "kind": {
+                "const": "error"
+              }
+            }
+          }
+        }
+      },
+      "type": "object"
+    },
     "EdgeSpec": {
       "additionalProperties": false,
       "properties": {
@@ -1017,6 +1150,12 @@
         "version"
       ],
       "type": "object"
+    },
+    "IngressPolicy": {
+      "enum": [
+        "copy_visible_v2"
+      ],
+      "type": "string"
     },
     "JoinStateLimits": {
       "additionalProperties": false,
@@ -1239,6 +1378,31 @@
     },
     "OperatorSpec": {
       "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Final DISTINCT over an explicit finite history domain.",
+          "properties": {
+            "columns": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "distinct",
+              "type": "string"
+            },
+            "spec": {
+              "$ref": "#/$defs/DistinctSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "columns",
+            "spec"
+          ],
+          "type": "object"
+        },
         {
           "additionalProperties": false,
           "properties": {
@@ -3422,6 +3586,29 @@
           "type": "string"
         }
       ]
+    },
+    "StateBudget": {
+      "additionalProperties": false,
+      "description": "Maximum retained rows and operator-defined logical bytes.\n\nThe byte count is an operator-defined deterministic logical charge; it is\nnot a process-wide resident-memory measurement.\nRolling operators containing RSI, ATR or MACD bound participating peak storage,\nincluding isolated candidates, prepared output, scratch and live checkpoint\nsegments. This applies to both finite and streaming evaluation, including\nother rolling outputs in the same operator. Old-only rolling operators\nretain their retained-state limit and exclude checkpoint copies, including\nwhen explicitly declared with indicator state layout 5 or 6.\nIndicator logical footprints include observable Arrow buffer storage and\nArray/container descriptors, excluding private immutable Buffer owner\ncontrol blocks whose shared identity Arrow does not expose.\nOwned String, Box and Vec storage retain their defined logical charges.\nPure accounting owner-key/reservation indexes are not recursively charged;\nthey may only reference already funded owners and numerical charges. This\ndoes not exempt computation, row/key/history, schema, output, segment or\nworkspace containers, or shorten the funded lifetime of data in a lease.\nThe default uses the largest JSON-safe counters. Use [`StateBudget::new`]\nto impose operational row and byte limits.",
+      "properties": {
+        "max_bytes": {
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_rows": {
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_rows",
+        "max_bytes"
+      ],
+      "type": "object"
     },
     "StateConfig": {
       "additionalProperties": false,

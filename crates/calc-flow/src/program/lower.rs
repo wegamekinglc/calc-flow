@@ -49,6 +49,14 @@ fn endpoint(table: &TableExpr, port: &str) -> PortEndpoint {
 }
 pub(super) fn children(table: &TableExpr, path: &str) -> Vec<(String, TableExpr, String)> {
     match &table.0.kind {
+        RelationKind::Distinct { input, sql, .. } => vec![(
+            "input".into(),
+            input.clone(),
+            format!(
+                "{path}.{}.value",
+                if *sql { "sql.distinct" } else { "distinct" }
+            ),
+        )],
         RelationKind::AsofJoin { inputs, sql, .. } => inputs
             .iter()
             .enumerate()
@@ -246,6 +254,10 @@ impl Lowered {
         self.diagnostics.push(schema_diagnostic(table, path, error));
         let (kind, query) = relation_kind(table);
         self.declarations.push(Declaration {
+            distinct_spec: match &table.0.kind {
+                RelationKind::Distinct { spec, .. } => Some(spec.clone()),
+                _ => None,
+            },
             path: path.into(),
             kind: kind.into(),
             query,
@@ -297,6 +309,10 @@ impl Lowered {
         validate_schema(&schema, path)?;
         self.orderings.insert(table.0.id.clone(), ordering.clone());
         self.declarations.push(Declaration {
+            distinct_spec: match &table.0.kind {
+                RelationKind::Distinct { spec, .. } => Some(spec.clone()),
+                _ => None,
+            },
             path: path.into(),
             kind: kind.into(),
             query,
@@ -343,6 +359,13 @@ impl Lowered {
     }
     async fn prepare(&self, table: &TableExpr, path: &str) -> Result<Prepared> {
         match &table.0.kind {
+            RelationKind::Distinct {
+                input,
+                columns,
+                spec,
+                wildcard,
+                ..
+            } => self.prepare_distinct(table, input, columns, spec, *wildcard),
             RelationKind::AsofJoin { inputs, spec, sql } => self.prepare_asof(
                 table,
                 inputs,
@@ -408,6 +431,47 @@ impl Lowered {
             }
             RelationKind::Sql { .. } => self.prepare_sql(table).await,
         }
+    }
+    fn prepare_distinct(
+        &self,
+        table: &TableExpr,
+        input: &TableExpr,
+        columns: &[String],
+        spec: &crate::DistinctSpec,
+        wildcard: bool,
+    ) -> Result<Prepared> {
+        let schema = &self.schemas[&input.0.id];
+        let columns = if wildcard {
+            schema.fields().iter().map(|f| f.name().clone()).collect()
+        } else {
+            columns.to_vec()
+        };
+        let operator = crate::DistinctOperator::new(
+            &node_id(table),
+            schema.clone(),
+            columns.clone(),
+            spec.clone(),
+        )?;
+        let output = crate::OperatorMetadata::output_ports(&operator)[0]
+            .schema()
+            .unwrap()
+            .clone();
+        Ok(Prepared {
+            node: NodeSpec {
+                id: node_id(table),
+                operator: OperatorSpec::Distinct {
+                    columns: columns.clone(),
+                    spec: spec.clone(),
+                },
+                input_ports: vec![port_spec("input", schema)],
+                output_ports: vec![port_spec("output", &output)],
+                position: None,
+            },
+            schema: output,
+            kind: "distinct",
+            query: None,
+            ordering: QueryOrderingFacts::default(),
+        })
     }
     async fn prepare_projection(&self, table: &TableExpr, path: &str) -> Result<Prepared> {
         let RelationKind::Project {
@@ -519,6 +583,7 @@ impl Lowered {
             .declarations
             .iter()
             .map(|node| Declaration {
+                distinct_spec: node.distinct_spec.clone(),
                 path: node.path.clone(),
                 kind: node.kind.clone(),
                 query: node.query.clone(),
@@ -578,6 +643,7 @@ impl Lowered {
     }
     pub fn project(&self, mode: CompileMode) -> Result<ProjectSpec> {
         self.ensure_valid()?;
+        crate::pipeline::distinct::validate(&self.builder()?)?;
         let data_sources = if mode == CompileMode::Batch {
             crate::pipeline::external_names(self.bindings.inputs.values().cloned().collect())
                 .keys()
@@ -624,6 +690,7 @@ fn native_edge(edge: &EdgeSpec) -> Result<Edge> {
 }
 fn relation_kind(table: &TableExpr) -> (&'static str, Option<String>) {
     match &table.0.kind {
+        RelationKind::Distinct { .. } => ("distinct", None),
         RelationKind::AsofJoin { .. } => ("stream_asof_join", None),
         RelationKind::InnerJoin { .. } => ("stream_join", None),
         RelationKind::Window { .. } => ("window", None),
@@ -754,6 +821,13 @@ fn node_operator(node: &NodeSpec, schemas: &PlannedPorts) -> Result<NodeOperator
     let inputs = schemas.inputs()?;
     let output = exact_port("output", &schemas.output)?;
     match &node.operator {
+        OperatorSpec::Distinct { columns, spec } => Ok(crate::DistinctOperator::new(
+            &node.id,
+            inputs[0].schema().unwrap().clone(),
+            columns.clone(),
+            spec.clone(),
+        )?
+        .into()),
         OperatorSpec::StreamAsofJoin { spec } => Ok(crate::StreamAsofJoinOperator::new(
             &node.id,
             inputs[0].schema().expect("exact left").clone(),

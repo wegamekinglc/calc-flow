@@ -4,7 +4,9 @@ mod asof;
 mod batch;
 mod checkpoint;
 mod cross_section;
+mod distinct;
 mod expression;
+pub use distinct::{DistinctHistory, DistinctOperator, DistinctSpec};
 pub(crate) mod ingress;
 mod join;
 mod key_identity;
@@ -305,6 +307,7 @@ pub trait OperatorMetadata: Send + Sync + std::any::Any {
 /// rejects batch-only nodes (plan section 2.2).
 #[non_exhaustive]
 pub enum NodeOperator {
+    Distinct(DistinctOperator),
     Expression(ExpressionOperator),
     Sql(SqlOperator),
     SnapshotSql(SnapshotSqlOperator),
@@ -321,6 +324,7 @@ pub enum NodeOperator {
 impl NodeOperator {
     pub(crate) fn metadata(&self) -> &dyn OperatorMetadata {
         match self {
+            Self::Distinct(operator) => operator,
             Self::Expression(operator) => operator,
             Self::Sql(operator) => operator,
             Self::SnapshotSql(operator) => operator,
@@ -357,9 +361,16 @@ impl NodeOperator {
             Self::Expression(_)
                 | Self::Sql(_)
                 | Self::SnapshotSql(_)
+                | Self::Distinct(_)
                 | Self::StreamJoin(_)
                 | Self::StreamAsofJoin(_)
         )
+    }
+}
+
+impl From<DistinctOperator> for NodeOperator {
+    fn from(value: DistinctOperator) -> Self {
+        Self::Distinct(value)
     }
 }
 

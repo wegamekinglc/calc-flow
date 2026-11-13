@@ -65,7 +65,7 @@ async fn append_union_proves_unordered_eof_history() -> Result<()> {
             },
         )
         .await?;
-    assert_eq!((report.schema_version, report.analysis_revision), (2, 7));
+    assert_eq!((report.schema_version, report.analysis_revision), (2, 9));
     assert_eq!(
         report.portability,
         Some(SupportStatus::Supported),

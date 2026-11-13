@@ -69,6 +69,23 @@ def test_empty_runtime_capabilities_are_frozen_and_session_scoped() -> None:
             replay_safe=True,
         ),
         OperatorCapability(
+            kind="distinct",
+            version="1",
+            input_ports=(ProviderPort("input", "table", required=True),),
+            output_ports=(ProviderPort("output", "table", required=True),),
+            modes=("batch", "stream"),
+            finality="group_final_append_only",
+            requires_datafusion=True,
+            stateful=True,
+            microbatch_invariant=True,
+            requires_watermark=False,
+            checkpoint_support="checkpointed_stateful",
+            state_version=1,
+            state_layouts=(2, 3),
+            deterministic=True,
+            replay_safe=True,
+        ),
+        OperatorCapability(
             kind="expression",
             version="1",
             input_ports=(ProviderPort("input", "table", required=True),),
@@ -1006,6 +1023,8 @@ def test_capability_catalog_reports_every_durable_state_layout() -> None:
 
     assert operators["rolling"].state_layouts == (1, 2, 3, 4, 5, 6)
     assert operators["cross_section"].state_layouts == (1,)
+    assert operators["distinct"].state_version == 1
+    assert operators["distinct"].state_layouts == (2, 3)
     assert operators["stream_join"].state_version == 1
     assert operators["stream_join"].state_layouts == (1, 2, 3)
     assert operators["stream_asof_join"].state_version == 3

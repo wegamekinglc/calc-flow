@@ -1,8 +1,12 @@
 //! Read-only SQL relations composable with typed `DataFrame` declarations.
 
 mod asof_join;
+mod distinct;
 #[doc(hidden)]
 pub use asof_join::{AsofJoinQuery, asof_join_query};
+pub(crate) use distinct::window_time_column;
+#[doc(hidden)]
+pub use distinct::{DistinctQuery, distinct_query};
 mod inner_join;
 pub use inner_join::JoinOutputOrdering;
 #[doc(hidden)]
@@ -69,6 +73,9 @@ pub fn sql(query: &str, tables: BTreeMap<String, TableExpr>) -> Result<TableExpr
                 "normalized SQL aliases must be unique",
             ));
         }
+    }
+    if let Some(plan) = distinct_query(query, &tables.keys().cloned().collect::<Vec<_>>())? {
+        return tables[&plan.alias].distinct_sql_relation(plan.columns, plan.spec);
     }
     if let Some(relation) = joined_relation(query, &tables)? {
         return Ok(relation);

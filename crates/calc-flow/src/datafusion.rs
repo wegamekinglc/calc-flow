@@ -311,7 +311,7 @@ impl DataFusionRuntime {
         Self::new_with_pool(config, pool, Instant::now())
     }
 
-    fn new_with_pool(
+    pub(crate) fn new_with_pool(
         config: DataFusionConfig,
         pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
         started: Instant,

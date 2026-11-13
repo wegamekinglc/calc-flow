@@ -284,6 +284,11 @@ impl LateMetricSink for OperatorProgress {
             self.0.lock().install_late_metrics(next);
         }))
     }
+    fn prepare_restore(self: Arc<Self>, totals: LateMetricDelta) -> Result<PreparedLateMetrics> {
+        Ok(PreparedLateMetrics::new(move || {
+            self.0.lock().install_late_metrics(totals);
+        }))
+    }
 }
 
 pub(crate) struct OperatorTaskInputs {
@@ -835,7 +840,9 @@ async fn reset_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Res
     match &inputs.operator {
         CompiledStreamOperator::StreamJoin(_) => reset_join_metadata(inputs, task_id).await,
         CompiledStreamOperator::StreamAsofJoin(_) => reset_managed_asof(inputs, task_id).await,
-        CompiledStreamOperator::External(_) => reset_async_operator(inputs, task_id).await,
+        CompiledStreamOperator::External(_) | CompiledStreamOperator::Distinct(_) => {
+            reset_async_operator(inputs, task_id).await
+        }
         CompiledStreamOperator::Rolling(operator)
             if matches!(
                 operator.state_layout_version(),
@@ -852,7 +859,14 @@ async fn reset_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Res
 async fn reset_async_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<()> {
     inputs.context.bind_task_id(task_id);
     let restore = inputs.restore.as_ref().expect("restore presence checked");
-    let context = StreamOperatorContext::new(inputs.context.job(), &inputs.node_id, None);
+    let context = StreamOperatorContext::for_task(
+        inputs.context.job(),
+        &inputs.node_id,
+        None,
+        IngressProgressSnapshot::default(),
+        effective_output_budget(&inputs.outputs),
+        Arc::new(inputs.progress.clone()),
+    );
     let operation = async {
         inputs.operator.reset()?;
         inputs
@@ -861,7 +875,12 @@ async fn reset_async_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) 
             .await
     };
     match AssertUnwindSafe(operation).catch_unwind().await {
-        Ok(result) => result,
+        Ok(result) => {
+            result?;
+            inputs
+                .metrics
+                .observe_operator_window_metrics(&inputs.node_id, &inputs.progress.snapshot())
+        }
         Err(payload) => Err(CalcFlowError::TaskPanicked {
             task_id: task_id.as_u64(),
             message: panic_message(payload.as_ref()),

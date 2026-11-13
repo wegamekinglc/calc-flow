@@ -280,6 +280,19 @@ pub enum SourceSchema {
     DynamicOrUnknown,
 }
 
+/// Whether a connector promises a fixed finite input cut for this job.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceBoundedness {
+    /// A fixed finite cut; recovery continues the same cut.
+    Bounded,
+    /// The source has no finite cut.
+    Unbounded,
+    /// No boundedness proof was declared.
+    #[default]
+    Unknown,
+}
+
 /// Complete source capability descriptor sampled once during preflight.
 #[derive(Clone, Debug)]
 pub struct SourceCapabilities {
@@ -343,6 +356,10 @@ pub enum WatermarkPolicy {
 /// Async lifecycle contract for a continuous source connector.
 #[async_trait]
 pub trait StreamSource: Send {
+    /// Declares a fixed finite cut independently of replay, schema and batch size.
+    fn boundedness(&self) -> SourceBoundedness {
+        SourceBoundedness::Unknown
+    }
     /// Returns the descriptor that the runtime samples once before `open`.
     fn capabilities(&self) -> SourceCapabilities;
     /// Declares optional immutable managed input history before any I/O.
@@ -432,6 +449,7 @@ pub trait SourceCheckpointGate: Send + Sync {
 struct SourceAdapter<S> {
     source: S,
     capabilities: OnceLock<SourceCapabilities>,
+    boundedness: OnceLock<SourceBoundedness>,
 }
 
 impl<S: StreamSource> SourceAdapter<S> {
@@ -442,6 +460,9 @@ impl<S: StreamSource> SourceAdapter<S> {
 
 #[async_trait]
 impl<S: StreamSource> InternalStreamSource for SourceAdapter<S> {
+    fn boundedness(&self) -> SourceBoundedness {
+        *self.boundedness.get_or_init(|| self.source.boundedness())
+    }
     fn history_spec(&self) -> Option<crate::SourceHistorySpec> {
         self.source.history_spec()
     }
@@ -574,6 +595,7 @@ impl SourceBinding {
         let adapter = SourceAdapter {
             source,
             capabilities: OnceLock::new(),
+            boundedness: OnceLock::new(),
         };
         let inner = InternalSourceBinding::unconfigured(Box::new(adapter));
         Self { inner }

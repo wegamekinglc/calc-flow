@@ -1,0 +1,83 @@
+# Final DISTINCT over bounded history
+
+`TableExpr.distinct(columns, spec=...)` and the explicit SQL macros
+`CF_DISTINCT_BOUNDED(alias, max_rows, max_bytes)` and
+`CF_DISTINCT_WINDOW(alias, time_column, start_micros, end_micros, max_rows, max_bytes)`
+declare one final, unordered relation. They share the Rust operator and DataFusion
+DISTINCT implementation. Ordinary SQL `SELECT DISTINCT` keeps its per-batch behavior.
+
+Use `DistinctSpec.bounded_source(StateBudget(...))` for a source with an authoritative
+fixed finite cut. Streaming validates its descriptor before opening the source or
+sink, and emits once at real normal EOF. Unknown and unbounded sources are refused.
+Materialized Arrow sources declare boundedness; an arbitrary iterator does not.
+
+`DistinctSpec.closed_window("ts", start_micros=0, end_micros=10, state_budget=...)`
+accepts only timestamps in `[0,10)` and ignores NULL times. The time field need not
+be a key. A trustworthy watermark at or beyond 10, or normal EOF, closes the relation.
+An unbounded/unknown source needs a proved watermark route. Earlier watermarks do
+not discard still-open window members. Cancellation, errors and disconnects fail
+the job; they do not produce a successful final relation.
+
+Each window has a persistent local policy. Python adds `late_policy="drop"` to
+`DistinctSpec.closed_window`; Rust uses `.with_late_policy(LatePolicySpec::Drop
+{ metrics_version: 1 })?`; SQL accepts an optional final `'drop'` argument in
+`CF_DISTINCT_WINDOW`. The default is `error` with envelope scope. Its wire omits
+the policy field, preserving existing default declarations and layout2 state.
+Only selected windows accept Drop; side output and other metric versions are
+rejected before reading data.
+
+Global Program lateness arguments configure independent unmarked rolling or
+cross-section consumers. They never override a DISTINCT policy, including the
+default global `error`. Without such a consumer, global `drop` or nonzero lateness
+is rejected with a pointer to the local window spec. Separate Error and Drop
+nodes can share a graph; a shared declaration's fan-out keeps one owner.
+
+After watermark closure, Drop ignores NULL/outside-window rows and drops members
+without increasing accepted history, even when `max_rows` was already reached.
+It records `late_rows`, one `affected_batches` increment per complete Data, and
+the maximum checked `W-ts` lateness in microseconds. Error rejects the whole Data
+without changing these metrics. Both policies keep the already emitted final;
+neither emits a second relation. Schema/time errors, cancellation, counter overflow
+and reservation failures leave state and metrics unchanged. Finite execution
+retains the declaration but makes no late decisions.
+
+`max_rows` counts **accepted history including duplicates**, not unique keys. Two
+events `[1]`, `[1]` need two rows of history even though the final relation is `{1}`.
+Empty history emits one empty final with the exact declared projected schema.
+Supported keys are Boolean, signed/unsigned integers, strings/large strings, dates
+and microsecond timestamps (naive or UTC). NULL tuples group together. Result order
+is unspecified. Float, dictionary and nested keys are outside this version.
+
+`copy_visible_v2` copies visible scalar values into independent Arrow buffers.
+`max_bytes` limits the node's **owned participating peak**: its declarations,
+retained history, replacement candidates, tracked query workspace, prepared output,
+IPC scratch and live checkpoint captures. Reservations precede those allocations.
+The temporary synchronous borrow of external ingress is an explicit exception:
+its unknown parent allocation is excluded. Other graph owners, reusable sources,
+callers, allocator overhead outside this accounting and process RSS are excluded.
+Retained history never uses this exception. Dropping the caller's input may not
+release a graph/source owner; the DISTINCT node itself retains only its copy.
+
+The supported path is one exact-schema source through deterministic row-local
+DF/SQL operations, one DISTINCT, then row-local operations. Independent branches
+and shared outputs are supported. Stateful/snapshot/multi-source/array paths and
+nested DISTINCT are rejected. Window time must trace to the input unchanged or
+through a pure rename.
+
+Project format 3 exports `kind="distinct"`, ordered keys and a required
+`ingress_policy="copy_visible_v2"`. Native identity is `distinct_v2`, state version
+1, accounting 2. Error reads/writes layout2; Drop uses layout3, including zero or
+nonzero checkpointed metrics. Runtime inventory offers layouts `(2,3)`; a runtime
+offering only layout2 can still accept Error. Policy/layout/version mismatches
+are refused before source replay. Restoration installs totals instead of adding
+them again. Checkpoints preserve duplicate history, closed state, watermark and
+output sequence. Old draft layouts/policies are refused. Captures
+remain charged while alive. Finite execution starts fresh on every call; it has
+NULL batch snapshots and requires no reset between calls.
+
+Analysis schema 2/revision 9 reports conditional finality and binding obligations;
+it does not inspect input rows or promise a runtime budget will suffice.
+The capability is `distinct@1`, batch/stream, `group_final_append_only`, checkpoint
+layouts `(2,3)`. It has no unconditional watermark requirement; the selected window
+still performs its conditional closure check. Full regression and coverage run in
+CI; this feature does not assert a performance guarantee.

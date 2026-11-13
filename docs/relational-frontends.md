@@ -118,6 +118,29 @@ complete replacements with an explicit state budget, as described below. General
 joins, wider portable Arrow types, and comprehensive Polars compatibility remain
 outside this scope.
 
+## Explicit final DISTINCT
+
+| Frontend | Declaration | Batch | Stream |
+|----------|-------------|-------|--------|
+| Rust/Python DataFrame | `TableExpr.distinct(columns, spec)` (Python: `spec=`) | Complete finite input | One final relation at proved closure |
+| Rust/Python SQL | `CF_DISTINCT_BOUNDED` / `CF_DISTINCT_WINDOW` | Same native finalizer | Same native history owner |
+
+`DistinctSpec::bounded_source` / `DistinctSpec.bounded_source` requires a fixed
+finite source cut in stream mode. `closed_window` selects one half-open timestamp
+interval and requires a trustworthy watermark route or bounded EOF. Unknown and
+unbounded sources cannot enter bounded-source history. Source/sink opening and
+state-root creation follow these mandatory binding checks, without a portability
+opt-in. Ordinary SQL DISTINCT keeps its existing per-batch behavior.
+
+`copy_visible_v2` limits **owned participating peak**. Temporarily borrowed
+external ingress backing and other graph/source/caller owners are excluded;
+retained history and prepared output are independent copies. Duplicate accepted
+rows count toward `max_rows`. `distinct@1` supports batch/stream with state version
+1 and accounting 2. Window Error preserves layout2; local Drop uses layout3 with
+checkpointed late metrics. Global lateness arguments configure only independent
+unmarked rolling/cross-section consumers. Analysis uses schema 2/revision 9. See the
+[complete DISTINCT contract and examples](bounded-global-distinct.md).
+
 ## Explicit relation updates
 
 Both DataFrame and SQL declarations use the same immutable Program choice:

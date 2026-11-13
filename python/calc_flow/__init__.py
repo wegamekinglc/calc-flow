@@ -69,6 +69,7 @@ from calc_flow.runtime import (
     SinkDelivery,
     SinkRecovery,
     SourceBinding,
+    SourceBoundedness,
     SourceCapabilities,
     SourceDeliveryCapability,
     SourceEvent,
@@ -96,6 +97,7 @@ from calc_flow.symbolic import (
     ColumnExpr,
     CompileMode,
     CrossSectionGroup,
+    DistinctSpec,
     DurationFrame,
     EventTimeBucket,
     Expr,
@@ -158,6 +160,7 @@ ProviderContext = _native.ProviderContext
 RunResult = _native.RunResult
 
 __all__ = [
+    "DistinctSpec",
     "CompileMode",
     "AnalysisOptions",
     "Comparison",
@@ -282,6 +285,7 @@ __all__ = [
     "SinkRecovery",
     "SourceBinding",
     "SourceCapabilities",
+    "SourceBoundedness",
     "SourceDeliveryCapability",
     "SourceEvent",
     "SourceProvidedWatermarks",

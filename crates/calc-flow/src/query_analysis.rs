@@ -1,5 +1,6 @@
 //! Data-only history facts and explicit cross-lifecycle comparison checks.
 
+mod distinct;
 mod sql;
 mod updates;
 
@@ -389,6 +390,8 @@ impl Serialize for QueryNodeFacts {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Declaration {
+    #[serde(default)]
+    pub distinct_spec: Option<crate::DistinctSpec>,
     pub path: String,
     pub kind: String,
     pub query: Option<String>,
@@ -450,13 +453,51 @@ pub(crate) fn analyze_graph(graph: DeclarationGraph) -> Result<QueryAnalysis> {
         mut diagnostics,
         update_semantics,
     } = graph;
-    let AnalyzedNodes { by_path, proofs } = analyze_nodes(
+    if options
+        .portability
+        .as_ref()
+        .is_some_and(|r| r.cutoff == ComparisonCutoff::ClosedWindow)
+    {
+        let domains = declarations
+            .iter()
+            .filter_map(|d| d.distinct_spec.as_ref())
+            .filter_map(|s| match s.history() {
+                crate::DistinctHistory::ClosedWindow {
+                    start_micros,
+                    end_micros,
+                    ..
+                } => Some((*start_micros, *end_micros)),
+                crate::DistinctHistory::BoundedSource => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        if domains.len() > 1 {
+            diagnostic(
+                &mut diagnostics,
+                "options.portability.cutoff",
+                "finality_unproven",
+                SupportStatus::Unknown,
+                "comparison must resolve to one fixed DISTINCT interval",
+            );
+        }
+    }
+    let invalid_distinct_times = distinct::invalid_times(&declarations, &declared_edges);
+    let AnalyzedNodes {
+        mut by_path,
+        proofs,
+    } = analyze_nodes(
         declarations,
         &declared_edges,
         options.portability.as_ref(),
         &mut diagnostics,
         update_semantics,
     )?;
+    distinct::validate(
+        &mut by_path,
+        &proofs,
+        &declared_edges,
+        &invalid_distinct_times,
+        &mut diagnostics,
+    );
     let mut edges = analyze_edges(
         &by_path,
         &proofs,
@@ -483,7 +524,7 @@ pub(crate) fn analyze_graph(graph: DeclarationGraph) -> Result<QueryAnalysis> {
         .map(|_| conjunction(diagnostics.iter().map(|issue| issue.status)));
     Ok(QueryAnalysis {
         schema_version: 2,
-        analysis_revision: 7,
+        analysis_revision: 9,
         update_semantics,
         request: options.portability,
         portability,
@@ -533,6 +574,7 @@ fn analyze_nodes(
         .collect::<BTreeMap<_, _>>();
     let mut by_path = BTreeMap::<String, QueryNodeFacts>::new();
     let mut proofs = BTreeMap::new();
+    let mut distinct_paths = BTreeMap::<String, crate::DistinctSpec>::new();
     while !pending.is_empty() {
         let ready = pending
             .keys()
@@ -588,6 +630,21 @@ fn analyze_nodes(
             &by_path,
             diagnostics,
         );
+        if let Some(spec) = &node.distinct_spec {
+            distinct_paths.insert(node.path.clone(), spec.clone());
+        } else if proof == sql::Proof::RowLocal
+            && inputs.len() == 1
+            && let Some(spec) = distinct_paths.get(&inputs[0].source_path).cloned()
+        {
+            let parent = &by_path[&inputs[0].source_path];
+            facts.stream.history = parent.stream.history;
+            facts.stream.finality = parent.stream.finality;
+            facts.stream.reason.clone_from(&parent.stream.reason);
+            facts.stream.ordering = QueryOrderingFacts::default();
+            facts.batch.history = HistoryScope::CurrentBatch;
+            facts.batch.finality = QueryFinality::PerBatch;
+            distinct_paths.insert(node.path.clone(), spec);
+        }
         if !update_semantics.is_legacy() {
             updates::node(&node, &mut facts, proof, aggregate, diagnostics);
         }
@@ -734,7 +791,7 @@ fn analyze_edges(
             proofs[&edge.target_path].1
                 || matches!(
                     target_kind.as_str(),
-                    "union" | "stream_join" | "stream_asof_join"
+                    "union" | "distinct" | "stream_join" | "stream_asof_join"
                 )
                 || window_kind(target_kind),
         ) {
@@ -920,7 +977,11 @@ fn batch_facts(
         batch.reason =
             "one finite execute finalizes every nonempty window of its complete input".into();
     }
-    if matches!(node.kind.as_str(), "stream_join" | "stream_asof_join") {
+    if matches!(
+        node.kind.as_str(),
+        "distinct" | "stream_join" | "stream_asof_join"
+    ) {
+        batch.support = node.batch_support.unwrap_or(SupportStatus::Supported);
         batch.history = HistoryScope::CurrentBatch;
         batch.update = UpdateKind::Append;
         batch.finality = QueryFinality::PerBatch;
@@ -1080,6 +1141,36 @@ fn stream_only_kind(kind: &str) -> bool {
 }
 
 fn stream_facts(node: &Declaration, class: Classification) -> QueryModeFacts {
+    if let Some(spec) = &node.distinct_spec {
+        let (history, closure) = match spec.history() {
+            crate::DistinctHistory::BoundedSource => (
+                HistoryScope::AcceptedHistory,
+                "requires SourceBoundedness::Bounded and actual normal EOF".to_owned(),
+            ),
+            crate::DistinctHistory::ClosedWindow {
+                start_micros,
+                end_micros,
+                ..
+            } => (
+                HistoryScope::EventWindow,
+                format!(
+                    "fixed UTC [{start_micros},{end_micros}); requires a trusted watermark route or bounded EOF"
+                ),
+            ),
+        };
+        return QueryModeFacts {
+            support: node.stream_support.unwrap_or(SupportStatus::Supported),
+            history,
+            update: UpdateKind::Append,
+            finality: QueryFinality::GroupFinal,
+            ordering: QueryOrderingFacts::default(),
+            reason: format!(
+                "copy_visible_v2: owned-only participating peak; borrowed ingress and other graph owners excluded; duplicate accepted tuples count toward max_rows; {closure}; local late_policy={:?}; layout={}; equivalence is conditional on the same accepted set and successful budgets",
+                spec.late_policy(),
+                spec.state_layout()
+            ),
+        };
+    }
     let Classification {
         proof,
         aggregate,
@@ -1238,6 +1329,32 @@ fn obligations(
     diagnostics: &mut Vec<QueryDiagnostic>,
 ) {
     record_unknown_support(node, facts, diagnostics);
+    if let Some(spec) = &node.distinct_spec {
+        let domain = match spec.history() {
+            crate::DistinctHistory::BoundedSource => {
+                request.history == HistoryScope::AcceptedHistory
+                    && request.cutoff == ComparisonCutoff::AllSourcesEof
+            }
+            crate::DistinctHistory::ClosedWindow { .. } => matches!(
+                (request.history, request.cutoff),
+                (HistoryScope::EventWindow, ComparisonCutoff::ClosedWindow)
+                    | (
+                        HistoryScope::AcceptedHistory,
+                        ComparisonCutoff::AllSourcesEof
+                    )
+            ),
+        };
+        if request.comparison != Comparison::FinalRelation || !domain {
+            diagnostic(
+                diagnostics,
+                &format!("{}.stream.history", node.path),
+                "history_scope_mismatch",
+                SupportStatus::Unsupported,
+                "final DISTINCT requires its explicit complete domain and real closure; per-batch comparison is unsupported",
+            );
+        }
+        return;
+    }
     if matches!(node.kind.as_str(), "stream_join" | "stream_asof_join") {
         if request.comparison != Comparison::FinalRelation
             || request.cutoff != ComparisonCutoff::AllSourcesEof

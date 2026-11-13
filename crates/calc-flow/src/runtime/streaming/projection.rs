@@ -45,6 +45,7 @@ pub enum StreamingErrorCategory {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum StreamingFailureReason {
+    StateBudgetExceeded,
     JoinStateLimitExceeded,
     JoinMatchLimitExceeded,
     JoinCounterOverflow,
@@ -922,6 +923,25 @@ fn preflight_failure_fields(
     (category, message, component_kind, None)
 }
 
+fn distinct_source_failure<'a>(field: &'a str, message: &str) -> Option<(&'a str, &'static str)> {
+    let source = field.strip_prefix("stream.inputs.")?;
+    let (source, suffix) = source.rsplit_once('.')?;
+    crate::json::validate_portable_identifier("source", source).ok()?;
+    let detail = match (suffix, message.split_once(':')?.0) {
+        ("watermark_policy", "finality_unproven") => {
+            "finality_unproven/unknown: selected window requires a proved closure route"
+        }
+        ("boundedness", "source_unbounded") => {
+            "source_unbounded/unsupported: final DISTINCT requires a fixed finite cut"
+        }
+        ("boundedness", "source_boundedness_unproved") => {
+            "source_boundedness_unproved/unknown: final DISTINCT requires a declared fixed finite cut"
+        }
+        _ => return None,
+    };
+    Some((source, detail))
+}
+
 fn invalid_argument_failure_fields(
     field: &str,
     message: &str,
@@ -931,6 +951,14 @@ fn invalid_argument_failure_fields(
     Option<ComponentKind>,
     Option<String>,
 ) {
+    if let Some((source_id, detail)) = distinct_source_failure(field, message) {
+        return (
+            StreamingErrorCategory::Validation,
+            format!("{field}: {detail}"),
+            Some(ComponentKind::Source),
+            Some(source_id.into()),
+        );
+    }
     if let Some(value) = field.strip_prefix("operators.") {
         let operator_id = strip_field_suffix(value, &[".checkpoint_capability"]);
         if crate::json::validate_portable_identifier("operator", operator_id).is_err() {

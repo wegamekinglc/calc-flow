@@ -183,6 +183,10 @@ fn update_report(builder: &PipelineBuilder) -> Result<QueryAnalysis> {
             let (kind, query) = operator_declaration(op);
             let opaque = !op.udf_references().is_empty();
             Declaration {
+                distinct_spec: match op {
+                    NodeOperator::Distinct(op) => Some(op.spec().clone()),
+                    _ => None,
+                },
                 path: node_path(id),
                 kind: if opaque { "opaque" } else { kind }.into(),
                 query: if opaque { None } else { query },
@@ -285,6 +289,10 @@ async fn describe_operator(
     }
     let union_batch = union_batch_support(id, op, diagnostics);
     let declaration = Declaration {
+        distinct_spec: match op {
+            NodeOperator::Distinct(op) => Some(op.spec().clone()),
+            _ => None,
+        },
         path: node_path(id),
         kind: kind.into(),
         query,
@@ -335,6 +343,7 @@ fn operator_declaration(op: &NodeOperator) -> (&'static str, Option<String>) {
 
 fn stream_operator_kind(op: &NodeOperator) -> &'static str {
     match op {
+        NodeOperator::Distinct(_) => "distinct",
         NodeOperator::Union(_) => "union",
         NodeOperator::Window(_) => "window",
         NodeOperator::StreamJoin(_) => "stream_join",

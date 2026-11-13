@@ -941,6 +941,76 @@ fn _asof_join_query(query: &str, aliases: &Bound<'_, PyList>) -> PyResult<String
 }
 
 #[pyfunction]
+fn _distinct_query(query: &str, aliases: &Bound<'_, PyList>) -> PyResult<String> {
+    let aliases = aliases.extract::<Vec<String>>()?;
+    let description = match calc_flow::sql::distinct_query(query, &aliases) {
+        Ok(plan) => {
+            serde_json::to_value(plan).map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+        }
+        Err(calc_flow::CalcFlowError::InvalidArgument { field, message }) => {
+            let (code, message) = message
+                .split_once(": ")
+                .unwrap_or(("invalid_literal", &message));
+            serde_json::json!({"error":{"path":if field.starts_with("distinct") {format!("sql.{field}")} else {field},"code":code,"message":message}})
+        }
+        Err(error) => return Err(crate::error::to_py_err(error)),
+    };
+    serde_json::to_string(&description).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+}
+
+#[pyfunction]
+fn _distinct_schema<'py>(
+    py: Python<'py>,
+    spec: &str,
+    columns: Vec<String>,
+    schema: pyo3_arrow::PySchema,
+) -> PyResult<Bound<'py, PyAny>> {
+    use calc_flow::OperatorMetadata;
+    let spec = serde_json::from_str(spec)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("distinct.spec: {e}")))?;
+    let operator = calc_flow::DistinctOperator::new("schema", schema.into_inner(), columns, spec)
+        .map_err(|error| distinct_schema_error(py, error))?;
+    pyo3_arrow::PySchema::new(
+        operator.output_ports()[0]
+            .schema()
+            .expect("distinct exact schema")
+            .clone(),
+    )
+    .into_pyarrow(py)
+}
+
+fn distinct_schema_error(py: Python<'_>, error: calc_flow::CalcFlowError) -> PyErr {
+    let details = match &error {
+        calc_flow::CalcFlowError::InvalidArgument { field, message } => Some((
+            field.clone(),
+            message
+                .split_once(": ")
+                .map_or("invalid_literal", |(code, _)| code)
+                .to_owned(),
+        )),
+        calc_flow::CalcFlowError::OperatorReason {
+            reason_code: calc_flow::StreamingFailureReason::StateBudgetExceeded,
+            ..
+        } => Some((
+            "distinct.spec.state_budget".into(),
+            "state_budget_exceeded".into(),
+        )),
+        _ => None,
+    };
+    let exception = crate::error::to_py_err(error);
+    if let Some((path, code)) = details {
+        let value = exception.value(py);
+        if let Err(error) = value
+            .setattr("_calc_flow_distinct_path", path)
+            .and_then(|()| value.setattr("_calc_flow_distinct_code", code))
+        {
+            return error;
+        }
+    }
+    exception
+}
+
+#[pyfunction]
 fn _event_window_query(query: &str, aliases: &Bound<'_, PyList>) -> PyResult<String> {
     let aliases = aliases.extract::<Vec<String>>()?;
     let description = match calc_flow::sql::event_window_query(query, &aliases) {
@@ -998,6 +1068,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 fn register_query_planners(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(_distinct_query, module)?)?;
+    module.add_function(wrap_pyfunction!(_distinct_schema, module)?)?;
     module.add_function(wrap_pyfunction!(_union_all_queries, module)?)?;
     register_join_planners(module)?;
     module.add_function(wrap_pyfunction!(_event_window_query, module)?)?;
@@ -1027,6 +1099,116 @@ mod kafka_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_distinct_owned_history_releases_foreign_parent_before_eof() {
+        use calc_flow::{
+            CancellationToken, DistinctOperator, DistinctSpec, EdgeCollector, OperatorMetadata,
+            StateBudget, StreamJobContext, StreamOperator, StreamOperatorContext,
+        };
+        use pyo3::types::PyCapsule;
+        Python::initialize();
+        Python::attach(|py| {
+            let locals = PyDict::new(py);
+            py.run(c"import gc\nimport pyarrow as pa\npool=pa.default_memory_pool()\nbefore=pool.bytes_allocated()\nowner=pa.array(range(1048576), type=pa.int64())\nsliced=owner.slice(1,1)\ntable=pa.table({'x':sliced})\nassert table.get_total_buffer_size()==8388608",Some(&locals),Some(&locals)).unwrap();
+            let imported = {
+                let table = locals.get_item("table").unwrap().unwrap();
+                let capsule = table.call_method0("__arrow_c_stream__").unwrap();
+                pyo3_arrow::PyTable::from_arrow_pycapsule(capsule.cast::<PyCapsule>().unwrap())
+                    .unwrap()
+            };
+            let (records, schema) = imported.into_inner();
+            let raw =
+                calc_flow::Batch::table(records, calc_flow::BatchMetadata::default()).unwrap();
+            let mut op = DistinctOperator::new(
+                "owned",
+                schema,
+                vec!["x".into()],
+                DistinctSpec::bounded_source(StateBudget::new(1, 8 << 20).unwrap()),
+            )
+            .unwrap();
+            let job = StreamJobContext::new(
+                1,
+                "foreign",
+                calc_flow::JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            );
+            let context = StreamOperatorContext::new(&job, "owned", None);
+            let mut collector = EdgeCollector::new(op.output_ports().to_vec());
+            py.run(
+                c"owner=sliced=table=None\ngc.collect()",
+                Some(&locals),
+                Some(&locals),
+            )
+            .unwrap();
+            let before: usize = locals
+                .get_item("before")
+                .unwrap()
+                .unwrap()
+                .extract()
+                .unwrap();
+            let pool = locals.get_item("pool").unwrap().unwrap();
+            assert!(
+                pool.call_method0("bytes_allocated")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap()
+                    >= before + 8_388_608
+            );
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime
+                .block_on(op.process_data("input", raw, &context, &mut collector))
+                .unwrap();
+            py.run(c"gc.collect()", Some(&locals), Some(&locals))
+                .unwrap();
+            assert_eq!(
+                pool.call_method0("bytes_allocated")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                before,
+                "H must retain independent buffers while the foreign parent is already released"
+            );
+            assert!(collector.drain("output").is_empty());
+            runtime
+                .block_on(op.on_end(&context, &mut collector))
+                .unwrap();
+            let result = collector.drain("output");
+            assert_eq!(result.len(), 1);
+            let batch = result[0].as_data().unwrap();
+            let values = batch.table_payload().unwrap().batches()[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::Int64Array>()
+                .unwrap();
+            assert_eq!(values.iter().collect::<Vec<_>>(), vec![Some(1)]);
+        });
+    }
+    #[test]
+    fn test_distinct_query_bridge_exports_v2_policy() {
+        Python::initialize();
+        Python::attach(|py| {
+            let aliases = PyList::new(py, ["a"]).unwrap();
+            let module = PyModule::new(py, "distinct_bridge").unwrap();
+            register_query_planners(&module).unwrap();
+            let result = module
+                .getattr("_distinct_query")
+                .unwrap()
+                .call1((
+                    "SELECT DISTINCT x FROM CF_DISTINCT_BOUNDED('a', 2, 8388608)",
+                    aliases,
+                ))
+                .unwrap()
+                .extract::<String>()
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_str(&result).unwrap();
+            assert_eq!(value["spec"]["ingress_policy"], "copy_visible_v2");
+            assert_eq!(value["columns"], serde_json::json!(["x"]));
+        });
+    }
     use std::sync::Arc;
 
     use datafusion::{

@@ -23,6 +23,7 @@ use super::{
 
 pub(crate) enum CompiledBatchOperator {
     External(Box<dyn BatchOperator>),
+    Distinct(crate::DistinctOperator),
     Expression(ExpressionOperator),
     Sql(SqlOperator),
     Union(crate::UnionOperator),
@@ -48,6 +49,7 @@ impl CompiledBatchOperator {
             NodeOperator::Rolling(operator) => Ok(Self::Rolling(operator)),
             NodeOperator::CrossSection(operator) => Ok(Self::CrossSection(operator)),
             NodeOperator::Batch(operator) => Ok(Self::External(operator)),
+            NodeOperator::Distinct(operator) => Ok(Self::Distinct(operator)),
             NodeOperator::SnapshotSql(_) | NodeOperator::Stream(_) => Err(CalcFlowError::Compile {
                 message: format!(
                     "node {:?} is stream-only; batch graphs compose multi-input logic through SQL aliases",
@@ -66,6 +68,7 @@ impl CompiledBatchOperator {
             | Self::CrossSection(_)
             | Self::Asof(_)
             | Self::Join(_)
+            | Self::Distinct(_)
             | Self::Window(_)
             | Self::Union(_) => Ok(Value::Null),
         }
@@ -80,6 +83,7 @@ impl CompiledBatchOperator {
             | Self::CrossSection(_)
             | Self::Asof(_)
             | Self::Join(_)
+            | Self::Distinct(_)
             | Self::Window(_)
             | Self::Union(_)
                 if state.is_null() =>
@@ -92,6 +96,7 @@ impl CompiledBatchOperator {
             | Self::CrossSection(_)
             | Self::Asof(_)
             | Self::Join(_)
+            | Self::Distinct(_)
             | Self::Window(_)
             | Self::Union(_) => Err(CalcFlowError::Format {
                 message: "stateless operator state must be null".into(),
@@ -108,6 +113,7 @@ impl CompiledBatchOperator {
             | Self::CrossSection(_)
             | Self::Asof(_)
             | Self::Join(_)
+            | Self::Distinct(_)
             | Self::Window(_)
             | Self::Union(_) => Ok(()),
         }
@@ -121,6 +127,14 @@ impl CompiledBatchOperator {
     ) -> Result<BTreeMap<String, Batch>> {
         match self {
             Self::External(operator) => {
+                operator
+                    .process(inputs, &BatchOperatorContext { run })
+                    .await
+            }
+            Self::Distinct(operator) => {
+                operator.set_datafusion_config(
+                    required_datafusion(datafusion, operator.name())?.compact_runtime_config(),
+                );
                 operator
                     .process(inputs, &BatchOperatorContext { run })
                     .await

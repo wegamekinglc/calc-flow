@@ -46,6 +46,7 @@ JSONValue = TypeAliasType(
 StreamingFailureReasonCode = TypeAliasType(
     "StreamingFailureReasonCode",
     Literal[
+        "state_budget_exceeded",
         "join_state_limit_exceeded",
         "join_match_limit_exceeded",
         "join_counter_overflow",
@@ -291,6 +292,14 @@ class Cursor:
         )
 
 
+class SourceBoundedness(StrEnum):
+    """An authoritative fixed finite cut, independent of replay or batch limits."""
+
+    BOUNDED = "bounded"
+    UNBOUNDED = "unbounded"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True, slots=True)
 class SourceCapabilities:
     """Source capability descriptor sampled once before connector open."""
@@ -304,7 +313,11 @@ class SourceCapabilities:
         NativeWatermarkCapability.EMITS_NATIVE
     )
 
+    boundedness: SourceBoundedness = SourceBoundedness.UNKNOWN
+
     def __post_init__(self) -> None:
+        if not isinstance(self.boundedness, SourceBoundedness):
+            raise TypeError("boundedness must be a SourceBoundedness value")
         if not isinstance(self.replay_positioning, ReplayPositioning):
             raise TypeError("replay_positioning must be a ReplayPositioning value")
         if not isinstance(self.delivery, SourceDeliveryCapability):
@@ -485,6 +498,7 @@ class SourceBinding:
             "max_batch_bytes": value.max_batch_bytes,
             "schema": value.schema,
             "native_watermarks": value.native_watermarks.value,
+            "boundedness": value.boundedness.value,
         }
 
     def _native_policy(self) -> dict[str, object]:
