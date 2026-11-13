@@ -634,3 +634,9 @@ The reviewer report remains byte-identical and unstaged, SHA256
 Only core query analysis, its direct relational regression, and this appended
 evidence are included. F4 independent incremental review remains for the
 coordinator/reviewer; DAL-520 stays in_progress.
+
+F4 fix commit: `b0d8e63de86d34b1fe42a88b7b2a7fcebfe5eff0`.
+All final F4 commands and Rust/source fingerprints above apply to this commit.
+The following evidence-only commit appends this mapping; its product files
+are unchanged. Reviewer F4 recheck and the final-head CI snapshot are handed
+off separately from these completed local results.
