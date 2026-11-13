@@ -58,7 +58,7 @@ pub struct RollingCallbackMetrics {
     pub ordering_proof_duration: Duration,
     /// Entity-key encoding and row-to-entity routing.
     pub entity_resolution_duration: Duration,
-    /// Preparation of private state for touched entities.
+    /// Preparation of touched-entity state and rollback information.
     pub state_preparation_duration: Duration,
     /// Numeric transitions and interleaved result appends.
     pub numeric_update_duration: Duration,

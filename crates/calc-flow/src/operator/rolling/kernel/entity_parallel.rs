@@ -548,7 +548,10 @@ impl<'a> PreparedOrderedKernel<'a> {
         work.add(RollingWork::NumericSerialCalls, 1);
         self.plan
             .finish_typed_fill(self.fill, self.node_id, observer)
-            .map(|execution| StreamKernelUpdate { execution })
+            .map(|execution| StreamKernelUpdate {
+                execution,
+                in_place: None,
+            })
     }
 
     /// Call only while the job's scratch reservation is held. All rejection
@@ -1981,6 +1984,7 @@ pub(crate) fn merge_numeric_results(
     // JoinedNumericPair releases its permit; only original serial state/output escape.
     Ok(StreamKernelUpdate {
         execution: seed.execution,
+        in_place: None,
     })
 }
 

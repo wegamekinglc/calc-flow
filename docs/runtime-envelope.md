@@ -886,9 +886,15 @@ compares those Arrow values in place and row-encodes only each batch's first
 and last identities. Whenever the only entity column is a non-null Utf8
 column, whatever the time and sequence types, entity routing assigns
 batch-local IDs from the string values and row-encodes each distinct entity
-once. Other key shapes use the full Arrow row encoding. Both routes check the entity that last followed
-the previous row's entity before hashing a key. Only touched entities prepare
-private kernel state; numerical state needed by the released West/M2/refold
+once. Other key shapes use the full Arrow row encoding. The checkpoint-disabled
+in-place path also keeps a rebuildable resident text-to-ID index so warm
+single-Utf8 entities skip canonical re-encoding; new or missing keys retain the
+canonical representation. This index is derived execution metadata, not durable
+state. Its string copies and hash-table storage grow with resident entities and
+are not included in the logical state charge. Both routes check the entity that
+last followed the previous row's entity
+before hashing a key. Only touched entities prepare transactional kernel state;
+numerical state needed by the released West/M2/refold
 behavior is retained even for mean-only outputs. Plans whose one or two
 row-window numeric groups feed only one or two Float64 mean or
 mean-difference outputs run a fixed-arity loop over that same state; other
@@ -897,6 +903,15 @@ entity's routed rows and walk back from the batch end only until its retention
 requirements are met. Mixed windows retain the union of the row suffix and
 the duration interval with an open lower bound, using widened timestamp
 arithmetic.
+
+With checkpointing disabled and deferred history, ordered Numeric batches below
+the entity-lane threshold update exclusively owned resident entities in place.
+Sparse undo records accumulators and evicted original samples so failed or
+cancelled emission restores the prior state. A touched entity with any shared
+owner falls back to the original private-copy transaction. The in-place path
+retains existing queue capacity rather than adopting the smaller capacity of a
+Duration clone; logical state charges continue to reflect the actual retained
+representation.
 
 Ordered typed plans can assign whole entities to owned CPU lanes when every
 group supports the same independent owned transition and every output is
