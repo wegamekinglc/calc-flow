@@ -1094,3 +1094,106 @@ correction. Original F1/F2 evidence and review remain preserved. The final
 handoff records the final pushed HEAD and one necessary CI snapshot; pending
 work remains with the existing coordinator wakeup. No merge/delegation/wakeup
 changes are made; DAL-519 remains in_progress.
+
+## PostgreSQL CDC slot-release cleanup synchronization
+
+Test-fixture fix commit: `1d966062ef0c79d3f31d0a6b9fe0e22d43fd67bb`.
+The actual failed PostgreSQL connector job on 10feabeb was
+https://github.com/wegamekinglc/calc-flow/actions/runs/43348839359/job/131634749135.
+Its downloaded log at 2026-11-13 02:05:32 UTC reports:
+
+```text
+exported_snapshot_hands_off_to_pgoutput_without_a_gap ... FAILED
+crates/calc-flow-connectors/tests/postgresql_cdc.rs:140:10
+cleans CDC artifacts: SqlState(E55006)
+replication slot "calc_flow_cdc_orders" is active for PID 306
+test result: FAILED. 2 passed; 1 failed; 0 ignored
+```
+
+All preceding CDC data/transaction assertions and source.close().await had
+completed. The supplied orchestrator snapshot also records that its one job
+rerun request was refused because the workflow was still running; no rerun
+executed. This turn does not retry or poll that old job.
+
+Direct source evidence: PostgresCdcSource::close at
+`crates/calc-flow-connectors/src/postgresql_cdc.rs:868` calls shutdown on the
+replication client and waits for its result. The client shutdown/join path in
+`vendor/pgwire-replication/src/client/tokio_client.rs:223` drains and joins the
+local worker. The stop branches in `client/worker.rs:278,294` write CopyDone
+and return without waiting for a server acknowledgement of slot release.
+The database's slot-active state can therefore lag local worker completion.
+No product close semantics or vendor code was changed.
+
+The minimal test correction keeps source.close().await in place, then checks
+only that test's named slot through pg_replication_slots. The entire async
+query/poll future has a five-second tokio timeout, with ten-millisecond
+intervals while active. It proceeds only when the slot is inactive or absent.
+Query errors still fail through expect, and deadline exhaustion still fails;
+neither database/drop errors nor source.close errors are swallowed. The
+original drop/publication/table cleanup remains, followed by an explicit
+assertion that the test slot no longer exists. No backend is terminated and no
+CDC/no-gap/transaction/slot-ownership assertion or container gate is removed.
+No formal test case, production change or new dependency is added.
+
+A dedicated PostgreSQL16 container was used with the existing checkout, target
+and Rust1.94 environment. Actual setup:
+
+```sh
+docker run --detach --name dal519-pg-close-sync -e POSTGRES_PASSWORD=postgres -p 127.0.0.1::5432 postgres:16 -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10
+docker port dal519-pg-close-sync 5432/tcp
+docker exec dal519-pg-close-sync psql -U postgres -d postgres -At -c "SELECT version(), current_setting('wal_level'), current_setting('max_replication_slots'), current_setting('max_wal_senders')"
+cargo test --locked -p calc-flow-connectors --features postgresql --test postgresql_cdc --no-run
+```
+
+Container image digest:
+`sha256:63e83b5a3dc36a917dccb76fe1bd2ac51f1ec9c1deb47ff20d4f04233bf6eae9`.
+Actual server: PostgreSQL16.16 on x86_64 Linux, logical WAL, 10 slots and 10 WAL
+senders, mapped only to 127.0.0.1:45026. No unrelated service was started.
+The first feature-specific compilation completed in 4m17s; that is build
+evidence, not a performance measurement.
+
+Before the fixture edit, the original failing case was run exactly once:
+
+```sh
+CALC_FLOW_CONNECTOR_CONTAINERS=1 CALC_FLOW_PG_TEST_URL='postgresql://postgres:postgres@127.0.0.1:45026/postgres?sslmode=disable' cargo test --locked -p calc-flow-connectors --features postgresql --test postgresql_cdc exported_snapshot_hands_off_to_pgoutput_without_a_gap -- --ignored --exact --test-threads=1
+```
+
+Local baseline: exit0, 1 passed / 2 filtered in 0.42s. The timing race did not
+reproduce locally in that single run; the actual CI failure above remains the
+RED evidence. No repeated attempts were made to manufacture a local failure.
+
+After the fix, the failure case and both necessary same-file neighbors ran
+against that real logical-replication server:
+
+```sh
+CALC_FLOW_CONNECTOR_CONTAINERS=1 CALC_FLOW_PG_TEST_URL='postgresql://postgres:postgres@127.0.0.1:45026/postgres?sslmode=disable' cargo test --locked -p calc-flow-connectors --features postgresql --test postgresql_cdc -- --ignored --test-threads=1
+cargo clippy --locked -p calc-flow-connectors --features postgresql --test postgresql_cdc -- -D warnings
+cargo fmt --all --check
+git diff --check
+```
+
+All exited0. GREEN: 3 passed / 0 failed / 0 ignored in 1.12s, covering gap-free
+snapshot-to-pgoutput handoff, removal of a newly created slot on failed snapshot
+import, and preservation of an existing slot on bootstrap refusal. The original
+counts, transaction-complete boundaries and source.close checks remain.
+Clippy selected this PostgreSQL test target and denied warnings; its first
+feature-specific metadata build completed in 2m10s. Format/whitespace passed.
+
+A final real database inventory query found slots=0, publications=0 and tables=0
+for the three fixture identities. Only then was the owned container stopped
+and removed with its temporary volume:
+
+```sh
+docker stop --time 30 dal519-pg-close-sync
+docker rm --volumes dal519-pg-close-sync
+```
+
+Both exited0. No local service or run-owned build remains active. Only the CDC
+test file and this evidence are committed. Product code/native interfaces are
+unchanged, so existing matching native, F1/F2 and catalog Approve evidence is
+reused without a wheel rebuild/full review restart. The untracked reviewer
+report remains unedited and unstaged, SHA-256
+`d3dc719231ec57c1e6cc31e1583049e651383fd76224a6b4e490f7ea6cd85837`.
+No full matrix, unrelated container, benchmark, gate change, delegation,
+merge or wakeup change is introduced. The final handoff records the final
+pushed HEAD and one necessary CI snapshot; DAL-519 remains in_progress.
