@@ -327,3 +327,55 @@ Local static checks clearing these diagnostics do not establish final-head
 Codacy/CI success. The handoff comment records the single post-push nonblocking
 snapshot. Independent review and required checks remain outstanding; no merge
 or delegation is performed, and DAL-521 remains in_progress.
+
+## Static subprocess regression follow-up
+
+Base `a561b38d0f6c89fabe5712763c14b40ec9189065` subsequently received one
+Codacy annotation in completed/action_required check `131868119063`:
+`python/tests/test_bounded_analytic_over.py:32`,
+`Detected subprocess function 'run' without a static string.` The orchestrator
+provided the confirmed annotation; the previous 18 corrections remain accepted.
+
+The test now uses the existing `python/tests/test_config.py` invocation form:
+literal argv[0] `python`, with `executable=sys.executable` selecting the current
+interpreter explicitly. The `-O` flag, fixed injected script, example path,
+default shell=False, and both rejection assertions remain unchanged. No PATH
+lookup is needed to select the executable. No suppression or gate configuration
+changes. Only this test and the evidence report change.
+
+The public Semgrep rule
+[dangerous-subprocess-use-audit](https://github.com/semgrep/semgrep-rules/blob/develop/python/lang/security/audit/dangerous-subprocess-use-audit.yaml)
+contains the same diagnostic and explicitly recognizes a literal first argv
+element. Its unchanged downloaded local copy has SHA256
+`db8fb4ee4a31dafe2e286228edebc07fd1386d9f63a0f683d26af4e6ff4d455d`.
+Semgrep 1.180.0 was run before and after the two-line test adjustment:
+
+```sh
+semgrep scan --config target/bounded-analytic-over-subprocess-rule.yaml \
+  --error --json --metrics off --no-git-ignore \
+  python/tests/test_bounded_analytic_over.py
+```
+
+RED: exit 1, exactly one finding at line 32 with the matching message.
+GREEN: exit 0, exactly one file scanned, zero findings and zero scan errors.
+The rule copy is local verification input under target, not a repository gate
+replacement or configuration change.
+
+```sh
+PYTHONPATH=target/installed <dev-python> -m pytest \
+  python/tests/test_bounded_analytic_over.py -q -k optimized
+```
+
+GREEN: 1 passed, 15 deselected. The test still runs an optimized Python child,
+injects incorrect SUM values `[-1,-1,-1]` and requires a failed process with
+`RuntimeError: batch analytic result differs`. Ruff check, Ruff format check,
+`uvx lizard -C 8 -w python/tests/test_bounded_analytic_over.py`, and whitespace
+checks pass.
+
+Product/native/Rust, public contracts, ownership and transaction behavior are
+unchanged. Their accepted evidence and the 1509-input native provenance above
+are reused; no native rebuild, Rust rerun or unrelated Python/full/static matrix
+is performed. This focused local rule pass is not a claim that new-head Codacy
+or all CI has passed. The final reply records the single nonblocking post-push
+snapshot; review remains pending, no merge/delegation is performed, and DAL-521
+stays in_progress.

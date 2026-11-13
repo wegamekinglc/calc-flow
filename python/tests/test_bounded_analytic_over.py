@@ -30,7 +30,8 @@ with patch.object(cf.Program, 'collect_async', incorrect_batch):
 """
     example = Path(__file__).resolve().parents[2] / "examples/bounded_analytic_over.py"
     result = subprocess.run(
-        [sys.executable, "-O", "-c", script, str(example)],
+        ["python", "-O", "-c", script, str(example)],
+        executable=sys.executable,
         capture_output=True,
         text=True,
         check=False,
