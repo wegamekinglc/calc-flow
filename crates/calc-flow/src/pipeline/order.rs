@@ -102,7 +102,13 @@ pub(crate) fn validate(builder: &PipelineBuilder) -> Result<()> {
         let NodeOperator::BoundedOrder(op) = &node.operator else {
             continue;
         };
-        validate_order(builder, id, op)?;
+        validate_order(builder, id, op).map_err(|error| {
+            if op.is_over() {
+                crate::operator::over::schema::remap(error)
+            } else {
+                error
+            }
+        })?;
     }
     Ok(())
 }

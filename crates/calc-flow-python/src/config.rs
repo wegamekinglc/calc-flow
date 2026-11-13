@@ -941,6 +941,79 @@ fn _asof_join_query(query: &str, aliases: &Bound<'_, PyList>) -> PyResult<String
 }
 
 #[pyfunction]
+fn _over_query(query: &str, aliases: &Bound<'_, PyList>) -> PyResult<String> {
+    let aliases = aliases.extract::<Vec<String>>()?;
+    let description = match calc_flow::sql::over_query(query, &aliases) {
+        Ok(plan) => {
+            serde_json::to_value(plan).map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+        }
+        Err(calc_flow::CalcFlowError::InvalidArgument { field, message }) => {
+            let (code, message) = message
+                .split_once(": ")
+                .unwrap_or(("invalid_literal", &message));
+            serde_json::json!({"error":{"path":if field.starts_with("sort") {format!("sql.{field}")} else {field},"code":code,"message":message}})
+        }
+        Err(error) => return Err(crate::error::to_py_err(error)),
+    };
+    serde_json::to_string(&description).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+}
+
+#[pyfunction]
+fn _over_schema<'py>(
+    py: Python<'py>,
+    spec: &str,
+    expressions: &str,
+    schema: pyo3_arrow::PySchema,
+) -> PyResult<Bound<'py, PyAny>> {
+    use calc_flow::OperatorMetadata;
+    let spec = serde_json::from_str(spec)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("over.spec: {e}")))?;
+    let expressions = serde_json::from_str(expressions)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("over.expressions: {e}")))?;
+    let operator =
+        calc_flow::BoundedOrderOperator::new_over("schema", schema.into_inner(), expressions, spec)
+            .map_err(|error| over_schema_error(py, error))?;
+    pyo3_arrow::PySchema::new(
+        operator.output_ports()[0]
+            .schema()
+            .expect("analytic exact schema")
+            .clone(),
+    )
+    .into_pyarrow(py)
+}
+
+fn over_schema_error(py: Python<'_>, error: calc_flow::CalcFlowError) -> PyErr {
+    let details = match &error {
+        calc_flow::CalcFlowError::InvalidArgument { field, message } => Some((
+            field.clone(),
+            message
+                .split_once(": ")
+                .map_or("invalid_literal", |(code, _)| code)
+                .to_owned(),
+        )),
+        calc_flow::CalcFlowError::OperatorReason {
+            reason_code: calc_flow::StreamingFailureReason::StateBudgetExceeded,
+            ..
+        } => Some((
+            "over.spec.state_budget".into(),
+            "state_budget_exceeded".into(),
+        )),
+        _ => None,
+    };
+    let exception = crate::error::to_py_err(error);
+    if let Some((path, code)) = details {
+        let value = exception.value(py);
+        if let Err(error) = value
+            .setattr("_calc_flow_over_path", path)
+            .and_then(|()| value.setattr("_calc_flow_over_code", code))
+        {
+            return error;
+        }
+    }
+    exception
+}
+
+#[pyfunction]
 fn _order_query(query: &str, aliases: &Bound<'_, PyList>) -> PyResult<String> {
     let aliases = aliases.extract::<Vec<String>>()?;
     let description = match calc_flow::sql::order_query(query, &aliases) {
@@ -1143,6 +1216,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 fn register_query_planners(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(_over_query, module)?)?;
+    module.add_function(wrap_pyfunction!(_over_schema, module)?)?;
     module.add_function(wrap_pyfunction!(_order_query, module)?)?;
     module.add_function(wrap_pyfunction!(_order_schema, module)?)?;
     module.add_function(wrap_pyfunction!(_distinct_query, module)?)?;

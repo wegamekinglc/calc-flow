@@ -154,6 +154,12 @@ pub struct NodeSpec {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[non_exhaustive]
 pub enum OperatorSpec {
+    /// Analytic columns over a complete explicitly bounded history.
+    BoundedOver {
+        #[schemars(length(min = 1))]
+        expressions: Vec<crate::AnalyticExpr>,
+        spec: crate::OverSpec,
+    },
     /// Final ordering over an explicit finite history domain.
     BoundedOrder {
         #[schemars(length(min = 1))]
@@ -1381,6 +1387,37 @@ fn order_node(
     Ok(operator.into())
 }
 
+fn over_node(
+    node: &NodeSpec,
+    inputs: Vec<Port>,
+    outputs: Vec<Port>,
+    expressions: &[crate::AnalyticExpr],
+    spec: &crate::OverSpec,
+) -> Result<NodeOperator> {
+    let (inputs, outputs) =
+        builtin_ports(inputs, outputs, &["input"], &["output"], BatchKind::Table)?;
+    let schema = inputs[0]
+        .schema()
+        .ok_or_else(|| {
+            crate::dataframe::invalid("over.input", "unresolved_type", "exact schema required")
+        })?
+        .clone();
+    let operator = crate::BoundedOrderOperator::new_over(
+        &node.id,
+        schema,
+        expressions.to_vec(),
+        spec.clone(),
+    )?;
+    if outputs[0].schema() != crate::OperatorMetadata::output_ports(&operator)[0].schema() {
+        return Err(crate::dataframe::invalid(
+            "over.output",
+            "schema_mismatch",
+            "exact analytic output schema required",
+        ));
+    }
+    Ok(operator.into())
+}
+
 fn project_node_operator(
     node: &NodeSpec,
     providers: &ProviderRegistry,
@@ -1422,6 +1459,9 @@ fn project_node_operator(
             ))
         }
         OperatorSpec::Union => union_node(node, inputs, &outputs, mode),
+        OperatorSpec::BoundedOver { expressions, spec } => {
+            over_node(node, inputs, outputs, expressions, spec)
+        }
         OperatorSpec::BoundedOrder { by, fetch, spec } => {
             order_node(node, inputs, outputs, by, *fetch, spec)
         }
@@ -2263,7 +2303,9 @@ fn validate_operator(
             validate_union_operator(node, index, mode, &base, issues);
             (None, Some(vec!["output"]))
         }
-        OperatorSpec::BoundedOrder { .. } | OperatorSpec::Distinct { .. } => single_table_io(),
+        OperatorSpec::BoundedOver { .. }
+        | OperatorSpec::BoundedOrder { .. }
+        | OperatorSpec::Distinct { .. } => single_table_io(),
         OperatorSpec::Window { spec } => {
             validate_window_operator(node, index, spec, mode, &base, issues);
             single_table_io()
@@ -3261,6 +3303,7 @@ fn operator_udfs(operator: &OperatorSpec) -> &[UdfReference] {
         | OperatorSpec::Sql { udfs, .. }
         | OperatorSpec::SnapshotSql { udfs, .. } => udfs,
         OperatorSpec::Union
+        | OperatorSpec::BoundedOver { .. }
         | OperatorSpec::BoundedOrder { .. }
         | OperatorSpec::Distinct { .. }
         | OperatorSpec::Window { .. }

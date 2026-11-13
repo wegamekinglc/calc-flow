@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from calc_flow.symbolic.asof import _AsofJoinOptions
     from calc_flow.symbolic.distinct import DistinctSpec
     from calc_flow.symbolic.order import SortKey, SortSpec
+    from calc_flow.symbolic.over import AnalyticExpr, OverSpec
     from calc_flow.symbolic.program import FeatureSet
 
 ColumnOperand = TypeAliasType("ColumnOperand", Union["ColumnExpr", ScalarLiteral])
@@ -512,6 +513,14 @@ def _reflected_array(
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
 class TableExpr(Expr[object]):
     """An Arrow-backed table expression."""
+
+    def over(
+        self, expressions: Sequence[AnalyticExpr], /, *, spec: OverSpec
+    ) -> TableExpr:
+        """Append analytic columns over one complete, explicitly bounded history."""
+        from calc_flow.symbolic.over import declaration
+
+        return TableExpr(declaration(self._node, expressions, spec))
 
     def sort(self, by: Sequence[SortKey], /, *, spec: SortSpec) -> TableExpr:
         """Sort a complete explicit history, with one final output."""

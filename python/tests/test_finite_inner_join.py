@@ -139,7 +139,7 @@ def test_four_surface_join_fixture(sql):
             )
             == 1
         )
-        assert p.analyze().query.analysis_revision == 10
+        assert p.analyze().query.analysis_revision == 11
 
 
 def test_inner_join_conditional_eof_analysis():
@@ -152,7 +152,7 @@ def test_inner_join_conditional_eof_analysis():
         cutoff="all_sources_eof",
     )
     report = p.analyze(options=cf.AnalysisOptions(portability=request)).query
-    assert report.analysis_revision == 10
+    assert report.analysis_revision == 11
     assert report.portability == "supported", report.diagnostics
 
 

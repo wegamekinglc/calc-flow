@@ -3,6 +3,7 @@
 mod asof_join;
 mod distinct;
 mod order;
+mod over;
 #[doc(hidden)]
 pub use asof_join::{AsofJoinQuery, asof_join_query};
 pub(crate) use distinct::window_time_column;
@@ -10,6 +11,8 @@ pub(crate) use distinct::window_time_column;
 pub use distinct::{DistinctQuery, distinct_query};
 #[doc(hidden)]
 pub use order::{OrderQuery, order_query};
+#[doc(hidden)]
+pub use over::{OverQuery, over_query};
 mod inner_join;
 pub use inner_join::JoinOutputOrdering;
 #[doc(hidden)]
@@ -76,6 +79,9 @@ pub fn sql(query: &str, tables: BTreeMap<String, TableExpr>) -> Result<TableExpr
                 "normalized SQL aliases must be unique",
             ));
         }
+    }
+    if let Some(plan) = over_query(query, &tables.keys().cloned().collect::<Vec<_>>())? {
+        return tables[&plan.alias].over_relation(plan.expressions, plan.spec, true);
     }
     if let Some(plan) = order_query(query, &tables.keys().cloned().collect::<Vec<_>>())? {
         return tables[&plan.alias].order_relation(plan.by, plan.fetch, plan.spec, true);

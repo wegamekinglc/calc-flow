@@ -625,6 +625,9 @@ def _check_stateful_lowering(
     needs_cross_section = _program_needs_cross_section(program)
     check_lateness(program, mode_value, late_policy, allowed_lateness_micros)
     check_order_lateness(program, mode_value, late_policy, allowed_lateness_micros)
+    from calc_flow.symbolic.over import check_lateness as check_over_lateness
+
+    check_over_lateness(program, mode_value, late_policy, allowed_lateness_micros)
     if _program_needs_stream_join(program):
         _check_stream_join_capability(program, capabilities, mode_value)
     if needs_rolling or needs_cross_section:
@@ -709,6 +712,7 @@ def _can_pin_update_graph(graph):
             "snapshot_sql",
             "union",
             "window",
+            "bounded_over",
             "bounded_order",
             "distinct",
         }
@@ -840,11 +844,12 @@ def compile_program_batch(program: Program, runtime: object, /) -> BatchExecutio
     from calc_flow.symbolic.event_window_sql import cache_policy as window_cache_policy
     from calc_flow.symbolic.inner_join_sql import cache_policy as join_cache_policy
     from calc_flow.symbolic.order import cache_policy as order_cache_policy
+    from calc_flow.symbolic.over import cache_policy as over_cache_policy
     from calc_flow.symbolic.union import cache_policy
 
     document = (
         _lower_program_document(program, selected, "batch")
-        if order_cache_policy(program)
+        if order_cache_policy(program) or over_cache_policy(program)
         else None
     )
     key = (
@@ -853,6 +858,7 @@ def compile_program_batch(program: Program, runtime: object, /) -> BatchExecutio
         *window_cache_policy(program),
         *distinct_cache_policy(program),
         *order_cache_policy(program),
+        *over_cache_policy(program),
         *join_cache_policy(program),
     )
     return selected._cached_symbolic_compile(
@@ -881,6 +887,7 @@ def compile_program_stream(
     from calc_flow.symbolic.event_window_sql import cache_policy as window_cache_policy
     from calc_flow.symbolic.inner_join_sql import cache_policy as join_cache_policy
     from calc_flow.symbolic.order import cache_policy as order_cache_policy
+    from calc_flow.symbolic.over import cache_policy as over_cache_policy
     from calc_flow.symbolic.union import cache_policy
 
     document = (
@@ -891,7 +898,7 @@ def compile_program_stream(
             allowed_lateness_micros=allowed_lateness_micros,
             late_policy=late_policy,
         )
-        if order_cache_policy(program)
+        if order_cache_policy(program) or over_cache_policy(program)
         else None
     )
     key = (
@@ -900,6 +907,7 @@ def compile_program_stream(
         *window_cache_policy(program),
         *distinct_cache_policy(program),
         *order_cache_policy(program),
+        *over_cache_policy(program),
         *join_cache_policy(program),
     )
     return selected._compile_symbolic_stream(

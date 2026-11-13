@@ -556,7 +556,7 @@ pub(crate) fn analyze_graph(graph: DeclarationGraph) -> Result<QueryAnalysis> {
         .map(|_| conjunction(diagnostics.iter().map(|issue| issue.status)));
     Ok(QueryAnalysis {
         schema_version: 2,
-        analysis_revision: 10,
+        analysis_revision: 11,
         update_semantics,
         request: options.portability,
         portability,
@@ -832,7 +832,12 @@ fn analyze_edges(
             proofs[&edge.target_path].1
                 || matches!(
                     target_kind.as_str(),
-                    "union" | "bounded_order" | "distinct" | "stream_join" | "stream_asof_join"
+                    "union"
+                        | "bounded_over"
+                        | "bounded_order"
+                        | "distinct"
+                        | "stream_join"
+                        | "stream_asof_join"
                 )
                 || window_kind(target_kind),
         ) {
@@ -900,7 +905,8 @@ fn check_ordering(
             if node.stream.ordering.kind != QueryRowOrder::Ordered
                 || node.stream.ordering.ties != QueryTieOrder::Total
                 || request.comparison == Comparison::FinalRelation
-                    && !node.stream.reason.starts_with("bounded_order_v1")
+                    && !(node.stream.reason.starts_with("bounded_order_v1")
+                        || node.stream.reason.starts_with("bounded_over_v1"))
             {
                 diagnostic(
                     diagnostics,
@@ -1021,7 +1027,7 @@ fn batch_facts(
     }
     if matches!(
         node.kind.as_str(),
-        "bounded_order" | "distinct" | "stream_join" | "stream_asof_join"
+        "bounded_over" | "bounded_order" | "distinct" | "stream_join" | "stream_asof_join"
     ) {
         batch.support = node.batch_support.unwrap_or(SupportStatus::Supported);
         batch.history = HistoryScope::CurrentBatch;

@@ -256,6 +256,7 @@ def _wire_semantics(value: dict) -> UpdateSemantics:
         (2, 7),
         (2, 9),
         (2, 10),
+        (2, 11),
     ):
         raise ValueError("query_analysis: unsupported revision")
     semantics = (
@@ -382,6 +383,8 @@ def _named_roles(node):
     from calc_flow.symbolic.analyzer import _cstr_seq
 
     name = node.op.name
+    if name == "bounded_over":
+        return (".over.value",)
     if name == "bounded_order":
         return (".sort.value",)
     if name == "aggregate":
@@ -458,6 +461,7 @@ def _issue_diagnostic(issue, mode, paths, legacy_paths):
             ".window_hopping",
             ".distinct",
             ".sort",
+            ".over",
         )
     )
     status = (
@@ -532,6 +536,10 @@ def _query_identity(facts):
 
 
 def order_descriptor(node):
+    if node.op.name == "bounded_over":
+        from calc_flow.symbolic.over import order_descriptor as analytic_order
+
+        return analytic_order(node)
     if node.op.name != "bounded_order":
         return None
     return {key: json.loads(node.attr(key).value) for key in ("by", "fetch", "spec")}
@@ -623,7 +631,10 @@ def _native_relation_kinds(graph, paths, analyzers):
     orders = {
         paths[key]: order_descriptor(node)
         for analyzer in analyzers
-        for key, node in analyzer._sql_order_nodes.items()
+        for key, node in {
+            **analyzer._sql_order_nodes,
+            **analyzer._sql_over_nodes,
+        }.items()
         if key in paths
     }
     distincts = {
@@ -644,7 +655,9 @@ def _native_relation_kinds(graph, paths, analyzers):
             if node["path"] in distincts
             else {
                 **node,
-                "kind": "bounded_order",
+                "kind": "bounded_over"
+                if "analytic" in orders[node["path"]]
+                else "bounded_order",
                 "query": None,
                 "order": orders[node["path"]],
             }
@@ -665,12 +678,12 @@ def _gate(program, runtime, request):
     report = program.analyze(
         runtime, options=AnalysisOptions(portability=request)
     ).query
-    if (report.schema_version, report.analysis_revision) != (2, 10):
+    if (report.schema_version, report.analysis_revision) != (2, 11):
         from calc_flow.errors import CompileError
 
         error = CompileError(
             "Program.portability: finality_unproven: strict compilation requires "
-            "matching r10 analysis"
+            "matching r11 analysis"
         )
         error.query_analysis = report
         raise error
@@ -687,7 +700,7 @@ def _gate_latest(program, runtime):
     report = program.analyze(runtime).query
     if (report.schema_version, report.analysis_revision, report.update_semantics) != (
         2,
-        10,
+        11,
         "latest_relation",
     ):
         error = CompileError(

@@ -351,7 +351,13 @@ fn operator_declaration(op: &NodeOperator) -> (&'static str, Option<String>) {
 
 fn stream_operator_kind(op: &NodeOperator) -> &'static str {
     match op {
-        NodeOperator::BoundedOrder(_) => "bounded_order",
+        NodeOperator::BoundedOrder(op) => {
+            if op.is_over() {
+                "bounded_over"
+            } else {
+                "bounded_order"
+            }
+        }
         NodeOperator::Distinct(_) => "distinct",
         NodeOperator::Union(_) => "union",
         NodeOperator::Window(_) => "window",

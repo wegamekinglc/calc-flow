@@ -344,6 +344,7 @@ _PRIMITIVES: dict[str, PrimitiveSpec] = {
     "aggregate": PrimitiveSpec(
         frozenset({"query", "aliases", "group_by", "reducers"}), CMap(())
     ),
+    "bounded_over": PrimitiveSpec(frozenset({"expressions", "spec"}), CMap(())),
     "bounded_order": PrimitiveSpec(frozenset({"by", "fetch", "spec"}), CMap(())),
     "distinct": PrimitiveSpec(frozenset({"columns", "spec"}), CMap(())),
     "union_all": PrimitiveSpec(frozenset(), CMap(())),
@@ -726,4 +727,7 @@ def explain_node(node: Node, /) -> str:
             "temporarily borrowed ingress backing and other graph owners are excluded"
         )
         lines.extend(policy_explanations(node))
+    from calc_flow.symbolic.over import policy_explanations as over_explanations
+
+    lines.extend(over_explanations(node))
     return "\n".join(lines)

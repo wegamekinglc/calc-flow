@@ -50,7 +50,7 @@ impl Visitor for Find {
 fn error(message: impl std::fmt::Display) -> crate::CalcFlowError {
     invalid("sql.order", "capability_mismatch", message)
 }
-fn query(statement: &DFStatement) -> Option<&Query> {
+pub(super) fn query(statement: &DFStatement) -> Option<&Query> {
     let DFStatement::Statement(s) = statement else {
         return None;
     };
@@ -189,7 +189,7 @@ fn selected_spec(window: bool, args: &[FunctionArg]) -> Result<SortSpec> {
         Some(arg) => spec.with_sequence_by(sequence_columns(arg)?),
     }
 }
-fn sequence_columns(arg: &FunctionArg) -> Result<Vec<String>> {
+pub(super) fn sequence_columns(arg: &FunctionArg) -> Result<Vec<String>> {
     let Expr::Array(array) = expression(arg)? else {
         return Err(error(
             "nonempty ARRAY of sequence column string literals required",
@@ -277,7 +277,7 @@ fn key_columns(q: &Query, alias: &str) -> Result<Vec<crate::SortKey>> {
     }
     keys.iter().map(|key| sort_key(key, alias)).collect()
 }
-fn sort_key(
+pub(super) fn sort_key(
     key: &datafusion::sql::sqlparser::ast::OrderByExpr,
     alias: &str,
 ) -> Result<crate::SortKey> {
@@ -301,7 +301,7 @@ fn sort_key(
         },
     )
 }
-fn key_column(expr: &Expr, alias: &str) -> Result<String> {
+pub(super) fn key_column(expr: &Expr, alias: &str) -> Result<String> {
     match expr {
         Expr::Identifier(name) => Ok(normalized(name)),
         Expr::CompoundIdentifier(names) if names.len() == 2 && normalized(&names[0]) == alias => {
@@ -312,7 +312,7 @@ fn key_column(expr: &Expr, alias: &str) -> Result<String> {
         )),
     }
 }
-fn validate_shape(q: &Query) -> Result<()> {
+pub(super) fn validate_shape(q: &Query) -> Result<()> {
     let seed = crate::expression::parse_select_query("SELECT x FROM input")?;
     let seed_statement = seed.statement();
     let SetExpr::Select(seed) = query(&seed_statement).unwrap().body.as_ref() else {
@@ -334,16 +334,16 @@ fn validate_shape(q: &Query) -> Result<()> {
     }
     Ok(())
 }
-fn normalized(name: &Ident) -> String {
+pub(super) fn normalized(name: &Ident) -> String {
     IdentNormalizer::new(true).normalize(name.clone())
 }
-fn expression(arg: &FunctionArg) -> Result<&Expr> {
+pub(super) fn expression(arg: &FunctionArg) -> Result<&Expr> {
     match arg {
         FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => Ok(expr),
         _ => Err(error("positional literal macro arguments required")),
     }
 }
-fn string(arg: &FunctionArg) -> Result<String> {
+pub(super) fn string(arg: &FunctionArg) -> Result<String> {
     match expression(arg)? {
         Expr::Value(v) if matches!(v.value, Value::SingleQuotedString(_)) => {
             let Value::SingleQuotedString(s) = &v.value else {
@@ -354,7 +354,7 @@ fn string(arg: &FunctionArg) -> Result<String> {
         _ => Err(error("string literal required")),
     }
 }
-fn integer(arg: &FunctionArg) -> Result<u64> {
+pub(super) fn integer(arg: &FunctionArg) -> Result<u64> {
     let Expr::Value(v) = expression(arg)? else {
         return Err(error("positive decimal integer literal required"));
     };
@@ -367,7 +367,7 @@ fn integer(arg: &FunctionArg) -> Result<u64> {
     n.parse().map_err(error)
 }
 
-fn signed(arg: &FunctionArg) -> Result<i64> {
+pub(super) fn signed(arg: &FunctionArg) -> Result<i64> {
     use datafusion::sql::sqlparser::ast::UnaryOperator;
     let expr = expression(arg)?;
     let (negative, expr) = match expr {

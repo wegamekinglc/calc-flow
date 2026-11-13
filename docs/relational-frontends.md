@@ -443,3 +443,5 @@ strictly beyond a left time, or normal EOF, and preserves cross-batch state and
 checkpoint identity. See [ASOF contracts and limits](asof-join-guide.md), the
 [Python example](../examples/finite_asof_join.py), and
 [Rust example](../crates/calc-flow/examples/finite_asof_join.rs).
+
+Explicit bounded analytic windows are described in [bounded analytic OVER](bounded-analytic-over.md).

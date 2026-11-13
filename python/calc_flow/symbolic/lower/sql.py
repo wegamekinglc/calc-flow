@@ -77,6 +77,7 @@ _TABLE_BOUNDARIES = frozenset(
     {
         *_EVENT_WINDOW_OPS,
         "aggregate",
+        "bounded_over",
         "bounded_order",
         "distinct",
         "union_all",
@@ -191,16 +192,9 @@ class _SQLGraph:
         if node.op.name == "table_input":
             self.schemas[node.digest] = self.analyzer.table(node, "sql.input").schema
             return self.graph.source(node)
-        if (
-            node.op.name == "bounded_order"
-            or node.digest in self.analyzer._sql_order_nodes
-        ):
-            return self._append_order(node)
-        if (
-            node.op.name == "distinct"
-            or node.digest in self.analyzer._sql_distinct_nodes
-        ):
-            return self._append_distinct(node)
+        bounded = self._bounded_relation(node)
+        if bounded is not None:
+            return bounded
         if self._is_join(node):
             return self._append_join(node)
         if self._is_event_window(node):
@@ -217,6 +211,49 @@ class _SQLGraph:
             return self._append_expression(node)
         output_id = self.graph.allocate(f"cf_sql_{node.digest[:24]}")
         self._append_sql(node, output_id)
+        self._remember(node, output_id)
+        return output_id
+
+    def _bounded_relation(self, node):
+        for kind, sql_nodes, append in (
+            ("bounded_over", self.analyzer._sql_over_nodes, self._append_over),
+            ("bounded_order", self.analyzer._sql_order_nodes, self._append_order),
+            ("distinct", self.analyzer._sql_distinct_nodes, self._append_distinct),
+        ):
+            if node.op.name == kind or node.digest in sql_nodes:
+                return append(node)
+        return None
+
+    def _append_over(self, node):
+        import json
+
+        over = self.analyzer._sql_over_nodes.get(node.digest, node)
+        parent = self.table(over.args[0])
+        output_id = self.graph.allocate(f"cf_over_{node.digest[:24]}")
+        schema = self.analyzer.table(node, "over.output").schema
+        self.schemas[node.digest] = schema
+        self.graph.nodes.append(
+            dict(
+                id=output_id,
+                input_ports=[
+                    _table_port(self.analyzer._over_input_schemas[node.digest], "input")
+                ],
+                output_ports=[_table_port(schema, "output")],
+                operator=dict(
+                    kind="bounded_over",
+                    expressions=json.loads(over.attr("expressions").value),
+                    spec=json.loads(over.attr("spec").value),
+                ),
+            )
+        )
+        self.graph.edges.append(
+            dict(
+                source_node=parent,
+                source_port="output",
+                target_node=output_id,
+                target_port="input",
+            )
+        )
         self._remember(node, output_id)
         return output_id
 
@@ -478,6 +515,7 @@ class _SQLGraph:
                 in {
                     *_EVENT_WINDOW_OPS,
                     "aggregate",
+                    "bounded_over",
                     "bounded_order",
                     "distinct",
                     "union_all",
@@ -696,6 +734,7 @@ def lower_sql_program(
     if not _macd_input_boundaries(program) and not any(
         node.op.name
         in {
+            "bounded_over",
             "bounded_order",
             "distinct",
             "aggregate",

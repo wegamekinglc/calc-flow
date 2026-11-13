@@ -73,6 +73,12 @@ pub(crate) struct Relation {
 }
 #[derive(Debug)]
 pub(crate) enum RelationKind {
+    Over {
+        input: TableExpr,
+        expressions: Vec<crate::AnalyticExpr>,
+        spec: crate::OverSpec,
+        sql: bool,
+    },
     Order {
         input: TableExpr,
         by: Vec<crate::SortKey>,
@@ -409,6 +415,53 @@ impl TableExpr {
             },
         })))
     }
+    /// Appends analytic columns computed once over an explicit complete history.
+    ///
+    /// All expressions share a partition and reproducible total order. ROWS
+    /// bounds calculation, while the entire accepted history remains retained.
+    /// # Errors
+    /// Rejects empty expressions and duplicate output names. Schema and original
+    /// time/sequence provenance are checked before execution.
+    pub fn over(
+        &self,
+        expressions: Vec<crate::AnalyticExpr>,
+        spec: crate::OverSpec,
+    ) -> Result<Self> {
+        self.over_relation(expressions, spec, false)
+    }
+    pub(crate) fn over_relation(
+        &self,
+        expressions: Vec<crate::AnalyticExpr>,
+        spec: crate::OverSpec,
+        sql: bool,
+    ) -> Result<Self> {
+        if expressions.is_empty() {
+            return Err(invalid(
+                "over.expressions",
+                "invalid_literal",
+                "at least one expression required",
+            ));
+        }
+        let mut names = BTreeSet::new();
+        for (index, expression) in expressions.iter().enumerate() {
+            if !names.insert(expression.name()) {
+                return Err(invalid(
+                    &format!("over.expressions[{index}].name"),
+                    "duplicate_name",
+                    "unique output names required",
+                ));
+            }
+        }
+        Ok(Self(Arc::new(Relation {
+            id: digest(&json!(["bounded_over", self.0.id, expressions, spec, sql])),
+            kind: RelationKind::Over {
+                input: self.clone(),
+                expressions,
+                spec,
+                sql,
+            },
+        })))
+    }
     /// Sorts a complete explicitly bounded history, skipping the declared offset.
     /// # Errors
     /// Rejects invalid comparator/limit declarations; schema is checked at planning.
@@ -482,11 +535,19 @@ impl TableExpr {
             | RelationKind::Distinct { .. }
             | RelationKind::Union { .. }
             | RelationKind::Sql { .. }
+            | RelationKind::Over { .. }
             | RelationKind::Aggregate { .. } => &self.0.id,
         }
     }
     fn known_names(&self) -> Option<BTreeSet<String>> {
         match &self.0.kind {
+            RelationKind::Over {
+                input, expressions, ..
+            } => {
+                let mut names = input.known_names()?;
+                names.extend(expressions.iter().map(|e| e.name().to_owned()));
+                Some(names)
+            }
             RelationKind::Input { schema, .. } => Some(
                 schema
                     .fields()
