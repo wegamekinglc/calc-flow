@@ -245,6 +245,20 @@
       "candidate_sha256": "8cea102961011d3c932129718e5e04f5f885789d066993a0df77cc0abe8b95d3",
       "reason": "Exact composed core workload migration through the retained rolling history/grouped-lane declarations: add one cold two-state-group/four-output Rows case (a Rows37 SUM+Mean, b Rows61 SUM+Mean), with independent integer dyadic full-row oracles. All prior case formulas, schemas, samples, runner/drop/snapshot timer boundaries and cumulative proof gates are unchanged; second input-column validation applies only to the new case outside timing. Both feature products use this identical benchmark overlay. New case is additional coverage, never historical timing evidence.",
       "reference": "PR #594 / 2026-11-12 bounded multi-group performance validation"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "8cea102961011d3c932129718e5e04f5f885789d066993a0df77cc0abe8b95d3",
+      "candidate_sha256": "3ccb111b826fcfed78f2dbffa47d4aa0e2a8da8020a3f9f55f22cf0dad918293",
+      "reason": "Add two exact-oracle complete-runner rolling cases: small multi-group Duration SUM plus Rows20 SUM, and dense Duration SUM for warm 10,000-row batches. Existing case declarations, fixtures, samples and timing boundaries are unchanged; both new cases are additional coverage, not historical timing evidence.",
+      "reference": "PR #608 / small-batch rolling state and routing optimization"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "1977e38423122a9a4be36d56317cd905d64dd2fb95e37005e05669f436d47c98",
+      "candidate_sha256": "3ccb111b826fcfed78f2dbffa47d4aa0e2a8da8020a3f9f55f22cf0dad918293",
+      "reason": "Exact composed migration from the retained dependency-upgrade core workload anchor through the existing rolling declarations and PR #608: preserve all previously declared cases and add the small multi-group Duration SUM plus Rows20 SUM and dense warm-batch Duration SUM cases with independent integer oracles. New cases are additional coverage, not historical timing evidence.",
+      "reference": "Retained dependency-migration core workload anchor and PR #608"
     }
   ]
 }
