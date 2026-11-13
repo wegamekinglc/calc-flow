@@ -340,3 +340,12 @@ sources are unchanged from the recorded baseline. Fingerprint and artifacts:
 
 The commit-to-evidence mapping is appended after the implementation commit;
 only this analysis record changes in that follow-up commit.
+
+Implementation commit: `9535b1c47afbf1ee5fe7ec11cd7c67c3cb247c8d`.
+The final local verification and source/native/wheel fingerprints above apply
+to its product tree. Its parent is the authorized baseline. The follow-up
+commit records this mapping only; it does not change or rebuild the product.
+
+The checkout had no configured Git author, so the first commit attempt failed
+without creating a commit. Successful commits use per-command identity from
+this run's explicit On Behalf Of metadata; no persistent Git identity was set.
