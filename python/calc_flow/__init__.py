@@ -107,6 +107,9 @@ from calc_flow.symbolic import (
     Parameter,
     Program,
     RowFrame,
+    SortKey,
+    SortSpec,
+    SortWindow,
     TableExpr,
     WindowAggregate,
     array_input,
@@ -160,6 +163,9 @@ ProviderContext = _native.ProviderContext
 RunResult = _native.RunResult
 
 __all__ = [
+    "SortKey",
+    "SortSpec",
+    "SortWindow",
     "DistinctSpec",
     "CompileMode",
     "AnalysisOptions",

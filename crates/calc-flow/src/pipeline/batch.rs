@@ -23,6 +23,7 @@ use super::{
 
 pub(crate) enum CompiledBatchOperator {
     External(Box<dyn BatchOperator>),
+    BoundedOrder(crate::BoundedOrderOperator),
     Distinct(crate::DistinctOperator),
     Expression(ExpressionOperator),
     Sql(SqlOperator),
@@ -49,6 +50,7 @@ impl CompiledBatchOperator {
             NodeOperator::Rolling(operator) => Ok(Self::Rolling(operator)),
             NodeOperator::CrossSection(operator) => Ok(Self::CrossSection(operator)),
             NodeOperator::Batch(operator) => Ok(Self::External(operator)),
+            NodeOperator::BoundedOrder(operator) => Ok(Self::BoundedOrder(operator)),
             NodeOperator::Distinct(operator) => Ok(Self::Distinct(operator)),
             NodeOperator::SnapshotSql(_) | NodeOperator::Stream(_) => Err(CalcFlowError::Compile {
                 message: format!(
@@ -68,6 +70,7 @@ impl CompiledBatchOperator {
             | Self::CrossSection(_)
             | Self::Asof(_)
             | Self::Join(_)
+            | Self::BoundedOrder(_)
             | Self::Distinct(_)
             | Self::Window(_)
             | Self::Union(_) => Ok(Value::Null),
@@ -83,6 +86,7 @@ impl CompiledBatchOperator {
             | Self::CrossSection(_)
             | Self::Asof(_)
             | Self::Join(_)
+            | Self::BoundedOrder(_)
             | Self::Distinct(_)
             | Self::Window(_)
             | Self::Union(_)
@@ -96,6 +100,7 @@ impl CompiledBatchOperator {
             | Self::CrossSection(_)
             | Self::Asof(_)
             | Self::Join(_)
+            | Self::BoundedOrder(_)
             | Self::Distinct(_)
             | Self::Window(_)
             | Self::Union(_) => Err(CalcFlowError::Format {
@@ -113,6 +118,7 @@ impl CompiledBatchOperator {
             | Self::CrossSection(_)
             | Self::Asof(_)
             | Self::Join(_)
+            | Self::BoundedOrder(_)
             | Self::Distinct(_)
             | Self::Window(_)
             | Self::Union(_) => Ok(()),
@@ -127,6 +133,14 @@ impl CompiledBatchOperator {
     ) -> Result<BTreeMap<String, Batch>> {
         match self {
             Self::External(operator) => {
+                operator
+                    .process(inputs, &BatchOperatorContext { run })
+                    .await
+            }
+            Self::BoundedOrder(operator) => {
+                operator.set_datafusion_config(
+                    required_datafusion(datafusion, operator.name())?.compact_runtime_config(),
+                );
                 operator
                     .process(inputs, &BatchOperatorContext { run })
                     .await
@@ -314,7 +328,8 @@ impl PipelineBuilder {
     /// Panics when a node that passed the stream-only rejection above still
     /// fails conversion; validation runs before conversion, so this is
     /// unreachable and guards the internal invariant only.
-    pub fn compile_batch(self, udfs: &UdfRegistrySnapshot) -> Result<BatchExecutionPlan> {
+    pub fn compile_batch(mut self, udfs: &UdfRegistrySnapshot) -> Result<BatchExecutionPlan> {
+        super::order::prepare(&mut self);
         for (node_id, node) in &self.nodes {
             validate_finite_node(node_id, &node.operator)?;
         }

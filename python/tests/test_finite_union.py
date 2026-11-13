@@ -80,7 +80,7 @@ def request(history="accepted_history", ordering="unordered"):
 def test_union_reports_append_history_and_no_global_order(kind):
     batch = program(kind)
     report = batch.analyze(options=cf.AnalysisOptions(portability=request())).query
-    assert (report.schema_version, report.analysis_revision) == (2, 9)
+    assert (report.schema_version, report.analysis_revision) == (2, 10)
     assert report.portability == "supported", report.diagnostics
     report = batch.analyze(
         options=cf.AnalysisOptions(portability=request(ordering="declared"))

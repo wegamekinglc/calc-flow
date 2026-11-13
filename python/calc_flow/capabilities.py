@@ -1019,6 +1019,23 @@ def runtime_capabilities(
         portable_arrow_types=PORTABLE_ARROW_TYPES,
         operators=(
             OperatorCapability(
+                kind="bounded_order",
+                version="1",
+                input_ports=(ProviderPort("input", "table", required=True),),
+                output_ports=(ProviderPort("output", "table", required=True),),
+                modes=("batch", "stream"),
+                finality="group_final_append_only",
+                requires_datafusion=True,
+                stateful=True,
+                microbatch_invariant=False,
+                requires_watermark=False,
+                checkpoint_support="checkpointed_stateful",
+                state_version=1,
+                state_layouts=(1, 2),
+                deterministic=False,
+                replay_safe=False,
+            ),
+            OperatorCapability(
                 kind="cross_section",
                 version="1",
                 input_ports=(ProviderPort("input", "table", required=True),),

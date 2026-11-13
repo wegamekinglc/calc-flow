@@ -63,7 +63,7 @@ def test_latest_gate_reports_consumer_before_source_or_job(monkeypatch, transfor
     monkeypatch.setattr(cf.StreamingRunner, "start_async", forbid_job)
     report = latest.analyze(runtime).query
     assert report.update_semantics == "latest_relation"
-    assert (report.schema_version, report.analysis_revision) == (2, 9)
+    assert (report.schema_version, report.analysis_revision) == (2, 10)
     edge = next(
         edge for edge in report.edges if edge.path == "outputs.result.sql.tables.input"
     )

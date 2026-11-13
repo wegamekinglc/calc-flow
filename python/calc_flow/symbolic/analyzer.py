@@ -641,6 +641,8 @@ class _Analyzer:
         self._capabilities = capabilities
         self._runtime: Runtime | None = None
         self._bindings: _BatchBindings | None = None
+        self._order_input_schemas: dict[str, tuple[Field, ...]] = {}
+        self._sql_order_nodes: dict[str, Node] = {}
         self._distinct_input_schemas: dict[str, tuple[Field, ...]] = {}
         self._sql_distinct_nodes: dict[str, Node] = {}
         self._window_input_schemas: dict[str, tuple[Field, ...]] = {}
@@ -870,6 +872,7 @@ class _Analyzer:
                 "attach_columns",
                 "stream_join",
                 "stream_asof_join",
+                "bounded_order",
                 "distinct",
             }:
                 boundaries[current.digest] = self._table_cache[current.digest].schema
@@ -894,6 +897,7 @@ class _Analyzer:
             "stream_asof_join": self._stream_asof_join_table,
             "window_tumbling": self._window_table,
             "window_hopping": self._window_table,
+            "bounded_order": self._order_table,
             "distinct": self._distinct_table,
             "union_all": self._union_table,
             "aggregate": self._aggregate_table,
@@ -990,6 +994,7 @@ class _Analyzer:
 
     def _sql_native_relation(self, node, path):
         for parse in (
+            self._sql_order,
             self._sql_distinct,
             self._sql_asof_join,
             self._sql_inner_join,
@@ -999,6 +1004,38 @@ class _Analyzer:
             if relation is not None:
                 return relation
         return None
+
+    def _order_table(self, node, path):
+        from calc_flow.symbolic.order import analyze
+
+        return analyze(self, node, path)
+
+    def _sql_order(self, node, path):
+        from calc_flow.symbolic.order import analyze, native_plan, relation_node
+
+        plan = native_plan(node)
+        if plan is None:
+            return None
+        if "error" in plan:
+            item = plan["error"]
+            self.issue(f"{path}.{item['path']}", item["code"], item["message"])
+            return TableFacts(
+                (),
+                _SQLRowOrigin(node.digest),
+                frozenset({"bounded_order"}),
+                None,
+                (),
+                (),
+            )
+        child = self.table(node.args[0], f"{path}.sql.order.value")
+        relation = relation_node(node, plan, child.schema)
+        self._sql_order_nodes[node.digest] = relation
+        result = analyze(self, relation, path, role=f"{path}.sql.order")
+        self._order_input_schemas[node.digest] = self._order_input_schemas[
+            relation.digest
+        ]
+        self._table_cache[relation.digest] = result
+        return result
 
     def _distinct_table(self, node, path):
         from calc_flow.symbolic.distinct import analyze

@@ -79,6 +79,7 @@ impl Lowered {
         self.orderings
             .insert(table.0.id.clone(), QueryOrderingFacts::default());
         self.declarations.push(Declaration {
+            order: None,
             distinct_spec: None,
             path: path.into(),
             kind: "union".into(),
@@ -122,6 +123,7 @@ impl Lowered {
         );
         self.edges.push(edge_spec(&node_id(child), id, &arm.alias));
         self.declarations.push(Declaration {
+            order: None,
             distinct_spec: None,
             path: arm_path.clone(),
             kind: "sql".into(),

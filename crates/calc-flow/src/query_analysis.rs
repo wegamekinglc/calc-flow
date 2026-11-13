@@ -1,6 +1,7 @@
 //! Data-only history facts and explicit cross-lifecycle comparison checks.
 
 mod distinct;
+pub(crate) mod order;
 mod sql;
 mod updates;
 
@@ -392,6 +393,8 @@ impl Serialize for QueryNodeFacts {
 pub(crate) struct Declaration {
     #[serde(default)]
     pub distinct_spec: Option<crate::DistinctSpec>,
+    #[serde(default)]
+    pub order: Option<order::OrderDeclaration>,
     pub path: String,
     pub kind: String,
     pub query: Option<String>,
@@ -445,14 +448,11 @@ pub fn analyze_query_graph_json(declaration: &str) -> Result<String> {
     })?)
 }
 
-pub(crate) fn analyze_graph(graph: DeclarationGraph) -> Result<QueryAnalysis> {
-    let DeclarationGraph {
-        nodes: declarations,
-        edges: declared_edges,
-        options,
-        mut diagnostics,
-        update_semantics,
-    } = graph;
+fn validate_cutoff_domain(
+    declarations: &[Declaration],
+    options: &AnalysisOptions,
+    diagnostics: &mut Vec<QueryDiagnostic>,
+) {
     if options
         .portability
         .as_ref()
@@ -469,17 +469,42 @@ pub(crate) fn analyze_graph(graph: DeclarationGraph) -> Result<QueryAnalysis> {
                 } => Some((*start_micros, *end_micros)),
                 crate::DistinctHistory::BoundedSource => None,
             })
+            .chain(
+                declarations
+                    .iter()
+                    .filter_map(|d| d.order.as_ref())
+                    .filter_map(|order| match order.spec.history() {
+                        crate::SortHistory::ClosedWindow {
+                            start_micros,
+                            end_micros,
+                            ..
+                        } => Some((*start_micros, *end_micros)),
+                        crate::SortHistory::BoundedSource => None,
+                    }),
+            )
             .collect::<std::collections::BTreeSet<_>>();
         if domains.len() > 1 {
             diagnostic(
-                &mut diagnostics,
+                diagnostics,
                 "options.portability.cutoff",
                 "finality_unproven",
                 SupportStatus::Unknown,
-                "comparison must resolve to one fixed DISTINCT interval",
+                "comparison must resolve to one fixed complete-history interval",
             );
         }
     }
+}
+
+pub(crate) fn analyze_graph(graph: DeclarationGraph) -> Result<QueryAnalysis> {
+    let DeclarationGraph {
+        nodes: declarations,
+        edges: declared_edges,
+        options,
+        mut diagnostics,
+        update_semantics,
+    } = graph;
+    validate_cutoff_domain(&declarations, &options, &mut diagnostics);
+    let invalid_order_fields = order::invalid_fields(&declarations, &declared_edges);
     let invalid_distinct_times = distinct::invalid_times(&declarations, &declared_edges);
     let AnalyzedNodes {
         mut by_path,
@@ -496,6 +521,13 @@ pub(crate) fn analyze_graph(graph: DeclarationGraph) -> Result<QueryAnalysis> {
         &proofs,
         &declared_edges,
         &invalid_distinct_times,
+        &mut diagnostics,
+    );
+    order::validate(
+        &mut by_path,
+        &proofs,
+        &declared_edges,
+        &invalid_order_fields,
         &mut diagnostics,
     );
     let mut edges = analyze_edges(
@@ -524,7 +556,7 @@ pub(crate) fn analyze_graph(graph: DeclarationGraph) -> Result<QueryAnalysis> {
         .map(|_| conjunction(diagnostics.iter().map(|issue| issue.status)));
     Ok(QueryAnalysis {
         schema_version: 2,
-        analysis_revision: 9,
+        analysis_revision: 10,
         update_semantics,
         request: options.portability,
         portability,
@@ -574,6 +606,7 @@ fn analyze_nodes(
         .collect::<BTreeMap<_, _>>();
     let mut by_path = BTreeMap::<String, QueryNodeFacts>::new();
     let mut proofs = BTreeMap::new();
+    let mut order_paths = std::collections::BTreeSet::new();
     let mut distinct_paths = BTreeMap::<String, crate::DistinctSpec>::new();
     while !pending.is_empty() {
         let ready = pending
@@ -629,6 +662,14 @@ fn analyze_nodes(
             declared_edges,
             &by_path,
             diagnostics,
+        );
+        order::propagate(
+            &node,
+            &mut facts,
+            proof,
+            &inputs,
+            &by_path,
+            &mut order_paths,
         );
         if let Some(spec) = &node.distinct_spec {
             distinct_paths.insert(node.path.clone(), spec.clone());
@@ -791,7 +832,7 @@ fn analyze_edges(
             proofs[&edge.target_path].1
                 || matches!(
                     target_kind.as_str(),
-                    "union" | "distinct" | "stream_join" | "stream_asof_join"
+                    "union" | "bounded_order" | "distinct" | "stream_join" | "stream_asof_join"
                 )
                 || window_kind(target_kind),
         ) {
@@ -859,6 +900,7 @@ fn check_ordering(
             if node.stream.ordering.kind != QueryRowOrder::Ordered
                 || node.stream.ordering.ties != QueryTieOrder::Total
                 || request.comparison == Comparison::FinalRelation
+                    && !node.stream.reason.starts_with("bounded_order_v1")
             {
                 diagnostic(
                     diagnostics,
@@ -979,7 +1021,7 @@ fn batch_facts(
     }
     if matches!(
         node.kind.as_str(),
-        "distinct" | "stream_join" | "stream_asof_join"
+        "bounded_order" | "distinct" | "stream_join" | "stream_asof_join"
     ) {
         batch.support = node.batch_support.unwrap_or(SupportStatus::Supported);
         batch.history = HistoryScope::CurrentBatch;
@@ -1075,6 +1117,13 @@ fn classify(
             proof = sql.proof;
             aggregate = sql.aggregate;
             ordering = sql.ordering;
+            if matches!(node.kind.as_str(), "project" | "with_columns" | "filter")
+                && proof == sql::Proof::RowLocal
+            {
+                ordering
+                    .temporal_identity
+                    .clone_from(&node.ordering.temporal_identity);
+            }
             support = if schema_known {
                 SupportStatus::Supported
             } else {
@@ -1141,6 +1190,9 @@ fn stream_only_kind(kind: &str) -> bool {
 }
 
 fn stream_facts(node: &Declaration, class: Classification) -> QueryModeFacts {
+    if let Some(order) = &node.order {
+        return order.facts(node);
+    }
     if let Some(spec) = &node.distinct_spec {
         let (history, closure) = match spec.history() {
             crate::DistinctHistory::BoundedSource => (
@@ -1329,6 +1381,10 @@ fn obligations(
     diagnostics: &mut Vec<QueryDiagnostic>,
 ) {
     record_unknown_support(node, facts, diagnostics);
+    if let Some(order) = &node.order {
+        order.obligations(node, request, diagnostics);
+        return;
+    }
     if let Some(spec) = &node.distinct_spec {
         let domain = match spec.history() {
             crate::DistinctHistory::BoundedSource => {

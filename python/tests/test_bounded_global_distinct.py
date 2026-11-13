@@ -214,7 +214,7 @@ def test_mixed_dag_shared_owner_schema_export_and_r9_analysis():
     )
     assert after.collect_schema() == pa.schema([pa.field("z", pa.int64())])
     report = program.analyze(cf.Runtime()).query
-    assert (report.schema_version, report.analysis_revision) == (2, 9)
+    assert (report.schema_version, report.analysis_revision) == (2, 10)
     document = program.to_project().model_dump()
     assert (
         len(
@@ -388,13 +388,20 @@ class _ReplaySource:
         pass
 
 
+@pytest.mark.parametrize("operation", ["distinct", "top_k"])
 @_sync
-async def test_durable_checkpoint_continues_duplicate_history(tmp_path):
+async def test_durable_checkpoint_continues_duplicate_history(tmp_path, operation):
     schema = pa.schema([pa.field("x", pa.int64())])
     events = cf.table_input("events", schema=schema)
     unique = events.distinct(
         ["x"], spec=cf.DistinctSpec.bounded_source(cf.StateBudget(2, 8 << 20))
     )
+    if operation == "top_k":
+        unique = events.top_k(
+            1,
+            [cf.SortKey("x")],
+            spec=cf.SortSpec.bounded_source(cf.StateBudget(2, 8 << 20)),
+        )
     program = cf.Program("durable_unique", mode="stream", outputs={"out": unique})
     runtime = cf.Runtime()
     written = []

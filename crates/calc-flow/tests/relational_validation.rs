@@ -255,6 +255,75 @@ async fn native_input_identity_survives_dataframe_but_is_cleared_by_sql() -> cal
     Ok(())
 }
 
+#[tokio::test]
+async fn typed_projection_and_filter_preserve_only_retained_temporal_identity() {
+    let source = ordered_input().unwrap();
+    let projected = source
+        .select(vec![
+            source.column("symbol").unwrap().alias("symbol").unwrap(),
+            source.column("ts").unwrap().alias("ts").unwrap(),
+            source.column("seq").unwrap().alias("seq").unwrap(),
+            source.column("x").unwrap().alias("x").unwrap(),
+        ])
+        .unwrap();
+    let filtered = projected
+        .filter(projected.column("x").unwrap().gt(lit(0_i64).unwrap()))
+        .unwrap();
+    let added = source
+        .with_columns(vec![
+            (source.column("x").unwrap() + lit(1_i64).unwrap())
+                .alias("y")
+                .unwrap(),
+        ])
+        .unwrap();
+    let dropped = source
+        .select(vec![
+            source.column("symbol").unwrap().alias("symbol").unwrap(),
+            source.column("ts").unwrap().alias("ts").unwrap(),
+            source.column("x").unwrap().alias("x").unwrap(),
+        ])
+        .unwrap();
+    let sql = projected.sql("SELECT * FROM input").unwrap();
+    let sql_filtered = sql
+        .filter(sql.column("x").unwrap().gt(lit(0_i64).unwrap()))
+        .unwrap();
+    for (name, table, retained) in [
+        ("project", projected, true),
+        ("filter", filtered, true),
+        ("with_columns", added, true),
+        ("drop_sequence", dropped, false),
+        ("sql_filter", sql_filtered, false),
+    ] {
+        let p = Program::new(
+            name,
+            CompileMode::Batch,
+            BTreeMap::from([("out".into(), table)]),
+        )
+        .unwrap();
+        let report = p
+            .analyze(&UdfRegistry::new().snapshot(), &AnalysisOptions::default())
+            .await
+            .unwrap();
+        let out = report
+            .nodes
+            .iter()
+            .find(|n| n.path == "outputs.out")
+            .unwrap();
+        for mode in [&out.batch, &out.stream] {
+            assert_eq!(
+                mode.ordering.temporal_identity.is_some(),
+                retained,
+                "{name}: {report:?}"
+            );
+            if let Some(identity) = &mode.ordering.temporal_identity {
+                assert_eq!(identity.entity_by, vec!["symbol"]);
+                assert_eq!(identity.event_time, "ts");
+                assert_eq!(identity.sequence_by, vec!["seq"]);
+            }
+        }
+    }
+}
+
 #[test]
 fn readonly_sql_constructor_keeps_public_query_path() -> calc_flow::Result<()> {
     let source = input("events")?;

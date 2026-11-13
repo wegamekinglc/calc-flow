@@ -13,6 +13,40 @@ use crate::{
 
 use super::validate_external_provider_lifecycles;
 
+#[test]
+fn test_bounded_order_requires_explicit_sequence_for_strong_delivery() {
+    use crate::{
+        BoundedOrderOperator, DeliveryGuarantee, NullPlacement, SortDirection, SortKey, SortSpec,
+        StateBudget,
+    };
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)]));
+    let op = BoundedOrderOperator::new(
+        "order",
+        schema,
+        vec![SortKey::new("x", SortDirection::Ascending, NullPlacement::Last).unwrap()],
+        Some(1),
+        SortSpec::bounded_source(StateBudget::new(10, 8 << 20).unwrap()).unwrap(),
+    )
+    .unwrap();
+    let builder = PipelineBuilder::new("proof")
+        .unwrap()
+        .add_node("order", op)
+        .unwrap();
+    let requirements = StreamRequirements {
+        delivery: std::collections::BTreeMap::from([(
+            "output".into(),
+            DeliveryGuarantee::ExactlyOnce,
+        )]),
+    };
+    let result = validate_external_provider_lifecycles(&builder.nodes, &requirements);
+    assert!(
+        result.is_err(),
+        "a built-in checkpoint codec must not bypass tie/replay proof"
+    );
+    assert!(result.unwrap_err().to_string().contains("ties"));
+}
+
 struct Proof {
     version: Arc<AtomicU32>,
     inputs: Vec<Port>,

@@ -14,6 +14,7 @@ mod stream;
 
 pub use batch::BatchExecutionPlan;
 pub(crate) mod distinct;
+pub(crate) mod order;
 pub use stream::{
     DeliveryGuarantee, EdgeBudget, StreamExecutionPlan, StreamRequirements, StreamRuntimeConfig,
 };
@@ -214,7 +215,8 @@ impl PipelineBuilder {
                 OperatorCheckpointCapability::CheckpointedStateful { state_version: 2 }
             }
             NodeOperator::Sql(_) => OperatorCheckpointCapability::Stateless,
-            NodeOperator::Distinct(_)
+            NodeOperator::BoundedOrder(_)
+            | NodeOperator::Distinct(_)
             | NodeOperator::SnapshotSql(_)
             | NodeOperator::StreamJoin(_) => {
                 OperatorCheckpointCapability::CheckpointedStateful { state_version: 1 }

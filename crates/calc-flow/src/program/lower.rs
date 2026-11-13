@@ -49,6 +49,11 @@ fn endpoint(table: &TableExpr, port: &str) -> PortEndpoint {
 }
 pub(super) fn children(table: &TableExpr, path: &str) -> Vec<(String, TableExpr, String)> {
     match &table.0.kind {
+        RelationKind::Order { input, sql, .. } => vec![(
+            "input".into(),
+            input.clone(),
+            format!("{path}.{}.value", if *sql { "sql.order" } else { "sort" }),
+        )],
         RelationKind::Distinct { input, sql, .. } => vec![(
             "input".into(),
             input.clone(),
@@ -254,6 +259,16 @@ impl Lowered {
         self.diagnostics.push(schema_diagnostic(table, path, error));
         let (kind, query) = relation_kind(table);
         self.declarations.push(Declaration {
+            order: match &table.0.kind {
+                RelationKind::Order {
+                    by, fetch, spec, ..
+                } => Some(crate::query_analysis::order::OrderDeclaration {
+                    by: by.clone(),
+                    fetch: *fetch,
+                    spec: spec.clone(),
+                }),
+                _ => None,
+            },
             distinct_spec: match &table.0.kind {
                 RelationKind::Distinct { spec, .. } => Some(spec.clone()),
                 _ => None,
@@ -309,6 +324,16 @@ impl Lowered {
         validate_schema(&schema, path)?;
         self.orderings.insert(table.0.id.clone(), ordering.clone());
         self.declarations.push(Declaration {
+            order: match &table.0.kind {
+                RelationKind::Order {
+                    by, fetch, spec, ..
+                } => Some(crate::query_analysis::order::OrderDeclaration {
+                    by: by.clone(),
+                    fetch: *fetch,
+                    spec: spec.clone(),
+                }),
+                _ => None,
+            },
             distinct_spec: match &table.0.kind {
                 RelationKind::Distinct { spec, .. } => Some(spec.clone()),
                 _ => None,
@@ -359,6 +384,13 @@ impl Lowered {
     }
     async fn prepare(&self, table: &TableExpr, path: &str) -> Result<Prepared> {
         match &table.0.kind {
+            RelationKind::Order {
+                input,
+                by,
+                fetch,
+                spec,
+                ..
+            } => self.prepare_order(table, input, by, *fetch, spec),
             RelationKind::Distinct {
                 input,
                 columns,
@@ -432,6 +464,44 @@ impl Lowered {
             RelationKind::Sql { .. } => self.prepare_sql(table).await,
         }
     }
+    fn prepare_order(
+        &self,
+        table: &TableExpr,
+        input: &TableExpr,
+        by: &[crate::SortKey],
+        fetch: Option<u64>,
+        spec: &crate::SortSpec,
+    ) -> Result<Prepared> {
+        let schema = &self.schemas[&input.0.id];
+        let op = crate::BoundedOrderOperator::new(
+            &node_id(table),
+            schema.clone(),
+            by.to_vec(),
+            fetch,
+            spec.clone(),
+        )?;
+        let schema = crate::OperatorMetadata::output_ports(&op)[0]
+            .schema()
+            .unwrap()
+            .clone();
+        Ok(Prepared {
+            node: NodeSpec {
+                id: node_id(table),
+                operator: OperatorSpec::BoundedOrder {
+                    by: by.to_vec(),
+                    fetch,
+                    spec: spec.clone(),
+                },
+                input_ports: vec![port_spec("input", &schema)],
+                output_ports: vec![port_spec("output", &schema)],
+                position: None,
+            },
+            schema,
+            kind: "bounded_order",
+            query: None,
+            ordering: QueryOrderingFacts::default(),
+        })
+    }
     fn prepare_distinct(
         &self,
         table: &TableExpr,
@@ -492,7 +562,7 @@ impl Lowered {
             ordering: self.projection_ordering(table, &schema),
             schema,
             kind: if *append { "with_columns" } else { "project" },
-            query: None,
+            query: Some(operator.query_text().to_owned()),
         })
     }
     async fn prepare_filter(&self, table: &TableExpr, path: &str) -> Result<Prepared> {
@@ -521,7 +591,7 @@ impl Lowered {
             node: expression_node(&id, select, filter, input_schema, &schema),
             schema,
             kind: "filter",
-            query: None,
+            query: Some(operator.query_text().to_owned()),
             ordering: self.orderings[&input.0.id].clone(),
         })
     }
@@ -583,6 +653,7 @@ impl Lowered {
             .declarations
             .iter()
             .map(|node| Declaration {
+                order: node.order.clone(),
                 distinct_spec: node.distinct_spec.clone(),
                 path: node.path.clone(),
                 kind: node.kind.clone(),
@@ -644,6 +715,7 @@ impl Lowered {
     pub fn project(&self, mode: CompileMode) -> Result<ProjectSpec> {
         self.ensure_valid()?;
         crate::pipeline::distinct::validate(&self.builder()?)?;
+        crate::pipeline::order::validate(&self.builder()?)?;
         let data_sources = if mode == CompileMode::Batch {
             crate::pipeline::external_names(self.bindings.inputs.values().cloned().collect())
                 .keys()
@@ -690,6 +762,7 @@ fn native_edge(edge: &EdgeSpec) -> Result<Edge> {
 }
 fn relation_kind(table: &TableExpr) -> (&'static str, Option<String>) {
     match &table.0.kind {
+        RelationKind::Order { .. } => ("bounded_order", None),
         RelationKind::Distinct { .. } => ("distinct", None),
         RelationKind::AsofJoin { .. } => ("stream_asof_join", None),
         RelationKind::InnerJoin { .. } => ("stream_join", None),
@@ -821,6 +894,14 @@ fn node_operator(node: &NodeSpec, schemas: &PlannedPorts) -> Result<NodeOperator
     let inputs = schemas.inputs()?;
     let output = exact_port("output", &schemas.output)?;
     match &node.operator {
+        OperatorSpec::BoundedOrder { by, fetch, spec } => Ok(crate::BoundedOrderOperator::new(
+            &node.id,
+            inputs[0].schema().unwrap().clone(),
+            by.clone(),
+            *fetch,
+            spec.clone(),
+        )?
+        .into()),
         OperatorSpec::Distinct { columns, spec } => Ok(crate::DistinctOperator::new(
             &node.id,
             inputs[0].schema().unwrap().clone(),

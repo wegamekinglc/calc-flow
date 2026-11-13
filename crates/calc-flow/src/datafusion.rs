@@ -622,6 +622,23 @@ impl DataFusionRuntime {
         self.execute_query(query, 0, tables, node_id, None).await
     }
 
+    pub(crate) async fn sql_ordered(
+        &self,
+        query: &ValidatedQuery,
+        tables: &BTreeMap<String, Batch>,
+        node_id: Option<&str>,
+    ) -> Result<Batch> {
+        self.ensure_open()?;
+        let runtime = Self::new_with_pool(
+            crate::pipeline::order::serial_config(self.config),
+            self.runtime_env.memory_pool.clone(),
+            Instant::now(),
+        )?;
+        let output = runtime.sql_validated(query, tables, node_id).await?;
+        self.metrics.lock().extend(runtime.metrics());
+        Ok(output)
+    }
+
     pub(crate) async fn snapshot_sql(
         &self,
         query: &ValidatedQuery,

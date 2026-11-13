@@ -1,5 +1,6 @@
 mod asof;
 mod distinct;
+mod order;
 
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
@@ -485,6 +486,7 @@ pub(crate) fn preflight_job(spec: ContinuousJobSpec) -> Result<ValidatedContinuo
     let (validated_sources, progress) = validate_sources(&plan, sources)?;
     asof::validate_progress(&plan, &progress)?;
     distinct::validate_progress(&plan, &validated_sources, &progress)?;
+    order::validate_progress(&plan, &validated_sources, &progress)?;
     let validated_sinks = validate_sinks(&plan, sinks)?;
     validate_state_owner_ids(&plan, &validated_sinks)?;
     let delivery_proofs =
@@ -714,6 +716,7 @@ fn validate_sources(
         })
         .collect::<Result<Vec<_>>>()?;
     let distinct_fingerprint = distinct::fingerprint(plan, &validated)?;
+    let distinct_fingerprint = order::fingerprint(plan, &validated, &distinct_fingerprint)?;
     let progress = prepare_stream_job(
         &distinct_fingerprint,
         &specs,

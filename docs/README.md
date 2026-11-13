@@ -37,6 +37,7 @@ pages explain how the implementation provides those behaviors.
 
 - [DataFrame and SQL relations in Rust and Python](relational-frontends.md).
 - [Final DISTINCT over bounded history](bounded-global-distinct.md).
+- [Complete-history sorting and top-k](bounded-global-ordering.md).
 - [Query history and strict portability checks](query-history-portability.md).
 
 1. [API reference](api-reference.md): public surfaces, errors,

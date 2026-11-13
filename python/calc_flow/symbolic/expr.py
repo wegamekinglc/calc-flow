@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from calc_flow.stream import StreamInput, StreamResults
     from calc_flow.symbolic.asof import _AsofJoinOptions
     from calc_flow.symbolic.distinct import DistinctSpec
+    from calc_flow.symbolic.order import SortKey, SortSpec
     from calc_flow.symbolic.program import FeatureSet
 
 ColumnOperand = TypeAliasType("ColumnOperand", Union["ColumnExpr", ScalarLiteral])
@@ -511,6 +512,19 @@ def _reflected_array(
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
 class TableExpr(Expr[object]):
     """An Arrow-backed table expression."""
+
+    def sort(self, by: Sequence[SortKey], /, *, spec: SortSpec) -> TableExpr:
+        """Sort a complete explicit history, with one final output."""
+        from calc_flow.symbolic.order import declaration
+
+        return TableExpr(declaration(self._node, by, spec))
+
+    def top_k(self, k: int, by: Sequence[SortKey], /, *, spec: SortSpec) -> TableExpr:
+        """Take the first k rows of the comparator order after offset."""
+        from calc_flow.symbolic.order import _limit, declaration
+
+        _limit(k, "top_k.k")
+        return TableExpr(declaration(self._node, by, spec, k))
 
     def distinct(self, columns: Sequence[str], /, *, spec: DistinctSpec) -> TableExpr:
         """Final DISTINCT with copy_visible_v2 owned peak accounting.

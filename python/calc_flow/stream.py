@@ -365,8 +365,11 @@ class StreamResults(Generic[T]):
 
     async def _create_root(self) -> None:
         from calc_flow.symbolic.distinct import cache_policy
+        from calc_flow.symbolic.order import cache_policy as order_cache_policy
 
-        if cache_policy(self._request.program):
+        if cache_policy(self._request.program) or order_cache_policy(
+            self._request.program
+        ):
             # Native preflight must validate the binding before creating state.
             self._root = os.path.join(
                 tempfile.gettempdir(), f"calc-flow-{uuid.uuid4().hex}"

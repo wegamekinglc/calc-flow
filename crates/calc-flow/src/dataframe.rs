@@ -73,6 +73,13 @@ pub(crate) struct Relation {
 }
 #[derive(Debug)]
 pub(crate) enum RelationKind {
+    Order {
+        input: TableExpr,
+        by: Vec<crate::SortKey>,
+        fetch: Option<u64>,
+        spec: crate::SortSpec,
+        sql: bool,
+    },
     Distinct {
         input: TableExpr,
         columns: Vec<String>,
@@ -402,6 +409,44 @@ impl TableExpr {
             },
         })))
     }
+    /// Sorts a complete explicitly bounded history, skipping the declared offset.
+    /// # Errors
+    /// Rejects invalid comparator/limit declarations; schema is checked at planning.
+    pub fn sort(&self, by: Vec<crate::SortKey>, spec: crate::SortSpec) -> Result<Self> {
+        self.order_relation(by, None, spec, false)
+    }
+    /// Returns the first k rows of the explicit comparator order after offset.
+    /// # Errors
+    /// Rejects limits or offset+k outside the inclusive `UInt32` domain.
+    pub fn top_k(&self, k: u64, by: Vec<crate::SortKey>, spec: crate::SortSpec) -> Result<Self> {
+        self.order_relation(by, Some(k), spec, false)
+    }
+    pub(crate) fn order_relation(
+        &self,
+        by: Vec<crate::SortKey>,
+        fetch: Option<u64>,
+        spec: crate::SortSpec,
+        sql: bool,
+    ) -> Result<Self> {
+        crate::operator::order::validate_fetch(fetch, &spec)?;
+        if by.is_empty() {
+            return Err(invalid(
+                "sort.by",
+                "invalid_literal",
+                "at least one comparator required",
+            ));
+        }
+        Ok(Self(Arc::new(Relation {
+            id: digest(&json!(["bounded_order", self.0.id, by, fetch, spec, sql])),
+            kind: RelationKind::Order {
+                input: self.clone(),
+                by,
+                fetch,
+                spec,
+                sql,
+            },
+        })))
+    }
     /// Appends rows from two exact-schema relations, preserving duplicates and NULLs.
     ///
     /// Each input keeps its FIFO order; cross-input order is unspecified.
@@ -433,6 +478,7 @@ impl TableExpr {
             | RelationKind::AsofJoin { .. }
             | RelationKind::InnerJoin { .. }
             | RelationKind::Window { .. }
+            | RelationKind::Order { .. }
             | RelationKind::Distinct { .. }
             | RelationKind::Union { .. }
             | RelationKind::Sql { .. }
@@ -461,7 +507,9 @@ impl TableExpr {
                 names.extend(columns.iter().map(|column| column.name.clone()));
                 Some(names)
             }
-            RelationKind::Filter { input, .. } => input.known_names(),
+            RelationKind::Filter { input, .. } | RelationKind::Order { input, .. } => {
+                input.known_names()
+            }
             RelationKind::Distinct {
                 columns, wildcard, ..
             } => {

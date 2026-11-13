@@ -154,6 +154,15 @@ pub struct NodeSpec {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[non_exhaustive]
 pub enum OperatorSpec {
+    /// Final ordering over an explicit finite history domain.
+    BoundedOrder {
+        #[schemars(length(min = 1))]
+        by: Vec<crate::SortKey>,
+        #[serde(deserialize_with = "required_order_fetch")]
+        #[schemars(with = "OrderFetchSchema")]
+        fetch: Option<u64>,
+        spec: crate::SortSpec,
+    },
     /// Final DISTINCT over an explicit finite history domain.
     Distinct {
         columns: Vec<String>,
@@ -1344,6 +1353,34 @@ fn add_project_edges(
     Ok(builder)
 }
 
+fn order_node(
+    node: &NodeSpec,
+    inputs: Vec<Port>,
+    outputs: Vec<Port>,
+    by: &[crate::SortKey],
+    fetch: Option<u64>,
+    spec: &crate::SortSpec,
+) -> Result<NodeOperator> {
+    let (inputs, outputs) =
+        builtin_ports(inputs, outputs, &["input"], &["output"], BatchKind::Table)?;
+    let schema = inputs[0]
+        .schema()
+        .ok_or_else(|| {
+            crate::dataframe::invalid("sort.input", "unresolved_type", "exact schema required")
+        })?
+        .clone();
+    let operator =
+        crate::BoundedOrderOperator::new(&node.id, schema, by.to_vec(), fetch, spec.clone())?;
+    if outputs[0].schema() != crate::OperatorMetadata::output_ports(&operator)[0].schema() {
+        return Err(crate::dataframe::invalid(
+            "sort.output",
+            "schema_mismatch",
+            "exact input schema required",
+        ));
+    }
+    Ok(operator.into())
+}
+
 fn project_node_operator(
     node: &NodeSpec,
     providers: &ProviderRegistry,
@@ -1385,6 +1422,9 @@ fn project_node_operator(
             ))
         }
         OperatorSpec::Union => union_node(node, inputs, &outputs, mode),
+        OperatorSpec::BoundedOrder { by, fetch, spec } => {
+            order_node(node, inputs, outputs, by, *fetch, spec)
+        }
         OperatorSpec::Distinct { columns, spec } => {
             let (inputs, outputs) =
                 builtin_ports(inputs, outputs, &["input"], &["output"], BatchKind::Table)?;
@@ -2223,7 +2263,7 @@ fn validate_operator(
             validate_union_operator(node, index, mode, &base, issues);
             (None, Some(vec!["output"]))
         }
-        OperatorSpec::Distinct { .. } => single_table_io(),
+        OperatorSpec::BoundedOrder { .. } | OperatorSpec::Distinct { .. } => single_table_io(),
         OperatorSpec::Window { spec } => {
             validate_window_operator(node, index, spec, mode, &base, issues);
             single_table_io()
@@ -3221,6 +3261,7 @@ fn operator_udfs(operator: &OperatorSpec) -> &[UdfReference] {
         | OperatorSpec::Sql { udfs, .. }
         | OperatorSpec::SnapshotSql { udfs, .. } => udfs,
         OperatorSpec::Union
+        | OperatorSpec::BoundedOrder { .. }
         | OperatorSpec::Distinct { .. }
         | OperatorSpec::Window { .. }
         | OperatorSpec::Rolling { .. }
@@ -3304,6 +3345,22 @@ fn default_input() -> String {
 
 fn default_output() -> String {
     "output".into()
+}
+
+fn required_order_fetch<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<u64>, D::Error> {
+    Option::<u64>::deserialize(deserializer)
+}
+
+struct OrderFetchSchema;
+impl JsonSchema for OrderFetchSchema {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "OrderFetch".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({"type":["integer","null"],"minimum":0,"maximum":4_294_967_295_u64})
+    }
 }
 
 #[cfg(test)]

@@ -18,7 +18,7 @@ use crate::{
 mod budget;
 mod checkpoint;
 mod late;
-mod owned;
+pub(crate) mod owned;
 mod spec;
 pub use spec::{DistinctHistory, DistinctSpec};
 
@@ -523,7 +523,9 @@ fn validate_window_type(schema: &SchemaRef, spec: &DistinctSpec) -> Result<()> {
     }
     Ok(())
 }
-fn window_time_type(dtype: &datafusion::arrow::datatypes::DataType) -> bool {
+pub(in crate::operator) fn window_time_type(
+    dtype: &datafusion::arrow::datatypes::DataType,
+) -> bool {
     use datafusion::arrow::datatypes::{DataType, TimeUnit};
     matches!(dtype, DataType::Timestamp(TimeUnit::Millisecond, None))
         || matches!(dtype,DataType::Timestamp(TimeUnit::Microsecond,tz) if tz.as_deref().is_none_or(|tz|tz=="UTC"))

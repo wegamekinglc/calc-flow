@@ -5,6 +5,8 @@ mod batch;
 mod checkpoint;
 mod cross_section;
 mod distinct;
+pub(crate) mod order;
+pub use order::{BoundedOrderOperator, SortHistory, SortKey, SortSpec, SortTies, SortWindow};
 mod expression;
 pub use distinct::{DistinctHistory, DistinctOperator, DistinctSpec};
 pub(crate) mod ingress;
@@ -307,6 +309,7 @@ pub trait OperatorMetadata: Send + Sync + std::any::Any {
 /// rejects batch-only nodes (plan section 2.2).
 #[non_exhaustive]
 pub enum NodeOperator {
+    BoundedOrder(BoundedOrderOperator),
     Distinct(DistinctOperator),
     Expression(ExpressionOperator),
     Sql(SqlOperator),
@@ -324,6 +327,7 @@ pub enum NodeOperator {
 impl NodeOperator {
     pub(crate) fn metadata(&self) -> &dyn OperatorMetadata {
         match self {
+            Self::BoundedOrder(operator) => operator,
             Self::Distinct(operator) => operator,
             Self::Expression(operator) => operator,
             Self::Sql(operator) => operator,
@@ -361,6 +365,7 @@ impl NodeOperator {
             Self::Expression(_)
                 | Self::Sql(_)
                 | Self::SnapshotSql(_)
+                | Self::BoundedOrder(_)
                 | Self::Distinct(_)
                 | Self::StreamJoin(_)
                 | Self::StreamAsofJoin(_)
@@ -368,6 +373,11 @@ impl NodeOperator {
     }
 }
 
+impl From<BoundedOrderOperator> for NodeOperator {
+    fn from(value: BoundedOrderOperator) -> Self {
+        Self::BoundedOrder(value)
+    }
+}
 impl From<DistinctOperator> for NodeOperator {
     fn from(value: DistinctOperator) -> Self {
         Self::Distinct(value)

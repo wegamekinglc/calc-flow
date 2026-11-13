@@ -9,8 +9,8 @@ use datafusion::{
         buffer::{BooleanBuffer, MutableBuffer, NullBuffer, OffsetBuffer, ScalarBuffer},
         datatypes::{
             DataType, Date32Type, Date64Type, Field, Int8Type, Int16Type, Int32Type, Int64Type,
-            Schema, SchemaRef, TimeUnit, TimestampMicrosecondType, UInt8Type, UInt16Type,
-            UInt32Type, UInt64Type,
+            Schema, SchemaRef, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
+            UInt8Type, UInt16Type, UInt32Type, UInt64Type,
         },
         record_batch::RecordBatch,
     },
@@ -21,18 +21,18 @@ use std::{collections::BTreeSet, sync::Arc};
 #[cfg(test)]
 mod tests;
 
-pub(super) struct OwnedBatch {
-    pub(super) batch: Batch,
+pub(in crate::operator) struct OwnedBatch {
+    pub(in crate::operator) batch: Batch,
     data_lease: MemoryReservation,
     metadata_lease: MemoryReservation,
 }
 impl OwnedBatch {
-    pub(super) fn charge(&self) -> usize {
+    pub(in crate::operator) fn charge(&self) -> usize {
         self.data_lease.size() + self.metadata_lease.size()
     }
 }
 
-pub(super) fn combine(
+pub(in crate::operator) fn combine(
     history: &[Arc<OwnedBatch>],
     schema: &SchemaRef,
     columns: &[String],
@@ -101,7 +101,19 @@ fn combined_records(
     Ok(records)
 }
 
-pub(super) fn projected_schema(schema: &SchemaRef, columns: &[String]) -> Result<SchemaRef> {
+pub(in crate::operator) fn projected_schema(
+    schema: &SchemaRef,
+    columns: &[String],
+) -> Result<SchemaRef> {
+    schema_projection(schema, columns, false)
+}
+pub(in crate::operator) fn order_schema(
+    schema: &SchemaRef,
+    columns: &[String],
+) -> Result<SchemaRef> {
+    schema_projection(schema, columns, true)
+}
+fn schema_projection(schema: &SchemaRef, columns: &[String], allow_ms: bool) -> Result<SchemaRef> {
     if columns.is_empty() {
         return Err(invalid(
             "distinct.columns",
@@ -114,13 +126,13 @@ pub(super) fn projected_schema(schema: &SchemaRef, columns: &[String]) -> Result
         let path = format!("distinct.columns[{i}]");
         if !seen.insert(name) { return Err(invalid(&path, "duplicate_name", name)); }
         let field = schema.field_with_name(name).map_err(|_| invalid(&path, "unresolved_type", format!("unknown key {name:?}")))?;
-        if !key_type(field.data_type()) { return Err(invalid(&path, "unsupported_type", format!("keys require Boolean, integers, Utf8/LargeUtf8, dates or timestamp[us] naive/UTC; found {}", field.data_type()))); }
+        if !(key_type(field.data_type()) || allow_ms && matches!(field.data_type(),DataType::Timestamp(TimeUnit::Millisecond,None))) { return Err(invalid(&path, "unsupported_type", format!("keys require Boolean, integers, Utf8/LargeUtf8, dates or timestamp[us] naive/UTC; found {}", field.data_type()))); }
         Ok(Field::new(field.name(), own_dtype(field.data_type()), field.is_nullable()))
     }).collect::<Result<Vec<_>>>()?;
     Ok(Arc::new(Schema::new(fields)))
 }
 
-pub(super) fn normalize(
+pub(in crate::operator) fn normalize(
     raw: &Batch,
     columns: &[String],
     pool: &Arc<dyn MemoryPool>,
@@ -192,7 +204,7 @@ fn copy_table(
     let table = raw.table_payload()?;
     #[cfg(test)]
     tests::before_target_allocation();
-    let schema = projected_schema(table.schema(), columns)?;
+    let schema = order_schema(table.schema(), columns)?;
     let records = table
         .batches()
         .iter()
@@ -371,6 +383,9 @@ fn copy_temporal(
     match array.data_type() {
         DataType::Date32 => copy_primitive::<Date32Type>(array, n, selected, nulls, check),
         DataType::Date64 => copy_primitive::<Date64Type>(array, n, selected, nulls, check),
+        DataType::Timestamp(TimeUnit::Millisecond, None) => {
+            copy_primitive::<TimestampMillisecondType>(array, n, selected, nulls, check)
+        }
         DataType::Timestamp(TimeUnit::Microsecond, _) => {
             copy_primitive::<TimestampMicrosecondType>(array, n, selected, nulls, check)
         }
@@ -465,7 +480,7 @@ fn copy_boolean(
 fn boolean_value(src: &BooleanArray, i: usize) -> bool {
     src.is_valid(i) && src.value(i)
 }
-pub(super) fn check_row(i: usize, check: &dyn Fn() -> Result<()>) -> Result<()> {
+pub(in crate::operator) fn check_row(i: usize, check: &dyn Fn() -> Result<()>) -> Result<()> {
     if i.is_multiple_of(256) {
         check()?;
     }
@@ -515,7 +530,7 @@ fn string_offsets<O: OffsetSizeTrait>(n: usize) -> Result<MutableBuffer> {
     )?))
 }
 
-pub(super) fn count(
+pub(in crate::operator) fn count(
     raw: &Batch,
     domain: Option<&DistinctHistory>,
     check: &dyn Fn() -> Result<()>,
@@ -553,7 +568,7 @@ fn member(record: &RecordBatch, row: usize, domain: Option<&DistinctHistory>) ->
     };
     Ok((*start_micros..*end_micros).contains(&t))
 }
-pub(super) fn event_time(
+pub(in crate::operator) fn event_time(
     record: &RecordBatch,
     row: usize,
     event_time_column: &str,
@@ -589,7 +604,7 @@ fn own_dtype(dtype: &DataType) -> DataType {
     }
 }
 
-pub(super) fn schema_quote(schema: &Schema) -> Result<usize> {
+pub(in crate::operator) fn schema_quote(schema: &Schema) -> Result<usize> {
     schema
         .fields()
         .iter()
@@ -656,7 +671,7 @@ fn pair_type_quote(dtype: &DataType, depth: usize) -> Result<usize> {
     }
 }
 
-pub(super) fn fresh_schema(schema: &Schema) -> SchemaRef {
+pub(in crate::operator) fn fresh_schema(schema: &Schema) -> SchemaRef {
     Arc::new(Schema::new_with_metadata(
         schema
             .fields()
@@ -738,7 +753,7 @@ fn key_type(dtype: &DataType) -> bool {
             | DataType::Date64
     ) || matches!(dtype, DataType::Timestamp(TimeUnit::Microsecond, tz) if tz.as_deref().is_none_or(|tz| tz=="UTC"))
 }
-pub(super) fn backing(batch: &Batch) -> Result<usize> {
+pub(in crate::operator) fn backing(batch: &Batch) -> Result<usize> {
     let t = batch.table_payload()?;
     t.batches().iter().try_fold(
         add(512, super::super::sql::ipc::schema_bytes(t.schema())?)?,
@@ -749,7 +764,7 @@ pub(super) fn backing(batch: &Batch) -> Result<usize> {
         },
     )
 }
-pub(super) fn reserve(
+pub(in crate::operator) fn reserve(
     pool: &Arc<dyn MemoryPool>,
     bytes: usize,
     role: &str,
@@ -767,10 +782,10 @@ pub(super) fn reserve(
     })?;
     Ok(lease)
 }
-pub(super) fn add(a: usize, b: usize) -> Result<usize> {
+pub(in crate::operator) fn add(a: usize, b: usize) -> Result<usize> {
     a.checked_add(b).ok_or_else(|| error("accounting overflow"))
 }
-pub(super) fn mul(a: usize, b: usize) -> Result<usize> {
+pub(in crate::operator) fn mul(a: usize, b: usize) -> Result<usize> {
     a.checked_mul(b).ok_or_else(|| error("accounting overflow"))
 }
 fn align(n: usize) -> Result<usize> {
@@ -781,6 +796,6 @@ fn align(n: usize) -> Result<usize> {
         Ok(rounded)
     }
 }
-pub(super) fn error(e: impl std::fmt::Display) -> crate::CalcFlowError {
+pub(in crate::operator) fn error(e: impl std::fmt::Display) -> crate::CalcFlowError {
     invalid("distinct", "execution", e)
 }

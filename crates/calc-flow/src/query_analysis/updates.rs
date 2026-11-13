@@ -124,6 +124,7 @@ fn append_only(target: &(sql::Proof, bool, String)) -> bool {
         || matches!(
             target.2.as_str(),
             "union"
+                | "bounded_order"
                 | "distinct"
                 | "window"
                 | "window_tumbling"
