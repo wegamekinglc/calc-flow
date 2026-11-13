@@ -359,8 +359,10 @@ impl RollingOperator {
             && !context.job().checkpointing()
             && self.compiled.kernel_plan.supports_deferred_history();
         self.ensure_ordered_kernel_state(input, context.operator_id(), observer)?;
-        let mut update = self.prepare_ordered_update(input, context).await?;
         let defer_history = self.state.deferred_history || can_defer;
+        let mut update = self
+            .prepare_ordered_update(input, context, defer_history)
+            .await?;
         let (touched, deferred_charge) = if defer_history {
             let charge = update.charge_change(
                 self.state
@@ -368,7 +370,14 @@ impl RollingOperator {
                     .as_deref()
                     .expect("state initialized above"),
                 context.operator_id(),
-            )?;
+            );
+            let charge = match charge {
+                Ok(charge) => charge,
+                Err(error) => {
+                    self.rollback_ordered_update(&mut update);
+                    return Err(error);
+                }
+            };
             (Vec::new(), Some(charge))
         } else {
             let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
@@ -384,7 +393,14 @@ impl RollingOperator {
                 None,
             )
         };
-        let (batches, next_sequence) = self.ordered_output_chunks(input, &mut update, context)?;
+        let (batches, next_sequence) = match self.ordered_output_chunks(input, &mut update, context)
+        {
+            Ok(output) => output,
+            Err(error) => {
+                self.rollback_ordered_update(&mut update);
+                return Err(error);
+            }
+        };
         Ok(PreparedOrderedOutput {
             update,
             touched,
@@ -395,11 +411,60 @@ impl RollingOperator {
         })
     }
 
-    async fn prepare_ordered_update(
-        &self,
+    fn rollback_ordered_update(&mut self, update: &mut StreamKernelUpdate) {
+        if let Ok(state) = self.state.owned_mut()
+            && let Some(kernel) = state.typed_kernel_state.as_deref_mut()
+        {
+            update.rollback(kernel);
+        }
+    }
+
+    fn prepare_ordered_update_in_place(
+        &mut self,
         input: &RecordBatch,
         context: &StreamOperatorContext<'_>,
+        defer_history: bool,
+    ) -> Option<Result<StreamKernelUpdate>> {
+        let observer = context.rolling_metrics();
+        let plan = &self.compiled.kernel_plan;
+        if !defer_history
+            || context.job().checkpointing()
+            || !plan.supports_inplace_ordered_stream(input)
+        {
+            return None;
+        }
+        let state = match self.state.owned_mut() {
+            Ok(state) => state,
+            Err(error) => return Some(Err(error)),
+        };
+        let update = plan.prepare_ordered_stream_in_place(
+            state
+                .typed_kernel_state
+                .as_deref_mut()
+                .expect("state initialized above"),
+            input,
+            context.operator_id(),
+            observer,
+        );
+        if matches!(&update, Ok(None)) {
+            return None;
+        }
+        let mut work = RollingWorkBatch::new(observer);
+        work.add(RollingWork::ParallelFallbackSmallBatch, 1);
+        work.add(RollingWork::NumericSerialCalls, 1);
+        drop(work);
+        Some(update.map(|update| update.expect("in-place update was checked above")))
+    }
+
+    async fn prepare_ordered_update(
+        &mut self,
+        input: &RecordBatch,
+        context: &StreamOperatorContext<'_>,
+        defer_history: bool,
     ) -> Result<StreamKernelUpdate> {
+        if let Some(update) = self.prepare_ordered_update_in_place(input, context, defer_history) {
+            return update;
+        }
         let observer = context.rolling_metrics();
         let plan = &self.compiled.kernel_plan;
         let prior = self
@@ -577,6 +642,9 @@ impl RollingOperator {
         ) {
             Ok(charge) => charge,
             Err(error) => {
+                if let Ok(state) = self.state.owned_mut() {
+                    prepared.rollback(state);
+                }
                 return self.restore_ordered_failure(
                     records,
                     last_identity,
@@ -587,26 +655,48 @@ impl RollingOperator {
                 );
             }
         };
-        let state = self.state.owned_mut()?;
+        let state = match self.state.owned_mut() {
+            Ok(state) => state,
+            Err(error) => return Err(error),
+        };
         state.charge = current_charge;
-        for batch in std::mem::take(&mut prepared.batches) {
-            if let Err(error) = output.emit("output", batch).await {
-                if prepared.defer_history || self.state.deferred_history {
-                    return self.restore_ordered_failure(
-                        records,
-                        last_identity,
-                        original_charge,
-                        error,
-                        context.operator_id(),
-                        observer,
-                    );
-                }
-                return Err(error);
+        let defer_history = prepared.defer_history || state.deferred_history;
+        if let Err(error) = Self::deliver_ordered_batches(&mut prepared, state, output).await {
+            if defer_history {
+                return self.restore_ordered_failure(
+                    records,
+                    last_identity,
+                    original_charge,
+                    error,
+                    context.operator_id(),
+                    observer,
+                );
             }
+            return Err(error);
         }
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
         prepared.commit(state);
         state.charge = next_charge;
+        Ok(())
+    }
+
+    async fn deliver_ordered_batches(
+        prepared: &mut PreparedOrderedOutput,
+        state: &mut RollingStreamState,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        let mut rollback = InPlaceRollbackGuard {
+            update: &mut prepared.update,
+            resident: state
+                .typed_kernel_state
+                .as_deref_mut()
+                .expect("state initialized above"),
+            active: true,
+        };
+        for batch in std::mem::take(&mut prepared.batches) {
+            output.emit("output", batch).await?;
+        }
+        rollback.active = false;
         Ok(())
     }
 }
@@ -621,6 +711,20 @@ fn combine_ordered_records(records: &[RecordBatch], node_id: &str) -> Result<Opt
     concat_batches(&first.schema(), records)
         .map(Some)
         .map_err(|error| operator_error(node_id, &error.to_string()))
+}
+
+struct InPlaceRollbackGuard<'a> {
+    update: &'a mut StreamKernelUpdate,
+    resident: &'a mut super::kernel::RollingKernelState,
+    active: bool,
+}
+
+impl Drop for InPlaceRollbackGuard<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.update.rollback(self.resident);
+        }
+    }
 }
 
 struct PreparedOrderedOutput {
@@ -653,6 +757,12 @@ impl PreparedOrderedOutput {
             new = new.checked_add(projected, node)?;
         }
         current.checked_sub(old)?.checked_add(new, node)
+    }
+
+    fn rollback(&mut self, state: &mut RollingStreamState) {
+        if let Some(kernel) = state.typed_kernel_state.as_deref_mut() {
+            self.update.rollback(kernel);
+        }
     }
 
     fn commit(self, state: &mut RollingStreamState) {

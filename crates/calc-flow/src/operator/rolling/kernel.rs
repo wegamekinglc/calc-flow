@@ -48,6 +48,7 @@ use crate::{
 
 mod cumulative;
 mod decay;
+mod in_place;
 mod mean;
 mod numeric_rows;
 use cumulative::TypedCumulativeState;
@@ -70,6 +71,17 @@ const ROLLING_KERNEL_PLAN_VERSION: u32 = 1;
 #[cfg(test)]
 thread_local! {
     pub(super) static GENERIC_F64_BUILDER_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static DIRECT_ENTITY_KEY_ENCODINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_direct_entity_key_encodings(count: usize) {
+    DIRECT_ENTITY_KEY_ENCODINGS.with(|counter| counter.set(counter.get() + count));
+}
+
+#[cfg(test)]
+pub(super) fn take_direct_entity_key_encodings() -> usize {
+    DIRECT_ENTITY_KEY_ENCODINGS.with(|counter| counter.replace(0))
 }
 
 /// Selected executable family for one immutable rolling kernel plan.
@@ -442,9 +454,10 @@ pub(super) struct EntityRows {
     pub(super) first_rows: Vec<usize>,
 }
 
-/// A transactional replacement of only the entities touched by a stream batch.
+/// A transactional update of only the entities touched by a stream batch.
 pub(crate) struct StreamKernelUpdate {
     execution: RollingKernelExecution,
+    in_place: Option<in_place::InPlaceUpdate>,
 }
 
 /// Durable recurrences which cannot be reconstructed from a retained row tail.
@@ -468,6 +481,9 @@ impl StreamKernelUpdate {
     }
 
     pub(super) fn recurrence_seeds(&self) -> Vec<Vec<Option<RecurrenceSeed>>> {
+        if let Some(in_place) = &self.in_place {
+            return in_place.recurrence_seeds();
+        }
         self.execution
             .state
             .states
@@ -495,6 +511,9 @@ impl StreamKernelUpdate {
         base: &RollingKernelState,
         node_id: &str,
     ) -> Result<(StateCharge, StateCharge)> {
+        if let Some(in_place) = &self.in_place {
+            return in_place.charge_change(base, node_id);
+        }
         let mut old = StateCharge::default();
         let mut new = StateCharge::default();
         for (key, &index) in &self.execution.state.entities {
@@ -509,8 +528,22 @@ impl StreamKernelUpdate {
         Ok((old, new))
     }
 
+    pub(super) fn rollback(&mut self, base: &mut RollingKernelState) {
+        if let Some(in_place) = &mut self.in_place {
+            in_place.rollback(base);
+            self.in_place = None;
+        }
+    }
+
     pub(super) fn commit(self, base: &mut RollingKernelState) {
         let local = self.execution.state;
+        if self.in_place.is_some() {
+            base.kernel_fingerprint = local.kernel_fingerprint;
+            if local.last_identity.is_some() {
+                base.last_identity = local.last_identity;
+            }
+            return;
+        }
         let mut keys = vec![Vec::new(); local.states.len()];
         for (key, index) in local.entities {
             keys[index] = key;
@@ -576,6 +609,7 @@ impl TypedStreamTransition {
 pub(super) struct RollingKernelState {
     kernel_fingerprint: Option<String>,
     entities: HashMap<Vec<u8>, usize>,
+    direct_entities: HashMap<String, (usize, usize)>,
     states: Vec<Arc<TypedEntityState>>,
     last_identity: Option<Vec<u8>>,
 }
@@ -656,7 +690,10 @@ impl RollingKernelPlan {
         let mut fill = self.prepare_typed_fill(input, stream, node_id, observer)?;
         decay::prepare_inputs(self, &mut fill, input, histories, node_id, observer)?;
         self.finish_typed_fill(fill, node_id, observer)
-            .map(|execution| StreamKernelUpdate { execution })
+            .map(|execution| StreamKernelUpdate {
+                execution,
+                in_place: None,
+            })
     }
 
     fn prepare_ordered_stream_state(
@@ -1142,7 +1179,12 @@ impl RollingKernelPlan {
             self.prepare_typed_fill(input, proof.prepare(resolved, input), node_id, observer)?;
         decay::prepare_inputs(self, &mut fill, input, histories, node_id, observer)?;
         self.finish_typed_fill(fill, node_id, observer)
-            .map(|execution| Some(StreamKernelUpdate { execution }))
+            .map(|execution| {
+                Some(StreamKernelUpdate {
+                    execution,
+                    in_place: None,
+                })
+            })
     }
 
     /// Validates required values and proves canonical order; `Ok(None)` asks
@@ -1639,6 +1681,25 @@ impl RollingKernelState {
     }
 
     #[cfg(test)]
+    pub(super) fn numeric_queue_shapes_for_test(&self) -> Vec<Vec<(usize, usize)>> {
+        self.states
+            .iter()
+            .map(|entity| {
+                entity
+                    .groups
+                    .iter()
+                    .filter_map(|group| match group {
+                        TypedWindowState::Numeric(state) => {
+                            Some((state.samples.len(), state.samples.values.capacity()))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
     pub(super) fn shared_rows_owner_addresses(&self) -> Vec<usize> {
         self.states
             .iter()
@@ -1693,6 +1754,7 @@ impl RollingKernelState {
             Self {
                 kernel_fingerprint: Some(fingerprint.into()),
                 entities,
+                direct_entities: HashMap::new(),
                 states,
                 last_identity: None,
             },
@@ -2517,6 +2579,8 @@ fn direct_entity_routing(
     let (distinct, entity_rows, entity_ids) = dense_entity_ids(values, expected_entities);
     let distinct: ArrayRef = Arc::new(StringArray::from_iter_values(distinct));
     let rows = encode_arrays(&[distinct], node_id)?;
+    #[cfg(test)]
+    record_direct_entity_key_encodings(rows.num_rows());
     Ok(EntityRouting {
         keys: (0..rows.num_rows())
             .map(|row| rows.row(row).data().to_vec())

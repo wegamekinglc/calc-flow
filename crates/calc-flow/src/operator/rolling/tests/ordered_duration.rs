@@ -194,6 +194,65 @@ async fn test_ordered_duration_late_duplicate_drops_before_duplicate_validation(
 }
 
 #[tokio::test]
+async fn test_checkpoint_disabled_small_batch_reuses_resident_numeric_state() {
+    let spec = kernel_spec(json!([
+        duration_output("sum", "price", "sum", 6),
+        duration_output("mean", "price", "mean", 10),
+    ]));
+    let first = float64_fast_record(&[
+        (1, "a", 1, Some(1.0)),
+        (2, "b", 2, Some(2.0)),
+        (3, "a", 3, Some(3.0)),
+    ]);
+    let second = float64_fast_record(&[
+        (4, "b", 4, Some(4.0)),
+        (5, "a", 5, Some(5.0)),
+        (10, "a", 6, Some(10.0)),
+    ]);
+    let input = concat_batches(&first.schema(), [&first, &second]).unwrap();
+    let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    let (expected, _) = reference_output(&operator, &input);
+    let (job, store, mut output) = fixture(&operator);
+    let job = job.with_checkpointing(false);
+    let mut emitted = Vec::new();
+    for (record, watermark) in [(first, 3), (second, 10)] {
+        assert!(observe_data(&mut operator, &job, &store, &mut output, record).await);
+        emitted.extend(close(&mut operator, &job, &store, &mut output, watermark).await);
+    }
+    assert_eq!(
+        concat_batches(&expected.schema(), &emitted).unwrap(),
+        expected
+    );
+    assert_eq!(store.snapshot().watermark.copied_entities, 0);
+    assert_deferred_charge(&operator);
+}
+
+#[tokio::test]
+async fn test_warm_direct_entities_skip_canonical_key_encoding() {
+    let spec = kernel_spec(json!([duration_output("sum", "price", "sum", 6)]));
+    let first = float64_fast_record(&[(1, "a", 1, Some(1.0)), (2, "b", 2, Some(2.0))]);
+    let second = float64_fast_record(&[(3, "a", 3, Some(3.0)), (4, "b", 4, Some(4.0))]);
+    let input = concat_batches(&first.schema(), [&first, &second]).unwrap();
+    let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    let (expected, _) = reference_output(&operator, &input);
+    let (job, store, mut output) = fixture(&operator);
+    let job = job.with_checkpointing(false);
+    let mut emitted = Vec::new();
+    for (record, watermark) in [(first, 2), (second, 4)] {
+        assert!(observe_data(&mut operator, &job, &store, &mut output, record).await);
+        emitted.extend(close(&mut operator, &job, &store, &mut output, watermark).await);
+        if watermark == 2 {
+            assert_eq!(kernel::take_direct_entity_key_encodings(), 2);
+        }
+    }
+    assert_eq!(kernel::take_direct_entity_key_encodings(), 0);
+    assert_eq!(
+        concat_batches(&expected.schema(), &emitted).unwrap(),
+        expected
+    );
+}
+
+#[tokio::test]
 async fn test_checkpoint_disabled_numeric_stream_skips_duplicate_recovery_rows() {
     let spec = kernel_spec(json!([duration_output("sum", "price", "sum", 6)]));
     let input = float64_fast_record(&[
@@ -266,21 +325,37 @@ async fn test_deferred_numeric_history_restores_state_after_output_rejection() {
         }
     }
 
-    let spec = kernel_spec(json!([duration_output("sum", "price", "sum", 6)]));
-    let input = float64_fast_record(&[(1, "a", 1, Some(1.0)), (2, "a", 2, Some(2.0))]);
+    let spec = kernel_spec(json!([
+        duration_output("sum", "price", "sum", 6),
+        duration_output("mean", "price", "mean", 6),
+    ]));
+    let input = float64_fast_record(&[
+        (1, "a", 1, Some(1.0)),
+        (2, "a", 2, Some(2.0)),
+        (3, "a", 3, Some(3.0)),
+        (10, "a", 4, Some(10.0)),
+        (20, "a", 5, Some(20.0)),
+        (21, "b", 6, Some(21.0)),
+    ]);
     let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
     let (expected, _) = reference_output(&operator, &input);
     let (job, store, mut output) = fixture(&operator);
     let job = job.with_checkpointing(false);
-    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(0, 1)).await);
-    let mut emitted = close(&mut operator, &job, &store, &mut output, 1).await;
+    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(0, 3)).await);
+    let mut emitted = close(&mut operator, &job, &store, &mut output, 3).await;
     let prior = format!("{:?}", operator.state.typed_kernel_state);
+    let shapes = operator
+        .state
+        .typed_kernel_state
+        .as_deref()
+        .unwrap()
+        .numeric_queue_shapes_for_test();
     let sequence = operator.state.next_output_sequence;
-    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(1, 1)).await);
+    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(3, 3)).await);
     let charge = operator.state.charge;
-    let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(1)));
+    let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(3)));
     let error = operator
-        .on_watermark(EventTime::from_micros(2), &context, &mut Reject)
+        .on_watermark(EventTime::from_micros(21), &context, &mut Reject)
         .await
         .unwrap_err();
     assert!(
@@ -289,10 +364,150 @@ async fn test_deferred_numeric_history_restores_state_after_output_rejection() {
             .contains("expected deferred collector rejection")
     );
     assert_eq!(format!("{:?}", operator.state.typed_kernel_state), prior);
+    assert_eq!(
+        operator
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .unwrap()
+            .numeric_queue_shapes_for_test(),
+        shapes
+    );
     assert_eq!(operator.state.charge, charge);
     assert_eq!(operator.state.next_output_sequence, sequence);
     assert_eq!(operator.state.ordered.records().count(), 1);
-    emitted.extend(close(&mut operator, &job, &store, &mut output, 2).await);
+    assert_deferred_charge(&operator);
+    emitted.extend(close(&mut operator, &job, &store, &mut output, 21).await);
+    assert_eq!(
+        concat_batches(&expected.schema(), &emitted).unwrap(),
+        expected
+    );
+}
+
+#[tokio::test]
+async fn test_deferred_numeric_history_rolls_back_when_output_future_is_dropped() {
+    struct Pending {
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamCollector for Pending {
+        async fn emit(&mut self, _port: &str, _batch: Batch) -> Result<()> {
+            self.entered.notify_one();
+            std::future::pending::<Result<()>>().await
+        }
+    }
+
+    let spec = kernel_spec(json!([duration_output("sum", "price", "sum", 6)]));
+    let input = float64_fast_record(&[
+        (1, "a", 1, Some(1.0)),
+        (10, "a", 2, Some(10.0)),
+        (21, "b", 3, Some(21.0)),
+    ]);
+    let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    let (job, store, mut output) = fixture(&operator);
+    let job = job.with_checkpointing(false);
+    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(0, 1)).await);
+    close(&mut operator, &job, &store, &mut output, 1).await;
+    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(1, 2)).await);
+    let prior = operator
+        .state
+        .typed_kernel_state
+        .as_deref()
+        .unwrap()
+        .canonical_state_for_test();
+    let sequence = operator.state.next_output_sequence;
+    let operator = Arc::new(tokio::sync::Mutex::new(operator));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let task = {
+        let operator = Arc::clone(&operator);
+        let entered = Arc::clone(&entered);
+        let job = job.clone();
+        tokio::spawn(async move {
+            let mut operator = operator.lock().await;
+            let context =
+                StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(1)));
+            operator
+                .on_watermark(
+                    EventTime::from_micros(21),
+                    &context,
+                    &mut Pending { entered },
+                )
+                .await
+        })
+    };
+    entered.notified().await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    let operator = operator.lock().await;
+    assert_eq!(
+        operator
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .unwrap()
+            .canonical_state_for_test(),
+        prior
+    );
+    assert_eq!(operator.state.next_output_sequence, sequence);
+}
+
+#[tokio::test]
+async fn test_aliased_duration_state_uses_transactional_update_and_preserves_capacity() {
+    struct Reject;
+    #[async_trait::async_trait]
+    impl StreamCollector for Reject {
+        async fn emit(&mut self, _port: &str, _batch: Batch) -> Result<()> {
+            Err(internal_error("expected aliased collector rejection"))
+        }
+    }
+
+    let spec = kernel_spec(json!([duration_output("sum", "price", "sum", 100)]));
+    let burst = float64_fast_record(
+        &(1_u32..=32)
+            .map(|time| (i64::from(time), "a", u64::from(time), Some(f64::from(time))))
+            .collect::<Vec<_>>(),
+    );
+    let gap = float64_fast_record(&[(1_000, "a", 33, Some(1_000.0))]);
+    let next = float64_fast_record(&[(1_001, "a", 34, Some(1_001.0))]);
+    let input = concat_batches(&burst.schema(), [&burst, &gap, &next]).unwrap();
+    let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    let (expected, _) = reference_output(&operator, &input);
+    let (job, store, mut output) = fixture(&operator);
+    let job = job.with_checkpointing(false);
+    let mut emitted = Vec::new();
+    for (record, watermark) in [(burst, 32), (gap, 1_000)] {
+        assert!(observe_data(&mut operator, &job, &store, &mut output, record).await);
+        emitted.extend(close(&mut operator, &job, &store, &mut output, watermark).await);
+    }
+    let kernel = operator.state.typed_kernel_state.as_deref().unwrap();
+    let prior = kernel.canonical_state_for_test();
+    let shapes = kernel.numeric_queue_shapes_for_test();
+    assert!(shapes[0][0].1 > shapes[0][0].0 + 1, "{shapes:?}");
+    let _alias = operator.state.typed_kernel_state.clone();
+    let copied = store.snapshot().watermark.copied_entities;
+    assert!(observe_data(&mut operator, &job, &store, &mut output, next).await);
+    let charge = operator.state.charge;
+    let callback = store.begin(RollingCallback::Watermark, crate::CancellationToken::new());
+    let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(1_000)))
+        .with_rolling_metrics(callback.recorder());
+    let result = operator
+        .on_watermark(EventTime::from_micros(1_001), &context, &mut Reject)
+        .await;
+    callback.complete(&result);
+    let error = result.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("expected aliased collector rejection")
+    );
+    let kernel = operator.state.typed_kernel_state.as_deref().unwrap();
+    assert_eq!(kernel.canonical_state_for_test(), prior);
+    assert_eq!(kernel.numeric_queue_shapes_for_test(), shapes);
+    assert_eq!(operator.state.charge, charge);
+    assert_deferred_charge(&operator);
+    assert!(store.snapshot().watermark.copied_entities > copied);
+    emitted.extend(close(&mut operator, &job, &store, &mut output, 1_001).await);
     assert_eq!(
         concat_batches(&expected.schema(), &emitted).unwrap(),
         expected

@@ -482,6 +482,8 @@ mod rolling_history {
         WarmDurationSum,
         WarmRowsMean,
         ColdMultiGroup,
+        SmallMultiGroup,
+        DenseDurationSum,
     }
 
     impl Case {
@@ -494,12 +496,14 @@ mod rolling_history {
                 Self::WarmDurationSum => "warm_duration_sum60s_132075_keys1000",
                 Self::WarmRowsMean => "warm_rows20_mean_132075_keys1000",
                 Self::ColdMultiGroup => "cold_two_groups_four_outputs_131074_keys1000",
+                Self::SmallMultiGroup => "small_two_groups_sum_100k_keys1000_batch1000",
+                Self::DenseDurationSum => "dense_duration_sum60s_100k_keys1000_batch10000",
             }
         }
 
         fn rows(self) -> usize {
             match self {
-                Self::DurationSum => 100_000,
+                Self::DurationSum | Self::SmallMultiGroup | Self::DenseDurationSum => 100_000,
                 Self::MixedExtrema | Self::RowsSum => 10_000,
                 Self::ColdRowsMean | Self::ColdMultiGroup => 131_074,
                 Self::WarmDurationSum | Self::WarmRowsMean => 132_075,
@@ -534,22 +538,27 @@ mod rolling_history {
             match self {
                 Self::ColdRowsMean | Self::ColdMultiGroup => vec![131_074],
                 Self::WarmDurationSum | Self::WarmRowsMean => vec![1_001, 65_537, 65_537],
+                Self::DenseDurationSum => vec![10_000; 10],
                 _ => vec![BATCH_ROWS; self.rows() / BATCH_ROWS],
             }
         }
 
         fn rows_window(self) -> Option<usize> {
             match self {
-                Self::DurationSum | Self::WarmDurationSum => None,
+                Self::DurationSum | Self::WarmDurationSum | Self::DenseDurationSum => None,
                 Self::MixedExtrema | Self::ColdRowsMean | Self::ColdMultiGroup => Some(37),
-                Self::RowsSum | Self::WarmRowsMean => Some(20),
+                Self::SmallMultiGroup | Self::RowsSum | Self::WarmRowsMean => Some(20),
             }
         }
 
         fn window_micros(self) -> Option<i64> {
             matches!(
                 self,
-                Self::DurationSum | Self::MixedExtrema | Self::WarmDurationSum
+                Self::DurationSum
+                    | Self::MixedExtrema
+                    | Self::WarmDurationSum
+                    | Self::SmallMultiGroup
+                    | Self::DenseDurationSum
             )
             .then_some(WINDOW)
         }
@@ -572,7 +581,13 @@ mod rolling_history {
                 min_periods: 1,
             };
             match self {
-                Self::DurationSum | Self::WarmDurationSum => vec![sum(duration, "sum_60s")],
+                Self::DurationSum | Self::WarmDurationSum | Self::DenseDurationSum => {
+                    vec![sum(duration, "sum_60s")]
+                }
+                Self::SmallMultiGroup => vec![
+                    sum(duration, "sum_60s"),
+                    sum(RollingFrameSpec::Rows { size: 20 }, "sum_20_rows"),
+                ],
                 Self::RowsSum => vec![sum(RollingFrameSpec::Rows { size: 20 }, "sum_20")],
                 Self::ColdRowsMean | Self::WarmRowsMean => vec![RollingOutputSpec::Mean {
                     primitive_version: 1,
@@ -605,7 +620,8 @@ mod rolling_history {
 
         fn names(self) -> &'static [&'static str] {
             match self {
-                Self::DurationSum | Self::WarmDurationSum => &["sum_60s"],
+                Self::DurationSum | Self::WarmDurationSum | Self::DenseDurationSum => &["sum_60s"],
+                Self::SmallMultiGroup => &["sum_60s", "sum_20_rows"],
                 Self::RowsSum => &["sum_20"],
                 Self::MixedExtrema => &["min_60s", "max_37"],
                 Self::ColdRowsMean => &["mean_37"],
@@ -785,7 +801,13 @@ mod rolling_history {
                 row_queue.pop_front();
             }
             match case {
-                Case::DurationSum | Case::WarmDurationSum => expected[0].push(scaled(totals[key])),
+                Case::DurationSum | Case::WarmDurationSum | Case::DenseDurationSum => {
+                    expected[0].push(scaled(totals[key]));
+                }
+                Case::SmallMultiGroup => {
+                    expected[0].push(scaled(totals[key]));
+                    expected[1].push(scaled(row_queue.iter().sum::<i64>()));
+                }
                 Case::RowsSum => expected[0].push(scaled(row_queue.iter().sum::<i64>())),
                 Case::ColdRowsMean | Case::WarmRowsMean => {
                     let ordinal = row / case.groups();
@@ -1320,7 +1342,13 @@ mod rolling_history {
             c,
             &runtime,
             "rolling_state_history",
-            &[Case::DurationSum, Case::MixedExtrema, Case::RowsSum],
+            &[
+                Case::DurationSum,
+                Case::MixedExtrema,
+                Case::RowsSum,
+                Case::SmallMultiGroup,
+                Case::DenseDurationSum,
+            ],
         );
         register_group(
             c,
