@@ -640,3 +640,184 @@ All final F4 commands and Rust/source fingerprints above apply to this commit.
 The following evidence-only commit appends this mapping; its product files
 are unchanged. Reviewer F4 recheck and the final-head CI snapshot are handed
 off separately from these completed local results.
+
+## CI gate follow-up after F4 approval
+
+Base/reviewed HEAD: `ab85af2c0e462b49f44d823547ef1ea07a580f67`.
+The independent reviewer approved G1/F1–F4. This increment addresses actual
+gate failures on that HEAD, in the same checkout/branch/PR606. It does not
+reopen the approved feature contract. Product refactoring in this increment
+still requires the coordinator's direct incremental review before merge.
+
+### Actual failure evidence and RED
+
+The initial nonblocking check snapshot found21 checks: Codacy's
+`131738367954` concluded `action_required`, and Windows Clippy job
+`131738212752` concluded `failure`. Other pending checks were not polled.
+Codacy's exact output was `33 new issues (0 max.) of at least minor severity.`
+The33 annotations were fetched with:
+
+```sh
+gh api 'repos/wegamekinglc/calc-flow/check-runs/131738367954/annotations?per_page=100'
+```
+
+The GitHub connector supports commit check listings but rejects the direct
+annotations endpoint, so the authenticated gh CLI was used for that read.
+The raw annotations are saved locally under target and attached with delivery.
+The findings comprise29 complexity reports (27 Rust,2 Python), two Bandit
+reports, and two intentionally invalid-call test diagnostics. Paths are:
+
+- Rust product/example: operator/order/{mod,checkpoint,sequence,work}.rs,
+  pipeline/order.rs, sql/order.rs, examples/bounded_global_ordering.rs.
+- Rust tests: bounded_global_ordering.rs (9), order_analysis.rs (5),
+  order_review.rs (1), relational_validation.rs (1), sort_window.rs (1).
+- Python: symbolic/order.py declaration/analyze, its projection SQL rendering,
+  examples/bounded_global_ordering.py assertion, and two invalid constructor
+  calls in python/tests/test_sort_window.py.
+
+Windows failure log: https://github.com/wegamekinglc/calc-flow/actions/runs/43380870659/job/131738212752
+(Rust1.94.0; PR merge ref90a88f1 for this HEAD). It reports five errors:
+`items_after_test_module` for required_order_fetch/OrderFetchSchema below
+config.rs's tests, and four `cast_possible_truncation` errors at order/tests.rs
+lines75/95/119/171. The actual job exits1.
+
+Before edits, the local reproductions were:
+
+```sh
+uvx lizard -C 8 -w crates/calc-flow/examples/bounded_global_ordering.rs crates/calc-flow/src/operator/order crates/calc-flow/src/pipeline/order.rs crates/calc-flow/src/sql/order.rs crates/calc-flow/tests/bounded_global_ordering.rs crates/calc-flow/tests/order_analysis.rs crates/calc-flow/tests/order_review.rs crates/calc-flow/tests/relational_validation.rs crates/calc-flow/tests/sort_window.rs python/calc_flow/symbolic/order.py
+# RED exit1: 29 complexity findings; local Lizard1.26.0 reproduces every location.
+cargo clippy --locked -p calc-flow --lib --tests -- -D warnings
+# RED exit101: the same five Clippy errors.
+uvx bandit -q python/calc_flow/symbolic/order.py examples/bounded_global_ordering.py
+# RED exit1: B101 example assertion and B608 projection SQL f-string.
+PYTHONPATH=python uvx pylint --disable=all --enable=E1120,E1123 python/tests/test_sort_window.py
+# RED exit2: local Pylint reports the legacy start/end keyword arguments.
+# Codacy additionally diagnoses the missing required budget in the other call.
+```
+
+### Minimal gate corrections
+
+Rust declaration validation/prepayment, restore container staging, sequence
+keys/uniqueness, sort indices/take, graph admission and SQL key parsing now
+have separate helpers for their existing responsibilities. Budget formulas,
+limits, reservation owners and prepay-before-copy order are retained; no
+history/final/checkpoint commit boundary moves. The workspace reservation
+still covers the entire worker through output normalization. The core example
+extracts its declaration builder without changing its component/dependencies.
+
+Seventeen reported Rust tests now assert success with unwrap rather than
+propagating setup/expected-success errors via `?`. All62 assertion macros,
+loops, case values, failure expectations and checked B/B-1 numbers are
+preserved; no test is removed. The Clippy fixes move the unchanged config
+helpers before the test module and use checked usize conversions in the four
+peak assertions.
+
+Python separates key validation, input schema/provenance, native schema
+selection and capability admission. Wire/config/cache values and native
+authority are unchanged. Projection rendering joins fixed SQL tokens with
+the existing escaped identifier list, producing the same query bytes; no raw
+column is interpolated. A regression checks exact projection bytes for a
+normal name, a quote/SQL-fragment name, and a reserved word. The two portable
+names execute; the nonportable name must fail canonical project validation.
+The example
+uses an explicit RuntimeError so optimized Python cannot omit verification.
+The two invalid-signature calls become parameterized runtime input cases,
+retaining both TypeError expectations without a static invalid-call expression.
+
+No suppression, excluded path, threshold, baseline, gate script, pyproject,
+schema artifact, public signature, API note or revision is changed.
+The frozen API note SHA256 is still
+`b4a087ef52cb9b3a43803666e13365dfce544205a6af8c97b88cb34dd8758624`.
+The reviewer owns its now-appended F4 approval report; this run preserves its
+SHA256 `22d70d675a4f23201dde9b53b2cdf6c2fb3dacc4aec7c92b22d9178ea7a37053`
+and leaves it unstaged.
+
+### Static GREEN evidence
+
+The exact Lizard command above exits0 after refactoring. Its CSV covers261
+functions, maximum CCN8. Both Bandit files pass (exit0); the same Pylint E1120/
+E1123 command passes (exit0). These are local reproductions, not a claim that
+the external Codacy check has passed on an unobserved HEAD.
+
+```sh
+cargo clippy --locked -p calc-flow --lib --tests --examples --all-features -- -D warnings
+# GREEN exit0, Rust1.94.0, finished in2m12s; includes all reported lint sites.
+target/venv/bin/python -m ruff check python/calc_flow/symbolic/order.py python/tests/test_sort_window.py python/tests/test_bounded_global_ordering.py examples/bounded_global_ordering.py
+# exit0.
+target/venv/bin/python scripts/verify_complexity_gates.py
+# exit0: complexity ratchet holds, original unmodified script/baseline.
+cargo fmt --all --check
+target/venv/bin/python -m ruff format --check python/calc_flow/symbolic/order.py python/tests/test_sort_window.py python/tests/test_bounded_global_ordering.py examples/bounded_global_ordering.py
+git diff --check
+# all exit0.
+git diff --exit-code -- schemas/project-v3.schema.json .codacy.yml scripts/complexity_baseline.json scripts/verify_complexity_gates.py pyproject.toml .codex/artifacts/api-notes/bounded-global-ordering.md
+# exit0, no drift in frozen contract or gate inputs.
+```
+
+### Direct behavior/build verification
+
+```sh
+cargo test --locked -p calc-flow --test bounded_global_ordering --test order_analysis --test order_review --test sort_window
+# exit0: 19 passed (10+5+2+2).
+cargo test --locked -p calc-flow --test relational_validation typed_projection_and_filter_preserve_only_retained_temporal_identity -- --exact --nocapture
+# exit0: 1 passed, 15 filtered; all five batch/stream cases retained.
+cargo test --locked -p calc-flow --lib order::tests -- --test-threads=1
+# exit0: 14 passed, 3217 filtered; includes the seven bounded-order ownership/
+# exact budget cases, the native-identity gate, and six neighboring rolling
+# tests matched by the filter. No broader matrix was run afterward.
+cargo run --locked -p calc-flow --example bounded_global_ordering
+# exit0: independent core build/run, complete H=[3,1,2], final top-1=[1].
+PYO3_PYTHON="$PWD/target/venv/bin/python" target/venv/bin/maturin build --locked --profile dev --out target/wheels
+# exit0: current-checkout core/connectors/binding rebuilt,49.94s.
+uv pip install --python target/venv/bin/python --reinstall --no-deps target/wheels/calc_flow_python-2026.11.2-cp313-cp313-linux_x86_64.whl
+# exit0.
+JAX_PLATFORMS=cpu target/venv/bin/python -m pytest -q python/tests/test_sort_window.py python/tests/test_bounded_global_ordering.py
+# final exit0: 29 passed, including both invalid-signature cases and all three
+# exact projection-byte/portable-name boundary cases.
+JAX_PLATFORMS=cpu target/venv/bin/python -O examples/bounded_global_ordering.py
+# exit0: both DataFrame and SQL outputs are {'x': [1], 'seq': [11]}.
+```
+
+The new quoted-name fixture initially expected successful collection of a
+nonportable name. Its actual ConfigError established that the existing project
+contract rejects it before execution. The corrected test keeps that exact
+adversarial name, adds a golden escaped query assertion, and requires the
+specific native ConfigError and portable-identifier diagnostic. An initial
+generic ValueError expectation also failed and was corrected to ConfigError.
+Neither failure required or justified widening the accepted name domain.
+The final two-file run is29/29 green; no production change followed rebuilding
+the wheel. Ruff check/format for the changed test passed again after the fix.
+
+The old wheel evidence is not used for these Python results. A fresh local
+CPython3.13.9 Linux dev wheel was built/reinstalled from this product tree;
+it is not release/manylinux evidence. All62 package/native/stub entries match
+the new wheel, and installed .py/.pyi files match repository source bytes.
+The matching native's generated schema equals the unchanged committed schema
+as parsed JSON. Final-HEAD package/Python/cross-platform repository gates
+remain for CI; local targeted results do not replace them.
+
+Current-product build provenance (same1208-file NUL-delimited fingerprint
+scheme as earlier deliveries):
+
+```json
+{
+  "base_head": "ab85af2c0e462b49f44d823547ef1ea07a580f67",
+  "source_sha256": "66e10b8a07c57dafa6e2ce64536a6d3dda7ccce31777fd95c53ea9fbc2f1dca9",
+  "source_file_count": 1208,
+  "wheel_sha256": "66e5b7b27ceb2cb13471fd7b542f06164d5eae988aadb0f4a85c7a368eb3054f",
+  "native_sha256": "c9a546db726b223c56349f4197bde6ee97cbc61a24864e3fcbe0f71d7fa08c74",
+  "matched_archive_files": 62,
+  "python": "3.13.9",
+  "schema_matches_committed": true,
+  "rust_artifact": "target/debug/deps/libcalc_flow-c4242eaab5409a3b.rlib",
+  "rust_artifact_sha256": "839082b320e39eb722a92eeaac8ec8074180b32a02bfab2c1f09e4cbc3033f8a"
+}
+```
+
+This run performs no full matrix, coverage, performance, branch/PR/environment
+creation or delegation. Unaffected prior evidence is reused with its recorded
+tree boundaries. The existing checks wakeup is retained, not duplicated.
+The final push/readiness/check snapshot is reported in the issue handoff.
+Pending checks and the required direct review of this refactoring block merge;
+DAL-520 remains in_progress unless a subsequent authorized merge actually
+completes. No required check or review is bypassed.

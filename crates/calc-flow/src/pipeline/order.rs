@@ -98,46 +98,54 @@ fn downstream(builder: &PipelineBuilder, id: &str, seen: &mut BTreeSet<String>) 
 }
 pub(crate) fn validate(builder: &PipelineBuilder) -> Result<()> {
     for (id, node) in &builder.nodes {
-        if matches!(
-            node.operator,
-            NodeOperator::Batch(_) | NodeOperator::Stream(_)
-        ) && node.operator.metadata().type_id()
-            == std::any::TypeId::of::<crate::BoundedOrderOperator>()
-        {
-            return Err(invalid(
-                &format!("graph.nodes.{id}.sort"),
-                "capability_mismatch",
-                "bounded ordering must retain its native graph identity for mandatory source and structural admission",
-            ));
-        }
+        validate_native_identity(&node.operator, id)?;
         let NodeOperator::BoundedOrder(op) = &node.operator else {
             continue;
         };
-        let mut fields = match op.spec().history() {
-            SortHistory::BoundedSource => vec![],
-            SortHistory::ClosedWindow {
-                event_time_column, ..
-            } => vec![event_time_column.clone()],
-        };
-        if let crate::SortTies::Sequence { columns } = op.spec().ties() {
-            fields.extend_from_slice(columns);
-        }
-        let mut origins = BTreeSet::new();
-        upstream(
-            builder,
-            &PortEndpoint {
-                node_id: id.clone(),
-                port: "input".into(),
-            },
-            &fields,
-            &mut origins,
-        )?;
-        if origins.len() != 1 {
-            return Err(unsupported(builder, id));
-        }
-        downstream(builder, id, &mut BTreeSet::new())?;
+        validate_order(builder, id, op)?;
     }
     Ok(())
+}
+fn validate_native_identity(operator: &NodeOperator, id: &str) -> Result<()> {
+    if matches!(operator, NodeOperator::Batch(_) | NodeOperator::Stream(_))
+        && operator.metadata().type_id() == std::any::TypeId::of::<crate::BoundedOrderOperator>()
+    {
+        return Err(invalid(
+            &format!("graph.nodes.{id}.sort"),
+            "capability_mismatch",
+            "bounded ordering must retain its native graph identity for mandatory source and structural admission",
+        ));
+    }
+    Ok(())
+}
+fn validate_order(
+    builder: &PipelineBuilder,
+    id: &str,
+    op: &crate::BoundedOrderOperator,
+) -> Result<()> {
+    let mut fields = match op.spec().history() {
+        SortHistory::BoundedSource => vec![],
+        SortHistory::ClosedWindow {
+            event_time_column, ..
+        } => vec![event_time_column.clone()],
+    };
+    if let crate::SortTies::Sequence { columns } = op.spec().ties() {
+        fields.extend_from_slice(columns);
+    }
+    let mut origins = BTreeSet::new();
+    upstream(
+        builder,
+        &PortEndpoint {
+            node_id: id.into(),
+            port: "input".into(),
+        },
+        &fields,
+        &mut origins,
+    )?;
+    if origins.len() != 1 {
+        return Err(unsupported(builder, id));
+    }
+    downstream(builder, id, &mut BTreeSet::new())
 }
 
 // These nodes consume one final ordered relation; a single physical partition

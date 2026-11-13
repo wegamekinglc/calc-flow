@@ -29,10 +29,14 @@ impl FinalWork {
     fn execute(&self, check: &dyn Fn() -> Result<()>) -> Result<owned::OwnedBatch> {
         let history = &self.history;
         let pool: Arc<dyn MemoryPool> = self.pool.clone();
-        let n = history.batch.num_rows();
         check()?;
         let table = history.batch.table_payload()?;
         let input = concat_batches(table.schema(), table.batches()).map_err(owned::error)?;
+        let indices = self.sorted_indices(&input)?;
+        let batch = take_batch(&input, &indices, check)?;
+        owned::normalize(&batch, &self.columns, &pool, None, check)
+    }
+    fn sorted_indices(&self, input: &RecordBatch) -> Result<datafusion::arrow::array::UInt32Array> {
         let mut keys = self
             .by
             .iter()
@@ -54,22 +58,12 @@ impl FinalWork {
             }));
         }
         let indices = lexsort_to_indices(&keys, None).map_err(owned::error)?;
+        let n = input.num_rows();
         let start = usize::try_from(self.offset).map_err(owned::error)?.min(n);
         let count = self
             .fetch
             .map_or(n - start, |k| usize::try_from(k).unwrap().min(n - start));
-        let indices = indices.slice(start, count);
-        let arrays = input
-            .columns()
-            .iter()
-            .map(|a| {
-                check()?;
-                take(a.as_ref(), &indices, None).map_err(owned::error)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let record = RecordBatch::try_new(table.schema().clone(), arrays).map_err(owned::error)?;
-        let batch = Batch::table(vec![record], crate::BatchMetadata::default())?;
-        owned::normalize(&batch, &self.columns, &pool, None, check)
+        Ok(indices.slice(start, count))
     }
 }
 impl OwnedCpuWork for FinalWork {
@@ -137,16 +131,36 @@ impl BoundedOrderOperator {
         let ticket = scope
             .submit_work(work, credit, GatherStop::from_job(context.job()))
             .await
-            .map_err(|failure| match failure {
-                AdmissionFailure::Runtime(error) => error,
-                AdmissionFailure::Budget { .. } => {
-                    owned::error("sort worker admission exceeds runtime budget")
-                }
-            })?;
+            .map_err(admission_error)?;
         let output = ticket.finish().await?;
         context.check_cancelled()?;
         Ok(output.value)
     }
+}
+
+fn admission_error(failure: AdmissionFailure) -> crate::CalcFlowError {
+    match failure {
+        AdmissionFailure::Runtime(error) => error,
+        AdmissionFailure::Budget { .. } => {
+            owned::error("sort worker admission exceeds runtime budget")
+        }
+    }
+}
+fn take_batch(
+    input: &RecordBatch,
+    indices: &datafusion::arrow::array::UInt32Array,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<Batch> {
+    let arrays = input
+        .columns()
+        .iter()
+        .map(|a| {
+            check()?;
+            take(a.as_ref(), indices, None).map_err(owned::error)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let record = RecordBatch::try_new(input.schema(), arrays).map_err(owned::error)?;
+    Batch::table(vec![record], crate::BatchMetadata::default())
 }
 
 pub(super) fn validate_string_capacity(

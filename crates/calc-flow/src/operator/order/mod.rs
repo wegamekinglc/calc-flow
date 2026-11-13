@@ -61,56 +61,10 @@ impl BoundedOrderOperator {
         fetch: Option<u64>,
         spec: SortSpec,
     ) -> Result<Self> {
-        super::validate_operator_name(name)?;
-        validate_fetch(fetch, &spec)?;
-        if by.is_empty() {
-            return Err(invalid(
-                "sort.by",
-                "invalid_literal",
-                "at least one sort key required",
-            ));
-        }
-        for (i, key) in by.iter().enumerate() {
-            if by[..i].iter().any(|prior| prior.column() == key.column()) {
-                return Err(invalid(
-                    &format!("sort.by[{i}].column"),
-                    "duplicate_name",
-                    "unique sort columns required",
-                ));
-            }
-            schema.field_with_name(key.column()).map_err(|_| {
-                invalid(
-                    &format!("sort.by[{i}].column"),
-                    "unresolved_type",
-                    "unknown sort column",
-                )
-            })?;
-        }
-        sequence::validate_schema(&schema, &by, &spec)?;
-        if let SortHistory::ClosedWindow {
-            event_time_column, ..
-        } = spec.history()
-        {
-            let field = schema.field_with_name(event_time_column).map_err(|_| {
-                invalid(
-                    "sort.spec.history.event_time_column",
-                    "unresolved_type",
-                    "requires an existing original timestamp column",
-                )
-            })?;
-            if !super::distinct::window_time_type(field.data_type()) {
-                return Err(invalid(
-                    "sort.spec.history.event_time_column",
-                    "unsupported_type",
-                    "requires timestamp[ms] naive or timestamp[us] naive/UTC",
-                ));
-            }
-        }
+        validate_declaration(name, &schema, &by, fetch, &spec)?;
         let pool = state_pool(spec.state_budget().max_bytes())?;
         let erased: Arc<dyn MemoryPool> = pool.clone();
-        let bound = owned::add(owned::mul(owned::schema_quote(&schema)?, 4)?, 4096)?;
-        let bound = owned::add(bound, owned::add(name.len(), 256)?)?;
-        let declaration = owned::reserve(&erased, bound, "declaration schema/metadata/name")?;
+        let declaration = reserve_declaration(&erased, &schema, name)?;
         let fresh_by = by.clone();
         drop(by);
         let by = fresh_by;
@@ -126,6 +80,7 @@ impl BoundedOrderOperator {
         drop(schema);
         let schema = fresh_schema;
         let domain = spec.domain_spec()?.history().clone();
+        let (input, output) = ports(schema)?;
         Ok(Self {
             name: name.into(),
             by,
@@ -133,18 +88,8 @@ impl BoundedOrderOperator {
             spec,
             domain,
             columns,
-            input: [Port::with_schema_ref(
-                "input",
-                BatchKind::Table,
-                true,
-                Some(schema.clone()),
-            )?],
-            output: [Port::with_schema_ref(
-                "output",
-                BatchKind::Table,
-                true,
-                Some(schema),
-            )?],
+            input,
+            output,
             pool,
             declaration: Arc::new(declaration),
             stream: None,
@@ -245,14 +190,7 @@ impl BoundedOrderOperator {
         self.ensure_stream()?;
         let state = self.stream.as_ref().unwrap();
         let pool: Arc<dyn MemoryPool> = state.pool.clone();
-        let copy = owned::normalize(&raw, &self.columns, &pool, Some(&self.domain), &|| {
-            context.check_cancelled()
-        })?;
-        drop(raw);
-        let candidate_lease = history_candidate_lease(state, &pool)?;
-        let mut history = Vec::with_capacity(state.history.len() + 1);
-        history.extend(state.history.iter().cloned());
-        history.push(Arc::new(copy));
+        let (history, candidate_lease) = self.copy_candidate(raw, state, &pool, context)?;
         self.validate_candidate(&history, &pool, &|| context.check_cancelled())?;
         context.check_cancelled()?;
         let state = self.stream.as_mut().unwrap();
@@ -261,6 +199,23 @@ impl BoundedOrderOperator {
         state.accepted = accepted;
         state.capture = None;
         Ok(())
+    }
+    fn copy_candidate(
+        &self,
+        raw: Batch,
+        state: &StreamState,
+        pool: &Arc<dyn MemoryPool>,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<(Vec<Arc<owned::OwnedBatch>>, MemoryReservation)> {
+        let copy = owned::normalize(&raw, &self.columns, pool, Some(&self.domain), &|| {
+            context.check_cancelled()
+        })?;
+        drop(raw);
+        let lease = history_candidate_lease(state, pool)?;
+        let mut history = Vec::with_capacity(state.history.len() + 1);
+        history.extend(state.history.iter().cloned());
+        history.push(Arc::new(copy));
+        Ok((history, lease))
     }
     fn finite_pool(&self) -> Result<(Arc<OwnedStatePool>, MemoryReservation)> {
         let pool = state_pool(self.spec.state_budget().max_bytes())?;
@@ -301,6 +256,92 @@ impl BoundedOrderOperator {
         }
         owned::normalize(raw, &self.columns, pool, Some(&self.domain), check)
     }
+}
+fn validate_declaration(
+    name: &str,
+    schema: &SchemaRef,
+    by: &[SortKey],
+    fetch: Option<u64>,
+    spec: &SortSpec,
+) -> Result<()> {
+    super::validate_operator_name(name)?;
+    validate_fetch(fetch, spec)?;
+    validate_keys(schema, by)?;
+    sequence::validate_schema(schema, by, spec)?;
+    validate_window_schema(schema, spec)
+}
+fn validate_keys(schema: &SchemaRef, by: &[SortKey]) -> Result<()> {
+    if by.is_empty() {
+        return Err(invalid(
+            "sort.by",
+            "invalid_literal",
+            "at least one sort key required",
+        ));
+    }
+    for (i, key) in by.iter().enumerate() {
+        if by[..i].iter().any(|prior| prior.column() == key.column()) {
+            return Err(invalid(
+                &format!("sort.by[{i}].column"),
+                "duplicate_name",
+                "unique sort columns required",
+            ));
+        }
+        schema.field_with_name(key.column()).map_err(|_| {
+            invalid(
+                &format!("sort.by[{i}].column"),
+                "unresolved_type",
+                "unknown sort column",
+            )
+        })?;
+    }
+    Ok(())
+}
+fn validate_window_schema(schema: &SchemaRef, spec: &SortSpec) -> Result<()> {
+    if let SortHistory::ClosedWindow {
+        event_time_column, ..
+    } = spec.history()
+    {
+        let field = schema.field_with_name(event_time_column).map_err(|_| {
+            invalid(
+                "sort.spec.history.event_time_column",
+                "unresolved_type",
+                "requires an existing original timestamp column",
+            )
+        })?;
+        if !super::distinct::window_time_type(field.data_type()) {
+            return Err(invalid(
+                "sort.spec.history.event_time_column",
+                "unsupported_type",
+                "requires timestamp[ms] naive or timestamp[us] naive/UTC",
+            ));
+        }
+    }
+    Ok(())
+}
+fn reserve_declaration(
+    pool: &Arc<dyn MemoryPool>,
+    schema: &SchemaRef,
+    name: &str,
+) -> Result<MemoryReservation> {
+    let bound = owned::add(owned::mul(owned::schema_quote(schema)?, 4)?, 4096)?;
+    let bound = owned::add(bound, owned::add(name.len(), 256)?)?;
+    owned::reserve(pool, bound, "declaration schema/metadata/name")
+}
+fn ports(schema: SchemaRef) -> Result<([Port; 1], [Port; 1])> {
+    Ok((
+        [Port::with_schema_ref(
+            "input",
+            BatchKind::Table,
+            true,
+            Some(schema.clone()),
+        )?],
+        [Port::with_schema_ref(
+            "output",
+            BatchKind::Table,
+            true,
+            Some(schema),
+        )?],
+    ))
 }
 fn state_pool(limit: u64) -> Result<Arc<OwnedStatePool>> {
     let pool = Arc::new(OwnedStatePool::new(

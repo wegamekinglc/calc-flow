@@ -183,13 +183,7 @@ def _limit(value, path):
 def declaration(value, by, spec, fetch=None):
     if not isinstance(spec, SortSpec):
         raise TypeError("spec must be a SortSpec")
-    if not isinstance(by, Sequence) or isinstance(by, (str, bytes)):
-        raise TypeError("sort.by must be a nonempty sequence of SortKey")
-    by = tuple(by)
-    if not by or any(not isinstance(key, SortKey) for key in by):
-        raise ValueError("sort.by must contain SortKey values")
-    if len({key.column for key in by}) != len(by):
-        raise ValueError("sort.by columns must be unique")
+    by = _sort_keys(by)
     if fetch is not None:
         _limit(fetch, "top_k.k")
         _limit(fetch + json.loads(spec._wire)["offset"], "top_k.k + offset")
@@ -202,6 +196,17 @@ def declaration(value, by, spec, fetch=None):
             "spec": CStr(spec._wire),
         },
     )
+
+
+def _sort_keys(by):
+    if not isinstance(by, Sequence) or isinstance(by, (str, bytes)):
+        raise TypeError("sort.by must be a nonempty sequence of SortKey")
+    by = tuple(by)
+    if not by or any(not isinstance(key, SortKey) for key in by):
+        raise ValueError("sort.by must contain SortKey values")
+    if len({key.column for key in by}) != len(by):
+        raise ValueError("sort.by columns must be unique")
+    return by
 
 
 def native_plan(node):
@@ -264,13 +269,23 @@ def relation_node(node, plan, schema):
 
 
 def analyze(analyzer, node, path, *, role=None):
-    from calc_flow import _native
     from calc_flow.symbolic.analyzer import TableFacts, _SQLRowOrigin
-    from calc_flow.symbolic.distinct import input_schema
-    from calc_flow.symbolic.lower.schema import _arrow_schema, _fields
 
     role = role or f"{path}.sort"
     spec = json.loads(node.attr("spec").value)
+    exact, arrow_schema = _ordering_input_schema(analyzer, node, role, spec)
+    analyzer._order_input_schemas[node.digest] = exact
+    selected = _selected_schema(analyzer, node, role, exact, arrow_schema)
+    _require_capability(analyzer, role, spec)
+    return TableFacts(
+        selected, _SQLRowOrigin(node.digest), frozenset({"bounded_order"}), None, (), ()
+    )
+
+
+def _ordering_input_schema(analyzer, node, role, spec):
+    from calc_flow.symbolic.distinct import input_schema
+    from calc_flow.symbolic.lower.schema import _arrow_schema
+
     exact = input_schema(analyzer, node, role, spec)
     try:
         arrow_schema = _arrow_schema(exact)
@@ -280,6 +295,7 @@ def analyze(analyzer, node, path, *, role=None):
             "unsupported_type",
             "ordering input has a type outside the native schema wire domain",
         )
+        arrow_schema = None
     from calc_flow.symbolic.event_window_sql import time_is_input
 
     for index, name in enumerate(spec["ties"].get("columns", ())):
@@ -289,11 +305,16 @@ def analyze(analyzer, node, path, *, role=None):
                 "capability_mismatch",
                 "sequence must be an original input field or pure rename",
             )
-    analyzer._order_input_schemas[node.digest] = exact
-    selected = exact
+    return exact, arrow_schema
+
+
+def _selected_schema(analyzer, node, role, exact, arrow_schema):
+    from calc_flow import _native
+    from calc_flow.symbolic.lower.schema import _fields
+
     if not analyzer._issues and analyzer._runtime is not None:
         try:
-            selected = _fields(
+            return _fields(
                 _native._order_schema(
                     node.attr("spec").value,
                     node.attr("by").value,
@@ -309,14 +330,20 @@ def analyze(analyzer, node, path, *, role=None):
                 getattr(error, "_calc_flow_order_code", "unsupported_type"),
                 str(error),
             )
-    capability = (
-        next(
-            (c for c in analyzer._capabilities.operators if c.kind == "bounded_order"),
-            None,
-        )
-        if analyzer._capabilities
-        else None
+    return exact
+
+
+def _order_capability(analyzer):
+    if not analyzer._capabilities:
+        return None
+    return next(
+        (c for c in analyzer._capabilities.operators if c.kind == "bounded_order"),
+        None,
     )
+
+
+def _require_capability(analyzer, role, spec):
+    capability = _order_capability(analyzer)
     layout = 2 if spec["late_policy"]["kind"] == "drop" else 1
     if (
         capability is None
@@ -330,9 +357,6 @@ def analyze(analyzer, node, path, *, role=None):
             "capability_mismatch",
             "requires bounded_order@1 and the selected policy layout",
         )
-    return TableFacts(
-        selected, _SQLRowOrigin(node.digest), frozenset({"bounded_order"}), None, (), ()
-    )
 
 
 def projection_query(node):
@@ -349,4 +373,4 @@ def projection_query(node):
     columns = ", ".join(
         _quote_identifier(name) for name in _cstr_seq(node.attr("columns"))
     )
-    return f"SELECT {columns} FROM input"
+    return " ".join(("SELECT", columns, "FROM input"))

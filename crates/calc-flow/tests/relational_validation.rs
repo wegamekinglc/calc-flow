@@ -256,24 +256,37 @@ async fn native_input_identity_survives_dataframe_but_is_cleared_by_sql() -> cal
 }
 
 #[tokio::test]
-async fn typed_projection_and_filter_preserve_only_retained_temporal_identity()
--> calc_flow::Result<()> {
-    let source = ordered_input()?;
-    let projected = source.select(vec![
-        source.column("symbol")?.alias("symbol")?,
-        source.column("ts")?.alias("ts")?,
-        source.column("seq")?.alias("seq")?,
-        source.column("x")?.alias("x")?,
-    ])?;
-    let filtered = projected.filter(projected.column("x")?.gt(lit(0_i64)?))?;
-    let added = source.with_columns(vec![(source.column("x")? + lit(1_i64)?).alias("y")?])?;
-    let dropped = source.select(vec![
-        source.column("symbol")?.alias("symbol")?,
-        source.column("ts")?.alias("ts")?,
-        source.column("x")?.alias("x")?,
-    ])?;
-    let sql = projected.sql("SELECT * FROM input")?;
-    let sql_filtered = sql.filter(sql.column("x")?.gt(lit(0_i64)?))?;
+async fn typed_projection_and_filter_preserve_only_retained_temporal_identity() {
+    let source = ordered_input().unwrap();
+    let projected = source
+        .select(vec![
+            source.column("symbol").unwrap().alias("symbol").unwrap(),
+            source.column("ts").unwrap().alias("ts").unwrap(),
+            source.column("seq").unwrap().alias("seq").unwrap(),
+            source.column("x").unwrap().alias("x").unwrap(),
+        ])
+        .unwrap();
+    let filtered = projected
+        .filter(projected.column("x").unwrap().gt(lit(0_i64).unwrap()))
+        .unwrap();
+    let added = source
+        .with_columns(vec![
+            (source.column("x").unwrap() + lit(1_i64).unwrap())
+                .alias("y")
+                .unwrap(),
+        ])
+        .unwrap();
+    let dropped = source
+        .select(vec![
+            source.column("symbol").unwrap().alias("symbol").unwrap(),
+            source.column("ts").unwrap().alias("ts").unwrap(),
+            source.column("x").unwrap().alias("x").unwrap(),
+        ])
+        .unwrap();
+    let sql = projected.sql("SELECT * FROM input").unwrap();
+    let sql_filtered = sql
+        .filter(sql.column("x").unwrap().gt(lit(0_i64).unwrap()))
+        .unwrap();
     for (name, table, retained) in [
         ("project", projected, true),
         ("filter", filtered, true),
@@ -285,10 +298,12 @@ async fn typed_projection_and_filter_preserve_only_retained_temporal_identity()
             name,
             CompileMode::Batch,
             BTreeMap::from([("out".into(), table)]),
-        )?;
+        )
+        .unwrap();
         let report = p
             .analyze(&UdfRegistry::new().snapshot(), &AnalysisOptions::default())
-            .await?;
+            .await
+            .unwrap();
         let out = report
             .nodes
             .iter()
@@ -307,7 +322,6 @@ async fn typed_projection_and_filter_preserve_only_retained_temporal_identity()
             }
         }
     }
-    Ok(())
 }
 
 #[test]

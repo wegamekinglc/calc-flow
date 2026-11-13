@@ -230,16 +230,7 @@ impl BoundedOrderOperator {
         let (data, meta) = history_segments(snapshot, &control)?;
         let owned = self.decode_history(data, meta, &control, &pool, check)?;
         let capture = copy_capture(snapshot, &pool, check)?;
-        let history_lease = if control.closed {
-            None
-        } else {
-            Some(owned::reserve(&pool, 64, "restored history container")?)
-        };
-        let history = if control.closed {
-            vec![]
-        } else {
-            vec![Arc::new(owned)]
-        };
+        let (history, history_lease) = restored_history(owned, control.closed, &pool)?;
         Ok(RestoreCandidate {
             control,
             history,
@@ -322,6 +313,21 @@ impl BoundedOrderOperator {
             _ => Err(mismatch("late policy/metrics layout mismatch")),
         }
     }
+}
+
+fn restored_history(
+    owned: owned::OwnedBatch,
+    closed: bool,
+    pool: &Arc<dyn MemoryPool>,
+) -> Result<(
+    Vec<Arc<owned::OwnedBatch>>,
+    Option<datafusion::execution::memory_pool::MemoryReservation>,
+)> {
+    if closed {
+        return Ok((vec![], None));
+    }
+    let lease = owned::reserve(pool, 64, "restored history container")?;
+    Ok((vec![Arc::new(owned)], Some(lease)))
 }
 
 struct RestoreCandidate {

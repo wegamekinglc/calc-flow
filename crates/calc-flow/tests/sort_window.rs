@@ -1,16 +1,17 @@
 use calc_flow::{
-    CalcFlowError, EventTime, LatePolicySpec, Result, SortHistory, SortSpec, SortWindow,
-    StateBudget, canonical_json,
+    CalcFlowError, EventTime, LatePolicySpec, SortHistory, SortSpec, SortWindow, StateBudget,
+    canonical_json,
 };
 use serde_json::json;
 
 #[test]
-fn test_sort_window_flattens_to_the_original_wire() -> Result<()> {
+fn test_sort_window_flattens_to_the_original_wire() {
     let window = SortWindow::new(
         "ts",
         EventTime::from_micros(-10),
         EventTime::from_micros(10),
-    )?;
+    )
+    .unwrap();
     assert_eq!(window.event_time_column(), "ts");
     assert_eq!(window.start().as_micros(), -10);
     assert_eq!(window.end().as_micros(), 10);
@@ -20,14 +21,19 @@ fn test_sort_window_flattens_to_the_original_wire() -> Result<()> {
         },
         LatePolicySpec::Drop { metrics_version: 1 },
     ] {
-        let spec = SortSpec::closed_window(window.clone(), StateBudget::new(1000, 8 << 20)?)?
-            .with_offset(1)?
-            .with_sequence_by(vec!["seq".into()])?
-            .with_late_policy(late)?;
+        let spec =
+            SortSpec::closed_window(window.clone(), StateBudget::new(1000, 8 << 20).unwrap())
+                .unwrap()
+                .with_offset(1)
+                .unwrap()
+                .with_sequence_by(vec!["seq".into()])
+                .unwrap()
+                .with_late_policy(late)
+                .unwrap();
         let expected = json!({"history":{"kind":"closed_window","event_time_column":"ts","start_micros":-10,"end_micros":10},"ingress_policy":"copy_visible_v2","state_budget":{"max_rows":1000,"max_bytes":8_388_608},"offset":1,"ties":{"kind":"sequence","columns":["seq"]},"late_policy":late});
         assert_eq!(
-            canonical_json(&serde_json::to_value(&spec).unwrap())?,
-            canonical_json(&expected)?
+            canonical_json(&serde_json::to_value(&spec).unwrap()).unwrap(),
+            canonical_json(&expected).unwrap()
         );
         assert_eq!(serde_json::from_value::<SortSpec>(expected).unwrap(), spec);
         assert!(matches!(
@@ -40,7 +46,6 @@ fn test_sort_window_flattens_to_the_original_wire() -> Result<()> {
         ));
     }
     assert_eq!(window, window.clone());
-    Ok(())
 }
 
 #[test]

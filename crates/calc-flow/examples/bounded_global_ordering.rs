@@ -18,23 +18,7 @@ async fn main() -> Result<()> {
         Field::new("x", DataType::Int64, true),
         Field::new("seq", DataType::UInt64, false),
     ]));
-    let events = table_input("events", schema.clone(), InputOptions::default())?;
-    let spec = SortSpec::bounded_source(StateBudget::new(1000, 8 << 20)?)?
-        .with_sequence_by(vec!["seq".into()])?;
-    let out = events.top_k(
-        1,
-        vec![SortKey::new(
-            "x",
-            SortDirection::Ascending,
-            NullPlacement::Last,
-        )?],
-        spec,
-    )?;
-    let program = Program::new(
-        "smallest",
-        CompileMode::Batch,
-        BTreeMap::from([("out".into(), out)]),
-    )?;
+    let program = ordering_program(schema.clone())?;
     let plan = program
         .compile_batch(&UdfRegistry::new().snapshot(), &CompileOptions::default())
         .await?;
@@ -70,4 +54,24 @@ async fn main() -> Result<()> {
     );
     println!("complete H=[3,1,2], final top-1=[1]");
     Ok(())
+}
+
+fn ordering_program(schema: Arc<Schema>) -> Result<Program> {
+    let events = table_input("events", schema, InputOptions::default())?;
+    let spec = SortSpec::bounded_source(StateBudget::new(1000, 8 << 20)?)?
+        .with_sequence_by(vec!["seq".into()])?;
+    let out = events.top_k(
+        1,
+        vec![SortKey::new(
+            "x",
+            SortDirection::Ascending,
+            NullPlacement::Last,
+        )?],
+        spec,
+    )?;
+    Program::new(
+        "smallest",
+        CompileMode::Batch,
+        BTreeMap::from([("out".into(), out)]),
+    )
 }

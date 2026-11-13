@@ -82,37 +82,8 @@ impl BoundedOrderOperator {
         check()?;
         let table = history.batch.table_payload()?;
         let input = concat_batches(table.schema(), table.batches()).map_err(owned::error)?;
-        let mut keys = Vec::with_capacity(columns.len());
-        for name in columns {
-            let values = input.column_by_name(name).unwrap();
-            if values.null_count() != 0 {
-                return Err(invalid(
-                    "sort.spec.ties",
-                    "ordering_required",
-                    "sequence must be non-NULL and unique over the whole H",
-                ));
-            }
-            keys.push(SortColumn {
-                values: values.clone(),
-                options: Some(SortOptions {
-                    descending: false,
-                    nulls_first: false,
-                }),
-            });
-        }
-        let indices = lexsort_to_indices(&keys, None).map_err(owned::error)?;
-        let compare = LexicographicalComparator::try_new(&keys).map_err(owned::error)?;
-        for pair in indices.values().windows(2) {
-            owned::check_row(pair[0] as usize, check)?;
-            if compare.compare(pair[0] as usize, pair[1] as usize).is_eq() {
-                return Err(invalid(
-                    "sort.spec.ties",
-                    "ordering_required",
-                    "sequence tuple must be unique over the whole H; candidate not committed",
-                ));
-            }
-        }
-        check()
+        let keys = sequence_keys(&input, columns)?;
+        validate_unique(&keys, check)
     }
     pub(super) fn validate_candidate(
         &self,
@@ -132,4 +103,44 @@ impl BoundedOrderOperator {
         )?;
         self.validate_sequence(&combined, pool, check)
     }
+}
+
+fn sequence_keys(
+    input: &datafusion::arrow::record_batch::RecordBatch,
+    columns: &[String],
+) -> Result<Vec<SortColumn>> {
+    let mut keys = Vec::with_capacity(columns.len());
+    for name in columns {
+        let values = input.column_by_name(name).unwrap();
+        if values.null_count() != 0 {
+            return Err(invalid(
+                "sort.spec.ties",
+                "ordering_required",
+                "sequence must be non-NULL and unique over the whole H",
+            ));
+        }
+        keys.push(SortColumn {
+            values: values.clone(),
+            options: Some(SortOptions {
+                descending: false,
+                nulls_first: false,
+            }),
+        });
+    }
+    Ok(keys)
+}
+fn validate_unique(keys: &[SortColumn], check: &dyn Fn() -> Result<()>) -> Result<()> {
+    let indices = lexsort_to_indices(keys, None).map_err(owned::error)?;
+    let compare = LexicographicalComparator::try_new(keys).map_err(owned::error)?;
+    for pair in indices.values().windows(2) {
+        owned::check_row(pair[0] as usize, check)?;
+        if compare.compare(pair[0] as usize, pair[1] as usize).is_eq() {
+            return Err(invalid(
+                "sort.spec.ties",
+                "ordering_required",
+                "sequence tuple must be unique over the whole H; candidate not committed",
+            ));
+        }
+    }
+    check()
 }

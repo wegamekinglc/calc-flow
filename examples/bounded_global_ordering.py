@@ -27,7 +27,8 @@ def main() -> None:
     for out in declarations:
         program = cf.Program("smallest", mode="batch", outputs={"out": out})
         result = program.collect({"events": data})["out"]
-        assert result.to_pydict() == {"x": [1], "seq": [11]}
+        if result.to_pydict() != {"x": [1], "seq": [11]}:
+            raise RuntimeError("complete-history top-1 returned an unexpected relation")
         print(result.to_pydict())
 
 

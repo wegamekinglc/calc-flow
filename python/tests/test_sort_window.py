@@ -105,12 +105,26 @@ def test_sort_window_signed_extremes_and_required_constructor_arguments():
     for other in ("ts", {}, ("ts", 0, 10), None):
         with pytest.raises(TypeError, match="window must be a SortWindow"):
             cf.SortSpec.closed_window(other, state_budget=cf.StateBudget(2, 8 << 20))
-    with pytest.raises(TypeError, match="state_budget"):
-        cf.SortSpec.closed_window(window)
-    with pytest.raises(TypeError):
-        cf.SortSpec.closed_window(
-            "ts", start_micros=0, end_micros=10, state_budget=cf.StateBudget(2, 8 << 20)
-        )
+
+
+@pytest.mark.parametrize(
+    ("argument", "kwargs", "message"),
+    [
+        (cf.SortWindow("ts", start_micros=0, end_micros=10), {}, "state_budget"),
+        (
+            "ts",
+            dict(
+                start_micros=0, end_micros=10, state_budget=cf.StateBudget(2, 8 << 20)
+            ),
+            None,
+        ),
+    ],
+)
+def test_sort_window_rejects_missing_budget_and_legacy_signature(
+    argument, kwargs, message
+):
+    with pytest.raises(TypeError, match=message):
+        cf.SortSpec.closed_window(argument, **kwargs)
 
 
 def expected_spec(policy):

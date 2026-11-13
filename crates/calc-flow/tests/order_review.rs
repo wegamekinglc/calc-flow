@@ -34,13 +34,16 @@ fn batch(values: Vec<i64>) -> Batch {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn test_cancelled_finite_worker_does_not_charge_the_next_execute() -> Result<()> {
+async fn test_cancelled_finite_worker_does_not_charge_the_next_execute() {
     // Original full-input peak plus the new 261-byte owned name role.
-    let op = operator("order", 11_262_843)?;
-    let plan = PipelineBuilder::new("cancel")?
-        .add_node("order", op)?
-        .compile_batch(&UdfRegistry::new().snapshot())?;
-    let input = plan.single_external_input()?.to_owned();
+    let op = operator("order", 11_262_843).unwrap();
+    let plan = PipelineBuilder::new("cancel")
+        .unwrap()
+        .add_node("order", op)
+        .unwrap()
+        .compile_batch(&UdfRegistry::new().snapshot())
+        .unwrap();
+    let input = plan.single_external_input().unwrap().to_owned();
     let mut seed = 10_u64;
     let large = batch(
         (0..200_000)
@@ -56,7 +59,8 @@ async fn test_cancelled_finite_worker_does_not_charge_the_next_execute() -> Resu
             BTreeMap::from([(input.clone(), data)]),
             ExecutionOptions::default(),
         )
-        .await?;
+        .await
+        .unwrap();
     }
     let mut pending = Box::pin(plan.execute(
         BTreeMap::from([(input.clone(), large)]),
@@ -70,8 +74,15 @@ async fn test_cancelled_finite_worker_does_not_charge_the_next_execute() -> Resu
     drop(pending);
     let result = plan
         .execute(BTreeMap::from([(input, tiny)]), ExecutionOptions::default())
-        .await?;
-    let output = result.outputs.values().next().unwrap().table_payload()?;
+        .await
+        .unwrap();
+    let output = result
+        .outputs
+        .values()
+        .next()
+        .unwrap()
+        .table_payload()
+        .unwrap();
     assert_eq!(result.outputs.values().next().unwrap().num_rows(), 1);
     assert_eq!(
         output.batches()[0]
@@ -82,7 +93,6 @@ async fn test_cancelled_finite_worker_does_not_charge_the_next_execute() -> Resu
             .value(0),
         9
     );
-    Ok(())
 }
 
 #[test]

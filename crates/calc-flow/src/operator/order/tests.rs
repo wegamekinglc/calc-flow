@@ -72,7 +72,7 @@ async fn test_order_owned_budget_boundaries() {
             "finite peak {limit}: {:?}",
             result.err()
         );
-        assert!(pool.take_peak() <= limit as usize);
+        assert!(pool.take_peak() <= usize::try_from(limit).unwrap());
         drop(result);
         assert_eq!(pool.reserved(), 0);
         assert_eq!(op.pool.reserved(), 25_877);
@@ -92,7 +92,7 @@ async fn test_order_owned_budget_boundaries() {
             "capture peak {limit}: {:?}",
             result.err()
         );
-        assert!(op.pool.take_peak() <= limit as usize);
+        assert!(op.pool.take_peak() <= usize::try_from(limit).unwrap());
         assert_eq!(op.stream.as_ref().unwrap().accepted, 2);
         assert!(!op.stream.as_ref().unwrap().closed);
     }
@@ -116,7 +116,7 @@ async fn test_order_owned_budget_boundaries() {
             "restore peak {limit}: {:?}",
             result.err()
         );
-        assert!(target.pool.take_peak() <= limit as usize);
+        assert!(target.pool.take_peak() <= usize::try_from(limit).unwrap());
         assert_eq!(
             target.stream.as_ref().unwrap().accepted,
             if success { 2 } else { 0 }
@@ -168,7 +168,7 @@ fn test_order_sequence_workspace_exact_boundary() {
         let history = op.finite_input(&raw, &pool, &|| Ok(())).unwrap();
         let result = op.validate_sequence(&history, &pool, &|| Ok(()));
         assert_eq!(result.is_ok(), success, "sequence peak {limit}: {result:?}");
-        assert!(op.pool.take_peak() <= limit as usize);
+        assert!(op.pool.take_peak() <= usize::try_from(limit).unwrap());
     }
 }
 

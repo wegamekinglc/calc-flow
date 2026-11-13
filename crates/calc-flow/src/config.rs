@@ -3347,6 +3347,22 @@ fn default_output() -> String {
     "output".into()
 }
 
+fn required_order_fetch<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<u64>, D::Error> {
+    Option::<u64>::deserialize(deserializer)
+}
+
+struct OrderFetchSchema;
+impl JsonSchema for OrderFetchSchema {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "OrderFetch".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({"type":["integer","null"],"minimum":0,"maximum":4_294_967_295_u64})
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -3565,21 +3581,5 @@ mod tests {
                 "{spelling} must be rejected"
             );
         }
-    }
-}
-
-fn required_order_fetch<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> std::result::Result<Option<u64>, D::Error> {
-    Option::<u64>::deserialize(deserializer)
-}
-
-struct OrderFetchSchema;
-impl JsonSchema for OrderFetchSchema {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "OrderFetch".into()
-    }
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({"type":["integer","null"],"minimum":0,"maximum":4_294_967_295_u64})
     }
 }

@@ -83,12 +83,8 @@ fn plan_select(q: &Query, aliases: &[String]) -> Result<OrderQuery> {
     let select = top_select(q)?;
     let (window, args) = macro_arguments(&select.from[0].relation)?;
     validate_arity(window, args.len())?;
-    let alias = string(&args[0])?;
-    if aliases != [alias.clone()] {
-        return Err(error("exactly the referenced input alias must be supplied"));
-    }
-    let (offset, fetch) = limits(q)?;
-    let spec = selected_spec(window, args)?.with_offset(offset)?;
+    let alias = input_alias(&args[0], aliases)?;
+    let (spec, fetch) = selected_limits(q, window, args)?;
     let by = key_columns(q, &alias)?;
     Ok(OrderQuery {
         alias,
@@ -96,6 +92,22 @@ fn plan_select(q: &Query, aliases: &[String]) -> Result<OrderQuery> {
         fetch,
         spec,
     })
+}
+fn selected_limits(
+    q: &Query,
+    window: bool,
+    args: &[FunctionArg],
+) -> Result<(SortSpec, Option<u64>)> {
+    let (offset, fetch) = limits(q)?;
+    let spec = selected_spec(window, args)?.with_offset(offset)?;
+    Ok((spec, fetch))
+}
+fn input_alias(arg: &FunctionArg, aliases: &[String]) -> Result<String> {
+    let alias = string(arg)?;
+    if aliases != [alias.clone()] {
+        return Err(error("exactly the referenced input alias must be supplied"));
+    }
+    Ok(alias)
 }
 fn top_select(q: &Query) -> Result<&datafusion::sql::sqlparser::ast::Select> {
     let SetExpr::Select(select) = q.body.as_ref() else {
@@ -252,7 +264,6 @@ fn late_policy(arg: Option<&FunctionArg>) -> Result<crate::LatePolicySpec> {
     }
 }
 fn key_columns(q: &Query, alias: &str) -> Result<Vec<crate::SortKey>> {
-    use crate::{NullPlacement, SortDirection, SortKey};
     use datafusion::sql::sqlparser::ast::OrderByKind;
     let order = q
         .order_by
@@ -264,40 +275,42 @@ fn key_columns(q: &Query, alias: &str) -> Result<Vec<crate::SortKey>> {
     if keys.is_empty() || order.interpolate.is_some() {
         return Err(error("nonempty ORDER BY without INTERPOLATE required"));
     }
-    keys.iter()
-        .map(|key| {
-            if key.with_fill.is_some() {
-                return Err(error("WITH FILL unsupported"));
-            }
-            let column = match &key.expr {
-                Expr::Identifier(name) => normalized(name),
-                Expr::CompoundIdentifier(names)
-                    if names.len() == 2 && normalized(&names[0]) == alias =>
-                {
-                    normalized(&names[1])
-                }
-                _ => {
-                    return Err(error(
-                        "ORDER BY direct columns only; no ordinal, expression or collation",
-                    ));
-                }
-            };
-            let asc = key.options.asc.unwrap_or(true);
-            SortKey::new(
-                &column,
-                if asc {
-                    SortDirection::Ascending
-                } else {
-                    SortDirection::Descending
-                },
-                if key.options.nulls_first.unwrap_or(!asc) {
-                    NullPlacement::First
-                } else {
-                    NullPlacement::Last
-                },
-            )
-        })
-        .collect()
+    keys.iter().map(|key| sort_key(key, alias)).collect()
+}
+fn sort_key(
+    key: &datafusion::sql::sqlparser::ast::OrderByExpr,
+    alias: &str,
+) -> Result<crate::SortKey> {
+    use crate::{NullPlacement, SortDirection, SortKey};
+    if key.with_fill.is_some() {
+        return Err(error("WITH FILL unsupported"));
+    }
+    let column = key_column(&key.expr, alias)?;
+    let asc = key.options.asc.unwrap_or(true);
+    SortKey::new(
+        &column,
+        if asc {
+            SortDirection::Ascending
+        } else {
+            SortDirection::Descending
+        },
+        if key.options.nulls_first.unwrap_or(!asc) {
+            NullPlacement::First
+        } else {
+            NullPlacement::Last
+        },
+    )
+}
+fn key_column(expr: &Expr, alias: &str) -> Result<String> {
+    match expr {
+        Expr::Identifier(name) => Ok(normalized(name)),
+        Expr::CompoundIdentifier(names) if names.len() == 2 && normalized(&names[0]) == alias => {
+            Ok(normalized(&names[1]))
+        }
+        _ => Err(error(
+            "ORDER BY direct columns only; no ordinal, expression or collation",
+        )),
+    }
 }
 fn validate_shape(q: &Query) -> Result<()> {
     let seed = crate::expression::parse_select_query("SELECT x FROM input")?;

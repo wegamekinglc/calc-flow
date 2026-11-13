@@ -284,3 +284,52 @@ def test_declared_order_survives_literal_dataframe_projection():
             p.analyze(options=cf.AnalysisOptions(portability=request)).query.portability
             == expected
         )
+
+
+@pytest.mark.parametrize(
+    ("name", "projection", "portable"),
+    [
+        ("x", 'SELECT "x", "seq" FROM input', True),
+        (
+            'x" FROM input; DROP TABLE input; --',
+            'SELECT "x"" FROM input; DROP TABLE input; --", "seq" FROM input',
+            False,
+        ),
+        ("select", 'SELECT "select", "seq" FROM input', True),
+    ],
+)
+def test_order_projection_treats_quoted_column_contents_as_identifiers(
+    name, projection, portable
+):
+    from calc_flow.symbolic.order import projection_query
+
+    schema = pa.schema(
+        [pa.field(name, pa.int64()), pa.field("seq", pa.uint64(), nullable=False)]
+    )
+    events = cf.table_input("events", schema=schema)
+    ordered = events.top_k(
+        1,
+        [cf.SortKey(name)],
+        spec=cf.SortSpec.bounded_source(
+            cf.StateBudget(10, 8 << 20), sequence_by=["seq"]
+        ),
+    ).select(name, "seq")
+    assert projection_query(ordered._node) == projection
+    program = cf.Program("quoted_order", mode="batch", outputs={"out": ordered})
+    data = pa.record_batch(
+        [
+            pa.array([3, 1, 2], type=pa.int64()),
+            pa.array([10, 11, 12], type=pa.uint64()),
+        ],
+        schema=schema,
+    )
+    if portable:
+        assert program.collect({"events": data})["out"].to_pydict() == {
+            name: [1],
+            "seq": [11],
+        }
+    else:
+        with pytest.raises(
+            cf.ConfigError, match="Arrow field name must be a portable SQL identifier"
+        ):
+            program.collect({"events": data})
