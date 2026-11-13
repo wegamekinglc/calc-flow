@@ -829,3 +829,71 @@ mapping without changing the tested product files. The prior independent
 approval is for ab85af2c; the new helpers/rendering/test refactoring are the
 direct incremental review scope. External Codacy and final-head CI remain
 subject to the actual next snapshot and the existing checks wakeup.
+
+## Project-v3 capability inventory test synchronization
+
+Base/reviewed product HEAD: `f1e0e43622fa6a474e699e2de4bdcad0a9fd21b2`.
+The coordinator supplied actual Linux job131757725676 (run43384132153) and
+Windows job131748742603 (run43384132120) failures: both report only
+`TestProjectV3Surface::test_v3_schema_constant`, line180, whose complete
+operator-kind tuple omitted the newly declared bounded_order capability.
+The reported Linux Ruff/complexity and96.19% coverage results remain evidence
+for their original HEAD; no local coverage rerun or final-head extrapolation
+is claimed here.
+
+The frozen API note's capability section explicitly requires bounded_order@1
+with batch/stream modes and layouts1/2. The existing inventory at
+`python/calc_flow/capabilities.py:1020` already places this capability before
+cross_section. The test now adds exactly the literal `"bounded_order"` at
+that same first position. The complete ordered tuple and every old capability
+remain, as do project_format_versions=(3,), the explicit package/revision
+fixture and the connector tuple assertion. No inclusion check, dynamically
+generated expected list, product edit, version/schema edit or gate change
+was introduced.
+
+The same failure was actually reproduced locally before editing:
+
+```sh
+JAX_PLATFORMS=cpu target/venv/bin/python -m pytest -q python/tests/test_project_v3.py::TestProjectV3Surface::test_v3_schema_constant
+# RED exit1: 1 failed; index0 bounded_order != cross_section, one extra kind.
+```
+
+After the one-literal fix:
+
+```sh
+JAX_PLATFORMS=cpu target/venv/bin/python -m pytest -q python/tests/test_project_v3.py::TestProjectV3Surface::test_v3_schema_constant
+# GREEN exit0: 1 passed in0.23s.
+JAX_PLATFORMS=cpu target/venv/bin/python -m pytest -q python/tests/test_project_v3.py
+# exit0: all12 file-local cases passed in0.24s.
+target/venv/bin/python -m ruff check python/tests/test_project_v3.py
+# exit0.
+target/venv/bin/python -m ruff format --check python/tests/test_project_v3.py
+# exit0: one file already formatted.
+git diff --check
+# exit0.
+```
+
+Before the RED run, the unchanged1208-file product-source fingerprint was
+actually recomputed and checked against the preceding build ledger:
+`66e10b8a07c57dafa6e2ce64536a6d3dda7ccce31777fd95c53ea9fbc2f1dca9`.
+The imported native's SHA256 was also rechecked, unchanged:
+`c9a546db726b223c56349f4197bde6ee97cbc61a24864e3fcbe0f71d7fa08c74`.
+Thus the currently installed CPython3.13.9 dev wheel from the gate repair is
+reused for these checks; no rebuild is needed for a test-only expected tuple.
+Its recorded wheel SHA256 remains
+`66e5b7b27ceb2cb13471fd7b542f06164d5eae988aadb0f4a85c7a368eb3054f`.
+The prior independent reviewer verified the matching62 installed product
+files, core/native/source/wheel hashes and approved this unchanged product.
+
+This commit includes only that test literal and this analysis appendix.
+The frozen API note stays byte-identical at SHA256
+`b4a087ef52cb9b3a43803666e13365dfce544205a6af8c97b88cb34dd8758624`.
+The reviewer-owned report, including its product approval of f1e0e436, stays
+unchanged/unstaged at SHA256
+`a263a8109f433f011def5856e6c6cc5070b501abe62da23ab198344472c3d357`.
+Existing product approvals and unaffected verification remain valid; no new
+review, full matrix, coverage, performance, delegation or DAL-521 work is
+started for this test-list synchronization. Final-head CI/merge state is
+reported in the issue comment after the authorized push and one nonblocking
+snapshot. Pending checks retain in_progress and the existing checks wakeup;
+no required check may be bypassed.
