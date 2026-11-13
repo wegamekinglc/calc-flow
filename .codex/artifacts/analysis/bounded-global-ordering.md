@@ -897,3 +897,79 @@ started for this test-list synchronization. Final-head CI/merge state is
 reported in the issue comment after the authorized push and one nonblocking
 snapshot. Pending checks retain in_progress and the existing checks wakeup;
 no required check may be bypassed.
+
+## PyO3 immutable-report revision test synchronization
+
+Base: `1c59f3498c92ef39bdd478460bc45e41f94fd472`. The coordinator supplied
+the actual Rust core parity job131760341433 (run43387789264) failure:
+`error::tests::query_portability_errors_keep_the_immutable_report` at
+error.rs:393 expected9 but received10; that CI process had147 passes/1 failure.
+The earlier Python inventory failure is resolved on this base.
+
+The frozen API note explicitly preserves schema_version2 and advances
+analysis_revision to10. The authoritative Rust producer in query_analysis.rs
+constructs QueryAnalysis with analysis_revision10; the Python current gates
+also require(2,10). Older report decoding remains supported by the unchanged
+version allowlist, including(2,9). The fix changes exactly one independent
+literal expectation9→10 in the existing PyO3 test. It does not derive the
+expected revision from the observed report or edit the producer/parser/gates.
+CompileError type, schema2, unsupported portability, node path and the
+PyAttributeError assertion after attempted mutation are retained verbatim;
+all other compatibility and error-mapping assertions are untouched.
+
+Local commands use the existing target/venv CPython3.13.9. Each cargo command
+is invoked with PYO3_PYTHON=sys.executable and the existing
+scripts.run_rust_tests._python_test_environment() helper, which supplies the
+Python library search directory. This reuses the established PyO3 environment
+without running the script's full matrix. Selected features are the normal
+default connector-file features, not the CI all-feature matrix.
+
+```sh
+cargo test --locked -p calc-flow-python --lib error::tests::query_portability_errors_keep_the_immutable_report -- --exact --nocapture
+# RED exit101: 0 passed/1 failed/136 filtered; left10, right9, error.rs:393.
+# Initial lib-test build26.51s; failure reproduced before editing.
+# GREEN exit0 after rebuilding the changed lib-test5.13s:
+# 1 passed/136 filtered,0.18s; same binary target, fresh test contents.
+cargo test --locked -p calc-flow-python --lib error::tests:: -- --skip query_portability_errors_keep_the_immutable_report --test-threads=1
+# exit0: 4 passed/133 filtered; configuration/compilation, execution/checkpoint,
+# IO cause, and wildcard TaskPanicked mappings retain their exact assertions.
+cargo clippy --locked -p calc-flow-python --lib --tests -- -D warnings
+# exit0, finished1m03s.
+cargo fmt --all --check
+git diff --check
+# exit0.
+```
+
+The rebuilt lib-test is
+`target/debug/deps/calc_flow_python-b60fc4a453d9790f`, SHA256
+`ec84e75444f28fe7ee3d1cb050bcaa8c7c090c218f6eddff4c955eb219674831`;
+its Cargo fingerprint records features[connector-file,default]. This is
+lib-test build evidence, not a new installed wheel/native build claim.
+
+The raw1208-file source fingerprint now necessarily includes this test edit:
+`0f8e873e81bf990e4fa1ced5b120e4229b8c195825933adf0bca0db68b4263ba`.
+Actual byte checks against the base prove that error.rs differs by exactly
+this9→10 test literal, and its entire prefix before #[cfg(test)] is identical.
+Replacing only that test file with its base bytes reproduces the previously
+approved1208-file fingerprint
+`66e10b8a07c57dafa6e2ce64536a6d3dda7ccce31777fd95c53ea9fbc2f1dca9`;
+all remaining files in that source manifest are unchanged. Thus non-test
+product content and the prior product approval remain applicable.
+
+Actual hashes of the imported native and existing wheel were rechecked:
+
+- native: `c9a546db726b223c56349f4197bde6ee97cbc61a24864e3fcbe0f71d7fa08c74`;
+- wheel: `66e5b7b27ceb2cb13471fd7b542f06164d5eae988aadb0f4a85c7a368eb3054f`.
+
+Both equal the prior independent build/installed-package evidence. No wheel
+is built or reinstalled for this cfg(test)-only literal synchronization.
+Frozen API note SHA256 remains
+`b4a087ef52cb9b3a43803666e13365dfce544205a6af8c97b88cb34dd8758624`;
+the reviewer report remains unchanged/unstaged at SHA256
+`a263a8109f433f011def5856e6c6cc5070b501abe62da23ab198344472c3d357`.
+This commit includes only error.rs's test expectation and this appendix.
+No product revision, old-version acceptance rule, public API, gate, baseline,
+suppression or reviewer artifact is changed. No new review, full matrix,
+coverage, performance, delegation or DAL-521 work is started. The issue
+handoff records the precise pushed SHA and one final-head CI snapshot;
+pending required checks keep in_progress and the existing checks wakeup.
