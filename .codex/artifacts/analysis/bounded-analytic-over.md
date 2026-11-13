@@ -458,3 +458,47 @@ performed. The prior valid evidence is reused. The full independent review
 remains complete, with only F1/direct impact requiring reviewer recheck; this
 report does not grant that acceptance. The final issue reply records the single
 post-push nonblocking CI snapshot. No merge/delegation; DAL-521 stays in_progress.
+
+## Explicit inventory expectations follow-up
+
+The product at `20b7845aebe355ae8afc30eb12f0a9e9c0d0a357` has an independent
+Approve after the F1 recheck. The coordinator subsequently supplied the actual
+failure from job `131893294931`, run `43424416843` (Ruff + unit tests): two
+inventory assertions failed, while 3056 passed / 3 skipped and Python coverage
+was 96.06%. Those full-suite figures are the coordinator's CI evidence, not a
+local rerun or an overall green result.
+
+The two exact failures were reproduced locally against the current-source
+staged package and accepted native:
+
+```sh
+PYTHONPATH=target/bounded-analytic-over-f1-python <dev-python> -m pytest \
+  python/tests/test_project_v3.py::TestProjectV3Surface::test_v3_schema_constant \
+  python/tests/test_symbolic_expr.py::test_public_surface_is_the_frozen_export_list -q
+```
+
+RED: exit 1, 2 failed. The operator inventory omits bounded_over and the frozen
+symbolic export list omits AnalyticExpr, OverOrder, OverSpec, OverWindow and
+RowsFrame. These are already approved product entries, not new behavior added
+to satisfy the tests.
+
+The correction adds exactly those six literal entries to the complete explicit
+expected tuple/list, in their declared order. Both strict equality assertions
+and all existing entries remain unchanged. No expected inventory is derived
+dynamically from the product. GREEN: the same command exits 0, 2 passed.
+Ruff check and format checks on both test files, targeted Lizard at CCN 8,
+and whitespace checks pass.
+
+Only these two test files and this evidence report change relative to the
+approved product SHA. All product/schema/API/gate bytes remain identical, so
+the existing independent Approve and valid product checks are reused. All 62
+Python/stub files in the tested stage match source, and imported native SHA256
+remains `3a6819c1a784d8c984c3942deb2d1e9fd9f78dc82b46e2331c1caca73f2e62c1`.
+The original reviewer report (including its legitimate F1 addendum) remains
+untracked and unmodified, SHA256
+`d5169d99cde40b91eb46af34ce85931a17b38512f504e4c09a7d25b7b3c99ea1`.
+
+No full suite, coverage, performance, Rust/native rebuild or renewed product
+review is performed. The final comment records the single nonblocking new-head
+snapshot; required checks are not assumed green. No polling, merge or
+delegation; DAL-521 stays in_progress.
