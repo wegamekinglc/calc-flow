@@ -506,10 +506,15 @@ impl RollingOperator {
             )
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "ordered emission keeps preparation, output, and rollback in one transaction"
-    )]
+    fn ordered_buffer_removal_charge(
+        &self,
+        records: &[RecordBatch],
+        node: &str,
+    ) -> Result<super::budget::StateCharge> {
+        super::budget::ordered_buffer_charge(records.iter(), &self.compiled, node)?
+            .ok_or_else(|| internal_error("ordered rolling state has unsupported state charge"))
+    }
+
     pub(super) async fn emit_ordered(
         &mut self,
         records: Vec<RecordBatch>,
@@ -519,22 +524,8 @@ impl RollingOperator {
     ) -> Result<()> {
         let original_charge = self.state.charge;
         let observer = context.rolling_metrics();
-        let removed = match super::budget::ordered_buffer_charge(
-            records.iter(),
-            &self.compiled,
-            context.operator_id(),
-        ) {
-            Ok(Some(charge)) => charge,
-            Ok(None) => {
-                return self.restore_ordered_failure(
-                    records,
-                    last_identity,
-                    original_charge,
-                    internal_error("ordered rolling state has unsupported state charge"),
-                    context.operator_id(),
-                    observer,
-                );
-            }
+        let removed = match self.ordered_buffer_removal_charge(&records, context.operator_id()) {
+            Ok(charge) => charge,
             Err(error) => {
                 return self.restore_ordered_failure(
                     records,

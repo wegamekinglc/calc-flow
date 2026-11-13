@@ -43,6 +43,30 @@ struct InputColumns<'a> {
     values: &'a Float64Array,
 }
 
+fn supports_schema(
+    schema: &Schema,
+    partition_index: usize,
+    event_time_index: usize,
+    input_index: usize,
+) -> bool {
+    supports_partition(schema.field(partition_index))
+        && supports_event_time(schema.field(event_time_index))
+        && schema.field(input_index).data_type() == &DataType::Float64
+}
+
+fn supports_partition(field: &datafusion::arrow::datatypes::Field) -> bool {
+    field.data_type() == &DataType::Utf8 && !field.is_nullable()
+}
+
+fn supports_event_time(field: &datafusion::arrow::datatypes::Field) -> bool {
+    !field.is_nullable()
+        && matches!(
+            field.data_type(),
+            DataType::Timestamp(TimeUnit::Microsecond, timezone)
+                if timezone.as_deref().is_none_or(|timezone| timezone == "UTC")
+        )
+}
+
 impl SqlSumRangeKernel {
     pub(super) fn compile(
         schema: &Schema,
@@ -58,14 +82,11 @@ impl SqlSumRangeKernel {
         let preceding_micros = window.duration_micros.filter(|micros| *micros > 0)?;
         if !window.is_sum
             || window.is_count
-            || schema.field(*partition_index).data_type() != &DataType::Utf8
-            || schema.field(*partition_index).is_nullable()
-            || schema.field(*event_time_index).is_nullable()
-            || schema.field(window.input_index).data_type() != &DataType::Float64
-            || !matches!(
-                schema.field(*event_time_index).data_type(),
-                DataType::Timestamp(TimeUnit::Microsecond, timezone)
-                    if timezone.as_deref().is_none_or(|timezone| timezone == "UTC")
+            || !supports_schema(
+                schema,
+                *partition_index,
+                *event_time_index,
+                window.input_index,
             )
         {
             return None;
@@ -122,15 +143,7 @@ impl SqlSumRangeKernel {
         self.columns(input)?;
         let input_validation_ns = elapsed_ns(started);
         let started = Instant::now();
-        let combined = match state.pending.take() {
-            Some(pending) if input.num_rows() != 0 => {
-                concat_batches(&pending.schema(), [&pending, input]).map_err(|error| {
-                    internal(&format!("SQL range pending input failed: {error}"))
-                })?
-            }
-            Some(pending) => pending,
-            None => input.clone(),
-        };
+        let combined = combine_pending(state.pending.take(), input)?;
         let columns = self.columns(&combined)?;
         let held = if finish {
             0
@@ -169,21 +182,18 @@ impl SqlSumRangeKernel {
     }
 
     fn columns<'a>(&self, input: &'a RecordBatch) -> crate::Result<InputColumns<'a>> {
-        let entities = input
-            .column(self.partition_index)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| internal("SQL range partition type changed"))?;
-        let times = input
-            .column(self.event_time_index)
-            .as_any()
-            .downcast_ref::<TimestampMicrosecondArray>()
-            .ok_or_else(|| internal("SQL range event-time type changed"))?;
-        let values = input
-            .column(self.input_index)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .ok_or_else(|| internal("SQL range input type changed"))?;
+        let entities: &StringArray = typed_column(
+            input,
+            self.partition_index,
+            "SQL range partition type changed",
+        )?;
+        let times: &TimestampMicrosecondArray = typed_column(
+            input,
+            self.event_time_index,
+            "SQL range event-time type changed",
+        )?;
+        let values: &Float64Array =
+            typed_column(input, self.input_index, "SQL range input type changed")?;
         if entities.null_count() != 0 || times.null_count() != 0 {
             return Err(internal("SQL range required input contains nulls"));
         }
@@ -204,20 +214,9 @@ impl SqlSumRangeKernel {
         let mut row = 0;
         while row < rows {
             let entity = input.entities.value(row);
-            if state.entity.as_deref() != Some(entity) {
-                state.entity = Some(entity.to_owned());
-                state.samples.clear();
-                state.sum = None;
-                state.count = 0;
-            }
+            state.start_entity(entity);
             let event_time = input.times.value(row);
-            let mut end = row + 1;
-            while end < rows
-                && input.entities.value(end) == entity
-                && input.times.value(end) == event_time
-            {
-                end += 1;
-            }
+            let end = peer_group_end(input, row, rows, entity, event_time);
             state.add_group(input.values, row, end, event_time)?;
             state.expire(event_time, self.preceding_micros)?;
             let result = (state.count != 0).then_some(state.sum).flatten();
@@ -231,6 +230,15 @@ impl SqlSumRangeKernel {
 }
 
 impl SqlSumRangeState {
+    fn start_entity(&mut self, entity: &str) {
+        if self.entity.as_deref() != Some(entity) {
+            self.entity = Some(entity.to_owned());
+            self.samples.clear();
+            self.sum = None;
+            self.count = 0;
+        }
+    }
+
     fn add_group(
         &mut self,
         values: &Float64Array,
@@ -291,6 +299,47 @@ impl SqlSumRangeState {
                     .map(Array::get_array_memory_size)
                     .sum()
             })
+    }
+}
+
+fn peer_group_end(
+    input: InputColumns<'_>,
+    row: usize,
+    rows: usize,
+    entity: &str,
+    event_time: i64,
+) -> usize {
+    let mut end = row + 1;
+    while end < rows && input.entities.value(end) == entity && input.times.value(end) == event_time
+    {
+        end += 1;
+    }
+    end
+}
+
+fn typed_column<'a, T: 'static>(
+    input: &'a RecordBatch,
+    index: usize,
+    message: &'static str,
+) -> crate::Result<&'a T> {
+    input
+        .column(index)
+        .as_any()
+        .downcast_ref::<T>()
+        .ok_or_else(|| internal(message))
+}
+
+fn combine_pending(
+    pending: Option<RecordBatch>,
+    input: &RecordBatch,
+) -> crate::Result<RecordBatch> {
+    match pending {
+        Some(pending) if input.num_rows() != 0 => {
+            concat_batches(&pending.schema(), [&pending, input])
+                .map_err(|error| internal(&format!("SQL range pending input failed: {error}")))
+        }
+        Some(pending) => Ok(pending),
+        None => Ok(input.clone()),
     }
 }
 

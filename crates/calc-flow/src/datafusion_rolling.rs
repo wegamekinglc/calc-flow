@@ -304,28 +304,41 @@ fn bounded_preceding_rows(bound: &WindowFrameBound) -> Option<u64> {
 
 fn bounded_preceding_range(bound: &WindowFrameBound) -> Option<u64> {
     match bound {
-        WindowFrameBound::Preceding(ScalarValue::IntervalMonthDayNano(Some(value)))
-            if value.months == 0 && value.days == 0 && value.nanoseconds > 0 =>
-        {
-            u64::try_from(value.nanoseconds)
-                .ok()
-                .filter(|nanos| nanos % 1_000 == 0)
-                .map(|nanos| nanos / 1_000)
+        WindowFrameBound::Preceding(ScalarValue::IntervalMonthDayNano(Some(value))) => {
+            month_day_nano_micros(value.months, value.days, value.nanoseconds)
         }
-        WindowFrameBound::Preceding(ScalarValue::IntervalDayTime(Some(value)))
-            if value.days == 0 && value.milliseconds > 0 =>
-        {
-            u64::try_from(value.milliseconds)
-                .ok()
-                .and_then(|millis| millis.checked_mul(1_000))
+        WindowFrameBound::Preceding(ScalarValue::IntervalDayTime(Some(value))) => {
+            day_time_micros(value.days, value.milliseconds)
         }
-        WindowFrameBound::Preceding(ScalarValue::DurationMicrosecond(Some(micros)))
-            if *micros > 0 =>
-        {
-            u64::try_from(*micros).ok()
+        WindowFrameBound::Preceding(ScalarValue::DurationMicrosecond(Some(micros))) => {
+            positive_duration_micros(*micros)
         }
         _ => None,
     }
+}
+
+fn month_day_nano_micros(months: i32, days: i32, nanoseconds: i64) -> Option<u64> {
+    if months != 0 || days != 0 {
+        return None;
+    }
+    u64::try_from(nanoseconds)
+        .ok()
+        .filter(|nanos| *nanos > 0 && nanos % 1_000 == 0)
+        .map(|nanos| nanos / 1_000)
+}
+
+fn day_time_micros(days: i32, milliseconds: i32) -> Option<u64> {
+    if days != 0 {
+        return None;
+    }
+    u64::try_from(milliseconds)
+        .ok()
+        .filter(|millis| *millis > 0)
+        .and_then(|millis| millis.checked_mul(1_000))
+}
+
+fn positive_duration_micros(micros: i64) -> Option<u64> {
+    u64::try_from(micros).ok().filter(|micros| *micros > 0)
 }
 
 #[derive(Clone, Debug)]
