@@ -111,35 +111,35 @@ impl BoundedOrderOperator {
         expressions: Vec<crate::AnalyticExpr>,
         spec: crate::OverSpec,
     ) -> Result<Self> {
-        let report = |error| match error {
-            crate::CalcFlowError::OperatorReason { .. } => qualify(name, error),
-            other => super::over::schema::remap(other),
-        };
+        let report = |error| over_error(name, error);
         let mut operator = Self::new(name, schema, spec.order().keys()?, None, spec.sort_spec()?)
             .map_err(report)?;
-        let declaration = super::over::Declaration { spec, expressions };
-        let pool: Arc<dyn MemoryPool> = operator.pool.clone();
-        let extra = super::over::declaration_bound(&declaration)?;
+        operator.install_analytic(&super::over::Declaration { spec, expressions })?;
+        Ok(operator)
+    }
+    fn install_analytic(&mut self, declaration: &super::over::Declaration) -> Result<()> {
+        let pool: Arc<dyn MemoryPool> = self.pool.clone();
+        let extra = super::over::declaration_bound(declaration)?;
         let lease = owned::reserve(
             &pool,
-            owned::add(operator.declaration.size(), extra)?,
+            owned::add(self.declaration.size(), extra)?,
             "analytic declaration/output schema",
         )
-        .map_err(report)?;
-        operator.declaration = Arc::new(lease);
+        .map_err(|error| over_error(&self.name, error))?;
+        self.declaration = Arc::new(lease);
         let output_schema = super::over::schema::output_schema(
-            operator.input[0].schema().unwrap(),
+            self.input[0].schema().unwrap(),
             &declaration.expressions,
             &declaration.spec,
         )?;
-        operator.analytic = Some(declaration.clone());
-        operator.output = [Port::with_schema_ref(
+        self.analytic = Some(declaration.clone());
+        self.output = [Port::with_schema_ref(
             "output",
             BatchKind::Table,
             true,
             Some(output_schema),
         )?];
-        Ok(operator)
+        Ok(())
     }
     fn qualify(&self, error: crate::CalcFlowError) -> crate::CalcFlowError {
         qualify(
@@ -616,6 +616,13 @@ fn history_error(name: &str, _code: &str, message: impl std::fmt::Display) -> cr
         node_id: name.into(),
         reason_code: crate::StreamingFailureReason::StateBudgetExceeded,
         message: format!("state_budget_exceeded: {message}"),
+    }
+}
+
+fn over_error(name: &str, error: crate::CalcFlowError) -> crate::CalcFlowError {
+    match error {
+        crate::CalcFlowError::OperatorReason { .. } => qualify(name, error),
+        other => super::over::schema::remap(other),
     }
 }
 

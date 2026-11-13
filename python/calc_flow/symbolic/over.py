@@ -261,18 +261,7 @@ def declaration(value, expressions, spec):
 
     if not isinstance(spec, OverSpec):
         raise TypeError("over.spec requires an OverSpec")
-    if not isinstance(expressions, Sequence) or isinstance(expressions, (str, bytes)):
-        raise TypeError("over.expressions requires a sequence of AnalyticExpr")
-    expressions = tuple(expressions)
-    if not expressions:
-        raise ValueError("over.expressions requires nonempty AnalyticExpr values")
-    for index, expression in enumerate(expressions):
-        if not isinstance(expression, AnalyticExpr):
-            raise TypeError(f"over.expressions[{index}] requires an AnalyticExpr")
-    descriptors = [json.loads(e._wire) for e in expressions]
-    names = [e["name"] for e in descriptors]
-    if len(set(names)) != len(names):
-        raise ValueError("over.expressions requires unique output names")
+    descriptors = _expression_descriptors(expressions)
     return build(
         "bounded_over",
         (value,),
@@ -281,6 +270,26 @@ def declaration(value, expressions, spec):
             "expressions": CStr(json.dumps(descriptors, sort_keys=True)),
         },
     )
+
+
+def _expression_values(expressions):
+    if not isinstance(expressions, Sequence) or isinstance(expressions, (str, bytes)):
+        raise TypeError("over.expressions requires a sequence of AnalyticExpr")
+    expressions = tuple(expressions)
+    if not expressions:
+        raise ValueError("over.expressions requires nonempty AnalyticExpr values")
+    for index, expression in enumerate(expressions):
+        if not isinstance(expression, AnalyticExpr):
+            raise TypeError(f"over.expressions[{index}] requires an AnalyticExpr")
+    return expressions
+
+
+def _expression_descriptors(expressions):
+    descriptors = [json.loads(e._wire) for e in _expression_values(expressions)]
+    names = [e["name"] for e in descriptors]
+    if len(set(names)) != len(names):
+        raise ValueError("over.expressions requires unique output names")
+    return descriptors
 
 
 def native_plan(node):
@@ -353,27 +362,29 @@ def analyze(analyzer, node, path, *, role=None):
 
 
 def _require_capability(analyzer, role, spec):
-    capability = (
-        next(
-            (c for c in analyzer._capabilities.operators if c.kind == "bounded_over"),
-            None,
-        )
-        if analyzer._capabilities
-        else None
-    )
+    capability = _over_capability(analyzer._capabilities)
     layout = 2 if spec["late_policy"]["kind"] == "drop" else 1
-    if (
-        capability is None
-        or capability.version != "1"
-        or capability.state_version != 1
-        or layout not in capability.state_layouts
-        or analyzer._mode not in capability.modes
-    ):
+    if capability is None or not _supports(capability, layout, analyzer._mode):
         analyzer.issue(
             role,
             "capability_mismatch",
             "requires bounded_over@1 and the selected policy layout",
         )
+
+
+def _over_capability(capabilities):
+    if not capabilities:
+        return None
+    return next((c for c in capabilities.operators if c.kind == "bounded_over"), None)
+
+
+def _supports(capability, layout, mode):
+    return (
+        capability.version == "1"
+        and capability.state_version == 1
+        and layout in capability.state_layouts
+        and mode in capability.modes
+    )
 
 
 def order_descriptor(node):

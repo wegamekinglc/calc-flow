@@ -8,7 +8,7 @@ use crate::{
     dataframe::invalid,
 };
 use datafusion::sql::sqlparser::ast::{
-    Expr, Function, FunctionArg, FunctionArguments, ObjectName, Query, SelectItem, SetExpr,
+    Expr, Function, FunctionArg, FunctionArguments, ObjectName, Query, Select, SelectItem, SetExpr,
     TableFactor, Visit, Visitor, WindowFrame, WindowFrameBound, WindowFrameUnits, WindowSpec,
     WindowType,
 };
@@ -87,6 +87,18 @@ fn remap(error: crate::CalcFlowError) -> crate::CalcFlowError {
     }
 }
 fn plan(q: &Query, aliases: &[String]) -> Result<OverQuery> {
+    let select = analytic_select(q)?;
+    let invocation = invocation(select, aliases)?;
+    let (order, expressions) = projection(select, &invocation.alias, &invocation.sequence)?;
+    validate_shape(q)?;
+    let spec = selected_spec(invocation.window, invocation.args, order)?;
+    Ok(OverQuery {
+        alias: invocation.alias,
+        spec,
+        expressions,
+    })
+}
+fn analytic_select(q: &Query) -> Result<&Select> {
     let SetExpr::Select(select) = q.body.as_ref() else {
         return Err(error("", "one top-level SELECT required"));
     };
@@ -101,6 +113,9 @@ fn plan(q: &Query, aliases: &[String]) -> Result<OverQuery> {
             "requires SELECT *, analytic AS name with no DISTINCT/outer order/limit",
         ));
     }
+    Ok(select)
+}
+fn macro_source(select: &Select) -> Result<(bool, &[FunctionArg])> {
     let [from] = select.from.as_slice() else {
         return Err(error("", "one macro FROM required"));
     };
@@ -114,11 +129,33 @@ fn plan(q: &Query, aliases: &[String]) -> Result<OverQuery> {
             "expected bounded arity 4 or window arity 7/8 with mandatory sequence ARRAY",
         ));
     }
+    Ok((window, args))
+}
+struct Invocation<'a> {
+    window: bool,
+    args: &'a [FunctionArg],
+    alias: String,
+    sequence: Vec<String>,
+}
+fn invocation<'a>(select: &'a Select, aliases: &[String]) -> Result<Invocation<'a>> {
+    let (window, args) = macro_source(select)?;
     let alias = string(&args[0])?;
     if aliases != [alias.clone()] {
         return Err(error("", "exactly the referenced alias required"));
     }
     let sequence = sequence_columns(&args[if window { 6 } else { 3 }])?;
+    Ok(Invocation {
+        window,
+        args,
+        alias,
+        sequence,
+    })
+}
+fn projection(
+    select: &Select,
+    alias: &str,
+    sequence: &[String],
+) -> Result<(OverOrder, Vec<AnalyticExpr>)> {
     let mut order = None;
     let mut expressions = Vec::with_capacity(select.projection.len() - 1);
     for (index, item) in select.projection.iter().skip(1).enumerate() {
@@ -133,7 +170,7 @@ fn plan(q: &Query, aliases: &[String]) -> Result<OverQuery> {
                 "one analytic function with explicit alias required",
             ));
         };
-        let (selected, expr) = analytic(f, &normalized(name), &alias, &sequence, &path)?;
+        let (selected, expr) = analytic(f, &normalized(name), alias, sequence, &path)?;
         if order.as_ref().is_some_and(|o| o != &selected) {
             return Err(error(
                 &format!("{path}.order"),
@@ -143,13 +180,7 @@ fn plan(q: &Query, aliases: &[String]) -> Result<OverQuery> {
         order = Some(selected);
         expressions.push(expr);
     }
-    validate_shape(q)?;
-    let spec = selected_spec(window, args, order.expect("nonempty projection"))?;
-    Ok(OverQuery {
-        alias,
-        spec,
-        expressions,
-    })
+    Ok((order.expect("nonempty projection"), expressions))
 }
 fn macro_args(table: &TableFactor) -> Result<(bool, &[FunctionArg])> {
     let TableFactor::Table {
@@ -175,42 +206,48 @@ fn macro_args(table: &TableFactor) -> Result<(bool, &[FunctionArg])> {
     {
         return Err(error("", "qualified macros and FROM modifiers unsupported"));
     }
-    let window = match name.0[0]
+    Ok((macro_window(name)?, &args.args))
+}
+fn macro_window(name: &ObjectName) -> Result<bool> {
+    match name.0[0]
         .as_ident()
         .unwrap()
         .value
         .to_ascii_lowercase()
         .as_str()
     {
-        "cf_over_bounded" => false,
-        "cf_over_window" => true,
-        _ => return Err(error("", "expected CF_OVER_BOUNDED or CF_OVER_WINDOW")),
-    };
-    Ok((window, &args.args))
+        "cf_over_bounded" => Ok(false),
+        "cf_over_window" => Ok(true),
+        _ => Err(error("", "expected CF_OVER_BOUNDED or CF_OVER_WINDOW")),
+    }
 }
 fn selected_spec(window: bool, args: &[FunctionArg], order: OverOrder) -> Result<OverSpec> {
-    let offset = if window { 4 } else { 1 };
-    let budget = StateBudget::new(integer(&args[offset])?, integer(&args[offset + 1])?)?;
+    let budget = state_budget(window, args)?;
     if !window {
         return OverSpec::bounded_source(order, budget);
     }
-    let spec = OverSpec::closed_window(
-        OverWindow::new(
-            &string(&args[1])?,
-            EventTime::from_micros(signed(&args[2])?),
-            EventTime::from_micros(signed(&args[3])?),
-        )?,
-        order,
-        budget,
-    )?;
-    let policy = match args.get(7).map(string).transpose()?.as_deref() {
-        None | Some("error") => crate::LatePolicySpec::Error {
+    let spec = OverSpec::closed_window(history_window(args)?, order, budget)?;
+    spec.with_late_policy(late_policy(args)?)
+}
+fn state_budget(window: bool, args: &[FunctionArg]) -> Result<StateBudget> {
+    let offset = if window { 4 } else { 1 };
+    StateBudget::new(integer(&args[offset])?, integer(&args[offset + 1])?)
+}
+fn history_window(args: &[FunctionArg]) -> Result<OverWindow> {
+    OverWindow::new(
+        &string(&args[1])?,
+        EventTime::from_micros(signed(&args[2])?),
+        EventTime::from_micros(signed(&args[3])?),
+    )
+}
+fn late_policy(args: &[FunctionArg]) -> Result<crate::LatePolicySpec> {
+    match args.get(7).map(string).transpose()?.as_deref() {
+        None | Some("error") => Ok(crate::LatePolicySpec::Error {
             scope: crate::LateErrorScope::Envelope,
-        },
-        Some("drop") => crate::LatePolicySpec::Drop { metrics_version: 1 },
-        _ => return Err(error(".spec.late_policy", "requires 'error' or 'drop'")),
-    };
-    spec.with_late_policy(policy)
+        }),
+        Some("drop") => Ok(crate::LatePolicySpec::Drop { metrics_version: 1 }),
+        _ => Err(error(".spec.late_policy", "requires 'error' or 'drop'")),
+    }
 }
 fn analytic(
     f: &Function,
@@ -219,6 +256,20 @@ fn analytic(
     sequence: &[String],
     path: &str,
 ) -> Result<(OverOrder, AnalyticExpr)> {
+    validate_function(f, path)?;
+    let args = positional_arguments(f, path)?;
+    let Some(WindowType::WindowSpec(window)) = &f.over else {
+        return Err(error(
+            &format!("{path}.order"),
+            "explicit OVER partition/order required",
+        ));
+    };
+    let order = window_order(window, alias, sequence, path)?;
+    let fname = f.name.0[0].as_ident().unwrap().value.to_ascii_lowercase();
+    let expr = analytic_value(&fname, args, window, name, alias, path)?;
+    Ok((order, expr))
+}
+fn validate_function(f: &Function, path: &str) -> Result<()> {
     if f.name.0.len() != 1
         || f.uses_odbc_syntax
         || f.parameters != FunctionArguments::None
@@ -231,38 +282,74 @@ fn analytic(
             "function modifiers, parameters and NULL-treatment unsupported",
         ));
     }
+    Ok(())
+}
+fn positional_arguments<'a>(f: &'a Function, path: &str) -> Result<&'a [FunctionArg]> {
     let FunctionArguments::List(args) = &f.args else {
         return Err(error(path, "plain positional arguments required"));
     };
     if args.duplicate_treatment.is_some() || !args.clauses.is_empty() {
         return Err(error(path, "DISTINCT/ALL/argument clauses unsupported"));
     }
-    let Some(WindowType::WindowSpec(window)) = &f.over else {
-        return Err(error(
-            &format!("{path}.order"),
-            "explicit OVER partition/order required",
-        ));
-    };
-    let order = window_order(window, alias, sequence, path)?;
-    let fname = f.name.0[0].as_ident().unwrap().value.to_ascii_lowercase();
-    let expr = match (fname.as_str(), args.args.as_slice()) {
-        ("row_number", []) if window.window_frame.is_none() => AnalyticExpr::row_number(name)?,
-        ("lag", [column, offset]) if window.window_frame.is_none() && integer(offset)? == 1 => {
-            AnalyticExpr::lag(&key_column(expression(column)?, alias)?, name)?
+    Ok(&args.args)
+}
+fn analytic_value(
+    function: &str,
+    args: &[FunctionArg],
+    window: &WindowSpec,
+    name: &str,
+    alias: &str,
+    path: &str,
+) -> Result<AnalyticExpr> {
+    match (function, args) {
+        ("row_number", []) => {
+            without_frame(window, path)?;
+            AnalyticExpr::row_number(name)
         }
-        ("sum", [column]) => AnalyticExpr::sum(
-            &key_column(expression(column)?, alias)?,
-            frame(window.window_frame.as_ref(), path)?,
-            name,
-        )?,
-        _ => {
-            return Err(error(
-                path,
-                "requires ROW_NUMBER(), LAG(column,1) without frame, or SUM(column) with explicit supported ROWS frame",
-            ));
-        }
-    };
-    Ok((order, expr))
+        ("lag", [column, offset]) => lag_expression(column, offset, window, name, alias, path),
+        ("sum", [column]) => sum_expression(column, window, name, alias, path),
+        _ => Err(unsupported_function(path)),
+    }
+}
+fn unsupported_function(path: &str) -> crate::CalcFlowError {
+    error(
+        path,
+        "requires ROW_NUMBER(), LAG(column,1) without frame, or SUM(column) with explicit supported ROWS frame",
+    )
+}
+fn without_frame(window: &WindowSpec, path: &str) -> Result<()> {
+    if window.window_frame.is_some() {
+        Err(unsupported_function(path))
+    } else {
+        Ok(())
+    }
+}
+fn lag_expression(
+    column: &FunctionArg,
+    offset: &FunctionArg,
+    window: &WindowSpec,
+    name: &str,
+    alias: &str,
+    path: &str,
+) -> Result<AnalyticExpr> {
+    without_frame(window, path)?;
+    if integer(offset)? != 1 {
+        return Err(unsupported_function(path));
+    }
+    AnalyticExpr::lag(&key_column(expression(column)?, alias)?, name)
+}
+fn sum_expression(
+    column: &FunctionArg,
+    window: &WindowSpec,
+    name: &str,
+    alias: &str,
+    path: &str,
+) -> Result<AnalyticExpr> {
+    AnalyticExpr::sum(
+        &key_column(expression(column)?, alias)?,
+        frame(window.window_frame.as_ref(), path)?,
+        name,
+    )
 }
 fn window_order(
     window: &WindowSpec,
@@ -278,11 +365,22 @@ fn window_order(
         .iter()
         .map(|e| key_column(e, alias))
         .collect::<Result<Vec<_>>>()?;
-    let mut keys = window
+    let keys = window
         .order_by
         .iter()
         .map(|k| sort_key(k, alias))
         .collect::<Result<Vec<_>>>()?;
+    OverOrder::new(
+        partition,
+        primary_keys(keys, sequence, path)?,
+        sequence.to_vec(),
+    )
+}
+fn primary_keys(
+    mut keys: Vec<crate::SortKey>,
+    sequence: &[String],
+    path: &str,
+) -> Result<Vec<crate::SortKey>> {
     if sequence.is_empty() || keys.len() <= sequence.len() {
         return Err(error(
             &format!("{path}.order"),
@@ -300,7 +398,7 @@ fn window_order(
             "ORDER must end with sequence ARRAY in ASC NULLS LAST order",
         ));
     }
-    OverOrder::new(partition, keys, sequence.to_vec())
+    Ok(keys)
 }
 fn frame(frame: Option<&WindowFrame>, path: &str) -> Result<RowsFrame> {
     let fail = || {

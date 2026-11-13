@@ -6,6 +6,9 @@ on base `35ff239f7b054b640d120f02925c0113159a8cd3`, using the existing
 (SHA256 `71eb1580b0d912f534a8006c22fc79db0b9f284e3fca9d1681bf9fda1f102964`).
 Its opening “not implemented” statement describes its historical design checkpoint.
 This report records actual product execution, not note self-validation.
+The initial implementation results below apply to
+`d2c567030aafd3cae911ec653995aba0a8e4e33f`; the final section records the
+subsequent Codacy correction and its replacement native/source provenance.
 
 ## Result and implementation choices
 
@@ -222,3 +225,105 @@ required CI remain prerequisites to merge. The issue stays in_progress until mer
 - `python/tests/test_query_history_portability.py`
 - `python/tests/test_update_semantics.py`
 - `schemas/project-v3.schema.json`
+
+## Codacy correction after initial delivery
+
+This increment responds to the actual failure on
+`d2c567030aafd3cae911ec653995aba0a8e4e33f` in the same checkout/branch/PR607.
+The completed Codacy check is `131859180066`, conclusion `action_required`,
+title `18 new issues (0 max.) of at least minor severity.` Its annotations were
+read through authenticated `gh api`, since the GitHub connector rejects the
+individual check/annotations endpoints:
+
+```sh
+gh api 'repos/wegamekinglc/calc-flow/check-runs/131859180066/annotations?per_page=100'
+```
+
+The 18 findings consist of 13 Rust and two Python complexity reports (limit 8),
+and three Bandit B101 reports for Python example assertions. A single diagnostic
+listing found no other failed check on that HEAD. No check was polled.
+
+### Focused RED
+
+```sh
+uvx lizard -C 8 -w crates/calc-flow/examples/bounded_analytic_over.rs \
+  crates/calc-flow/src/operator/order/mod.rs crates/calc-flow/src/operator/over \
+  crates/calc-flow/src/sql/over.rs python/calc_flow/symbolic/over.py
+uvx bandit -q examples/bounded_analytic_over.py
+python -m pytest python/tests/test_bounded_analytic_over.py -q -k optimized
+```
+
+Lizard 1.26.0 exits 1 and reproduces all 15 locations, including workspace_bound
+at CCN 28, SQL analytic at 27 and plan at 21. Bandit 1.9.4 exits 1 with exactly
+three B101 findings. The new optimized-Python regression exits 1: an injected
+incorrect native batch total `[-1,-1,-1]` is printed successfully because all
+example assertions disappear under `python -O`. These are observed failures,
+not a hypothetical reason to weaken checks.
+
+### Correction
+
+- Split declaration installation/error mapping, input schema validation and
+  analytic field construction into their existing responsibilities.
+- Name the partition, provisional input/schema, expression, LAG, string gather
+  and array-buffer bounds separately. All checked arithmetic and quoted amounts
+  remain unchanged, as do reserve-before-allocation and commit boundaries.
+- Separate ROW_NUMBER/LAG evaluation and signed/unsigned primitive reads. Move
+  expired frame-row subtraction to a pure helper returning sum/count; retain
+  the same i128 accumulation, NULL semantics and per-output overflow checks.
+- Separate SQL shape/source/arity, shared projection order, macro arguments,
+  history/budget/policy and function/frame validation. Error paths and validation
+  order remain covered by the existing strict SQL tests.
+- Separate Python expression validation/serialization and capability lookup
+  from compatibility checks. The example uses explicit RuntimeError checks
+  for expected batch rows, final count and stream/batch equality.
+
+Only nine source/example/test files and this evidence file change in the
+increment. No public API, serialized schema, frozen note, dependency, gate
+configuration, suppression or complexity baseline changes. A local Clippy
+finding on the extracted declaration helper was corrected to borrow its input.
+
+### Incremental GREEN
+
+- The original Lizard command, expanded to the changed Python test/example,
+  exits 0 with no warnings. All 169 functions in the nine changed source files
+  have CCN <= 8. Bandit exits 0 with no B101 reports.
+- The six OVER Rust integration targets plus bounded_global_ordering pass:
+  31 tests. After the constructor helper's borrow-only lint correction, only
+  bounded_analytic_over and bounded_analytic_over_execution are rerun: 5 pass.
+  The other unchanged integration results are reused.
+- `cargo test --locked -p calc-flow --lib operator::order::over_tests -- --nocapture`:
+  4 pass. All B/B−1 outcomes and measured peaks are identical: nonempty 144106,
+  empty 142386, capture 764852, capture+final 898318, restore 840340 bytes.
+- Rebuilt final-source native wheel:
+  `python -m pytest python/tests/test_bounded_analytic_over.py -q`: 16 pass,
+  including optimized-Python rejection of a wrong batch result.
+- `cargo clippy --locked -p calc-flow --lib` with the six new integration
+  targets and example, `-- -D warnings`: passes. Ruff check/format on the three
+  changed Python files, rustfmt, complexity ratchet, spec references and
+  whitespace checks pass without a baseline update.
+- The standalone core command from the original report passes again; so does
+  `python -O examples/bounded_analytic_over.py`, checking batch and stream values.
+
+One example invocation was mistakenly started before wheel extraction finished
+and exited with SIGBUS. It is a setup failure, not product RED or passing
+evidence. After extraction completed, the same example was run serially and
+passed; only that completed invocation supports the result above.
+
+The final wheel is built with the same locked toolchain/dev environment as the
+initial delivery. All 1509 build inputs are checked against the corrective
+delivery commit; all 62 packaged Python/stub files match the final source.
+The replacement provenance is:
+
+- Sorted build-input path/hash map SHA256:
+  `91944e0cb051d0308cf116b12881f7fe83086e9d3afdddd7cb0884b2be997c1d`.
+- Wheel SHA256:
+  `14457ab13610593e91cd40d64bdeba243e05c14cee480b07e51cf5e1b7906094`.
+- Native library SHA256:
+  `3a6819c1a784d8c984c3942deb2d1e9fd9f78dc82b46e2331c1caca73f2e62c1`.
+
+The unaffected initial report remains accepted evidence; no unrelated full
+regression, coverage, platform, release, or performance matrix is rerun locally.
+Local static checks clearing these diagnostics do not establish final-head
+Codacy/CI success. The handoff comment records the single post-push nonblocking
+snapshot. Independent review and required checks remain outstanding; no merge
+or delegation is performed, and DAL-521 remains in_progress.

@@ -17,8 +17,22 @@ async fn main() -> Result<()> {
         Field::new("v", DataType::Int64, true),
         Field::new("seq", DataType::UInt64, false),
     ]));
-    let events = table_input("events", schema.clone(), InputOptions::default())?;
-    let order = OverOrder::new(
+    let program = analytic_program(schema.clone())?;
+    let plan = program
+        .compile_batch(&UdfRegistry::new().snapshot(), &CompileOptions::default())
+        .await?;
+    let result = plan
+        .execute(
+            BTreeMap::from([("events".into(), input(schema)?)]),
+            ExecutionOptions::default(),
+        )
+        .await?;
+    verify_result(&result.outputs["out"])?;
+    println!("complete H=[3,1,2]; sorted v=[1,2,3], rn=[1,2,3], prev=[NULL,1,2], total=[1,3,6]");
+    Ok(())
+}
+fn analytic_order() -> Result<OverOrder> {
+    OverOrder::new(
         vec![],
         vec![SortKey::new(
             "v",
@@ -26,24 +40,29 @@ async fn main() -> Result<()> {
             NullPlacement::Last,
         )?],
         vec!["seq".into()],
-    )?;
+    )
+}
+fn expressions() -> Result<Vec<AnalyticExpr>> {
+    Ok(vec![
+        AnalyticExpr::row_number("rn")?,
+        AnalyticExpr::lag("v", "prev")?,
+        AnalyticExpr::sum("v", RowsFrame::cumulative(), "total")?,
+    ])
+}
+fn analytic_program(schema: Arc<Schema>) -> Result<Program> {
+    let events = table_input("events", schema, InputOptions::default())?;
     let out = events.over(
-        vec![
-            AnalyticExpr::row_number("rn")?,
-            AnalyticExpr::lag("v", "prev")?,
-            AnalyticExpr::sum("v", RowsFrame::cumulative(), "total")?,
-        ],
-        OverSpec::bounded_source(order, StateBudget::new(9, 8 << 20)?)?,
+        expressions()?,
+        OverSpec::bounded_source(analytic_order()?, StateBudget::new(9, 8 << 20)?)?,
     )?;
-    let program = Program::new(
+    Program::new(
         "features",
         CompileMode::Batch,
         BTreeMap::from([("out".into(), out)]),
-    )?;
-    let plan = program
-        .compile_batch(&UdfRegistry::new().snapshot(), &CompileOptions::default())
-        .await?;
-    let raw = Batch::table(
+    )
+}
+fn input(schema: Arc<Schema>) -> Result<Batch> {
+    Batch::table(
         vec![
             RecordBatch::try_new(
                 schema,
@@ -55,14 +74,10 @@ async fn main() -> Result<()> {
             .unwrap(),
         ],
         BatchMetadata::default(),
-    )?;
-    let result = plan
-        .execute(
-            BTreeMap::from([("events".into(), raw)]),
-            ExecutionOptions::default(),
-        )
-        .await?;
-    let record = &result.outputs["out"].table_payload()?.batches()[0];
+    )
+}
+fn verify_result(batch: &Batch) -> Result<()> {
+    let record = &batch.table_payload()?.batches()[0];
     let sums = record
         .column_by_name("total")
         .unwrap()
@@ -73,6 +88,5 @@ async fn main() -> Result<()> {
         sums.iter().collect::<Vec<_>>(),
         vec![Some(1), Some(3), Some(6)]
     );
-    println!("complete H=[3,1,2]; sorted v=[1,2,3], rn=[1,2,3], prev=[NULL,1,2], total=[1,3,6]");
     Ok(())
 }

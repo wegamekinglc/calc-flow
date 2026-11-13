@@ -15,20 +15,7 @@ pub(crate) fn output_schema(
             "at least one analytic expression required",
         ));
     }
-    for (role, names) in [
-        ("partition_by", spec.order().partition_by()),
-        ("sequence_by", spec.order().sequence_by()),
-    ] {
-        for (index, name) in names.iter().enumerate() {
-            schema.field_with_name(name).map_err(|_| {
-                invalid(
-                    &format!("over.spec.order.{role}[{index}]"),
-                    "unresolved_type",
-                    "existing input column required",
-                )
-            })?;
-        }
-    }
+    validate_order_columns(schema, spec)?;
     let columns = schema
         .fields()
         .iter()
@@ -50,17 +37,37 @@ pub(crate) fn output_schema(
                 "output names must be unique and must not overwrite input fields",
             ));
         }
-        let (dtype, nullable) = match &expression.0 {
-            AnalyticKind::RowNumber { .. } => (DataType::UInt64, false),
-            AnalyticKind::Lag { column, .. } => (operand(schema, column, &path)?.clone(), true),
-            AnalyticKind::Sum { column, .. } => (
-                sum_type(operand(schema, column, &path)?, &format!("{path}.column"))?,
-                true,
-            ),
-        };
-        fields.push(Field::new(expression.name(), dtype, nullable));
+        fields.push(analytic_field(schema, expression, &path)?);
     }
     Ok(Arc::new(Schema::new(fields)))
+}
+fn validate_order_columns(schema: &SchemaRef, spec: &OverSpec) -> Result<()> {
+    for (role, names) in [
+        ("partition_by", spec.order().partition_by()),
+        ("sequence_by", spec.order().sequence_by()),
+    ] {
+        for (index, name) in names.iter().enumerate() {
+            schema.field_with_name(name).map_err(|_| {
+                invalid(
+                    &format!("over.spec.order.{role}[{index}]"),
+                    "unresolved_type",
+                    "existing input column required",
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+fn analytic_field(schema: &SchemaRef, expression: &AnalyticExpr, path: &str) -> Result<Field> {
+    let (dtype, nullable) = match &expression.0 {
+        AnalyticKind::RowNumber { .. } => (DataType::UInt64, false),
+        AnalyticKind::Lag { column, .. } => (operand(schema, column, path)?.clone(), true),
+        AnalyticKind::Sum { column, .. } => (
+            sum_type(operand(schema, column, path)?, &format!("{path}.column"))?,
+            true,
+        ),
+    };
+    Ok(Field::new(expression.name(), dtype, nullable))
 }
 fn operand<'a>(schema: &'a SchemaRef, column: &str, path: &str) -> Result<&'a DataType> {
     schema

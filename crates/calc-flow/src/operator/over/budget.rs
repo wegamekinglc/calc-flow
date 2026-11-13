@@ -1,4 +1,4 @@
-use super::{Declaration, spec::AnalyticKind};
+use super::{AnalyticExpr, Declaration, spec::AnalyticKind};
 use crate::{Result, operator::distinct::owned};
 use datafusion::arrow::{
     array::{LargeStringArray, StringArray},
@@ -38,60 +38,78 @@ pub(in crate::operator) fn workspace_bound(
     declaration: &Declaration,
 ) -> Result<usize> {
     let n = history.batch.num_rows();
-    let table = history.batch.table_payload()?;
-    let partitions = owned::add(
-        owned::mul(n, 8)?,
-        owned::mul(declaration.spec.order().partition_by().len(), 256)?,
-    )?;
-    // Separate owners and their lifetimes are listed in the OVER budget ledger.
-    let schema_owners = owned::mul(owned::schema_quote(table.schema())?, 4)?;
-    let provisional_input = owned::add(owned::backing(&history.batch)?, schema_owners)?;
+    let partitions = partition_bound(n, declaration.spec.order().partition_by().len())?;
+    let provisional_input = provisional_input_bound(history)?;
     let output_schema = owned::add(declaration_bound(declaration)?, provisional_input)?;
     declaration
         .expressions
         .iter()
         .try_fold(owned::add(partitions, output_schema)?, |bound, e| {
-            let buffers = match &e.0 {
-                AnalyticKind::RowNumber { .. } | AnalyticKind::Sum { .. } => array_bound(n, 8, 0)?,
-                AnalyticKind::Lag { column, .. } => {
-                    let field = table
-                        .schema()
-                        .field_with_name(column)
-                        .map_err(owned::error)?;
-                    let bytes = string_bytes(history, column, field.data_type())?;
-                    let width = match field.data_type() {
-                        DataType::Boolean | DataType::Int8 | DataType::UInt8 => 1,
-                        DataType::Int16 | DataType::UInt16 => 2,
-                        DataType::Int32 | DataType::UInt32 | DataType::Date32 | DataType::Utf8 => 4,
-                        _ => 8,
-                    };
-                    let gather =
-                        if matches!(field.data_type(), DataType::Utf8 | DataType::LargeUtf8) {
-                            owned::add(
-                                owned::align(owned::mul(n, size_of::<(usize, usize)>())?)?,
-                                256,
-                            )?
-                        } else {
-                            0
-                        };
-                    owned::add(
-                        owned::add(array_bound(n, width, bytes)?, array_bound(n, 4, 0)?)?,
-                        gather,
-                    )?
-                }
-            };
-            // A live generated array and its compact final copy coexist. The copy's
-            // own reservation is acquired by normalize before allocation.
-            owned::add(bound, owned::add(buffers, 512)?)
+            // Generated arrays coexist with the separately reserved compact final copy.
+            owned::add(bound, owned::add(expression_bound(history, e)?, 512)?)
         })
 }
+fn partition_bound(rows: usize, columns: usize) -> Result<usize> {
+    owned::add(owned::mul(rows, 8)?, owned::mul(columns, 256)?)
+}
+fn provisional_input_bound(history: &owned::OwnedBatch) -> Result<usize> {
+    let table = history.batch.table_payload()?;
+    // Separate owners and their lifetimes are listed in the OVER budget ledger.
+    let schema_owners = owned::mul(owned::schema_quote(table.schema())?, 4)?;
+    owned::add(owned::backing(&history.batch)?, schema_owners)
+}
+fn expression_bound(history: &owned::OwnedBatch, expression: &AnalyticExpr) -> Result<usize> {
+    match &expression.0 {
+        AnalyticKind::RowNumber { .. } | AnalyticKind::Sum { .. } => {
+            array_bound(history.batch.num_rows(), 8, 0)
+        }
+        AnalyticKind::Lag { column, .. } => lag_bound(history, column),
+    }
+}
+fn lag_bound(history: &owned::OwnedBatch, column: &str) -> Result<usize> {
+    let n = history.batch.num_rows();
+    let table = history.batch.table_payload()?;
+    let field = table
+        .schema()
+        .field_with_name(column)
+        .map_err(owned::error)?;
+    let dtype = field.data_type();
+    let values = array_bound(
+        n,
+        scalar_width(dtype),
+        string_bytes(history, column, dtype)?,
+    )?;
+    let indices = array_bound(n, 4, 0)?;
+    owned::add(owned::add(values, indices)?, string_gather_bound(n, dtype)?)
+}
+fn scalar_width(dtype: &DataType) -> usize {
+    match dtype {
+        DataType::Boolean | DataType::Int8 | DataType::UInt8 => 1,
+        DataType::Int16 | DataType::UInt16 => 2,
+        DataType::Int32 | DataType::UInt32 | DataType::Date32 | DataType::Utf8 => 4,
+        _ => 8,
+    }
+}
+fn string_gather_bound(n: usize, dtype: &DataType) -> Result<usize> {
+    if matches!(dtype, DataType::Utf8 | DataType::LargeUtf8) {
+        owned::add(
+            owned::align(owned::mul(n, size_of::<(usize, usize)>())?)?,
+            256,
+        )
+    } else {
+        Ok(0)
+    }
+}
 fn array_bound(n: usize, width: usize, strings: usize) -> Result<usize> {
-    let values = owned::align(owned::mul(owned::add(n, 1)?, width)?)?;
+    let values = values_bound(n, width)?;
     let validity = owned::align(owned::add(n, 7)? / 8)?;
     owned::add(
         owned::add(values, validity)?,
         owned::add(owned::align(strings)?, 512)?,
     )
+}
+fn values_bound(n: usize, width: usize) -> Result<usize> {
+    owned::align(owned::mul(owned::add(n, 1)?, width)?)
 }
 fn string_bytes(history: &owned::OwnedBatch, column: &str, dtype: &DataType) -> Result<usize> {
     history

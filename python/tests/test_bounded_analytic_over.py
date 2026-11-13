@@ -1,8 +1,42 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 import calc_flow as cf
+
+
+def test_example_rejects_incorrect_batch_even_with_optimized_python():
+    script = """
+import asyncio
+import runpy
+import sys
+from unittest.mock import patch
+import pyarrow as pa
+import calc_flow as cf
+
+example = runpy.run_path(sys.argv[1])
+collect = cf.Program.collect_async
+async def incorrect_batch(self, *args, **kwargs):
+    outputs = await collect(self, *args, **kwargs)
+    table = outputs['out']
+    return {'out': table.set_column(table.schema.get_field_index('total'),
+                                   'total', pa.array([-1, -1, -1]))}
+with patch.object(cf.Program, 'collect_async', incorrect_batch):
+    asyncio.run(example['main']())
+"""
+    example = Path(__file__).resolve().parents[2] / "examples/bounded_analytic_over.py"
+    result = subprocess.run(
+        [sys.executable, "-O", "-c", script, str(example)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "RuntimeError: batch analytic result differs" in result.stderr
 
 
 def test_over_declaration_is_immutable_and_strict():

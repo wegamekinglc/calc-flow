@@ -30,13 +30,15 @@ async def main():
     program, schema = declaration()
     data = pa.Table.from_pydict({"v": [3, 1, 2], "seq": [30, 10, 20]}, schema)
     batch = (await program.collect_async({"events": data}))["out"]
-    assert batch.to_pydict() == dict(
+    expected = dict(
         v=[1, 2, 3],
         seq=[10, 20, 30],
         rn=[1, 2, 3],
         prev=[None, 1, 2],
         total=[1, 3, 6],
     )
+    if batch.to_pydict() != expected:
+        raise RuntimeError("batch analytic result differs from the expected rows")
     source = cf.SourceBinding.from_arrow(
         data, budget=cf.EdgeBudget(max_rows=2, max_bytes=4096)
     )
@@ -46,8 +48,10 @@ async def main():
     ) as results:
         async for event in results:
             finals.append(event.table)
-    assert len(finals) == 1
-    assert finals[0].equals(batch)
+    if len(finals) != 1:
+        raise RuntimeError("expected exactly one stream final")
+    if not finals[0].equals(batch):
+        raise RuntimeError("stream analytic result differs from the batch result")
     print(batch.to_pydict())
 
 
