@@ -8,13 +8,12 @@ interpreter.
 
 ## Install
 
-The first crates.io release is being prepared. Once published, use Rust 1.94.0
-or newer and these dependencies (the current shared release version is
-`2026.11.2`):
+Use Rust 1.94.0 or newer and these dependencies (the current shared release
+version is `2026.11.14`):
 
 ```toml
 [dependencies]
-calc-flow = "=2026.11.2"
+calc-flow = "=2026.11.14"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
