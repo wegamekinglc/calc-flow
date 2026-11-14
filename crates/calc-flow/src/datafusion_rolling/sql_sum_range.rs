@@ -272,6 +272,20 @@ impl SqlSumRangeState {
         if expired == 0 {
             return Ok(());
         }
+        if expired == 1 {
+            let sample = self
+                .samples
+                .pop_front()
+                .expect("one expiring rolling sample has a front value");
+            if let Some(value) = sample.value {
+                self.sum = Some(self.sum.unwrap_or(0.0) - (0.0_f64 + value));
+            }
+            self.count = self
+                .count
+                .checked_sub(u64::from(sample.value.is_some()))
+                .ok_or_else(|| internal("SQL range count underflowed"))?;
+            return Ok(());
+        }
         let values = self
             .samples
             .drain(..expired)
@@ -364,5 +378,52 @@ fn elapsed_ns(started: Instant) -> u64 {
 fn internal(message: &str) -> crate::CalcFlowError {
     crate::CalcFlowError::Internal {
         message: message.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_value_expiration_does_not_allocate() {
+        let mut state = SqlSumRangeState {
+            samples: VecDeque::from([TimedValue {
+                event_time: 0,
+                value: Some(3.5),
+            }]),
+            sum: Some(3.5),
+            count: 1,
+            ..SqlSumRangeState::default()
+        };
+
+        let measured = allocation_counter::measure(|| state.expire(11, 10).unwrap());
+
+        assert_eq!(measured.count_total, 0, "{measured:?}");
+        assert_eq!(state.sum, Some(0.0));
+        assert_eq!(state.count, 0);
+        assert!(state.samples.is_empty());
+    }
+
+    #[test]
+    fn single_signed_zero_expiration_matches_arrow_reduction() {
+        let value = -0.0_f64;
+        let expected = arrow_sum(&Float64Array::from(vec![Some(value)])).unwrap();
+        let mut state = SqlSumRangeState {
+            samples: VecDeque::from([TimedValue {
+                event_time: 0,
+                value: Some(value),
+            }]),
+            sum: Some(1.0),
+            count: 1,
+            ..SqlSumRangeState::default()
+        };
+
+        state.expire(11, 10).unwrap();
+
+        assert_eq!(
+            state.sum.map(f64::to_bits),
+            Some((1.0 - expected).to_bits())
+        );
     }
 }

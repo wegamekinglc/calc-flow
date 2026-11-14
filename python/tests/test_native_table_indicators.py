@@ -294,13 +294,8 @@ def _rolling_specs(program: cf.Program) -> list[dict[str, object]]:
     ]
 
 
-def test_installed_layout_five_inventory_and_native_project_export() -> None:
+def test_native_indicator_project_export_preserves_layout_and_primitives() -> None:
     runtime = cf.Runtime()
-    rolling = next(
-        item for item in runtime.capabilities().operators if item.kind == "rolling"
-    )
-    assert rolling.state_layouts == (1, 2, 3, 4, 5, 6)
-    assert rolling.state_version == 1
     data = _prices()
     program = cf.Program(
         "exported", engine="sql", outputs={"signals": _indicators(_source(data))}

@@ -12,13 +12,14 @@ use std::{
 };
 
 use super::{
-    Array, ArrayRef, DataType, DerivedBuilder, Float64Array, Float64Builder, KernelSelection,
-    OutputStorage, PreparedTypedFill, RecordBatch, RollingKernelExecution, RollingKernelPlan,
-    RollingKernelState, RollingMetricsRecorder, RollingNumericalProfile, RollingWork,
-    RollingWorkBatch, Statistic, StreamKernelUpdate, TimestampMicrosecondArray, TypedEntityState,
-    TypedFloatReadout, TypedFloatReadoutKind, TypedFrame, TypedGroupInput, TypedGroupPlan,
-    TypedOutputKind, TypedOutputPlan, TypedWindowState, append_numeric_float64, internal_error,
-    operator_error, read_typed_float, typed_output_mismatch, valid_float64, with_float64_builder,
+    Array, ArrayRef, DataType, DerivedBuilder, ENTITY_PARALLEL_MIN_ROWS, Float64Array,
+    Float64Builder, KernelSelection, OutputStorage, PreparedTypedFill, RecordBatch,
+    RollingKernelExecution, RollingKernelPlan, RollingKernelState, RollingMetricsRecorder,
+    RollingNumericalProfile, RollingWork, RollingWorkBatch, Statistic, StreamKernelUpdate,
+    TimestampMicrosecondArray, TypedEntityState, TypedFloatReadout, TypedFloatReadoutKind,
+    TypedFrame, TypedGroupInput, TypedGroupPlan, TypedOutputKind, TypedOutputPlan,
+    TypedWindowState, append_numeric_float64, internal_error, operator_error, read_typed_float,
+    typed_output_mismatch, valid_float64, with_float64_builder,
 };
 use crate::{CalcFlowError, Result};
 
@@ -427,7 +428,7 @@ impl RollingKernelPlan {
         &self,
         input: &RecordBatch,
     ) -> Option<RollingWork> {
-        if input.num_rows() < 64_000 {
+        if input.num_rows() < ENTITY_PARALLEL_MIN_ROWS {
             return Some(RollingWork::ParallelFallbackSmallBatch);
         }
         let supported = self.parallel_dimensions(input)

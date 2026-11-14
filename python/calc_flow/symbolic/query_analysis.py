@@ -49,16 +49,14 @@ class PortabilityRequest:
         cutoff: ComparisonCutoff,
         ordering: ComparisonOrdering = "unordered",
     ) -> None:
-        _literal(comparison, ("per_batch", "final_relation"), "comparison")
+        _literal(comparison, get_args(Comparison), "comparison")
         _literal(
             history,
             ("current_batch", "accepted_history", "event_window", "latest_relation"),
             "history",
         )
-        _literal(
-            cutoff, ("batch_boundary", "all_sources_eof", "closed_window"), "cutoff"
-        )
-        _literal(ordering, ("unordered", "declared"), "ordering")
+        _literal(cutoff, get_args(ComparisonCutoff), "cutoff")
+        _literal(ordering, get_args(ComparisonOrdering), "ordering")
         if (comparison, history, cutoff) not in (
             ("per_batch", "current_batch", "batch_boundary"),
             ("final_relation", "accepted_history", "all_sources_eof"),

@@ -6,12 +6,12 @@ use datafusion::arrow::{
 };
 
 use super::{
-    Array, DerivedBuilder, EntityRouting, Float64NumericState, RecurrenceSeed,
-    RollingKernelExecution, RollingKernelMetrics, RollingKernelPlan, RollingKernelState,
-    RollingMetricsRecorder, RollingStage, RollingWork, StateCharge, StreamKernelUpdate,
-    TimedSample, TypedEntityState, TypedFrame, TypedGroupInput, TypedRowInputs, TypedWindowState,
-    WindowAccumulator, add_float64, dense_entity_ids, encode_arrays, internal_error, nanos,
-    operator_error, remove_float64, valid_float64,
+    Array, DerivedBuilder, ENTITY_PARALLEL_MIN_ROWS, EntityRouting, Float64NumericState,
+    RecurrenceSeed, RollingKernelExecution, RollingKernelMetrics, RollingKernelPlan,
+    RollingKernelState, RollingMetricsRecorder, RollingStage, RollingWork, StateCharge,
+    StreamKernelUpdate, TimedSample, TypedEntityState, TypedFrame, TypedGroupInput, TypedRowInputs,
+    TypedWindowState, WindowAccumulator, add_float64, dense_entity_ids, encode_arrays,
+    internal_error, nanos, operator_error, remove_float64, valid_float64,
 };
 use crate::Result;
 
@@ -421,7 +421,7 @@ impl RollingKernelPlan {
         &self,
         input: &RecordBatch,
     ) -> bool {
-        input.num_rows() < 64_000
+        input.num_rows() < ENTITY_PARALLEL_MIN_ROWS
             && self.supports_deferred_history()
             && self.shared_rows.is_none()
             && super::mean::MeanKernel::compile(self).is_none()

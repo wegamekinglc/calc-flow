@@ -233,7 +233,7 @@ fn test_descriptors_period_and_peak_limits_reject_before_values() -> Result<()> 
     Ok(())
 }
 
-#[path = "fixtures/indicators/golden.rs"]
+#[path = "../fixtures/indicators/golden.rs"]
 mod golden;
 
 #[test]

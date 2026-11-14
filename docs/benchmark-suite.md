@@ -1041,6 +1041,9 @@ plan getter check from changing when a version-only binary layout shift places
 the loop across an instruction-cache line. The product library retains the
 ordinary bench profile, and the other Rust targets keep their existing build
 command. The baseline and candidate use the same alignment setting.
+The `execute/sql_sum_range_single_expiry_1024_rows` case exercises the real SQL
+RANGE rewrite with one expiration per step and nullable values; its warm-up
+checks the complete output and native rewrite admission before timing.
 
 Each case receives two rounds of ten adjacent baseline/candidate invocation
 pairs, alternating AB/BA. Every invocation starts a fresh isolated process.

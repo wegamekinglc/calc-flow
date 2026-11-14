@@ -555,11 +555,111 @@ fn stream_saturated_backpressure(c: &mut Criterion) {
     });
 }
 
+fn execute_sql_sum_range(c: &mut Criterion) {
+    use datafusion::arrow::{
+        array::{Array, Float64Array, StringArray, TimestampMicrosecondArray},
+        datatypes::{DataType, Field, Schema, TimeUnit},
+    };
+
+    fn value(row: i64) -> Option<f64> {
+        (row % 17 != 0).then(|| {
+            f64::from(u32::try_from(row).unwrap_or_else(|_| panic!("invalid benchmark row {row}")))
+                + 0.5
+        })
+    }
+
+    let rows = 1_024_i64;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("target_id", DataType::Utf8, false),
+        Field::new(
+            "event_time",
+            DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC"))),
+            false,
+        ),
+        Field::new("seq", DataType::Int64, false),
+        Field::new("value", DataType::Float64, true),
+    ]));
+    let input = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from_iter_values((0..rows).map(|_| "a"))),
+            Arc::new(TimestampMicrosecondArray::from_iter_values(0..rows).with_timezone("UTC")),
+            Arc::new(Int64Array::from_iter_values(0..rows)),
+            Arc::new((0..rows).map(value).collect::<Float64Array>()),
+        ],
+    )
+    .unwrap();
+    let inputs = BTreeMap::from([(
+        "input".into(),
+        Batch::table(vec![input], BatchMetadata::default()).unwrap(),
+    )]);
+    let query = "SELECT target_id, event_time, seq, value, \
+        SUM(value) OVER (PARTITION BY target_id ORDER BY event_time \
+        RANGE BETWEEN INTERVAL '1 microseconds' PRECEDING AND CURRENT ROW) AS sum_1us \
+        FROM input ORDER BY seq";
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let datafusion = DataFusionRuntime::new(DataFusionConfig {
+        target_partitions: 1,
+        ..DataFusionConfig::default()
+    })
+    .unwrap();
+    let warm = runtime
+        .block_on(datafusion.sql(query, &inputs, None))
+        .unwrap();
+    assert_eq!(
+        warm.table_payload()
+            .unwrap()
+            .batches()
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>(),
+        usize::try_from(rows).unwrap()
+    );
+    let mut index = 0_i64;
+    for batch in warm.table_payload().unwrap().batches() {
+        let values = batch
+            .column(4)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        for row in 0..batch.num_rows() {
+            let expected = (index.saturating_sub(1).max(0)..=index)
+                .filter_map(value)
+                .fold(None, |total: Option<f64>, value| {
+                    Some(total.unwrap_or(0.0) + value)
+                });
+            assert_eq!(values.is_null(row), expected.is_none(), "row {index}");
+            if let Some(expected) = expected {
+                assert_eq!(
+                    values.value(row).to_bits(),
+                    expected.to_bits(),
+                    "row {index}"
+                );
+            }
+            index += 1;
+        }
+    }
+    assert!(
+        datafusion
+            .metrics()
+            .iter()
+            .any(|metric| metric.rolling_rewritten_windows == 1)
+    );
+    c.bench_function("execute/sql_sum_range_single_expiry_1024_rows", |b| {
+        b.to_async(&runtime).iter(|| {
+            let inputs = inputs.clone();
+            let datafusion = &datafusion;
+            async move { black_box(datafusion.sql(query, &inputs, None).await.unwrap()) }
+        });
+    });
+}
+
 criterion_group!(
     core_benchmarks,
     compile_expression,
     create_datafusion_runtime,
     execute_expression,
+    execute_sql_sum_range,
     execute_external_passthrough,
     encode_canonical_json,
     stream_runner_single_input,

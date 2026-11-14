@@ -1,4 +1,4 @@
-#[path = "bounded_analytic_over/common.rs"]
+#[path = "common.rs"]
 mod common;
 use calc_flow::{
     CancellationToken, EdgeCollector, Epoch, EventTime, JsonMap, OperatorMetadata,
@@ -195,7 +195,7 @@ async fn test_over_duplicate_candidate_emit_cancel_and_identity_are_atomic() {
     assert!(output.drain("output").is_empty());
 }
 
-#[path = "bounded_analytic_over/public_stream.rs"]
+#[path = "public_stream.rs"]
 mod public_stream;
 #[tokio::test]
 async fn test_over_public_rust_df_sql_nine_row_modes_and_export_reload() {
