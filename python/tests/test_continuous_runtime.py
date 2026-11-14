@@ -302,7 +302,7 @@ def test_source_cursor_native_decode_skips_json_roundtrip(monkeypatch) -> None:
     )
 
     class Source:
-        emitted = False
+        events = iter([event])
 
         def capabilities(self) -> SourceCapabilities:
             return SourceCapabilities(
@@ -317,10 +317,7 @@ def test_source_cursor_native_decode_skips_json_roundtrip(monkeypatch) -> None:
             pass
 
         async def next(self) -> Data | None:
-            if self.emitted:
-                return None
-            self.emitted = True
-            return event
+            return next(self.events, None)
 
         async def close(self) -> None:
             pass
