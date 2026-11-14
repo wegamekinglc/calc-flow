@@ -593,6 +593,25 @@ pub(crate) struct SourceProgressSnapshot {
     pub(crate) durable_cursor: Option<Cursor>,
     pub(crate) next_sequence: Option<u64>,
     pub(crate) ended: bool,
+    pub(crate) last_watermark: Option<EventTime>,
+}
+
+impl SourceProgressSnapshot {
+    fn new(
+        replayable: bool,
+        durable_cursor: Option<Cursor>,
+        next_sequence: u64,
+        ended: bool,
+    ) -> Self {
+        Self {
+            replayable,
+            latest_observed_cursor: None,
+            durable_cursor,
+            next_sequence: Some(next_sequence),
+            ended,
+            last_watermark: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1372,13 +1391,12 @@ fn spawn_validated_source_tasks(
         history: history
             .as_ref()
             .and_then(crate::SourceHistoryContext::manifest),
-        snapshot: Arc::new(Mutex::new(SourceProgressSnapshot {
-            replayable: capabilities.replayable,
-            latest_observed_cursor: None,
-            durable_cursor: resume_cursor.clone(),
-            next_sequence: Some(next_sequence),
-            ended: restored_ended,
-        })),
+        snapshot: Arc::new(Mutex::new(SourceProgressSnapshot::new(
+            capabilities.replayable,
+            resume_cursor.clone(),
+            next_sequence,
+            restored_ended,
+        ))),
         acceptance: Arc::clone(&acceptance),
         binding_id: binding_id.clone(),
         durable_cursor_acknowledger,
@@ -1979,6 +1997,9 @@ async fn process_source_watermark(
             ),
         });
     }
+    if order.last_watermark == Some(watermark) {
+        return Ok(SourceLoopStep::Continue);
+    }
     let sent = send_fanout(
         &mut inputs.outputs,
         StreamMessage::watermark(watermark),
@@ -1986,6 +2007,9 @@ async fn process_source_watermark(
     )
     .await?;
     order.last_watermark = Some(watermark);
+    if sent {
+        inputs.progress.snapshot.lock().last_watermark = Some(watermark);
+    }
     Ok(if sent {
         SourceLoopStep::Continue
     } else {
@@ -2265,6 +2289,7 @@ mod tests {
             durable_cursor: Some(cursor(4)),
             next_sequence: Some(7),
             ended: false,
+            last_watermark: None,
         };
 
         assert_eq!(
@@ -3628,6 +3653,43 @@ mod tests {
             StreamMessageKind::Watermark
         );
         assert!(receiver.recv().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn direct_watermarks_suppress_repeated_values() {
+        let cancellation = CancellationToken::new();
+        let mut supervisor = TaskSupervisor::new(cancellation.clone());
+        let source = StepSource::new([
+            Ok(Some(SourceEvent::Watermark(EventTime::from_micros(5)))),
+            Ok(Some(SourceEvent::Watermark(EventTime::from_micros(5)))),
+            Ok(Some(SourceEvent::Watermark(EventTime::from_micros(6)))),
+        ]);
+        let binding = SourceBinding::new(Box::new(source), None, 0).unwrap();
+        let (sender, mut receiver) = edge_channel("source->sink", EdgeBudget::default()).unwrap();
+        let progress = spawn_source_tasks(
+            &mut supervisor,
+            &context(cancellation),
+            "orders",
+            binding,
+            vec![sender],
+        )
+        .unwrap();
+
+        let report = supervisor.join_all().await;
+
+        assert!(report.errors.is_empty());
+        for expected in [5, 6] {
+            assert_eq!(
+                receiver.recv().await.unwrap().unwrap().as_watermark(),
+                Some(EventTime::from_micros(expected))
+            );
+        }
+        assert!(receiver.recv().await.unwrap().unwrap().is_end_of_input());
+        assert!(receiver.recv().await.unwrap().is_none());
+        assert_eq!(
+            progress.snapshot().last_watermark,
+            Some(EventTime::from_micros(6))
+        );
     }
 
     #[tokio::test]

@@ -186,7 +186,7 @@ fn traced_inputs(
         entity_work: None,
         sql_recovery: None,
         context: context.for_node(&node_id).unwrap(),
-        node_id,
+        node_id: node_id.clone(),
         operator: CompiledStreamOperator::External(Box::new(TracedNative {
             inner,
             trace: trace.clone(),
@@ -195,13 +195,13 @@ fn traced_inputs(
         checkpoint_capability: OperatorCheckpointCapability::Stateless,
         ingresses: [(
             "input".into(),
-            OperatorIngress::new(receiver.edge().into(), receiver),
+            OperatorIngress::new("input", receiver.edge().into(), receiver),
         )]
         .into(),
         outputs: [("output".into(), vec![sender.into()])].into(),
         output_ports,
         progress: OperatorProgress::default(),
-        metrics: metrics.clone(),
+        metrics: metrics.operator(&node_id).unwrap(),
         entry_gate: watch::channel(true).1,
         entry_ack: entry_ack.clone(),
         data_gate: watch::channel(true).1,

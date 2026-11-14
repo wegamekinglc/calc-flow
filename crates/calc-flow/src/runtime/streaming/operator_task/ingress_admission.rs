@@ -333,7 +333,7 @@ mod tests {
         tasks.spawn(async { panic!("prepare worker failed") });
         let (mut sender, receiver) =
             crate::edge_channel("held", crate::EdgeBudget::default()).unwrap();
-        let mut ingress = OperatorIngress::new("held".into(), receiver);
+        let mut ingress = OperatorIngress::new("held", "held".into(), receiver);
         let source = ingress.receiver.take().unwrap();
         let mut ingresses = BTreeMap::from([("held".into(), ingress)]);
         let (exited, done) = oneshot::channel();

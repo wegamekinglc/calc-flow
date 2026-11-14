@@ -99,12 +99,14 @@ impl TaskEnvironment {
             checkpoint_capability: OperatorCheckpointCapability::Stateless,
             ingresses: BTreeMap::from([(
                 "input".into(),
-                OperatorIngress::new(receiver.edge().into(), receiver),
+                OperatorIngress::new("input", receiver.edge().into(), receiver),
             )]),
             outputs: BTreeMap::from([("output".into(), vec![sender.into()])]),
             context: self.job.for_node(node_id).unwrap(),
             progress: OperatorProgress::default(),
-            metrics: super::super::MetricsRecorder::default(),
+            metrics: super::super::MetricsRecorder::default()
+                .operator(node_id)
+                .unwrap(),
             entry_gate,
             entry_ack: self.ack.clone(),
             data_gate,
@@ -365,7 +367,7 @@ async fn test_asof_admission_cleanup_preserves_reason_before_upstream_edge_close
         ("left".into(), left),
         (
             "right".into(),
-            OperatorIngress::new("quotes->asof".into(), right_receiver),
+            OperatorIngress::new("right", "quotes->asof".into(), right_receiver),
         ),
     ]);
     spawn_operator_task(&mut supervisor, inputs);

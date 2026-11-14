@@ -148,7 +148,7 @@ impl JobEntityWorkOwner {
             owner: Arc::downgrade(&self.0),
             task_id: None,
             task_name,
-            scope: Mutex::new(Weak::new()),
+            scope: Mutex::new(None),
         }
     }
 
@@ -207,7 +207,7 @@ pub(crate) struct TaskEntityWorkClient {
     owner: Weak<OwnerCell>,
     task_id: Option<TaskId>,
     task_name: Arc<str>,
-    scope: Mutex<Weak<ScopeState>>,
+    scope: Mutex<Option<Arc<ScopeState>>>,
 }
 
 impl TaskEntityWorkClient {
@@ -225,12 +225,20 @@ impl TaskEntityWorkClient {
             work: Mutex::new(None),
             closed: AtomicBool::new(false),
         });
-        *self.scope.lock() = Arc::downgrade(&scope);
+        *self.scope.lock() = Some(Arc::clone(&scope));
         CallbackWorkScope(scope)
     }
 
+    #[cfg(test)]
     pub(crate) fn context_client(&self) -> Option<ScopedEntityWorkClient> {
-        self.scope.lock().upgrade().map(ScopedEntityWorkClient)
+        self.scope.lock().clone().map(ScopedEntityWorkClient)
+    }
+
+    pub(crate) async fn settle_current_scope(&self) {
+        let scope = self.scope.lock().take();
+        if let Some(scope) = scope {
+            CallbackWorkScope(scope).settle_abandoned().await;
+        }
     }
 }
 
@@ -245,7 +253,6 @@ struct ScopeState {
 pub(crate) struct CallbackWorkScope(Arc<ScopeState>);
 
 impl CallbackWorkScope {
-    #[cfg(test)]
     pub(crate) fn context_client(&self) -> ScopedEntityWorkClient {
         ScopedEntityWorkClient(self.0.clone())
     }

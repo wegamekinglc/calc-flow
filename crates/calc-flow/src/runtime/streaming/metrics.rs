@@ -152,8 +152,96 @@ impl MetricsTimer {
 
 struct MetricsInner {
     snapshot: Mutex<M2MetricsSnapshot>,
+    operators: BTreeMap<String, Arc<Mutex<OperatorMetrics>>>,
     clock: Arc<dyn MetricsClock>,
     strict_ids: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct OperatorMetricsHandle {
+    node_id: Arc<str>,
+    metrics: Arc<Mutex<OperatorMetrics>>,
+    clock: Arc<dyn MetricsClock>,
+}
+
+impl OperatorMetricsHandle {
+    pub(crate) fn timer(&self) -> MetricsTimer {
+        MetricsTimer {
+            started: self.clock.now(),
+            clock: Arc::clone(&self.clock),
+        }
+    }
+
+    pub(crate) fn record_input(&self, cost: EnvelopeCost) -> Result<()> {
+        let mut guard = self.metrics.lock();
+        let metrics = &mut *guard;
+        checked_traffic(
+            &mut metrics.input_batches,
+            &mut metrics.input_rows,
+            &mut metrics.input_bytes,
+            cost,
+            &self.node_id,
+            "input",
+        )
+    }
+
+    pub(crate) fn record_output(&self, cost: EnvelopeCost) -> Result<()> {
+        let mut guard = self.metrics.lock();
+        let metrics = &mut *guard;
+        checked_traffic(
+            &mut metrics.fully_fanned_out_batches,
+            &mut metrics.fully_fanned_out_rows,
+            &mut metrics.fully_fanned_out_bytes,
+            cost,
+            &self.node_id,
+            "fully_fanned_out",
+        )
+    }
+
+    pub(crate) fn record_processing(&self, timer: &MetricsTimer) -> Result<()> {
+        let elapsed = timer.elapsed(&self.node_id, "processing_duration")?;
+        let mut metrics = self.metrics.lock();
+        metrics.processing_duration = metrics
+            .processing_duration
+            .checked_add(elapsed)
+            .ok_or_else(|| {
+                metrics_error(&self.node_id, "processing_duration", "counter overflow")
+            })?;
+        Ok(())
+    }
+
+    pub(crate) fn record_watermark(&self, timer: &MetricsTimer) -> Result<()> {
+        let elapsed = timer.elapsed(&self.node_id, "watermark_processing_duration")?;
+        let mut metrics = self.metrics.lock();
+        let total = metrics
+            .processing_duration
+            .checked_add(elapsed)
+            .ok_or_else(|| {
+                metrics_error(&self.node_id, "processing_duration", "counter overflow")
+            })?;
+        let watermark = metrics
+            .watermark_processing_duration
+            .checked_add(elapsed)
+            .ok_or_else(|| {
+                metrics_error(
+                    &self.node_id,
+                    "watermark_processing_duration",
+                    "counter overflow",
+                )
+            })?;
+        metrics.processing_duration = total;
+        metrics.watermark_processing_duration = watermark;
+        Ok(())
+    }
+
+    pub(crate) fn observe_window(&self, progress: &super::operator_task::OperatorProgressSnapshot) {
+        let mut metrics = self.metrics.lock();
+        metrics.late_rows = progress.late_rows;
+        metrics.affected_batches = progress.affected_batches;
+        metrics.max_lateness_micros = progress.max_lateness_micros;
+        metrics.null_event_time_rows = progress.null_event_time_rows;
+        metrics.null_event_time_batches = progress.null_event_time_batches;
+    }
 }
 
 /// A cloneable handle over one bounded stable-ID metrics registry.
@@ -166,6 +254,7 @@ impl Default for MetricsRecorder {
     fn default() -> Self {
         Self(Arc::new(MetricsInner {
             snapshot: Mutex::new(M2MetricsSnapshot::default()),
+            operators: BTreeMap::new(),
             clock: Arc::new(MonotonicMetricsClock::default()),
             strict_ids: false,
         }))
@@ -195,6 +284,10 @@ impl MetricsRecorder {
         sinks: impl IntoIterator<Item = String>,
         clock: Arc<dyn MetricsClock>,
     ) -> Self {
+        let operators = nodes
+            .into_iter()
+            .map(|id| (id, Arc::new(Mutex::new(OperatorMetrics::default()))))
+            .collect::<BTreeMap<_, _>>();
         let snapshot = M2MetricsSnapshot {
             job: JobMetrics::default(),
             edges: edges
@@ -213,9 +306,9 @@ impl MetricsRecorder {
                 .into_iter()
                 .map(|id| (id, SourceMetrics::default()))
                 .collect(),
-            nodes: nodes
-                .into_iter()
-                .map(|id| (id, OperatorMetrics::default()))
+            nodes: operators
+                .keys()
+                .map(|id| (id.clone(), OperatorMetrics::default()))
                 .collect(),
             sinks: sinks
                 .into_iter()
@@ -225,13 +318,33 @@ impl MetricsRecorder {
         };
         Self(Arc::new(MetricsInner {
             snapshot: Mutex::new(snapshot),
+            operators,
             clock,
             strict_ids: true,
         }))
     }
 
+    pub(crate) fn operator(&self, node_id: &str) -> Result<OperatorMetricsHandle> {
+        let metrics = match self.0.operators.get(node_id) {
+            Some(metrics) => Arc::clone(metrics),
+            None if self.0.strict_ids => return Err(unregistered_id("node", node_id)),
+            None => Arc::default(),
+        };
+        Ok(OperatorMetricsHandle {
+            node_id: node_id.into(),
+            metrics,
+            clock: Arc::clone(&self.0.clock),
+        })
+    }
+
     pub(crate) fn snapshot(&self) -> M2MetricsSnapshot {
-        self.0.snapshot.lock().clone()
+        let mut snapshot = self.0.snapshot.lock().clone();
+        for (node_id, metrics) in &self.0.operators {
+            snapshot
+                .nodes
+                .insert(node_id.clone(), metrics.lock().clone());
+        }
+        snapshot
     }
 
     pub(crate) fn timer(&self) -> MetricsTimer {
@@ -283,85 +396,6 @@ impl MetricsRecorder {
     pub(crate) fn record_source_end(&self, source_id: &str) -> Result<()> {
         self.with_source(source_id, |metrics| {
             metrics.ended = true;
-            Ok(())
-        })
-    }
-
-    pub(crate) fn record_operator_input(&self, node_id: &str, cost: EnvelopeCost) -> Result<()> {
-        self.with_node(node_id, |metrics| {
-            checked_traffic(
-                &mut metrics.input_batches,
-                &mut metrics.input_rows,
-                &mut metrics.input_bytes,
-                cost,
-                node_id,
-                "input",
-            )
-        })
-    }
-
-    pub(crate) fn record_operator_output(&self, node_id: &str, cost: EnvelopeCost) -> Result<()> {
-        self.with_node(node_id, |metrics| {
-            checked_traffic(
-                &mut metrics.fully_fanned_out_batches,
-                &mut metrics.fully_fanned_out_rows,
-                &mut metrics.fully_fanned_out_bytes,
-                cost,
-                node_id,
-                "fully_fanned_out",
-            )
-        })
-    }
-
-    pub(crate) fn record_operator_processing(
-        &self,
-        node_id: &str,
-        timer: &MetricsTimer,
-    ) -> Result<()> {
-        let elapsed = timer.elapsed(node_id, "processing_duration")?;
-        self.with_node(node_id, |metrics| {
-            metrics.processing_duration = metrics
-                .processing_duration
-                .checked_add(elapsed)
-                .ok_or_else(|| metrics_error(node_id, "processing_duration", "counter overflow"))?;
-            Ok(())
-        })
-    }
-
-    pub(crate) fn record_operator_watermark(
-        &self,
-        node_id: &str,
-        timer: &MetricsTimer,
-    ) -> Result<()> {
-        let elapsed = timer.elapsed(node_id, "watermark_processing_duration")?;
-        self.with_node(node_id, |metrics| {
-            let total = metrics
-                .processing_duration
-                .checked_add(elapsed)
-                .ok_or_else(|| metrics_error(node_id, "processing_duration", "counter overflow"))?;
-            let watermark = metrics
-                .watermark_processing_duration
-                .checked_add(elapsed)
-                .ok_or_else(|| {
-                    metrics_error(node_id, "watermark_processing_duration", "counter overflow")
-                })?;
-            metrics.processing_duration = total;
-            metrics.watermark_processing_duration = watermark;
-            Ok(())
-        })
-    }
-
-    pub(crate) fn observe_operator_window_metrics(
-        &self,
-        node_id: &str,
-        progress: &super::operator_task::OperatorProgressSnapshot,
-    ) -> Result<()> {
-        self.with_node(node_id, |metrics| {
-            metrics.late_rows = progress.late_rows;
-            metrics.affected_batches = progress.affected_batches;
-            metrics.max_lateness_micros = progress.max_lateness_micros;
-            metrics.null_event_time_rows = progress.null_event_time_rows;
-            metrics.null_event_time_batches = progress.null_event_time_batches;
             Ok(())
         })
     }
@@ -681,11 +715,11 @@ impl MetricsRecorder {
             match &failure.origin {
                 FailureOrigin::OperatorEntry { node_id }
                 | FailureOrigin::NativeSequenceRecovery { node_id } => {
-                    attempt_node_error(&mut snapshot.nodes, node_id, &mut first_overflow);
+                    attempt_node_error(&self.0.operators, node_id, &mut first_overflow);
                 }
                 FailureOrigin::RollingIndicator { diagnostic } => {
                     attempt_node_error(
-                        &mut snapshot.nodes,
+                        &self.0.operators,
                         diagnostic.node_id(),
                         &mut first_overflow,
                     );
@@ -723,7 +757,7 @@ impl MetricsRecorder {
                     {
                         attempt_source_error(&mut snapshot.sources, source_id, &mut first_overflow);
                     } else if let Some(node_id) = task_name.strip_prefix("operator:") {
-                        attempt_node_error(&mut snapshot.nodes, node_id, &mut first_overflow);
+                        attempt_node_error(&self.0.operators, node_id, &mut first_overflow);
                     }
                 }
                 FailureOrigin::Preflight
@@ -745,11 +779,10 @@ impl MetricsRecorder {
     #[cfg(test)]
     pub(crate) fn preset_operator_outputs_for_test(&self, node: &str, value: u64) {
         self.0
-            .snapshot
-            .lock()
-            .nodes
-            .get_mut(node)
+            .operators
+            .get(node)
             .expect("registered operator metrics")
+            .lock()
             .fully_fanned_out_batches = value;
     }
 
@@ -781,19 +814,6 @@ impl MetricsRecorder {
             Some(metrics) => record(metrics),
             None if !self.0.strict_ids => Ok(()),
             None => Err(unregistered_id("source", source_id)),
-        }
-    }
-
-    fn with_node(
-        &self,
-        node_id: &str,
-        record: impl FnOnce(&mut OperatorMetrics) -> Result<()>,
-    ) -> Result<()> {
-        let mut snapshot = self.0.snapshot.lock();
-        match snapshot.nodes.get_mut(node_id) {
-            Some(metrics) => record(metrics),
-            None if !self.0.strict_ids => Ok(()),
-            None => Err(unregistered_id("node", node_id)),
         }
     }
 
@@ -1065,12 +1085,12 @@ fn attempt_source_error(
 }
 
 fn attempt_node_error(
-    nodes: &mut BTreeMap<String, OperatorMetrics>,
+    nodes: &BTreeMap<String, Arc<Mutex<OperatorMetrics>>>,
     node_id: &str,
     overflow: &mut Option<(String, &'static str)>,
 ) {
-    if let Some(metrics) = nodes.get_mut(node_id) {
-        attempt_terminal_increment(&mut metrics.errors, node_id, "errors", overflow);
+    if let Some(metrics) = nodes.get(node_id) {
+        attempt_terminal_increment(&mut metrics.lock().errors, node_id, "errors", overflow);
     }
 }
 
@@ -1155,12 +1175,11 @@ mod tests {
             ["sink".into()],
             clock.clone(),
         );
-        recorder
-            .record_operator_input("node", EnvelopeCost::new(1, 2, 16))
-            .unwrap();
-        let timer = recorder.timer();
+        let node = recorder.operator("node").unwrap();
+        node.record_input(EnvelopeCost::new(1, 2, 16)).unwrap();
+        let timer = node.timer();
         clock.0.store(17, Ordering::SeqCst);
-        recorder.record_operator_processing("node", &timer).unwrap();
+        node.record_processing(&timer).unwrap();
 
         let snapshot = recorder.snapshot();
         assert_eq!(
@@ -1210,6 +1229,28 @@ mod tests {
         assert_eq!(snapshot.job.task_errors, u64::MAX);
         assert!(snapshot.job.metrics_overflowed);
         assert_eq!(snapshot.nodes["node"].errors, 1);
+    }
+
+    #[test]
+    fn operator_handle_preserves_exact_updates_and_overflow() {
+        let recorder = MetricsRecorder::new([], [], ["node".into()], []);
+        let node = recorder.operator("node").unwrap();
+        node.record_input(EnvelopeCost::new(1, 2, 16)).unwrap();
+        node.record_output(EnvelopeCost::new(1, 2, 16)).unwrap();
+
+        let snapshot = recorder.snapshot();
+        assert_eq!(snapshot.nodes["node"].input_batches, 1);
+        assert_eq!(snapshot.nodes["node"].input_rows, 2);
+        assert_eq!(snapshot.nodes["node"].fully_fanned_out_bytes, 16);
+        node.metrics.lock().input_batches = u64::MAX;
+        let error = node.record_input(EnvelopeCost::new(1, 1, 1)).unwrap_err();
+        assert!(matches!(
+            error,
+            CalcFlowError::InvalidArgument { ref field, .. }
+                if field == "runtime.metrics.node.input_batches"
+        ));
+        assert_eq!(recorder.snapshot().nodes["node"].input_batches, u64::MAX);
+        assert!(recorder.operator("missing").is_err());
     }
 
     #[test]

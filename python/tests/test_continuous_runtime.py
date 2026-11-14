@@ -33,6 +33,7 @@ from calc_flow import (
     StreamExecutionPlan,
     StreamingRunner,
     StreamRequirements,
+    StreamRuntimeConfig,
     _native,
 )
 
@@ -291,6 +292,65 @@ def test_continuous_runner_processes_data_and_closes_connectors(tmp_path: Path) 
     asyncio.run(exercise())
     assert written == [2]
     assert events == ["source.open", "sink.open", "source.close", "sink.close"]
+
+
+def test_source_cursor_native_decode_skips_json_roundtrip(monkeypatch) -> None:
+    written: list[int] = []
+    event = Data(
+        Batch.from_pyarrow(pa.table({"a": [1]})),
+        Cursor(b"1", {"position": {"offsets": [1]}}),
+    )
+
+    class Source:
+        events = iter([event])
+
+        def capabilities(self) -> SourceCapabilities:
+            return SourceCapabilities(
+                ReplayPositioning.UNSUPPORTED,
+                SourceDeliveryCapability.LOSSY,
+                max_batch_rows=1,
+                max_batch_bytes=1024,
+                native_watermarks=NativeWatermarkCapability.NEVER_EMITS,
+            )
+
+        async def open(self, cursor: Cursor | None) -> None:
+            pass
+
+        async def next(self) -> Data | None:
+            return next(self.events, None)
+
+        async def close(self) -> None:
+            pass
+
+    class Sink:
+        async def open(self) -> None:
+            pass
+
+        async def write(self, batch: Batch) -> None:
+            written.append(batch.num_rows)
+
+        async def close(self) -> None:
+            pass
+
+    plan = PipelineBuilder("cursor-json").expression("copy", "b = a").compile_stream()
+
+    def reject_json(*args, **kwargs) -> None:
+        raise AssertionError("native cursor decode called Python json.dumps")
+
+    monkeypatch.setattr(json, "dumps", reject_json)
+
+    async def exercise() -> None:
+        job = await StreamingRunner(
+            plan,
+            {"input": SourceBinding(Source(), watermark_policy=DisabledWatermarks())},
+            {"output": [SinkBinding.ordinary("archive", Sink())]},
+            config=StreamRuntimeConfig(checkpointing=False),
+        ).start_async()
+        outcome = await job.wait_async()
+        assert outcome.state == "completed"
+
+    asyncio.run(exercise())
+    assert written == [1]
 
 
 def test_blocking_lifecycle_keeps_connector_event_loop_alive(tmp_path: Path) -> None:

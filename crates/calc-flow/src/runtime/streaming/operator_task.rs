@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use async_trait::async_trait;
@@ -16,7 +16,7 @@ use super::{
     entity_work::TaskEntityWorkClient,
     failure::{indicator_diagnostic::SafeIndicatorDiagnostic, panic_message},
     local_edge::{LocalEdgeOwner, OperatorEdgeReceiver, OperatorEdgeSender},
-    metrics::MetricsRecorder,
+    metrics::OperatorMetricsHandle,
     progress::{
         aggregate::{AggregateInput, IngressActivity, MultiInputProgress, ProgressEmissionKind},
         prepare::BindingOrdinal,
@@ -47,6 +47,7 @@ use crate::{
 #[cfg(test)]
 use super::{
     EdgeReceiver, EdgeSender,
+    metrics::MetricsRecorder,
     supervisor::{PreparedPair, TaskSupervisor},
 };
 
@@ -105,6 +106,7 @@ pub(crate) struct OperatorRestoreState {
 }
 
 pub(crate) struct OperatorIngress {
+    name: Arc<str>,
     pub(crate) edge_id: String,
     receiver: Option<OperatorEdgeReceiver>,
     admission: Option<ingress_admission::Receiver>,
@@ -112,8 +114,13 @@ pub(crate) struct OperatorIngress {
 }
 
 impl OperatorIngress {
-    pub(crate) fn new(edge_id: String, receiver: impl Into<OperatorEdgeReceiver>) -> Self {
+    pub(crate) fn new(
+        name: impl std::borrow::Borrow<str>,
+        edge_id: String,
+        receiver: impl Into<OperatorEdgeReceiver>,
+    ) -> Self {
         Self {
+            name: name.borrow().into(),
             edge_id,
             receiver: Some(receiver.into()),
             admission: None,
@@ -161,11 +168,16 @@ pub(crate) struct OperatorProgressSnapshot {
 pub(crate) struct OperatorProgress(
     Arc<Mutex<OperatorProgressSnapshot>>,
     Option<RollingMetricsStore>,
+    Arc<OnceLock<EdgeBudget>>,
 );
 
 impl OperatorProgress {
     pub(crate) fn with_optional_rolling_metrics(metrics: Option<RollingMetricsStore>) -> Self {
-        Self(Arc::default(), metrics)
+        Self(Arc::default(), metrics, Arc::default())
+    }
+
+    fn output_budget(&self, outputs: &BTreeMap<String, Vec<OperatorEdgeSender>>) -> EdgeBudget {
+        *self.2.get_or_init(|| effective_output_budget(outputs))
     }
 
     #[cfg(test)]
@@ -303,7 +315,7 @@ pub(crate) struct OperatorTaskInputs {
     pub(crate) late_output_ports: BTreeSet<String>,
     pub(crate) context: StreamTaskContext,
     pub(crate) progress: OperatorProgress,
-    pub(crate) metrics: MetricsRecorder,
+    pub(crate) metrics: OperatorMetricsHandle,
     pub(crate) entry_gate: watch::Receiver<bool>,
     pub(crate) entry_ack: mpsc::UnboundedSender<OperatorEntryAck>,
     pub(crate) data_gate: watch::Receiver<bool>,
@@ -323,7 +335,7 @@ struct OperatorEntryFrame {
     late_output_ports: BTreeSet<String>,
     context: StreamTaskContext,
     progress: OperatorProgress,
-    metrics: MetricsRecorder,
+    metrics: OperatorMetricsHandle,
     entry_gate: watch::Receiver<bool>,
     entry_ack: mpsc::UnboundedSender<OperatorEntryAck>,
     data_gate: watch::Receiver<bool>,
@@ -864,7 +876,7 @@ async fn reset_async_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) 
         &inputs.node_id,
         None,
         IngressProgressSnapshot::default(),
-        effective_output_budget(&inputs.outputs),
+        inputs.progress.output_budget(&inputs.outputs),
         Arc::new(inputs.progress.clone()),
     );
     let operation = async {
@@ -877,9 +889,8 @@ async fn reset_async_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) 
     match AssertUnwindSafe(operation).catch_unwind().await {
         Ok(result) => {
             result?;
-            inputs
-                .metrics
-                .observe_operator_window_metrics(&inputs.node_id, &inputs.progress.snapshot())
+            inputs.metrics.observe_window(&inputs.progress.snapshot());
+            Ok(())
         }
         Err(payload) => Err(CalcFlowError::TaskPanicked {
             task_id: task_id.as_u64(),
@@ -1208,13 +1219,9 @@ async fn finish_operator(
     input_progress: &OperatorInputProgress,
     completed_epoch: Option<Epoch>,
 ) -> Result<()> {
-    let work = inputs
-        .entity_work
-        .as_ref()
-        .map(TaskEntityWorkClient::callback_scope);
     let input_watermark = input_progress.input_watermark();
     let cancellation = inputs.context.job().cancellation().clone();
-    let output_budget = effective_output_budget(&inputs.outputs);
+    let output_budget = inputs.progress.output_budget(&inputs.outputs);
     let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());
     let context = StreamOperatorContext::for_task(
         inputs.context.job(),
@@ -1250,14 +1257,14 @@ async fn finish_operator(
         if let Some(callback) = callback {
             callback.complete(&result);
         }
-        if let Some(work) = &work {
-            work.settle_abandoned().await;
+        if let Some(task) = &inputs.entity_work {
+            task.settle_current_scope().await;
         }
         result?;
     } else {
         drop(callback);
-        if let Some(work) = &work {
-            work.settle_abandoned().await;
+        if let Some(task) = &inputs.entity_work {
+            task.settle_current_scope().await;
         }
         return Ok(());
     }
@@ -1354,7 +1361,7 @@ async fn receive_operator_message_observing_pending(
     barrier_alignment: &OperatorBarrierAlignment,
     last_ingress: Option<&str>,
     suspended: &mut bool,
-) -> Result<Option<(String, StreamMessage)>> {
+) -> Result<Option<(Arc<str>, StreamMessage)>> {
     let mut receive = std::pin::pin!(receive_operator_message(
         inputs,
         barrier_alignment,
@@ -1372,7 +1379,7 @@ async fn receive_operator_message(
     inputs: &mut OperatorTaskInputs,
     barrier_alignment: &OperatorBarrierAlignment,
     last_ingress: Option<&str>,
-) -> Result<Option<(String, StreamMessage)>> {
+) -> Result<Option<(Arc<str>, StreamMessage)>> {
     let received = tokio::select! {
         biased;
         () = inputs.context.job().cancellation().cancelled() => return Ok(None),
@@ -1383,7 +1390,7 @@ async fn receive_operator_message(
         Some(message) => Ok(Some((ingress_name, message))),
         None if inputs.context.job().cancellation().is_cancelled() => Ok(None),
         None => Err(CalcFlowError::EdgeClosed {
-            edge: inputs.ingresses[&ingress_name].edge_id.clone(),
+            edge: inputs.ingresses[ingress_name.as_ref()].edge_id.clone(),
         }),
     }
 }
@@ -1395,10 +1402,6 @@ async fn dispatch_or_cancel(
     input_progress: &mut OperatorInputProgress,
     barrier_alignment: &mut OperatorBarrierAlignment,
 ) -> Result<()> {
-    let work = inputs
-        .entity_work
-        .as_ref()
-        .map(TaskEntityWorkClient::callback_scope);
     let cancellation = inputs.context.job().cancellation().clone();
     let can_complete_barrier = matches!(
         message.kind(),
@@ -1417,8 +1420,8 @@ async fn dispatch_or_cancel(
     } else {
         result
     };
-    if let Some(work) = &work {
-        work.settle_abandoned().await;
+    if let Some(task) = &inputs.entity_work {
+        task.settle_current_scope().await;
     }
     if cancellation.is_cancelled() && matches!(result, Err(CalcFlowError::Cancelled { .. })) {
         Ok(())
@@ -1428,13 +1431,20 @@ async fn dispatch_or_cancel(
 }
 
 type ReceiveFuture<'a> =
-    Pin<Box<dyn Future<Output = (String, Result<Option<StreamMessage>>)> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = (Arc<str>, Result<Option<StreamMessage>>)> + Send + 'a>>;
 
 async fn receive_ready(
     ingresses: &mut BTreeMap<String, OperatorIngress>,
     barrier_alignment: &OperatorBarrierAlignment,
     last_ingress: Option<&str>,
-) -> Result<(String, Option<StreamMessage>)> {
+) -> Result<(Arc<str>, Option<StreamMessage>)> {
+    if ingresses.len() == 1 {
+        let (map_name, ingress) = ingresses.iter_mut().next().expect("one ingress");
+        if !ingress.saw_explicit_eof && !barrier_alignment.is_blocked(map_name) {
+            let name = Arc::clone(&ingress.name);
+            return Ok((name, ingress.recv().await?));
+        }
+    }
     let start = last_ingress.map_or(0, |last| {
         ingresses
             .iter()
@@ -1449,7 +1459,7 @@ async fn receive_ready(
         .iter_mut()
         .filter(|(name, ingress)| !ingress.saw_explicit_eof && !barrier_alignment.is_blocked(name))
         .map(|(name, ingress)| {
-            let name = name.clone();
+            let name: Arc<str> = name.as_str().into();
             Box::pin(async move { (name, ingress.recv().await) }) as ReceiveFuture<'_>
         })
         .collect::<Vec<_>>();
@@ -1862,7 +1872,7 @@ async fn prepare_operator_snapshot(
             &inputs.node_id,
             input_progress.input_watermark(),
             input_progress.snapshot()?,
-            effective_output_budget(&inputs.outputs),
+            inputs.progress.output_budget(&inputs.outputs),
             Arc::new(inputs.progress.clone()),
         )
         .with_task_id(inputs.context.task_id());
@@ -2014,12 +2024,10 @@ async fn dispatch_data(
         .expect("data kind always carries a batch")
         .clone();
     let cost = EnvelopeCost::of_message(&message)?;
-    inputs
-        .metrics
-        .record_operator_input(&inputs.node_id, cost)?;
+    inputs.metrics.record_input(cost)?;
     inputs.progress.record_input()?;
     let processing_timer = inputs.metrics.timer();
-    let output_budget = effective_output_budget(&inputs.outputs);
+    let output_budget = inputs.progress.output_budget(&inputs.outputs);
     let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());
     let callback = inputs
         .progress
@@ -2070,12 +2078,8 @@ async fn dispatch_data(
             .dispatch_trace()
             .callback(&inputs.node_id, "data")?;
     }
-    inputs
-        .metrics
-        .observe_operator_window_metrics(&inputs.node_id, &inputs.progress.snapshot())?;
-    inputs
-        .metrics
-        .record_operator_processing(&inputs.node_id, &processing_timer)
+    inputs.metrics.observe_window(&inputs.progress.snapshot());
+    inputs.metrics.record_processing(&processing_timer)
 }
 
 async fn dispatch_watermark_handler(
@@ -2086,7 +2090,7 @@ async fn dispatch_watermark_handler(
     ingress_progress: IngressProgressSnapshot,
 ) -> Result<()> {
     let processing_timer = inputs.metrics.timer();
-    let output_budget = effective_output_budget(&inputs.outputs);
+    let output_budget = inputs.progress.output_budget(&inputs.outputs);
     let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());
     let callback = inputs.progress.begin_rolling(
         RollingCallback::Watermark,
@@ -2129,9 +2133,7 @@ async fn dispatch_watermark_handler(
             .dispatch_trace()
             .callback(&inputs.node_id, "watermark")?;
     }
-    inputs
-        .metrics
-        .record_operator_watermark(&inputs.node_id, &processing_timer)
+    inputs.metrics.record_watermark(&processing_timer)
 }
 
 fn attach_rolling_context<'a>(
@@ -2146,10 +2148,10 @@ fn attach_rolling_context<'a>(
 
 fn attach_entity_context<'a>(
     context: StreamOperatorContext<'a>,
-    task: Option<&TaskEntityWorkClient>,
+    task: Option<&'a TaskEntityWorkClient>,
 ) -> StreamOperatorContext<'a> {
-    match task.and_then(TaskEntityWorkClient::context_client) {
-        Some(client) => context.with_entity_work(client),
+    match task {
+        Some(task) => context.with_entity_work_task(task),
         None => context,
     }
 }
@@ -2189,7 +2191,7 @@ async fn dispatch_progress_transition(
     aggregate_input_frontier: Option<EventTime>,
     output_frontier: &mut Option<EventTime>,
 ) -> Result<()> {
-    let output_budget = effective_output_budget(&inputs.outputs);
+    let output_budget = inputs.progress.output_budget(&inputs.outputs);
     let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());
     let context = StreamOperatorContext::for_task(
         inputs.context.job(),
@@ -2544,7 +2546,7 @@ pub(crate) struct ChannelStreamCollector<'a> {
     outputs: &'a mut BTreeMap<String, Vec<OperatorEdgeSender>>,
     cancellation: &'a CancellationToken,
     progress: &'a OperatorProgress,
-    metrics: &'a MetricsRecorder,
+    metrics: &'a OperatorMetricsHandle,
     rolling_metrics: Option<RollingMetricsRecorder>,
 }
 
@@ -2556,7 +2558,7 @@ impl<'a> ChannelStreamCollector<'a> {
         outputs: &'a mut BTreeMap<String, Vec<OperatorEdgeSender>>,
         cancellation: &'a CancellationToken,
         progress: &'a OperatorProgress,
-        metrics: &'a MetricsRecorder,
+        metrics: &'a OperatorMetricsHandle,
     ) -> Self {
         Self {
             node_id,
@@ -2599,7 +2601,7 @@ impl StreamCollector for ChannelStreamCollector<'_> {
             self.rolling_metrics.as_ref(),
         )
         .await?;
-        self.metrics.record_operator_output(self.node_id, cost)?;
+        self.metrics.record_output(cost)?;
         self.progress.record_output()
     }
 }
@@ -2804,7 +2806,7 @@ pub(super) mod tests {
             output_ports: BTreeMap::new(),
             context: job.for_node("node").unwrap(),
             progress: OperatorProgress::default(),
-            metrics: metrics.clone(),
+            metrics: metrics.operator("node").unwrap(),
             entry_gate,
             entry_ack,
             data_gate,
@@ -2873,8 +2875,9 @@ pub(super) mod tests {
         let metrics =
             crate::runtime::streaming::metrics::MetricsRecorder::new([], [], ["window".into()], []);
         metrics
-            .observe_operator_window_metrics("window", &snapshot)
-            .unwrap();
+            .operator("window")
+            .unwrap()
+            .observe_window(&snapshot);
         let node = &metrics.snapshot().nodes["window"];
         assert_eq!(node.late_rows, 5);
         assert_eq!(node.affected_batches, 2);
@@ -3334,13 +3337,13 @@ pub(super) mod tests {
                 checkpoint_capability: OperatorCheckpointCapability::Stateless,
                 ingresses: BTreeMap::from([(
                     "input".into(),
-                    OperatorIngress::new("source->input".into(), input_receiver),
+                    OperatorIngress::new("input", "source->input".into(), input_receiver),
                 )]),
                 outputs: BTreeMap::from([("output".into(), vec![output_sender.into()])]),
                 output_ports: BTreeMap::from([("output".into(), output_port)]),
                 context: context.for_node("node").unwrap(),
                 progress: progress.clone(),
-                metrics,
+                metrics: metrics.operator("node").unwrap(),
                 entry_gate,
                 entry_ack,
                 data_gate,
@@ -3444,7 +3447,7 @@ pub(super) mod tests {
             output_ports: BTreeMap::from([("output".into(), output_port)]),
             context: job.for_node("node").unwrap(),
             progress: progress.clone(),
-            metrics: super::MetricsRecorder::default(),
+            metrics: super::MetricsRecorder::default().operator("node").unwrap(),
             entry_gate,
             entry_ack,
             data_gate,
@@ -3803,7 +3806,10 @@ pub(super) mod tests {
             )
             .unwrap();
             inputs.insert((*name).into(), sender);
-            ingresses.insert((*name).into(), OperatorIngress::new(edge_id, receiver));
+            ingresses.insert(
+                (*name).into(),
+                OperatorIngress::new(*name, edge_id, receiver),
+            );
         }
         let mut output_senders = Vec::new();
         let mut outputs = Vec::new();
@@ -3840,7 +3846,7 @@ pub(super) mod tests {
                 output_ports: BTreeMap::from([("output".into(), output_port)]),
                 context: task_context,
                 progress: progress.clone(),
-                metrics: metrics.clone(),
+                metrics: metrics.operator("node").unwrap(),
                 entry_gate: entry_rx,
                 entry_ack: ack_tx,
                 data_gate: data_rx,
@@ -3973,6 +3979,30 @@ pub(super) mod tests {
         assert_eq!(message, "handler-ready-error");
     }
 
+    #[test]
+    fn single_ingress_ready_receive_does_not_allocate() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (mut sender, receiver) = crate::edge_channel("input", EdgeBudget::default()).unwrap();
+        runtime
+            .block_on(sender.send(StreamMessage::data(batch("S", 0))))
+            .unwrap();
+        let mut ingresses = BTreeMap::from([(
+            "input".into(),
+            OperatorIngress::new("input", "input".into(), receiver),
+        )]);
+        let alignment = super::OperatorBarrierAlignment::default();
+        let measured = allocation_counter::measure(|| {
+            let selected = runtime
+                .block_on(super::receive_ready(&mut ingresses, &alignment, None))
+                .unwrap();
+            assert_eq!(selected.0.as_ref(), "input");
+            assert!(selected.1.unwrap().as_data().is_some());
+        });
+        assert_eq!(measured.count_total, 0, "{measured:?}");
+    }
+
     #[tokio::test]
     async fn ready_selection_does_not_starve_another_ingress_watermark() {
         let (mut left, left_receiver) = crate::edge_channel("left", EdgeBudget::default()).unwrap();
@@ -3990,22 +4020,22 @@ pub(super) mod tests {
         let mut ingresses = BTreeMap::from([
             (
                 "left".into(),
-                OperatorIngress::new("left".into(), left_receiver),
+                OperatorIngress::new("left", "left".into(), left_receiver),
             ),
             (
                 "right".into(),
-                OperatorIngress::new("right".into(), right_receiver),
+                OperatorIngress::new("right", "right".into(), right_receiver),
             ),
         ]);
         let alignment = super::OperatorBarrierAlignment::default();
         let first = super::receive_ready(&mut ingresses, &alignment, None)
             .await
             .unwrap();
-        assert_eq!(first.0, "left");
-        let second = super::receive_ready(&mut ingresses, &alignment, Some(&first.0))
+        assert_eq!(first.0.as_ref(), "left");
+        let second = super::receive_ready(&mut ingresses, &alignment, Some(first.0.as_ref()))
             .await
             .unwrap();
-        assert_eq!(second.0, "right");
+        assert_eq!(second.0.as_ref(), "right");
         assert_eq!(
             second.1.unwrap().as_watermark(),
             Some(EventTime::from_micros(10))

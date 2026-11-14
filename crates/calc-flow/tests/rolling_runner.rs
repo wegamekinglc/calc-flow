@@ -248,6 +248,60 @@ fn runner(
 }
 
 #[tokio::test]
+async fn checkpoint_off_single_source_skips_the_progress_driver() {
+    let rows: Vec<InputRow> = vec![
+        (10, "a", 1, Some(1.0), Some(10)),
+        (11, "a", 2, Some(2.0), Some(20)),
+    ];
+    let collected = CollectedRows::default();
+    let plan = rolling_plan();
+    let source_id = plan.source_binding_ids()[0].to_owned();
+    let output_id = plan.sink_binding_ids()[0].to_owned();
+    let job = StreamingRunner::without_checkpoints(
+        plan,
+        BTreeMap::from([(
+            source_id,
+            SourceBinding::new(ScriptedSource {
+                events: VecDeque::from([
+                    data_event(&rows, 1),
+                    SourceEvent::Watermark(EventTime::from_micros(100)),
+                ]),
+                hold_open: true,
+            }),
+        )]),
+        BTreeMap::from([(
+            output_id,
+            vec![
+                SinkBinding::ordinary(
+                    "sink",
+                    CollectingSink {
+                        collected: collected.clone(),
+                    },
+                )
+                .unwrap(),
+            ],
+        )]),
+    )
+    .unwrap()
+    .start()
+    .await
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let complete = collected.rows.lock().unwrap().len() == rows.len();
+            if complete && job.status().watermark == Some(EventTime::from_micros(100)) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(job.status().task_count, 4);
+    job.cancel().await;
+}
+
+#[tokio::test]
 async fn single_job_emits_rolling_output_to_the_sink() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("managed");

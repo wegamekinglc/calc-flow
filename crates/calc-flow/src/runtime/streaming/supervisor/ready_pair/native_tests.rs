@@ -156,6 +156,7 @@ fn native_inputs(
     metrics: &MetricsRecorder,
     entry_ack: &mpsc::UnboundedSender<OperatorEntryAck>,
 ) -> OperatorTaskInputs {
+    let node_metrics = metrics.operator(&node.node_id).unwrap();
     OperatorTaskInputs {
         late_output_ports: node.late_output_ports,
         entity_work: None,
@@ -166,13 +167,13 @@ fn native_inputs(
         checkpoint_capability: node.checkpoint_capability,
         ingresses: [(
             "input".into(),
-            OperatorIngress::new(input.edge().into(), input),
+            OperatorIngress::new("input", input.edge().into(), input),
         )]
         .into(),
         outputs: [("output".into(), vec![output.into()])].into(),
         output_ports: node.output_ports,
         progress: OperatorProgress::default(),
-        metrics: metrics.clone(),
+        metrics: node_metrics,
         entry_gate: watch::channel(true).1,
         entry_ack: entry_ack.clone(),
         data_gate: watch::channel(true).1,

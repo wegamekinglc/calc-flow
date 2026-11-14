@@ -1070,8 +1070,8 @@ paired driver is subsequently aborted.
 
 ## Progress and replay
 
-The runtime prepares each source policy during whole-job preflight, then
-routes raw source data/control through one job-scoped progress driver. That
+The runtime prepares each source policy during whole-job preflight. Coordinated
+jobs route raw source data/control through one job-scoped progress driver. That
 driver alone owns the logical clock, binding/local/global ordering, finite
 inbox fences, timer heap, idle epochs, aggregate progress and completion receipts.
 Managed live jobs retain checked trace coordinates and incremental cumulative
@@ -1087,6 +1087,13 @@ processing, and all-ended emits one plain `EndOfInput` without a sentinel
 watermark. Stateful operators may maintain a more conservative output
 frontier; ASOF retains idle input progress and applies the strict closure
 contract described under [operator tasks](#operator-tasks-and-barrier-alignment).
+
+A checkpoint-disabled job with exactly one source and source-provided watermarks
+uses the source task's direct fan-out instead of allocating a progress-driver
+task. This path retains cursor/order checks, repeated-watermark suppression,
+FIFO data/control, source metrics, and the public job-level watermark. Generated
+or disabled watermark modes, multiple sources, recovery, and checkpointed jobs
+retain the coordinator and its timer/receipt protocol.
 
 For a record/replay driver, the crate-private transient snapshot captures the
 exact prepared/config,
