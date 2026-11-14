@@ -9,6 +9,18 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-14: Prepare the aligned `calc-flow` and `calc-flow-python`
+  2026.11.14 releases, synchronizing workspace versions, exact internal
+  dependencies, lockfiles, package metadata, and current-version documentation.
+  This release includes native array expressions and owned indicator states,
+  typed Rust/Python relational declarations, finite union/windows/joins,
+  bounded-history final DISTINCT, small-batch streaming and rolling
+  optimizations, and isolated nested cursor/recovery JSON. Project and
+  checkpoint manifest formats remain version 3; engine identities and
+  operator state layouts still determine checkpoint compatibility. See
+  the [introduction](docs/introduction.md), [Rust release guide](docs/rust-release.md),
+  and [Python release guide](docs/python-release.md).
+
 - 2026-11-13: Add explicit bounded-history final DISTINCT declarations, owned
   scalar normalization under copy_visible_v2, accounting 2 checkpoints,
   source boundedness and conditional window-closure admission. Query analysis

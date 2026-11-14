@@ -163,7 +163,7 @@ from calc_flow.symbolic.query_analysis import (
     UpdateSemantics,
 )
 
-__version__ = "2026.11.2"
+__version__ = "2026.11.14"
 Batch = _native.Batch
 ExecutionOptions = _native.ExecutionOptions
 ProviderContext = _native.ProviderContext
