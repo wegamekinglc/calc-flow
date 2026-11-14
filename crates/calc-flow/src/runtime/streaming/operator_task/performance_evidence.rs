@@ -165,7 +165,7 @@ impl Fixture {
                 progress: OperatorProgress::with_optional_rolling_metrics(
                     observed.then(RollingMetricsStore::default),
                 ),
-                metrics: MetricsRecorder::default(),
+                metrics: MetricsRecorder::default().operator("rolling").unwrap(),
                 entry_gate,
                 entry_ack,
                 data_gate,

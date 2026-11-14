@@ -68,8 +68,8 @@ use super::{
     },
     progress::{
         DurableProgressRestore, DurableSourceCut, LiveProgressCoordinator, LiveProgressEvidence,
-        LiveProgressStatusHandle, restore_durable_progress, spawn_live_progress_task,
-        types::LogicalInstant,
+        LiveProgressStatusHandle, prepare::NormalizedWatermarkMode, restore_durable_progress,
+        spawn_live_progress_task, types::LogicalInstant,
     },
     projection::{JobStatus, StatusProjection},
     sink_task::{
@@ -78,7 +78,7 @@ use super::{
     },
     source_task::{
         SourceBinding, SourceProgress, SourceProgressSnapshot,
-        spawn_source_tasks_gated_with_live_progress,
+        spawn_source_tasks_gated_with_live_progress, spawn_source_tasks_gated_with_metrics,
     },
     sql_recovery_work::{CheckpointWorkOperator, JobSqlRecoveryOwner, SqlRecoveryClient},
     supervisor::{
@@ -408,6 +408,7 @@ pub(crate) struct SourceStatus {
     pub(crate) durable_order: Option<Vec<u8>>,
     pub(crate) next_sequence: Option<u64>,
     pub(crate) ended: bool,
+    pub(crate) last_watermark: Option<EventTime>,
 }
 
 impl From<SourceProgressSnapshot> for SourceStatus {
@@ -422,6 +423,7 @@ impl From<SourceProgressSnapshot> for SourceStatus {
                 .map(|cursor| cursor.order().to_vec()),
             next_sequence: progress.next_sequence,
             ended: progress.ended,
+            last_watermark: progress.last_watermark,
         }
     }
 }
@@ -3310,7 +3312,7 @@ fn take_node_ingresses(
                 })?;
             Ok((
                 ingress.clone(),
-                OperatorIngress::new(edge_id.clone(), receiver),
+                OperatorIngress::new(ingress.as_str(), edge_id.clone(), receiver),
             ))
         })
         .collect()
@@ -3570,7 +3572,10 @@ fn prepare_operator_task(
         output_ports: node.output_ports,
         context: task_context,
         progress: progress.clone(),
-        metrics: registration.metrics.clone(),
+        metrics: registration
+            .metrics
+            .operator(&node_id)
+            .map_err(preflight_entry_failure)?,
         entry_gate: registration.entry_tx.subscribe(),
         entry_ack: registration.ack_tx.clone(),
         data_gate: registration.data_tx.subscribe(),
@@ -3776,6 +3781,20 @@ fn opened_connector_bindings(
     (sources, sinks)
 }
 
+fn can_use_direct_source_progress(
+    prepared: &super::progress::PreparedStreamJob,
+    durable_progress: Option<&DurableProgressRestore>,
+    checkpoint: Option<&OpenedCheckpointRuntime>,
+) -> bool {
+    durable_progress.is_none()
+        && checkpoint.is_none()
+        && prepared.bindings.len() == 1
+        && matches!(
+            prepared.bindings[0].normalized_watermark,
+            NormalizedWatermarkMode::SourceProvided { .. }
+        )
+}
+
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -3794,33 +3813,60 @@ fn register_boundary_tasks(
 ) -> RuntimeTaskProgress {
     let prepared_progress = Arc::new(prepared_progress);
     let source_outputs = std::mem::take(&mut runtime.source_outputs);
-    let live_progress = match durable_progress {
-        Some(restored) => LiveProgressCoordinator::new_restored(
-            &prepared_progress,
-            source_outputs,
-            context.cancellation().clone(),
-            restored,
-        ),
-        None => LiveProgressCoordinator::new(
-            &prepared_progress,
-            source_outputs,
-            context.cancellation().clone(),
-        ),
-    }
-    .expect("preflight projected every prepared progress source route");
-    let progress_status = live_progress.status_handle();
+    let direct =
+        can_use_direct_source_progress(&prepared_progress, durable_progress, checkpoint.as_ref());
+    let (mut direct_outputs, live_progress) = if direct {
+        (Some(source_outputs), None)
+    } else {
+        let coordinated = match durable_progress {
+            Some(restored) => LiveProgressCoordinator::new_restored(
+                &prepared_progress,
+                source_outputs,
+                context.cancellation().clone(),
+                restored,
+            ),
+            None => LiveProgressCoordinator::new(
+                &prepared_progress,
+                source_outputs,
+                context.cancellation().clone(),
+            ),
+        }
+        .expect("preflight projected every prepared progress source route");
+        (None, Some(coordinated))
+    };
+    let progress_status = live_progress
+        .as_ref()
+        .map(LiveProgressCoordinator::status_handle);
     let mut source_progress = BTreeMap::new();
     for (binding_id, binding) in sources {
-        let progress = spawn_source_tasks_gated_with_live_progress(
-            &mut runtime.supervisor,
-            context,
-            &binding_id,
-            binding,
-            runtime.data_gate.subscribe(),
-            core.launch_cancel.clone(),
-            core.metrics.clone(),
-            live_progress.clone(),
-        )
+        let progress = if let Some(coordinated) = &live_progress {
+            spawn_source_tasks_gated_with_live_progress(
+                &mut runtime.supervisor,
+                context,
+                &binding_id,
+                binding,
+                runtime.data_gate.subscribe(),
+                core.launch_cancel.clone(),
+                core.metrics.clone(),
+                coordinated.clone(),
+            )
+        } else {
+            let outputs = direct_outputs
+                .as_mut()
+                .expect("direct progress retains source outputs")
+                .remove(&binding_id)
+                .expect("preflight projected the direct source route");
+            spawn_source_tasks_gated_with_metrics(
+                &mut runtime.supervisor,
+                context,
+                &binding_id,
+                binding,
+                outputs,
+                runtime.data_gate.subscribe(),
+                core.launch_cancel.clone(),
+                core.metrics.clone(),
+            )
+        }
         .expect("preflight validated every source task scope and first-hop budget");
         source_progress.insert(binding_id, progress);
     }
@@ -3881,7 +3927,9 @@ fn register_boundary_tasks(
             let task_inputs = LiveCheckpointTaskInputs {
                 checkpoint,
                 channels,
-                live_progress: live_progress.clone(),
+                live_progress: live_progress
+                    .clone()
+                    .expect("checkpointed jobs retain coordinated progress"),
                 sources: source_progress.clone(),
                 sinks: sink_progress.clone(),
                 cancellation: context.cancellation().clone(),
@@ -3895,18 +3943,21 @@ fn register_boundary_tasks(
         (None, None) => {}
         _ => unreachable!("checkpoint runtime and channels are created together"),
     }
-    spawn_live_progress_task(
-        &mut runtime.supervisor,
-        live_progress,
-        context.cancellation().clone(),
-    );
+    if let Some(coordinated) = live_progress {
+        spawn_live_progress_task(
+            &mut runtime.supervisor,
+            coordinated,
+            context.cancellation().clone(),
+        );
+    }
     debug_assert!(runtime.source_outputs.is_empty());
+    debug_assert!(direct_outputs.as_ref().is_none_or(BTreeMap::is_empty));
     debug_assert!(runtime.sink_inputs.is_empty());
     {
         let mut status = core.runtime_status.lock();
         status.sources = source_progress.clone();
         status.sinks = sink_progress.clone();
-        status.progress = Some(progress_status);
+        status.progress = progress_status;
     }
     RuntimeTaskProgress {
         sources: source_progress,

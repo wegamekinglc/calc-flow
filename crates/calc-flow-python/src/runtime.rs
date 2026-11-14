@@ -8,7 +8,7 @@ use pyo3::{
     PyTraverseError, PyVisit,
     exceptions::PyRuntimeError,
     prelude::*,
-    types::{PyAny, PyDict},
+    types::{PyAny, PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple},
 };
 
 use crate::config::PythonRoot;
@@ -593,7 +593,93 @@ async fn finish_python_call(
     }
 }
 
+fn direct_json_sequence<'py>(
+    items: impl IntoIterator<Item = Bound<'py, PyAny>>,
+    depth: usize,
+) -> PyResult<Option<serde_json::Value>> {
+    let mut values = Vec::new();
+    for item in items {
+        let Some(value) = direct_python_json(&item, depth)? else {
+            return Ok(None);
+        };
+        values.push(value);
+    }
+    Ok(Some(serde_json::Value::Array(values)))
+}
+
+fn direct_json_dict<'py>(
+    items: impl IntoIterator<Item = (Bound<'py, PyAny>, Bound<'py, PyAny>)>,
+    depth: usize,
+) -> PyResult<Option<serde_json::Value>> {
+    let mut values = serde_json::Map::new();
+    for (key, value) in items {
+        let Ok(key) = key.extract::<String>() else {
+            return Ok(None);
+        };
+        let Some(value) = direct_python_json(&value, depth)? else {
+            return Ok(None);
+        };
+        if values.insert(key, value).is_some() {
+            return Ok(None);
+        }
+    }
+    Ok(Some(serde_json::Value::Object(values)))
+}
+
+fn direct_python_json(
+    value: &Bound<'_, PyAny>,
+    depth: usize,
+) -> PyResult<Option<serde_json::Value>> {
+    if depth > calc_flow::MAX_JSON_DEPTH {
+        return Ok(None);
+    }
+    if value.is_none() {
+        return Ok(Some(serde_json::Value::Null));
+    }
+    if value.is_instance_of::<PyBool>() {
+        return Ok(Some(serde_json::Value::Bool(value.extract::<bool>()?)));
+    }
+    if value.is_instance_of::<PyInt>() {
+        if let Ok(value) = value.extract::<i64>() {
+            return Ok(Some(serde_json::Value::Number(value.into())));
+        }
+        if let Ok(value) = value.extract::<u64>() {
+            return Ok(Some(serde_json::Value::Number(value.into())));
+        }
+        return Ok(None);
+    }
+    if value.is_instance_of::<PyFloat>() {
+        let Some(value) = serde_json::Number::from_f64(value.extract::<f64>()?) else {
+            return Ok(None);
+        };
+        return Ok(Some(serde_json::Value::Number(value)));
+    }
+    if value.is_instance_of::<PyString>() {
+        return Ok(Some(serde_json::Value::String(value.extract::<String>()?)));
+    }
+    if value.is_instance_of::<PyList>() {
+        return direct_json_sequence(value.cast::<PyList>()?.iter(), depth + 1);
+    }
+    if value.is_instance_of::<PyTuple>() {
+        return direct_json_sequence(value.cast::<PyTuple>()?.iter(), depth + 1);
+    }
+    if value.is_instance_of::<PyDict>() {
+        return direct_json_dict(value.cast::<PyDict>()?.iter(), depth + 1);
+    }
+    Ok(None)
+}
+
 pub(crate) fn python_json(
+    value: &Bound<'_, PyAny>,
+    label: &str,
+) -> calc_flow::Result<serde_json::Value> {
+    match direct_python_json(value, 0) {
+        Ok(Some(value)) => Ok(value),
+        Ok(None) | Err(_) => python_json_fallback(value, label),
+    }
+}
+
+fn python_json_fallback(
     value: &Bound<'_, PyAny>,
     label: &str,
 ) -> calc_flow::Result<serde_json::Value> {
@@ -1118,6 +1204,41 @@ asyncio.run(exercise())
             assert_eq!(
                 error.value(py).str().unwrap().extract::<String>().unwrap(),
                 "Python awaitable completion channel closed unexpectedly"
+            );
+        });
+    }
+
+    #[test]
+    fn python_json_preserves_nested_values() {
+        Python::initialize();
+        Python::attach(|py| {
+            let value = py
+                .eval(c"{'text': 'x', 'items': [1, True, None, 2.5]}", None, None)
+                .unwrap();
+            assert_eq!(
+                python_json(&value, "test").unwrap(),
+                serde_json::json!({"text": "x", "items": [1, true, null, 2.5]})
+            );
+        });
+    }
+
+    #[test]
+    fn python_json_rejects_nonfinite_floats() {
+        Python::initialize();
+        Python::attach(|py| {
+            let value = py.eval(c"float('nan')", None, None).unwrap();
+            assert!(python_json(&value, "test").is_err());
+        });
+    }
+
+    #[test]
+    fn python_json_uses_strict_fallback_for_nonstring_keys() {
+        Python::initialize();
+        Python::attach(|py| {
+            let value = py.eval(c"{1: {'items': [2]}}", None, None).unwrap();
+            assert_eq!(
+                python_json(&value, "test").unwrap(),
+                serde_json::json!({"1": {"items": [2]}})
             );
         });
     }

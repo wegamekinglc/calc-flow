@@ -1492,7 +1492,18 @@ impl StatusProjection {
             watermark: status
                 .progress
                 .as_ref()
-                .and_then(|progress| progress.current.aggregate_watermark),
+                .and_then(|progress| progress.current.aggregate_watermark)
+                .or_else(|| {
+                    if status.sources.len() == 1 {
+                        status
+                            .sources
+                            .values()
+                            .next()
+                            .and_then(|source| source.last_watermark)
+                    } else {
+                        None
+                    }
+                }),
             edges: self.project_edges(status),
             sources: self.project_sources(status),
             operators: Self::project_operators(status),

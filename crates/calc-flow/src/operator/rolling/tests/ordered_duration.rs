@@ -228,6 +228,68 @@ async fn test_checkpoint_disabled_small_batch_reuses_resident_numeric_state() {
 }
 
 #[tokio::test]
+async fn test_checkpoint_disabled_rows_mean_rejection_restores_full_window() {
+    struct Reject;
+    #[async_trait::async_trait]
+    impl StreamCollector for Reject {
+        async fn emit(&mut self, _port: &str, _batch: Batch) -> Result<()> {
+            Err(internal_error("expected row mean collector rejection"))
+        }
+    }
+
+    let spec = kernel_spec(json!([aggregate_output("mean", "price", "mean", 2)]));
+    let input = float64_fast_record(&[
+        (1, "a", 1, Some(1.0)),
+        (2, "a", 2, Some(2.0)),
+        (3, "a", 3, Some(3.0)),
+        (10, "a", 4, Some(10.0)),
+    ]);
+    let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    let (expected, _) = reference_output(&operator, &input);
+    let (job, store, mut output) = fixture(&operator);
+    let job = job.with_checkpointing(false);
+    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(0, 2)).await);
+    let mut emitted = close(&mut operator, &job, &store, &mut output, 2).await;
+    let prior = format!("{:?}", operator.state.typed_kernel_state);
+    let shapes = operator
+        .state
+        .typed_kernel_state
+        .as_deref()
+        .unwrap()
+        .numeric_queue_shapes_for_test();
+    let sequence = operator.state.next_output_sequence;
+    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(2, 2)).await);
+    let charge = operator.state.charge;
+    let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(2)));
+    let error = operator
+        .on_watermark(EventTime::from_micros(10), &context, &mut Reject)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("expected row mean collector rejection")
+    );
+    assert_eq!(format!("{:?}", operator.state.typed_kernel_state), prior);
+    assert_eq!(
+        operator
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .unwrap()
+            .numeric_queue_shapes_for_test(),
+        shapes
+    );
+    assert_eq!(operator.state.charge, charge);
+    assert_eq!(operator.state.next_output_sequence, sequence);
+    emitted.extend(close(&mut operator, &job, &store, &mut output, 10).await);
+    assert_eq!(
+        concat_batches(&expected.schema(), &emitted).unwrap(),
+        expected
+    );
+}
+
+#[tokio::test]
 async fn test_warm_direct_entities_skip_canonical_key_encoding() {
     let spec = kernel_spec(json!([duration_output("sum", "price", "sum", 6)]));
     let first = float64_fast_record(&[(1, "a", 1, Some(1.0)), (2, "b", 2, Some(2.0))]);

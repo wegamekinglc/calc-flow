@@ -129,6 +129,30 @@ async fn cpu_rolling_abandoned_eight_lanes_retain_scratch_and_input_until_settle
     assert!(owner.drain().await.is_empty());
 }
 
+#[tokio::test]
+async fn current_scope_remains_owned_until_post_callback_settlement() {
+    let owner = owner();
+    let task = owner.client(TaskId::new(3), "operator:rolling".into());
+    let cancellation = crate::CancellationToken::new();
+    let job = crate::StreamJobContext::new(7, "scope", crate::JsonMap::new(), None, cancellation);
+    {
+        let context =
+            crate::StreamOperatorContext::new(&job, "rolling", None).with_entity_work_task(&task);
+        let client = context.entity_work().expect("lazy entity-work client");
+        let scratch = ScratchPlan::large_test_plan();
+        let reservation = client.try_reserve(scratch);
+        assert!(matches!(reservation, ReservePair::Reserved(_)));
+        drop(reservation);
+        assert!(owner.active_bytes() > 0);
+    }
+    assert!(task.scope.lock().is_some());
+    task.settle_current_scope().await;
+    assert!(task.scope.lock().is_none());
+    assert_eq!(owner.active_bytes(), 0);
+    owner.close_admission();
+    assert!(owner.drain().await.is_empty());
+}
+
 struct ReleaseGate(Arc<Gate>);
 
 impl Drop for ReleaseGate {

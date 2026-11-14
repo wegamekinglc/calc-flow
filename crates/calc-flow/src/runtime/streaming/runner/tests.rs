@@ -4694,7 +4694,7 @@ async fn all_operators_enter_before_open_and_data_waits_for_handle_claim() {
         core.state.lock().launch_delivery,
         super::LaunchDeliveryState::ReadyUnclaimed
     );
-    assert_eq!(core.runtime_status.lock().tasks.snapshot().len(), 6);
+    assert_eq!(core.runtime_status.lock().tasks.snapshot().len(), 5);
     assert_eq!(polls.load(Ordering::SeqCst), 0);
     assert_eq!(processed.load(Ordering::SeqCst), 0);
 

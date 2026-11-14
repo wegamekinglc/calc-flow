@@ -3,10 +3,12 @@ use std::{any::Any, collections::BTreeMap, hint::black_box, sync::Arc};
 use async_trait::async_trait;
 use calc_flow::{
     Batch, BatchKind, BatchMetadata, BatchOperator, BatchOperatorContext, CalcFlowError,
-    CancellationToken, DataFusionConfig, DataFusionRuntime, EdgeBudget, EdgeCollector,
-    ExecutionOptions, ExpressionOperator, ExternalPayload, JsonMap, OperatorMetadata,
-    PipelineBuilder, Port, Result, StreamCollector, StreamJobContext, StreamMessage,
-    StreamOperator, StreamOperatorContext, UdfReference, UdfRegistry, canonical_json, edge_channel,
+    CancellationToken, Cursor, DataFusionConfig, DataFusionRuntime, EdgeBudget, EdgeCollector,
+    ExecutionOptions, ExpressionOperator, ExternalPayload, JsonMap, NativeWatermarkCapability,
+    OperatorMetadata, PipelineBuilder, Port, ReplayPositioning, Result, SinkBinding, SourceBinding,
+    SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema, StreamCollector,
+    StreamJobContext, StreamMessage, StreamOperator, StreamOperatorContext, StreamRequirements,
+    StreamSink, StreamingRunner, UdfReference, UdfRegistry, canonical_json, edge_channel,
 };
 use criterion::{Criterion, criterion_group, criterion_main};
 use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
@@ -210,6 +212,136 @@ fn encode_canonical_json(c: &mut Criterion) {
     c.bench_function("json/canonical_nested", |b| {
         b.iter(|| black_box(canonical_json(black_box(&value)).unwrap()));
     });
+}
+
+struct RunnerBenchSource {
+    input: tokio::sync::mpsc::Receiver<Batch>,
+    sequence: u64,
+}
+
+#[async_trait]
+impl calc_flow::StreamSource for RunnerBenchSource {
+    fn capabilities(&self) -> SourceCapabilities {
+        SourceCapabilities {
+            replay_positioning: ReplayPositioning::Unsupported,
+            delivery: SourceDeliveryCapability::Lossy,
+            max_batch_rows: 1,
+            max_batch_bytes: 1024,
+            schema: SourceSchema::DynamicOrUnknown,
+            native_watermarks: NativeWatermarkCapability::EmitsNative,
+        }
+    }
+
+    async fn open(&mut self, _cursor: Option<Cursor>) -> Result<()> {
+        Ok(())
+    }
+
+    async fn next(&mut self) -> Result<Option<SourceEvent>> {
+        let Some(batch) = self.input.recv().await else {
+            return Ok(None);
+        };
+        let cursor = Cursor::unbound(self.sequence.to_be_bytes().to_vec(), JsonMap::new())?;
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .expect("benchmark source sequence exhausted");
+        Ok(Some(SourceEvent::Data { batch, cursor }))
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        self.input.close();
+        Ok(())
+    }
+}
+
+struct RunnerBenchSink {
+    output: tokio::sync::mpsc::Sender<Batch>,
+}
+
+#[async_trait]
+impl StreamSink for RunnerBenchSink {
+    async fn open(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn write(&mut self, batch: &Batch) -> Result<()> {
+        self.output
+            .send(batch.clone())
+            .await
+            .map_err(|_| CalcFlowError::Internal {
+                message: "benchmark output receiver closed".into(),
+            })
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+fn stream_runner_single_input(c: &mut Criterion) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let plan = PipelineBuilder::new("single-input-runner")
+        .unwrap()
+        .add_node(
+            "project",
+            Box::new(
+                ExpressionOperator::new("project", "", vec!["value".into()], None, vec![]).unwrap(),
+            ),
+        )
+        .unwrap()
+        .compile_stream(
+            &UdfRegistry::new().snapshot(),
+            &StreamRequirements::default(),
+        )
+        .unwrap();
+    let (input_sender, input_receiver) = tokio::sync::mpsc::channel(1);
+    let (output_sender, output_receiver) = tokio::sync::mpsc::channel(1);
+    let output_receiver = tokio::sync::Mutex::new(output_receiver);
+    let runner = StreamingRunner::without_checkpoints(
+        plan,
+        BTreeMap::from([(
+            "input".into(),
+            SourceBinding::new(RunnerBenchSource {
+                input: input_receiver,
+                sequence: 0,
+            }),
+        )]),
+        BTreeMap::from([(
+            "output".into(),
+            vec![
+                SinkBinding::ordinary(
+                    "output",
+                    RunnerBenchSink {
+                        output: output_sender,
+                    },
+                )
+                .unwrap(),
+            ],
+        )]),
+    )
+    .unwrap();
+    let job = runtime.block_on(runner.start()).unwrap();
+    let input = Batch::table(
+        vec![
+            RecordBatch::try_from_iter(vec![(
+                "value",
+                Arc::new(Int64Array::from_iter_values([1])) as _,
+            )])
+            .unwrap(),
+        ],
+        BatchMetadata::default(),
+    )
+    .unwrap();
+    c.bench_function("stream/runner_single_input_1_row", |b| {
+        b.to_async(&runtime).iter(|| async {
+            input_sender.send(input.clone()).await.unwrap();
+            let output = output_receiver.lock().await.recv().await.unwrap();
+            assert_eq!(output.num_rows(), 1);
+            black_box(output)
+        });
+    });
+    drop(input_sender);
+    drop(runtime.block_on(job.shutdown()));
 }
 
 fn stream_message(rows: usize) -> StreamMessage {
@@ -430,6 +562,7 @@ criterion_group!(
     execute_expression,
     execute_external_passthrough,
     encode_canonical_json,
+    stream_runner_single_input,
     stream_channel_roundtrip,
     stream_unary_operator_overhead,
     stream_fanout,

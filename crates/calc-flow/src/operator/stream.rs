@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -345,6 +349,9 @@ pub struct StreamOperatorContext<'a> {
     late_metrics: Arc<dyn LateMetricSink>,
     rolling_metrics: Option<RollingMetricsRecorder>,
     entity_work: Option<ScopedEntityWorkClient>,
+    entity_work_task: Option<&'a crate::runtime::streaming::entity_work::TaskEntityWorkClient>,
+    entity_work_scope: OnceLock<crate::runtime::streaming::entity_work::CallbackWorkScope>,
+    entity_work_cache: OnceLock<ScopedEntityWorkClient>,
     task_id: Option<crate::runtime::streaming::gather_work::TaskId>,
     ingress_preparation: Option<&'a super::ingress::Preparation>,
 }
@@ -364,6 +371,9 @@ impl<'a> StreamOperatorContext<'a> {
             late_metrics: Arc::clone(&self.late_metrics),
             rolling_metrics: self.rolling_metrics.clone(),
             entity_work: self.entity_work.clone(),
+            entity_work_task: self.entity_work_task,
+            entity_work_scope: OnceLock::new(),
+            entity_work_cache: OnceLock::new(),
             task_id: self.task_id,
             ingress_preparation: self.ingress_preparation,
         }
@@ -384,6 +394,9 @@ impl<'a> StreamOperatorContext<'a> {
             late_metrics: Arc::new(LateMetricRecorder::default()),
             rolling_metrics: None,
             entity_work: None,
+            entity_work_task: None,
+            entity_work_scope: OnceLock::new(),
+            entity_work_cache: OnceLock::new(),
             task_id: None,
             ingress_preparation: None,
         }
@@ -405,6 +418,9 @@ impl<'a> StreamOperatorContext<'a> {
             late_metrics: Arc::new(LateMetricRecorder::default()),
             rolling_metrics: None,
             entity_work: None,
+            entity_work_task: None,
+            entity_work_scope: OnceLock::new(),
+            entity_work_cache: OnceLock::new(),
             task_id: None,
             ingress_preparation: None,
         }
@@ -427,6 +443,9 @@ impl<'a> StreamOperatorContext<'a> {
             late_metrics,
             rolling_metrics: None,
             entity_work: None,
+            entity_work_task: None,
+            entity_work_scope: OnceLock::new(),
+            entity_work_cache: OnceLock::new(),
             task_id: None,
             ingress_preparation: None,
         }
@@ -470,13 +489,31 @@ impl<'a> StreamOperatorContext<'a> {
             .client(operator.with_task(self.task_id))
     }
 
+    #[cfg(test)]
     pub(crate) fn with_entity_work(mut self, client: ScopedEntityWorkClient) -> Self {
         self.entity_work = Some(client);
         self
     }
 
+    pub(crate) fn with_entity_work_task(
+        mut self,
+        task: &'a crate::runtime::streaming::entity_work::TaskEntityWorkClient,
+    ) -> Self {
+        self.entity_work_task = Some(task);
+        self
+    }
+
     pub(crate) fn entity_work(&self) -> Option<&ScopedEntityWorkClient> {
-        self.entity_work.as_ref()
+        if let Some(client) = self.entity_work.as_ref() {
+            return Some(client);
+        }
+        if let Some(client) = self.entity_work_cache.get() {
+            return Some(client);
+        }
+        let task = self.entity_work_task?;
+        let scope = self.entity_work_scope.get_or_init(|| task.callback_scope());
+        let client = scope.context_client();
+        Some(self.entity_work_cache.get_or_init(|| client))
     }
 
     /// Returns the owning job's immutable context.

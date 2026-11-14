@@ -199,10 +199,9 @@ async fn run_graph(
                 .ingress_edges
                 .iter()
                 .map(|(name, edge)| {
-                    (
-                        name.clone(),
-                        OperatorIngress::new(edge.clone(), receivers.remove(edge).unwrap()),
-                    )
+                    let receiver = receivers.remove(edge).unwrap();
+                    let input = OperatorIngress::new(name.as_str(), edge.clone(), receiver);
+                    (name.clone(), input)
                 })
                 .collect(),
             outputs: node
@@ -223,7 +222,7 @@ async fn run_graph(
             checkpoint_capability: node.checkpoint_capability,
             context: context.for_node(&node.node_id).unwrap(),
             progress: OperatorProgress::default(),
-            metrics: MetricsRecorder::default(),
+            metrics: MetricsRecorder::default().operator(&node.node_id).unwrap(),
             entry_gate,
             entry_ack: entry.clone(),
             data_gate,
@@ -463,7 +462,7 @@ async fn test_late_runtime_collector_preflights_later_wide_chunk_without_state_o
         let context = StreamOperatorContext::new(&job, "roll", Some(EventTime::from_micros(10)))
             .with_output_budget(budget);
         let progress = OperatorProgress::default();
-        let metrics = MetricsRecorder::default();
+        let metrics = MetricsRecorder::default().operator("roll").unwrap();
         let mut output = ChannelStreamCollector::new(
             "roll",
             1,
@@ -545,7 +544,7 @@ async fn test_late_runtime_post_enqueue_counter_failure_preserves_error_and_forb
         let context = StreamOperatorContext::new(&job, "roll", Some(EventTime::from_micros(10)));
         let progress = OperatorProgress::default();
         progress.0.lock().fully_fanned_out_batches = u64::MAX;
-        let metrics = MetricsRecorder::default();
+        let metrics = MetricsRecorder::default().operator("roll").unwrap();
         let mut output = ChannelStreamCollector::new(
             "roll",
             1,
