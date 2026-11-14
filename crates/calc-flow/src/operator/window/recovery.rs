@@ -413,16 +413,17 @@ fn decode_accumulator_state(
                 AccumulatorValue::Max(scalar)
             }
         }
-        AggregateFunction::Avg => decode_average_state(
-            record,
-            value.as_ref(),
-            row,
-            column_index,
-            &compiled.input_type,
-            operator_id,
-            ordinal,
-            version,
-        )?,
+        AggregateFunction::Avg => {
+            let context = AverageDecodeContext {
+                record,
+                row,
+                column_index,
+                operator_id,
+                ordinal,
+                version,
+            };
+            decode_average_state(&context, value.as_ref(), &compiled.input_type)?
+        }
     };
     Ok((Some(decoded), column_index + width))
 }
@@ -449,65 +450,82 @@ fn float_compensation_at(
     float_value(&value).map_err(state_format)
 }
 
-/// Decode one average aggregate's sum column and its adjacent count column.
-#[allow(clippy::too_many_arguments, reason = "names every durable coordinate")]
-fn decode_average_state(
-    record: &RecordBatch,
-    value: &dyn Array,
+struct AverageDecodeContext<'a> {
+    record: &'a RecordBatch,
     row: usize,
     column_index: usize,
-    input_type: &DataType,
-    operator_id: &str,
+    operator_id: &'a str,
     ordinal: usize,
     version: u32,
+}
+
+fn decode_float_average_state(
+    context: &AverageDecodeContext<'_>,
+    value: &dyn Array,
+    count: u64,
+) -> Result<AccumulatorValue> {
+    let Some(ScalarValue::Float64(bits)) =
+        scalar_at(value, &DataType::Float64, context.row, context.operator_id)
+            .map_err(|error| state_format(error.to_string()))?
+    else {
+        return Err(state_format(format!(
+            "window average aggregate {} has invalid float state",
+            context.ordinal
+        )));
+    };
+    Ok(AccumulatorValue::FloatAverage {
+        sum: CompensatedSum {
+            sum: f64::from_bits(bits),
+            correction: if context.version >= WINDOW_SEGMENT_LAYOUT_VERSION {
+                float_compensation_at(
+                    context.record,
+                    context.row,
+                    context.column_index + 2,
+                    context.operator_id,
+                    context.ordinal,
+                )?
+            } else {
+                0.0
+            },
+        },
+        count,
+    })
+}
+
+/// Decode one average aggregate's sum column and its adjacent count column.
+fn decode_average_state(
+    context: &AverageDecodeContext<'_>,
+    value: &dyn Array,
+    input_type: &DataType,
 ) -> Result<AccumulatorValue> {
     let count_array = state_array::<UInt64Array>(
-        record,
-        column_index + 1,
-        &format!("_agg_{ordinal:04}_count"),
+        context.record,
+        context.column_index + 1,
+        &format!("_agg_{:04}_count", context.ordinal),
     )?;
-    if value.is_null(row) || count_array.is_null(row) {
+    if value.is_null(context.row) || count_array.is_null(context.row) {
         return Err(state_format(format!(
-            "window average aggregate {ordinal} has null state"
+            "window average aggregate {} has null state",
+            context.ordinal
         )));
     }
-    let count = count_array.value(row);
+    let count = count_array.value(context.row);
     Ok(match input_type {
         DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
-            let bytes = fixed_width_average_bytes(value, row, ordinal, "signed")?;
+            let bytes = fixed_width_average_bytes(value, context.row, context.ordinal, "signed")?;
             AccumulatorValue::SignedAverage {
                 sum: i128::from_be_bytes(bytes),
                 count,
             }
         }
         DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
-            let bytes = fixed_width_average_bytes(value, row, ordinal, "unsigned")?;
+            let bytes = fixed_width_average_bytes(value, context.row, context.ordinal, "unsigned")?;
             AccumulatorValue::UnsignedAverage {
                 sum: u128::from_be_bytes(bytes),
                 count,
             }
         }
-        DataType::Float32 | DataType::Float64 => {
-            let Some(ScalarValue::Float64(bits)) =
-                scalar_at(value, &DataType::Float64, row, operator_id)
-                    .map_err(|error| state_format(error.to_string()))?
-            else {
-                return Err(state_format(format!(
-                    "window average aggregate {ordinal} has invalid float state"
-                )));
-            };
-            AccumulatorValue::FloatAverage {
-                sum: CompensatedSum {
-                    sum: f64::from_bits(bits),
-                    correction: if version >= WINDOW_SEGMENT_LAYOUT_VERSION {
-                        float_compensation_at(record, row, column_index + 2, operator_id, ordinal)?
-                    } else {
-                        0.0
-                    },
-                },
-                count,
-            }
-        }
+        DataType::Float32 | DataType::Float64 => decode_float_average_state(context, value, count)?,
         _ => unreachable!("average input matrix validated at construction"),
     })
 }
