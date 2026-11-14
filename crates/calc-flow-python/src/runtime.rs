@@ -636,6 +636,18 @@ fn direct_json_int(value: &Bound<'_, PyAny>) -> Option<serde_json::Value> {
         .map(|value| serde_json::Value::Number(value.into()))
 }
 
+fn direct_json_float_or_string(value: &Bound<'_, PyAny>) -> PyResult<Option<serde_json::Value>> {
+    if value.is_instance_of::<PyFloat>() {
+        return Ok(
+            serde_json::Number::from_f64(value.extract::<f64>()?).map(serde_json::Value::Number)
+        );
+    }
+    if value.is_instance_of::<PyString>() {
+        return Ok(Some(serde_json::Value::String(value.extract::<String>()?)));
+    }
+    Ok(None)
+}
+
 fn direct_json_scalar(value: &Bound<'_, PyAny>) -> PyResult<Option<serde_json::Value>> {
     if value.is_none() {
         return Ok(Some(serde_json::Value::Null));
@@ -646,15 +658,7 @@ fn direct_json_scalar(value: &Bound<'_, PyAny>) -> PyResult<Option<serde_json::V
     if value.is_instance_of::<PyInt>() {
         return Ok(direct_json_int(value));
     }
-    if value.is_instance_of::<PyFloat>() {
-        return Ok(
-            serde_json::Number::from_f64(value.extract::<f64>()?).map(serde_json::Value::Number)
-        );
-    }
-    if value.is_instance_of::<PyString>() {
-        return Ok(Some(serde_json::Value::String(value.extract::<String>()?)));
-    }
-    Ok(None)
+    direct_json_float_or_string(value)
 }
 
 fn direct_json_container(
