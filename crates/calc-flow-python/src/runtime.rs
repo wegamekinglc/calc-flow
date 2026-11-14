@@ -626,13 +626,17 @@ fn direct_json_dict<'py>(
     Ok(Some(serde_json::Value::Object(values)))
 }
 
-fn direct_python_json(
-    value: &Bound<'_, PyAny>,
-    depth: usize,
-) -> PyResult<Option<serde_json::Value>> {
-    if depth > calc_flow::MAX_JSON_DEPTH {
-        return Ok(None);
+fn direct_json_int(value: &Bound<'_, PyAny>) -> Option<serde_json::Value> {
+    if let Ok(value) = value.extract::<i64>() {
+        return Some(serde_json::Value::Number(value.into()));
     }
+    value
+        .extract::<u64>()
+        .ok()
+        .map(|value| serde_json::Value::Number(value.into()))
+}
+
+fn direct_json_scalar(value: &Bound<'_, PyAny>) -> PyResult<Option<serde_json::Value>> {
     if value.is_none() {
         return Ok(Some(serde_json::Value::Null));
     }
@@ -640,23 +644,23 @@ fn direct_python_json(
         return Ok(Some(serde_json::Value::Bool(value.extract::<bool>()?)));
     }
     if value.is_instance_of::<PyInt>() {
-        if let Ok(value) = value.extract::<i64>() {
-            return Ok(Some(serde_json::Value::Number(value.into())));
-        }
-        if let Ok(value) = value.extract::<u64>() {
-            return Ok(Some(serde_json::Value::Number(value.into())));
-        }
-        return Ok(None);
+        return Ok(direct_json_int(value));
     }
     if value.is_instance_of::<PyFloat>() {
-        let Some(value) = serde_json::Number::from_f64(value.extract::<f64>()?) else {
-            return Ok(None);
-        };
-        return Ok(Some(serde_json::Value::Number(value)));
+        return Ok(
+            serde_json::Number::from_f64(value.extract::<f64>()?).map(serde_json::Value::Number)
+        );
     }
     if value.is_instance_of::<PyString>() {
         return Ok(Some(serde_json::Value::String(value.extract::<String>()?)));
     }
+    Ok(None)
+}
+
+fn direct_json_container(
+    value: &Bound<'_, PyAny>,
+    depth: usize,
+) -> PyResult<Option<serde_json::Value>> {
     if value.is_instance_of::<PyList>() {
         return direct_json_sequence(value.cast::<PyList>()?.iter(), depth + 1);
     }
@@ -667,6 +671,19 @@ fn direct_python_json(
         return direct_json_dict(value.cast::<PyDict>()?.iter(), depth + 1);
     }
     Ok(None)
+}
+
+fn direct_python_json(
+    value: &Bound<'_, PyAny>,
+    depth: usize,
+) -> PyResult<Option<serde_json::Value>> {
+    if depth > calc_flow::MAX_JSON_DEPTH {
+        return Ok(None);
+    }
+    if let Some(value) = direct_json_scalar(value)? {
+        return Ok(Some(value));
+    }
+    direct_json_container(value, depth)
 }
 
 pub(crate) fn python_json(
