@@ -174,10 +174,10 @@ jobs:
     needs: [prepare, build]
     runs-on: ubuntu-latest
     # The complete 10M engine inventory needs six hours with paired 1T/4T cases.
-    # The Rust shard nears four hours when its build cache misses and both sides
-    # compile from cold dependencies before four measured blocks.
+    # Rust also needs six hours for cold builds and four measured blocks; measured
+    # multi-minute host stalls exhausted the former four-hour budget.
     # Include dependency setup and artifact retention in those job budgets.
-    timeout-minutes: ${{ matrix.id == 'engines-10000000' && 360 || matrix.id == 'rust' && 240 || 180 }}
+    timeout-minutes: ${{ matrix.id == 'engines-10000000' && 360 || matrix.id == 'rust' && 360 || 180 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}

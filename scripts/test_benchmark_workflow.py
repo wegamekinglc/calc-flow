@@ -477,7 +477,7 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         )
         self.assertIn(
             "timeout-minutes: ${{ matrix.id == 'engines-10000000' && 360 || "
-            "matrix.id == 'rust' && 240 || 180 }}",
+            "matrix.id == 'rust' && 360 || 180 }}",
             suite,
         )
 
