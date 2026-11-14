@@ -259,6 +259,20 @@
       "candidate_sha256": "3ccb111b826fcfed78f2dbffa47d4aa0e2a8da8020a3f9f55f22cf0dad918293",
       "reason": "Exact composed migration from the retained dependency-upgrade core workload anchor through the existing rolling declarations and PR #608: preserve all previously declared cases and add the small multi-group Duration SUM plus Rows20 SUM and dense warm-batch Duration SUM cases with independent integer oracles. New cases are additional coverage, not historical timing evidence.",
       "reference": "Retained dependency-migration core workload anchor and PR #608"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "3ccb111b826fcfed78f2dbffa47d4aa0e2a8da8020a3f9f55f22cf0dad918293",
+      "candidate_sha256": "5886be98a0ecc09f7812b3175ba9896f9e5845c748b8e9eb8a7927cc3bff4897",
+      "reason": "Add one exact-shape one-row single-input complete-runner case covering source cursor, expression, sink and owning-job dispatch. Existing core case declarations, fixtures, samples and timing boundaries are unchanged; the new case is additional coverage, not historical timing evidence.",
+      "reference": "PR #611; Complete benchmark suite run 43603027990 preflight diagnosis"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "1977e38423122a9a4be36d56317cd905d64dd2fb95e37005e05669f436d47c98",
+      "candidate_sha256": "5886be98a0ecc09f7812b3175ba9896f9e5845c748b8e9eb8a7927cc3bff4897",
+      "reason": "Exact composed migration from the retained dependency-upgrade core workload anchor through PR #611: preserve all previously declared cases and add the one-row single-input complete-runner case. Existing fixtures, samples and timing boundaries are unchanged; new coverage has no historical timing equivalence.",
+      "reference": "Retained dependency-migration core workload anchor and PR #611"
     }
   ]
 }
