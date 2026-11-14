@@ -510,24 +510,26 @@ fn decode_average_state(
         )));
     }
     let count = count_array.value(context.row);
-    Ok(match input_type {
+    match input_type {
         DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
-            let bytes = fixed_width_average_bytes(value, context.row, context.ordinal, "signed")?;
-            AccumulatorValue::SignedAverage {
-                sum: i128::from_be_bytes(bytes),
-                count,
-            }
+            fixed_width_average_bytes(value, context.row, context.ordinal, "signed").map(|bytes| {
+                AccumulatorValue::SignedAverage {
+                    sum: i128::from_be_bytes(bytes),
+                    count,
+                }
+            })
         }
         DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
-            let bytes = fixed_width_average_bytes(value, context.row, context.ordinal, "unsigned")?;
-            AccumulatorValue::UnsignedAverage {
-                sum: u128::from_be_bytes(bytes),
-                count,
-            }
+            fixed_width_average_bytes(value, context.row, context.ordinal, "unsigned").map(
+                |bytes| AccumulatorValue::UnsignedAverage {
+                    sum: u128::from_be_bytes(bytes),
+                    count,
+                },
+            )
         }
-        DataType::Float32 | DataType::Float64 => decode_float_average_state(context, value, count)?,
+        DataType::Float32 | DataType::Float64 => decode_float_average_state(context, value, count),
         _ => unreachable!("average input matrix validated at construction"),
-    })
+    }
 }
 
 /// Read one 16-byte big-endian average sum from a fixed-size binary column.
