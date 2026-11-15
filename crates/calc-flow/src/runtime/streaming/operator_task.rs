@@ -51,6 +51,7 @@ use super::{
     supervisor::{PreparedPair, TaskSupervisor},
 };
 
+pub(in crate::runtime::streaming) mod caller_driven;
 mod ingress_admission;
 pub(in crate::runtime::streaming) mod join_checkpoint_credit;
 

@@ -1581,7 +1581,7 @@ fn invalid_shape_id(kind: ComponentKind, message: &str) -> CalcFlowError {
     CalcFlowError::Streaming(projection::validation_error(kind, None, message.into()))
 }
 
-fn allocate_job_id() -> Result<u64> {
+pub(crate) fn allocate_job_id() -> Result<u64> {
     NEXT_JOB_ID
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
             value.checked_add(1)

@@ -3295,7 +3295,7 @@ fn create_runtime_edges(
     Ok(channels)
 }
 
-fn take_node_ingresses(
+pub(super) fn take_node_ingresses(
     node: &RuntimeStreamNode,
     receivers: &mut BTreeMap<String, OperatorEdgeReceiver>,
 ) -> crate::Result<BTreeMap<String, OperatorIngress>> {
@@ -3318,7 +3318,7 @@ fn take_node_ingresses(
         .collect()
 }
 
-fn take_node_outputs(
+pub(super) fn take_node_outputs(
     node: &RuntimeStreamNode,
     senders: &mut BTreeMap<String, OperatorEdgeSender>,
 ) -> crate::Result<BTreeMap<String, Vec<OperatorEdgeSender>>> {

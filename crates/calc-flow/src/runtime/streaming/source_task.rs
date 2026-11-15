@@ -1903,7 +1903,7 @@ async fn process_source_data(
     Ok(SourceLoopStep::Continue)
 }
 
-fn sequenced_source_message(
+pub(super) fn sequenced_source_message(
     binding_id: &str,
     next_sequence: Option<u64>,
     batch: &Batch,

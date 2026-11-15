@@ -1,0 +1,499 @@
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::{Arc, Mutex},
+};
+
+use datafusion::arrow::{
+    array::{
+        ArrayRef, Float64Array, StringArray, TimestampMicrosecondArray, TimestampNanosecondArray,
+        UInt64Array,
+    },
+    datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
+    record_batch::RecordBatch,
+    util::display::{ArrayFormatter, FormatOptions},
+};
+use serde_json::{Value, json};
+
+use super::{SessionWatermark, StreamSession};
+use crate::runtime::streaming::progress::{
+    GeneratedWatermarkState,
+    prepare::{ArrowTimestampUnit, ResolvedEventTimeColumn},
+};
+use crate::{
+    Batch, BatchKind, BatchMetadata, CalcFlowError, Cursor, Edge, EventTime, ExpressionOperator,
+    JobState, JsonMap, NativeWatermarkCapability, OperatorMetadata, PipelineBuilder, Port,
+    PortEndpoint, ReplayPositioning, RollingOperator, RollingSpec, SinkBinding, SourceBinding,
+    SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema, StreamExecutionPlan,
+    StreamRequirements, StreamRuntimeConfig, StreamSink, StreamSource, StreamingRunner,
+    UdfRegistry, WatermarkPolicy,
+};
+
+type Row = (i64, &'static str, u64, f64);
+
+fn input_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            false,
+        ),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("sequence", DataType::UInt64, false),
+        Field::new("price", DataType::Float64, false),
+    ]))
+}
+
+fn input_batch(rows: &[Row]) -> Batch {
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(
+            TimestampMicrosecondArray::from_iter_values(rows.iter().map(|row| row.0))
+                .with_timezone("UTC"),
+        ),
+        Arc::new(StringArray::from_iter_values(rows.iter().map(|row| row.1))),
+        Arc::new(UInt64Array::from_iter_values(rows.iter().map(|row| row.2))),
+        Arc::new(Float64Array::from_iter_values(rows.iter().map(|row| row.3))),
+    ];
+    Batch::table(
+        vec![RecordBatch::try_new(input_schema(), columns).unwrap()],
+        BatchMetadata::default(),
+    )
+    .unwrap()
+}
+
+fn error_policy() -> Value {
+    json!({"kind": "error", "scope": "envelope"})
+}
+
+fn rolling_spec(late_policy: Value) -> RollingSpec {
+    serde_json::from_value(json!({
+        "configuration_version": 1, "state_layout_version": 1,
+        "partition_by": ["symbol"], "event_time": "ts", "sequence_by": ["sequence"],
+        "outputs": [{
+            "kind": "mean", "primitive_version": 1, "input": "price", "output": "price_mean",
+            "frame": {"kind": "rows", "size": 2}, "min_periods": 1,
+        }],
+        "allowed_lateness_micros": 0, "late_policy": late_policy,
+        "value_policy": "stateful_numeric_v1",
+    }))
+    .unwrap()
+}
+
+fn rolling(node_id: &str, late_policy: Value) -> RollingOperator {
+    RollingOperator::new(node_id, input_schema(), rolling_spec(late_policy)).unwrap()
+}
+
+fn compile(builder: PipelineBuilder) -> StreamExecutionPlan {
+    builder
+        .compile_stream(
+            &UdfRegistry::new().snapshot(),
+            &StreamRequirements::default(),
+        )
+        .unwrap()
+}
+
+fn connect(
+    builder: PipelineBuilder,
+    source: (&str, &str),
+    target: (&str, &str),
+) -> PipelineBuilder {
+    builder
+        .connect(Edge::new(
+            PortEndpoint::new(source.0, source.1).unwrap(),
+            PortEndpoint::new(target.0, target.1).unwrap(),
+        ))
+        .unwrap()
+}
+
+/// An exact projection of rolling output columns `ts, symbol, price_mean`.
+fn projection(node_id: &str, rolled: &SchemaRef) -> ExpressionOperator {
+    let projected = Arc::new(rolled.project(&[0, 1, 4]).unwrap());
+    ExpressionOperator::new(
+        node_id,
+        "",
+        vec!["ts".into(), "symbol".into(), "price_mean".into()],
+        None,
+        vec![],
+    )
+    .unwrap()
+    .with_ports(
+        Port::with_schema_ref("input", BatchKind::Table, true, Some(Arc::clone(rolled))).unwrap(),
+        Port::with_schema_ref("output", BatchKind::Table, true, Some(projected)).unwrap(),
+    )
+    .unwrap()
+}
+
+fn rolling_projection_plan() -> StreamExecutionPlan {
+    let rolling = rolling("rolling", error_policy());
+    let rolled = rolling.output_ports()[0].schema().unwrap().clone();
+    let builder = PipelineBuilder::new("session")
+        .unwrap()
+        .add_node("rolling", rolling)
+        .unwrap()
+        .add_node("project", Box::new(projection("project", &rolled)))
+        .unwrap();
+    compile(connect(
+        builder,
+        ("rolling", "output"),
+        ("project", "input"),
+    ))
+}
+
+fn session_config() -> StreamRuntimeConfig {
+    StreamRuntimeConfig {
+        checkpointing: false,
+        ..StreamRuntimeConfig::default()
+    }
+}
+
+fn open_session(
+    plan: StreamExecutionPlan,
+    watermarks: BTreeMap<String, SessionWatermark>,
+) -> StreamSession {
+    StreamSession::new(plan, &session_config(), watermarks).unwrap()
+}
+
+fn micros(value: i64) -> EventTime {
+    EventTime::from_micros(value)
+}
+
+/// Renders each row as `column|column|...` in emission order.
+fn rendered_rows(batches: &[Batch]) -> Vec<String> {
+    let options = FormatOptions::default();
+    let mut rows = Vec::new();
+    for batch in batches {
+        for record in batch.table_payload().unwrap().batches() {
+            let formatters = record
+                .columns()
+                .iter()
+                .map(|column| ArrayFormatter::try_new(column.as_ref(), &options).unwrap())
+                .collect::<Vec<_>>();
+            for row in 0..record.num_rows() {
+                rows.push(
+                    formatters
+                        .iter()
+                        .map(|formatter| formatter.value(row).to_string())
+                        .collect::<Vec<_>>()
+                        .join("|"),
+                );
+            }
+        }
+    }
+    rows
+}
+
+struct ScriptedSource(VecDeque<SourceEvent>);
+
+#[async_trait::async_trait]
+impl StreamSource for ScriptedSource {
+    fn capabilities(&self) -> SourceCapabilities {
+        SourceCapabilities {
+            replay_positioning: ReplayPositioning::ExactPauseReportAndSeek,
+            delivery: SourceDeliveryCapability::Lossless,
+            max_batch_rows: 1_024,
+            max_batch_bytes: 1 << 20,
+            schema: SourceSchema::DynamicOrUnknown,
+            native_watermarks: NativeWatermarkCapability::EmitsNative,
+        }
+    }
+
+    async fn open(&mut self, _cursor: Option<Cursor>) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn next(&mut self) -> crate::Result<Option<SourceEvent>> {
+        Ok(self.0.pop_front())
+    }
+
+    async fn close(&mut self) -> crate::Result<()> {
+        Ok(())
+    }
+}
+
+struct CollectingSink(Arc<Mutex<Vec<Batch>>>);
+
+#[async_trait::async_trait]
+impl StreamSink for CollectingSink {
+    async fn open(&mut self) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn write(&mut self, batch: &Batch) -> crate::Result<()> {
+        self.0.lock().unwrap().push(batch.clone());
+        Ok(())
+    }
+
+    async fn close(&mut self) -> crate::Result<()> {
+        Ok(())
+    }
+}
+
+fn data_event(rows: &[Row], offset: usize) -> SourceEvent {
+    SourceEvent::Data {
+        batch: input_batch(rows),
+        cursor: Cursor::unbound(offset.to_be_bytes().to_vec(), JsonMap::new()).unwrap(),
+    }
+}
+
+/// Runs the same plan through a checkpoint-off `StreamingRunner` (the oracle).
+fn runner_outputs(
+    plan: StreamExecutionPlan,
+    events: Vec<SourceEvent>,
+    policy: WatermarkPolicy,
+) -> BTreeMap<String, Vec<Batch>> {
+    let source_id = plan.source_binding_ids()[0].to_owned();
+    let collected = plan
+        .sink_binding_ids()
+        .into_iter()
+        .map(|output| (output.to_owned(), Arc::<Mutex<Vec<Batch>>>::default()))
+        .collect::<BTreeMap<_, _>>();
+    let sinks = collected
+        .iter()
+        .enumerate()
+        .map(|(index, (output, batches))| {
+            let sink = CollectingSink(Arc::clone(batches));
+            let binding = SinkBinding::ordinary(&format!("sink_{index}"), sink).unwrap();
+            (output.clone(), vec![binding])
+        })
+        .collect();
+    let source = SourceBinding::new(ScriptedSource(events.into())).with_watermark_policy(policy);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let outcome = runtime.block_on(async {
+        StreamingRunner::without_checkpoints(plan, BTreeMap::from([(source_id, source)]), sinks)
+            .unwrap()
+            .start()
+            .await
+            .unwrap()
+            .wait()
+            .await
+    });
+    assert_eq!(outcome.state, JobState::Completed, "{outcome:?}");
+    collected
+        .into_iter()
+        .map(|(output, batches)| (output, std::mem::take(&mut *batches.lock().unwrap())))
+        .collect()
+}
+
+/// Explicit-watermark pushes and the equivalent source-provided runner events.
+fn explicit_pushes() -> Vec<(Vec<Row>, i64)> {
+    vec![
+        (vec![(10, "a", 0, 1.0), (10, "b", 1, 2.0)], 10),
+        (vec![(11, "a", 2, 3.0)], 11),
+        (vec![(12, "b", 3, 4.0), (13, "a", 4, 5.0)], 12),
+    ]
+}
+
+fn explicit_events(pushes: &[(Vec<Row>, i64)]) -> Vec<SourceEvent> {
+    pushes
+        .iter()
+        .enumerate()
+        .flat_map(|(offset, (rows, watermark))| {
+            [
+                data_event(rows, offset),
+                SourceEvent::Watermark(micros(*watermark)),
+            ]
+        })
+        .collect()
+}
+
+#[test]
+fn test_rolling_projection_with_explicit_watermarks_matches_runner() {
+    let pushes = explicit_pushes();
+    let mut session = open_session(rolling_projection_plan(), BTreeMap::new());
+    let input = session.input_ids()[0].to_owned();
+    let output = session.output_ids()[0].to_owned();
+    let mut rows = Vec::new();
+    let mut emitted_per_push = Vec::new();
+    for (batch_rows, watermark) in &pushes {
+        let pushed = session
+            .push(&input, input_batch(batch_rows), Some(micros(*watermark)))
+            .unwrap();
+        let pushed = rendered_rows(pushed.batches(&output));
+        emitted_per_push.push(pushed.len());
+        rows.extend(pushed);
+    }
+    let finished = session.finish().unwrap();
+    rows.extend(rendered_rows(finished.batches(&output)));
+
+    let expected = runner_outputs(
+        rolling_projection_plan(),
+        explicit_events(&pushes),
+        WatermarkPolicy::SourceProvided,
+    );
+    assert_eq!(emitted_per_push, [2, 1, 1]);
+    assert_eq!(rows.len(), 5);
+    assert_eq!(rows, rendered_rows(&expected[&output]));
+}
+
+fn ordered(input: &str) -> BTreeMap<String, SessionWatermark> {
+    BTreeMap::from([(
+        input.to_owned(),
+        SessionWatermark::Ordered {
+            event_time_column: "ts".into(),
+        },
+    )])
+}
+
+fn source_id(plan: &StreamExecutionPlan) -> String {
+    plan.source_binding_ids()[0].to_owned()
+}
+
+fn ordered_session() -> (StreamSession, String, String) {
+    let plan = rolling_projection_plan();
+    let input = source_id(&plan);
+    let session = open_session(plan, ordered(&input));
+    let output = session.output_ids()[0].to_owned();
+    (session, input, output)
+}
+
+#[test]
+fn test_ordered_watermark_keeps_latest_timestamp_open_until_later_push() {
+    let (mut session, input, output) = ordered_session();
+    let first = session
+        .push(
+            &input,
+            input_batch(&[(10, "a", 0, 1.0), (10, "b", 1, 2.0)]),
+            None,
+        )
+        .unwrap();
+    assert!(first.is_empty());
+    let second = session
+        .push(&input, input_batch(&[(11, "a", 2, 3.0)]), None)
+        .unwrap();
+    assert_eq!(rendered_rows(second.batches(&output)).len(), 2);
+    let finished = session.finish().unwrap();
+    assert_eq!(
+        rendered_rows(finished.batches(&output)),
+        ["1970-01-01T00:00:00.000011Z|a|2.0"]
+    );
+
+    let (mut session, input, output) = ordered_session();
+    assert!(
+        session
+            .push(&input, input_batch(&[(10, "a", 0, 1.0)]), None)
+            .unwrap()
+            .is_empty()
+    );
+    let advanced = session.advance(&input, micros(10)).unwrap();
+    assert_eq!(
+        rendered_rows(advanced.batches(&output)),
+        ["1970-01-01T00:00:00.000010Z|a|1.0"]
+    );
+}
+
+#[test]
+fn test_ordered_rejects_row_at_explicit_watermark_and_stays_usable() {
+    let (mut session, input, output) = ordered_session();
+    let closed = session
+        .push(&input, input_batch(&[(10, "a", 0, 1.0)]), Some(micros(10)))
+        .unwrap();
+    assert_eq!(rendered_rows(closed.batches(&output)).len(), 1);
+    let error = session
+        .push(&input, input_batch(&[(10, "a", 1, 2.0)]), None)
+        .unwrap_err();
+    assert!(
+        matches!(&error, CalcFlowError::InvalidArgument { field, .. }
+            if field == &format!("session.inputs.{input}.event_time")),
+        "{error:?}"
+    );
+    assert!(
+        session
+            .push(&input, input_batch(&[(11, "a", 2, 3.0)]), None)
+            .unwrap()
+            .is_empty()
+    );
+    let finished = session.finish().unwrap();
+    assert_eq!(
+        rendered_rows(finished.batches(&output)),
+        ["1970-01-01T00:00:00.000011Z|a|2.0"]
+    );
+}
+
+fn nanosecond_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+            true,
+        ),
+        Field::new("value", DataType::Float64, false),
+    ]))
+}
+
+fn nanosecond_batch(times: &[Option<i64>]) -> Batch {
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(TimestampNanosecondArray::from(times.to_vec()).with_timezone("UTC")),
+        Arc::new(Float64Array::from_iter_values(times.iter().map(|_| 1.0))),
+    ];
+    Batch::table(
+        vec![RecordBatch::try_new(nanosecond_schema(), columns).unwrap()],
+        BatchMetadata::default(),
+    )
+    .unwrap()
+}
+
+/// A pass-through exact projection over `schema`'s columns.
+fn pass_through_plan(schema: &SchemaRef) -> StreamExecutionPlan {
+    let columns = schema
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect();
+    let operator = ExpressionOperator::new("pass", "", columns, None, vec![])
+        .unwrap()
+        .with_ports(
+            Port::with_schema_ref("input", BatchKind::Table, true, Some(Arc::clone(schema)))
+                .unwrap(),
+            Port::with_schema_ref("output", BatchKind::Table, true, Some(Arc::clone(schema)))
+                .unwrap(),
+        )
+        .unwrap();
+    compile(
+        PipelineBuilder::new("pass")
+            .unwrap()
+            .add_node("pass", Box::new(operator))
+            .unwrap(),
+    )
+}
+
+#[test]
+fn test_bounded_out_of_orderness_nanoseconds_matches_generated_watermark_state() {
+    let plan = pass_through_plan(&nanosecond_schema());
+    let input = source_id(&plan);
+    let delay = std::time::Duration::from_nanos(1_500);
+    let mut session = open_session(
+        plan,
+        BTreeMap::from([(
+            input.clone(),
+            SessionWatermark::BoundedOutOfOrderness {
+                event_time_column: "ts".into(),
+                max_out_of_orderness: delay,
+            },
+        )]),
+    );
+    let mut oracle = GeneratedWatermarkState::new(
+        ResolvedEventTimeColumn {
+            name: "ts".into(),
+            index: 0,
+            unit: ArrowTimestampUnit::Nanosecond,
+        },
+        delay,
+    );
+    let mut expected = None;
+    for times in [
+        vec![Some(5_000), Some(2_000)],
+        vec![Some(9_999), None],
+        vec![Some(3_000)],
+        vec![],
+        vec![Some(1_000_000_123)],
+    ] {
+        let batch = nanosecond_batch(&times);
+        session.push(&input, batch.clone(), None).unwrap();
+        oracle.observe_batch(&batch, &input).unwrap();
+        if let Some(watermark) = oracle.on_timer(&input).unwrap() {
+            expected = Some(watermark);
+        }
+        assert_eq!(session.watermark_for_test(), expected, "{times:?}");
+    }
+    // (1_000_000_123 ns - 1_500 ns).div_euclid(1_000)
+    assert_eq!(expected, Some(micros(999_998)));
+}

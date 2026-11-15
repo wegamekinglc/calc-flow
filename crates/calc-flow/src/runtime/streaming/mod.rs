@@ -51,6 +51,7 @@ mod registry;
     reason = "the internal runner is owned exclusively by the public one-shot facade"
 )]
 pub(crate) mod runner;
+mod session;
 #[allow(
     dead_code,
     reason = "ordinary sink tasks are exercised through public sink bindings"

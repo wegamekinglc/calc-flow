@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, num::NonZeroUsize, sync::Arc, time::Duration};
 
-use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
+use datafusion::arrow::datatypes::{DataType, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::ipc::writer::{DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -486,6 +486,16 @@ fn resolve_event_time(
             message: "generated watermarks require a statically known Arrow schema".into(),
         });
     };
+    resolve_event_time_column(path, schema, column)
+}
+
+/// Resolves a generated-watermark event-time column in a known schema;
+/// `path` names the column field in errors.
+pub(crate) fn resolve_event_time_column(
+    path: String,
+    schema: &Schema,
+    column: &Arc<str>,
+) -> Result<ResolvedEventTimeColumn> {
     let (index, field) = schema
         .fields()
         .iter()

@@ -1,10 +1,11 @@
-use std::{future::poll_fn, sync::Arc, task::Poll};
+use std::{collections::VecDeque, future::poll_fn, sync::Arc, task::Poll};
 
 use futures::task::AtomicWaker;
+use parking_lot::Mutex;
 
 use super::{
-    ChannelMetrics, EdgeReceiver, EdgeSender, StreamMessage,
-    edge_queue::{Dequeue, EdgeQueueCore},
+    ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, StreamMessage,
+    edge_queue::{Dequeue, EdgeQueueCore, reject_oversize},
     metrics::MetricsRecorder,
 };
 use crate::{
@@ -118,14 +119,72 @@ impl Drop for LocalEdgeOwner {
     }
 }
 
+/// One caller-drained FIFO between `StreamSession` operators. It has no
+/// capacity backpressure: a session call empties every queue before it returns.
+struct SessionQueue {
+    edge: String,
+    budget: EdgeBudget,
+    queue: Mutex<VecDeque<StreamMessage>>,
+}
+
+pub(crate) struct SessionEdgeSender(Arc<SessionQueue>);
+pub(crate) struct SessionEdgeReceiver(Arc<SessionQueue>);
+
+pub(super) fn session_edge(
+    edge: String,
+    budget: EdgeBudget,
+) -> Result<(SessionEdgeSender, SessionEdgeReceiver)> {
+    if edge.is_empty() {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "edge".into(),
+            message: "must not be empty".into(),
+        });
+    }
+    EdgeBudget::new(budget.max_rows, budget.max_bytes)?;
+    let shared = Arc::new(SessionQueue {
+        edge,
+        budget,
+        queue: Mutex::new(VecDeque::new()),
+    });
+    Ok((
+        SessionEdgeSender(Arc::clone(&shared)),
+        SessionEdgeReceiver(shared),
+    ))
+}
+
+impl SessionEdgeSender {
+    pub(super) fn validate_message(&self, message: &StreamMessage) -> Result<()> {
+        reject_oversize(
+            &self.0.edge,
+            self.0.budget,
+            &EnvelopeCost::of_message(message)?,
+        )
+    }
+
+    /// Appends after the runtime edges' oversize rule; never waits.
+    pub(super) fn push(&self, message: StreamMessage) -> Result<()> {
+        self.validate_message(&message)?;
+        self.0.queue.lock().push_back(message);
+        Ok(())
+    }
+}
+
+impl SessionEdgeReceiver {
+    pub(super) fn try_recv(&self) -> Option<StreamMessage> {
+        self.0.queue.lock().pop_front()
+    }
+}
+
 pub(crate) enum OperatorEdgeSender {
     Physical(EdgeSender),
     Local(LocalEdgeSender),
+    Session(SessionEdgeSender),
 }
 
 pub(crate) enum OperatorEdgeReceiver {
     Physical(EdgeReceiver),
     Local(LocalEdgeReceiver),
+    Session(SessionEdgeReceiver),
 }
 
 impl From<EdgeSender> for OperatorEdgeSender {
@@ -145,6 +204,7 @@ impl OperatorEdgeSender {
         match self {
             Self::Physical(sender) => sender.edge(),
             Self::Local(sender) => &sender.0.core.edge,
+            Self::Session(sender) => &sender.0.edge,
         }
     }
 
@@ -152,6 +212,7 @@ impl OperatorEdgeSender {
         match self {
             Self::Physical(sender) => sender.budget(),
             Self::Local(sender) => sender.0.core.budget,
+            Self::Session(sender) => sender.0.budget,
         }
     }
 
@@ -159,6 +220,7 @@ impl OperatorEdgeSender {
         match self {
             Self::Physical(sender) => sender.validate_message(message),
             Self::Local(sender) => sender.0.core.message_cost(message).map(|_| ()),
+            Self::Session(sender) => sender.validate_message(message),
         }
     }
 
@@ -174,6 +236,7 @@ impl OperatorEdgeSender {
         match self {
             Self::Physical(sender) => sender.send_observed(message, observation).await,
             Self::Local(sender) => sender.send_observed(message, observation).await,
+            Self::Session(sender) => sender.push(message),
         }
     }
 
@@ -184,6 +247,18 @@ impl OperatorEdgeSender {
             Self::Local(_) => Err(CalcFlowError::Internal {
                 message: format!("local edge {edge:?} cannot be a source boundary"),
             }),
+            Self::Session(_) => Err(CalcFlowError::Internal {
+                message: format!("session edge {edge:?} cannot be a runtime source boundary"),
+            }),
+        }
+    }
+
+    pub(crate) fn into_session(self) -> Result<SessionEdgeSender> {
+        match self {
+            Self::Session(sender) => Ok(sender),
+            other => Err(CalcFlowError::Internal {
+                message: format!("edge {:?} is not a session edge", other.edge()),
+            }),
         }
     }
 }
@@ -193,6 +268,7 @@ impl OperatorEdgeReceiver {
         match self {
             Self::Physical(receiver) => receiver.edge(),
             Self::Local(receiver) => &receiver.0.core.edge,
+            Self::Session(receiver) => &receiver.0.edge,
         }
     }
 
@@ -200,13 +276,29 @@ impl OperatorEdgeReceiver {
         match self {
             Self::Physical(receiver) => receiver.metrics(),
             Self::Local(receiver) => receiver.0.core.metrics(),
+            Self::Session(receiver) => ChannelMetrics {
+                queue_depth: receiver.0.queue.lock().len(),
+                ..ChannelMetrics::default()
+            },
         }
     }
 
+    /// A session edge never suspends: it yields its front message or `None`.
     pub(crate) async fn recv(&mut self) -> Result<Option<StreamMessage>> {
         match self {
             Self::Physical(receiver) => receiver.recv().await,
             Self::Local(receiver) => receiver.recv().await,
+            Self::Session(receiver) => Ok(receiver.try_recv()),
+        }
+    }
+
+    /// Synchronously takes the front message of a session edge.
+    pub(crate) fn try_recv(&mut self) -> Result<Option<StreamMessage>> {
+        match self {
+            Self::Session(receiver) => Ok(receiver.try_recv()),
+            Self::Physical(_) | Self::Local(_) => Err(CalcFlowError::Internal {
+                message: format!("edge {:?} is not a session edge", self.edge()),
+            }),
         }
     }
 
@@ -217,6 +309,7 @@ impl OperatorEdgeReceiver {
                 receiver.0.core.close_receiver();
                 receiver.0.producer.wake();
             }
+            Self::Session(receiver) => receiver.0.queue.lock().clear(),
         }
     }
 
@@ -229,6 +322,9 @@ impl OperatorEdgeReceiver {
             Self::Physical(receiver) => Ok(receiver),
             Self::Local(_) => Err(CalcFlowError::Internal {
                 message: format!("local edge {edge:?} cannot be a sink boundary"),
+            }),
+            Self::Session(_) => Err(CalcFlowError::Internal {
+                message: format!("session edge {edge:?} cannot be a runtime sink boundary"),
             }),
         }
     }
