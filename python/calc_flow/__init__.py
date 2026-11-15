@@ -87,6 +87,7 @@ from calc_flow.runtime import (
     Watermark,
     WatermarkPolicy,
 )
+from calc_flow.session import StreamSession
 from calc_flow.store import FileProjectStore
 from calc_flow.stream import StreamInput, StreamOutput, StreamResults
 from calc_flow.symbolic import (
@@ -212,6 +213,7 @@ __all__ = [
     "StreamInput",
     "StreamOutput",
     "StreamResults",
+    "StreamSession",
     "Expr",
     "ColumnExpr",
     "TableExpr",
