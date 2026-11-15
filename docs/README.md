@@ -85,6 +85,9 @@ project contract.
 9. [TA-Lib and Arroyo performance development plan, dated 2026-11-08](plans/2026-11-08-ta-lib-arroyo-performance.md):
    runtime fusion, incremental rolling kernels, shared history, and conditional
    output and checkpoint work with compatibility and measurement gates.
+10. [Streaming core re-architecture plan, dated 2026-11-15](plans/2026-11-15-streaming-core-rearchitecture.md):
+    the review findings, synchronous compute core, runtime-owned state tables,
+    new rolling arithmetic, checkpoint protocol, and phased acceptance gates.
 
 ## History and maintenance
 
