@@ -343,6 +343,12 @@ pub enum WatermarkPolicy {
     #[default]
     SourceProvided,
     /// Generate watermarks from an event-time column and a bounded delay.
+    ///
+    /// A positive `emit_interval` emits on a phase-anchored runtime timer. A
+    /// zero `emit_interval` arms no watermark timer and instead emits after
+    /// every data batch that advances the observed event-time maximum, ordered
+    /// behind that batch. `max_out_of_orderness` and any `idle_timeout` must be
+    /// positive.
     BoundedOutOfOrderness {
         event_time_column: String,
         max_out_of_orderness: Duration,

@@ -93,11 +93,7 @@ fn restore_source(
                 },
             ) => (*idle, None, *last_emitted_micros, None, None),
             (
-                NormalizedWatermarkMode::Generated {
-                    emit_interval,
-                    idle_timeout,
-                    ..
-                },
+                mode @ NormalizedWatermarkMode::Generated { idle_timeout, .. },
                 SourceWatermarkManifestState::BoundedOutOfOrderness {
                     observed_max_micros,
                     last_emitted_micros,
@@ -107,7 +103,7 @@ fn restore_source(
                 *idle,
                 *observed_max_micros,
                 *last_emitted_micros,
-                Some(*emit_interval),
+                mode.watermark_timer_interval(),
                 *idle_timeout,
             ),
             (
@@ -175,6 +171,10 @@ mod tests {
     use crate::{EventTime, SourceManifestEntry, SourceWatermarkManifestState};
 
     fn prepared() -> super::super::prepare::PreparedStreamJob {
+        prepared_with_interval(Duration::from_secs(10))
+    }
+
+    fn prepared_with_interval(emit_interval: Duration) -> super::super::prepare::PreparedStreamJob {
         let schema = Arc::new(Schema::new(vec![Field::new(
             "at",
             DataType::Timestamp(TimeUnit::Microsecond, None),
@@ -193,7 +193,7 @@ mod tests {
                 watermark_policy: WatermarkPolicy::BoundedOutOfOrderness {
                     event_time_column: Arc::from("at"),
                     max_out_of_orderness: Duration::from_secs(2),
-                    emit_interval: Duration::from_secs(10),
+                    emit_interval,
                     idle_timeout: Some(Duration::from_secs(30)),
                 },
             }],
@@ -241,5 +241,40 @@ mod tests {
         );
         assert_eq!(restored.next_receipt_sequence, 0);
         assert_eq!(restored.trace_records, 0);
+    }
+
+    #[test]
+    fn durable_restore_of_zero_emit_interval_arms_no_watermark_deadline() {
+        let prepared = prepared_with_interval(Duration::ZERO);
+        let identity_hash = prepared.bindings[0].identity_hash();
+        let sources = BTreeMap::from([(
+            "source".into(),
+            SourceManifestEntry {
+                history: None,
+                cursor: None,
+                identity_hash,
+                sequence: 3,
+                ended: false,
+                watermark_policy: SourceWatermarkManifestState::BoundedOutOfOrderness {
+                    observed_max_micros: Some(EventTime::from_micros(20_000_000)),
+                    last_emitted_micros: Some(EventTime::from_micros(18_000_000)),
+                    idle: false,
+                },
+            },
+        )]);
+        let origin = LogicalInstant(500);
+
+        let restored = restore_durable_progress(&prepared, &sources, origin).unwrap();
+        let source = &restored.sources["source"];
+
+        assert_eq!(source.watermark_deadline, None);
+        assert_eq!(
+            source.idle_deadline,
+            Some(origin.checked_add(Duration::from_secs(30)).unwrap())
+        );
+        assert_eq!(
+            source.observed_max,
+            Some(EventTime::from_micros(20_000_000))
+        );
     }
 }
