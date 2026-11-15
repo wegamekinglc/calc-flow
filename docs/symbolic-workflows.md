@@ -42,8 +42,9 @@ aliases and follows SQL with a column expression, producing
 
 SQL output uses a native planned schema and a new row lineage. It supports
 row-local expressions afterward, but carries no temporal ordering proof.
-Compute rolling features before SQL. Multi-alias SQL is for batch execution;
-stream SQL accepts one alias, with cumulative snapshots for aggregation. See the
+Compute rolling features before SQL. Append stream SQL accepts one alias or the exact-schema
+[UNION ALL subset](relational-frontends.md#same-schema-union), with cumulative
+snapshots for ordinary aggregation. See the
 [batch tutorial](batch-guide.md#compose-sql-and-python-pipelines) and
 [SQL composition reference](symbolic-api.md#sql-composition).
 

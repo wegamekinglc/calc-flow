@@ -275,7 +275,8 @@ work after SQL and rolling before SQL are supported. SQL-to-event-window paths
 and standalone array Program outputs are unsupported; the
 [composition reference](symbolic-api.md#sql-composition) gives the full boundary.
 
-Batch SQL accepts multiple aliases. Append stream SQL accepts exactly one.
+Batch SQL accepts multiple aliases. Append stream SQL accepts one alias or the
+exact-schema [UNION ALL subset](relational-frontends.md#same-schema-union).
 Queries with ordinary aggregates or `GROUP BY` accumulate state across batches and emit the full
 current result after each batch: `SELECT SUM(value) AS total` emits `1`, then
 `6` for input batches `[1]` and `[2, 3]`. A grouped result includes unchanged

@@ -2,10 +2,14 @@
 
 [Documentation](README.md) / 2.2 Arrays and matrices
 
-Calc Flow supports explicit NumPy and JAX array providers alongside Arrow table
-calculations. Compose table-attached matrix expressions with the root `cf.linalg`,
-`cf.parameter`, and `cf.table` namespaces. Install the matching optional dependency
-and register it on the `Runtime` used for collection or compilation. Example 06
+Calc Flow supports native arrays and explicit NumPy and JAX array providers
+alongside Arrow table calculations. The native `calc_flow.array.NativeArray`
+and registered `native:array_expr@1` provider require neither NumPy nor JAX;
+see [native arrays](python-api.md#native-arrays) for supported types and operations.
+Compose table-attached matrix expressions with the root `cf.linalg`,
+`cf.parameter`, and `cf.table` namespaces. For NumPy/JAX, install the matching
+optional dependency and register its provider on the `Runtime` used for
+collection or compilation. Example 06
 and the NumPy parts of examples 07 and 11 require NumPy; example 07 skips its
 JAX part when JAX is unavailable.
 
@@ -41,10 +45,15 @@ described separately in [symbolic compiler design](symbolic-design.md).
 
 ## Advanced array and graph interfaces
 
-Standalone `ArrayExpr` outputs are declaration-only. To return an array `Batch`
-directly, use the explicit provider and graph methods below; `compute` and
-`collect` return tables. The table-attached expression workflow above produces
-Arrow results and requires the exact supported matrix shape.
+Native `ArrayExpr.collect_array(inputs, /, *, runtime, options=None,
+array_options=None)` returns one `NativeArray` from supported array or table
+roots using an explicitly registered runtime. It is a blocking batch method;
+see [native declaration collection](python-api.md#native-arrayexpr-declarations-and-collection).
+Standalone array outputs are not supported by Program table collection or
+convenience streams. To return an array `Batch` directly, use the explicit
+provider and graph methods below; `compute` and `collect` return tables.
+The table-attached expression workflow above produces Arrow results and
+requires the exact supported matrix shape.
 
 ## Center an array
 

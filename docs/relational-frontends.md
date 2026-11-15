@@ -130,10 +130,10 @@ examples](bounded-global-ordering.md).
 
 ## Explicit final DISTINCT
 
-| Frontend | Declaration | Batch | Stream |
-|----------|-------------|-------|--------|
+| Frontend              | Declaration                                           | Batch                 | Stream                               |
+|-----------------------|-------------------------------------------------------|-----------------------|--------------------------------------|
 | Rust/Python DataFrame | `TableExpr.distinct(columns, spec)` (Python: `spec=`) | Complete finite input | One final relation at proved closure |
-| Rust/Python SQL | `CF_DISTINCT_BOUNDED` / `CF_DISTINCT_WINDOW` | Same native finalizer | Same native history owner |
+| Rust/Python SQL       | `CF_DISTINCT_BOUNDED` / `CF_DISTINCT_WINDOW`          | Same native finalizer | Same native history owner            |
 
 `DistinctSpec::bounded_source` / `DistinctSpec.bounded_source` requires a fixed
 finite source cut in stream mode. `closed_window` selects one half-open timestamp
@@ -148,7 +148,7 @@ retained history and prepared output are independent copies. Duplicate accepted
 rows count toward `max_rows`. `distinct@1` supports batch/stream with state version
 1 and accounting 2. Window Error preserves layout2; local Drop uses layout3 with
 checkpointed late metrics. Global lateness arguments configure only independent
-unmarked rolling/cross-section consumers. Analysis uses schema 2/revision 9. See the
+unmarked rolling/cross-section consumers. Analysis uses schema 2/revision 11. See the
 [complete DISTINCT contract and examples](bounded-global-distinct.md).
 
 ## Explicit relation updates
@@ -221,12 +221,12 @@ native UnionOperator in batch and stream. SQL
 planner into that same union. Both frontends support downstream DataFrame/SQL
 and shared named outputs without collecting intermediate tables.
 
-| Interface        | Declaration                            | Batch and stream |
-|------------------|----------------------------------------|------------------|
-| Rust DataFrame   | `a.union_all(&b)?`                     | supported        |
-| Rust SQL         | `calc_flow::sql::sql(query, aliases)?` | approved subset  |
-| Python DataFrame | `a.union_all(b)`                       | supported        |
-| Python SQL       | `cf.sql(query, a=a, b=b)`              | approved subset  |
+| Interface          | Declaration                              | Batch and stream   |
+|--------------------|------------------------------------------|--------------------|
+| Rust DataFrame     | `a.union_all(&b)?`                       | supported          |
+| Rust SQL           | `calc_flow::sql::sql(query, aliases)?`   | approved subset    |
+| Python DataFrame   | `a.union_all(b)`                         | supported          |
+| Python SQL         | `cf.sql(query, a=a, b=b)`                | approved subset    |
 
 Inputs must match exactly in column names, order, Arrow dtype and nullability.
 Union preserves duplicates, NULL and empty inputs, creates a new row lineage
@@ -262,7 +262,7 @@ replacement-union state, budget parameter, checkpoint layout or batch recovery.
 Low-level finite UnionOperator requires table ports with an explicit exact
 schema and `required=true`; the existing wider stream forwarding stays available.
 
-Query reports now use schema version 2, analysis revision 5. Old SQL declaration
+Query reports use schema version 2, analysis revision 11. Old SQL declaration
 digests stay unchanged, but admitted multi-alias SQL exports a new native union
 topology and fingerprint. Saved legacy SQL projects retain their SQL nodes;
 checkpoints with different fingerprints cannot be restored across the change.
@@ -374,7 +374,7 @@ See the streaming guide for replacement admission, budgeting and recovery.
 ## Bounded inner joins
 
 | Interface        | Declaration                                | Finite batch   | Stateful stream   |
-| ---------------- | ------------------------------------------ | -------------- | ----------------- |
+|------------------|--------------------------------------------|----------------|-------------------|
 | Rust DataFrame   | `a.inner_join(&b, spec, ordering)`         | Supported      | Supported         |
 | Rust SQL         | `calc_flow::sql::sql` with `CF_INNER_JOIN` | Supported      | Supported         |
 | Python DataFrame | `cf.table.stream_join(a, b, ...)`          | Supported      | Supported         |

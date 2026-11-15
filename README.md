@@ -101,15 +101,15 @@ The native dependency edges are `crates/calc-flow ← calc-flow-connectors` and
 `crates/calc-flow ← crates/calc-flow-python ← python/calc_flow`.
 The Python package is not a second engine.
 
-| Path                           | Purpose                                                                                                                                  |
-|--------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
-| `crates/calc-flow/`            | Native core: batches, ports/operators, graph compiler, DataFusion runtime, UDF/provider registries, runners, checkpoints, project stores |
-| `crates/calc-flow-connectors/` | Trusted file, Kafka, PostgreSQL, MySQL, ClickHouse, HTTP, and WebSocket connectors behind feature gates                                  |
-| `crates/calc-flow-python/`     | PyO3 binding exposing the core as `calc_flow._native`                                                                                    |
-| `python/calc_flow/`            | Python expressions and SQL, `pipe`, Arrow collection, owned stream results, lowering, and runtime integrations                           |
-| `schemas/`                     | `project-v3.schema.json`, the canonical generated project contract                                                                       |
-| `examples/`                    | Executable Python expression and integration examples                                                                                    |
-| `benchmarks/`                  | Benchmark workloads; scheduled regression gates and informational comparisons                                                            |
+| Path                             | Purpose                                                                                                                                    |
+|----------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------|
+| `crates/calc-flow/`              | Native core: batches, ports/operators, graph compiler, DataFusion runtime, UDF/provider registries, runners, checkpoints, project stores   |
+| `crates/calc-flow-connectors/`   | Trusted file, Kafka, PostgreSQL, MySQL, ClickHouse, HTTP, and WebSocket connectors behind feature gates                                    |
+| `crates/calc-flow-python/`       | PyO3 binding exposing the core as `calc_flow._native`                                                                                      |
+| `python/calc_flow/`              | Python expressions and SQL, `pipe`, Arrow collection, owned stream results, lowering, and runtime integrations                             |
+| `schemas/`                       | `project-v3.schema.json`, the canonical generated project contract                                                                         |
+| `examples/`                      | Executable Python expression and integration examples                                                                                      |
+| `benchmarks/`                    | Benchmark workloads; scheduled regression gates and informational comparisons                                                              |
 
 ## Data and execution model
 
@@ -132,14 +132,17 @@ The Python package is not a second engine.
   deep-copied strict-JSON settings and a cooperative, timezone-aware deadline
   normalized to UTC.
 - `TableExpr.stream` and `Program.stream` own a single native job with bounded
-  backpressure. Append SQL accepts one alias in a stream. Ordinary aggregates and
+  backpressure. Append SQL accepts one alias or the exact-schema
+  [UNION ALL subset](docs/relational-frontends.md#same-schema-union) in a stream. Ordinary aggregates and
   `GROUP BY` emit full cumulative snapshots; other SQL runs per batch.
   Stream-only `cf.snapshot_sql` queries complete latest relations across aliases;
   see [semantics and recovery](docs/streaming-guide.md#complete-replacement-snapshot-sql).
-- `Program(name, engine="sql")` or `Program(name, engine="streaming")` fixes
-  the engine when the immutable program is created. `Program.execute` returns
-  finite named tables or owned streaming results, respectively. Calls for the
-  other engine fail.
+- `Program(name, mode="batch")` or `Program(name, mode="stream")` fixes
+  the lifecycle when the immutable program is created. Legacy
+  `engine="sql"|"streaming"` is an exclusive alias; exactly one selector is
+  required. `Program.execute` returns finite named tables or owned streaming
+  results, respectively. `for_mode` creates an independent declaration wrapper
+  for another lifecycle. Calls for the other mode fail.
 - The source-driven `StreamingRunner` consumes a `StreamExecutionPlan`, owns
   async source/sink bindings, and returns a one-owner `StreamingJob`.
 - Managed epoch checkpoints use `LocalStateBackend` segments and strict v3
