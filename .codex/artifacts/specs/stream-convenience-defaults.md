@@ -173,3 +173,11 @@ implementation checklist; no further review round. Decisions:
    `README.md`; document the zero sentinel (zero means per batch) and that
    checkpoint-off convenience jobs admit operators without a proven
    checkpoint lifecycle.
+8. **Decision 4 refinement (final).** Explicit `StreamingRunner` resolves
+   `checkpointing=None` to `True`, keeping its current behavior (missing
+   checkpoint storage still raises). Convenience streams resolve `None` to
+   `False`. One shared helper resolves before any `_native()` use;
+   `_native()` on an unresolved config treats `None` as `True`; the native
+   layer only receives bools; non-bool, non-`None` values still raise
+   `TypeError`. Update `python/tests/test_checkpointing.py:14-30`. This
+   resolves critique items 12–14.

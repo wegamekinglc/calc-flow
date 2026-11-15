@@ -70,3 +70,37 @@ Verified OK, no change needed:
 11. **Benchmark note.** The PR and CHANGELOG should note that
     `benchmarks/test_stream_operators.py:190` and
     `test_program_engine.py:63` change baseline: both defaults flip.
+
+## Spec §7 follow-ups
+
+Spec §7 adopts items 1, 4, 5, 7, 10 and 11. Its decision 4 supersedes
+item 8. Decision 4 (tri-state `checkpointing`) adds three items:
+
+12. **Decide how a bare `StreamingRunner` resolves the default.** Today,
+    `StreamingRunner(plan, s, k, None, config=None)` raises "checkpoints must be
+    a ManagedCheckpointRuntime" (`runtime.py:1295-1300`). Resolving `None`
+    from "storage passed" makes that call run with checkpointing silently off.
+    That contradicts spec §1, which says explicit runners keep their current
+    defaults. Either resolve `None` to `True` for explicit runners, which
+    keeps the error, or record the behavior change in §1 and CHANGELOG.
+13. **Resolve `None` in one place, before the native boundary.**
+    - Use one helper, shared by `stream.py:291-296` and `runtime.py:1295-1303`
+      (including the project-plan branch at `runtime.py:1281-1292`).
+    - `stream.py:317` and `runtime.py:1297,1301` read `config.checkpointing`
+      directly. They must see the resolved bool, never `None`.
+    - Decide what a bare `StreamRuntimeConfig()._native()` returns.
+      `_native()` currently raises for anything that is not a bool
+      (`runtime.py:779`), and `test_checkpointing.py:20` and `:157` call it on
+      a default config.
+    - The native `_StreamingRunner` must keep rejecting `None`
+      (`test_checkpointing.py:154-160`).
+14. **Tests and docs for the field type change.**
+    - `test_checkpointing.py:14-24` asserts `config.checkpointing is True`;
+      the default becomes `None`.
+    - `test_checkpointing.py:26-30` expects `None` to raise `TypeError` from
+      `_native()`.
+    - Update both, and add cases for convenience `None → False` and the chosen
+      runner resolution.
+    - Document the field change (`bool` becomes `bool | None`) in
+      `python-api.md` and CHANGELOG. Downstream calc-flow-studio may read the
+      field.
