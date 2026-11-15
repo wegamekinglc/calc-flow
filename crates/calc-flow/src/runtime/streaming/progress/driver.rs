@@ -1382,10 +1382,10 @@ impl<C: DriverLogicalClock> StreamProgressDriver<C> {
         scratch.clock = coordinate;
         let ordinals = scratch.bindings.keys().copied().collect::<Vec<_>>();
         for ordinal in ordinals {
-            let interval = match &scratch.bindings[&ordinal].prepared.normalized_watermark {
-                NormalizedWatermarkMode::Generated { emit_interval, .. } => Some(*emit_interval),
-                _ => None,
-            };
+            let interval = scratch.bindings[&ordinal]
+                .prepared
+                .normalized_watermark
+                .watermark_timer_interval();
             if let Some(interval) = interval {
                 arm_timer(
                     &mut scratch,
@@ -2730,6 +2730,14 @@ fn evaluate_raw(
                 binding: ordinal,
                 batch: batch.clone(),
             });
+            if state.bindings[&ordinal]
+                .prepared
+                .normalized_watermark
+                .generates_per_batch()
+            {
+                // The watermark follows its batch in FIFO order on the source edge.
+                emit_generated_watermark(state, ordinal, key, emissions)?;
+            }
         }
         RawIngressEvent::ConnectorWatermark(watermark) => {
             if !matches!(
@@ -2844,11 +2852,6 @@ fn evaluate_timer(
     }
     match timer.identity.kind {
         TimerKind::Watermark => {
-            let binding_id = state.bindings[&ordinal]
-                .prepared
-                .identity
-                .as_str()
-                .to_owned();
             let NormalizedWatermarkMode::Generated {
                 emit_interval: interval,
                 ..
@@ -2860,33 +2863,7 @@ fn evaluate_timer(
                     "watermark timer exists for a non-generated binding",
                 ));
             };
-            let watermark = state
-                .bindings
-                .get_mut(&ordinal)
-                .expect("binding exists")
-                .generated
-                .as_mut()
-                .expect("generated mode owns generated state")
-                .on_timer(&binding_id)
-                .map_err(|error| {
-                    selected_error(timer.key, "runtime.progress.generated", &error.to_string())
-                })?;
-            if let Some(watermark) = watermark {
-                emissions.push(DriverEmission::ForwardControl {
-                    binding: ordinal,
-                    kind: super::aggregate::ProgressEmissionKind::Watermark(watermark),
-                });
-                append_progress(
-                    emissions,
-                    state
-                        .aggregate
-                        .evaluate(ordinal, AggregateInput::Watermark(watermark))
-                        .map_err(|failure| SelectedItemError {
-                            first_error_key: timer.key,
-                            failure,
-                        })?,
-                );
-            }
+            emit_generated_watermark(state, ordinal, timer.key, emissions)?;
             let deadline =
                 next_phase_deadline(timer.identity.deadline, timer.key.logical_instant, interval)
                     .map_err(|error| {
@@ -2921,6 +2898,39 @@ fn evaluate_timer(
                     })?,
             );
         }
+    }
+    Ok(())
+}
+
+/// Forwards a generated binding's next watermark candidate when it advances.
+fn emit_generated_watermark(
+    state: &mut DriverProgressState,
+    ordinal: BindingOrdinal,
+    key: ReadyKey,
+    emissions: &mut Vec<DriverEmission>,
+) -> std::result::Result<(), SelectedItemError> {
+    let binding = state.bindings.get_mut(&ordinal).expect("binding exists");
+    let watermark = binding
+        .generated
+        .as_mut()
+        .expect("generated mode owns generated state")
+        .on_timer(binding.prepared.identity.as_str())
+        .map_err(|error| selected_error(key, "runtime.progress.generated", &error.to_string()))?;
+    if let Some(watermark) = watermark {
+        emissions.push(DriverEmission::ForwardControl {
+            binding: ordinal,
+            kind: super::aggregate::ProgressEmissionKind::Watermark(watermark),
+        });
+        append_progress(
+            emissions,
+            state
+                .aggregate
+                .evaluate(ordinal, AggregateInput::Watermark(watermark))
+                .map_err(|failure| SelectedItemError {
+                    first_error_key: key,
+                    failure,
+                })?,
+        );
     }
     Ok(())
 }
@@ -3669,7 +3679,7 @@ mod tests {
     use super::{DriverEmission, ManualClock, RawIngressEvent, StreamProgressDriver};
     use crate::runtime::streaming::progress::{
         aggregate::ProgressEmissionKind,
-        durable::{DurableProgressRestore, RestoredSourceProgress},
+        durable::{DurableProgressRestore, RestoredSourceProgress, restore_durable_progress},
         prepare::{
             BindingIdentity, DeclaredSchema, FenceSelectionPolicy, NativeWatermarkCapability,
             ReplayPositioningCapability, SourceBindingSpec, SourceDescriptor,
@@ -3683,7 +3693,10 @@ mod tests {
             CheckedSemanticAllocator, DriverFailurePhase, LogicalInstant, ReadyClass, TimerKind,
         },
     };
-    use crate::{Batch, BatchMetadata, CursorManifestEntry, EventTime, JsonMap};
+    use crate::{
+        Batch, BatchMetadata, CursorManifestEntry, EventTime, JsonMap, SourceManifestEntry,
+        SourceWatermarkManifestState,
+    };
 
     #[derive(Debug, Eq, PartialEq)]
     struct RecordedSeedArtifact {
@@ -3830,6 +3843,10 @@ mod tests {
     }
 
     fn timestamp_batch(value: i64) -> Batch {
+        timestamp_values_batch(vec![Some(value)])
+    }
+
+    fn timestamp_values_batch(values: Vec<Option<i64>>) -> Batch {
         let schema = Arc::new(Schema::new(vec![Field::new(
             "at",
             DataType::Timestamp(TimeUnit::Microsecond, None),
@@ -3839,13 +3856,297 @@ mod tests {
             vec![
                 RecordBatch::try_new(
                     schema,
-                    vec![Arc::new(TimestampMicrosecondArray::from(vec![value]))],
+                    vec![Arc::new(TimestampMicrosecondArray::from(values))],
                 )
                 .unwrap(),
             ],
             BatchMetadata::default(),
         )
         .unwrap()
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    enum Emitted {
+        Data(usize),
+        Control(ProgressEmissionKind),
+        Progress(ProgressEmissionKind),
+    }
+
+    fn emitted(emissions: &[DriverEmission]) -> Vec<Emitted> {
+        emissions
+            .iter()
+            .map(|emission| match emission {
+                DriverEmission::ForwardData { batch, .. } => Emitted::Data(batch.num_rows()),
+                DriverEmission::ForwardControl { kind, .. } => Emitted::Control(*kind),
+                DriverEmission::Progress(progress) => Emitted::Progress(progress.kind),
+            })
+            .collect()
+    }
+
+    fn watermark(micros: i64) -> ProgressEmissionKind {
+        ProgressEmissionKind::Watermark(EventTime::from_micros(micros))
+    }
+
+    async fn drain_batches(
+        driver: &mut StreamProgressDriver<ManualClock>,
+        sender: &super::RawIngressSender,
+        batches: Vec<(u8, Batch)>,
+    ) -> Vec<Emitted> {
+        let mut receipts = Vec::new();
+        for (position, batch) in batches {
+            receipts.push(
+                sender
+                    .submit(
+                        identity("left"),
+                        RawIngressEvent::Data(batch),
+                        exact(position),
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let drain = driver.drain_ready().unwrap();
+        for receipt in receipts {
+            receipt.wait_settled().await.unwrap();
+        }
+        emitted(&drain.emissions)
+    }
+
+    #[tokio::test]
+    async fn zero_emit_interval_emits_a_watermark_after_each_advancing_batch() {
+        let clock = ManualClock::new(LogicalInstant::ZERO);
+        let (mut driver, sender) =
+            StreamProgressDriver::new(prepared(&[generated("left", 0, None)]), clock).unwrap();
+        driver.start_running().unwrap();
+        assert!(driver.state.timer_heap.is_empty());
+        assert_eq!(driver.next_central_wake(), None);
+
+        let two_batches = drain_batches(
+            &mut driver,
+            &sender,
+            vec![(0, timestamp_batch(5)), (1, timestamp_batch(8))],
+        )
+        .await;
+        assert_eq!(
+            two_batches,
+            vec![
+                Emitted::Data(1),
+                Emitted::Control(watermark(4)),
+                Emitted::Progress(watermark(4)),
+                Emitted::Data(1),
+                Emitted::Control(watermark(7)),
+                Emitted::Progress(watermark(7)),
+            ]
+        );
+        for (position, batch, rows) in [
+            (2, timestamp_batch(8), 1),
+            (3, timestamp_batch(6), 1),
+            (4, timestamp_values_batch(vec![None, None]), 2),
+            (5, timestamp_values_batch(Vec::new()), 0),
+        ] {
+            assert_eq!(
+                drain_batches(&mut driver, &sender, vec![(position, batch)]).await,
+                vec![Emitted::Data(rows)]
+            );
+        }
+        assert_eq!(
+            drain_batches(&mut driver, &sender, vec![(6, timestamp_batch(9))]).await,
+            vec![
+                Emitted::Data(1),
+                Emitted::Control(watermark(8)),
+                Emitted::Progress(watermark(8)),
+            ]
+        );
+        assert!(driver.state.timer_heap.is_empty());
+        assert_eq!(driver.unsettled_receipts(), 0);
+    }
+
+    #[tokio::test]
+    async fn zero_emit_interval_bindings_route_watermarks_and_progress_the_minimum() {
+        let clock = ManualClock::new(LogicalInstant::ZERO);
+        let (mut driver, sender) = StreamProgressDriver::new(
+            prepared(&[generated("left", 0, None), generated("right", 0, None)]),
+            clock,
+        )
+        .unwrap();
+        driver.start_running().unwrap();
+        assert!(driver.state.timer_heap.is_empty());
+        let (left, right) = (super::BindingOrdinal::new(0), super::BindingOrdinal::new(1));
+        let mut position = 0;
+        let mut drain = async |batches: Vec<(&str, i64)>| {
+            let mut receipts = Vec::new();
+            for (binding, value) in batches {
+                receipts.push(
+                    sender
+                        .submit(
+                            identity(binding),
+                            RawIngressEvent::Data(timestamp_batch(value)),
+                            exact(position),
+                        )
+                        .await
+                        .unwrap(),
+                );
+                position += 1;
+            }
+            let committed = driver.drain_ready().unwrap();
+            for receipt in receipts {
+                receipt.wait_settled().await.unwrap();
+            }
+            committed
+                .emissions
+                .iter()
+                .map(|emission| match emission {
+                    DriverEmission::ForwardData { binding, .. } => (Some(*binding), "data", None),
+                    DriverEmission::ForwardControl {
+                        binding,
+                        kind: ProgressEmissionKind::Watermark(at),
+                    } => (Some(*binding), "watermark", Some(at.as_micros())),
+                    DriverEmission::Progress(super::ProgressEmission {
+                        kind: ProgressEmissionKind::Watermark(at),
+                        ..
+                    }) => (None, "progress", Some(at.as_micros())),
+                    other => panic!("unexpected emission {other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // One drain orders by binding; progress waits for the unprimed right input.
+        assert_eq!(
+            drain(vec![("left", 5), ("right", 8), ("left", 10)]).await,
+            vec![
+                (Some(left), "data", None),
+                (Some(left), "watermark", Some(4)),
+                (Some(left), "data", None),
+                (Some(left), "watermark", Some(9)),
+                (Some(right), "data", None),
+                (Some(right), "watermark", Some(7)),
+                (None, "progress", Some(7)),
+            ]
+        );
+        // Each binding's control stays on its own route; progress tracks the minimum.
+        assert_eq!(
+            drain(vec![("right", 20)]).await,
+            vec![
+                (Some(right), "data", None),
+                (Some(right), "watermark", Some(19)),
+                (None, "progress", Some(9)),
+            ]
+        );
+        assert_eq!(
+            drain(vec![("left", 12), ("right", 15)]).await,
+            vec![
+                (Some(left), "data", None),
+                (Some(left), "watermark", Some(11)),
+                (None, "progress", Some(11)),
+                (Some(right), "data", None),
+            ]
+        );
+        assert!(driver.state.timer_heap.is_empty());
+        assert_eq!(driver.unsettled_receipts(), 0);
+    }
+
+    #[tokio::test]
+    async fn durable_restore_of_zero_emit_interval_keeps_emitting_per_batch() {
+        let prepared = prepared(&[generated("left", 0, None)]);
+        let sources = BTreeMap::from([(
+            "left".into(),
+            SourceManifestEntry {
+                history: None,
+                cursor: None,
+                identity_hash: prepared.bindings[0].identity_hash(),
+                sequence: 2,
+                ended: false,
+                watermark_policy: SourceWatermarkManifestState::BoundedOutOfOrderness {
+                    observed_max_micros: Some(EventTime::from_micros(20)),
+                    last_emitted_micros: Some(EventTime::from_micros(19)),
+                    idle: false,
+                },
+            },
+        )]);
+        let restored = restore_durable_progress(&prepared, &sources, LogicalInstant::ZERO).unwrap();
+        let (mut driver, sender) = StreamProgressDriver::restore_durable(
+            &prepared,
+            ManualClock::new(LogicalInstant::ZERO),
+            &restored,
+        )
+        .unwrap();
+        assert!(driver.state.timer_heap.is_empty());
+        assert_eq!(driver.next_central_wake(), None);
+
+        assert_eq!(
+            drain_batches(&mut driver, &sender, vec![(0, timestamp_batch(20))]).await,
+            vec![Emitted::Data(1)]
+        );
+        assert_eq!(
+            drain_batches(&mut driver, &sender, vec![(1, timestamp_batch(25))]).await,
+            vec![
+                Emitted::Data(1),
+                Emitted::Control(watermark(24)),
+                Emitted::Progress(watermark(24)),
+            ]
+        );
+        assert!(driver.state.timer_heap.is_empty());
+    }
+
+    #[tokio::test]
+    async fn zero_emit_interval_arithmetic_error_fails_the_whole_drain() {
+        let clock = ManualClock::new(LogicalInstant::ZERO);
+        let (mut driver, sender) =
+            StreamProgressDriver::new(prepared(&[generated("left", 0, None)]), clock).unwrap();
+        driver.start_running().unwrap();
+        let mut receipts = Vec::new();
+        for (position, value) in [(0, i64::MIN), (1, 5)] {
+            receipts.push(
+                sender
+                    .submit(
+                        identity("left"),
+                        RawIngressEvent::Data(timestamp_batch(value)),
+                        exact(position),
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let error = driver.drain_ready().unwrap_err();
+        assert!(
+            error.to_string().contains("runtime.progress.generated"),
+            "{error}"
+        );
+        for receipt in receipts {
+            assert!(receipt.wait_settled().await.is_err());
+        }
+        assert_eq!(driver.unsettled_receipts(), 0);
+    }
+
+    #[tokio::test]
+    async fn zero_emit_interval_with_idle_timeout_arms_only_the_idle_timer() {
+        let clock = ManualClock::new(LogicalInstant::ZERO);
+        let (mut driver, sender) =
+            StreamProgressDriver::new(prepared(&[generated("left", 0, Some(5))]), clock.clone())
+                .unwrap();
+        driver.start_running().unwrap();
+        assert!(driver.state.timer_heap.is_empty());
+        assert_eq!(
+            drain_batches(&mut driver, &sender, vec![(0, timestamp_batch(5))]).await,
+            vec![
+                Emitted::Data(1),
+                Emitted::Control(watermark(4)),
+                Emitted::Progress(watermark(4)),
+            ]
+        );
+        let binding = &driver.state.bindings[&super::BindingOrdinal::new(0)];
+        assert!(binding.watermark_timer.is_none());
+        assert!(binding.idle_timer.is_some());
+        assert_eq!(driver.state.timer_heap.len(), 1);
+        assert_eq!(driver.next_central_wake(), Some(LogicalInstant(5)));
+
+        clock.set(LogicalInstant(5));
+        let idle = driver.drain_ready().unwrap();
+        assert_eq!(
+            emitted(&idle.emissions).first(),
+            Some(&Emitted::Control(ProgressEmissionKind::Idle))
+        );
+        assert!(driver.state.timer_heap.is_empty());
     }
 
     #[tokio::test]

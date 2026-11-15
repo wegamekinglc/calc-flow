@@ -85,7 +85,11 @@ control values — watermark monotonicity and epoch consistency — belongs to
 the runtime paths that construct and enqueue them and runs before enqueue,
 before any downstream side effect. On coordinated jobs, the job-scoped
 progress driver validates source-provided watermark monotonicity and owns
-generated watermark/timer ordering. The direct single-source path performs
+generated watermark/timer ordering. A generated policy with a positive emit
+interval publishes on a phase-anchored timer. A zero interval arms no watermark
+timer; the driver evaluates the generated watermark in the same drain step as
+each data batch and enqueues it behind that batch on the same source route
+only when the observed maximum advances. The direct single-source path performs
 that monotonicity check in its source task before fan-out. A checkpoint-enabled job validates the
 single-flight epoch at its source cut, operator alignment, sink pre-commit,
 manifest publication, and sink finalization boundaries. An internal job path
@@ -425,7 +429,9 @@ Two hashes describe the plan:
   and timeout, the per-edge envelope/row/byte budget, and retained epochs —
   and feeds observability and diagnostics only, so retuning it never invalidates
   checkpoints. Durations must be exact multiples of one microsecond, and
-  both budget fields must be positive. Checkpointing defaults to enabled. Other defaults
+  both budget fields must be positive. The Rust default enables checkpointing;
+  the Python `checkpointing=None` default resolves per entry point, off for
+  convenience streams and on for `StreamingRunner`. Other defaults
   are a 60-second checkpoint
   interval, a 600-second checkpoint timeout, 1,000,000 envelopes and rows per
   edge, no byte ceiling below the native address-space limit, and two retained
@@ -757,7 +763,9 @@ removed before connector ownership.
 The durable projection contains source cursor/sequence/end/watermark policy and
 operator ingress progress/state handles; it never serializes execution trace history,
 pending receipts, or process-local timer coordinates. Restored timers re-arm
-from a fresh origin with their complete configured delay.
+from a fresh origin with their complete configured delay. A zero-interval
+generated binding has no watermark timer, so restore arms no watermark
+deadline for it; its idle timeout, if any, still re-arms.
 
 ## Terminal recovery
 

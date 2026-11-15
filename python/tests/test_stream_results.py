@@ -61,6 +61,31 @@ def _source() -> cf.TableExpr:
     return cf.table_input("events", schema=pa.schema([("value", pa.int64())]))
 
 
+# Convenience streams default to checkpointing off; temp-root lifecycle tests opt in.
+_TEMPORARY_CHECKPOINTS = cf.StreamRuntimeConfig(checkpointing=True)
+_CHECKPOINT_MODES = pytest.mark.parametrize(
+    "config", [None, _TEMPORARY_CHECKPOINTS], ids=["default", "checkpointed"]
+)
+
+
+def _recorded_roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
+    """Create temporary checkpoint roots under ``tmp_path`` and record them."""
+    monkeypatch.setattr(stream_module.tempfile, "tempdir", str(tmp_path))
+    original = stream_module.tempfile.mkdtemp
+    created: list[str] = []
+
+    def recorded(**kwargs: object) -> str:
+        created.append(original(**kwargs))
+        return created[-1]
+
+    monkeypatch.setattr(stream_module.tempfile, "mkdtemp", recorded)
+    return created
+
+
+def _expected_roots(config: cf.StreamRuntimeConfig | None) -> int:
+    return 0 if config is None else 1
+
+
 def test_stream_compiles_off_the_event_loop(monkeypatch) -> None:
     seen: list[int] = []
 
@@ -269,13 +294,15 @@ class _FailingFeed(_Feed):
         raise ValueError("private-row-payload-sentinel")
 
 
+@_CHECKPOINT_MODES
 def test_stream_source_failure_wakes_consumer_with_safe_native_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    config: cf.StreamRuntimeConfig | None,
 ) -> None:
-    monkeypatch.setattr(stream_module.tempfile, "tempdir", str(tmp_path))
+    roots = _recorded_roots(monkeypatch, tmp_path)
     feed = _FailingFeed([])
-    results = _source().stream(feed)
+    results = _source().stream(feed, config=config)
 
     async def run() -> None:
         before = asyncio.all_tasks()
@@ -293,18 +320,21 @@ def test_stream_source_failure_wakes_consumer_with_safe_native_error(
 
     asyncio.run(run())
     assert feed.closed == 1
+    assert len(roots) == _expected_roots(config)
     assert list(tmp_path.iterdir()) == []
 
 
+@_CHECKPOINT_MODES
 def test_stream_cancels_idle_source_and_cleans_owned_tasks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    config: cf.StreamRuntimeConfig | None,
 ) -> None:
-    monkeypatch.setattr(stream_module.tempfile, "tempdir", str(tmp_path))
+    roots = _recorded_roots(monkeypatch, tmp_path)
 
     async def run() -> None:
         feed = _IdleFeed()
-        results = _source().stream(feed)
+        results = _source().stream(feed, config=config)
         before = asyncio.all_tasks()
         entered = asyncio.Event()
 
@@ -325,6 +355,7 @@ def test_stream_cancels_idle_source_and_cleans_owned_tasks(
         assert asyncio.all_tasks() == before
 
     asyncio.run(run())
+    assert len(roots) == _expected_roots(config)
     assert list(tmp_path.iterdir()) == []
 
 
@@ -466,7 +497,7 @@ def test_stream_full_output_queue_applies_backpressure_and_cancels(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(stream_module.tempfile, "tempdir", str(tmp_path))
+    roots = _recorded_roots(monkeypatch, tmp_path)
 
     async def run() -> None:
         blocked = asyncio.Event()
@@ -479,7 +510,9 @@ def test_stream_full_output_queue_applies_backpressure_and_cancels(
 
         monkeypatch.setattr(stream_module._QueueSink, "write", write)
         feed = _InfiniteFeed([])
-        config = cf.StreamRuntimeConfig(edge_budget=cf.EdgeBudget(1, 32))
+        config = cf.StreamRuntimeConfig(
+            edge_budget=cf.EdgeBudget(1, 32), checkpointing=True
+        )
         results = _source().stream(feed, config=config)
         before = asyncio.all_tasks()
         async with results:
@@ -491,14 +524,17 @@ def test_stream_full_output_queue_applies_backpressure_and_cancels(
         assert asyncio.all_tasks() == before
 
     asyncio.run(run())
+    assert len(roots) == 1
     assert list(tmp_path.iterdir()) == []
 
 
+@_CHECKPOINT_MODES
 def test_stream_start_failure_closes_only_acquired_iterators(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    config: cf.StreamRuntimeConfig | None,
 ) -> None:
-    monkeypatch.setattr(stream_module.tempfile, "tempdir", str(tmp_path))
+    roots = _recorded_roots(monkeypatch, tmp_path)
 
     class BrokenOpen(_Feed):
         def __aiter__(self) -> _Feed:
@@ -506,7 +542,7 @@ def test_stream_start_failure_closes_only_acquired_iterators(
             raise RuntimeError("private-open-payload-sentinel")
 
     feed = BrokenOpen([])
-    results = _source().stream(feed)
+    results = _source().stream(feed, config=config)
 
     async def run() -> None:
         before = asyncio.all_tasks()
@@ -518,6 +554,7 @@ def test_stream_start_failure_closes_only_acquired_iterators(
 
     asyncio.run(run())
     assert (feed.opened, feed.closed) == (1, 0)
+    assert len(roots) == _expected_roots(config)
     assert list(tmp_path.iterdir()) == []
 
 
@@ -735,7 +772,7 @@ def test_stream_cancellation_during_temp_creation_reclaims_created_directory(
 
         monkeypatch.setattr(stream_module.tempfile, "mkdtemp", mkdtemp)
         feed = _Feed([])
-        results = _source().stream(feed)
+        results = _source().stream(feed, config=_TEMPORARY_CHECKPOINTS)
         before = asyncio.all_tasks()
         task = asyncio.create_task(results.__aenter__())
         await asyncio.wait_for(created.wait(), 5)
@@ -939,7 +976,7 @@ def test_stream_cancellation_at_native_start_result_releases_job(
     async def run() -> None:
         before = asyncio.all_tasks()
         feed = _IdleFeed()
-        results = _source().stream(feed)
+        results = _source().stream(feed, config=_TEMPORARY_CHECKPOINTS)
         probe.mark("entry-started")
         deadline = asyncio.get_running_loop().time() + 5
         task = asyncio.create_task(results.__aenter__())
@@ -1034,7 +1071,7 @@ def test_stream_close_waits_for_pending_start_and_prevents_late_job(
         monkeypatch.setattr(stream_module.tempfile, "mkdtemp", gate)
         monkeypatch.setattr(stream_module.StreamResults, "_close", close)
         feed = _IdleFeed()
-        results = _source().stream(feed)
+        results = _source().stream(feed, config=_TEMPORARY_CHECKPOINTS)
         entry = asyncio.create_task(results.__aenter__())
         await asyncio.wait_for(gate.created.wait(), 5)
         closing = [asyncio.create_task(results.aclose()) for _ in range(close_count)]
@@ -1073,7 +1110,7 @@ def test_stream_close_at_native_start_completion_cancels_before_entry_returns(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(stream_module.tempfile, "tempdir", str(tmp_path))
+    roots = _recorded_roots(monkeypatch, tmp_path)
     original_start = stream_module.StreamResults._start
 
     async def run() -> None:
@@ -1088,7 +1125,7 @@ def test_stream_close_at_native_start_completion_cancels_before_entry_returns(
 
         monkeypatch.setattr(stream_module.StreamResults, "_start", start)
         feed = _IdleFeed()
-        results = _source().stream(feed)
+        results = _source().stream(feed, config=_TEMPORARY_CHECKPOINTS)
         try:
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(results.__aenter__(), 5)
@@ -1097,6 +1134,7 @@ def test_stream_close_at_native_start_completion_cancels_before_entry_returns(
             assert results.job.status()["task_count"] == 0
             assert feed.opened == feed.closed == 1
             assert asyncio.all_tasks() == before
+            assert len(roots) == 1
             assert list(tmp_path.iterdir()) == []
         finally:
             await results.aclose()
@@ -1129,11 +1167,7 @@ async def _first_rows(results, count: int) -> pa.Table:
     raise AssertionError("stream ended before the requested rows arrived")
 
 
-def test_stream_composite_rolling_emits_while_source_remains_open(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(stream_module.tempfile, "tempdir", str(tmp_path))
+def test_stream_composite_rolling_emits_while_source_remains_open() -> None:
     quotes = _quotes()
     source = cf.table_input(
         "quotes",
@@ -1166,7 +1200,6 @@ def test_stream_composite_rolling_emits_while_source_remains_open(
             assert (feed.opened, feed.closed, feed.read) == (1, 1, 2)
             assert not feed.release.is_set()
             assert results.job.status()["task_count"] == 0
-            assert list(tmp_path.iterdir()) == []
             assert asyncio.all_tasks() == before
 
     asyncio.run(run())
@@ -1536,12 +1569,53 @@ def test_stream_default_watermark_underflow_fails_without_forward_progress() -> 
         feed = _OpenEndedFeed([_temporal_rows([-(1 << 63)])])
         results = output.stream(feed)
         with pytest.raises(cf.StreamingRuntimeError):
+            # The open feed never ends, so only watermark generation can fail;
+            # per-batch generation may fail before the feed pauses again.
             async with asyncio.timeout(5), results:
-                await feed.waiting.wait()
                 assert [table async for table in results] == []
+        assert feed.read == 1
         assert results.job.status()["watermark_micros"] is None
         assert results.job.status()["task_count"] == 0
         assert feed.closed == 1
+        assert asyncio.all_tasks() == before
+
+    asyncio.run(run())
+
+
+async def _rows_through(results, timestamp: int) -> pa.Table:
+    tables: list[pa.Table] = []
+    async for table in results:
+        tables.append(table)
+        times = pa.concat_tables(tables)["ts"].cast(pa.int64()).to_pylist()
+        if timestamp in times:
+            return pa.concat_tables(tables)
+    raise AssertionError("stream ended before the requested timestamp arrived")
+
+
+def test_stream_default_ordered_rolling_emits_each_batch_before_the_next() -> None:
+    source = _temporal_source()
+    output = source.select("ts", mean=cf.ts.mean(source["price"], window=cf.rows(2)))
+
+    async def run() -> None:
+        before = asyncio.all_tasks()
+        feed = _PushFeed([])
+        results = output.stream(feed)
+        async with asyncio.timeout(5), results:
+            # Each batch is supplied only after the previous one's rows arrived.
+            feed.pending.put_nowait(_temporal_rows([1, 2]))
+            first = await _rows_through(results, 1)
+            assert first["ts"].cast(pa.int64()).to_pylist() == [1]
+            assert first["mean"].to_pylist() == [0.0]
+            # The observed maximum stays open behind the one-microsecond delay.
+            assert results.job.status()["watermark_micros"] == 1
+            feed.pending.put_nowait(_temporal_rows([3]))
+            second = await _rows_through(results, 2)
+            assert second["ts"].cast(pa.int64()).to_pylist() == [2]
+            assert second["mean"].to_pylist() == [0.5]
+            assert results.job.status()["watermark_micros"] == 2
+            assert feed.read == 2
+        assert feed.closed == 1
+        assert results.job.status()["task_count"] == 0
         assert asyncio.all_tasks() == before
 
     asyncio.run(run())
@@ -1608,8 +1682,13 @@ def test_stream_generated_timer_with_full_output_queue_cleans_owned_work(
 
         monkeypatch.setattr(stream_module._QueueSink, "write", write)
         feed = _OpenEndedFeed([_quotes()])
-        config = cf.StreamRuntimeConfig(edge_budget=cf.EdgeBudget(4, 256))
-        results = program.stream({"quotes": feed}, config=config)
+        config = cf.StreamRuntimeConfig(
+            edge_budget=cf.EdgeBudget(4, 256), checkpointing=True
+        )
+        timer = cf.BoundedOutOfOrderness(
+            "ts", timedelta(microseconds=1), timedelta(milliseconds=100)
+        )
+        results = program.stream({"quotes": feed}, config=config, watermarks=timer)
         async with asyncio.timeout(5), results:
             await feed.waiting.wait()
             await blocked.wait()

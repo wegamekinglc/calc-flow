@@ -83,9 +83,17 @@ configuration. Compile it with `compile_stream_project(project)` and start
 `StreamingRunner(plan)`. The plan supplies the registered connector factories
 and managed state settings.
 
+A source binding's `watermark` selects `{"policy": "source_provided"}`,
+`{"policy": "disabled"}`, or `{"policy": "bounded_out_of_orderness"}` with
+`column`, a positive `delay_ms`, an optional `emit_interval_ms`, and an
+optional positive `idle_timeout_ms`. A positive `emit_interval_ms` publishes
+generated watermarks on that period. An omitted or zero `emit_interval_ms`
+arms no watermark timer and publishes after every data batch that advances
+the column's observed maximum.
+
 For async results without durable restart, use `TableExpr.stream` or
-`Program.stream` directly; their input iterables and temporary checkpoint roots
-are not project configuration. See [streaming results](python-api.md#streaming-results).
+`Program.stream` directly; their input iterables and runtime config are not
+project configuration. See [streaming results](python-api.md#streaming-results).
 
 For application-owned Python sources and durable sinks, use `program.compile_stream()`
 and supply physical source/sink bindings plus a managed checkpoint runtime to the

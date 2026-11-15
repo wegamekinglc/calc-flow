@@ -25,6 +25,28 @@ measurements. Use the current guides for supported behavior.
   [Rust reference](docs/rust-api.md#caller-driven-stream-sessions), and the
   [re-architecture plan](docs/plans/2026-11-15-streaming-core-rearchitecture.md).
 
+- 2026-11-15: Default convenience streams (`TableExpr.stream`,
+  `Program.stream`, streaming `Program.execute`) to checkpointing off and
+  per-batch watermarks. A zero `emit_interval` on
+  `WatermarkPolicy::BoundedOutOfOrderness`, previously invalid, now arms no
+  watermark timer and emits after every advancing data batch; durable restore
+  arms no watermark deadline for it. Declared event-time convenience inputs
+  default to `BoundedOutOfOrderness(col, 1 µs, 0)` instead of a 100 ms timer.
+  Python `StreamRuntimeConfig.checkpointing` changes from `bool = True` to
+  `bool | None = None`: convenience streams resolve `None` to off and create no
+  temporary checkpoint root, so a config tuning only other fields no longer
+  enables checkpoints; explicit `StreamingRunner` resolves it to on and is
+  unchanged. Invalid values raise `checkpointing must be a bool or None`.
+  Checkpoint-off convenience jobs admit operators without a proven checkpoint
+  lifecycle. Project-v3 bounded-disorder bindings that omit `emit_interval_ms`
+  (default 0) now run per batch instead of failing prepare; the schema is
+  unchanged. The Python convenience-stream benchmarks
+  (`benchmarks/test_stream_operators.py`, `benchmarks/test_program_engine.py`,
+  `benchmarks/arrow_source.py`) now run checkpoint-off, with per-batch
+  watermarks for event-time inputs, so earlier baselines are not comparable.
+  See [streaming results](docs/python-api.md#streaming-results) and
+  [watermark policies](docs/streaming-guide.md#watermark-policies).
+
 - 2026-11-14: Prepare the aligned `calc-flow` and `calc-flow-python`
   2026.11.14 releases, synchronizing workspace versions, exact internal
   dependencies, lockfiles, package metadata, and current-version documentation.

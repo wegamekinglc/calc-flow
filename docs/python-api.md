@@ -400,12 +400,15 @@ its actual capabilities and watermark policy.
 With `watermarks=None`, an iterable or materialized input declaring `event_time` must have
 non-null, nondecreasing timestamps in arrival order across rows, batches, and
 all entities in that source. The native runtime generates a watermark at
-`max_seen - 1 microsecond`, with a 100 ms emission interval. Equal timestamps
-may span batches; the latest timestamp stays open until a larger one arrives,
-explicit progress is supplied, or the source ends. This allows finalized rolling
-results to arrive before EOF. A decrease fails; the adapter does not sort or
-drop rows. Inputs without event time use disabled watermarks, and stateless
-expressions and SQL produce results as batches arrive.
+`max_seen - 1 microsecond` with a zero emission interval: it arms no watermark
+timer and publishes the watermark behind each data batch that advances the
+observed maximum. Equal timestamps may span batches; the latest timestamp stays
+open until a larger one arrives, explicit progress is supplied, or the source
+ends. Finalized rolling results for earlier timestamps therefore follow each
+advancing batch without waiting for a timer or EOF. A decrease fails; the
+adapter does not sort or drop rows. Inputs without event time use disabled
+watermarks, and stateless expressions and SQL produce results as batches
+arrive.
 
 `watermarks` accepts an existing `WatermarkPolicy` for one dynamic input or a
 mapping by logical dynamic input name. Omitted mapping entries use the default.
@@ -429,7 +432,8 @@ Each runner has an independent cursor; the reusable binding retains its imported
 buffers until released. Jobs release their own references on close, including
 failure and cancellation. Slices can retain larger backing allocations: logical
 edge byte limits do not bound input storage or process RSS. Neither this cursor
-nor temporary checkpoints provide persistent replay or exactly-once delivery.
+nor opt-in temporary convenience checkpoints provide persistent replay or
+exactly-once delivery.
 Readers and arbitrary Arrow stream providers are not accepted by this factory.
 
 `StreamResults` supports async context management, async iteration, idempotent
@@ -446,11 +450,22 @@ combined order or synchronized dictionary. Do not assume one result table per
 source batch. Results omit native `Batch` metadata and do not acknowledge
 application delivery.
 
-Every convenience stream owns temporary managed checkpoint storage removed
-after native cleanup. Ordinary iterables have best-effort delivery, and neither
-the iterator nor its temporary checkpoints provide durable restart or
-exactly-once processing. For those contracts, use explicit source/sink bindings,
-`Program.compile_stream`, `StreamingRunner`, and `ManagedCheckpointRuntime`.
+`StreamRuntimeConfig.checkpointing` is `bool | None` and defaults to `None`,
+which selects the entry point's mode. Convenience streams (`TableExpr.stream`,
+`Program.stream`, and streaming `Program.execute`) resolve `None` to
+checkpointing off, so a config that only tunes other fields, such as
+`StreamRuntimeConfig(edge_budget=...)`, also runs without checkpoints. These
+jobs create no checkpoint storage, take no snapshots, and admit operators
+without a proven checkpoint lifecycle. Set `checkpointing=True` to run a
+convenience stream with temporary managed checkpoint storage, which is removed
+after native cleanup; checkpointed admission rules then apply. Any other value
+raises `TypeError` with the message `checkpointing must be a bool or None` at
+context entry, before compilation.
+
+Ordinary iterables have best-effort delivery, and neither the iterator nor
+temporary checkpoints provide durable restart or exactly-once processing. For
+those contracts, use explicit source/sink bindings, `Program.compile_stream`,
+`StreamingRunner`, and `ManagedCheckpointRuntime`.
 See [explicit connectors and recovery](streaming-guide.md#explicit-connectors-and-recovery).
 
 ## Stream sessions
@@ -1868,7 +1883,10 @@ The convenience `stream` methods translate logical declaration names.
 The plan records immutable source/sink binding IDs and optional per-output
 `StreamRequirements`; it cannot execute as a batch plan. A
 `StreamingRunner` owns that plan, all connector bindings, one
-`ManagedCheckpointRuntime`, and optional `StreamRuntimeConfig`:
+`ManagedCheckpointRuntime`, and optional `StreamRuntimeConfig`. The runner
+resolves `StreamRuntimeConfig.checkpointing=None` to checkpointing on, so a
+graph-only plan still requires a `ManagedCheckpointRuntime` unless the config
+sets `checkpointing=False`; disabled mode requires `checkpoints=None`.
 
 The explicit graph form is:
 

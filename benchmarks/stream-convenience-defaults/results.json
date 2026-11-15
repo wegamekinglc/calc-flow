@@ -1,0 +1,200 @@
+{
+  "argv": [
+    "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/stream-convenience-defaults-perf/collect.py",
+    "--protocol",
+    "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/stream-convenience-defaults-perf/protocol.json",
+    "--output",
+    "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/stream-convenience-defaults-perf/results"
+  ],
+  "budget_seconds": 600,
+  "builds": {
+    "baseline": {
+      "build_profile": "release",
+      "cargo_lock_sha256": "d2b0e0ea1469156fffda9aa0fa5d80fae1d9d1cb1437c63256c7e584141bd5e5",
+      "command": [
+        "python",
+        "-m",
+        "maturin",
+        "build",
+        "--release",
+        "--locked",
+        "--features",
+        "pyo3/abi3-py313",
+        "--out",
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/compiled-region-performance/baseline-build"
+      ],
+      "contract": "warm-stream-build-v1",
+      "git_clean": false,
+      "git_sha": "b9a46e1266510271b63fffd2fca254659fc96607",
+      "native_sha256": "68be91fe8d0e0dc33cf4b433e7bddfe1615cf10620f0a67f25e483eb0ddbb3ba",
+      "python": "3.13.9",
+      "python_executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8",
+      "source": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/compiled-region-performance/baseline-product",
+      "source_sha256": "4c81e0114f0769f23be9074a2d4a88a9da41b5341590c81f3b6a4f79644000b3",
+      "wheel": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/compiled-region-performance/baseline-build/calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+      "wheel_sha256": "e7af99f8d6eebe44fb152bb393b267075c573e7e10ec7addab8abbc4612b00ea"
+    },
+    "candidate": {
+      "build_profile": "release",
+      "cargo_lock_sha256": "d2b0e0ea1469156fffda9aa0fa5d80fae1d9d1cb1437c63256c7e584141bd5e5",
+      "command": [
+        "python",
+        "-m",
+        "maturin",
+        "build",
+        "--release",
+        "--locked",
+        "--features",
+        "pyo3/abi3-py313",
+        "--out",
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/stream-convenience-defaults-perf/candidate-build"
+      ],
+      "contract": "warm-stream-build-v1",
+      "git_clean": true,
+      "git_sha": "3235ca37fe60a22cbed6e1b7d3a34e596ffff055",
+      "native_sha256": "9db31303d7c5d720765bf098617e117eb19f4478b8d4a84894a0289b53715d7d",
+      "python": "3.13.9",
+      "python_executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python",
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8",
+      "source": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/stream-convenience-defaults",
+      "source_sha256": "aea9cbdee9e5d8473eb42a92389f801777156234882eadd85b909ba7046030e5",
+      "wheel": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/stream-convenience-defaults-perf/candidate-build/calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+      "wheel_sha256": "3f70fa425141093f4e066644a4a73f0ef7104a09c419e7bc1b50ae6499c3410d"
+    }
+  },
+  "cases": [
+    {
+      "evidence": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/stream-convenience-defaults-perf/results/case-A/pairs.json",
+      "finished_seconds": 155.74137733899988,
+      "id": "benchmarks/test_stream_operators.py::test_stream_operator_lifecycle[standard-rolling_state]",
+      "label": "A",
+      "load_after": [
+        1.53564453125,
+        1.38671875,
+        2.138671875
+      ],
+      "load_before": [
+        0.537109375,
+        1.29638671875,
+        2.251953125
+      ],
+      "result": {
+        "base_p50": 0.01824327950089355,
+        "change_percent": -9.333256114628941,
+        "head_max": 0.01811350449861493,
+        "head_min": 0.013466186999721685,
+        "head_p50": 0.016540587501367554,
+        "head_p95": 0.018013979172246765,
+        "round_changes": [
+          -9.567722326377542,
+          -7.553197602872452
+        ],
+        "round_intervals": [
+          {
+            "coverage": 0.978515625,
+            "high": -2.2988095239977135,
+            "low": -20.444880135858202,
+            "median": -9.567722326377542
+          },
+          {
+            "coverage": 0.978515625,
+            "high": 7.563556995808107,
+            "low": -11.431193502736093,
+            "median": -7.553197602872452
+          }
+        ],
+        "round_min_changes": [
+          -8.842944229182748,
+          5.994697546504857
+        ],
+        "rows_per_second": null,
+        "samples": 20,
+        "verdict": "inconclusive"
+      },
+      "scale": "standard",
+      "started_seconds": 2.957311687998299
+    },
+    {
+      "evidence": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/stream-convenience-defaults-perf/results/case-B/pairs.json",
+      "finished_seconds": 297.010158563,
+      "id": "benchmarks/test_stream_operators.py::test_stream_operator_lifecycle[overhead-rolling_state]",
+      "label": "B",
+      "load_after": [
+        1.224609375,
+        1.3388671875,
+        2.01416015625
+      ],
+      "load_before": [
+        1.53564453125,
+        1.38671875,
+        2.138671875
+      ],
+      "result": {
+        "base_p50": 0.008570389498345321,
+        "change_percent": -39.237793656586916,
+        "head_max": 0.005741581997426692,
+        "head_min": 0.0036226650008757133,
+        "head_p50": 0.00520755775141879,
+        "head_p95": 0.005737240501002816,
+        "round_changes": [
+          -41.667957947209665,
+          -39.69460210962451
+        ],
+        "round_intervals": [
+          {
+            "coverage": 0.978515625,
+            "high": -34.07008617907405,
+            "low": -50.62188880011592,
+            "median": -41.667957947209665
+          },
+          {
+            "coverage": 0.978515625,
+            "high": -37.51333874576661,
+            "low": -46.06308506038511,
+            "median": -39.69460210962451
+          }
+        ],
+        "round_min_changes": [
+          -42.65856499493823,
+          -48.05860593477864
+        ],
+        "rows_per_second": null,
+        "samples": 20,
+        "verdict": "improved"
+      },
+      "scale": "overhead",
+      "started_seconds": 155.74161505299708
+    }
+  ],
+  "collector_sha256": "cfa1528e45fc5c2360a8a9867478e3a78323cb2a5e567722ec837854341492a0",
+  "contract": "stream-convenience-defaults-pairs-v1",
+  "elapsed_seconds": 297.0105154289995,
+  "errors": [],
+  "harness_sha256": {
+    "benchmarks/support.py": "cbac70aa0e90cf08d1738033eeec10c046651044ba3d60533d9f6ef014b4ba5b",
+    "benchmarks/test_stream_operators.py": "4ba40bf63e07a71a3a9d2068c376cedabf642676346aa09a64f2f916dd27c12d",
+    "benchmarks/warm_stream.py": "9c23f97cebb62f6bf475c4b8d59b03dd0423ef4688f12fcf8d4345dbfb45a000",
+    "scripts/benchmark_suite/release_collectors.py": "e3c60c585bd03215125100777359fce58dc295734d16dafa8a38a1b04cfbe250",
+    "scripts/benchmark_suite/release_pairs.py": "13393d24d5b98a8065f9c21d851454386bb4ba9f6cf14b2b88fcaeb5efbc102a",
+    "scripts/benchmark_suite/report.py": "0daf6c205c2cc733813d2c658c6541d811f8324b502c2f2982a09de5a8dd9ff2",
+    "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd"
+  },
+  "host": {
+    "affinity": 32,
+    "cpu": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "logical_cpus": 32,
+    "memory": "32669504 kB",
+    "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "python": "3.13.9",
+    "python_executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/.venv/bin/python"
+  },
+  "pairs_per_round": 10,
+  "protocol_sha256": "44a8e969fd7e915aaa2ad5075137a1061aad993bcd2240fce582e3711463110f",
+  "rounds": 2,
+  "seals": {
+    "baseline": "68be91fe8d0e0dc33cf4b433e7bddfe1615cf10620f0a67f25e483eb0ddbb3ba",
+    "candidate": "9db31303d7c5d720765bf098617e117eb19f4478b8d4a84894a0289b53715d7d"
+  },
+  "unmeasured": []
+}

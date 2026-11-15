@@ -1632,6 +1632,21 @@ capabilities, then implements async `open`, `next`, and `close`. An ordinary
 also expose epoch commit and recovery. Managed checkpoints bind source cursors,
 operator state, and sink evidence to the plan fingerprint.
 
+`SourceBinding::with_watermark_policy` attaches one immutable
+`WatermarkPolicy` to a source binding:
+
+| Variant                 | Fields                                                                       | Progress                                    |
+|-------------------------|------------------------------------------------------------------------------|---------------------------------------------|
+| `SourceProvided`        | none (the default)                                                           | Accepts source-native watermarks            |
+| `BoundedOutOfOrderness` | `event_time_column`, `max_out_of_orderness`, `emit_interval`, `idle_timeout` | Generates `max_seen - max_out_of_orderness` |
+| `Disabled`              | `idle_timeout`                                                               | No watermark advancement; optional idleness |
+
+For `BoundedOutOfOrderness`, `max_out_of_orderness` and any `idle_timeout` must
+be positive. A positive `emit_interval` emits on a phase-anchored runtime timer.
+A zero `emit_interval` arms no watermark timer and emits after every data batch
+that advances the observed event-time maximum, ordered behind that batch;
+durable restore of such a binding arms no watermark deadline.
+
 The managed local backend's crash-durability guarantee applies on Unix;
 on Windows, parent directory updates are not synced, so recovery after a
 power loss is not guaranteed.

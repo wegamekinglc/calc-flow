@@ -48,7 +48,7 @@ native job across input batches. Its source stays open while the first three
 rows arrive, and context exit closes the waiting source. Continue with
 [34_streaming_outputs.py](../examples/34_streaming_outputs.py) to branch a
 Program and consume named events. Both use `async with` and `async for`, require
-no external service, and clean up temporary checkpoint storage.
+no external service, and run without checkpoint storage.
 
 Event-time iterables default to nondecreasing arrival times and native watermarks.
 Use an explicit [watermark policy](streaming-guide.md#watermark-policies) for

@@ -82,7 +82,9 @@ async def test_unknown_iterator_rejected_before_iterator_acquisition_and_temp_ro
     with pytest.raises(
         cf.StreamingRuntimeError, match="source_boundedness_unproved"
     ) as rejected:
-        async with program.stream({"events": Unknown()}):
+        async with program.stream(
+            {"events": Unknown()}, config=cf.StreamRuntimeConfig(checkpointing=True)
+        ):
             pass
     assert "stream.inputs.events.boundedness" in str(rejected.value)
     assert rejected.value.component_id == "events"

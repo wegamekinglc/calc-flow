@@ -460,8 +460,9 @@ Ordinary at-least-once sinks can still receive replayed writes after an
 interruption before a durable cut. Exactly-once external delivery depends on the
 [complete source/operator/sink proof](streaming-guide.md#delivery-requirements).
 One logical result per accepted left row does not upgrade a sink's guarantee.
-The convenience `.stream()` iterator and its temporary checkpoints do not
-provide durable restart or application delivery acknowledgements.
+The convenience `.stream()` iterator, with or without opt-in temporary
+checkpoints, does not provide durable restart or application delivery
+acknowledgements.
 
 `job.status()["stream_asof_joins"]` maps node IDs to payload-free status values.
 It is empty when the graph has no ASOF node. Side status includes accepted,

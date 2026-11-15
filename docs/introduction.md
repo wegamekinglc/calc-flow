@@ -121,7 +121,8 @@ emits. It accepts one dynamic input feeding rolling, row-local expression, and
 union stages, and has no checkpoint or recovery. Calls on an existing session
 may run inside an event loop. See [stream sessions](python-api.md#stream-sessions).
 
-Convenience streams use temporary managed state. Async iterable inputs provide
+Convenience streams run without checkpoints by default; `checkpointing=True`
+adds temporary managed checkpoints. Async iterable inputs provide
 best-effort delivery without replay. For durable recovery,
 transactional delivery, or explicit sink ownership, use `program.compile_stream()`
 and `StreamingRunner` with capable source/sink bindings and a stable checkpoint

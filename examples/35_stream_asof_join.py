@@ -2,9 +2,10 @@
 
 Tolerance bounds quote age, not wall-clock waiting. Explicit watermarks permit
 out-of-order input; idle does not finalize ASOF. These iterable sources have no
-replay and convenience-stream checkpoints are temporary. Durable recovery and
-external exactly-once delivery require capable sources/sinks and a stable
-managed checkpoint root.
+replay, and convenience streams run without checkpoints by default;
+``StreamRuntimeConfig(checkpointing=True)`` opts into temporary checkpoints.
+Durable recovery and external exactly-once delivery require capable
+sources/sinks and a stable managed checkpoint root.
 """
 
 from __future__ import annotations
