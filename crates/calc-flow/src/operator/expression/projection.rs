@@ -14,13 +14,13 @@ use datafusion::{
     },
 };
 
-use crate::{Batch, CalcFlowError, Result};
+use crate::{Batch, CalcFlowError, Result, batch::TableBatchShell};
 
 mod dependencies;
 pub(super) use dependencies::required_columns;
 
 #[derive(Clone, Debug)]
-pub(super) struct ColumnProjection {
+pub(crate) struct ColumnProjection {
     columns: Vec<(String, String)>,
 }
 
@@ -94,6 +94,73 @@ impl ColumnProjection {
             .collect::<Result<Vec<_>>>()?;
         Batch::table(records, batch.metadata().clone())
             .map(|projected| Some(projected.with_source_cursor(batch.source_cursor())))
+    }
+}
+
+pub(crate) struct PreparedColumnProjection {
+    indices: Vec<usize>,
+    schema: SchemaRef,
+}
+
+impl PreparedColumnProjection {
+    pub(crate) fn new(
+        projection: &ColumnProjection,
+        input: &SchemaRef,
+        output: Option<&SchemaRef>,
+    ) -> Option<Self> {
+        let (indices, schema) = projection.schema(input)?;
+        (output.is_none_or(|output| schema == *output)).then_some(Self { indices, schema })
+    }
+
+    pub(crate) fn shares_input_schema(&self, input: &Batch) -> bool {
+        input
+            .table_payload()
+            .is_ok_and(|table| Arc::ptr_eq(&self.schema, table.schema()))
+    }
+
+    pub(crate) fn apply(
+        &self,
+        batch: &Batch,
+        node_id: &str,
+        shell: Option<TableBatchShell>,
+    ) -> Result<Batch> {
+        if self.shares_input_schema(batch) {
+            return Ok(batch.clone());
+        }
+        if let Some(shell) = shell.filter(|shell| shell.matches(batch)) {
+            return shell
+                .project(
+                    batch,
+                    &self.indices,
+                    Arc::clone(&self.schema),
+                    batch.metadata().clone(),
+                    batch.source_cursor(),
+                )
+                .map_err(|error| projection_error(node_id, error));
+        }
+        let table = batch.table_payload()?;
+        let records = table
+            .batches()
+            .iter()
+            .map(|record| {
+                let columns = self
+                    .indices
+                    .iter()
+                    .map(|&index| record.column(index).clone())
+                    .collect();
+                RecordBatch::try_new(Arc::clone(&self.schema), columns)
+                    .map_err(|error| projection_error(node_id, error))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Batch::table(records, batch.metadata().clone())
+            .map(|projected| projected.with_source_cursor(batch.source_cursor()))
+    }
+}
+
+fn projection_error(node_id: &str, error: datafusion::arrow::error::ArrowError) -> CalcFlowError {
+    CalcFlowError::Operator {
+        node_id: node_id.into(),
+        message: format!("column projection failed: {error}"),
     }
 }
 

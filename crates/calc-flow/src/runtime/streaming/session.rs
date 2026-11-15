@@ -16,7 +16,10 @@ use super::{
     StreamJobContext, StreamMessage,
     local_edge::{OperatorEdgeReceiver, OperatorEdgeSender, SessionEdgeSender, session_edge},
     metrics::MetricsRecorder,
-    operator_task::{OperatorProgress, OperatorTaskInputs, caller_driven::CallerDrivenOperator},
+    operator_task::{
+        OperatorProgress, OperatorTaskInputs,
+        caller_driven::{CallerDrivenOperator, drain_in_order_sync},
+    },
     progress::{
         GeneratedWatermarkState,
         prepare::{
@@ -41,12 +44,12 @@ use crate::{
 /// [`push`](Self::push), [`advance`](Self::advance) and
 /// [`finish`](Self::finish) are synchronous. Each call runs its batch and
 /// watermark through every operator in topological order on the calling
-/// thread, using the runner's per-operator code, and returns the rows emitted
-/// by that call. There is no source, sink or progress task. The session owns
-/// one current-thread Tokio runtime (timers only) and blocks the caller on it;
-/// calling from inside a Tokio runtime context returns
-/// [`CalcFlowError::InvalidArgument`] at field `session` instead of blocking
-/// that runtime.
+/// thread and returns the rows emitted by that call. There is no source, sink
+/// or progress task. Async operators use one session-owned current-thread
+/// Tokio runtime (timers only); an all-sync graph releases it after preparation
+/// and never enters it from a call. Calling from inside a Tokio runtime context
+/// returns [`CalcFlowError::InvalidArgument`] at field `session` instead of
+/// blocking that runtime.
 ///
 /// Sessions are in-memory and non-durable. The checkpoint fields of
 /// [`StreamRuntimeConfig`] are ignored, including `checkpointing = true`;
@@ -261,9 +264,11 @@ impl StreamSession {
     ) -> Result<Self> {
         let parts = admitted_parts(plan, config)?;
         let job = session_job(&parts.fingerprint)?;
-        let (input, nodes, outputs) = wire(parts, &job, watermarks)?;
+        let runtime = session_runtime()?;
+        let (input, nodes, outputs) = session_block_on(&runtime, wire(parts, &job, watermarks))?;
+        let needs_async = nodes.iter().any(|node| !node.is_sync());
         Ok(Self {
-            runtime: Some(session_runtime()?),
+            runtime: needs_async.then_some(runtime),
             job,
             input,
             nodes,
@@ -412,10 +417,15 @@ impl StreamSession {
             // Staging validated the data envelope; control messages carry no rows.
             input.sender.enqueue(message);
         }
-        let runtime = runtime.as_ref().ok_or_else(|| CalcFlowError::Internal {
-            message: "session runtime was released".into(),
-        })?;
-        runtime.block_on(drain_in_order(nodes))?;
+        if nodes.iter().all(CallerDrivenOperator::is_sync) {
+            debug_assert!(runtime.is_none());
+            drain_in_order_sync(nodes)?;
+        } else {
+            let runtime = runtime.as_ref().ok_or_else(|| CalcFlowError::Internal {
+                message: "session runtime was released".into(),
+            })?;
+            session_block_on(runtime, drain_in_order(nodes))?;
+        }
         collect_outputs(outputs)
     }
 }
@@ -481,6 +491,43 @@ fn session_runtime() -> Result<tokio::runtime::Runtime> {
         .map_err(|error| CalcFlowError::Internal {
             message: format!("session runtime could not start: {error}"),
         })
+}
+
+#[cfg(test)]
+thread_local! {
+    static BLOCK_ON_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FUTURE_POLLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn session_block_on<F: std::future::Future>(
+    runtime: &tokio::runtime::Runtime,
+    future: F,
+) -> F::Output {
+    #[cfg(test)]
+    {
+        BLOCK_ON_CALLS.with(|calls| calls.set(calls.get() + 1));
+        let mut future = Box::pin(future);
+        return runtime.block_on(std::future::poll_fn(|context| {
+            FUTURE_POLLS.with(|polls| polls.set(polls.get() + 1));
+            std::future::Future::poll(future.as_mut(), context)
+        }));
+    }
+    #[cfg(not(test))]
+    runtime.block_on(future)
+}
+
+#[cfg(test)]
+fn reset_drive_counters_for_test() {
+    BLOCK_ON_CALLS.with(|calls| calls.set(0));
+    FUTURE_POLLS.with(|polls| polls.set(0));
+}
+
+#[cfg(test)]
+fn drive_counters_for_test() -> (usize, usize) {
+    (
+        BLOCK_ON_CALLS.with(std::cell::Cell::get),
+        FUTURE_POLLS.with(std::cell::Cell::get),
+    )
 }
 
 fn session_error(message: &str) -> CalcFlowError {
@@ -808,7 +855,9 @@ fn admit_nodes(nodes: &[RuntimeStreamNode]) -> Result<()> {
 /// exhaustive so a new operator kind must choose explicitly.
 fn node_rejection(operator: &CompiledStreamOperator) -> Option<String> {
     let kind = match operator {
-        CompiledStreamOperator::Expression(_) | CompiledStreamOperator::Union(_) => return None,
+        CompiledStreamOperator::Expression(_)
+        | CompiledStreamOperator::SyncExpression(_)
+        | CompiledStreamOperator::Union(_) => return None,
         CompiledStreamOperator::Rolling(rolling) => {
             return rolling_rejection(rolling.state_layout_version());
         }
@@ -934,7 +983,7 @@ type Wiring = (
     Vec<(String, OperatorEdgeReceiver)>,
 );
 
-fn wire(
+async fn wire(
     parts: StreamRuntimePlanParts,
     job: &StreamJobContext,
     watermarks: BTreeMap<String, SessionWatermark>,
@@ -947,7 +996,7 @@ fn wire(
         ..
     } = parts;
     let (mut senders, mut receivers) = session_edges(&edges)?;
-    let nodes = prepare_nodes(nodes, job, &mut senders, &mut receivers)?;
+    let nodes = prepare_nodes(nodes, job, &mut senders, &mut receivers).await?;
     let input = session_input(source_routes, &mut senders, watermarks)?;
     let outputs = sink_routes
         .into_values()
@@ -979,20 +1028,19 @@ fn session_edges(edges: &BTreeMap<String, RuntimeEdge>) -> Result<SessionEdges> 
 }
 
 /// Prepares and resets every node in the plan's topological order.
-fn prepare_nodes(
+async fn prepare_nodes(
     nodes: Vec<RuntimeStreamNode>,
     job: &StreamJobContext,
     senders: &mut BTreeMap<String, OperatorEdgeSender>,
     receivers: &mut BTreeMap<String, OperatorEdgeReceiver>,
 ) -> Result<Vec<CallerDrivenOperator>> {
     let metrics = MetricsRecorder::default();
-    nodes
-        .into_iter()
-        .map(|node| {
-            prepare_node(node, job, &metrics, senders, receivers)
-                .and_then(CallerDrivenOperator::new)
-        })
-        .collect()
+    let mut prepared = Vec::with_capacity(nodes.len());
+    for (producer, node) in nodes.into_iter().enumerate() {
+        let inputs = prepare_node(node, job, &metrics, senders, receivers, producer)?;
+        prepared.push(CallerDrivenOperator::prepare(inputs).await?);
+    }
+    Ok(prepared)
 }
 
 /// The one dynamic input: its route port, edge sender and watermark mode.
@@ -1046,10 +1094,14 @@ fn prepare_node(
     metrics: &MetricsRecorder,
     senders: &mut BTreeMap<String, OperatorEdgeSender>,
     receivers: &mut BTreeMap<String, OperatorEdgeReceiver>,
+    producer: usize,
 ) -> Result<OperatorTaskInputs> {
     let node_id = node.operator_id.as_str().to_owned();
     let ingresses = take_node_ingresses(&node, receivers)?;
     let outputs = take_node_outputs(&node, senders)?;
+    for sender in outputs.values().flatten() {
+        sender.set_session_producer(producer);
+    }
     let (_, entry_gate) = watch::channel(true);
     let (_, data_gate) = watch::channel(true);
     let (entry_ack, _) = mpsc::unbounded_channel();

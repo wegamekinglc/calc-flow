@@ -1,4 +1,12 @@
-use std::{collections::VecDeque, future::poll_fn, sync::Arc, task::Poll};
+use std::{
+    collections::VecDeque,
+    future::poll_fn,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    task::Poll,
+};
 
 use futures::task::AtomicWaker;
 use parking_lot::Mutex;
@@ -124,7 +132,13 @@ impl Drop for LocalEdgeOwner {
 struct SessionQueue {
     edge: String,
     budget: EdgeBudget,
-    queue: Mutex<VecDeque<StreamMessage>>,
+    producer: AtomicUsize,
+    queue: Mutex<VecDeque<SessionEnvelope>>,
+}
+
+pub(crate) struct SessionEnvelope {
+    pub(crate) producer: Option<usize>,
+    pub(crate) message: StreamMessage,
 }
 
 pub(crate) struct SessionEdgeSender(Arc<SessionQueue>);
@@ -144,6 +158,7 @@ pub(super) fn session_edge(
     let shared = Arc::new(SessionQueue {
         edge,
         budget,
+        producer: AtomicUsize::new(usize::MAX),
         queue: Mutex::new(VecDeque::new()),
     });
     Ok((
@@ -153,6 +168,10 @@ pub(super) fn session_edge(
 }
 
 impl SessionEdgeSender {
+    fn set_producer(&self, producer: usize) {
+        self.0.producer.store(producer, Ordering::Relaxed);
+    }
+
     pub(super) fn validate_message(&self, message: &StreamMessage) -> Result<()> {
         self.check_cost(&EnvelopeCost::of_message(message)?)
     }
@@ -171,13 +190,24 @@ impl SessionEdgeSender {
 
     /// Appends a message whose envelope the caller already admitted.
     pub(super) fn enqueue(&self, message: StreamMessage) {
-        self.0.queue.lock().push_back(message);
+        let producer = match self.0.producer.load(Ordering::Relaxed) {
+            usize::MAX => None,
+            producer => Some(producer),
+        };
+        self.0
+            .queue
+            .lock()
+            .push_back(SessionEnvelope { producer, message });
     }
 }
 
 impl SessionEdgeReceiver {
-    pub(super) fn try_recv(&self) -> Option<StreamMessage> {
+    pub(super) fn try_recv_envelope(&self) -> Option<SessionEnvelope> {
         self.0.queue.lock().pop_front()
+    }
+
+    pub(super) fn try_recv(&self) -> Option<StreamMessage> {
+        self.try_recv_envelope().map(|envelope| envelope.message)
     }
 }
 
@@ -228,6 +258,31 @@ impl OperatorEdgeSender {
             Self::Local(sender) => sender.0.core.message_cost(message).map(|_| ()),
             Self::Session(sender) => sender.validate_message(message),
         }
+    }
+
+    pub(crate) fn validate_cost(&self, cost: &EnvelopeCost) -> Result<()> {
+        reject_oversize(self.edge(), self.budget(), cost)
+    }
+
+    pub(crate) fn set_session_producer(&self, producer: usize) {
+        if let Self::Session(sender) = self {
+            sender.set_producer(producer);
+        }
+    }
+
+    pub(crate) fn send_session(
+        &mut self,
+        message: StreamMessage,
+        cost: &EnvelopeCost,
+    ) -> Result<()> {
+        let Self::Session(sender) = self else {
+            return Err(CalcFlowError::Internal {
+                message: format!("edge {:?} is not a session edge", self.edge()),
+            });
+        };
+        sender.check_cost(cost)?;
+        sender.enqueue(message);
+        Ok(())
     }
 
     pub(crate) async fn send(&mut self, message: StreamMessage) -> Result<()> {
@@ -302,6 +357,15 @@ impl OperatorEdgeReceiver {
     pub(crate) fn try_recv(&mut self) -> Result<Option<StreamMessage>> {
         match self {
             Self::Session(receiver) => Ok(receiver.try_recv()),
+            Self::Physical(_) | Self::Local(_) => Err(CalcFlowError::Internal {
+                message: format!("edge {:?} is not a session edge", self.edge()),
+            }),
+        }
+    }
+
+    pub(crate) fn try_recv_envelope(&mut self) -> Result<Option<SessionEnvelope>> {
+        match self {
+            Self::Session(receiver) => Ok(receiver.try_recv_envelope()),
             Self::Physical(_) | Self::Local(_) => Err(CalcFlowError::Internal {
                 message: format!("edge {:?} is not a session edge", self.edge()),
             }),

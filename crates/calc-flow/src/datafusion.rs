@@ -34,7 +34,7 @@ use crate::{
     datafusion_interval::TimestampIntervalArithmetic,
     datafusion_predicate::UInt64ModuloPredicate,
     datafusion_rolling::{CalcFlowQueryPlanner, RollingRewriteAudit, RollingRewriteAuditSnapshot},
-    datafusion_template::{QueryTemplate, QueryTemplates, TemplateCandidate},
+    datafusion_template::{CompiledExpression, QueryTemplate, QueryTemplates, TemplateCandidate},
     expression::{ValidatedQuery, parse_select_query, sql_projection},
     validate_selected_udfs,
 };
@@ -665,6 +665,30 @@ impl DataFusionRuntime {
             "snapshot-sql-owned",
             "snapshot_sql owned state exceeds max_bytes",
         ))
+    }
+
+    /// Plans a row-local stream expression once from its exact input schema.
+    pub(crate) async fn compile_stream_expression(
+        &self,
+        query: &ValidatedQuery,
+        input: SchemaRef,
+        node_id: &str,
+    ) -> Result<Option<Arc<CompiledExpression>>> {
+        self.ensure_open()?;
+        let input = Batch::table(
+            vec![RecordBatch::new_empty(input)],
+            crate::BatchMetadata::default(),
+        )?;
+        let tables = BTreeMap::from([("input".into(), input)]);
+        let context = self.context_for_rows(0, None, "not_evaluated");
+        let planned = self
+            .prepare_query(context, query, &tables, Some(node_id))
+            .await?;
+        let partitions = planned.task_ctx.session_config().target_partitions();
+        Ok(self
+            .templates
+            .find(query.text(), &tables, partitions)
+            .and_then(|template| template.compiled_expression()))
     }
 
     pub(crate) async fn stream_expression(
