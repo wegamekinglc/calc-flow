@@ -2261,8 +2261,9 @@ async def _native_rounds(
         if remaining is not None and remaining <= 0:
             stopped = True
             break
+        deadline = asyncio.timeout(remaining)
         try:
-            async with asyncio.timeout(remaining) as deadline:
+            async with deadline:
                 paired, record = await _native_round(binaries, selected, work, number)
         except TimeoutError:
             if not deadline.expired():
