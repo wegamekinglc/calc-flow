@@ -84,6 +84,38 @@ SESSION_PHASE_NOTE = (
     "each timed sample includes the two probe callbacks, estimated per worker "
     "as phase_probe.overhead_seconds_estimate"
 )
+NATIVE_CONTRACT = "calc-flow.rolling-kernel-v2-evidence/1"
+NATIVE_EVIDENCE_TEST = (
+    "runtime::streaming::operator_task::performance_evidence::"
+    "rolling_kernel_v2_evidence"
+)
+NATIVE_CASES = (
+    "1x1-dual",
+    "99x1-dual",
+    "6400x64-dual",
+    "64x64-dual-tick",
+    "6400x64-dual-lag1",
+)
+NATIVE_ARMS = ("absent", "present")
+NATIVE_SIDES = ("baseline", "candidate")
+NATIVE_TIMED_SAMPLES = 30
+NATIVE_HISTORY_ROWS = 4_096
+NATIVE_WARM_DISPATCHES = 3
+NATIVE_MAX_CASES = 5
+NATIVE_REGRESSION_BELOW = 0.95
+NATIVE_CASE_ROWS = {
+    "1x1-dual": 1,
+    "99x1-dual": 99,
+    "6400x64-dual": 6_400,
+    "64x64-dual-tick": 64,
+    "6400x64-dual-lag1": 6_400,
+}
+# Rolling-kernel-v2 spec §10.2: (gate, case, arm, limit in seconds).
+NATIVE_LATENCY_GATES = (
+    ("G1", "1x1-dual", "absent", 1e-6),
+    ("G3", "6400x64-dual", "absent", 100e-6),
+)
+NATIVE_G2_LIMIT_NS = 4.0
 SOURCE_PATHS = (
     "crates",
     "python",
@@ -806,10 +838,18 @@ def _validate_start(response: dict[str, Any], config: dict[str, Any]) -> None:
 
 
 def _validate_pair_digest(
-    left: str, right: str, config: dict[str, Any], phase: str
+    left: str,
+    right: str,
+    config: dict[str, Any],
+    phase: str,
+    numeric_contract_change: bool = False,
 ) -> None:
     # Decay retains the independent value oracle's D13 tolerance.
-    if config["indicator"] in ("rolling_mean", "dual_sma_spread") and left != right:
+    if (
+        not numeric_contract_change
+        and config["indicator"] in ("rolling_mean", "dual_sma_spread")
+        and left != right
+    ):
         raise ValueError(f"paired {phase} Float64 digests differ")
 
 
@@ -817,6 +857,7 @@ def _validate_starts(
     starts: list[dict[str, Any]],
     config: dict[str, Any],
     drivers: tuple[str, str] = DEFAULT_DRIVERS,
+    numeric_contract_change: bool = False,
 ) -> None:
     for response, driver in zip(starts, drivers, strict=True):
         _validate_start(response, config)
@@ -825,7 +866,11 @@ def _validate_starts(
     if starts[0]["config"] != starts[1]["config"]:
         raise ValueError("paired worker configurations differ")
     _validate_pair_digest(
-        starts[0]["warm_output_digest"], starts[1]["warm_output_digest"], config, "warm"
+        starts[0]["warm_output_digest"],
+        starts[1]["warm_output_digest"],
+        config,
+        "warm",
+        numeric_contract_change,
     )
     if starts[0]["plan_identity"] != starts[1]["plan_identity"]:
         raise ValueError("paired plan preflight identities differ")
@@ -944,12 +989,13 @@ async def _measure_case(
     *,
     drivers: tuple[str, str] = DEFAULT_DRIVERS,
     reference: str | None = None,
+    numeric_contract_change: bool = False,
 ) -> dict[str, Any]:
     starts = [
         await worker.request(operation="start", config=config, driver=driver)
         for worker, driver in zip(workers, drivers, strict=True)
     ]
-    _validate_starts(starts, config, drivers)
+    _validate_starts(starts, config, drivers, numeric_contract_change)
     measured: list[list[dict[str, Any]]] = [[], []]
     for index in range(samples):
         order = (0, 1) if index % 2 == 0 else (1, 0)
@@ -965,6 +1011,7 @@ async def _measure_case(
             measured[1][-1]["correctness"]["float64_digest"],
             config,
             "sample",
+            numeric_contract_change,
         )
     terminal = [await worker.request(operation="finish") for worker in workers]
     result = {
@@ -1328,6 +1375,7 @@ class WorkerPairOptions:
     thread_counts: tuple[int, int] | None = None
     drivers: tuple[str, str] = DEFAULT_DRIVERS
     reference: str | None = None
+    numeric_contract_change: bool = False
 
 
 async def _close_workers(workers, path):
@@ -1393,6 +1441,7 @@ async def _fresh_case(
                 collect_gc,
                 drivers=options.drivers,
                 reference=options.reference,
+                numeric_contract_change=options.numeric_contract_change,
             )
         except BaseException as error:
             primary_error = error
@@ -1442,6 +1491,7 @@ def _compare_report(
         "comparison_kind": "engine"
         if counts is None
         else "same-wheel scheduler configuration",
+        "numeric_contract_change": args.numeric_contract_change,
         "timed_boundaries": TIMED_BOUNDARIES,
         "session_phase_note": SESSION_PHASE_NOTE,
         "budget_seconds": args.budget_seconds,
@@ -1493,7 +1543,13 @@ async def compare(args: argparse.Namespace) -> None:
                     config,
                     args.samples,
                     mode == "forced",
-                    WorkerPairOptions(work, counts, arms["drivers"], arms["reference"]),
+                    WorkerPairOptions(
+                        work,
+                        counts,
+                        arms["drivers"],
+                        arms["reference"],
+                        args.numeric_contract_change,
+                    ),
                 )
         except TimeoutError:
             if not deadline.expired():
@@ -1523,6 +1579,633 @@ async def compare(args: argparse.Namespace) -> None:
         json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8"
     )
     output.with_suffix(".md").write_text(markdown(report), encoding="utf-8")
+
+
+def _validate_native_case_names(names: list[str]) -> None:
+    if any(not name for name in names):
+        raise argparse.ArgumentTypeError("native evidence case names must not be empty")
+    unknown = [name for name in names if name not in NATIVE_CASES]
+    if unknown:
+        raise argparse.ArgumentTypeError(
+            f"unknown native evidence case {unknown[0]!r}; "
+            f"known cases: {', '.join(NATIVE_CASES)}"
+        )
+
+
+def _validate_native_case_counts(names: list[str]) -> None:
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise argparse.ArgumentTypeError(
+            f"native evidence case {duplicates[0]!r} is selected more than once"
+        )
+    if len(names) > NATIVE_MAX_CASES:
+        raise argparse.ArgumentTypeError(
+            f"native evidence accepts at most {NATIVE_MAX_CASES} cases"
+        )
+
+
+def parse_native_cases(text: str) -> tuple[str, ...]:
+    """Parse a bounded, ordered selection of rolling-dispatch evidence cases."""
+    names = text.split(",")
+    _validate_native_case_names(names)
+    _validate_native_case_counts(names)
+    return tuple(names)
+
+
+def _native_round_count(value: str) -> int:
+    rounds = _positive_scalar(value)
+    if rounds < 2:
+        raise argparse.ArgumentTypeError("native evidence requires at least two rounds")
+    return rounds
+
+
+def _native_selection(cases: tuple[str, ...]) -> tuple[str, ...]:
+    selected = tuple(cases)
+    valid = (
+        1 <= len(selected) <= NATIVE_MAX_CASES
+        and len(set(selected)) == len(selected)
+        and all(name in NATIVE_CASES for name in selected)
+    )
+    if not valid:
+        raise ValueError("invalid native evidence case selection")
+    return selected
+
+
+def _native_number(value: Any, *, positive: bool) -> float:
+    if type(value) not in (int, float):
+        raise ValueError("native evidence times must be JSON numbers")
+    parsed = float(value)
+    if not np.isfinite(parsed):
+        raise ValueError("native evidence times must be finite")
+    if positive and parsed <= 0:
+        raise ValueError("native dispatch times must be positive")
+    if not positive and parsed < 0:
+        raise ValueError("native stage times must be nonnegative")
+    return parsed
+
+
+def _validate_native_sample(sample: Any, index: int) -> None:
+    if not isinstance(sample, dict):
+        raise ValueError("native evidence samples must be objects")
+    if type(sample.get("index")) is not int or sample["index"] != index:
+        raise ValueError("native evidence sample indices must be contiguous")
+    expected_order = "AB" if index % 2 == 0 else "BA"
+    if sample.get("order") != expected_order:
+        raise ValueError("native evidence samples must alternate AB/BA order")
+    for arm in NATIVE_ARMS:
+        _native_number(sample.get(f"{arm}_seconds"), positive=True)
+    _native_number(sample.get("present_numeric_update_seconds"), positive=False)
+
+
+def _validate_native_case_metadata(case: dict[str, Any], name: str) -> None:
+    if type(case.get("rows")) is not int or case["rows"] != NATIVE_CASE_ROWS[name]:
+        raise ValueError(f"native evidence case {name!r} has the wrong row count")
+    expected = {
+        "name": name,
+        "kind": "dispatch",
+        "window_outputs": 2,
+        "history_rows": NATIVE_HISTORY_ROWS,
+        "warm_dispatches": NATIVE_WARM_DISPATCHES,
+    }
+    if any(case.get(key) != value for key, value in expected.items()):
+        raise ValueError(f"native evidence case {name!r} does not match its workload")
+
+
+def _validate_native_case(case: Any, name: str) -> None:
+    if not isinstance(case, dict):
+        raise ValueError("native evidence cases must be objects")
+    _validate_native_case_metadata(case, name)
+    samples = case.get("samples")
+    if not isinstance(samples, list) or len(samples) != NATIVE_TIMED_SAMPLES:
+        raise ValueError("native evidence cases require exactly 30 timed samples")
+    for index, sample in enumerate(samples):
+        _validate_native_sample(sample, index)
+
+
+def _validate_native_envelope(
+    evidence: dict[str, Any], selected: tuple[str, ...]
+) -> None:
+    if evidence.get("contract") != NATIVE_CONTRACT:
+        raise ValueError("unexpected native evidence contract")
+    if type(evidence.get("debug_assertions")) is not bool:
+        raise ValueError("native evidence must declare its build mode")
+    if evidence["debug_assertions"]:
+        raise ValueError("native evidence requires a release test binary")
+    if evidence.get("selection") != list(selected):
+        raise ValueError("native evidence selection differs from the request")
+
+
+def _validate_native_run_metadata(evidence: dict[str, Any]) -> None:
+    if (
+        type(evidence.get("timed_samples")) is not int
+        or evidence["timed_samples"] != NATIVE_TIMED_SAMPLES
+    ):
+        raise ValueError("native evidence declares the wrong timed-sample count")
+    if not isinstance(evidence.get("executable"), str) or not evidence["executable"]:
+        raise ValueError("native evidence must identify its executable")
+
+
+def _validate_native_evidence(evidence: Any, selected: tuple[str, ...]) -> None:
+    """Reject stale, debug, mis-selected, malformed or non-finite evidence."""
+    if not isinstance(evidence, dict):
+        raise ValueError("native evidence must be a JSON object")
+    _validate_native_envelope(evidence, selected)
+    _validate_native_run_metadata(evidence)
+    cases = evidence.get("cases")
+    if not isinstance(cases, list) or len(cases) != len(selected):
+        raise ValueError("native evidence cases differ from the request")
+    for case, name in zip(cases, selected, strict=True):
+        _validate_native_case(case, name)
+
+
+async def _settle_native_process(creation, process, error: BaseException) -> None:
+    try:
+        if process is None:
+            process = await _complete_owned(creation)
+        await _complete_owned(asyncio.create_task(stop(process)))
+    except BaseException as cleanup_error:
+        _raise_command_error(error, cleanup_error)
+
+
+async def _run_native_evidence(
+    binary: Path, selected: tuple[str, ...], output: Path
+) -> dict[str, Any]:
+    """Run one owned release-test process and load its exclusive JSON output."""
+    binary = binary.resolve()
+    output = output.resolve()
+    if output.exists():
+        raise FileExistsError(f"refusing to overwrite native evidence: {output}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    environment = dict(
+        os.environ,
+        CALC_FLOW_NATIVE_EVIDENCE_CASES=",".join(selected),
+        CALC_FLOW_NATIVE_EVIDENCE_OUTPUT=str(output),
+    )
+    with output.with_suffix(".log").open("wb") as log:
+        creation = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                str(binary),
+                "--exact",
+                NATIVE_EVIDENCE_TEST,
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+                cwd=REPOSITORY,
+                env=environment,
+                stdout=log,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        )
+        process = None
+        try:
+            process = await asyncio.shield(creation)
+            code = await process.wait()
+        except BaseException as error:
+            await _settle_native_process(creation, process, error)
+            raise
+    if code:
+        raise RuntimeError(
+            f"native evidence binary exited {code}; see {output.with_suffix('.log')}"
+        )
+    try:
+        evidence = json.loads(output.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(
+            f"native evidence output is missing or invalid: {output}"
+        ) from error
+    _validate_native_evidence(evidence, selected)
+    return evidence
+
+
+def _native_binary_identity(binary: Path, side: str) -> dict[str, Any]:
+    path = binary.resolve(strict=True)
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise ValueError(f"{side} native evidence binary must be an executable file")
+    return {"side": side, "path": str(path), "sha256": sha256_file(path)}
+
+
+def _verify_native_binaries(binaries: list[dict[str, Any]]) -> None:
+    for binary in binaries:
+        if sha256_file(Path(binary["path"])) != binary["sha256"]:
+            raise ValueError(
+                f"{binary['side']} native evidence binary changed during the run"
+            )
+
+
+async def _native_round(
+    binaries: list[dict[str, Any]],
+    selected: tuple[str, ...],
+    work: Path,
+    number: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    by_side = {binary["side"]: binary for binary in binaries}
+    order = NATIVE_SIDES if number % 2 else tuple(reversed(NATIVE_SIDES))
+    paths = {side: work / f"round-{number}-{side}.json" for side in NATIVE_SIDES}
+    evidence = {}
+    for side in order:
+        evidence[side] = await _run_native_evidence(
+            Path(by_side[side]["path"]), selected, paths[side]
+        )
+        _validate_native_evidence(evidence[side], selected)
+    outputs = {
+        side: {
+            "path": str(paths[side].resolve()),
+            "sha256": sha256_file(paths[side]),
+            "executable": evidence[side]["executable"],
+        }
+        for side in NATIVE_SIDES
+    }
+    return evidence, {
+        "round": number,
+        "order": "AB" if order == NATIVE_SIDES else "BA",
+        "outputs": outputs,
+    }
+
+
+def _native_case(evidence: dict[str, Any], name: str) -> dict[str, Any]:
+    return next(case for case in evidence["cases"] if case["name"] == name)
+
+
+def _native_round_samples(
+    rounds: list[dict[str, Any]], name: str, arm: str, side: str
+) -> list[list[float]]:
+    return [
+        [
+            _native_number(sample[f"{arm}_seconds"], positive=True)
+            for sample in _native_case(paired[side], name)["samples"]
+        ]
+        for paired in rounds
+    ]
+
+
+def _native_paired_statistics(
+    baseline: list[float], candidate: list[float], rows: int
+) -> tuple[float, list[float] | None, int]:
+    if len(baseline) == 1:
+        ratio = baseline[0] / candidate[0]
+        return ratio, None, 0
+    paired = paired_summary(baseline, candidate, rows=rows)
+    return (
+        paired["paired_speedup_median"],
+        paired["paired_speedup_ci95"],
+        paired["bootstrap_resamples"],
+    )
+
+
+def _native_verdict(interval: list[float] | None) -> dict[str, Any]:
+    if interval is None:
+        return {"paired_speedup": "inconclusive", "confirmed_regression": None}
+    low, high = interval
+    return {
+        "paired_speedup": (
+            "slower" if high < 1.0 else "faster" if low > 1.0 else "inconclusive"
+        ),
+        "confirmed_regression": high < NATIVE_REGRESSION_BELOW,
+    }
+
+
+def _native_numeric_update(
+    rounds: list[dict[str, Any]], name: str, rows: int, window_outputs: int
+) -> dict[str, float]:
+    divisor = rows * window_outputs
+    return {
+        side: float(
+            np.median(
+                [
+                    _native_number(
+                        sample["present_numeric_update_seconds"], positive=False
+                    )
+                    * 1e9
+                    / divisor
+                    for paired in rounds
+                    for sample in _native_case(paired[side], name)["samples"]
+                ]
+            )
+        )
+        for side in NATIVE_SIDES
+    }
+
+
+def _native_arm_summary(
+    rounds: list[dict[str, Any]], name: str, arm: str
+) -> dict[str, Any]:
+    case = _native_case(rounds[0]["baseline"], name)
+    rows = case["rows"]
+    samples = {
+        side: _native_round_samples(rounds, name, arm, side) for side in NATIVE_SIDES
+    }
+    medians = {
+        side: [float(np.median(values)) for values in samples[side]]
+        for side in NATIVE_SIDES
+    }
+    speedup, interval, resamples = _native_paired_statistics(
+        medians["baseline"], medians["candidate"], rows
+    )
+    numeric = (
+        _native_numeric_update(rounds, name, rows, case["window_outputs"])
+        if arm == "present"
+        else None
+    )
+    return {
+        "case": name,
+        "kind": "dispatch",
+        "arm": arm,
+        "rows": rows,
+        "rounds": len(rounds),
+        "baseline": _summary(np.asarray(samples["baseline"]).ravel(), rows),
+        "candidate": _summary(np.asarray(samples["candidate"]).ravel(), rows),
+        "round_medians_seconds": medians,
+        "paired_round_speedups": [
+            baseline / candidate
+            for baseline, candidate in zip(
+                medians["baseline"], medians["candidate"], strict=True
+            )
+        ],
+        "paired_round_speedup_median": speedup,
+        "paired_round_speedup_ci95": interval,
+        "bootstrap_resamples": resamples,
+        "verdict": _native_verdict(interval),
+        **({} if numeric is None else {"numeric_update_ns_per_window_row": numeric}),
+    }
+
+
+def _native_arm_summaries(rounds: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not rounds:
+        return []
+    selected = rounds[0]["baseline"]["selection"]
+    return [
+        _native_arm_summary(rounds, name, arm)
+        for name in selected
+        for arm in NATIVE_ARMS
+    ]
+
+
+def _native_find_arm(arms: list[dict[str, Any]], case: str, arm: str):
+    return next(
+        (item for item in arms if (item["case"], item["arm"]) == (case, arm)),
+        None,
+    )
+
+
+def _native_latency_gate(
+    gate: str,
+    case: str,
+    arm: str,
+    limit: float,
+    arms: list[dict[str, Any]],
+    complete: bool,
+) -> dict[str, Any]:
+    measured = _native_find_arm(arms, case, arm)
+    value = None if measured is None else measured["candidate"]["p50_seconds"]
+    return {
+        "case": case,
+        "arm": arm,
+        "value_seconds": value,
+        "limit_seconds": limit,
+        "met": value <= limit if complete and value is not None else None,
+    }
+
+
+def _native_g2_gate(arms: list[dict[str, Any]], complete: bool) -> dict[str, Any]:
+    measured = _native_find_arm(arms, "6400x64-dual", "present")
+    value = (
+        None
+        if measured is None
+        else measured["numeric_update_ns_per_window_row"]["candidate"]
+    )
+    return {
+        "case": "6400x64-dual",
+        "arm": "present",
+        "value_ns_per_window_row": value,
+        "limit_ns_per_window_row": NATIVE_G2_LIMIT_NS,
+        "met": (
+            value <= NATIVE_G2_LIMIT_NS if complete and value is not None else None
+        ),
+    }
+
+
+def _native_gate_values(
+    arms: list[dict[str, Any]], complete: bool
+) -> dict[str, dict[str, Any]]:
+    latency = {
+        gate: _native_latency_gate(gate, case, arm, limit, arms, complete)
+        for gate, case, arm, limit in NATIVE_LATENCY_GATES
+    }
+    return {
+        "G1": latency["G1"],
+        "G2": _native_g2_gate(arms, complete),
+        "G3": latency["G3"],
+    }
+
+
+def _native_report(
+    args: argparse.Namespace,
+    binaries: list[dict[str, Any]],
+    rounds: list[dict[str, Any]],
+    round_records: list[dict[str, Any]],
+    status: str,
+    started: float,
+) -> dict[str, Any]:
+    arms = _native_arm_summaries(rounds)
+    return {
+        "contract": "paired-native-evidence-v1",
+        "status": status,
+        "cases": list(args.cases),
+        "requested_rounds": args.rounds,
+        "completed_rounds": len(rounds),
+        "timed_samples_per_round": NATIVE_TIMED_SAMPLES,
+        "sample_pairs_per_case": len(rounds) * NATIVE_TIMED_SAMPLES,
+        "budget_seconds": args.budget_seconds,
+        "elapsed_seconds": time.monotonic() - started,
+        "numeric_contract_change": args.numeric_contract_change,
+        "binaries": binaries,
+        "round_evidence": round_records,
+        "arms": arms,
+        "gate_values": _native_gate_values(arms, status == "completed"),
+        "timed_boundary": (
+            "current-thread dispatch_data plus dispatch_watermark_handler on a "
+            "RollingOperator; no projection; output drain outside the timer"
+        ),
+        "comparison_note": (
+            "P2.1 uses the async dispatch boundary; later cross-boundary "
+            "speedups are informational, while G1-G3 remain absolute"
+        ),
+        "harness_sha256": sha256_file(Path(__file__).resolve()),
+    }
+
+
+def _native_speedup(arm: dict[str, Any]) -> str:
+    interval = arm["paired_round_speedup_ci95"]
+    if interval is None:
+        return f"{arm['paired_round_speedup_median']:.2f}x (one round; no CI)"
+    low, high = interval
+    return f"{arm['paired_round_speedup_median']:.2f}x ({low:.2f}–{high:.2f})"
+
+
+def _native_arm_markdown(arms: list[dict[str, Any]]) -> list[str]:
+    rows = [
+        [
+            arm["case"],
+            arm["arm"],
+            str(arm["rounds"]),
+            f"{_micros(arm['baseline']['p50_seconds'])} / "
+            f"{_micros(arm['baseline']['p95_seconds'])}",
+            f"{_micros(arm['candidate']['p50_seconds'])} / "
+            f"{_micros(arm['candidate']['p95_seconds'])}",
+            _native_speedup(arm),
+            arm["verdict"]["paired_speedup"],
+        ]
+        for arm in arms
+    ]
+    return _markdown_table(
+        [
+            "Case",
+            "Arm",
+            "Rounds",
+            "Baseline P50 / P95 µs",
+            "Candidate P50 / P95 µs",
+            "Paired-round speedup (95% CI)",
+            "Verdict",
+        ],
+        rows,
+    )
+
+
+def _native_gate_measurement(
+    gate: dict[str, Any],
+) -> tuple[float | None, float, str]:
+    if "value_seconds" in gate:
+        value = gate["value_seconds"]
+        return (
+            None if value is None else value * 1e6,
+            gate["limit_seconds"] * 1e6,
+            "µs",
+        )
+    return (
+        gate["value_ns_per_window_row"],
+        gate["limit_ns_per_window_row"],
+        "ns/window-row",
+    )
+
+
+def _native_gate_cell(value: float | None) -> str:
+    return "unmeasured" if value is None else f"{value:.3f}"
+
+
+def _native_gate_markdown(gates: dict[str, dict[str, Any]]) -> list[str]:
+    rows = []
+    for name, gate in gates.items():
+        value, limit, unit = _native_gate_measurement(gate)
+        rows.append(
+            [
+                name,
+                gate["case"],
+                gate["arm"],
+                _native_gate_cell(value),
+                _native_gate_cell(limit),
+                unit,
+                "incomplete" if gate["met"] is None else str(gate["met"]),
+            ]
+        )
+    return _markdown_table(
+        ["Gate", "Case", "Arm", "Candidate value", "Limit", "Unit", "Met"], rows
+    )
+
+
+def native_markdown(report: dict[str, Any]) -> str:
+    budget = report["budget_seconds"]
+    lines = [
+        "# Paired native rolling-dispatch evidence",
+        "",
+        (
+            "Release test binaries alternate AB/BA across rounds; each round warms "
+            "both recorder arms and collects 30 timed dispatches per case."
+        ),
+        f"Status: {report['status']}; {report['completed_rounds']} / "
+        f"{report['requested_rounds']} rounds completed; "
+        f"{report['elapsed_seconds']:.1f} s elapsed"
+        + (f" of a {budget:g} s budget." if budget is not None else "."),
+        "",
+        *_native_arm_markdown(report["arms"]),
+        "",
+        "## Absolute gate values",
+        "",
+        (
+            "Gate values use candidate P50 over all retained samples. Incomplete "
+            "budget-stopped reports do not assert gate outcomes."
+        ),
+        "",
+        *_native_gate_markdown(report["gate_values"]),
+        "",
+        (
+            "G2 uses recorder-present numeric_update ns divided by 6,400 × 2 "
+            "window rows. P2.1 cross-boundary speedups are informational."
+        ),
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _native_remaining_budget(budget: float | None, started: float) -> float | None:
+    return None if budget is None else budget - (time.monotonic() - started)
+
+
+async def _native_rounds(
+    args: argparse.Namespace,
+    binaries: list[dict[str, Any]],
+    selected: tuple[str, ...],
+    work: Path,
+    started: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+    rounds: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
+    stopped = False
+    for number in range(1, args.rounds + 1):
+        remaining = _native_remaining_budget(args.budget_seconds, started)
+        if remaining is not None and remaining <= 0:
+            stopped = True
+            break
+        try:
+            async with asyncio.timeout(remaining) as deadline:
+                paired, record = await _native_round(binaries, selected, work, number)
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+            stopped = True
+            break
+        rounds.append(paired)
+        records.append(record)
+        print(f"native evidence round {number}: {record['order']}", flush=True)
+    return rounds, records, stopped
+
+
+async def native(args: argparse.Namespace) -> None:
+    """Pair prebuilt release binaries without compiling or expanding the matrix."""
+    started = time.monotonic()
+    selected = _native_selection(args.cases)
+    output = args.output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    work = output.parent if args.work_dir is None else args.work_dir.resolve()
+    work.mkdir(parents=True, exist_ok=True)
+    binaries = [
+        _native_binary_identity(binary, side)
+        for binary, side in zip(
+            (args.baseline_binary, args.candidate_binary), NATIVE_SIDES, strict=True
+        )
+    ]
+    rounds, records, stopped = await _native_rounds(
+        args, binaries, selected, work, started
+    )
+    _verify_native_binaries(binaries)
+    if stopped:
+        print(f"budget exhausted; retained {len(rounds)} completed rounds", flush=True)
+    report = _native_report(
+        args, binaries, rounds, records, "stopped" if stopped else "completed", started
+    )
+    output.write_text(
+        json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+    )
+    output.with_suffix(".md").write_text(native_markdown(report), encoding="utf-8")
 
 
 async def diagnose(args: argparse.Namespace) -> None:
@@ -1608,6 +2291,11 @@ def main() -> None:
     )
     paired.add_argument("--budget-seconds", type=_positive_float)
     paired.add_argument(
+        "--numeric-contract-change",
+        action="store_true",
+        help="allow unequal cross-arm rolling digests; retain all other validation",
+    )
+    paired.add_argument(
         "--work-dir", type=Path, help="worker temporaries and exit receipts"
     )
     paired.add_argument(
@@ -1625,6 +2313,15 @@ def main() -> None:
         choices=("forced", "normal"),
         default=("forced", "normal"),
     )
+    native_parser = commands.add_parser("native")
+    native_parser.add_argument("--baseline-binary", type=Path, required=True)
+    native_parser.add_argument("--candidate-binary", type=Path, required=True)
+    native_parser.add_argument("--cases", type=parse_native_cases, required=True)
+    native_parser.add_argument("--rounds", type=_native_round_count, default=10)
+    native_parser.add_argument("--output", type=Path, required=True)
+    native_parser.add_argument("--work-dir", type=Path)
+    native_parser.add_argument("--budget-seconds", type=_positive_float)
+    native_parser.add_argument("--numeric-contract-change", action="store_true")
     worker = commands.add_parser("_worker")
     worker.add_argument("--root", type=Path, required=True)
     diagnostic = commands.add_parser("diagnose")
@@ -1647,6 +2344,8 @@ def main() -> None:
         asyncio.run(build(args))
     elif args.command == "_worker":
         asyncio.run(worker_main(args.root))
+    elif args.command == "native":
+        asyncio.run(native(args))
     elif args.command == "diagnose":
         if args.samples < 2:
             parser.error("at least two diagnostic samples are required")
