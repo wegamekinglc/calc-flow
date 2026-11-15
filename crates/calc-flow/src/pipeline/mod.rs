@@ -24,8 +24,8 @@ pub(crate) use compile::{
 };
 pub(crate) use stream::{
     CompiledStreamOperator, OUTPUT_FRONTIER_METADATA_KEY_V1, OperatorCheckpointCapability,
-    RuntimeConsumer, RuntimeEdgeKind, RuntimeProducer, RuntimeSinkRoute, RuntimeSourceRoute,
-    RuntimeStreamNode, StableOperatorId, StreamRuntimePlanParts,
+    RuntimeConsumer, RuntimeEdge, RuntimeEdgeKind, RuntimeProducer, RuntimeSinkRoute,
+    RuntimeSourceRoute, RuntimeStreamNode, StableOperatorId, StreamRuntimePlanParts,
 };
 
 use std::collections::BTreeMap;
