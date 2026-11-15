@@ -106,7 +106,11 @@ def _assert_native_calls(calls: list[tuple[str, str]]) -> None:
         "round-1-candidate.json",
         "round-2-candidate.json",
         "round-2-baseline.json",
-    ] * 2
+        "round-3-baseline.json",
+        "round-3-candidate.json",
+        "round-4-candidate.json",
+        "round-4-baseline.json",
+    ]
 
 
 def _assert_native_report(report: dict, args: SimpleNamespace) -> None:
