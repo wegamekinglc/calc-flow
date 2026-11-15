@@ -13,6 +13,12 @@ Two rounds of ten alternating fresh-process AB/BA pairs follow the maintained
 Arrow output, including compilation, job startup and completion; fixture
 construction and validation are outside timing.
 
+The collector was refactored for complexity limits after collection. The
+`collector_sha256` in `results.json` identifies the exact collection-time
+version at commit `55514073`; re-evaluating both archived `pairs.json` files
+with the refactored collector reproduces every verdict and numeric result
+exactly.
+
 The two default changes are measured together: checkpoint-off convenience jobs
 and per-batch generated watermarks. This harness cannot pin one while varying
 the other, so the result cannot attribute between them.
