@@ -504,12 +504,12 @@ class WarmProcessTests(unittest.IsolatedAsyncioTestCase):
                 await session.dispatch({"operation": operation, "collect_gc": False})
         with self.assertRaisesRegex(ValueError, "unknown"):
             await session.dispatch({"operation": "invalid"})
-        scenario = SimpleNamespace(job=SimpleNamespace(cancel_async=AsyncMock()))
+        scenario = SimpleNamespace(cancel=AsyncMock())
         session.scenario = scenario
         await session.close()
-        scenario.job.cancel_async.assert_awaited_once()
+        scenario.cancel.assert_awaited_once()
         await session.close()
-        scenario.job.cancel_async.assert_awaited_once()
+        scenario.cancel.assert_awaited_once()
 
     async def test_metadata_process_failure_cannot_produce_a_fingerprint(self) -> None:
         process = SimpleNamespace(

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import runpy
 import sys
+import threading
+import time
 import zoneinfo
 from datetime import timedelta
 from pathlib import Path
@@ -14,18 +17,26 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
+from benchmarks import warm_stream as warm
 from benchmarks.warm_stream import (
     BASE,
+    SCHEMA,
     ScenarioConfig,
     WarmScenario,
+    WarmSessionScenario,
     _expected,
     _input_table,
+    _native_method_matcher,
+    _NativeCallProbe,
     _prepared_events,
+    _probe_overhead_seconds,
     _segment,
     _summary,
     _validate_output,
     _warm_program,
+    ta_lib_reference,
 )
+from calc_flow.symbolic import Program
 
 
 def test_warm_shared_helpers_do_not_require_optional_talib(monkeypatch) -> None:
@@ -237,5 +248,248 @@ def test_callback_diagnostics_are_opt_in_and_survive_terminal_cleanup(tmp_path) 
                     <= record["elapsed_ns"]
                 )
         assert json.loads(native._take_callback_profile())["records"] == []
+
+    asyncio.run(exercise())
+
+
+def _probed_push(native: collections.deque, value: int) -> dict[str, int]:
+    prepared = list([value])
+    native.append(sum(prepared))
+    return {"rows": len(native)}
+
+
+def _bound_push(native: collections.deque, value: int) -> int:
+    append = native.append
+    append(value)
+    return len(native)
+
+
+def _double_push(native: collections.deque, value: int) -> None:
+    native.append(value)
+    native.append(value)
+
+
+def _probe_sample(probe: _NativeCallProbe, function, native) -> dict | str:
+    probe.reset()
+    started = time.perf_counter_ns()
+    function(native, 1)
+    return probe.phases(started, time.perf_counter_ns())
+
+
+def test_native_call_probe_splits_samples_at_the_matching_native_call() -> None:
+    codes = (_probed_push.__code__, _bound_push.__code__, _double_push.__code__)
+    probe = _NativeCallProbe(codes, _native_method_matcher(collections.deque, "append"))
+    assert probe.install() is None
+    native: collections.deque = collections.deque()
+    try:
+        for function in (_probed_push, _bound_push):
+            for _ in range(3):
+                phases = _probe_sample(probe, function, native)
+                assert set(phases) == {
+                    "argument_handling",
+                    "native_call",
+                    "result_assembly",
+                }
+                assert all(value >= 0 for value in phases.values())
+        assert _probe_sample(probe, _double_push, native) == (
+            "observed 2 matching native calls"
+        )
+        assert _probe_sample(probe, lambda native, value: None, native) == (
+            "observed 0 matching native calls"
+        )
+    finally:
+        probe.close()
+    probe.reset()
+    _probed_push(native, 1)
+    assert probe.calls == 0
+    overhead = _probe_overhead_seconds(calls=200, rounds=2)
+    assert overhead is not None and 0 <= overhead < 1e-3
+
+
+def test_native_call_probe_reports_an_occupied_monitoring_tool() -> None:
+    tool = sys.monitoring.PROFILER_ID
+    sys.monitoring.use_tool_id(tool, "occupied")
+    try:
+        probe = _NativeCallProbe((), lambda callable_, arg0: False)
+        assert "already in use" in probe.install()
+    finally:
+        sys.monitoring.free_tool_id(tool)
+
+
+class _OracleSession:
+    """Release rows at explicit watermarks with oracle values, like a session."""
+
+    def __init__(self, config: ScenarioConfig, column: str) -> None:
+        self._config = config
+        self._column = column
+        self._pending: list[pa.Table] = []
+        self.emitted = 0
+        self.closed = False
+        self.calls: list[tuple[str, int, object]] = []
+
+    def _record(self, operation: str, watermark: object = None) -> None:
+        with pytest.raises(RuntimeError):
+            asyncio.get_running_loop()
+        self.calls.append((operation, threading.get_ident(), watermark))
+
+    def _empty(self) -> pa.Table:
+        schema = SCHEMA.append(pa.field(self._column, pa.float64()))
+        return schema.empty_table()
+
+    def push(self, inputs, *, watermark=None) -> dict[str, pa.Table]:
+        self._record("push", watermark)
+        (batch,) = inputs.values()
+        assert list(inputs) == ["quotes"]
+        self._pending.append(batch.to_pyarrow())
+        if watermark is None:
+            return {"indicators": self._empty()}
+        released = pa.concat_tables(self._pending)
+        self._pending = []
+        values = _expected(self._config, start=self.emitted, rows=released.num_rows)
+        self.emitted += released.num_rows
+        return {"indicators": released.append_column(self._column, pa.array(values))}
+
+    def finish(self) -> dict[str, pa.Table]:
+        self._record("finish")
+        return {"indicators": self._empty()}
+
+    def close(self) -> None:
+        self._record("close")
+        self.closed = True
+
+
+class _SessionProgram:
+    def __init__(self, program: Program, session: _OracleSession) -> None:
+        self._program = program
+        self._session = session
+        self.session_arguments: dict = {}
+
+    def __getattr__(self, name: str):
+        return getattr(self._program, name)
+
+    def session(self, **arguments) -> _OracleSession:
+        self.session_arguments = arguments
+        return self._session
+
+
+def test_session_driver_warms_samples_and_finishes_on_one_session_thread(
+    monkeypatch,
+) -> None:
+    config = ScenarioConfig(
+        history_rows=128,
+        append_rows=64,
+        history_segment_rows=32,
+        indicator="dual_sma_spread",
+        exact_projection=True,
+    )
+    session = _OracleSession(config, "dual_sma_spread")
+    program = _SessionProgram(_warm_program(config), session)
+    monkeypatch.setattr(warm, "_warm_program", lambda _config: program)
+
+    async def exercise() -> None:
+        scenario = await WarmSessionScenario.start(config)
+        assert scenario.position == 128
+        assert scenario.plan_identity["preflight"]["exact_projection"] is True
+        assert scenario.phase_probe["installed"] is False
+        first = await scenario.sample(collect_gc=True)
+        second = await scenario.sample(collect_gc=False)
+        assert [first["start_row"], second["start_row"]] == [128, 192]
+        for sample in (first, second):
+            assert sample["correctness"]["passed"]
+            assert sample["seconds"] > 0
+            assert sample["phases_seconds"] == {}
+            assert sample["phase_attribution"].startswith("unavailable: ")
+        terminal = await scenario.finish()
+        assert terminal["state"] == "completed"
+        assert terminal["finish_rows"] == {"indicators": 0}
+        await scenario.cancel()
+
+    asyncio.run(exercise())
+    arguments = program.session_arguments
+    assert set(arguments["watermarks"]) == {"quotes"}
+    assert arguments["config"].checkpointing is False
+    assert arguments["config"].edge_budget.max_rows == 64
+    pushes = [watermark for operation, _, watermark in session.calls[:4]]
+    # Sub-tick history segments carry a watermark only after a complete tick.
+    assert [watermark is None for watermark in pushes] == [True, False] * 2
+    assert [operation for operation, _, _ in session.calls[4:]] == [
+        "push",
+        "push",
+        "finish",
+        "close",
+    ]
+    assert len({thread for _, thread, _ in session.calls}) == 1
+    assert session.calls[0][1] != threading.get_ident()
+    assert session.closed
+
+
+def test_session_driver_requires_the_checkpoint_off_exact_projection() -> None:
+    with pytest.raises(ValueError, match="exact projection"):
+        asyncio.run(WarmSessionScenario.start(ScenarioConfig(history_rows=128)))
+
+
+@pytest.mark.parametrize(
+    ("append_rows", "entities"), ((1, 1), (99, 1), (128, 64)), ids=str
+)
+def test_ta_lib_reference_times_each_paired_append_against_the_oracle(
+    append_rows, entities
+) -> None:
+    pytest.importorskip("talib")
+    config = ScenarioConfig(
+        history_rows=4_096,
+        append_rows=append_rows,
+        entities=entities,
+        indicator="dual_sma_spread",
+        exact_projection=True,
+    )
+    reference = ta_lib_reference(config, samples=3, collect_gc=True)
+    assert len(reference["samples_seconds"]) == 3
+    assert all(value > 0 for value in reference["samples_seconds"])
+    assert reference["history_rows_per_entity"] == 19
+    assert reference["throughput_rows_per_second"] > 0
+
+
+def test_ta_lib_reference_rejects_unsupported_layouts() -> None:
+    for config in (
+        ScenarioConfig(history_rows=128, indicator="rolling_decay"),
+        ScenarioConfig(history_rows=128, append_rows=1, append_entities=1),
+    ):
+        with pytest.raises(ValueError, match="TA-Lib reference"):
+            ta_lib_reference(config, samples=2, collect_gc=False)
+    with pytest.raises(ValueError, match="two samples"):
+        ta_lib_reference(ScenarioConfig(history_rows=128), samples=1, collect_gc=False)
+
+
+@pytest.mark.skipif(
+    not hasattr(Program, "session"), reason="requires the P1 Program.session API"
+)
+def test_session_driver_matches_the_runner_driver_on_a_real_session(
+    tmp_path,
+) -> None:
+    config = ScenarioConfig(
+        history_rows=128,
+        append_rows=64,
+        indicator="dual_sma_spread",
+        exact_projection=True,
+    )
+
+    async def exercise() -> None:
+        runner = await WarmScenario.start(config, tmp_path)
+        session = await WarmSessionScenario.start(config)
+        try:
+            assert session.plan_identity == runner.plan_identity
+            assert session.warm_output_digest == runner.warm_output_digest
+            assert session.phase_probe["installed"]
+            for _ in range(3):
+                expected = await runner.sample(collect_gc=False)
+                actual = await session.sample(collect_gc=True)
+                assert actual["correctness"] == expected["correctness"]
+            assert actual["phase_attribution"] == "native_call_probe"
+            assert sum(actual["phases_seconds"].values()) == pytest.approx(
+                actual["seconds"]
+            )
+        finally:
+            assert (await runner.finish())["state"] == "completed"
+            assert (await session.finish())["state"] == "completed"
 
     asyncio.run(exercise())
