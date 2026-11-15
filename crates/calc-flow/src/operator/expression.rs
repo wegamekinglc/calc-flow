@@ -1002,6 +1002,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_preparation_keeps_non_row_local_plans_async() {
+        use crate::{CancellationToken, StreamJobContext};
+
+        let input = projection_input();
+        let schema = input.table_payload().unwrap().schema().clone();
+        let job = StreamJobContext::new(
+            1,
+            "sync-expression-admission",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        for select in [r#"SUM("Price") AS total"#, "now() AS stamp"] {
+            let operator = ExpressionOperator::new("async", "", vec![select.into()], None, vec![])
+                .unwrap()
+                .with_ports(
+                    Port::with_schema_ref(
+                        "input",
+                        crate::BatchKind::Table,
+                        true,
+                        Some(Arc::clone(&schema)),
+                    )
+                    .unwrap(),
+                    table_port("output").unwrap(),
+                )
+                .unwrap();
+            let prepared = operator
+                .prepare_sync(&PrepareContext::new(&job))
+                .await
+                .unwrap();
+            assert!(matches!(prepared, PreparedExpression::Async(_)), "{select}");
+        }
+    }
+
+    #[tokio::test]
     async fn stream_projection_schema_metadata_matches_the_sql_reference() {
         let input = projection_input();
         let record = &input.table_payload().unwrap().batches()[0];
