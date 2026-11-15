@@ -5,8 +5,8 @@ benchmark sources are unchanged on `feature/stream-session`). Branch:
 `feature/rolling-kernel-v2`. Plan:
 [streaming core re-architecture](../../../docs/plans/2026-11-15-streaming-core-rearchitecture.md),
 phase P2 (§3.6, §4.1, §4.2, §4.4, §5, §7.3, §7 gates, §8). Status:
-revision 2, draft for `cf-api-designer` (public removals, §4.6, §6.3 and the
-trait in §6.4) and `cf-critic` (numeric contract, §4); then implementation as
+revision 4, with the `cf-critic` critique applied; `cf-api-designer` still
+confirms public removals (§4.6), metrics (§6.3) and the trait in §6.4 before
 the PR series in §9.
 
 Revision 2 (user decision, 2026-11-15) moves P1's ≤ 20 µs session gate into
@@ -17,9 +17,12 @@ P2. P2 now also covers:
 - gate G4, session latency (§10.2);
 - gate G5, a zero-allocation push with bounded footprint (§6.5).
 
-Revision 3 renames the session gates to G4 and G5. G5 now forbids transient
-allocations entirely, so the intermediate rolling → projection batch is
-recycled. Only the session-path steps depend on #618 (P1).
+Revision 3 renames the session gates to G4 and G5. Only the session-path
+steps depend on #618 (P1).
+
+Revision 4 applies the numeric-oracle and G5 critique: family-local overflow
+rebuilds, NaN-preserving dispersion readouts, exact rational bound enclosures,
+and a one-output rolling graph whose recycling is limited to batch shells.
 
 Paths below are relative to `crates/calc-flow/src/` unless they start with a
 repository directory.
@@ -215,9 +218,11 @@ expected values for these kinds must not be regenerated.
 
 ### 4.3 Arithmetic
 
-Each window group carries only the accumulator families its readouts need,
-chosen at plan time. A readout's bits never depend on which other outputs
-share its group.
+Each window group is identified by `(input column or input pair, frame)`. It
+carries only the accumulator families its readouts need, chosen at plan time. All
+families in a group share validity; pair counters count pairwise-valid
+positions. A readout's bits never depend on which other outputs share its
+group.
 
 - **Counters (exact).** `valid`, `finite`, `pos_inf`, `neg_inf`, `nan_seen`
   (sticky policy only) and `since_rebuild` (u32).
@@ -236,36 +241,49 @@ share its group.
   An evicted sample recomputes `d` from its ring value and the same `k`.
 - **Pair family.** Shifts `kx`, `ky`, then compensated `Σdx`, `Σdy`,
   `Σdx·dy`, `Σdx²` and `Σdy²` over pairwise-valid positions.
-- **Shift choice.** `k` is set by the first finite valid sample inserted into
-  an empty group. At each rebuild it is the newest finite valid sample in the
-  window.
+- **Shift choice.** A family's shift is set by its first finite valid sample
+  inserted into an empty group. At each rebuild of that family it is the
+  newest finite valid sample in the window.
 - **Per-row order.** For each finalized row of an entity and each group:
-  evict, insert, `since_rebuild += 1`, rebuild if due, then read out. This
-  order is the same in every tier.
-- **Rebuild.** A rebuild is due when `since_rebuild` reaches `R`, or when any
-  float sum of the group is non-finite. The rebuild resets every float sum to
-  `+0.0`, re-chooses `k`, folds the window's finite valid samples
-  oldest-to-newest with the single-operand rule, and sets `since_rebuild = 0`.
-  For Rows frames, `R = max(W, 64)` with `W` the frame size. For Duration
-  frames, `R = max(n_prev, 64)`, where `n_prev` is the number of positions
-  retained right after the previous rebuild (64 before the first). Counting
-  every finalized entity row, valid or not, makes the cadence independent of
-  batch splits.
-- **Reset.** When `finite` reaches 0, all float sums reset to `+0.0`, `k`
-  becomes unset and `since_rebuild = 0`.
-- **Readouts.**
-  - Finite sum: `F = s` if `s` is non-finite, else `fl(s + e)`.
+  evict, reset if `finite == 0`, insert, `since_rebuild += 1`, rebuild if due,
+  then read out. Reset therefore precedes both the insert and the counter
+  increment, allowing the insert to set `k`. This order is the same in every
+  tier.
+- **Rebuild.** A full group rebuild is due when `since_rebuild` reaches `R`.
+  It resets every float sum to `+0.0`, re-chooses each family's shift, folds
+  the window's finite valid samples oldest-to-newest with the single-operand
+  rule, and sets `since_rebuild = 0`. For Rows frames, `R = max(W, 64)` with
+  `W` the frame size. For Duration frames, `R = max(n_prev, 64)`, where
+  `n_prev` is this group's own frame row count immediately after the previous
+  full rebuild (64 before the first), never the shared ring length. A full
+  rebuild updates `n_prev`. Counting every finalized entity row, valid or not,
+  makes the cadence independent of batch splits.
+- **Family-local overflow rebuild.** If any float sum in one family is
+  non-finite, only that family is reset and refolded as above, with its own
+  shift re-chosen. Other families, the group's `since_rebuild` and `n_prev`
+  are unchanged. In particular, dispersion overflow cannot change mean bits.
+- **Reset.** When `finite` reaches 0, all float sums reset to `+0.0`, family
+  shifts become unset, `since_rebuild = 0` and `n_prev = 64`.
+- **Readouts.** Every compensated readout uses
+  `read(s, e) = s` if `s` is non-finite, else `fl(s + e)`.
+  - Finite sum: `F = read(s, e)`.
   - Infinity term: `I` is +inf, −inf or NaN from `pos_inf` and `neg_inf`,
     and 0 when neither is present.
   - `sum = F` when `I = 0`, else `fl(F + I)`. Sticky NaN reads NaN.
   - `mean = fl(sum / valid)`.
-  - `D = fl(ds + de)`, `Q = fl(qs + qe)` and `M = max(0, fl(Q − fl(fl(D·D)/n)))`.
-  - `variance = fl(M / (n − ddof))` and `stddev = fl(√variance)`.
-  - Pair readouts use `Mx`, `My` and `C = fl(Pxy − fl(fl(Dx·Dy)/n))`, where
-    `Pxy` is the readout of the compensated `Σdx·dy`.
-    `covariance = fl(C / (n − ddof))`. `correlation` reads null when
-    `Mx == 0` or `My == 0`, else `fl(C / fl(fl(√Mx)·fl(√My)))`, with no
-    clamping, as today (`kernel.rs:4249-4257`).
+  - `D = read(ds, de)`, `Q = read(qs, qe)`,
+    `T = fl(Q − fl(fl(D·D)/n))`, and `M = 0` only when `T < 0` (which is
+    false for NaN); otherwise `M = T`.
+  - `variance = fl(M / (n − ddof))` and `stddev = fl(√variance)`. When finite
+    inputs make `Q = +inf`, these read +inf if `T = +inf`, or NaN if the
+    subtraction produces NaN (including `inf − inf`); NaN is never clamped to
+    0.
+  - Pair readouts use the same guarded `D`/`Q` rule for `Mx` and `My`, and
+    `C = fl(Pxy − fl(fl(Dx·Dy)/n))`, where `Pxy = read(ps, pe)` for the
+    compensated `Σdx·dy`. `covariance = fl(C / (n − ddof))`. `correlation`
+    reads null when `Mx == 0` or `My == 0`, else
+    `fl(C / fl(fl(√Mx)·fl(√My)))`, with no clamping, as today
+    (`kernel.rs:4249-4257`).
 - **Constant windows.** When a window has been constant for at least `R`
   positions, `Σd`, `Σq` and `M` are exactly zero. A rebuild inside the
   constant stretch sets `k` to that constant.
@@ -281,60 +299,87 @@ share its group.
 
 **Oracle.** A Python oracle in `python/tests/test_rolling_numeric_contract.py`
 uses `fractions.Fraction`, which is exact for every finite f64 and integer.
-It replays per-entity frame membership (Rows and Duration), the §4.2 policies,
-the rebuild, reset and shift schedule, and the operand sequence since the last
-rebuild. From these it computes exact `S`, `n`, `μ`, `Q_K` and co-moments,
-the bound terms below, and the exact classification. It asserts classification
-equality exactly and value bounds with exact rational comparison.
+Except for exact integer `sum` and the integer-`mean` numerator, its exact
+quantities use the converted binary64 samples `x = fl(input as f64)`, not the
+raw integers. It replays per-entity frame membership (Rows and Duration), the
+§4.2 policies, the §4.3 reset/rebuild/shift schedule and each family's operand
+sequence since its last rebuild or reset. From these it computes exact `S`,
+`n`, `μ`, `Q_K` and co-moments, the bound terms below, and the in-domain
+classification.
+
+Every irrational in an exact value or bound is represented by an
+outward-rounded rational enclosure, including `√(Q_K/n)`, `σ`,
+`√(Q_Kx·Q_Ky)`, `r` and the correlation denominator. Scaled integer square
+roots (for example `math.isqrt` on a value scaled by `2^2k`) provide root
+enclosures; `σ` and `r` use two-sided enclosures. Every final absolute bound
+is rounded upward, so acceptance uses only exact rational comparisons.
+
+Outside the numeric domain, expected classification is instead obtained by a
+binary64 replay of §4.3 in Python floats. This covers overflow to ±inf and
+NaN, whose exact `Fraction` value need not have the same classification.
+
+Correlation uses a three-valued in-domain rule:
+
+- **Must-null** iff every x operand, or every y operand, folded, inserted or
+  evicted since that family's last rebuild/reset equals its shift `k`.
+- **Must-finite** iff `ΔMx < Mx` and `ΔMy < My`. Its value is checked only
+  when the correlation bound's stronger premise below holds.
+- **Either** otherwise: null or finite is accepted, and a finite value is not
+  checked.
 
 **Notation.** `u = 2⁻⁵³`, `η = 2⁻¹⁰⁷⁴`, `γ_k = k·u/(1 − k·u)`. At position
-`p`, `r ≤ p` is the group's last rebuild or reset. `O` is the operand sequence
-of one compensated sum since `r`: the rebuild fold, then each insert and each
-negated eviction, where a paired row counts as two operands. `m = |O|` and
-`A = Σ|o|` over `O` (exact). `A_D`, `A_Q` and `A_P` are `A` for the deviation,
-square and product sums. `K` is the shift, `Q_K = Σ(x − K)²` over the
-window's finite valid samples, `M = Σ(x − μ)²`, and `n` is the valid count.
+`p`, `r ≤ p` is the family's last rebuild or reset. `O` is the operand
+sequence of one compensated sum since `r`: the rebuild fold, then each insert
+and each negated eviction, where a paired row counts as two operands. `m = |O|`
+and `A = Σ|o|` over `O` (exact). `A_D`, `A_Q` and `A_P` are `A` for the
+computed binary64 operands `fl(x−k)`, `fl(d·d)` and `fl(dx·dy)`, respectively:
+form those operands in Python floats, then sum their exact `Fraction`
+magnitudes. `K` is the shift, `Q_K = Σ(x − K)²` over the window's finite valid
+samples, `M = Σ(x − μ)²`, and `n` is the valid count.
 
 **Domain.** The bounds apply to finite windows with no infinity and no sticky
 NaN, when `A`, `A_Q`, `A_P` and `n·Q_K` are at most 2¹⁰⁰⁰. Outside the domain,
-outputs are deterministic and classified by §4.2 and §4.3 but unbounded.
+outputs are deterministic and classified by the binary64 replay but unbounded.
 
 Declared bounds on `abs(computed − exact)`:
 
-- **sum**: `u·abs(S) + 2γ_m²·A`.
-- **mean**: `3u·abs(μ) + 3γ_m²·A/n`, or `3u·abs(μ)` for integer input.
+- **sum**: `u·abs(S) + γ_m²·A`.
+- **mean**: `3u·abs(μ) + 3γ_m²·A/n + η`, or `3u·abs(μ)` for integer input.
 - **variance**:
   `Δv = [12u·Q_K + 3γ_m²·A_Q + 5γ_m²·A_D·√(Q_K/n) + 4m·η] / (n − ddof) + u·v`.
 - **stddev**: `min(√Δv, Δv/σ) + u·(σ + √Δv)`, or `√Δv + u·√Δv` when `σ = 0`.
 - **covariance**: `[12u·√(Q_Kx·Q_Ky) + 3γ_m²·A_P +
   5γ_m²·(A_Dx·√(Q_Ky/n) + A_Dy·√(Q_Kx/n)) + 4m·η] / (n − ddof) + u·abs(c)`.
 - **correlation**: when `ΔMx ≤ Mx/2` and `ΔMy ≤ My/2`,
-  `2ΔC/√(Mx·My) + 2·abs(r)·(ΔMx/Mx + ΔMy/My) + 6u·abs(r)`; otherwise only the
-  classification is asserted.
+  `2(1+γ₄)·ΔC/√(Mx·My) + 2·abs(r)·(ΔMx/Mx + ΔMy/My) + 6u·abs(r)`;
+  otherwise only the three-valued classification is asserted.
 - **difference**: `Δa + Δb + u·(abs(d) + Δa + Δb)`, with `Δa` and `Δb` the
   leaf bounds.
 
 `ΔC`, `ΔMx` and `ΔMy` are the bracketed numerators of the covariance and
 variance rows, before division by `n − ddof`. The sum term follows
-Ogita–Rump–Oishi's `Sum2` bound. The first-order constants come from rounding
-`d`, `q`, `D·D/n` and the final subtraction. `cf-critic` verifies the
-derivation. A corpus violation is an implementation defect unless the critic
-shows the bound itself is wrong.
+Ogita–Rump–Oishi's `Sum2` bound; pairing does not require an extra factor 2.
+The first-order constants come from rounding `d`, `q`, `D·D/n` and the final
+subtraction. A corpus violation of an applicable bound is an implementation
+defect unless the critic shows the bound itself is wrong.
 
-**Acceptance wording.** For every corpus position, the computed output has the
-oracle's classification. A finite output lies within the declared bound of the
-exact value. Outputs are bit-identical (`f64::to_bits`) across the
+**Acceptance wording.** For every in-domain corpus position, the computed
+output has the oracle's classification, using the three-valued correlation
+rule. A finite output with an applicable bound satisfies the outward-rounded
+rational bound relative to the exact value. Out-of-domain classification equals
+the binary64 replay. Outputs are bit-identical (`f64::to_bits`) across the
 determinism axes in §4.5.
 
-**Corpus** (seeded, ≤ 20,000 rows in total, runs in seconds):
+**Corpus** (seeded, ≤ 100,000 rows in total, runs in seconds):
 
 1. `1e9 + N(0, 1e−3)`, W = 20, 10,000 positions.
 2. Alternating `±1e16` mixed with unit values.
-3. Magnitudes `1e−300..1e300` with random signs, inside the domain.
+3. Magnitudes `1e−300..1e300` with random signs for sum/mean; dispersion and
+   pair cases use per-family caps so `A_Q`, `A_P` and `n·Q_K` stay in domain.
 4. Integers near `2⁵³` and at the i64/u64 extremes for `sum` and `mean`.
 5. Null, NaN and ±Inf injections under both policies.
-6. Constant stretches of at least `R` positions, including correlation's null
-   classification.
+6. Constant stretches of at least `W − 1 + R` positions, so the window itself
+   is constant for `R` positions, including correlation's null classification.
 7. Duration frames with bursts and gaps.
 8. W = 5 over 10,000 positions, crossing many rebuilds.
 
@@ -429,8 +474,9 @@ rolling needs:
   one i64 event-time ring per entity, shared across columns. Mixed Rows and
   Duration outputs retain by both bounds, as today.
 - **Groups.** Accumulator families (§4.3), counters, extrema deques (rings of
-  positions), EWMA/cumulative/indicator recurrence state, decay summaries and
-  `since_rebuild` are keyed columns. A group stores no history of its own.
+  positions), EWMA/cumulative/indicator recurrence state, decay summaries,
+  `since_rebuild` and per-group Duration `n_prev` are keyed columns. A group
+  stores no history of its own.
 - **Logical size.** A Rows-frame Float64 history is at most 8 bytes plus one
   validity bit per retained sample, plus per-entity constants (24 bytes per
   sample today). The state budget (`StateBudget` rows and bytes) checks
@@ -594,15 +640,15 @@ pub(crate) trait SyncStreamOperator: OperatorMetadata + Send {
   `Arc::ptr_eq` schema fast path. No string lookup or `format!` on success.
   On the session path no context, collector or emitter is constructed per
   call.
-- **Recycling.** After the consumer finishes with a spent intermediate batch,
-  the session driver returns it to its producer's `Emitter`.
-  - The producer reuses uniquely owned column vectors and value buffers with
-    arrow-array 59.2's `RecordBatch::into_parts`,
-    `PrimitiveArray::into_parts` and `Buffer::into_vec`, and typed `Arc`
-    handles it retained.
-  - It allocates only when a buffer is still shared, for example because a
-    column passed through to the caller's result.
-  - This is what makes G5a hold for the rolling → projection edge.
+- **Batch-shell recycling.** After the consumer finishes with a spent
+  intermediate batch, the session driver returns its shell to the producer's
+  `Emitter`. Only uniquely owned batch shells are recycled: the `RecordBatch`
+  column `Vec`, `Arc<[RecordBatch]>` (via `Arc::get_mut` and a zero-column
+  placeholder swap), and the cost cache (via `OnceLock::take`). Arrow value
+  buffers and typed array handles are not recycled: rebuilding their control
+  blocks would allocate. Computed columns consumed inside the graph therefore
+  cannot satisfy G5a without `unsafe`; the gated graph emits its only computed
+  column to the caller (§6.5). Passed-through columns remain shared `Arc`s.
 - **Behavior parity.** Errors, panics and ordering are as today. Each
   callback's outputs precede the forwarded control (plan §4.1).
 - **Cancellation.** Checked at entry and every 8,192 rows. Kernels contain no
@@ -644,31 +690,40 @@ pub(crate) trait SyncStreamOperator: OperatorMetadata + Send {
 
 ### 6.5 Gate G5: zero-allocation push and bounded footprint
 
-**The G4/G5 graph** is a Rust `StreamSession` running rolling dual
-mean(5)/mean(20) into the exact projection of the spread. It is warmed with
-4,096 history rows, then given 1,000 steady-state 1-row pushes with explicit
-per-append watermarks.
+**The G4/G5 graph** matches P1's harness shape: a Rust `StreamSession` with one
+rolling output, `difference(mean(5), mean(20))`, followed by a column-`select`
+projection. The projection performs no arithmetic, and no computed column is
+consumed inside the graph. The session is warmed with 4,096 history rows, then
+at least the largest group `R` unmeasured 1-row pushes to exercise the scalar
+path, then 1,000 measured steady-state 1-row pushes with explicit per-append
+watermarks.
 
-**Measurement** uses the existing `allocation_counter` seam
-(`runtime/streaming/operator_task/performance_evidence.rs:230-234`). The
-harness keeps every input batch handle and the returned output alive inside
-the measured scope. A push therefore frees nothing created before it.
+**Measurement** uses the existing thread-local `allocation_counter` seam
+(`runtime/streaming/operator_task/performance_evidence.rs:230-234`). For each
+per-push measurement, the harness keeps that push's input batch handle and
+returned output alive inside the measured scope, so the push frees nothing
+created before it.
 
 - **G5a, zero transient heap allocations.** `count_total(push) ==
   count_current(push)`: every allocation made during the push is still live
   when it returns, and all of it is owned by the returned `SessionOutput`.
   - Nothing is allocated and then freed inside the push: state, scratch,
     routing, validation, metadata stamping, contexts, emitters and collectors,
-    queues, metrics, futures, or the rolling → projection intermediate batch.
-  - Intermediate buffers are recycled (§6.4).
-- **G5b, result-only allocations.** `count_total(push) ≤ count_total(probe)`
-  and `bytes_total(push) ≤ bytes_total(probe)`.
-  - The probe runs in the same process and builds only the returned output.
-    For each returned batch it builds a `RecordBatch` from the same schema.
-    Passed-through `ArrayRef`s are reused. Each newly computed column is built
-    from a `Vec` of the emitted length, plus a null buffer only when it has
-    nulls. The batch is wrapped as a table `Batch` with
-    `BatchMetadata::default()`, inside one `SessionOutput`.
+    queues, metrics, futures, or intermediate batch shells.
+  - Only intermediate batch shells are recycled (§6.4).
+  - The same test, on the same thread, asserts zero `block_on` calls and
+    future polls.
+- **G5b, result-only allocations.** `count_total(push) == count_total(probe)`
+  and `bytes_total(push) == bytes_total(probe)`.
+  - The probe runs in the same process and thread and builds only the returned
+    output, using the engine's cached/shared `BatchMetadata` and the same
+    container construction. For each returned batch it builds a `RecordBatch`
+    from the same schema. Passed-through `ArrayRef`s are reused. Each newly
+    computed column is built from a `Vec` of the emitted length, plus a null
+    buffer only when it has nulls. The batch is wrapped as a table `Batch`
+    inside one `SessionOutput`.
+  - Equality leaves no allowance for hidden engine allocations. If the engine
+    allocates less than the probe, the probe is tightened.
   - **Why the push total is not literally zero.** P1's `push` returns
     `SessionOutput` by value, and the new result arrays are heap objects
     handed to the caller. G5a and G5b make every other allocation zero.
@@ -678,16 +733,25 @@ the measured scope. A push therefore frees nothing created before it.
     computed column plus a fixed container cost. It does not depend on history
     length (4,096 vs 65,536 rows), window (20 vs 4,096) or push count.
   - Over 10,000 pushes that drop each output, net live bytes stay at 0.
-  - The warmed session holds at most 256 KiB of net live heap beyond its
-    logical history and pending bytes, measured as `bytes_current` from
-    before construction to after warm-up.
-  - No DataFusion `SessionContext`, Tokio runtime or worker pool is retained.
+  - Before measuring, construct and drop one identical session on the same
+    thread to prime process-global lazy statics. Then take the `bytes_current`
+    baseline, construct the warmed session, and build the warm-up inputs
+    inside that measured scope. Drop the harness's warm-up input handles
+    before the final reading; buffers retained by session pending slices stay
+    counted. The per-push keep-alive rule does not apply to this measurement.
+  - The warmed session holds at most 256 KiB of net live heap beyond logical
+    history and pending bytes. Pending bytes are logical rows × row width,
+    not allocator-resident size.
+  - A structural assertion checks that the session runtime field is `None`;
+    the graph also retains no DataFusion `SessionContext` or worker pool.
+  - The 256 KiB gate applies to the CI test build. The release evidence arm
+    reports the same quantities, not necessarily the same absolute numbers.
 - **Stability and scope.** Results are identical across 1,000 consecutive
-  pushes. The same quantities are reported, not gated, for 99-row and
+  measured pushes. The same quantities are reported, not gated, for 99-row and
   6,400 × 64 pushes, whose scratch may grow only on first use.
 - **Where it runs.** G5 is a set of deterministic CI tests in
   `runtime/streaming/session/tests.rs`. The release evidence session arm
-  reports the same numbers.
+  reports the same quantities.
 
 ## 7. Checkpoint
 
@@ -698,14 +762,17 @@ the measured scope. A push therefore frees nothing created before it.
   - every keyed column, with raw f64 bits;
   - each ring in logical order with validity;
   - value logs and pending rows;
-  - `since_rebuild`, `k`, output sequence, last identity and last epoch;
+  - `since_rebuild`, per-group Duration `n_prev`, family shifts `k`, output
+    sequence, last identity and last epoch;
   - fingerprints: configuration hash, input schema, and the plan with numeric
     contract id `compensated-sliding-1`.
 - **Families.** Later P2 PRs may add group families to layout 7. They never
   change existing families' encodings.
 - **Restore validation.** Restore checks the layout, fingerprints and column
   inventory, plus the invariants: ring length ≤ capacity, counters equal a
-  recount from the rings, `k` is set iff `finite > 0`, and `since_rebuild < R`.
+  recount from the rings, family shifts `k` are set iff `finite > 0`, and
+  `since_rebuild < R`, with Duration `R` recomputed from the persisted
+  per-group `n_prev`.
   Any failure fails closed before installing state. A snapshot with layout 1–6
   fails with a checkpoint-mismatch error that names the layout and says to
   start a new lineage (plan §6.2).
@@ -792,16 +859,19 @@ Ordering and the #618 (P1) dependency:
   - Add a `native` subcommand to `scripts/profile_warm_stream.py`. It runs two
     prebuilt release evidence binaries alternately and summarizes them with
     `paired_summary`.
-  - Add a `--numeric-contract-change` option that skips
-    `_validate_pair_digest` (`scripts/profile_warm_stream.py:630-634`) while
-    keeping oracle tolerance validation.
+  - Add a shared `--numeric-contract-change` option to native and session
+    comparisons that skips `_validate_pair_digest`
+    (`scripts/profile_warm_stream.py:630-634`) while keeping oracle tolerance
+    validation. Native P2.2 controls and every session comparison whose arms
+    straddle P2.2 must enable it.
 - Red: the script test for the missing subcommand, and an unknown case
   selector rejected.
 - Measurement: register the G1–G3 baselines at the dispatch boundary, at this
   PR's merge commit, in `benchmarks/rolling-kernel-v2/baseline-<sha>.{json,md}`.
-  The G4 and G5 baselines are registered by P2.6.
+  The G4 baseline and first informational G5 values are registered by P2.6.
 
-**P2.2: numeric contract.** Needs API designer and critic first.
+**P2.2: numeric contract.** Needs API-designer confirmation; the numeric
+critique is applied.
 
 - Changes:
   - Add `accumulate/`, a crate-private module with two-sum, the families,
@@ -823,9 +893,13 @@ Ordering and the #618 (P1) dependency:
     occurs, the other red tests carry the PR);
   - a `RollingSpec` with `numerical_profile` is accepted but must be rejected;
   - `{−1e308, +1e308}` mean reads +inf but must read 0;
-  - Rust batch-split identity for the new accumulators.
+  - Rust batch-split identity for the new accumulators;
+  - mean-only and mean + variance stay bit-identical across a dispersion
+    overflow rebuild, and overflowed dispersion readouts follow §4.3's
+    +inf/NaN rule without clamping NaN to 0.
 - Measurement (no-regression controls; a CI upper bound below 0.95 stops the
-  PR): `1x1-dual` and `6400x64-dual` (evidence), and `benchmarks/test_rolling_kernel.py`
+  PR): `1x1-dual` and `6400x64-dual` (evidence, with
+  `--numeric-contract-change`), and `benchmarks/test_rolling_kernel.py`
   dual SMA at `small` scale.
 
 **P2.3: slab, undo and layout 7 for currently typed kinds.**
@@ -895,16 +969,18 @@ Ordering and the #618 (P1) dependency:
 merged.
 
 - Changes:
-  - Add the §6.4 trait, `SyncContext`, `Emitter` with recycling, and the
-    runner adapter.
+  - Add the §6.4 trait, `SyncContext`, `Emitter` with batch-shell recycling,
+    and the runner adapter.
   - Extract the shared control functions from `operator_task.rs`.
   - Session nodes become sync or async.
   - Expression's compilable shapes (D6) move to the trait. Their async route
     and lazy template capture are deleted.
   - Add the evidence session arm: the Rust G4/G5 graph (§6.5). It reports
     push latency and the G5 quantities, including the probe.
-  - Register the G4 and G5 baselines at this PR's parent: warm-stream case 1
-    in normal-GC and forced-GC modes, and the session arm's G5 values.
+  - Register the G4 baseline at this PR's parent: warm-stream case 1 in
+    normal-GC and forced-GC modes. P2.6 also records the first absolute G5
+    values as informational; no parent comparison is required because this PR
+    introduces the session arm, and G5's gates are absolute.
 - Red tests:
   - a `#[cfg(test)]` counter records `block_on` or future polls during
     pushes of an all-sync session graph (input → exact projection), and must
@@ -917,7 +993,8 @@ merged.
     tests stay green, unmodified.
 - Measurement:
   - warm-stream session case 1, normal GC, `drivers=session:session` against
-    the registered G4 baseline;
+    the registered G4 baseline, with `--numeric-contract-change` when the arms
+    straddle P2.2;
   - a runner 1-row control (`drivers=runner:runner`, regression below 0.95);
   - a runner 6,400 × 64 control.
 
@@ -935,8 +1012,8 @@ merged.
     passes on the sync path;
   - existing rolling runner and checkpoint tests stay green.
 - Measurement:
-  - warm-stream session case 1, normal GC, against the registered G4
-    baseline;
+  - warm-stream session case 1, normal GC, against the registered G4 baseline,
+    with `--numeric-contract-change` when the arms straddle P2.2;
   - the sync `1x1-dual` (G1 boundary, informational until P2.8);
   - a runner 6,400 × 64 control (regression below 0.95 stops the PR).
 
@@ -968,7 +1045,8 @@ merged.
     the full validation path, and a mismatched schema still raises
     `ValueError`.
 - Measurement:
-  - warm-stream session case 1, normal GC (G4, with the TA-Lib reference arm);
+  - warm-stream session case 1, normal GC (G4, with the TA-Lib reference arm
+    and `--numeric-contract-change` when the arms straddle P2.2);
   - the same case with forced GC (reported);
   - sync `1x1-dual` recorder absent (G1);
   - warm-stream session case 2 (99 rows) and case 3 (6,400 × 64), normal GC
@@ -1002,8 +1080,9 @@ merged.
   retries (`AGENTS.md`, Verification; `docs/benchmark-suite.md`).
 - **Baselines.**
   - G1–G3 use the P2.1 registration.
-  - G4 and G5 use the P2.6 registration, made at P2.6's parent: P1's session
-    over the pre-sync operators.
+  - G4 uses the P2.6 registration, made at P2.6's parent: P1's session over
+    the pre-sync operators. G5 is absolute; P2.6's first measurements are
+    informational rather than a parent baseline.
   - Each PR's no-regression controls use its parent commit.
 - **Evidence cases.** Release test binaries for both arms run alternately in
   ABBA order for 10 rounds. Each round runs warm-up, then 30 timed
@@ -1014,13 +1093,16 @@ merged.
     A CI spanning 1.0 is inconclusive.
   - Gates use the candidate's p50 over all samples.
 - **Python cases.** These reuse their harness's existing paired protocol.
-  Both arms validate outputs against the oracle or tolerance. Cross-contract
-  pairs use `--numeric-contract-change`.
+  Both arms validate outputs against the oracle or tolerance.
+- **Cross-contract comparisons.** Every native or warm-stream session
+  comparison whose arms straddle P2.2 uses `--numeric-contract-change`. This
+  skips only digest equality; oracle/tolerance validation still runs.
 - **Warm-stream session cases.** These use P1's `scripts/profile_warm_stream.py
   compare` protocol and configuration (P1 spec §8;
   `stream-session-measurement.md` on `feature/stream-session`):
-  - dual-SMA spread, window 20, fast window 5;
-  - 4,096 history rows in one segment, exact projection, checkpointing off;
+  - one rolling `difference(mean(5), mean(20))` output followed by a column
+    `select`, with no arithmetic in the projection;
+  - 4,096 history rows in one segment, checkpointing off;
   - `SourceProvidedWatermarks`, with a per-append watermark at the last
     appended timestamp;
   - 30 AB/BA pairs in persistent workers, `TOKIO_WORKER_THREADS=4`;
@@ -1036,11 +1118,12 @@ merged.
 ### 10.2 Gates
 
 - **G4** (P2.8): warm-stream session case 1 under the P1 protocol
-  (`stream-session-measurement.md` on `feature/stream-session`): dual-SMA
-  spread, history 4,096, 1-row append, exact projection, explicit per-append
-  watermark. It is run as
+  (`stream-session-measurement.md` on `feature/stream-session`): one rolling
+  `difference(mean(5), mean(20))` output, history 4,096, 1-row append, a
+  column-`select` projection and explicit per-append watermark. It is run as
   `--case name=1,append_rows=1,entities=1,drivers=session:session,reference=ta_lib,p50_limit_us=20`
-  with `--gc-modes normal`, and the candidate session p50 must be ≤ 20 µs.
+  with `--gc-modes normal`, plus `--numeric-contract-change` whenever the arms
+  straddle P2.2, and the candidate session p50 must be ≤ 20 µs.
   - The same case with `--gc-modes forced` is reported with its phase timers
     (argument handling, native call, result assembly) and is not gated.
   - P1 baselines (`benchmarks/stream-session/p1-20261115-summary.md` on
@@ -1059,6 +1142,9 @@ merged.
     plus `dispatch_watermark_handler` under a current-thread `block_on`.
   - G1–G3 are absolute. The cross-boundary ratio is informational.
   - The recorder is absent unless stated.
+  - Ordering keeps every gate measurable: G1's sync boundary exists from
+    P2.7, G2's stage attribution from P2.8, and the G5 CI tests may start with
+    P2.6 once #618 is available.
 - **G1** (P2.8): `1x1-dual` candidate p50 ≤ 1 µs.
 - **G2** (P2.9): `numeric_update` stage ns ÷ (6,400 × 2) ≤ 4 ns in
   `6400x64-dual` with the recorder present (plan target 2–4 ns).
@@ -1090,16 +1176,18 @@ merged.
   snapshot implementation applies to them later.
 - **R1.** Deleting lanes (D3) can slow streaming batches of at least 64,000
   rows on many-core hosts until P6. P2.3 reports it at four CPUs.
-- **R2.** The §4.4 constants are analytic and need the critic's check.
-  Correlation null classification for constant windows is exact only after
-  `R` constant positions.
+- **R2.** The §4.4 constants and oracle rules incorporate the critic's review.
+  Constant-window correlation is must-null only after the window itself has
+  been constant for `R` positions; ambiguous intermediate classifications use
+  the three-valued rule.
 - **R3.** P2.3 is the largest PR and is mostly deletion. Split it by family
   only if review requires, without leaving two state paths for the same family.
 - **R4.** Between P2.2 and P2.3, restore is not bit-identical (as today).
 - **R5.** Every visible change ships with P2: the last bits of rolling
   sum/mean/dispersion/pair outputs on batch, stream, array and SQL AVG-rewrite
-  paths; overflowed windows reading ±inf; the `{−1e308, +1e308}` mean reading
-  0; old rolling checkpoints failing; and `rolling_metrics` counter changes.
+  paths; overflowed windows following §4.3's ±inf/NaN classification; the
+  `{−1e308, +1e308}` mean reading 0; old rolling checkpoints failing; and
+  `rolling_metrics` counter changes.
 - **R6.** P1's normal-GC Python phases already total 16 µs: 10.9 µs argument
   handling and 5.1 µs result assembly. G4 can miss even with a near-zero
   native call, so P2.8 owns the bridge (§9). If G4 misses, the stop rule
@@ -1116,8 +1204,10 @@ merged.
 ## 12. Acceptance criteria
 
 - [ ] For every position of the §4.4 corpus, under both policies, Rows and
-  Duration frames and integer, Float32 and Float64 inputs, classification
-  equals the oracle and finite values lie within the declared bounds.
+  Duration frames and integer, Float32 and Float64 inputs, in-domain
+  classification follows the oracle (including correlation's three-valued
+  rule), finite values satisfy applicable outward-rational bounds, and
+  out-of-domain classification matches binary64 replay.
 - [ ] Given random Data/watermark splits (≥ 50 seeded patterns), finite
   evaluation and a session push sequence, outputs are bit-identical. The same
   holds for checkpoint/restore at random barriers versus uninterrupted runs,
@@ -1207,8 +1297,3 @@ merged.
   - D2's rustdoc rewording instead of renaming the declaration constants;
   - the §6.4 trait, context and emitter names, and whether `prepare` stays
     async or moves to plan compilation.
-- `cf-critic`:
-  - the §4.4 bound derivations, and the pairing rule's effect on the bound
-    (factor 2 on `γ_m²`);
-  - whether the §6.5 (G5b) result probe is strict enough to stop engine
-    allocations from hiding inside "output" construction.
