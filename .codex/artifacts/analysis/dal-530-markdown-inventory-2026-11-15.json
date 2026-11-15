@@ -5831,7 +5831,7 @@
     },
     {
       "path": "README.md",
-      "sha256": "a1f1ba574f546c9b2fea78c7d57e36e3d0da0d130b2e5d1eefbfcfc7ba437bc5",
+      "sha256": "81cbf4b40dee5b99b0cc579707bd2fe46d3ee9444c38cf2ae29caca30705fe6a",
       "lines": 238,
       "links": 53,
       "fences": 5,
@@ -5850,7 +5850,8 @@
         "Cargo metadata target inventory",
         "Existing example/fixture/script paths"
       ],
-      "baseline_findings": []
+      "baseline_findings": [],
+      "review_correction_from": "a639fdb97f2a461b056c4a249bd01a496bee2210"
     },
     {
       "path": "benchmarks/README.md",
@@ -6553,26 +6554,24 @@
     },
     {
       "path": "crates/calc-flow/README.md",
-      "sha256": "64d9d455300d0ca20a42680fdf927e105febc514d376363eed69ce08f12ba287",
-      "lines": 76,
+      "sha256": "3b1ba5b7d44d2dd3f33ba0d96a8b423f34a506d5009248d56bf6a825777b3ecd",
+      "lines": 111,
       "links": 4,
-      "fences": 2,
+      "fences": 4,
       "unaligned_table_headers": [],
       "findings": [],
       "baseline_sha256": "64d9d455300d0ca20a42680fdf927e105febc514d376363eed69ce08f12ba287",
-      "changed": false,
+      "changed": true,
       "scope": "current",
       "source_basis": [
-        "python/calc_flow/__init__.py (__all__)",
-        "python/calc_flow/_native.pyi",
-        "python/calc_flow/compute.py",
-        "crates/calc-flow/src/lib.rs",
         "Cargo.toml",
-        "pyproject.toml",
-        "Cargo metadata target inventory",
-        "Existing example/fixture/script paths"
+        "crates/calc-flow/Cargo.toml",
+        "crates/calc-flow/tests/relational-consumer/Cargo.toml",
+        "scripts/verify_rust_release.py",
+        "crates/calc-flow/examples/32_sql_expression_pipeline.rs"
       ],
-      "baseline_findings": []
+      "baseline_findings": [],
+      "review_correction_from": "a639fdb97f2a461b056c4a249bd01a496bee2210"
     },
     {
       "path": "crates/calc-flow/examples/README.md",
@@ -7575,14 +7574,14 @@
     },
     {
       "path": "docs/streaming-guide.md",
-      "sha256": "8a12db3339ef03b5bd8f1bfa83f71f51b40ef50875b079fe858b1300e1858546",
-      "lines": 1954,
-      "links": 82,
+      "sha256": "f21642e5613ee42f4f3656c0e184bf5334e73234b957ffb85ace90f53e92f6dc",
+      "lines": 1958,
+      "links": 83,
       "fences": 23,
       "unaligned_table_headers": [],
       "findings": [],
       "baseline_sha256": "8a12db3339ef03b5bd8f1bfa83f71f51b40ef50875b079fe858b1300e1858546",
-      "changed": false,
+      "changed": true,
       "scope": "current",
       "source_basis": [
         "python/calc_flow/runtime.py",
@@ -7593,11 +7592,12 @@
         "crates/calc-flow/src/config.rs",
         "schemas/project-v3.schema.json"
       ],
-      "baseline_findings": []
+      "baseline_findings": [],
+      "review_correction_from": "a639fdb97f2a461b056c4a249bd01a496bee2210"
     },
     {
       "path": "docs/symbolic-api.md",
-      "sha256": "af5a0b17d2e697627b909a89a7b94cafa9e6d64cfe871e7af227febc0b1fd0ab",
+      "sha256": "c5f4943dedfe911ccca0cf822116f58fda854d9f54ec640e4cc5760bbeb6d2ab",
       "lines": 938,
       "links": 37,
       "fences": 4,
@@ -7615,7 +7615,8 @@
         "crates/calc-flow/src/array/",
         "python/calc_flow/_native.pyi"
       ],
-      "baseline_findings": []
+      "baseline_findings": [],
+      "review_correction_from": "a639fdb97f2a461b056c4a249bd01a496bee2210"
     },
     {
       "path": "docs/symbolic-design.md",
@@ -7988,8 +7989,8 @@
     },
     {
       "path": ".codex/artifacts/analysis/dal-530-doc-audit-2026-11-15.md",
-      "sha256": "20284c2f71fb81e49ca76c0fd47e2781410eaf7aa0873a68c81ba1be2edc4dce",
-      "lines": 139,
+      "sha256": "dbb387c33eb20fe0caf7c3d74e2570f45404772bcee1e49a8e2ffd7cd14286f3",
+      "lines": 152,
       "links": 3,
       "fences": 0,
       "unaligned_table_headers": [],
@@ -8007,7 +8008,19 @@
         "Cargo metadata target inventory",
         "Existing example/fixture/script paths"
       ],
-      "baseline_findings": []
+      "baseline_findings": [],
+      "review_correction_from": "a639fdb97f2a461b056c4a249bd01a496bee2210"
     }
-  ]
+  ],
+  "review_correction": {
+    "from_commit": "a639fdb97f2a461b056c4a249bd01a496bee2210",
+    "refreshed_documents": [
+      "README.md",
+      "crates/calc-flow/README.md",
+      "docs/symbolic-api.md",
+      "docs/streaming-guide.md",
+      ".codex/artifacts/analysis/dal-530-doc-audit-2026-11-15.md"
+    ],
+    "enumeration": "unchanged 408-file inventory reused; only affected entries refreshed"
+  }
 }

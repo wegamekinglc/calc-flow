@@ -41,7 +41,7 @@ editors or validating stored declarations:
 | Domain                      | Construct/analyze   | Batch/stream compile           | Current lowering boundary                                               |
 |-----------------------------|---------------------|--------------------------------|-------------------------------------------------------------------------|
 | row-local columns           | yes                 | yes                            | portable scalar types and the documented SQL allowlist                  |
-| SQL table stages            | yes                 | yes; one stream alias          | native SELECT/CTE schema; row-local expressions after SQL               |
+| SQL table stages            | yes                 | yes; see SQL composition       | stream: one alias or exact-schema UNION ALL; native SELECT/CTE schema   |
 | rolling `ts`                | yes                 | yes                            | source/alias/row-local operands and earlier rolling results             |
 | cross-section `cs`          | yes                 | yes                            | staged values; event time and partitions resolve to inputs or aliases   |
 | relational stream joins     | yes                 | stream only                    | independent/nested native joins with proved post-join ordering          |

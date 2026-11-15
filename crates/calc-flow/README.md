@@ -8,8 +8,43 @@ interpreter.
 
 ## Install
 
-Use Rust 1.94.0 or newer and these dependencies (the current shared release
-version is `2026.11.14`):
+Use Rust 1.94.0 or newer. This checkout's shared version is `2026.11.14`.
+
+### Use the current source checkout
+
+Clone the repository and run an existing native example from its root:
+
+```bash
+git clone https://github.com/wegamekinglc/calc-flow.git
+cd calc-flow
+cargo run -p calc-flow --example 32_sql_expression_pipeline
+```
+
+For your own application in a sibling directory, place these entries in the
+application's `Cargo.toml`. Paths are relative to that manifest: `calc-flow/`
+is the repository checkout beside the application directory.
+
+```toml
+[dependencies]
+calc-flow = { path = "../calc-flow/crates/calc-flow" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[patch.crates-io]
+arrow-ipc = { path = "../calc-flow/vendor/arrow-ipc" }
+parquet = { path = "../calc-flow/vendor/parquet" }
+```
+
+The dependency crate's workspace patches do not propagate to an external
+application. These two Arrow overrides match the repository's public consumer
+fixture in `crates/calc-flow/tests/relational-consumer/Cargo.toml` and retain
+the checkout's selected dependency implementations. Use the calculation below
+as the application's `src/main.rs`.
+
+### Use a published registry version
+
+After `calc-flow` version `2026.11.14` is published on crates.io, use these
+dependencies instead. The version in this checkout does not establish registry
+availability; confirm that exact release exists before selecting this route.
 
 ```toml
 [dependencies]

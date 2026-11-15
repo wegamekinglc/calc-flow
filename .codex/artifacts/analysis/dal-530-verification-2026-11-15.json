@@ -9612,5 +9612,319 @@
     "Historical/proposal pseudocode, template placeholders and unmodified table alignment hints retained",
     "No product build, regression tests, coverage or benchmark execution"
   ],
-  "review": "Pending independent cf-reviewer review; no PR, push or merge in this batch"
+  "review": "Initial Request Changes: two blockers corrected; pending focused cf-reviewer recheck. No push, PR or merge.",
+  "initial_evidence_commit": "a639fdb97f2a461b056c4a249bd01a496bee2210",
+  "review_correction": {
+    "parent_commit": "a639fdb97f2a461b056c4a249bd01a496bee2210",
+    "scope": "two reviewer blockers only",
+    "documents": [
+      {
+        "path": "README.md",
+        "sha256": "81cbf4b40dee5b99b0cc579707bd2fe46d3ee9444c38cf2ae29caca30705fe6a",
+        "lines": 238,
+        "links": 53,
+        "fences": 5,
+        "local_links_checked": [
+          "docs/streaming-guide.md#watermark-policies",
+          "docs/batch-guide.md#compose-sql-and-python-pipelines",
+          "docs/streaming-guide.md#first-python-continuous-job",
+          "examples/32_sql_expression_pipeline.py",
+          "examples/33_streaming_pipeline.py",
+          "examples/34_streaming_outputs.py",
+          "docs/connectors/README.md",
+          "docs/symbolic-workflows.md",
+          "docs/rust-api.md",
+          "crates/calc-flow/examples/README.md",
+          "crates/calc-flow/README.md",
+          "docs/rust-release.md",
+          "docs/relational-frontends.md#same-schema-union",
+          "docs/streaming-guide.md#complete-replacement-snapshot-sql",
+          "docs/introduction.md",
+          "docs/design.md",
+          "docs/streaming-guide.md",
+          "docs/projects-guide.md",
+          "CHANGELOG.md",
+          "AGENTS.md#verification",
+          "AGENTS.md",
+          "docs/README.md",
+          "docs/introduction.md",
+          "docs/getting-started.md",
+          "docs/examples.md",
+          "docs/batch-guide.md",
+          "docs/array-guide.md",
+          "docs/streaming-guide.md",
+          "docs/connectors/README.md",
+          "docs/projects-guide.md",
+          "docs/python-api.md",
+          "docs/symbolic-workflows.md",
+          "docs/rust-api.md",
+          "docs/api-reference.md",
+          "docs/symbolic-api.md",
+          "docs/design.md",
+          "docs/verification.md",
+          "docs/python-release.md",
+          "docs/rust-release.md",
+          "docs/benchmark-suite.md",
+          "CHANGELOG.md",
+          "LICENSE"
+        ],
+        "findings": []
+      },
+      {
+        "path": "crates/calc-flow/README.md",
+        "sha256": "3b1ba5b7d44d2dd3f33ba0d96a8b423f34a506d5009248d56bf6a825777b3ecd",
+        "lines": 111,
+        "links": 4,
+        "fences": 4,
+        "local_links_checked": [
+          "../../docs/relational-frontends.md#rust"
+        ],
+        "findings": []
+      },
+      {
+        "path": "docs/symbolic-api.md",
+        "sha256": "c5f4943dedfe911ccca0cf822116f58fda854d9f54ec640e4cc5760bbeb6d2ab",
+        "lines": 938,
+        "links": 37,
+        "fences": 4,
+        "local_links_checked": [
+          "README.md",
+          "#symbolic-declarations-and-static-analysis",
+          "#sql-composition",
+          "#symbolic-compilation",
+          "#symbolic-event-time-window-aggregation",
+          "#symbolic-bounded-stream-joins",
+          "#symbolic-bounded-backward-asof-join",
+          "#rsi-and-atr-calculations",
+          "#macd-components",
+          "#native-array-compilation",
+          "#symbolic-matrix-compilation",
+          "symbolic-workflows.md",
+          "batch-guide.md",
+          "python-api.md#compute-arrow-data",
+          "batch-guide.md",
+          "relational-frontends.md#same-schema-union",
+          "streaming-guide.md#stream-ownership-and-sql-boundaries",
+          "../examples/32_sql_expression_pipeline.py",
+          "../examples/02_sql_join.py",
+          "../examples/33_streaming_pipeline.py",
+          "../examples/29_sql_stream_switch.py",
+          "streaming-guide.md#complete-replacement-snapshot-sql",
+          "streaming-guide.md#checkpoints-and-recovery",
+          "relational-frontends.md#fixed-utc-event-windows",
+          "../examples/36_symbolic_event_window.py",
+          "#logical-names-and-physical-bindings",
+          "../examples/12_symbolic_stream_join.py",
+          "../examples/13_symbolic_relational_dag.py",
+          "asof-join-guide.md",
+          "asof-join-guide.md#composition-and-explanation",
+          "python-api.md#native-arrays",
+          "python-api.md#native-arrayexpr-declarations-and-collection",
+          "rust-api.md",
+          "symbolic-design.md#native-rolling-state",
+          "rust-api.md",
+          "#sql-composition",
+          "rust-api.md"
+        ],
+        "findings": []
+      },
+      {
+        "path": "docs/streaming-guide.md",
+        "sha256": "f21642e5613ee42f4f3656c0e184bf5334e73234b957ffb85ace90f53e92f6dc",
+        "lines": 1958,
+        "links": 83,
+        "fences": 23,
+        "local_links_checked": [
+          "README.md",
+          "connectors/README.md",
+          "#choose-batch-or-stream",
+          "#first-python-continuous-job",
+          "#native-table-indicators",
+          "#named-streaming-outputs",
+          "#stock-account-positions",
+          "#account-market-values",
+          "#complete-replacement-snapshot-sql",
+          "#materialized-arrow-inputs",
+          "#route-late-rows",
+          "#stream-ownership-and-sql-boundaries",
+          "#explicit-connectors-and-recovery",
+          "#source-contract",
+          "#watermark-policies",
+          "#event-time-windows",
+          "#sink-contract",
+          "#delivery-requirements",
+          "#external-provider-lifecycles",
+          "#static-inputs",
+          "#bounded-event-time-join",
+          "#bounded-backward-asof-join",
+          "#checkpoints-and-recovery",
+          "#job-lifecycle",
+          "#runtime-tuning-and-backpressure",
+          "#native-array-sequence-recovery",
+          "#status-and-diagnostics",
+          "#production-checklist",
+          "../examples/33_streaming_pipeline.py",
+          "#watermark-policies",
+          "../examples/34_streaming_outputs.py",
+          "../examples/30_streaming_stock_positions.py",
+          "#checkpoints-and-recovery",
+          "../examples/31_streaming_account_market_values.py",
+          "#compact-ordered-last_value",
+          "relational-frontends.md#explicit-relation-updates",
+          "relational-frontends.md#same-schema-union",
+          "#explicit-connectors-and-recovery",
+          "snapshot-sql-native.md",
+          "../examples/26_late_side_output.py",
+          "python-api.md#lateoutputs-and-local-late-policy",
+          "connectors/file.md",
+          "../crates/calc-flow-connectors/examples/late_output_recovery.rs",
+          "#complete-replacement-snapshot-sql",
+          "relational-frontends.md#same-schema-union",
+          "#stock-account-positions",
+          "../benchmarks/sum-state/sum-batch-parallel-20261104.md",
+          "../benchmarks/sum-state/sum-columnar-keys-20261105.md",
+          "#complete-replacement-snapshot-sql",
+          "symbolic-api.md#sql-composition",
+          "#checkpoints-and-recovery",
+          "#checkpoints-and-recovery",
+          "../examples/10_symbolic_streaming_recovery.py",
+          "symbolic-workflows.md#run-continuously-and-recover",
+          "../examples/04_continuous_runtime.py",
+          "../crates/calc-flow/examples/04_continuous_runtime.rs",
+          "asof-join-guide.md#watermarks-idle-and-late-input",
+          "relational-frontends.md#fixed-utc-event-windows",
+          "../examples/36_symbolic_event_window.py",
+          "symbolic-api.md#symbolic-event-time-window-aggregation",
+          "rust-api.md",
+          "projects-guide.md#union-and-event-time-windows",
+          "projects-guide.md#static-input-declarations",
+          "../examples/11_symbolic_static_matrix.py",
+          "symbolic-design.md#static-values-and-matrix-placement",
+          "api-reference.md",
+          "../examples/12_symbolic_stream_join.py",
+          "../examples/13_symbolic_relational_dag.py",
+          "symbolic-api.md#symbolic-bounded-stream-joins",
+          "#delivery-requirements",
+          "runtime-envelope.md#the-operator-emission-boundary",
+          "benchmark-suite.md#join-materialization-measurements",
+          "../examples/35_stream_asof_join.py",
+          "asof-join-guide.md",
+          "asof-join-guide.md#recovery-status-and-delivery",
+          "runtime-envelope.md#manifest-publication-and-recovery",
+          "#complete-replacement-snapshot-sql",
+          "batch-guide.md#native-rsi-and-atr",
+          "rust-api.md#native-rsi-and-atr",
+          "rust-api.md#checkpointed-native-array-sequences",
+          "../crates/calc-flow/examples/native_sequence_stream.rs",
+          "runtime-envelope.md",
+          "design.md"
+        ],
+        "findings": []
+      },
+      {
+        "path": ".codex/artifacts/analysis/dal-530-doc-audit-2026-11-15.md",
+        "sha256": "dbb387c33eb20fe0caf7c3d74e2570f45404772bcee1e49a8e2ffd7cd14286f3",
+        "lines": 152,
+        "links": 3,
+        "fences": 0,
+        "local_links_checked": [
+          "dal-530-markdown-inventory-2026-11-15.json",
+          "dal-530-verification-2026-11-15.json",
+          "dal-530-agent-text-2026-11-15.json"
+        ],
+        "findings": []
+      }
+    ],
+    "local_links_checked": 166,
+    "source_inputs": [
+      {
+        "path": "Cargo.toml",
+        "sha256": "bfd2a6850177719b8c87792148e6143fa6294d483e91538cc2f0e005d4b8abef"
+      },
+      {
+        "path": "crates/calc-flow/Cargo.toml",
+        "sha256": "a7bf5367a81bf33f05c973efa5e912b2923ac1f8c6b2cec4c712ce0cd776103a"
+      },
+      {
+        "path": "crates/calc-flow/examples/32_sql_expression_pipeline.rs",
+        "sha256": "2d4fca86a9caefb5aa3c19a7dae1a3a489970d7e63b18de99701f4c6415feb12"
+      },
+      {
+        "path": "crates/calc-flow/src/operator/sql.rs",
+        "sha256": "b84ad00188e6a8b788e2bd79b8f8ed46adbba4b8ff553d6a6a63b851c679784b"
+      },
+      {
+        "path": "crates/calc-flow/src/pipeline/stream.rs",
+        "sha256": "783d13cc331ab52bc1939c83ce99e38c2dea7ffdccb74c4517e89cdf1c474db9"
+      },
+      {
+        "path": "crates/calc-flow/tests/relational-consumer/Cargo.toml",
+        "sha256": "dde20e07c6e85cdb5cd98e3be670aec60a090edfe73d70ec94671803b26232ad"
+      },
+      {
+        "path": "python/calc_flow/pipeline.py",
+        "sha256": "237c12cbfbee25e4f0822c329596edb410e8287f75146eb1c4ea38c1000ef410"
+      },
+      {
+        "path": "python/calc_flow/symbolic/program.py",
+        "sha256": "1fe71253431a2df4e53fa24f94142e40e8194aef18c65be2bb3486a902c14825"
+      },
+      {
+        "path": "python/calc_flow/symbolic/union.py",
+        "sha256": "7d7623fa8b47ddfcb17c51c86272d1a0fad351125d890bbd1e87d402c0be12fd"
+      },
+      {
+        "path": "python/tests/test_finite_union.py",
+        "sha256": "a98bc43328ff20272da8dda60943effd9e2e2b84f5cd9ffc0cbe65f1f2a01d01"
+      },
+      {
+        "path": "scripts/verify_rust_release.py",
+        "sha256": "a1383015e3de7d263cd477c1662b8de94b76341f57969bd604c6b14092e9053d"
+      }
+    ],
+    "source_path_checks": [
+      {
+        "kind": "dependency",
+        "path": "../calc-flow/crates/calc-flow",
+        "resolved_repo_path": "crates/calc-flow"
+      },
+      {
+        "kind": "patch",
+        "name": "arrow-ipc",
+        "path": "../calc-flow/vendor/arrow-ipc",
+        "resolved_repo_path": "vendor/arrow-ipc"
+      },
+      {
+        "kind": "patch",
+        "name": "parquet",
+        "path": "../calc-flow/vendor/parquet",
+        "resolved_repo_path": "vendor/parquet"
+      }
+    ],
+    "toml_blocks_parsed": 2,
+    "shell_blocks_bash_n": 1,
+    "cargo_example": "calc-flow:32_sql_expression_pipeline; existing metadata reused; example file exists",
+    "rust_quickstart": "single Rust fence unchanged byte-for-byte; release inspector extraction remains valid",
+    "blockers": {
+      "stream_sql_consistency": "corrected; named symbolic UNION ALL distinguished from single-table and low-level SQL interfaces",
+      "rust_installation": "conditional registry install plus current checkout and external path dependency with existing Arrow patches"
+    },
+    "reused_evidence": "a639fdb9 initial static checks, metadata, canonical/Multica audit and external-link limitations; no full reruns",
+    "product_build_or_tests": false,
+    "network_checks": false,
+    "checks": [
+      {
+        "command": "python check_review_blockers.py",
+        "result": "passed"
+      },
+      {
+        "command": "git diff --check",
+        "result": "passed"
+      },
+      {
+        "command": "git diff --exit-code a639fdb97f2a461b056c4a249bd01a496bee2210 -- schemas/project-v3.schema.json",
+        "result": "passed"
+      }
+    ]
+  }
 }

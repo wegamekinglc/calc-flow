@@ -84,9 +84,9 @@ The [Rust runtime reference](docs/rust-api.md) and
 extension work. The `calc-flow` crate's exports remain available to those users.
 
 For native applications, see the [Rust installation and quickstart](crates/calc-flow/README.md).
-The first crates.io publication is being prepared; the
-[Rust release guide](docs/rust-release.md) covers packaging, external consumers,
-and the registry dependency audit.
+Use the current source checkout, or a registry dependency after the required
+version is published. The [Rust release guide](docs/rust-release.md) covers
+packaging, external consumers, and the registry dependency audit.
 
 ## Architecture
 
