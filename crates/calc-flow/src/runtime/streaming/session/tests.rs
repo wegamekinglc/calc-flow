@@ -20,12 +20,12 @@ use crate::runtime::streaming::progress::{
     prepare::{ArrowTimestampUnit, ResolvedEventTimeColumn},
 };
 use crate::{
-    Batch, BatchKind, BatchMetadata, CalcFlowError, Cursor, Edge, EventTime, ExpressionOperator,
-    JobState, JsonMap, NativeWatermarkCapability, OperatorMetadata, PipelineBuilder, Port,
-    PortEndpoint, ReplayPositioning, RollingOperator, RollingSpec, SinkBinding, SourceBinding,
-    SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema, StreamExecutionPlan,
-    StreamRequirements, StreamRuntimeConfig, StreamSink, StreamSource, StreamingRunner,
-    UdfRegistry, WatermarkPolicy,
+    Batch, BatchKind, BatchMetadata, CalcFlowError, Cursor, Edge, EdgeBudget, EventTime,
+    ExpressionOperator, JobState, JsonMap, NativeWatermarkCapability, OperatorMetadata,
+    PipelineBuilder, Port, PortEndpoint, ReplayPositioning, RollingOperator, RollingSpec,
+    SinkBinding, SourceBinding, SourceCapabilities, SourceDeliveryCapability, SourceEvent,
+    SourceSchema, StreamExecutionPlan, StreamRequirements, StreamRuntimeConfig, StreamSink,
+    StreamSource, StreamingRunner, UdfRegistry, WatermarkPolicy,
 };
 
 type Row = (i64, &'static str, u64, f64);
@@ -496,4 +496,264 @@ fn test_bounded_out_of_orderness_nanoseconds_matches_generated_watermark_state()
     }
     // (1_000_000_123 ns - 1_500 ns).div_euclid(1_000)
     assert_eq!(expected, Some(micros(999_998)));
+}
+
+fn assert_invalid(result: crate::Result<super::SessionOutput>, expected_field: &str) {
+    match result {
+        Err(CalcFlowError::InvalidArgument { field, .. }) => assert_eq!(field, expected_field),
+        other => panic!("expected InvalidArgument at {expected_field}, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_validation_errors_leave_session_usable() {
+    let plan = rolling_projection_plan();
+    let input = source_id(&plan);
+    let config = StreamRuntimeConfig {
+        edge_budget: EdgeBudget {
+            max_rows: 2,
+            max_bytes: usize::MAX,
+        },
+        ..session_config()
+    };
+    let mut session = StreamSession::new(plan, &config, BTreeMap::new()).unwrap();
+    let output = session.output_ids()[0].to_owned();
+    let watermark_field = format!("session.inputs.{input}.watermark");
+    let mut rows = rendered_rows(
+        session
+            .push(&input, input_batch(&[(10, "a", 0, 1.0)]), Some(micros(10)))
+            .unwrap()
+            .batches(&output),
+    );
+    assert!(matches!(
+        session.push(&input, nanosecond_batch(&[Some(1)]), None),
+        Err(CalcFlowError::Compile { .. })
+    ));
+    assert!(matches!(
+        session.push(
+            &input,
+            input_batch(&[(11, "a", 1, 2.0), (11, "b", 2, 2.0), (11, "c", 3, 2.0)]),
+            None,
+        ),
+        Err(CalcFlowError::EdgeBudgetExceeded { .. })
+    ));
+    assert_invalid(
+        session.push(&input, input_batch(&[(11, "a", 1, 2.0)]), Some(micros(9))),
+        &watermark_field,
+    );
+    assert_invalid(session.advance(&input, micros(9)), &watermark_field);
+    assert_invalid(
+        session.push("missing", input_batch(&[(11, "a", 1, 2.0)]), None),
+        "session.inputs.missing",
+    );
+    assert_invalid(
+        session.advance("missing", micros(11)),
+        "session.inputs.missing",
+    );
+    assert!(
+        session
+            .push(&input, input_batch(&[]), None)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        session
+            .push(&input, input_batch(&[(11, "a", 1, 2.0)]), Some(micros(10)))
+            .unwrap()
+            .is_empty()
+    );
+    rows.extend(rendered_rows(
+        session
+            .push(&input, input_batch(&[(12, "a", 2, 3.0)]), Some(micros(12)))
+            .unwrap()
+            .batches(&output),
+    ));
+    assert_eq!(
+        rows,
+        [
+            "1970-01-01T00:00:00.000010Z|a|1.0",
+            "1970-01-01T00:00:00.000011Z|a|1.5",
+            "1970-01-01T00:00:00.000012Z|a|2.5",
+        ]
+    );
+
+    let (mut session, input, output) = ordered_session();
+    let time_field = format!("session.inputs.{input}.event_time");
+    session
+        .push(&input, input_batch(&[(10, "a", 0, 1.0)]), None)
+        .unwrap();
+    assert_invalid(
+        session.push(
+            &input,
+            input_batch(&[(12, "a", 1, 2.0), (11, "a", 2, 3.0)]),
+            None,
+        ),
+        &time_field,
+    );
+    assert_invalid(
+        session.push(&input, input_batch(&[(9, "a", 1, 2.0)]), None),
+        &time_field,
+    );
+    session
+        .push(&input, input_batch(&[(10, "a", 1, 2.0)]), None)
+        .unwrap();
+    assert_eq!(
+        rendered_rows(session.finish().unwrap().batches(&output)),
+        [
+            "1970-01-01T00:00:00.000010Z|a|1.0",
+            "1970-01-01T00:00:00.000010Z|a|1.5",
+        ]
+    );
+
+    let plan = rolling_projection_plan();
+    let input = source_id(&plan);
+    let mut session = open_session(
+        plan,
+        BTreeMap::from([(input.clone(), SessionWatermark::Disabled)]),
+    );
+    let output = session.output_ids()[0].to_owned();
+    assert_invalid(
+        session.push(&input, input_batch(&[(10, "a", 0, 1.0)]), Some(micros(10))),
+        &watermark_field,
+    );
+    assert_invalid(session.advance(&input, micros(10)), &watermark_field);
+    assert!(
+        session
+            .push(&input, input_batch(&[(10, "a", 0, 1.0)]), None)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        rendered_rows(session.finish().unwrap().batches(&output)),
+        ["1970-01-01T00:00:00.000010Z|a|1.0"]
+    );
+}
+
+fn assert_lifecycle_error(result: crate::Result<super::SessionOutput>, expected: &str) {
+    match result {
+        Err(CalcFlowError::InvalidArgument { field, message }) => {
+            assert_eq!((field.as_str(), message.as_str()), ("session", expected));
+        }
+        other => panic!("expected session lifecycle error {expected:?}, got {other:?}"),
+    }
+}
+
+fn assert_rejects_every_call(session: &mut StreamSession, input: &str, expected: &str) {
+    assert_lifecycle_error(
+        session.push(input, input_batch(&[(20, "a", 9, 1.0)]), Some(micros(20))),
+        expected,
+    );
+    assert_lifecycle_error(session.advance(input, micros(21)), expected);
+    assert_lifecycle_error(session.finish(), expected);
+}
+
+const FAILED: &str = "failed earlier; create a new session";
+const FINISHED: &str = "already finished";
+
+#[test]
+fn test_operator_failure_fails_session_for_later_calls() {
+    let mut session = open_session(rolling_projection_plan(), BTreeMap::new());
+    let input = session.input_ids()[0].to_owned();
+    session
+        .push(&input, input_batch(&[(10, "a", 0, 1.0)]), Some(micros(10)))
+        .unwrap();
+    let error = session
+        .push(&input, input_batch(&[(5, "a", 1, 2.0)]), None)
+        .unwrap_err();
+    assert!(
+        !matches!(error, CalcFlowError::InvalidArgument { .. }),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("late_row"), "{error}");
+    assert_rejects_every_call(&mut session, &input, FAILED);
+}
+
+#[test]
+fn test_internal_edge_budget_after_validation_fails_session() {
+    let operator = ExpressionOperator::new(
+        "widen",
+        "wide = repeat(symbol, 65536)",
+        vec![],
+        None,
+        vec![],
+    )
+    .unwrap()
+    .with_ports(
+        Port::with_schema_ref("input", BatchKind::Table, true, Some(input_schema())).unwrap(),
+        Port::with_schema_ref("output", BatchKind::Table, true, None).unwrap(),
+    )
+    .unwrap();
+    let plan = compile(
+        PipelineBuilder::new("widen")
+            .unwrap()
+            .add_node("widen", Box::new(operator))
+            .unwrap(),
+    );
+    let input = source_id(&plan);
+    let config = StreamRuntimeConfig {
+        edge_budget: EdgeBudget {
+            max_rows: 16,
+            max_bytes: 16_384,
+        },
+        ..session_config()
+    };
+    let mut session = StreamSession::new(plan, &config, BTreeMap::new()).unwrap();
+    let error = session
+        .push(&input, input_batch(&[(10, "a", 0, 1.0)]), None)
+        .unwrap_err();
+    assert!(
+        matches!(&error, CalcFlowError::EdgeBudgetExceeded { edge, .. } if edge.starts_with("sink/")),
+        "{error:?}"
+    );
+    assert_rejects_every_call(&mut session, &input, FAILED);
+}
+
+#[test]
+fn test_finish_without_pushes_then_rejects_later_calls() {
+    let mut session = open_session(rolling_projection_plan(), BTreeMap::new());
+    let input = session.input_ids()[0].to_owned();
+    assert!(session.finish().unwrap().is_empty());
+    assert_rejects_every_call(&mut session, &input, FINISHED);
+}
+
+#[test]
+fn test_calls_inside_tokio_runtime_return_documented_error() {
+    let mut session = open_session(rolling_projection_plan(), BTreeMap::new());
+    let input = session.input_ids()[0].to_owned();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let expected = "cannot run inside a Tokio runtime; call it from a blocking thread";
+    {
+        let _context = runtime.enter();
+        assert_lifecycle_error(
+            session.push(&input, input_batch(&[(10, "a", 0, 1.0)]), Some(micros(10))),
+            expected,
+        );
+        assert_lifecycle_error(session.advance(&input, micros(10)), expected);
+        assert_lifecycle_error(session.finish(), expected);
+        // Dropping a session inside a runtime context must not panic.
+        drop(open_session(rolling_projection_plan(), BTreeMap::new()));
+    }
+    let output = session.output_ids()[0].to_owned();
+    let pushed = session
+        .push(&input, input_batch(&[(10, "a", 0, 1.0)]), Some(micros(10)))
+        .unwrap();
+    assert_eq!(rendered_rows(pushed.batches(&output)).len(), 1);
+}
+
+#[test]
+fn test_operator_panic_is_contained_and_fails_session() {
+    let mut session = open_session(rolling_projection_plan(), BTreeMap::new());
+    let input = session.input_ids()[0].to_owned();
+    session.panic_on_next_dispatch_for_test("rolling");
+    let error = session
+        .push(&input, input_batch(&[(10, "a", 0, 1.0)]), Some(micros(10)))
+        .unwrap_err();
+    assert!(
+        matches!(&error, CalcFlowError::Operator { node_id, message }
+            if node_id == "rolling" && message == "panicked: session dispatch test seam"),
+        "{error:?}"
+    );
+    assert_rejects_every_call(&mut session, &input, FAILED);
 }

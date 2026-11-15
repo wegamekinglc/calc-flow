@@ -24,7 +24,7 @@ use super::{
     source_task::sequenced_source_message,
 };
 use crate::{
-    Batch, CalcFlowError, CancellationToken, EventTime, JsonMap, Result, StreamExecutionPlan,
+    Batch, CalcFlowError, CancellationToken, EventTime, JsonMap, Port, Result, StreamExecutionPlan,
     StreamRuntimeConfig,
     pipeline::{RuntimeStreamNode, StreamRuntimePlanParts},
 };
@@ -88,6 +88,8 @@ enum Lifecycle {
 
 struct SessionInput {
     binding_id: String,
+    /// The route's expected kind and exact schema.
+    port: Port,
     sender: SessionEdgeSender,
     mode: WatermarkMode,
     progress: InputProgress,
@@ -99,6 +101,7 @@ enum WatermarkMode {
         event_time: ResolvedEventTimeColumn,
         ordered: bool,
     },
+    Disabled,
 }
 
 #[derive(Clone)]
@@ -172,6 +175,15 @@ impl StreamSession {
         self.input.progress.watermark
     }
 
+    #[cfg(test)]
+    fn panic_on_next_dispatch_for_test(&mut self, node_id: &str) {
+        self.nodes
+            .iter_mut()
+            .find(|node| node.node_id() == node_id)
+            .expect("test node exists")
+            .panic_on_next_dispatch();
+    }
+
     /// Runs `batch`, then an optional watermark, through every operator.
     ///
     /// # Errors
@@ -183,8 +195,8 @@ impl StreamSession {
         batch: Batch,
         watermark: Option<EventTime>,
     ) -> Result<SessionOutput> {
-        let _ = input;
-        let staged = self.input.stage_push(&batch, watermark)?;
+        self.check_callable()?;
+        let staged = self.input.stage_push(input, &batch, watermark)?;
         self.run(staged)
     }
 
@@ -194,8 +206,8 @@ impl StreamSession {
     ///
     /// Returns the operator error that failed the session.
     pub fn advance(&mut self, input: &str, watermark: EventTime) -> Result<SessionOutput> {
-        let _ = input;
-        let staged = self.input.stage_advance(watermark);
+        self.check_callable()?;
+        let staged = self.input.stage_advance(input, watermark)?;
         self.run(staged)
     }
 
@@ -205,11 +217,26 @@ impl StreamSession {
     ///
     /// Returns the operator error that failed the session.
     pub fn finish(&mut self) -> Result<SessionOutput> {
+        self.check_callable()?;
         self.run(Staged {
             messages: vec![StreamMessage::end_of_input()],
             next: self.input.progress.clone(),
             finishes: true,
         })
+    }
+
+    fn check_callable(&self) -> Result<()> {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(session_error(
+                "cannot run inside a Tokio runtime; call it from a blocking thread",
+            ));
+        }
+        let message = match self.lifecycle {
+            Lifecycle::Open => return Ok(()),
+            Lifecycle::Finished => "already finished",
+            Lifecycle::Failed => "failed earlier; create a new session",
+        };
+        Err(session_error(message))
     }
 
     fn run(&mut self, staged: Staged) -> Result<SessionOutput> {
@@ -262,6 +289,13 @@ impl StreamSession {
     }
 }
 
+fn session_error(message: &str) -> CalcFlowError {
+    CalcFlowError::InvalidArgument {
+        field: "session".into(),
+        message: message.into(),
+    }
+}
+
 impl Drop for StreamSession {
     fn drop(&mut self) {
         self.job.cancellation().cancel();
@@ -278,20 +312,33 @@ impl Drop for StreamSession {
 }
 
 impl SessionInput {
-    fn stage_advance(&self, watermark: EventTime) -> Staged {
+    fn stage_advance(&self, input: &str, watermark: EventTime) -> Result<Staged> {
+        self.check_input(input)?;
+        self.check_explicit(Some(watermark))?;
         let mut next = self.progress.clone();
         let messages = advance_watermark(&mut next, Some(watermark))
             .map(StreamMessage::watermark)
             .into_iter()
             .collect();
-        Staged {
+        Ok(Staged {
             messages,
             next,
             finishes: false,
-        }
+        })
     }
 
-    fn stage_push(&self, batch: &Batch, watermark: Option<EventTime>) -> Result<Staged> {
+    /// Validates one push before any operator runs; the session is unchanged
+    /// when this fails.
+    fn stage_push(
+        &self,
+        input: &str,
+        batch: &Batch,
+        watermark: Option<EventTime>,
+    ) -> Result<Staged> {
+        self.check_input(input)?;
+        self.check_explicit(watermark)?;
+        self.port
+            .validate(batch, &format!("session.inputs.{}", self.binding_id))?;
         let mut next = self.progress.clone();
         let mut generated = None;
         if let WatermarkMode::Generated {
@@ -313,6 +360,7 @@ impl SessionInput {
         }
         let (sequence, data, _) =
             sequenced_source_message(&self.binding_id, next.next_sequence, batch, None)?;
+        self.sender.validate_message(&data)?;
         next.next_sequence = sequence.checked_add(1);
         let mut messages = vec![data];
         messages.extend(
@@ -322,6 +370,39 @@ impl SessionInput {
             messages,
             next,
             finishes: false,
+        })
+    }
+
+    fn check_input(&self, input: &str) -> Result<()> {
+        if input == self.binding_id {
+            return Ok(());
+        }
+        Err(CalcFlowError::InvalidArgument {
+            field: format!("session.inputs.{input}"),
+            message: format!("is not the session input {:?}", self.binding_id),
+        })
+    }
+
+    /// Rejects an explicit watermark under `Disabled` or below the current
+    /// one; an equal watermark is a no-op.
+    fn check_explicit(&self, watermark: Option<EventTime>) -> Result<()> {
+        let Some(watermark) = watermark else {
+            return Ok(());
+        };
+        let message = if matches!(self.mode, WatermarkMode::Disabled) {
+            "Disabled watermarks reject explicit watermarks"
+        } else if self
+            .progress
+            .watermark
+            .is_some_and(|current| watermark < current)
+        {
+            "must not regress below the current watermark"
+        } else {
+            return Ok(());
+        };
+        Err(CalcFlowError::InvalidArgument {
+            field: format!("session.inputs.{}.watermark", self.binding_id),
+            message: message.into(),
         })
     }
 }
@@ -414,9 +495,8 @@ fn input_mode(
         .remove(binding_id)
         .unwrap_or(SessionWatermark::Explicit)
     {
-        SessionWatermark::Explicit | SessionWatermark::Disabled => {
-            Ok((WatermarkMode::Explicit, None))
-        }
+        SessionWatermark::Explicit => Ok((WatermarkMode::Explicit, None)),
+        SessionWatermark::Disabled => Ok((WatermarkMode::Disabled, None)),
         SessionWatermark::Ordered { event_time_column } => generated_mode(
             binding_id,
             schema,
@@ -496,6 +576,12 @@ fn wire(
                 message: "session plan has no source route".into(),
             })?;
     let (mode, generator) = input_mode(&binding_id, route.expected_schema.as_ref(), watermarks)?;
+    let port = Port::with_schema_ref(
+        &route.target.port,
+        route.expected_kind,
+        true,
+        route.expected_schema.clone(),
+    )?;
     let sender = take_edge(&mut senders, &route.edge_id)?.into_session()?;
     let outputs = parts
         .sink_routes
@@ -509,6 +595,7 @@ fn wire(
     }
     let input = SessionInput {
         binding_id,
+        port,
         sender,
         mode,
         progress: InputProgress {
