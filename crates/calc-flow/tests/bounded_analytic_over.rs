@@ -1,3 +1,14 @@
+#[path = "bounded_analytic_over/closure.rs"]
+mod closure;
+#[path = "bounded_analytic_over/execution.rs"]
+mod execution;
+#[path = "bounded_analytic_over/sql.rs"]
+mod sql;
+#[path = "bounded_analytic_over/stream.rs"]
+mod stream;
+#[path = "bounded_analytic_over/values.rs"]
+mod values;
+
 use calc_flow::{
     AnalyticExpr, NullPlacement, OverOrder, OverSpec, RowsFrame, SortDirection, SortKey,
     StateBudget,

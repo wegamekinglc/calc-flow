@@ -80,9 +80,10 @@ Control messages are created only through crate-private constructors.
 and other public consumers cannot forge, suppress, or reorder control; the type system, not a runtime check, enforces this. Validation of
 control values — watermark monotonicity and epoch consistency — belongs to
 the runtime paths that construct and enqueue them and runs before enqueue,
-before any downstream side effect. The job-scoped progress driver
-validates source-provided watermark monotonicity and owns generated
-watermark/timer ordering. A checkpoint-enabled job validates the
+before any downstream side effect. On coordinated jobs, the job-scoped
+progress driver validates source-provided watermark monotonicity and owns
+generated watermark/timer ordering. The direct single-source path performs
+that monotonicity check in its source task before fan-out. A checkpoint-enabled job validates the
 single-flight epoch at its source cut, operator alignment, sink pre-commit,
 manifest publication, and sink finalization boundaries. An internal job path
 started without checkpoint wiring still fails closed if it receives a barrier.

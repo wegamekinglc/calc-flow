@@ -777,5 +777,5 @@ async fn test_indicator_sequence_normal_restore_rejects_valid_checksum_bad_state
     }
 }
 
-#[path = "native_array_sequence_recovery/macd.rs"]
+#[path = "sequence_recovery/macd.rs"]
 mod macd;

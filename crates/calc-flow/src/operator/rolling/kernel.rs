@@ -67,6 +67,7 @@ pub(super) fn shared_rows_test_pool(
 }
 
 const ROLLING_KERNEL_PLAN_VERSION: u32 = 1;
+const ENTITY_PARALLEL_MIN_ROWS: usize = 64_000;
 
 #[cfg(test)]
 thread_local! {

@@ -198,9 +198,14 @@ impl OperatorMetricsHandle {
         )
     }
 
-    pub(crate) fn record_processing(&self, timer: &MetricsTimer) -> Result<()> {
-        let elapsed = timer.elapsed(&self.node_id, "processing_duration")?;
+    pub(crate) fn record_data_completion(
+        &self,
+        timer: &MetricsTimer,
+        progress: &super::operator_task::OperatorProgressSnapshot,
+    ) -> Result<()> {
         let mut metrics = self.metrics.lock();
+        observe_window_metrics(&mut metrics, progress);
+        let elapsed = timer.elapsed(&self.node_id, "processing_duration")?;
         metrics.processing_duration = metrics
             .processing_duration
             .checked_add(elapsed)
@@ -235,13 +240,19 @@ impl OperatorMetricsHandle {
     }
 
     pub(crate) fn observe_window(&self, progress: &super::operator_task::OperatorProgressSnapshot) {
-        let mut metrics = self.metrics.lock();
-        metrics.late_rows = progress.late_rows;
-        metrics.affected_batches = progress.affected_batches;
-        metrics.max_lateness_micros = progress.max_lateness_micros;
-        metrics.null_event_time_rows = progress.null_event_time_rows;
-        metrics.null_event_time_batches = progress.null_event_time_batches;
+        observe_window_metrics(&mut self.metrics.lock(), progress);
     }
+}
+
+fn observe_window_metrics(
+    metrics: &mut OperatorMetrics,
+    progress: &super::operator_task::OperatorProgressSnapshot,
+) {
+    metrics.late_rows = progress.late_rows;
+    metrics.affected_batches = progress.affected_batches;
+    metrics.max_lateness_micros = progress.max_lateness_micros;
+    metrics.null_event_time_rows = progress.null_event_time_rows;
+    metrics.null_event_time_batches = progress.null_event_time_batches;
 }
 
 /// A cloneable handle over one bounded stable-ID metrics registry.
@@ -1149,6 +1160,7 @@ mod tests {
         CalcFlowError, EdgeBudget,
         runtime::streaming::{
             EnvelopeCost,
+            operator_task::OperatorProgressSnapshot,
             runner::{FailureOrigin, RuntimeFailure},
         },
     };
@@ -1179,7 +1191,10 @@ mod tests {
         node.record_input(EnvelopeCost::new(1, 2, 16)).unwrap();
         let timer = node.timer();
         clock.0.store(17, Ordering::SeqCst);
-        node.record_processing(&timer).unwrap();
+        let mut progress = OperatorProgressSnapshot::default();
+        progress.late_rows = 3;
+        progress.affected_batches = 2;
+        node.record_data_completion(&timer, &progress).unwrap();
 
         let snapshot = recorder.snapshot();
         assert_eq!(
@@ -1192,6 +1207,8 @@ mod tests {
             snapshot.nodes["node"].processing_duration,
             Duration::from_nanos(17)
         );
+        assert_eq!(snapshot.nodes["node"].late_rows, 3);
+        assert_eq!(snapshot.nodes["node"].affected_batches, 2);
     }
 
     #[test]

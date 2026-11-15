@@ -41,6 +41,11 @@ the existing dev Python environment. Logs are local evidence under `target/`;
 the source tests are committed. Compilation-only setup errors from ad-hoc
 rustc/Python import attempts are not counted as behavior REDs.
 
+The target-specific commands below preserve the original test-first record. The
+same tests are now modules of the single `--test bounded_analytic_over` target;
+their current source paths use the corresponding
+`tests/bounded_analytic_over/*.rs` module names.
+
 | Focused command / case | Observed RED | Final GREEN |
 |---|---|---|
 | `cargo test -p calc-flow --test bounded_analytic_over test_over_strict_declarations --no-default-features` | E0432: crate-root analytic types absent | declaration/config target: 4 pass |
@@ -189,11 +194,11 @@ required CI remain prerequisites to merge. The issue stays in_progress until mer
 - `crates/calc-flow/tests/bounded_analytic_over.rs`
 - `crates/calc-flow/tests/bounded_analytic_over/common.rs`
 - `crates/calc-flow/tests/bounded_analytic_over/public_stream.rs`
-- `crates/calc-flow/tests/bounded_analytic_over_closure.rs`
-- `crates/calc-flow/tests/bounded_analytic_over_execution.rs`
-- `crates/calc-flow/tests/bounded_analytic_over_sql.rs`
-- `crates/calc-flow/tests/bounded_analytic_over_stream.rs`
-- `crates/calc-flow/tests/bounded_analytic_over_values.rs`
+- `crates/calc-flow/tests/bounded_analytic_over/closure.rs`
+- `crates/calc-flow/tests/bounded_analytic_over/execution.rs`
+- `crates/calc-flow/tests/bounded_analytic_over/sql.rs`
+- `crates/calc-flow/tests/bounded_analytic_over/stream.rs`
+- `crates/calc-flow/tests/bounded_analytic_over/values.rs`
 - `crates/calc-flow/tests/distinct_analysis.rs`
 - `crates/calc-flow/tests/finite_union_frontend.rs`
 - `crates/calc-flow/tests/latest_relation.rs`

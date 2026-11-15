@@ -2078,8 +2078,9 @@ async fn dispatch_data(
             .dispatch_trace()
             .callback(&inputs.node_id, "data")?;
     }
-    inputs.metrics.observe_window(&inputs.progress.snapshot());
-    inputs.metrics.record_processing(&processing_timer)
+    inputs
+        .metrics
+        .record_data_completion(&processing_timer, &inputs.progress.snapshot())
 }
 
 async fn dispatch_watermark_handler(

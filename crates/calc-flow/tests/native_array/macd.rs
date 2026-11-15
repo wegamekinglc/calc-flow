@@ -235,7 +235,7 @@ fn test_macd_charges_three_outputs_and_fixed_state_at_exact_peak() -> Result<()>
     Ok(())
 }
 
-#[path = "fixtures/macd/golden.rs"]
+#[path = "../fixtures/macd/golden.rs"]
 mod golden;
 
 fn fixture_options(fixture: &golden::Fixture) -> Result<MacdOptions> {

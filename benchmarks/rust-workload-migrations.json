@@ -273,6 +273,20 @@
       "candidate_sha256": "5886be98a0ecc09f7812b3175ba9896f9e5845c748b8e9eb8a7927cc3bff4897",
       "reason": "Exact composed migration from the retained dependency-upgrade core workload anchor through PR #611: preserve all previously declared cases and add the one-row single-input complete-runner case. Existing fixtures, samples and timing boundaries are unchanged; new coverage has no historical timing equivalence.",
       "reference": "Retained dependency-migration core workload anchor and PR #611"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "5886be98a0ecc09f7812b3175ba9896f9e5845c748b8e9eb8a7927cc3bff4897",
+      "candidate_sha256": "d9cd4cb41c666a00610980502339fc12e8141158fefd41c57f6bcadcf7decc35",
+      "reason": "Add one real DataFusion SQL RANGE SUM case with 1,024 ordered rows, one expiration per step and nullable values. The warm-up validates every output row and native rewrite admission. Existing core cases, fixtures, samples and timing boundaries are unchanged; the new case is additional coverage, not historical timing evidence.",
+      "reference": "Weekly review cleanup; SQL range single-expiration allocation fast path"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "1977e38423122a9a4be36d56317cd905d64dd2fb95e37005e05669f436d47c98",
+      "candidate_sha256": "d9cd4cb41c666a00610980502339fc12e8141158fefd41c57f6bcadcf7decc35",
+      "reason": "Exact composed migration from the retained dependency-upgrade core workload anchor through the weekly review cleanup: preserve all previously declared cases and add the real DataFusion SQL RANGE SUM single-expiration case. Existing fixtures, samples and timing boundaries are unchanged; new coverage has no historical timing equivalence.",
+      "reference": "Retained dependency-migration core workload anchor and weekly review cleanup"
     }
   ]
 }
