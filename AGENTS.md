@@ -140,6 +140,10 @@ Ordinary feature work must not rewrite either team definition.
   values. Defensively copy before passing data to libraries that mutate.
 - Keep pure CPU-local transforms synchronous. Await file, stream, process, and
   network I/O; blocking convenience methods must reject a running event loop.
+  Calls on an existing `StreamSession` (`push`, `advance`, `finish`, `close`)
+  are synchronous caller-thread engine calls with no I/O or cross-thread waits
+  and may run inside an event loop; session construction compiles and follows
+  the blocking rule.
 - Do not add compatibility shims for the removed Python v1 implementation.
 
 For Markdown tables, align columns with pipes and pad separator rows so their
