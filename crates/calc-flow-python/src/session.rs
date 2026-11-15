@@ -88,6 +88,43 @@ impl<S> SessionState<S> {
     }
 }
 
+/// Owns one call's `Busy` state. A call that unwinds before completing
+/// stores `Failed` so a panic cannot leave the session busy forever.
+struct CallGuard<'a, S> {
+    state: &'a Mutex<SessionState<S>>,
+    completed: bool,
+}
+
+impl<'a, S> CallGuard<'a, S> {
+    fn begin(state: &'a Mutex<SessionState<S>>) -> Result<(Self, S), String> {
+        let session = state.lock().begin()?;
+        Ok((
+            Self {
+                state,
+                completed: false,
+            },
+            session,
+        ))
+    }
+
+    fn complete(mut self, session: S, completion: Completion) -> Option<S> {
+        self.completed = true;
+        self.state.lock().complete(session, completion)
+    }
+}
+
+impl<S> Drop for CallGuard<'_, S> {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let mut state = self.state.lock();
+        if matches!(*state, SessionState::Busy) {
+            *state = SessionState::Failed("a session call panicked".into());
+        }
+    }
+}
+
 type NativeSession = Box<calc_flow::StreamSession>;
 type NativeResult = calc_flow::Result<calc_flow::SessionOutput>;
 
@@ -107,7 +144,8 @@ impl PyStreamSession {
         finishes: bool,
         operation: impl FnOnce(&mut calc_flow::StreamSession) -> NativeResult + Send,
     ) -> PyResult<Py<PyDict>> {
-        let mut session = self.state.lock().begin().map_err(PyRuntimeError::new_err)?;
+        let (guard, mut session) =
+            CallGuard::begin(&self.state).map_err(PyRuntimeError::new_err)?;
         let (session, result) = py.detach(move || {
             let result = operation(&mut session);
             (session, result)
@@ -118,7 +156,7 @@ impl PyStreamSession {
             Err(error) if failed => Completion::Failed(error.to_string()),
             _ => Completion::Open,
         };
-        let released = self.state.lock().complete(session, completion);
+        let released = guard.complete(session, completion);
         drop(released);
         let output = result.map_err(|error| session_py_err(error, failed))?;
         outputs_to_python(py, output)
@@ -330,7 +368,11 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Completion, SessionState};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use parking_lot::Mutex;
+
+    use super::{CallGuard, Completion, SessionState};
 
     fn idle() -> SessionState<&'static str> {
         SessionState::Idle("session")
@@ -402,5 +444,38 @@ mod tests {
             assert_eq!(state.close(), None);
             assert!(matches!(state, SessionState::Closed));
         }
+    }
+
+    #[test]
+    fn test_panic_during_call_stores_failed_instead_of_busy() {
+        let state = Mutex::new(idle());
+        let unwound = catch_unwind(AssertUnwindSafe(|| {
+            let (_guard, _session) = CallGuard::begin(&state).unwrap();
+            panic!("export failed");
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(
+            state.lock().begin(),
+            Err(
+                "StreamSession failed earlier (a session call panicked); create a new session"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn test_completed_or_closed_call_guard_keeps_its_state() {
+        let state = Mutex::new(idle());
+        let (guard, session) = CallGuard::begin(&state).unwrap();
+        assert_eq!(guard.complete(session, Completion::Open), None);
+        assert!(matches!(*state.lock(), SessionState::Idle("session")));
+
+        let unwound = catch_unwind(AssertUnwindSafe(|| {
+            let (_guard, _session) = CallGuard::begin(&state).unwrap();
+            assert_eq!(state.lock().close(), None);
+            panic!("export failed after close");
+        }));
+        assert!(unwound.is_err());
+        assert!(matches!(*state.lock(), SessionState::Closed));
     }
 }

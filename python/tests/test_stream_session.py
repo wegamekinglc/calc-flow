@@ -259,3 +259,18 @@ def test_static_parameters_and_idle_timeouts_are_rejected() -> None:
     ):
         with pytest.raises(ValueError, match="idle_timeout"):
             _signals().session(config=CONFIG, watermarks=policy)
+
+
+def test_operator_failure_raises_execution_error_then_fails_session() -> None:
+    with _explicit_session() as session:
+        session.push(_rows((0, "a", 0, 1.0)), watermark=_at(0))
+        with pytest.raises(cf.ExecutionError, match="late"):
+            session.push(_rows((0, "a", 1, 2.0)))
+        for call in (
+            lambda: session.push(_rows((1, "a", 2, 3.0))),
+            lambda: session.advance(_at(5)),
+            session.finish,
+        ):
+            # The binding's failed state names the original failure.
+            with pytest.raises(RuntimeError, match=r"failed earlier \(.*late"):
+                call()
