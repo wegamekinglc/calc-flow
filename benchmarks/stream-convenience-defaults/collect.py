@@ -67,6 +67,27 @@ def sealed_build(path: Path, expected_sha: str) -> dict:
     return manifest
 
 
+def check_descriptors(metadata: dict, case: dict, workload: dict) -> None:
+    if workload.get("scale") != case["scale"] or any(
+        metadata.get(field) != workload.get(field) for field in DESCRIPTORS
+    ):
+        raise ValueError("incomparable workload identity: descriptor disagrees")
+
+
+def check_row_counts(metadata: dict, workload: dict) -> None:
+    rows = workload.get("rows_per_input")
+    if metadata.get("input_rows") != rows or metadata.get("output_rows") != rows:
+        raise ValueError("incomparable workload identity: row counts disagree")
+
+
+def check_reference_fingerprints(metadata: dict, reference: dict | None) -> None:
+    if reference is not None and any(
+        metadata[f"{name}_fingerprint"] != reference[f"{name}_fingerprint"]
+        for name in IDENTITIES
+    ):
+        raise ValueError("incomparable identity: fingerprint mismatch")
+
+
 def check_identity(metadata: dict, case: dict, reference: dict | None) -> None:
     """Fail closed on corrupt, mismatched, or mislabeled identities.
 
@@ -77,18 +98,9 @@ def check_identity(metadata: dict, case: dict, reference: dict | None) -> None:
     for name in IDENTITIES:
         validate_component(metadata, name)
     workload = metadata["workload_identity"]
-    if workload.get("scale") != case["scale"] or any(
-        metadata.get(field) != workload.get(field) for field in DESCRIPTORS
-    ):
-        raise ValueError("incomparable workload identity: descriptor disagrees")
-    rows = workload.get("rows_per_input")
-    if metadata.get("input_rows") != rows or metadata.get("output_rows") != rows:
-        raise ValueError("incomparable workload identity: row counts disagree")
-    if reference is not None and any(
-        metadata[f"{name}_fingerprint"] != reference[f"{name}_fingerprint"]
-        for name in IDENTITIES
-    ):
-        raise ValueError("incomparable identity: fingerprint mismatch")
+    check_descriptors(metadata, case, workload)
+    check_row_counts(metadata, workload)
+    check_reference_fingerprints(metadata, reference)
 
 
 async def observe(case: dict, site: Path, native: str, output: Path) -> dict:
@@ -124,13 +136,28 @@ async def observe(case: dict, site: Path, native: str, output: Path) -> dict:
     }
 
 
-def evaluate(case: dict, evidence: dict, seals: dict) -> dict:
-    """``release_pairs.evaluate_case`` with ``check_identity`` substituted."""
+def validate_observation(
+    value: dict, case: dict, seals: dict, side: str, reference: dict, workers: set[str]
+) -> None:
+    workers.add(_unique_worker(value, workers))
+    if value.get("binary_sha256") != seals[side]:
+        raise ValueError("incomparable observation: wrong native SHA")
+    if value.get("correctness") is not True:
+        raise ValueError("observation correctness was not established")
+    check_identity(value["metadata"], case, reference)
+
+
+def require_complete_rounds(evidence: dict) -> list:
     rounds = evidence["rounds"]
     if len(rounds) != RELEASE_ROUNDS or any(
         len(pairs) != RELEASE_SAMPLES for pairs in rounds
     ):
         raise ValueError("evidence requires two rounds of ten actual pairs")
+    return rounds
+
+
+def observation_values(case: dict, evidence: dict, seals: dict) -> dict:
+    rounds = require_complete_rounds(evidence)
     reference = rounds[0][0]["observations"]["baseline"]["metadata"]
     values = {side: [[] for _ in rounds] for side in SIDES}
     workers: set[str] = set()
@@ -139,15 +166,20 @@ def evaluate(case: dict, evidence: dict, seals: dict) -> dict:
             observations = _pair_observations(pair, index)
             for side in SIDES:
                 value = observations[side]
-                workers.add(_unique_worker(value, workers))
-                if value.get("binary_sha256") != seals[side]:
-                    raise ValueError("incomparable observation: wrong native SHA")
-                if value.get("correctness") is not True:
-                    raise ValueError("observation correctness was not established")
-                check_identity(value["metadata"], case, reference)
+                validate_observation(value, case, seals, side, reference, workers)
                 values[side][round_index].append(_sample_median(value["samples"]))
+    return values
+
+
+def evaluate(case: dict, evidence: dict, seals: dict) -> dict:
+    """``release_pairs.evaluate_case`` with ``check_identity`` substituted."""
     return comparison(
-        {"id": case["id"], "comparison": "interleaved", "correctness": True, **values},
+        {
+            "id": case["id"],
+            "comparison": "interleaved",
+            "correctness": True,
+            **observation_values(case, evidence, seals),
+        },
         minimum_samples=RELEASE_SAMPLES,
     )
 
@@ -205,12 +237,7 @@ async def measure_case(
     }
 
 
-async def collect(args: argparse.Namespace) -> int:
-    started = time.monotonic()
-    protocol = read_json(args.protocol)
-    output = args.output.resolve()
-    if output.exists() and any(output.iterdir()):
-        raise ValueError("measurement requires a fresh output directory")
+def load_seals(protocol: dict) -> tuple[dict, dict]:
     builds = {
         side: sealed_build(
             Path(protocol[side]["build_manifest"]), protocol[side]["git_sha"]
@@ -225,8 +252,13 @@ async def collect(args: argparse.Namespace) -> int:
     seals = {side: builds[side]["native_sha256"] for side in SIDES}
     if seals["baseline"] == seals["candidate"]:
         raise ValueError("baseline and candidate natives must differ")
-    budget = protocol["budget"]["measurement_seconds"]
-    report = {
+    return builds, seals
+
+
+def initial_report(
+    args: argparse.Namespace, protocol: dict, builds: dict, seals: dict, budget: int
+) -> dict:
+    return {
         "contract": protocol["contract"],
         "argv": sys.argv,
         "protocol_sha256": sha256_file(args.protocol),
@@ -241,20 +273,55 @@ async def collect(args: argparse.Namespace) -> int:
         "cases": [],
         "errors": [],
     }
+
+
+async def install_sites(builds: dict, output: Path) -> dict:
+    return {
+        side: await install(
+            {"wheel_path": builds[side]["wheel"]}, output / "install" / side
+        )
+        for side in SIDES
+    }
+
+
+async def measure_cases(
+    report: dict, protocol: dict, sites: dict, seals: dict, output: Path, started: float
+) -> dict:
+    for case in protocol["cases"]:
+        print(f"case {case['label']} {case['id']}", flush=True)
+        entry = await measure_case(case, sites, seals, output, started)
+        report = {**report, "cases": [*report["cases"], entry]}
+        write_json(output / "results.json", report)
+    return report
+
+
+def finalize_report(report: dict, protocol: dict, started: float) -> dict:
+    measured = {case["id"] for case in report["cases"] if "result" in case}
+    return {
+        **report,
+        "unmeasured": [
+            case["id"] for case in protocol["cases"] if case["id"] not in measured
+        ],
+        "elapsed_seconds": time.monotonic() - started,
+    }
+
+
+async def collect(args: argparse.Namespace) -> int:
+    started = time.monotonic()
+    protocol = read_json(args.protocol)
+    output = args.output.resolve()
+    if output.exists() and any(output.iterdir()):
+        raise ValueError("measurement requires a fresh output directory")
+    builds, seals = load_seals(protocol)
+    budget = protocol["budget"]["measurement_seconds"]
+    report = initial_report(args, protocol, builds, seals, budget)
     output.mkdir(parents=True, exist_ok=True)
     try:
         async with asyncio.timeout(budget):
-            sites = {
-                side: await install(
-                    {"wheel_path": builds[side]["wheel"]}, output / "install" / side
-                )
-                for side in SIDES
-            }
-            for case in protocol["cases"]:
-                print(f"case {case['label']} {case['id']}", flush=True)
-                entry = await measure_case(case, sites, seals, output, started)
-                report = {**report, "cases": [*report["cases"], entry]}
-                write_json(output / "results.json", report)
+            sites = await install_sites(builds, output)
+            report = await measure_cases(
+                report, protocol, sites, seals, output, started
+            )
     except TimeoutError:
         report = {
             **report,
@@ -264,14 +331,7 @@ async def collect(args: argparse.Namespace) -> int:
             ],
         }
     finally:
-        measured = {case["id"] for case in report["cases"] if "result" in case}
-        report = {
-            **report,
-            "unmeasured": [
-                case["id"] for case in protocol["cases"] if case["id"] not in measured
-            ],
-            "elapsed_seconds": time.monotonic() - started,
-        }
+        report = finalize_report(report, protocol, started)
         write_json(output / "results.json", report)
     return int(bool(report["errors"] or report["unmeasured"]))
 
