@@ -36,6 +36,11 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   `benchmarks/stream-convenience-defaults/`：2 批用例按维护规则 improved（−39.24%），
   32 批用例为 inconclusive（−9.33%）；两项默认变化合并测量，不能分别归因。
 - P1 其余项尚未开始：NumPy 路径，以及单源链路在 runner source task 内联（取代草稿 PR #616）。
+- P2.1：五个 rolling dispatch 证据用例和 native 配对控制器已并入；10 轮基线在 14.8 秒内完成，
+  原始样本、二进制身份和协议归档于 `benchmarks/rolling-kernel-v2/`。绝对基线为
+  G1 6.264 µs、G2 19.577 ns/window-row、G3 452.568 µs；两臂使用同一二进制，1.00x 不是性能结论。
+- P2–P7 规格已全部并入：rolling 数值与内核、checkpoint v4、keyed state 与 join、并行执行与 window pane。
+  实现按单一 PR 内的提交序列推进，不再建立分阶段 PR。
 
 ## 1. 目标
 
