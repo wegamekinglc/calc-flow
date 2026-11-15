@@ -3,7 +3,8 @@
 Calc Flow is a Python calculation library for Arrow tables and stateful streams.
 The application API under `python/calc_flow/` exposes immutable expressions,
 `compute`/`compute_async`, SQL and `pipe` composition, reusable `Program`
-collection, owned async stream results, and integrations. The
+collection, owned async stream results, synchronous stream sessions, and
+integrations. The
 `calc-flow` crate is the internal runtime and owns immutable `Batch` values,
 graph compilation, DataFusion execution, projects, stores, checkpoints, and
 runners. PyO3 and Python lowering connect the API to that single table runtime. `calc-flow-connectors` delivers connector implementations behind
@@ -167,7 +168,10 @@ dashes span the full column width, including cell spaces.
   aligned epoch checkpoints, managed v3 manifest recovery for durable restart,
   per-output delivery proof, and deterministic metrics. Control construction,
   task/coordinator/supervisor internals, and reaper ownership remain
-  crate-private. See `docs/runtime-envelope.md`.
+  crate-private. The crate-root `StreamSession` instead drives an admitted
+  plan (one dynamic input; rolling, expression, and union nodes) synchronously
+  on the caller's thread over session edges, with no tasks, checkpoints, or
+  queue backpressure. See `docs/runtime-envelope.md`.
 - `Port` declares name, `BatchKind`, required flag, and optional exact Arrow
   schema.
 - `OperatorMetadata` owns shared graph metadata. `BatchOperator` and
@@ -251,6 +255,15 @@ selectors.
   cumulative snapshots. Ordinary iterables have
   no replay; temporary checkpoints do not provide durable restart or exactly-once
   application delivery.
+- `python/calc_flow/session.py` implements `StreamSession` behind
+  `TableExpr.session` and `Program.session`. Each session compiles one native
+  plan with one dynamic input and maps watermark policies onto session
+  watermarks; synchronous caller-thread `push`, `advance`, and `finish` return
+  Arrow tables (programs: every declared output name), and `close` releases
+  state without flushing. State is in memory and checkpoint configuration is
+  ignored. The PyO3 `_StreamSession` binding releases the GIL per call and
+  raises `RuntimeError` for busy, closed, finished, or failed sessions. See
+  `docs/python-api.md`.
 - `Program(name, mode="batch")` or `Program(name, mode="stream")` fixes the
   lifecycle at construction; legacy `engine="sql"|"streaming"` is an exclusive
   alias. Exactly one selector is required. Immutable `with_input` and `output`

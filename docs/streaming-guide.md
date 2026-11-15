@@ -52,6 +52,17 @@ Use `Program.compile_stream()` with explicit bindings and a stable
 `ManagedCheckpointRuntime` when state must survive process restarts or the
 application owns transactional delivery.
 
+Use `TableExpr.session()` or `Program.session()` when the application already
+holds each input batch and needs the rows it closes returned by the same
+synchronous call, for example in a request handler or a replay loop. A session
+runs one compiled plan on the calling thread, with no source, sink, job, or
+checkpoint, and keeps state in memory only. It admits one dynamic input feeding
+rolling, row-local expression, and union stages. Use a stream instead for async
+sources, several dynamic inputs, other operators, status observation, bounded
+queue backpressure, or delivery and recovery contracts. See
+[stream sessions](python-api.md#stream-sessions) and
+[session watermarks](#session-watermarks).
+
 Batch and stream plans are intentionally different types. A batch plan cannot
 be passed to `StreamingRunner`, and a stream plan cannot be executed with
 `execute()`.
@@ -1100,6 +1111,49 @@ driver forwards data unchanged. A window operator applies its own late rule:
 an assignment is late when its window end is less than or equal to the current
 input watermark.
 
+### Session watermarks
+
+`TableExpr.session` and `Program.session` accept the same `watermarks`
+argument and map each policy onto caller-driven progress. Generated watermarks
+advance after every push instead of on an emission interval, and sessions have
+no idle timers.
+
+| Policy                                           | Session progress                                       |
+|--------------------------------------------------|--------------------------------------------------------|
+| Default, with declared `event_time`              | Ordered: `max_seen - 1 microsecond` after each push    |
+| Default without event time, `DisabledWatermarks` | No watermark; stateful results finalize at `finish()`  |
+| `SourceProvidedWatermarks`                       | Only `push(..., watermark=...)` and `advance(...)`     |
+| `BoundedOutOfOrderness`                          | `max_seen - delay` after each push; interval ignored   |
+
+A policy with a non-`None` `idle_timeout` is rejected when the session is
+created.
+
+The ordered default validates arrival order like the stream default:
+timestamps must be non-null and nondecreasing across every row and push of the
+input. It also rejects a push whose rows are at or before the current
+watermark, compared at the microsecond precision that operators observe. Such
+a row would be late under the default rolling policy and fail the session;
+rejecting it first raises `ConfigError` and keeps the session usable. The
+latest timestamp stays open until a later push, an explicit watermark,
+`advance`, or `finish()` closes it.
+
+An explicit watermark declares the input complete up to that time. Under the
+ordered default and `BoundedOutOfOrderness`, the effective watermark is the
+maximum of the generated candidate and the explicit value. An explicit
+watermark can therefore close the latest timestamp in the same call, and a
+later generated candidate cannot move progress backward. After
+`push(..., watermark=T)` under the ordered default, a row at `T` is rejected
+and a row after `T` is accepted. A regressing explicit watermark is rejected,
+an equal one adds nothing, and a disabled policy rejects every explicit
+watermark. Combining generated and explicit progress is specific to sessions;
+a stream source uses exactly one policy.
+
+Under `SourceProvidedWatermarks` and `BoundedOutOfOrderness`, a session does
+not check arrival order. Late rows reach the operators and follow their late
+policies; an error policy fails the session. Rows dropped by
+`late_policy="drop"` are not observable, because sessions expose no status or
+late-row metrics.
+
 ## Event-time windows
 
 Fixed UTC windows also support finite batch execution and the explicit
@@ -1769,6 +1823,11 @@ Backpressure is expected. A slow sink eventually awaits upstream sends. Do not
 hide that signal behind an unbounded queue inside a connector. If the external
 transport cannot pause, declare the loss explicitly and use a best-effort
 route.
+
+Stream sessions have no queue backpressure. `edge_budget` still bounds every
+input and internal message, but each call returns only after every operator
+has drained its queues, so memory per call follows the operators' output
+chunking. See [stream sessions](python-api.md#stream-sessions).
 
 ## Native Table indicators
 

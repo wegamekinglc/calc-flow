@@ -41,7 +41,8 @@ inputs. `sql` adds a read-only query to that same graph. `pipe` applies a
 reusable synchronous function to a declaration during construction.
 `compute(data, build)` supplies the input schema and returns an Arrow table.
 A `Program` gives reusable calculations named inputs and outputs; `stream`
-exposes an owned async iterator over a running calculation.
+exposes an owned async iterator over a running calculation, and `session`
+returns a synchronous push session over one compiled stream plan.
 
 For runtime integration, `Batch` is the immutable data envelope:
 
@@ -111,6 +112,14 @@ to nondecreasing arrival times and watermarks that finalize earlier timestamps
 before EOF. Select `watermarks` for disorder or source-provided progress; inputs
 without event time need no progress configuration for stateless work. See the
 [streaming guide](streaming-guide.md#first-python-continuous-job).
+
+Use `TableExpr.session()` or `Program.session()` when the application holds
+each batch and wants its results returned by the same synchronous call. A
+session compiles once, keeps native state in memory, and runs each `push`,
+`advance`, or `finish` on the calling thread, returning the rows that call
+emits. It accepts one dynamic input feeding rolling, row-local expression, and
+union stages, and has no checkpoint or recovery. Calls on an existing session
+may run inside an event loop. See [stream sessions](python-api.md#stream-sessions).
 
 Convenience streams use temporary managed state. Async iterable inputs provide
 best-effort delivery without replay. For durable recovery,

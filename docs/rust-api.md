@@ -32,6 +32,7 @@ On this page:
 - [Late-row policy contract](#late-row-policy-contract)
 - [Bounded backward ASOF Join](#bounded-backward-asof-join)
 - [Stream compilation and continuous runtime](#stream-compilation-and-continuous-runtime)
+- [Caller-driven stream sessions](#caller-driven-stream-sessions)
 - [Batches](#batches)
 - [UDFs and external providers](#udfs-and-external-providers)
 - [Continuous execution and recovery](#continuous-execution-and-recovery)
@@ -1355,7 +1356,8 @@ explains native state and DataFusion ownership.
 `StreamExecutionPlan`. The plan records stable edges, source and sink binding
 slots, stream requirements, and the semantic fingerprint. Pass it to the
 crate-root `StreamingRunner` with `SourceBinding`, `SinkBinding`, and
-`ManagedCheckpointRuntime` values.
+`ManagedCheckpointRuntime` values, or drive an admitted plan from the calling
+thread with a [`StreamSession`](#caller-driven-stream-sessions).
 
 A plan compiled from a project that declares static side inputs exposes them
 through `StreamExecutionPlan::static_input_ids()` and `static_inputs()`;
@@ -1434,6 +1436,114 @@ never cross the facade.
 charged rows are each independently capped at `R`, while charged bytes are
 capped at `B`. Direct callers must choose
 `R >= max(required_row_limit, required_simultaneous_messages)`.
+
+## Caller-driven stream sessions
+
+The crate-root `StreamSession` executes one compiled `StreamExecutionPlan`
+synchronously and in memory. Each call validates its input, runs the batch and
+watermark through every operator in topological order using the runner's
+per-operator code, and returns the rows emitted by that call. There are no
+source, sink, or progress tasks. The `StreamSession` rustdoc contains a
+complete doctest that compiles a rolling-to-projection plan; its central calls
+are:
+
+```rust
+let mut session = StreamSession::new(plan, &StreamRuntimeConfig::default(), BTreeMap::new())?;
+let (input, output) = (session.input_ids()[0].to_owned(), session.output_ids()[0].to_owned());
+let first = session.push(&input, batch(10, 0, 1.0)?, Some(EventTime::from_micros(10)))?;
+assert_eq!(first.batches(&output)[0].num_rows(), 1);
+assert!(session.finish()?.is_empty());
+```
+
+| Item                                            | Contract                                                                    |
+|-------------------------------------------------|-----------------------------------------------------------------------------|
+| `StreamSession::new(plan, &config, watermarks)` | Validate the config and admission, consume the plan, prepare every operator |
+| `input_ids()` / `output_ids()`                  | Source binding IDs and graph output IDs in plan order                       |
+| `push(&input, batch, Option<EventTime>)`        | Run one batch, then an optional watermark; return `SessionOutput`           |
+| `advance(&input, EventTime)`                    | Run a watermark without data; an equal watermark is a no-op                 |
+| `finish()`                                      | End the input, flush every operator, and finish the session                 |
+| `is_failed()`                                   | Whether an error after validation failed the session                        |
+| `SessionOutput::batches(output)`                | Batches emitted on one graph output, in emission order; empty when none     |
+| `SessionOutput::is_empty()`                     | Whether the call emitted no batch on any output                             |
+| `SessionOutput::into_batches()`                 | Consume into a `BTreeMap<String, Vec<Batch>>` by graph output ID            |
+
+`watermarks` is a `BTreeMap<String, SessionWatermark>` keyed by the input ID.
+`SessionWatermark` is `#[non_exhaustive]`:
+
+- `Explicit` advances only through watermarks passed to `push` or `advance`.
+  It is the runtime's source-provided mode and the default for an absent key.
+- `Ordered { event_time_column }` requires non-null, nondecreasing event time
+  that stays after the current watermark, and advances to
+  `max(event_time) - 1 µs` after each push.
+- `BoundedOutOfOrderness { event_time_column, max_out_of_orderness }` advances
+  to `max(event_time) - max_out_of_orderness` after each push. The delay must be
+  positive and representable in nanoseconds.
+- `Disabled` never advances and rejects explicit watermarks; results finalize
+  at `finish`.
+
+Generated modes use the runtime's generated-watermark arithmetic with no emit
+interval or idle timeout, and an explicit watermark combines with the generated
+candidate as their maximum. The Python adapter chooses `Ordered` or `Disabled`
+when no policy is given; see [session watermarks](streaming-guide.md#session-watermarks).
+
+The session owns one current-thread Tokio runtime with only the timer driver
+and blocks the caller on it. `push`, `advance`, and `finish` check for a Tokio
+runtime context before any work: inside one they return
+`CalcFlowError::InvalidArgument` at field `session` with the message
+`cannot run inside a Tokio runtime; call it from a blocking thread`. From async
+code, run the session on a blocking thread, for example through
+`tokio::task::spawn_blocking`. A synchronous call cannot be dropped midway, so
+no partial drain survives a call. Dropping a session cancels its job token and
+releases every operator; it is safe inside a runtime context.
+
+Sessions are non-durable. Every checkpoint field of `StreamRuntimeConfig` is
+ignored, including `checkpointing = true`; `edge_budget` bounds every envelope
+and the SQL state budgets are applied as runners apply them. Internal edges
+have no queue backpressure; see
+[caller-driven sessions](runtime-envelope.md#caller-driven-sessions).
+
+`new` admits one dynamic input with no static inputs, no native array sequence
+nodes, and no ExactlyOnce output, feeding only `Rolling`, `Expression`, and
+`Union` nodes. Rolling nodes with the RSI/ATR or MACD state layouts are
+rejected; rolling late side outputs are admitted. Every rejection is
+`CalcFlowError::InvalidArgument` and names `StreamingRunner` as the
+alternative:
+
+| Rejected at construction                                            | Field                                             |
+|---------------------------------------------------------------------|---------------------------------------------------|
+| Not exactly one dynamic source binding                              | `session.inputs`                                  |
+| Static inputs                                                       | `session.static_inputs`                           |
+| Native array sequence node, unsupported node kind or rolling layout | `session.nodes.<id>`                              |
+| Output requesting `DeliveryGuarantee::ExactlyOnce`                  | `session.requirements.delivery.<output>`          |
+| `watermarks` key other than the input                               | `session.watermarks.<key>`                        |
+| Missing or non-timestamp event-time column, or no exact schema      | `session.watermarks.<input>.event_time_column`    |
+| Zero or unrepresentable `max_out_of_orderness`                      | `session.watermarks.<input>.max_out_of_orderness` |
+| Invalid `StreamRuntimeConfig`                                       | The configuration field                           |
+
+Call validation happens before any operator runs; a validation error leaves
+the session unchanged:
+
+| Call validation error                                                | Error and field                                       |
+|----------------------------------------------------------------------|-------------------------------------------------------|
+| Input ID other than the session input                                | `InvalidArgument` at `session.inputs.<input>`         |
+| Batch kind or exact schema differs from the input route              | `Compile`, naming `session.inputs.<id>`               |
+| Batch above `edge_budget`                                            | `EdgeBudgetExceeded`                                  |
+| Regressing watermark, or any watermark under `Disabled`              | `InvalidArgument` at `session.inputs.<id>.watermark`  |
+| `Ordered` event time null, decreasing, or at or before the watermark | `InvalidArgument` at `session.inputs.<id>.event_time` |
+| Generated-watermark arithmetic failure                               | `InvalidArgument` under `session.watermarks.<id>`     |
+| Call on a finished or failed session, or inside Tokio                | `InvalidArgument` at `session`                        |
+
+A pushed batch is stamped like a runner source batch with the binding ID, a
+sequence starting at 0, and its original attributes. The sequence, generator
+state, and watermark commit only after a successful drain. Any error after
+validation fails the session, discards rows emitted earlier in that call, and
+makes `is_failed()` return `true`; later calls return `InvalidArgument` at
+field `session` with `failed earlier; create a new session`, and calls after
+`finish` return `already finished`. Operator panics are contained and returned
+as `CalcFlowError::Operator { node_id, message }`, where `message` is
+`panicked: ` followed by panic text bounded to 1,024 bytes. Session errors are
+ordinary `CalcFlowError` values, like batch execution errors; they are not
+projected through the runner's payload-safe `StreamingError`.
 
 ## Batches
 
@@ -1567,7 +1677,10 @@ ellipsis; non-string panic payloads use a fixed message. Fallible
 `ManagedCheckpointRuntime`, `StreamingRunner`, and `StreamingJob` operations
 expose only `CalcFlowError::Streaming(StreamingError)`; contained panics use
 `StreamingErrorCategory::TaskPanicked` and retain neither the internal task ID
-nor the panic message.
+nor the panic message. `StreamSession` calls instead return ordinary
+`CalcFlowError` values and report contained operator panics as
+`CalcFlowError::Operator`; see
+[caller-driven stream sessions](#caller-driven-stream-sessions).
 
 `ExecutionOptions` carries cancellation/deadline controls. Operators receive a
 `RunContext` and must check cancellation at safe work boundaries.

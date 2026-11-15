@@ -9,6 +9,22 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-15: Add the synchronous `StreamSession` push API. Rust
+  `StreamSession`, `SessionWatermark`, and `SessionOutput`, and Python
+  `TableExpr.session()` and `Program.session()`, run one admitted stream plan
+  on the calling thread and return the rows each `push`, `advance`, or `finish`
+  emits, with no source, sink, job, or checkpoint. Sessions admit one dynamic
+  input feeding rolling (except RSI/ATR/MACD layouts), expression, and union
+  nodes, keep state in memory, ignore checkpoint configuration, and have no
+  queue backpressure. Calls on an existing Python session may run inside an
+  event loop. The P1 measurement was 3.5–5.4x faster than the runner path for
+  1- and 99-row appends and 1.9x faster for 6,400 rows, with no runner
+  regression, but missed the pre-registered 20 µs one-row gate (152.9 µs p50
+  with forced GC); that gate moves to plan phase P2. See
+  [stream sessions](docs/python-api.md#stream-sessions), the
+  [Rust reference](docs/rust-api.md#caller-driven-stream-sessions), and the
+  [re-architecture plan](docs/plans/2026-11-15-streaming-core-rearchitecture.md).
+
 - 2026-11-14: Prepare the aligned `calc-flow` and `calc-flow-python`
   2026.11.14 releases, synchronizing workspace versions, exact internal
   dependencies, lockfiles, package metadata, and current-version documentation.

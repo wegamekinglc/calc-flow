@@ -92,18 +92,21 @@ collection state, streaming ownership, and logical versus physical bindings.
 
 ### SQL, pipelines, and streaming results
 
-| Entry point                                                                    | Contract                                                             |
-|--------------------------------------------------------------------------------|----------------------------------------------------------------------|
-| `sql(query, /, **tables)`                                                      | Lazy `TableExpr`; explicit aliases mapped to table declarations      |
-| `snapshot_sql(query, /, **tables)`                                             | Stream-only query over complete latest replacement relations         |
-| `TableExpr.sql(query, /)`                                                      | Single-table SQL with the local alias `input`                        |
-| `Expr.pipe(function, /, *args, **kwargs)`                                      | Call the synchronous builder once and preserve its return type       |
-| `TableExpr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`   | `StreamResults[pyarrow.Table]`                                       |
-| `Program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`     | `StreamResults[StreamOutput]`; logical input mapping required        |
-| `Program(name, mode=...)`                                                      | Require `"batch"` or `"stream"`; legacy engine is an exclusive alias |
-| `Program.execute(inputs, /, *, ...)`                                           | SQL: named Arrow tables; streaming: owned named events               |
-| `StreamOutput.name` / `.table`                                                 | Immutable named Arrow output event                                   |
-| `StreamResults` async context / iteration / `aclose()` / `.job`                | One native job, one consumer, bounded output and owned cleanup       |
+| Entry point                                                                  | Contract                                                             |
+|------------------------------------------------------------------------------|----------------------------------------------------------------------|
+| `sql(query, /, **tables)`                                                    | Lazy `TableExpr`; explicit aliases mapped to table declarations      |
+| `snapshot_sql(query, /, **tables)`                                           | Stream-only query over complete latest replacement relations         |
+| `TableExpr.sql(query, /)`                                                    | Single-table SQL with the local alias `input`                        |
+| `Expr.pipe(function, /, *args, **kwargs)`                                    | Call the synchronous builder once and preserve its return type       |
+| `TableExpr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)` | `StreamResults[pyarrow.Table]`                                       |
+| `Program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`   | `StreamResults[StreamOutput]`; logical input mapping required        |
+| `TableExpr.session(*, runtime=None, config=None, watermarks=None)`           | `StreamSession[pyarrow.Table]`                                       |
+| `Program.session(*, runtime=None, config=None, watermarks=None)`             | `StreamSession[dict[str, pyarrow.Table]]`; stream mode required      |
+| `Program(name, mode=...)`                                                    | Require `"batch"` or `"stream"`; legacy engine is an exclusive alias |
+| `Program.execute(inputs, /, *, ...)`                                         | SQL: named Arrow tables; streaming: owned named events               |
+| `StreamOutput.name` / `.table`                                               | Immutable named Arrow output event                                   |
+| `StreamResults` async context / iteration / `aclose()` / `.job`              | One native job, one consumer, bounded output and owned cleanup       |
+| `StreamSession.push` / `.advance` / `.finish` / `.close` / context manager   | Synchronous caller-thread calls returning the rows each call emits   |
 
 SQL schema planning reads declarations, not data. Batch SQL accepts multiple
 aliases; append stream SQL accepts one alias or the exact-schema
@@ -133,6 +136,15 @@ stream uses temporary checkpoint storage. Explicit bindings and managed state
 provide the separate durable-recovery path. Multi-output streams yield named
 events rather than synchronized dictionaries. See [Python contracts](python-api.md#streaming-results)
 and the [streaming guide](streaming-guide.md).
+
+`session` compiles once and returns a `StreamSession` whose `push`, `advance`,
+and `finish` run synchronously on the calling thread and return the emitted
+rows: one Arrow table for `TableExpr.session`, or every declared output name
+for `Program.session`. It admits one dynamic input feeding rolling, row-local
+expression, and union stages. Sessions are in-memory, ignore checkpoint
+configuration, and have no queue backpressure. Calls on an existing session may
+run inside an event loop; construction may not. Lifecycle errors raise
+`RuntimeError`. See [stream sessions](python-api.md#stream-sessions).
 
 ### Bounded backward ASOF Join
 
@@ -456,6 +468,7 @@ The `calc_flow` crate re-exports its supported public types from
 | UDF/providers         | `UdfRegistry`, `UdfReference`, `ProviderRegistry`, `BatchOperatorFactory`, `StreamOperatorFactory`                                                                                                  |
 | Sources and sinks     | `StreamSource`, `StreamSink`, `TransactionalStreamSink`, `SourceBinding`, `SinkBinding`                                                                                                             |
 | Continuous runtime    | `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, `Cursor`, `SourceEvent`, `JobStatus`, `JobOutcome`                                                                                   |
+| Stream session        | `StreamSession`, `SessionWatermark`, `SessionOutput`                                                                                                                                                |
 | Static inputs         | `StaticInputSpec`, `StaticInputDigest`, `StaticMutability`, `STATIC_INPUT_DIGEST_VERSION`, `StaticArraySnapshot`, `StaticArrayValues`                                                               |
 | Projects              | `ProjectSpec`, `compile_project`, `validate_project`                                                                                                                                                |
 | Persistence           | `FileProjectStore`, `LocalStateBackend`, `CheckpointManifest`                                                                                                                                       |
@@ -466,7 +479,9 @@ The `calc_flow` crate re-exports its supported public types from
 `StreamExecutionPlan` is consumed by the public source-driven
 `StreamingRunner`. The runner owns source and sink bindings plus a
 `ManagedCheckpointRuntime`; `start(self)` consumes it and returns the sole
-`StreamingJob` lifecycle owner. Static array inspection uses `StaticArraySnapshot` and `StaticArrayValues`.
+`StreamingJob` lifecycle owner. `StreamSession::new` instead consumes an
+admitted plan for synchronous, in-memory pushes on the calling thread; see
+[caller-driven stream sessions](rust-api.md#caller-driven-stream-sessions). Static array inspection uses `StaticArraySnapshot` and `StaticArrayValues`.
 `Batch::static_array_snapshot()` is an explicit owned host-neutral copy for a
 latched static array: its backend, dtype, shape, optional full null bitmap, and
 compact scalar carrier are available through read-only accessors. The snapshot
@@ -511,6 +526,12 @@ runtime task panic. Internally captured panic text is valid UTF-8 and at most
 through its existing `ExecutionError` category. Public continuous lifecycle
 failures use payload-safe `StreamingRuntimeError` projections; indeterminate
 manifest publication uses `CheckpointPublicationUnknownError`.
+
+`StreamSession` errors are ordinary `CalcFlowError` values rather than
+`StreamingError` projections, and contained operator panics surface as
+`CalcFlowError::Operator` with a `panicked: ` message. Python maps them to
+the hierarchy above and raises `RuntimeError` for calls on a failed,
+finished, closed, or busy session.
 
 ## Version and compatibility
 

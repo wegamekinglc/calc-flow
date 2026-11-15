@@ -1,15 +1,37 @@
 # 流式核心重构：架构修改与实现方案
 
-日期：2026-11-15。状态：方向与决定已获批准；尚未开始实施。
+日期：2026-11-15。状态：执行中；P1 的 `StreamSession` 和便捷流默认值已提交 PR，≤20 µs 门槛已移到 P2，见执行记录。
 
 本文记录对 Calc Flow 流式引擎的一次整体 review、由此确定的目标架构，以及分阶段的实现方案。
 它是后续各阶段规格和逐任务实施计划的统一入口；各阶段的逐任务计划另行编写，本文不包含。
 当前实现契约仍以 [runtime envelope](../runtime-envelope.md)、
-[streaming guide](../streaming-guide.md) 和源代码为准；本文描述的是尚未实现的目标状态。
+[streaming guide](../streaming-guide.md) 和源代码为准；本文描述目标状态，已实施的部分见执行记录。
 
 review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该提交。
 本次 review 只阅读了源码和仓库已有的测量产物，没有构建，也没有新增测量。
 文中所有“目标”和“验收门槛”都是待各阶段验收的估计值，不是已取得的结果。
+
+## 执行记录
+
+- P1 `StreamSession`：[PR #618](https://github.com/wegamekinglc/calc-flow/pull/618) 交付公开的同步 push API，
+  包括 Rust `StreamSession`、`SessionWatermark`、`SessionOutput` 和 Python `TableExpr.session`、`Program.session`。
+  现有 handler 由适配器在调用线程上按拓扑序跑完，没有 source、sink 和进度任务。
+  准入范围是单个动态输入，rolling（不含 RSI/ATR/MACD 指标 layout）、表达式和 union 节点，无 checkpoint。
+  规格为 `.codex/artifacts/specs/stream-session.md` 第 2 版，critique 和 review 是
+  `.codex/artifacts/critiques/` 与 `.codex/artifacts/reviews/` 下的同名文件。
+- P1 测量（`benchmarks/stream-session/p1-20261115-summary.md`，每个用例 30 对 AB/BA）：
+  预登记门槛（1 行 append 的 session p50 ≤20 µs）未达到。强制 GC 下为 152.9 µs，
+  常规 GC 的诊断运行为 90.5 µs，进程内热循环为 18.6 µs。
+  相对 runner 的配对加速：1 行和 99 行 append 为 3.5–5.4 倍，6,400 行 64 实体为 1.9 倍；
+  runner 对照的置信区间跨 1.0，没有回退。
+  强制 GC 下的阶段归因是 Python 参数处理 18.9 µs、原生调用 126.9 µs、结果装配 7.0 µs；
+  剩余成本主要在原生算子 dispatch 内，并随缓存状态大幅变化。
+- 按 7.2 的停止规则定位成本后，用户于 2026-11-15 决定：#618 作为严格改进合并；
+  ≤20 µs 门槛移到 P2，与每次调用的分配预算、rolling 和 projection 的同步算子 trait（4.1）一起验收。
+- 决定 5：[PR #617](https://github.com/wegamekinglc/calc-flow/pull/617) 让便捷流默认关闭 checkpoint，
+  有序事件时间输入在每个推进的数据批之后发出 watermark，不再等 100 ms 定时器；
+  显式 `StreamingRunner` 仍默认开启 checkpoint。合并前还需完成配对测量。
+- P1 其余项尚未开始：NumPy 路径，以及单源链路在 runner source task 内联（取代草稿 PR #616）。
 
 ## 1. 目标
 
@@ -375,16 +397,16 @@ TA-Lib 的写法是 `total += x_new; out = total / n; total -= x_old`。
 
 ## 7. 阶段与验收门槛
 
-| 阶段 | 内容                                                                                                        | 验收门槛（估计值）                                                                |
-|------|-------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------|
-| P0   | 固定基线和验收用例；建立新算术的精确参考 oracle                                                             | 每个后续阶段有基线、目标用例和停止规则                                            |
-| P1   | 同步核心和 `StreamSession`，先覆盖 rolling 后接 projection；Python push 与直接导出；便捷流默认值；并入 #616 | Python 1 行 append 从 599 µs 降到 ≤20 µs（Arrow）、≤5 µs（NumPy）；大批对照无回退 |
-| P2   | Rolling 内核重写：新算术、SoA slab、undo log、所有输出进 typed plan、两级内核                               | 原生 1 行 ≤1 µs；每窗口每行 2–4 ns；6,400 行 64 实体从 329 µs 降到 ≤100 µs        |
-| P3   | Checkpoint 重做：写时复制页和脏位图、后台持久化、manifest v4                                                | 已迁移算子开启未触发开销 ≤3%；1 s 间隔 ≥90%、100 ms 间隔 ≥75% 的关闭态吞吐        |
-| P4   | keyed-state 核心、列式分组状态、changelog 输出                                                              | Grouped SUM 10M 行单核从 1.67 s 降到 ≤0.5 s                                       |
-| P5   | Join、interval join 和 ASOF 在 keyed 核心上重建                                                             | Join 1M 单核从 78.5 ms 降到 ≤30 ms；interval 从 672 ms 降到 ≤350 ms               |
-| P6   | 分片执行器、统一 morsel 池、`x86-64-v3` wheel                                                               | Keyed 大批负载 4 核 ≥3 倍；小批路径不变                                           |
-| P7   | Window 改 pane；其余算子迁移；删除旧路径                                                                    | 高重叠 hopping 用例有改善；核心只剩一条执行路径和一种状态格式                     |
+| 阶段 | 内容                                                                                                                | 验收门槛（估计值）                                                                                                                      |
+|------|---------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| P0   | 固定基线和验收用例；建立新算术的精确参考 oracle                                                                     | 每个后续阶段有基线、目标用例和停止规则                                                                                                  |
+| P1   | 同步核心和 `StreamSession`，先覆盖 rolling 后接 projection；Python push 与直接导出；便捷流默认值；并入 #616         | Python 1 行 append 从 599 µs 降到 ≤20 µs（Arrow，已移到 P2）、≤5 µs（NumPy）；大批对照无回退                                            |
+| P2   | Rolling 内核重写：新算术、SoA slab、undo log、所有输出进 typed plan、两级内核；rolling 和 projection 迁到同步 trait | 原生 1 行 ≤1 µs；每窗口每行 2–4 ns；6,400 行 64 实体从 329 µs 降到 ≤100 µs；Python 1 行 append ≤20 µs（自 P1 移入）和每次调用的分配预算 |
+| P3   | Checkpoint 重做：写时复制页和脏位图、后台持久化、manifest v4                                                        | 已迁移算子开启未触发开销 ≤3%；1 s 间隔 ≥90%、100 ms 间隔 ≥75% 的关闭态吞吐                                                              |
+| P4   | keyed-state 核心、列式分组状态、changelog 输出                                                                      | Grouped SUM 10M 行单核从 1.67 s 降到 ≤0.5 s                                                                                             |
+| P5   | Join、interval join 和 ASOF 在 keyed 核心上重建                                                                     | Join 1M 单核从 78.5 ms 降到 ≤30 ms；interval 从 672 ms 降到 ≤350 ms                                                                     |
+| P6   | 分片执行器、统一 morsel 池、`x86-64-v3` wheel                                                                       | Keyed 大批负载 4 核 ≥3 倍；小批路径不变                                                                                                 |
+| P7   | Window 改 pane；其余算子迁移；删除旧路径                                                                            | 高重叠 hopping 用例有改善；核心只剩一条执行路径和一种状态格式                                                                           |
 
 Arroyo 对齐作为独立门槛：在同一集成 harness 上 burst 吞吐不低于 Arroyo 的 0.8 倍，
 在 P1 加原生连接器链路之后验收。
@@ -409,6 +431,7 @@ Arroyo 对齐作为独立门槛：在同一集成 harness 上 burst 吞吐不低
 - 便捷流默认关闭 checkpoint；有序输入按批推进 watermark。
 - #616 的 region 准入逻辑和测试并入，不单独合并。
 - 停止规则：适配器方式达不到 ≤20 µs 时先停下重新定位成本，不继续后续阶段。
+- 执行结果：门槛未达到；定位成本后，用户决定把 ≤20 µs 门槛移到 P2（见执行记录）。
 
 ### 7.3 P2：Rolling 内核重写
 
@@ -422,6 +445,9 @@ Arroyo 对齐作为独立门槛：在同一集成 harness 上 burst 吞吐不低
 - 2026-11-08 计划里的 decay 增量内核和多窗口共享历史在这里落地。
 - 有限（批）路径和流路径共用同一套内核。
 - 删除：每批克隆、`RollingHistories` 双份状态、`ScalarValue` 通用路径、layout 1–6 及其编码。
+- rolling 和 projection 迁到同步算子 trait（4.1），`StreamSession` 不再经适配器驱动它们。
+- 验收另含自 P1 移入的 Python 1 行 append ≤20 µs（Arrow）和每次调用的分配与内存占用预算，
+  同时报告进程内热循环和 harness 两种延迟。
 
 ### 7.4 P3：Checkpoint 重做
 
@@ -501,6 +527,7 @@ Arroyo 对齐作为独立门槛：在同一集成 harness 上 burst 吞吐不低
 ## 10. 未决项与风险
 
 1. P1 是证伪点。适配器方式的 `StreamSession` 达不到门槛时，后续阶段的前提需要重新评估。
+   P1 未达到 ≤20 µs，处理方式见执行记录。
 2. `StreamSession` 的准入范围从单源链路逐步扩大。多输入算子的 watermark 对齐语义在扩大时定义。
 3. 新算术的误差界数值，以及是否保留与 DataFusion 滑动 AVG 的 NaN 粘性兼容，由 P2 规格确定。
 4. 异步持久化的失败模型由 P3 规格确定（6.3）。

@@ -44,7 +44,8 @@ pages explain how the implementation provides those behaviors.
 1. [API reference](api-reference.md): public surfaces, errors,
    and package/protocol versions.
 2. [Python API](python-api.md): `compute`, SQL, `pipe`, named table expressions,
-   `Program`, collection, streams, and advanced execution/provider/runner contracts.
+   `Program`, collection, streams, stream sessions, and advanced
+   execution/provider/runner contracts.
 3. [Expression API](symbolic-api.md): declarations, ordering requirements,
    analysis, and compilation.
 4. [Rust runtime reference](rust-api.md): internal types, operator traits, and

@@ -19,6 +19,7 @@ On this page:
 - [Reusable programs and collection](#reusable-programs-and-collection)
 - [SQL and pipeline composition](#sql-and-pipeline-composition)
 - [Streaming results](#streaming-results)
+- [Stream sessions](#stream-sessions)
 - [LateOutputs and local late policy](#lateoutputs-and-local-late-policy)
 - [Bounded backward ASOF Join](#bounded-backward-asof-join)
 - [Choosing an integration API](#choosing-an-integration-api)
@@ -452,6 +453,114 @@ exactly-once processing. For those contracts, use explicit source/sink bindings,
 `Program.compile_stream`, `StreamingRunner`, and `ManagedCheckpointRuntime`.
 See [explicit connectors and recovery](streaming-guide.md#explicit-connectors-and-recovery).
 
+## Stream sessions
+
+`TableExpr.session(*, runtime=None, config=None, watermarks=None)` returns
+`StreamSession[pyarrow.Table]`. `Program.session(*, runtime=None, config=None,
+watermarks=None)` returns `StreamSession[dict[str, pyarrow.Table]]` and requires
+a stream-mode Program. A session compiles one fresh native stream plan and keeps
+its operator state in memory. Each call runs synchronously on the calling
+thread, passes its batch and watermark through every operator, and returns the
+rows emitted by that call. There is no source, sink, job, progress driver, or
+async bridge. Use `stream` for async sources and `StreamingRunner` for
+connectors, delivery contracts, and recovery; see
+[choose batch or stream](streaming-guide.md#choose-batch-or-stream).
+
+| Member                               | Contract                                                                    |
+|--------------------------------------|-----------------------------------------------------------------------------|
+| `push(inputs, /, *, watermark=None)` | Run one batch, then an optional completeness watermark; return emitted rows |
+| `advance(watermark)`                 | Advance the input watermark without data; return the rows it closes         |
+| `finish()`                           | End the input, flush every operator, and finish the session                 |
+| `close()`                            | Release native state without flushing; repeated calls do nothing            |
+| `with ... as session`                | Context exit calls `close()`; rows that are still open are discarded        |
+
+A table session's `push` takes one `pa.Table`, `pa.RecordBatch`, or table
+`Batch`, and `watermark` is a timezone-aware `datetime` or `Watermark`. A
+program session takes a mapping that contains exactly its one dynamic input by
+logical name; its `watermark` may also be a one-entry mapping by that name.
+Input data must have the declared exact Arrow schema; schema metadata is
+normalized as for ordinary stream iterables. Each pushed batch is stamped like
+a runner source batch, with the input binding ID, a sequence starting at 0, and
+the original `Batch` attributes.
+
+A table session returns one `pa.Table` per call: the emitted rows, or an empty
+table with the declared output schema. A program session returns a dictionary
+with every declared output name, empty tables included; aliases of one physical
+output share one table. Rows keep emission order within each output; outputs
+have no combined order. A call can emit no rows until progress closes them.
+
+Construction compiles, so it rejects a running event loop with `RuntimeError`.
+A session admits one dynamic table input feeding rolling `cf.ts` features
+(except RSI, ATR, and MACD), row-local expressions such as `with_columns`,
+`select`, and `filter`, and `union_all`. Static parameters and native array
+inputs raise `ValueError` before compilation. Native admission rejects other
+node kinds, including SQL, snapshot SQL, cross-section, window, join, ASOF,
+DISTINCT, ordering, and external-provider nodes, and outputs that request
+ExactlyOnce delivery, with `ConfigError`; use `stream` or `StreamingRunner`
+for those graphs. Native admission and call errors name the physical binding
+and node IDs of the compiled plan, which can differ from logical declaration
+names. Python-side checks name logical inputs.
+
+`watermarks` accepts one policy or a mapping by logical dynamic input name, as
+for `stream`. Each policy maps to caller-driven progress:
+
+| Policy for the input                                  | Session progress                                                      |
+|-------------------------------------------------------|-----------------------------------------------------------------------|
+| `None`, with declared `event_time`                    | Ordered: `max(event_time) - 1 microsecond` after each push            |
+| `None`, without `event_time`                          | Disabled: no watermark                                                |
+| `SourceProvidedWatermarks()`                          | Explicit: only `watermark=` and `advance`                             |
+| `BoundedOutOfOrderness(column, delay, emit_interval)` | `max(event_time) - delay` after each push; `emit_interval` is ignored |
+| `DisabledWatermarks()`                                | Disabled: no watermark                                                |
+
+Sessions have no idle timers: a policy with a non-`None` `idle_timeout` raises
+`ValueError`. The ordered default requires non-null, nondecreasing event time
+across rows and pushes, and rejects a push whose rows are at or before the
+current watermark. An explicit `watermark=` declares the input complete up to
+that time and combines with a generated watermark as their maximum. A
+regressing watermark, or any explicit watermark under a disabled policy, raises
+`ConfigError`; an equal watermark adds nothing. See
+[session watermarks](streaming-guide.md#session-watermarks) for the complete
+rules.
+
+Under `SourceProvidedWatermarks` and `BoundedOutOfOrderness`, the session does
+not check order, so late rows reach the operators and follow their late
+policies. Rows dropped by `late_policy="drop"` are not observable: sessions
+expose no `status()` or late-row metrics.
+
+`config=None` uses `StreamRuntimeConfig()`. Sessions are non-durable: checkpoint
+fields are ignored, including `checkpointing=True`, and no state survives the
+session. `config.edge_budget` bounds each input and internal message. Internal
+edges have no queue backpressure: a call buffers whatever each operator emits
+during its turn and returns only after every queue is empty, so memory per call
+is bounded by the operators' output chunking rather than by queue capacity.
+
+`push`, `advance`, `finish`, and `close` may run inside a running event loop.
+They run the admitted operators on the calling thread with no I/O and no
+cross-thread waits, so a large push blocks the loop for its duration. Native
+calls release the GIL. A session runs one call at a time: a concurrent call
+from another thread, or a re-entrant call from a UDF, raises `RuntimeError`
+naming the busy state. `close()` during an in-flight call returns immediately;
+that call still returns its rows or raises its own error, and later calls raise
+`RuntimeError` naming the closed state.
+
+| Condition                                                         | Exception                                                  | Session afterwards |
+|-------------------------------------------------------------------|------------------------------------------------------------|--------------------|
+| Input schema differs from the declaration                         | `ValueError`                                               | Usable             |
+| Wrong input name, watermark type, or naive `datetime`             | `ValueError` or `TypeError`                                | Usable             |
+| Regressing or disabled-policy watermark, ordered event-time error | `ConfigError`                                              | Usable             |
+| Input batch above `config.edge_budget`                            | `ExecutionError`                                           | Usable             |
+| Operator failure or panic during a call                           | Native error class, usually `ExecutionError`               | Failed             |
+| Call on a failed, finished, closed, or busy session               | `RuntimeError`                                             | Unchanged          |
+| Unsupported graph at construction                                 | `ConfigError`, or `ValueError` for static and array inputs | Not created        |
+| Construction inside a running event loop                          | `RuntimeError`                                             | Not created        |
+
+A failed call discards rows that operators emitted earlier in that call. Later
+calls on a failed session raise `RuntimeError` with the original message and
+ask for a new session; calls after `finish()` raise `RuntimeError` naming the
+finished state. Session errors are ordinary native errors, like collection
+errors. They are not redacted the way payload-safe `StreamingRuntimeError`
+values are, because the caller is in-process and owns the data.
+
 ## LateOutputs and local late policy
 
 `cf.with_late_output(value: TableExpr, /, *, allowed_lateness_micros: int = 0)
@@ -520,8 +629,9 @@ dialect; see the [finite ASOF example](../examples/finite_asof_join.py).
 
 ## Choosing an integration API
 
-Use root `calc_flow` expressions, SQL, `pipe`, collection, and streams for
-application calculations. Use the explicit controls below for operational needs:
+Use root `calc_flow` expressions, SQL, `pipe`, collection, streams, and stream
+sessions for application calculations. Use the explicit controls below for
+operational needs:
 
 | Need                                     | Interface                                                      |
 |------------------------------------------|----------------------------------------------------------------|

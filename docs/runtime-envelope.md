@@ -16,13 +16,15 @@ operators see, the compiled stream plan, and the delivery invariants the
 runtime guarantees today. The source-driven runtime is public through the
 crate-root `StreamingRunner` and owning `StreamingJob`; control construction,
 checkpoint coordination, supervision, and reaper ownership remain internal
-implementation details.
+implementation details. The crate-root `StreamSession` drives admitted plans
+from the caller's thread instead; see
+[caller-driven sessions](#caller-driven-sessions).
 
 The public facade lives in `crates/calc-flow/src/continuous.rs`. Its runtime
 implementation lives in `crates/calc-flow/src/runtime/streaming/` (the message,
 bounded channel, job and task contexts, whole-job preflight, source, operator,
 and sink tasks, the job-scoped progress driver, checkpoint coordinator,
-supervisor, internal runner/reaper, metrics, and soak),
+supervisor, internal runner/reaper, caller-driven session, metrics, and soak),
 `crates/calc-flow/src/state/` (the v3 manifest, segments, state backends, and
 production manifest transaction), `crates/calc-flow/src/time/` (event time and
 epoch),
@@ -54,6 +56,7 @@ On this page:
 - [Manifest publication and recovery](#manifest-publication-and-recovery)
 - [Terminal recovery](#terminal-recovery)
 - [Cancellation and ownership](#cancellation-and-ownership)
+- [Caller-driven sessions](#caller-driven-sessions)
 - [Status and metrics](#status-and-metrics)
 - [Execution paths](#execution-paths)
 - [Progress and replay](#progress-and-replay)
@@ -351,6 +354,8 @@ there is no smaller global row or byte ceiling. The default row budget is
 1,000,000; callers may explicitly configure larger batches and queues.
 Project-v3 stream runtime options use the same bounds. Row and envelope backpressure remains active when the byte budget is
 `usize::MAX`; these queue charges do not cap total runtime or process memory.
+Caller-driven sessions apply the same oversize rule but no queue capacity; see
+[caller-driven sessions](#caller-driven-sessions).
 
 Project-v3 JSON requires an `options` object and preserves its historical field
 defaults: `{}` or omitted budget fields use 10,000 rows and 64 MiB. The omitted
@@ -790,7 +795,9 @@ connector-open/close paths create operational
 `CalcFlowError::TaskPanicked` values with a stable task ID. Together these
 boundaries cover connector `open`, `next`, `write`, and `close` panics plus
 operator and uncaught task panics. Captured panic text is valid UTF-8 and at
-most 1,024 bytes; non-string payloads become `non-string panic payload`.
+most 1,024 bytes; non-string payloads become `non-string panic payload`. A
+caller-driven session has no tasks and returns contained operator panics as
+`CalcFlowError::Operator` instead.
 
 Source, operator, sink, progress, checkpoint, filesystem, and connector work
 remain owner-settled under cancellation: the owner waits for in-flight state
@@ -800,6 +807,75 @@ close has its own private five-second bound, and a close error, panic, or
 timeout becomes a typed bounded secondary diagnostic without replacing the
 primary failure. Cleanup continues through later resources and converges task,
 queue, state-lease, transaction, provisional-launch, and reaper ownership.
+
+## Caller-driven sessions
+
+`StreamSession` is a second public execution path for a compiled
+`StreamExecutionPlan`. It drives an admitted plan from the caller's thread
+instead of from source, operator, and sink tasks. The Python
+`TableExpr.session` and `Program.session` adapters bind it. The rules below
+differ from the runner path; everything else follows the per-operator code
+described above.
+
+**Admission.** Construction admits one dynamic source binding, no static
+inputs, no native array sequence nodes, no ExactlyOnce output, and only
+`Rolling`, `Expression`, and `Union` nodes. Rolling nodes with the RSI/ATR or
+MACD state layouts are rejected; rolling late side outputs are admitted. The
+check is an exhaustive match over compiled operator kinds, so a kind is
+rejected until it is explicitly admitted. Rejections are `InvalidArgument`
+values at `session.*` field paths, listed in the
+[Rust reference](rust-api.md#caller-driven-stream-sessions).
+
+**Scheduling.** A call first validates its input: input ID, batch kind and
+exact schema, input envelope budget, watermark, `Ordered` event time, and the
+next source sequence. It then stamps the batch as a source task does, with the
+binding ID, a sequence starting at 0, the original attributes, and no cursor.
+It enqueues `Data` on the source route followed by a `Watermark` when the
+effective watermark advances; `advance` enqueues only the watermark and
+`finish` enqueues `EndOfInput`. Nodes run in the plan's topological order.
+Each node empties its ingress queues in FIFO order through the runner's
+message dispatch and runs end-of-input finalization once after every ingress
+has ended. Watermark aggregation, late-port suppression,
+output frontiers, and `on_end` therefore follow the runner's per-operator code.
+Running each node to quiescence in topological order is one legal runner
+schedule; a union drains its first ingress before its second. Watermark, idle,
+and end-of-input messages that reach a graph output are not returned. The
+session constructs these control messages itself from validated call
+arguments; callers still cannot construct control messages.
+
+**Threads.** Each session owns one current-thread Tokio runtime with only the
+timer driver and blocks the caller on it. Operator futures run on the caller's
+thread, and nothing on the admitted path waits on another thread. Calls from
+inside a Tokio runtime context are rejected before any work.
+
+**Edges and budgets.** Session edges are FIFO queues that apply the oversize
+rule of runtime edges to every envelope against the configured `edge_budget`
+and report that budget, so operators chunk output exactly as on runner edges.
+They have no queue-capacity backpressure: a queue holds everything its producer
+emits during that producer's turn, and the call returns only after every queue
+is empty. Memory per call is therefore bounded by operator output chunking, not
+per edge. The queue-capacity and backpressure rules of
+[the operator emission boundary](#the-operator-emission-boundary) apply to
+runners and streams, not sessions. An oversized input batch is a validation
+error; an oversized internal message fails the session.
+
+**No checkpoint.** The session's job context has checkpointing disabled. Every
+checkpoint field of `StreamRuntimeConfig` is ignored, including
+`checkpointing = true`. Operators receive no checkpoint, restore, or barrier
+wiring, and nothing is durable. Sessions also publish no status or metrics.
+
+**Failure.** Validation errors leave the session unchanged; the source
+sequence, generated-watermark state, and watermark commit only after a
+successful drain. Any later error fails the session and discards rows emitted
+earlier in that call. Panics in operator dispatch and finalization are
+contained and returned as `CalcFlowError::Operator { node_id, message }`, with
+`message` set to `panicked: ` followed by the same bounded panic text that task
+capture uses, at most 1,024 bytes. There is no task, so
+`CalcFlowError::TaskPanicked` is not used. Session errors are ordinary
+`CalcFlowError` values, like batch execution errors. They are not redacted
+through the runner's payload-safe `StreamingError` projection, because the
+caller is in-process and owns the data. Dropping a session cancels its job
+token and releases every operator.
 
 ## Status and metrics
 
@@ -1153,7 +1229,8 @@ checkpoint transaction and durable recovery truth.
 
 ## Public and private surfaces
 
-Public: `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, source
+Public: `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`,
+`StreamSession`, `SessionWatermark`, `SessionOutput`, source
 and sink connector/binding types, status/outcome projections, the
 `StreamMessage` handle and `StreamMessageKind`, the typed
 `EventTime` and `Epoch` values, `StreamJobContext` and
@@ -1172,12 +1249,13 @@ the compiled-operator representation, the late-row recorder, internal source
 cursor/binding representations, the channel-backed operator collector,
 source/operator/sink tasks and progress snapshots, scoped task contexts,
 whole-job preflight, the task supervisor, checkpoint coordinator/transaction
-internals, raw status and metrics, and the runner-scoped reaper.
+internals, raw status and metrics, the runner-scoped reaper, and the session
+edge queues and caller-driven operator drivers.
 
 Runtime-owned control-message and transaction internals do not appear in
-project-v3 documents. Python binds the public continuous facade. The public
-v3 manifest model and state backend remain the runtime's durable recovery
-truth.
+project-v3 documents. Python binds the public continuous facade and
+`StreamSession`. The public v3 manifest model and state backend remain the
+runtime's durable recovery truth.
 
 
 See [verification](verification.md#streaming-stress-and-soak-checks) for the
