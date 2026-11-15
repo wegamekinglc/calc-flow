@@ -475,7 +475,8 @@ The example uses `SourceProvidedWatermarks` and this trace, with times relative
 to its UTC base: `W=1µs → [t=0,x=10; t=2,x=20] → W=2µs`.
 With zero allowed lateness, it checks `late=[10.0]` and `normal=[20.0]`.
 The explicit `RuntimeError` check remains active under Python optimization.
-The async context owns the job and removes temporary state after cleanup.
+The async context owns the job and awaits its cleanup; with the default
+checkpoint-off mode it creates no checkpoint storage.
 This iterable example demonstrates routing; durable restart requires the
 explicit bindings described below.
 The formatted, standalone [26_late_side_output.py](../examples/26_late_side_output.py)
@@ -636,8 +637,9 @@ an empty late epoch, and terminal restart. Ordinary sinks can repeat writes
 after recovery. Stronger delivery requires a proof for each output's complete
 Source/operator/Sink route; inspect each requested/effective guarantee.
 Transactional file sinks provide their own epoch protocol, not a distributed
-transaction across two destinations. The temporary state of `Program.stream`
-does not provide persistent restart or exactly-once application delivery.
+transaction across two destinations. A `Program.stream` iterator, with or
+without opt-in temporary checkpoints, does not provide persistent restart or
+exactly-once application delivery.
 
 ### Run the file recovery example
 
@@ -845,22 +847,27 @@ row-local expressions after it. A SQL result cannot currently feed a symbolic
 event window or execute as a standalone array Program output; see
 [SQL composition](symbolic-api.md#sql-composition).
 
-By default, convenience streams use a temporary managed checkpoint root and
-ordinary output sinks. Async iterable inputs provide best-effort delivery and no replay;
-a generated counter is not a recoverable source cursor. Even a supplied
-replayable `SourceBinding` does not make the temporary output iterator durable
-or provide exactly-once application delivery. Use explicit sinks and a stable
-checkpoint root for those guarantees. Temporary state is removed only after
-native cleanup finishes. Arrow results omit the `Batch` envelope; use an
-explicit sink when application processing needs its metadata or delivery
-acknowledgement.
+By default, `TableExpr.stream`, `Program.stream`, and streaming
+`Program.execute` run with checkpointing off and ordinary output sinks. A
+`StreamRuntimeConfig` that leaves `checkpointing` unset (`None`) keeps that
+default. These jobs create no checkpoint storage and skip snapshots (including
+at EOF) and recovery-only journals. Because no checkpoint runtime is present,
+admission does not require operators to prove a checkpoint lifecycle. State
+needed for computation, watermarks, edge/state budgets, output delivery, and
+awaited cleanup still apply.
 
-For a job that does not need checkpoint recovery, pass
-`StreamRuntimeConfig(checkpointing=False)` to `TableExpr.stream`,
-`Program.stream`, or streaming `Program.execute`. This skips temporary state
-storage, snapshots (including at EOF), and recovery-only journals. State needed
-for computation, watermarks, edge/state budgets, output delivery, and awaited
-cleanup still apply. See [checkpoint modes](#checkpoints-and-recovery).
+Pass `StreamRuntimeConfig(checkpointing=True)` to run a convenience stream with
+a temporary managed checkpoint root. The checkpointed admission rules then
+apply, and the root is removed only after native cleanup finishes. See
+[checkpoint modes](#checkpoints-and-recovery).
+
+Async iterable inputs provide best-effort delivery and no replay; a generated
+counter is not a recoverable source cursor. Even a supplied replayable
+`SourceBinding` does not make the convenience output iterator durable, with or
+without temporary checkpoints, or provide exactly-once application delivery.
+Use explicit sinks and a stable checkpoint root for those guarantees. Arrow
+results omit the `Batch` envelope; use an explicit sink when application
+processing needs its metadata or delivery acknowledgement.
 
 ### Compact ordered LAST_VALUE
 
@@ -1038,12 +1045,15 @@ applies across all entities, not separately per symbol. A decrease rejects the
 batch with its input name before admission; the adapter never sorts or drops rows.
 
 The default uses native `BoundedOutOfOrderness` with a one-microsecond delay,
-a 100 ms emission interval, and no idle timeout. Its watermark is
-`max_seen - 1 microsecond`. Rows at the latest timestamp remain open, allowing
-equal timestamps to span batches and entities. A larger timestamp closes earlier
-ones. The native timer keeps running while the next iterable read is suspended;
-backpressure and scheduling can delay delivery. Empty batches do not advance
-progress. Waiting at one timestamp alone cannot prove it complete.
+a zero emission interval, and no idle timeout. Its watermark is
+`max_seen - 1 microsecond`. The zero interval arms no watermark timer: the
+runtime publishes the watermark behind each data batch that advances the
+observed maximum, in order on that source edge. Rows at the latest timestamp
+remain open, allowing equal timestamps to span batches and entities. A larger
+timestamp closes earlier ones as soon as its batch is admitted, without waiting
+for the next iterable read; backpressure and scheduling can still delay
+delivery. Empty batches and batches that do not raise the maximum do not
+advance progress. Waiting at one timestamp alone cannot prove it complete.
 
 Without declared event time, ordinary inputs use `DisabledWatermarks`.
 Stateless expression and SQL stages still produce results as batches arrive.
@@ -1068,7 +1078,11 @@ The available policies are:
 | `DisabledWatermarks`       | The graph is stateless or windows should close only at end |
 
 Bounded out-of-orderness names the event-time column, maximum delay, emission
-interval, and optional idle timeout. Durations must be positive. An explicit
+interval, and optional idle timeout. The delay and any idle timeout must be
+positive. A positive emission interval publishes generated watermarks on a
+phase-anchored runtime timer. A zero interval arms no watermark timer and
+publishes behind every data batch that advances the observed maximum, as the
+default does. An explicit
 `BoundedOutOfOrderness` permits disorder without the default monotonic-arrival
 validation and publishes the native inclusive cutoff `max_seen - delay`.
 Unmarked convenience rolling/cross-section stages use zero allowed lateness and
@@ -1183,7 +1197,8 @@ that protocol.
 ## Delivery requirements
 
 These controls apply to explicit stream plans and sinks. The convenience
-iterator uses temporary state and does not provide durable application delivery.
+iterator runs without durable state and does not provide durable application
+delivery.
 Declare requirements during stream compilation:
 
 ```python
@@ -1623,12 +1638,16 @@ representation described in
 [ASOF recovery](asof-join-guide.md#recovery-status-and-delivery). Its
 `job.status()["stream_asof_joins"]` mapping is separate from `stream_joins`.
 Python keeps ASOF counters and watermark microseconds as integers. Ordinary
-sink replay and temporary iterable checkpoints
+sink replay and opt-in temporary iterable checkpoints
 retain the delivery boundaries described in this guide.
 
 ## Checkpoints and recovery
 
-Checkpointing is enabled by default. Select the mode once when creating the job:
+The default checkpoint mode depends on the entry point.
+`StreamRuntimeConfig.checkpointing` defaults to `None`: convenience streams
+resolve it to off, and an explicit `StreamingRunner` resolves it to on. An
+explicit `True` or `False` is honored by every entry point; any other value
+raises `TypeError`. Select the mode once when creating the job:
 
 ```python
 config = cf.StreamRuntimeConfig(checkpointing=False)
@@ -1638,7 +1657,8 @@ async with output.stream(source, config=config) as results:
 ```
 
 For an explicit Python runner, disabled mode requires `checkpoints=None` with
-the same config. Enabled mode requires a `ManagedCheckpointRuntime`. Conflicting
+the same config. Enabled mode, including an omitted config or one that leaves
+`checkpointing` unset, requires a `ManagedCheckpointRuntime`. Conflicting
 mode/storage arguments fail before startup. Rust callers use
 `StreamingRunner::without_checkpoints(plan, sources, sinks)`; when supplying a
 custom `StreamRuntimeConfig`, set its `checkpointing` field to `false` as well.
@@ -1646,9 +1666,11 @@ The existing Rust `StreamingRunner::new` keeps checkpointing enabled.
 
 Disabled jobs provide best-effort delivery and accept ordinary sinks. They
 reject exactly-once requests, transactional or epoch-idempotent sinks, and
-immutable source history before connector lifecycle calls. They do not restore
-or publish state, and manual checkpoint requests fail explicitly. Natural EOF
-still emits final results and closes resources; its `completed_epoch` is `None`.
+immutable source history before connector lifecycle calls. Unlike enabled
+jobs, they admit operators without a proven checkpoint lifecycle. They do not
+restore or publish state, and manual checkpoint requests fail explicitly.
+Natural EOF still emits final results and closes resources; its
+`completed_epoch` is `None`.
 Explicit cancellation keeps its existing no-drain contract. Python runners
 created from connector-backed project plans continue to use their project
 runtime configuration and storage; that entrypoint rejects config overrides.
@@ -1713,9 +1735,9 @@ active event loop; async applications should always use the async forms.
 
 ## Runtime tuning and backpressure
 
-`StreamRuntimeConfig` controls checkpoint interval and timeout, per-edge row
-and byte budgets, and retained epochs. These values affect runtime behavior and
-the diagnostic config hash, not the semantic plan fingerprint.
+`StreamRuntimeConfig` controls checkpoint mode, interval and timeout, per-edge
+row and byte budgets, and retained epochs. These values affect runtime
+behavior and the diagnostic config hash, not the semantic plan fingerprint.
 
 Choose an `EdgeBudget` large enough for the largest admitted source batch and
 the number of simultaneous control envelopes. Rows and envelopes each have an

@@ -112,7 +112,8 @@ before EOF. Select `watermarks` for disorder or source-provided progress; inputs
 without event time need no progress configuration for stateless work. See the
 [streaming guide](streaming-guide.md#first-python-continuous-job).
 
-Convenience streams use temporary managed state. Async iterable inputs provide
+Convenience streams run without checkpoints by default; `checkpointing=True`
+adds temporary managed checkpoints. Async iterable inputs provide
 best-effort delivery without replay. For durable recovery,
 transactional delivery, or explicit sink ownership, use `program.compile_stream()`
 and `StreamingRunner` with capable source/sink bindings and a stable checkpoint

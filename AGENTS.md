@@ -241,12 +241,14 @@ selectors.
   or named `StreamOutput` events. Native state persists across batches, with
   bounded backpressure and awaited lifecycle cleanup. Event-time iterables default
   to validated nondecreasing arrival times and native watermarks at
-  `max_seen - 1 microsecond`. `watermarks` selects existing policies by logical
+  `max_seen - 1 microsecond`, published after every advancing batch (zero
+  emission interval). `watermarks` selects existing policies by logical
   input name; supplied `SourceBinding` policies cannot be overridden. Inputs
   without event time retain per-batch output, except SQL aggregates with
-  cumulative snapshots. Ordinary iterables have
-  no replay; temporary checkpoints do not provide durable restart or exactly-once
-  application delivery.
+  cumulative snapshots. `StreamRuntimeConfig.checkpointing=None` resolves to
+  off for convenience streams and on for `StreamingRunner`. Ordinary iterables
+  have no replay; opt-in temporary checkpoints do not provide durable restart or
+  exactly-once application delivery.
 - `Program(name, mode="batch")` or `Program(name, mode="stream")` fixes the
   lifecycle at construction; legacy `engine="sql"|"streaming"` is an exclusive
   alias. Exactly one selector is required. Immutable `with_input` and `output`

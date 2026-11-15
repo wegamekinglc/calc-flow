@@ -410,14 +410,17 @@ windows. The input cap is 20,000 rows, giving 960, 9,920, and 20,000 rows at
 the overhead, small, and standard scales. Join and ASOF receive the same
 prepared table on two distinct bindings. The Python Join and ASOF cases cap
 each input at 3,200 and 1,920 rows; the engine matrix and dedicated Rust
-targets measure larger join workloads. These measurements are
-informational and have a different scope from the ready-runner engine matrix.
+targets measure larger join workloads. The jobs use the convenience defaults:
+checkpointing off and generated watermarks after every advancing batch. These
+measurements are informational and have a different scope from the
+ready-runner engine matrix.
 
 `benchmarks/test_program_engine.py` adds four separately identified cases:
 SQL and streaming `Program.execute` over the same projection or cumulative
 aggregate declaration. The timer starts after engine selection and input
 construction and ends at Arrow output. Streaming includes its owned job and
-returns one full aggregate snapshot per 640-row batch. Inputs cap at 20,000
+returns one full aggregate snapshot per 640-row batch and runs with the
+convenience defaults, without checkpoints. Inputs cap at 20,000
 rows. Existing compiled-plan and direct `Program.stream` case identities and
 timing boundaries remain unchanged.
 

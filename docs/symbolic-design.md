@@ -75,8 +75,9 @@ binding metadata with collection. On context entry, it creates one fresh owning
 native plan and runner. Iterable sources are consumed once; bounded queue sinks
 produce Arrow tables or named `StreamOutput` events. State remains in the native
 job across batches. Each convenience owner controls its queue and observation
-tasks, source closure, and temporary checkpoint cleanup. It does not reuse a
-cached batch plan, replay a Python pipeline per batch, or serialize callables.
+tasks, source closure, and any opt-in temporary checkpoint cleanup. It does not
+reuse a cached batch plan, replay a Python pipeline per batch, or serialize
+callables.
 
 The [iterable input adapter](../python/calc_flow/_stream_inputs.py) uses the
 declared event-time column to validate nondecreasing arrival times across the

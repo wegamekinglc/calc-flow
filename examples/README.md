@@ -218,7 +218,7 @@ example runner.
   and nested rolling-mean state across two input batches, followed by SQL.
   The source stays open while `async for` receives `delta=[None, 2.0, 3.0]` and
   `mean_delta=[None, 2.0, 2.5]`. Exiting `async with` cancels the waiting source
-  and cleans up temporary checkpoints; the latest timestamp remains buffered.
+  and awaits job cleanup; the latest timestamp remains buffered.
   Guide: [first stream](../docs/streaming-guide.md#first-python-continuous-job).
 - [34_streaming_outputs.py](34_streaming_outputs.py) — branch a Program and
   consume independent `StreamOutput` events by name. Checks
@@ -227,14 +227,14 @@ example runner.
 - [35_stream_asof_join.py](35_stream_asof_join.py) — attach the latest quote
   within ten microseconds to each trade. Checks no output while both
   watermarks equal 105, then `quote__price=[10.2, None]` after they advance to
-  122. Uses explicit source watermarks and temporary state; no external service
-  or durable iterable replay is required.
+  122. Uses explicit source watermarks and runs without checkpoints; no external
+  service or durable iterable replay is required.
   Guide: [bounded backward ASOF Join](../docs/asof-join-guide.md).
 
 - [26_late_side_output.py](26_late_side_output.py) — consume both ports of one
   rolling stage through one owned Program iterator. Explicit source watermarks
   route `normal=[20.0]` and `late=[10.0]`; checks remain active under `python -O`.
-  Runs without external services and cleans up its job and temporary state.
+  Runs without external services or checkpoints and cleans up its job.
   Guide: [late-row routing](../docs/streaming-guide.md#route-late-rows).
 
 - [29_sql_stream_switch.py](29_sql_stream_switch.py) — use one aggregate SQL

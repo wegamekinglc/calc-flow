@@ -128,9 +128,10 @@ validated nondecreasing arrival times and native watermark generation, so rollin
 results can arrive before EOF. `watermarks` selects existing policies for one
 dynamic input or a mapping by logical name; it cannot override `SourceBinding`.
 Inputs without event time retain per-batch output except for SQL aggregates.
-Ordinary iterables have best-effort delivery without replay; each convenience
-stream uses temporary checkpoint storage. Explicit bindings and managed state
-provide the separate durable-recovery path. Multi-output streams yield named
+Ordinary iterables have best-effort delivery without replay; convenience
+streams run without checkpoints unless `config.checkpointing=True` adds
+temporary checkpoint storage. Explicit bindings and managed state provide the
+separate durable-recovery path. Multi-output streams yield named
 events rather than synchronized dictionaries. See [Python contracts](python-api.md#streaming-results)
 and the [streaming guide](streaming-guide.md).
 
@@ -376,7 +377,8 @@ application-owned lifecycle controls. Ordinary iteration uses the
 
 `StreamingRunner(plan, sources=None, sinks=None, checkpoints=None, *,
 config=None, static_inputs=None)` owns async `StreamSource` and sink connectors.
-Graph-only plans require explicit source/sink bindings and a checkpoint runtime.
+Graph-only plans require explicit source/sink bindings and a checkpoint runtime
+unless `config.checkpointing=False`.
 Plans returned by `compile_stream_project` own their connector bindings and
 runtime/state settings: pass only the plan and any required `static_inputs`;
 external `sources`, `sinks`, `checkpoints`, or `config` overrides are rejected.

@@ -40,7 +40,8 @@ async def run(data):
 
 Exit, cancellation, exceptions and EOF await owned cleanup. Each fresh stream
 context owns a fresh job; iterators and explicit source bindings have one active
-owner. Convenience streams use temporary state and do not promise durable replay.
+owner. Convenience streams run without checkpoints by default and do not promise
+durable replay.
 Use the explicit runner and managed checkpoint contracts for recovery.
 
 Provide exactly one of `mode="batch"|"stream"` or legacy

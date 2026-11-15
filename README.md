@@ -63,9 +63,9 @@ timestamps and watermarks that produce finalized results before EOF. Use
 `watermarks` for explicit disorder or source-provided progress; see
 [watermark policies](docs/streaming-guide.md#watermark-policies).
 A `Program` yields named `StreamOutput` events for multiple
-outputs. The convenience stream uses temporary checkpoints and best-effort
-iterable delivery; durable recovery uses explicit source/sink bindings and a
-managed checkpoint root.
+outputs. The convenience stream runs without checkpoints by default and has
+best-effort iterable delivery; durable recovery uses explicit source/sink
+bindings and a managed checkpoint root.
 
 Continue with [SQL and reusable pipelines](docs/batch-guide.md#compose-sql-and-python-pipelines)
 and the [first streaming pipeline](docs/streaming-guide.md#first-python-continuous-job).

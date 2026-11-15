@@ -117,11 +117,12 @@ The table form yields Arrow tables; Program yields named events. No Python
 pipeline function is called per batch, and native operators own all rolling
 state. Exiting or cancelling the context settles the native job and cleanup.
 
-Convenience streams use a temporary managed checkpoint root, removed after
-native cleanup. Async iterable adapters provide best-effort delivery without
-replay. Declared event-time inputs validate nondecreasing arrival times and use
-native generated watermarks; explicit policies support disorder or source-provided
-progress. A supplied `SourceBinding` keeps its capability and watermark evidence.
+Convenience streams run with checkpointing off unless the config sets
+`checkpointing=True`, which adds a temporary managed checkpoint root removed
+after native cleanup. Async iterable adapters provide best-effort delivery
+without replay. Declared event-time inputs validate nondecreasing arrival times
+and use native generated watermarks after every advancing batch; explicit
+policies support disorder or source-provided progress. A supplied `SourceBinding` keeps its capability and watermark evidence.
 See [watermark policies](streaming-guide.md#watermark-policies) for defaults and
 finality. Durable restart and transactional sinks
 use explicit bindings and managed state through the same native runtime:
