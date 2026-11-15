@@ -824,33 +824,42 @@ class WarmScenario:
         await self.job.cancel_async()
 
 
-def _calc_flow_code_objects() -> tuple[CodeType, ...]:
-    """Return the code of every loaded pure-Python ``calc_flow`` function."""
-    modules = [
-        module
-        for name, module in tuple(sys.modules.items())
-        if (name == "calc_flow" or name.startswith("calc_flow."))
-        and isinstance(module, ModuleType)
+def _is_calc_flow_module(name: str, module: object) -> bool:
+    in_package = name == "calc_flow" or name.startswith("calc_flow.")
+    return in_package and isinstance(module, ModuleType)
+
+
+def _module_members(module: ModuleType) -> list[object]:
+    """Return a module's values and the attributes of classes it defines."""
+    values = list(vars(module).values())
+    for value in tuple(values):
+        if isinstance(value, type) and value.__module__ == module.__name__:
+            values.extend(vars(value).values())
+    return values
+
+
+def _member_functions(value: object) -> tuple[object, ...]:
+    if isinstance(value, property):
+        return (value.fget, value.fset, value.fdel)
+    return (getattr(value, "__func__", value),)
+
+
+def _defined_function(function: object, module: ModuleType) -> bool:
+    return isinstance(function, FunctionType) and function.__module__ == module.__name__
+
+
+def _module_codes(module: ModuleType) -> list[CodeType]:
+    return [
+        function.__code__
+        for value in _module_members(module)
+        for function in _member_functions(value)
+        if _defined_function(function, module)
     ]
-    pending: list[CodeType] = []
-    for module in modules:
-        values = list(vars(module).values())
-        for value in tuple(values):
-            if isinstance(value, type) and value.__module__ == module.__name__:
-                values.extend(vars(value).values())
-        for value in values:
-            functions = (
-                (value.fget, value.fset, value.fdel)
-                if isinstance(value, property)
-                else (getattr(value, "__func__", value),)
-            )
-            pending.extend(
-                function.__code__
-                for function in functions
-                if isinstance(function, FunctionType)
-                and function.__module__ == module.__name__
-            )
+
+
+def _with_nested_codes(roots: list[CodeType]) -> tuple[CodeType, ...]:
     codes: set[CodeType] = set()
+    pending = list(roots)
     while pending:
         code = pending.pop()
         if code not in codes:
@@ -859,6 +868,18 @@ def _calc_flow_code_objects() -> tuple[CodeType, ...]:
                 value for value in code.co_consts if isinstance(value, CodeType)
             )
     return tuple(codes)
+
+
+def _calc_flow_code_objects() -> tuple[CodeType, ...]:
+    """Return the code of every loaded pure-Python ``calc_flow`` function."""
+    return _with_nested_codes(
+        [
+            code
+            for name, module in tuple(sys.modules.items())
+            if _is_calc_flow_module(name, module)
+            for code in _module_codes(module)
+        ]
+    )
 
 
 def _native_method_matcher(
@@ -1212,6 +1233,41 @@ SCENARIO_DRIVERS: dict[str, Any] = {
 }
 
 
+def _require_ta_lib_layout(config: ScenarioConfig, samples: int) -> None:
+    if config.indicator not in ("rolling_mean", "dual_sma_spread"):
+        raise ValueError("the TA-Lib reference covers SMA indicators only")
+    if config.append_entities is not None:
+        raise ValueError("the TA-Lib reference requires complete entity ticks")
+    if type(samples) is not int or samples < 2:
+        raise ValueError("the TA-Lib reference requires at least two samples")
+
+
+def _ta_lib_append(config: ScenarioConfig, start: int) -> TaLibMethod:
+    """Return TA-Lib over one append and its ``window - 1`` rows per entity."""
+    context = min(start, (config.window - 1) * config.entities)
+    sequence = np.arange(start - context, start + config.append_rows, dtype=np.uint64)
+    fast_window = config.fast_window if config.indicator == "dual_sma_spread" else None
+    return TaLibMethod(
+        _prices(sequence, config.entities),
+        entities=config.entities,
+        window=config.window,
+        fast_window=fast_window,
+        history_rows=context,
+    )
+
+
+def _timed_ta_lib_append(config: ScenarioConfig, index: int, collect_gc: bool) -> float:
+    start = config.history_rows + index * config.append_rows
+    method = _ta_lib_append(config, start)
+    actual = method.run()
+    expected = _expected(config, start=start, rows=config.append_rows)
+    if not np.allclose(actual, expected, rtol=RTOL, atol=ATOL):
+        raise RuntimeError("TA-Lib reference does not match the warm oracle")
+    if collect_gc:
+        gc.collect()
+    return _timed_ta_lib(method, 1)
+
+
 def ta_lib_reference(
     config: ScenarioConfig, *, samples: int, collect_gc: bool
 ) -> dict[str, Any]:
@@ -1221,35 +1277,10 @@ def ta_lib_reference(
     ``i``-th paired append plus that append, returns only the appended rows and
     matches them against the warm oracle outside the timed call.
     """
-    if config.indicator not in ("rolling_mean", "dual_sma_spread"):
-        raise ValueError("the TA-Lib reference covers SMA indicators only")
-    if config.append_entities is not None:
-        raise ValueError("the TA-Lib reference requires complete entity ticks")
-    if type(samples) is not int or samples < 2:
-        raise ValueError("the TA-Lib reference requires at least two samples")
-    seconds = []
-    for index in range(samples):
-        start = config.history_rows + index * config.append_rows
-        context = min(start, (config.window - 1) * config.entities)
-        sequence = np.arange(
-            start - context, start + config.append_rows, dtype=np.uint64
-        )
-        method = TaLibMethod(
-            _prices(sequence, config.entities),
-            entities=config.entities,
-            window=config.window,
-            fast_window=(
-                config.fast_window if config.indicator == "dual_sma_spread" else None
-            ),
-            history_rows=context,
-        )
-        actual = method.run()
-        expected = _expected(config, start=start, rows=config.append_rows)
-        if not np.allclose(actual, expected, rtol=RTOL, atol=ATOL):
-            raise RuntimeError("TA-Lib reference does not match the warm oracle")
-        if collect_gc:
-            gc.collect()
-        seconds.append(_timed_ta_lib(method, 1))
+    _require_ta_lib_layout(config, samples)
+    seconds = [
+        _timed_ta_lib_append(config, index, collect_gc) for index in range(samples)
+    ]
     return {
         "adapter": "TaLibMethod bounded-history append",
         "ta_lib_version": importlib.metadata.version("ta-lib"),

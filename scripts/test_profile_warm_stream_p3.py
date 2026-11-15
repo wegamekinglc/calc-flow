@@ -584,6 +584,24 @@ def _table_blocks(text: str) -> list[list[str]]:
     return blocks
 
 
+def _assert_aligned_tables(text: str) -> None:
+    for block in _table_blocks(text):
+        assert len({len(line) for line in block}) == 1
+        assert set(block[1]) == {"|", "-"}
+
+
+def _fixture_workers(drivers: tuple[str, str]) -> list:
+    """Return fake workers for the shared fixture rows under the given drivers."""
+    if drivers[1] == "runner":
+        return [_worker(_start(_config())), _worker(_start(_config()))]
+    return [
+        _worker(_start(_config())),
+        _session_worker(
+            _start(_config(), "session"), [_session_sample(0), _session_sample(1)]
+        ),
+    ]
+
+
 def test_budget_stop_settles_the_running_case_and_reports_unmeasured_cases(
     tmp_path,
 ) -> None:
@@ -608,17 +626,13 @@ def test_budget_stop_settles_the_running_case_and_reports_unmeasured_cases(
                 await asyncio.sleep(30)
             finally:
                 settled.append(pair.drivers)
-        workers = [
-            _worker(_start(_config())),
-            _worker(_start(_config()))
-            if pair.drivers[1] == "runner"
-            else _session_worker(
-                _start(_config(), "session"), [_session_sample(0), _session_sample(1)]
-            ),
-        ]
         # Fake workers follow the shared fixture rows, not the protocol sizes.
         case = await profile._measure_case(
-            workers, _config(), 2, collect_gc, drivers=pair.drivers
+            _fixture_workers(pair.drivers),
+            _config(),
+            2,
+            collect_gc,
+            drivers=pair.drivers,
         )
         assert pair.directory == (tmp_path / "work").resolve()
         return case, []
@@ -632,21 +646,21 @@ def test_budget_stop_settles_the_running_case_and_reports_unmeasured_cases(
 
     asyncio.run(exercise())
     report = json.loads(output.read_text(encoding="utf-8"))
+    measured, remaining = first[2]["name"], {"1": "4", "4": "1"}[first[2]["name"]]
     assert report["status"] == "stopped"
     assert report["case_selection"] == "explicit"
-    assert [case["name"] for case in report["cases"]] == [first[2]["name"]]
-    assert [case["name"] for case in report["unmeasured_cases"]] == [
-        name for name in ("1", "4") if name != first[2]["name"]
-    ]
+    assert [case["name"] for case in report["cases"]] == [measured]
+    assert [case["name"] for case in report["unmeasured_cases"]] == [remaining]
     assert len(settled) == 1
-    assert report["cases"][0]["verdict"]["paired_speedup"] == (
-        "inconclusive" if first[2]["name"] == "4" else "faster"
+    # Case 4 pairs equal runner timings; case 1's fixture session is faster.
+    assert (
+        report["cases"][0]["verdict"]["paired_speedup"]
+        == ({"1": "faster", "4": "inconclusive"}[measured])
     )
     text = output.with_suffix(".md").read_text(encoding="utf-8")
-    assert "Status: stopped" in text and "Unmeasured after the budget stop" in text
-    for block in _table_blocks(text):
-        assert len({len(line) for line in block}) == 1
-        assert set(block[1]) == {"|", "-"}
+    assert "Status: stopped" in text
+    assert "Unmeasured after the budget stop" in text
+    _assert_aligned_tables(text)
 
 
 def test_case_timeouts_without_a_budget_are_not_budget_stops(tmp_path) -> None:

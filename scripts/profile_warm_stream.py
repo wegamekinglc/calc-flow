@@ -14,7 +14,9 @@ import sys
 import tempfile
 import time
 import tomllib
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
+from functools import partial
 from itertools import product
 from pathlib import Path
 from typing import Any
@@ -164,6 +166,7 @@ def matrix_cases(args: argparse.Namespace) -> list[tuple[dict[str, Any], str]]:
 
 CASE_FIELDS = frozenset(("name", "append_rows", "entities", "drivers"))
 OPTIONAL_CASE_FIELDS = frozenset(("reference", "p50_limit_us", "regression_below"))
+ALL_CASE_FIELDS = CASE_FIELDS | OPTIONAL_CASE_FIELDS
 MATRIX_ARMS = {
     "name": None,
     "drivers": DEFAULT_DRIVERS,
@@ -180,45 +183,66 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
-def parse_case(text: str) -> dict[str, Any]:
-    """Parse one explicit ``key=value,...`` case with its per-arm drivers."""
+def _case_fields(text: str) -> dict[str, str]:
     items = [item.split("=", 1) for item in text.split(",")]
     if any(len(item) != 2 for item in items):
         raise argparse.ArgumentTypeError("a case is comma-separated key=value fields")
     fields = dict(items)
-    if (
-        len(fields) != len(items)
-        or not CASE_FIELDS.issubset(fields)
-        or not (CASE_FIELDS | OPTIONAL_CASE_FIELDS).issuperset(fields)
-    ):
+    keys = set(fields)
+    if len(keys) != len(items) or CASE_FIELDS - keys or keys - ALL_CASE_FIELDS:
         raise argparse.ArgumentTypeError(
             "a case has name, append_rows, entities and drivers fields and "
             "optional reference, p50_limit_us and regression_below fields"
         )
-    drivers = tuple(fields["drivers"].split(":"))
-    if len(drivers) != 2 or any(driver not in DRIVERS for driver in drivers):
+    return fields
+
+
+def _case_drivers(value: str) -> tuple[str, str]:
+    drivers = tuple(value.split(":"))
+    if len(drivers) != 2 or not set(drivers).issubset(DRIVERS):
         raise argparse.ArgumentTypeError(
             "drivers are BASELINE:CANDIDATE runner/session"
         )
-    if fields.get("reference", "ta_lib") not in REFERENCES:
+    return drivers
+
+
+def _case_reference(value: str | None) -> str | None:
+    if value is not None and value not in REFERENCES:
         raise argparse.ArgumentTypeError("the only case reference is ta_lib")
-    if re.fullmatch(r"[A-Za-z0-9_-]+", fields["name"]) is None:
+    return value
+
+
+def _case_name(value: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9_-]+", value) is None:
         raise argparse.ArgumentTypeError("case names use letters, digits, - and _")
-    limit = fields.get("p50_limit_us")
-    regression = fields.get("regression_below")
+    return value
+
+
+def _optional_positive_float(value: str | None) -> float | None:
+    return None if value is None else _positive_float(value)
+
+
+def parse_case(text: str) -> dict[str, Any]:
+    """Parse one explicit ``key=value,...`` case with its per-arm drivers."""
+    fields = _case_fields(text)
+    drivers = _case_drivers(fields["drivers"])
+    reference = _case_reference(fields.get("reference"))
+    name = _case_name(fields["name"])
+    append_rows = _positive_scalar(fields["append_rows"])
+    entities = _positive_scalar(fields["entities"])
+    limit = _optional_positive_float(fields.get("p50_limit_us"))
     return {
-        "name": fields["name"],
-        "append_rows": _positive_scalar(fields["append_rows"]),
-        "entities": _positive_scalar(fields["entities"]),
+        "name": name,
+        "append_rows": append_rows,
+        "entities": entities,
         "drivers": drivers,
-        "reference": fields.get("reference"),
-        "p50_limit_seconds": None if limit is None else _positive_float(limit) / 1e6,
-        "regression_below": None if regression is None else _positive_float(regression),
+        "reference": reference,
+        "p50_limit_seconds": None if limit is None else limit / 1e6,
+        "regression_below": _optional_positive_float(fields.get("regression_below")),
     }
 
 
-def case_argument_error(args: argparse.Namespace) -> str | None:
-    """Explain why explicit cases conflict with matrix options, if they do."""
+def _case_option_error(args: argparse.Namespace) -> str | None:
     if any(
         value is not None
         for value in (args.append_rows, args.append_entities, args.entities)
@@ -231,14 +255,34 @@ def case_argument_error(args: argparse.Namespace) -> str | None:
         return "--case requires one history, indicator and GC mode"
     if args.worker_threads is not None:
         return "--case compares engines; omit --worker-threads"
-    names = [case["name"] for case in args.cases]
+    return None
+
+
+def _case_set_error(cases: list[dict[str, Any]], exact_projection: bool) -> str | None:
+    names = [case["name"] for case in cases]
     if len(set(names)) != len(names):
         return "case names must be unique"
-    if not args.exact_projection and any(
-        "session" in case["drivers"] for case in args.cases
-    ):
+    if not exact_projection and any("session" in case["drivers"] for case in cases):
         return "the session driver requires --exact-projection"
     return None
+
+
+def case_argument_error(args: argparse.Namespace) -> str | None:
+    """Explain why explicit cases conflict with matrix options, if they do."""
+    return _case_option_error(args) or _case_set_error(
+        args.cases, args.exact_projection
+    )
+
+
+def compare_argument_error(args: argparse.Namespace) -> str | None:
+    """Explain why compare arguments cannot produce paired evidence, if so."""
+    if args.samples < 2:
+        return "at least two paired samples are required"
+    if args.worker_threads is not None and any(
+        count not in (1, 4) for count in args.worker_threads
+    ):
+        return "worker thread overrides must be one or four"
+    return None if args.cases is None else case_argument_error(args)
 
 
 def selected_cases(
@@ -831,22 +875,34 @@ def _validate_starts(
         raise ValueError("paired plan preflight identities differ")
 
 
-def _session_phase_values(sample: dict[str, Any]) -> np.ndarray | None:
-    attribution = sample.get("phase_attribution")
+def _require_phase_range(values: np.ndarray) -> None:
+    if not np.isfinite(values).all() or np.any(values < 0):
+        raise ValueError("phase intervals must be finite and nonnegative")
+
+
+def _require_unattributed_reason(sample: dict[str, Any]) -> None:
+    reason = str(sample.get("phase_attribution"))
+    if not reason.startswith("unavailable: ") or sample.get("phases_seconds"):
+        raise ValueError("unattributed session samples must name a reason only")
+
+
+def _attributed_session_phases(sample: dict[str, Any]) -> np.ndarray:
     phases = sample.get("phases_seconds")
-    if attribution != "native_call_probe":
-        if not str(attribution).startswith("unavailable: ") or phases:
-            raise ValueError("unattributed session samples must name a reason only")
-        return None
     try:
         values = np.asarray([phases[name] for name in SESSION_PHASE_NAMES], dtype=float)
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError("attributed session samples need every phase") from error
-    if not np.isfinite(values).all() or np.any(values < 0):
-        raise ValueError("phase intervals must be finite and nonnegative")
+    _require_phase_range(values)
     if not np.isclose(values.sum(), sample["seconds"], rtol=1e-9, atol=1e-12):
         raise ValueError("contiguous session phases must cover the timed sample")
     return values
+
+
+def _session_phase_values(sample: dict[str, Any]) -> np.ndarray | None:
+    if sample.get("phase_attribution") == "native_call_probe":
+        return _attributed_session_phases(sample)
+    _require_unattributed_reason(sample)
+    return None
 
 
 def _session_phase_summary(samples: list[dict[str, Any]]) -> dict[str, Any]:
@@ -885,8 +941,7 @@ def _phase_values(sample: dict[str, Any]) -> np.ndarray:
         )
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError("sample must contain all numeric phase intervals") from error
-    if not np.isfinite(values).all() or np.any(values < 0):
-        raise ValueError("phase intervals must be finite and nonnegative")
+    _require_phase_range(values)
     if not np.isclose(values[:-1].sum(), sample["seconds"], rtol=1e-9, atol=1e-12):
         raise ValueError("non-overlapping phase intervals must cover the timed sample")
     if values[-1] > values[-2] + 1e-12:
@@ -1097,53 +1152,67 @@ def _boundary_markdown(report: dict[str, Any]) -> list[str]:
     ]
 
 
-def _session_phase_markdown(cases: list[dict[str, Any]]) -> list[str]:
-    rows = []
-    for case in cases:
-        drivers = case.get("drivers", DEFAULT_DRIVERS)
-        for index, side in enumerate(("baseline", "candidate")):
-            if drivers[index] != "session":
-                continue
-            summary = case["phase_intervals"][side]
-            probe = case["start"][index].get("phase_probe", {})
-            overhead = probe.get("overhead_seconds_estimate")
-            phases = summary["phases"]
-            rows.append(
-                [
-                    case.get("name") or "-",
-                    side,
-                    f"{case['config']['append_rows']:,}",
-                    f"{summary['attributed_samples']} / {len(case['samples'][index])}",
-                    *(
-                        _micros(phases[name]["p50_seconds"]) if phases else "-"
-                        for name in SESSION_PHASE_NAMES
-                    ),
-                    "-" if overhead is None else f"{overhead * 1e6:.3f}",
-                ]
-            )
+def _markdown_section(
+    title: str, notes: list[str], headers: list[str], rows: list[list[str]]
+) -> list[str]:
     if not rows:
         return []
+    return ["", f"## {title}", "", *notes, "", *_markdown_table(headers, rows)]
+
+
+def _driver_arms(case: dict[str, Any], driver: str) -> list[tuple[int, str]]:
+    drivers = case.get("drivers", DEFAULT_DRIVERS)
     return [
-        "",
-        "## Session phase attribution",
-        "",
-        "Independent P50 values in µs from the native-call probe; they need not",
-        "sum to the total median. Probe callbacks are inside every session sample.",
-        "",
-        *_markdown_table(
-            [
-                "Case",
-                "Arm",
-                "Append",
-                "Attributed samples",
-                "Argument handling",
-                "Native call",
-                "Result assembly",
-                "Probe overhead estimate µs",
-            ],
-            rows,
-        ),
+        (index, side)
+        for index, side in enumerate(("baseline", "candidate"))
+        if drivers[index] == driver
     ]
+
+
+def _session_phase_cells(phases: dict[str, Any]) -> list[str]:
+    if not phases:
+        return ["-"] * len(SESSION_PHASE_NAMES)
+    return [_micros(phases[name]["p50_seconds"]) for name in SESSION_PHASE_NAMES]
+
+
+def _session_phase_row(case: dict[str, Any], index: int, side: str) -> list[str]:
+    summary = case["phase_intervals"][side]
+    probe = case["start"][index].get("phase_probe", {})
+    overhead = probe.get("overhead_seconds_estimate")
+    return [
+        case.get("name") or "-",
+        side,
+        f"{case['config']['append_rows']:,}",
+        f"{summary['attributed_samples']} / {len(case['samples'][index])}",
+        *_session_phase_cells(summary["phases"]),
+        "-" if overhead is None else f"{overhead * 1e6:.3f}",
+    ]
+
+
+def _session_phase_markdown(cases: list[dict[str, Any]]) -> list[str]:
+    rows = [
+        _session_phase_row(case, index, side)
+        for case in cases
+        for index, side in _driver_arms(case, "session")
+    ]
+    return _markdown_section(
+        "Session phase attribution",
+        [
+            "Independent P50 values in µs from the native-call probe; they need not",
+            "sum to the total median. Probe callbacks are inside every session sample.",
+        ],
+        [
+            "Case",
+            "Arm",
+            "Append",
+            "Attributed samples",
+            "Argument handling",
+            "Native call",
+            "Result assembly",
+            "Probe overhead estimate µs",
+        ],
+        rows,
+    )
 
 
 def _reference_markdown(cases: list[dict[str, Any]]) -> list[str]:
@@ -1161,29 +1230,24 @@ def _reference_markdown(cases: list[dict[str, Any]]) -> list[str]:
         for case in cases
         if "reference" in case
     ]
-    if not rows:
-        return []
-    return [
-        "",
-        "## Unpaired references",
-        "",
-        "TA-Lib recalculates `window - 1` rows per entity before each paired",
-        "append plus the append in the idle baseline worker; every value matches",
-        "the warm oracle. References are not paired arms.",
-        "",
-        *_markdown_table(
-            [
-                "Case",
-                "Reference",
-                "Append",
-                "Entities",
-                "Samples",
-                "P50 / P95 µs",
-                "Rows per second",
-            ],
-            rows,
-        ),
-    ]
+    return _markdown_section(
+        "Unpaired references",
+        [
+            "TA-Lib recalculates `window - 1` rows per entity before each paired",
+            "append plus the append in the idle baseline worker; every value matches",
+            "the warm oracle. References are not paired arms.",
+        ],
+        [
+            "Case",
+            "Reference",
+            "Append",
+            "Entities",
+            "Samples",
+            "P50 / P95 µs",
+            "Rows per second",
+        ],
+        rows,
+    )
 
 
 def _unmeasured_markdown(unmeasured: list[dict[str, Any]]) -> list[str]:
@@ -1201,52 +1265,50 @@ def _unmeasured_markdown(unmeasured: list[dict[str, Any]]) -> list[str]:
     ]
 
 
-def _phase_markdown(cases: list[dict[str, Any]]) -> list[str]:
-    rows = []
-    for case in cases:
-        config = case["config"]
-        drivers = case.get("drivers", DEFAULT_DRIVERS)
-        if config["history_rows"] != 1_024_000 or not case["collect_gc"]:
-            continue
-        for index, side in enumerate(("baseline", "candidate")):
-            if drivers[index] != "runner":
-                continue
-            phases = case["phase_intervals"][side]
-            rows.append(
-                [
-                    config["indicator"],
-                    f"{config['append_rows']:,}",
-                    str(config.get("append_entities") or "full tick"),
-                    side,
-                    *(_micros(phases[name]["p50_seconds"]) for name in PHASE_NAMES),
-                ]
-            )
-    if not rows:
-        return []
+def _callback_breakdown_case(case: dict[str, Any]) -> bool:
+    return case["config"]["history_rows"] == 1_024_000 and case["collect_gc"]
+
+
+def _runner_phase_row(case: dict[str, Any], side: str) -> list[str]:
+    config = case["config"]
+    phases = case["phase_intervals"][side]
     return [
-        "",
-        "## Callback interval breakdown",
-        "",
-        "Representative H=1,024,000 forced-GC runner arms; independent P50 µs.",
-        "These wall intervals include scheduling and waiting, not just CPU work.",
-        "Conversion is a subset of sink-to-receive and must not be added again.",
-        "Independent phase medians need not sum to the total latency median.",
-        "",
-        *_markdown_table(
-            [
-                "Indicator",
-                "Append",
-                "Active entities",
-                "Build",
-                "Enqueue to source",
-                "Data to watermark",
-                "Watermark to sink",
-                "Sink to receive",
-                "to_pyarrow subset",
-            ],
-            rows,
-        ),
+        config["indicator"],
+        f"{config['append_rows']:,}",
+        str(config.get("append_entities") or "full tick"),
+        side,
+        *(_micros(phases[name]["p50_seconds"]) for name in PHASE_NAMES),
     ]
+
+
+def _phase_markdown(cases: list[dict[str, Any]]) -> list[str]:
+    rows = [
+        _runner_phase_row(case, side)
+        for case in cases
+        if _callback_breakdown_case(case)
+        for _, side in _driver_arms(case, "runner")
+    ]
+    return _markdown_section(
+        "Callback interval breakdown",
+        [
+            "Representative H=1,024,000 forced-GC runner arms; independent P50 µs.",
+            "These wall intervals include scheduling and waiting, not just CPU work.",
+            "Conversion is a subset of sink-to-receive and must not be added again.",
+            "Independent phase medians need not sum to the total latency median.",
+        ],
+        [
+            "Indicator",
+            "Append",
+            "Active entities",
+            "Build",
+            "Enqueue to source",
+            "Data to watermark",
+            "Watermark to sink",
+            "Sink to receive",
+            "to_pyarrow subset",
+        ],
+        rows,
+    )
 
 
 async def _compatible_builds(paths: tuple[Path, Path]) -> list[dict[str, Any]]:
@@ -1463,66 +1525,100 @@ def _unmeasured(
     ]
 
 
+def _remaining_budget(budget: float | None, started: float) -> float | None:
+    return None if budget is None else budget - (time.monotonic() - started)
+
+
+async def _budgeted(
+    remaining: float | None, run: Callable[[], Awaitable[Any]]
+) -> Any | None:
+    """Return ``run()``'s result, or ``None`` when the budget expires first."""
+    if remaining is not None and remaining <= 0:
+        return None
+    deadline = asyncio.timeout(remaining)
+    try:
+        async with deadline:
+            return await run()
+    except TimeoutError:
+        if not deadline.expired():
+            raise
+        # Cancellation already settled this case's owned workers.
+        return None
+
+
+def _measured_case(
+    case: dict[str, Any],
+    environments: list[dict[str, Any]],
+    report: dict[str, Any],
+    arms: dict[str, Any],
+) -> dict[str, Any]:
+    if environments != report["environments"]:
+        raise ValueError("worker fingerprints changed between cases")
+    return {"name": arms["name"], **case, "verdict": case_verdict(case, arms)}
+
+
+def _case_line(
+    case: dict[str, Any], config: dict[str, Any], mode: str, arms: dict[str, Any]
+) -> str:
+    return (
+        f"{arms['name'] or config} GC={mode} {'/'.join(arms['drivers'])}: "
+        f"{case['paired_speedup_median']:.2f}x"
+    )
+
+
+def _write_compare_report(output: Path, report: dict[str, Any]) -> None:
+    output.write_text(
+        json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+    )
+    output.with_suffix(".md").write_text(markdown(report), encoding="utf-8")
+
+
+def _compare_paths(args: argparse.Namespace) -> tuple[Path, Path]:
+    output = args.output.resolve()
+    work = output.parent if args.work_dir is None else args.work_dir.resolve()
+    for directory in (output.parent, work):
+        directory.mkdir(parents=True, exist_ok=True)
+    return output, work
+
+
 async def compare(args: argparse.Namespace) -> None:
     started = time.monotonic()
     manifests = await _compatible_builds((args.baseline_build, args.candidate_build))
     counts = None if args.worker_threads is None else tuple(args.worker_threads)
     _validate_scheduler_builds(manifests, counts)
-    output = args.output.resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    work = output.parent if args.work_dir is None else args.work_dir.resolve()
-    work.mkdir(parents=True, exist_ok=True)
+    output, work = _compare_paths(args)
     planned = selected_cases(args)
     if not planned:
         raise ValueError("benchmark matrix must not be empty")
     report: dict[str, Any] = {}
     unmeasured: list[dict[str, Any]] = []
     for position, (config, mode, arms) in enumerate(planned):
-        remaining = (
-            None
-            if args.budget_seconds is None
-            else args.budget_seconds - (time.monotonic() - started)
+        options = WorkerPairOptions(work, counts, arms["drivers"], arms["reference"])
+        measured = await _budgeted(
+            _remaining_budget(args.budget_seconds, started),
+            partial(
+                _fresh_case, manifests, config, args.samples, mode == "forced", options
+            ),
         )
-        if remaining is not None and remaining <= 0:
+        if measured is None:
             unmeasured = _unmeasured(planned[position:])
+            print(f"budget exhausted; {len(unmeasured)} cases unmeasured", flush=True)
             break
-        try:
-            async with asyncio.timeout(remaining) as deadline:
-                case, environments = await _fresh_case(
-                    manifests,
-                    config,
-                    args.samples,
-                    mode == "forced",
-                    WorkerPairOptions(work, counts, arms["drivers"], arms["reference"]),
-                )
-        except TimeoutError:
-            if not deadline.expired():
-                raise
-            # Cancellation already settled this case's owned workers.
-            unmeasured = _unmeasured(planned[position:])
-            break
-        if not report:
-            report = _compare_report(manifests, environments, args, counts)
-        if environments != report["environments"]:
-            raise ValueError("worker fingerprints changed between cases")
-        case = {"name": arms["name"], **case, "verdict": case_verdict(case, arms)}
+        case, environments = measured
+        report = report or _compare_report(manifests, environments, args, counts)
+        case = _measured_case(case, environments, report, arms)
         report["cases"].append(case)
-        print(
-            f"{arms['name'] or config} GC={mode} {'/'.join(arms['drivers'])}: "
-            f"{case['paired_speedup_median']:.2f}x",
-            flush=True,
-        )
-    if not report:
-        report = _compare_report(manifests, [], args, counts)
-    if unmeasured:
-        print(f"budget exhausted; {len(unmeasured)} cases unmeasured", flush=True)
-    report["status"] = "stopped" if unmeasured else "completed"
-    report["unmeasured_cases"] = unmeasured
-    report["elapsed_seconds"] = time.monotonic() - started
-    output.write_text(
-        json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+        print(_case_line(case, config, mode, arms), flush=True)
+    report = report or _compare_report(manifests, [], args, counts)
+    _write_compare_report(
+        output,
+        {
+            **report,
+            "status": "stopped" if unmeasured else "completed",
+            "unmeasured_cases": unmeasured,
+            "elapsed_seconds": time.monotonic() - started,
+        },
     )
-    output.with_suffix(".md").write_text(markdown(report), encoding="utf-8")
 
 
 async def diagnose(args: argparse.Namespace) -> None:
@@ -1652,13 +1748,7 @@ def main() -> None:
             parser.error("at least two diagnostic samples are required")
         asyncio.run(diagnose(args))
     else:
-        if args.samples < 2:
-            parser.error("at least two paired samples are required")
-        if args.worker_threads is not None and any(
-            count not in (1, 4) for count in args.worker_threads
-        ):
-            parser.error("worker thread overrides must be one or four")
-        if args.cases is not None and (error := case_argument_error(args)):
+        if error := compare_argument_error(args):
             parser.error(error)
         asyncio.run(compare(args))
 
