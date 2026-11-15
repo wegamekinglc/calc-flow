@@ -1,0 +1,64 @@
+{
+  "contract": "stream-convenience-defaults-pairs-v1",
+  "registered_at": "2026-11-15T16:10:00Z",
+  "purpose": "PR #617 spec section 7.6 decision 6: at most two paired cases with an existing maintained tool to attribute the per-batch watermark cost of the convenience-stream defaults",
+  "change": "feature/stream-convenience-defaults makes BoundedOutOfOrderness with emit_interval == 0 emit the generated watermark after every advancing data batch, makes that the default for convenience streams with declared event time (was a 100 ms timer), and makes convenience streams default to checkpointing off",
+  "attribution_limit": "Both arms use the entrypoint defaults, so each paired delta combines checkpoint-off and per-batch watermarks. The maintained harness accepts no runtime config or watermark policy, so neither change can be pinned; the result cannot attribute between the two default changes.",
+  "third_arm": "skipped: pinning StreamRuntimeConfig(checkpointing=True) on the candidate requires editing the maintained harness, and the release_pairs rule is strictly two-sided",
+  "baseline": {
+    "ref": "main 39cab2fb0bc44c871734ac1f2321396aa25e5161 (merge-base of the branch)",
+    "product_build": "sealed release wheel of b9a46e1266510271b63fffd2fca254659fc96607; b9a46e12..39cab2fb changes only crates/calc-flow/README.md under crates/, python/, Cargo.toml, Cargo.lock and pyproject.toml",
+    "build_manifest": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/compiled-region-performance/baseline-build/build.json",
+    "git_sha": "b9a46e1266510271b63fffd2fca254659fc96607",
+    "wheel_sha256": "e7af99f8d6eebe44fb152bb393b267075c573e7e10ec7addab8abbc4612b00ea",
+    "native_sha256": "68be91fe8d0e0dc33cf4b433e7bddfe1615cf10620f0a67f25e483eb0ddbb3ba"
+  },
+  "candidate": {
+    "ref": "feature/stream-convenience-defaults 3235ca37",
+    "build_manifest": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/stream-convenience-defaults-perf/candidate-build/build.json",
+    "git_sha": "3235ca37",
+    "build_command": "env -u CONDA_PREFIX .venv/bin/python scripts/profile_warm_stream.py build (release, --locked, pyo3/abi3-py313); seals recorded by the build manifest and verified before timing"
+  },
+  "harness": {
+    "source": "candidate checkout benchmarks/test_stream_operators.py, byte-identical to main (git diff 39cab2fb 3235ca37 -- benchmarks scripts is empty)",
+    "benchmarks/test_stream_operators.py": "4ba40bf63e07a71a3a9d2068c376cedabf642676346aa09a64f2f916dd27c12d",
+    "benchmarks/warm_stream.py": "9c23f97cebb62f6bf475c4b8d59b03dd0423ef4688f12fcf8d4345dbfb45a000",
+    "benchmarks/support.py": "cbac70aa0e90cf08d1738033eeec10c046651044ba3d60533d9f6ef014b4ba5b",
+    "entrypoint": "program.stream(inputs) with no config and no watermark policy over a declared event-time, entity-keyed, sequence-ordered source",
+    "timing_scope": "program-stream-lifecycle-to-arrow: compilation, fresh native job, source delivery, watermarks, output conversion and completion; fixture construction, batch splitting and output validation outside timing"
+  },
+  "rule": {
+    "source": "scripts.benchmark_suite.release_pairs collect_case ordering and scripts.benchmark_suite.report.comparison verdict",
+    "rounds": 2,
+    "pairs_per_round": 10,
+    "order": "adjacent AB/BA alternating, one fresh pytest process per invocation",
+    "observation": "median of the invocation's saved pytest-benchmark raw samples under the harness's declared min_rounds=3, max_time=1.0",
+    "verdict": "regression only when both round 95% paired-median lower bounds exceed +5%; inconclusive when an upper bound exceeds +5% otherwise; improved when both upper bounds are below -5%; otherwise no-confirmed-regression (not equivalence)",
+    "threads": "TOKIO_WORKER_THREADS=4 and single-threaded BLAS from scripts.benchmark_suite.process.child_environment",
+    "identity_deviation": "release_collectors.python_observation and release_pairs.evaluate_case call identity.validate_identity, which rejects this harness's rows because extra_info records input_rows/output_rows while its workload identity names the count rows_per_input. The driver instead requires every raw machine/dependency/workload identity to reproduce its SHA-256, all three fingerprints to equal the first baseline observation, scenario/scope/backend/scale to agree with the workload identity, and input_rows == output_rows == rows_per_input. Samples, order, worker uniqueness, native seals and verdict computation are unchanged."
+  },
+  "cases": [
+    {
+      "label": "A",
+      "id": "benchmarks/test_stream_operators.py::test_stream_operator_lifecycle[standard-rolling_state]",
+      "scale": "standard",
+      "workload": "rolling_state (ts.mean rows(20), ts.average, ts.ewma span 20), 16 entities, 20,000 rows as 32 ordered batches (31 x 640 + 160)",
+      "rationale": "many small ordered batches: the candidate emits a generated watermark after each of 32 advancing batches where the baseline relies on the 100 ms timer and end of input; the most batches this maintained harness offers"
+    },
+    {
+      "label": "B",
+      "id": "benchmarks/test_stream_operators.py::test_stream_operator_lifecycle[overhead-rolling_state]",
+      "scale": "overhead",
+      "workload": "same program and 640-row batch size, 960 rows as 2 batches (640 + 320)",
+      "rationale": "batch-count control: per-batch watermark count drops from 32 to 2 while per-job effects of the defaults (no temporary checkpoint runtime, no timer) remain. No maintained convenience-stream harness varies batch size, so a same-row-count large-batch control is unavailable without editing a harness; this control varies batch count at fixed batch size instead"
+    }
+  ],
+  "budget": {
+    "measurement_seconds": 600,
+    "includes": "seal checks, wheel installs, every invocation including pytest startup, collection, harness validation runs and pytest-benchmark calibration, evaluation and cleanup",
+    "excludes": "the candidate release build, reported separately",
+    "order": "case A then case B",
+    "stop_rule": "stop at the budget; an incomplete case receives no verdict; no added cases, samples or retries"
+  },
+  "environment": "WSL2 on a shared host; load average and concurrent cargo/pytest/maturin processes checked immediately before timing"
+}
