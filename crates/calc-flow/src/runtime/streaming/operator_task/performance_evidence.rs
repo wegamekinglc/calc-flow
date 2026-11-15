@@ -420,10 +420,7 @@ fn evidence_workloads() -> [Workload; 4] {
 fn evidence_case_selection_rejects_unknown_empty_and_duplicate_names() {
     let selected = select_cases("6400x64-dual-lag1,64x64-dual-tick,1x1-dual").unwrap();
     assert_eq!(
-        selected
-            .iter()
-            .map(|(name, _)| *name)
-            .collect::<Vec<_>>(),
+        selected.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
         ["6400x64-dual-lag1", "64x64-dual-tick", "1x1-dual"]
     );
     let session = select_cases("session-g0").unwrap_err();
