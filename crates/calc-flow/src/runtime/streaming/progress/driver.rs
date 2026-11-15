@@ -3962,6 +3962,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn zero_emit_interval_bindings_route_watermarks_and_progress_the_minimum() {
+        let clock = ManualClock::new(LogicalInstant::ZERO);
+        let (mut driver, sender) = StreamProgressDriver::new(
+            prepared(&[generated("left", 0, None), generated("right", 0, None)]),
+            clock,
+        )
+        .unwrap();
+        driver.start_running().unwrap();
+        assert!(driver.state.timer_heap.is_empty());
+        let (left, right) = (super::BindingOrdinal::new(0), super::BindingOrdinal::new(1));
+        let mut position = 0;
+        let mut drain = async |batches: Vec<(&str, i64)>| {
+            let mut receipts = Vec::new();
+            for (binding, value) in batches {
+                receipts.push(
+                    sender
+                        .submit(
+                            identity(binding),
+                            RawIngressEvent::Data(timestamp_batch(value)),
+                            exact(position),
+                        )
+                        .await
+                        .unwrap(),
+                );
+                position += 1;
+            }
+            let committed = driver.drain_ready().unwrap();
+            for receipt in receipts {
+                receipt.wait_settled().await.unwrap();
+            }
+            committed
+                .emissions
+                .iter()
+                .map(|emission| match emission {
+                    DriverEmission::ForwardData { binding, .. } => (Some(*binding), "data", None),
+                    DriverEmission::ForwardControl {
+                        binding,
+                        kind: ProgressEmissionKind::Watermark(at),
+                    } => (Some(*binding), "watermark", Some(at.as_micros())),
+                    DriverEmission::Progress(super::ProgressEmission {
+                        kind: ProgressEmissionKind::Watermark(at),
+                        ..
+                    }) => (None, "progress", Some(at.as_micros())),
+                    other => panic!("unexpected emission {other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // One drain orders by binding; progress waits for the unprimed right input.
+        assert_eq!(
+            drain(vec![("left", 5), ("right", 8), ("left", 10)]).await,
+            vec![
+                (Some(left), "data", None),
+                (Some(left), "watermark", Some(4)),
+                (Some(left), "data", None),
+                (Some(left), "watermark", Some(9)),
+                (Some(right), "data", None),
+                (Some(right), "watermark", Some(7)),
+                (None, "progress", Some(7)),
+            ]
+        );
+        // Each binding's control stays on its own route; progress tracks the minimum.
+        assert_eq!(
+            drain(vec![("right", 20)]).await,
+            vec![
+                (Some(right), "data", None),
+                (Some(right), "watermark", Some(19)),
+                (None, "progress", Some(9)),
+            ]
+        );
+        assert_eq!(
+            drain(vec![("left", 12), ("right", 15)]).await,
+            vec![
+                (Some(left), "data", None),
+                (Some(left), "watermark", Some(11)),
+                (None, "progress", Some(11)),
+                (Some(right), "data", None),
+            ]
+        );
+        assert!(driver.state.timer_heap.is_empty());
+        assert_eq!(driver.unsettled_receipts(), 0);
+    }
+
+    #[tokio::test]
     async fn durable_restore_of_zero_emit_interval_keeps_emitting_per_batch() {
         let prepared = prepared(&[generated("left", 0, None)]);
         let sources = BTreeMap::from([(

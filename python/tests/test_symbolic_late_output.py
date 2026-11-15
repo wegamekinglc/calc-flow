@@ -511,11 +511,8 @@ def _assert_late_diagnostic(tables: list[pa.Table]) -> None:
 @pytest.mark.parametrize("kind", ["rolling", "cross_section"])
 @pytest.mark.parametrize("late_rows", [False, True])
 def test_one_owned_iterator_routes_scripted_watermarks_and_closes(
-    kind: str, late_rows: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    kind: str, late_rows: bool
 ) -> None:
-    import calc_flow.stream as stream_module
-
-    monkeypatch.setattr(stream_module.tempfile, "tempdir", str(tmp_path))
     source = quotes()
     value = (
         rolling(source)
@@ -553,7 +550,6 @@ def test_one_owned_iterator_routes_scripted_watermarks_and_closes(
     }
     if late_rows:
         _assert_late_diagnostic(seen["late"])
-    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize("branch", ["output", "late", "indirect"])

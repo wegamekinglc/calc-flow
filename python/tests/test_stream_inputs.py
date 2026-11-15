@@ -24,10 +24,17 @@ async def _feed():
     yield _rows()
 
 
-@pytest.mark.parametrize("kind", ["iterable", "materialized", "sequence"])
+_INPUTS = {
+    "iterable": _feed,
+    "materialized": _rows,
+    "sequence": lambda: [_rows()],
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_INPUTS))
 def test_default_ordered_policy_emits_watermarks_after_every_batch(kind: str) -> None:
     source = cf.table_input("quotes", schema=_SCHEMA, event_time="ts")
-    data = {"iterable": _feed(), "materialized": _rows(), "sequence": [_rows()]}[kind]
+    data = _INPUTS[kind]()
 
     binding, _ = _source_binding(data, ("quotes", source), cf.EdgeBudget(), None)
 
