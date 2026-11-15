@@ -464,7 +464,9 @@ thread, passes its batch and watermark through every operator, and returns the
 rows emitted by that call. There is no source, sink, job, progress driver, or
 async bridge. Use `stream` for async sources and `StreamingRunner` for
 connectors, delivery contracts, and recovery; see
-[choose batch or stream](streaming-guide.md#choose-batch-or-stream).
+[choose batch or stream](streaming-guide.md#choose-batch-or-stream). Run
+[example 37](../examples/37_stream_session.py) for a checked table session with
+ordered rows, explicit progress, and finalization.
 
 | Member                               | Contract                                                                    |
 |--------------------------------------|-----------------------------------------------------------------------------|
