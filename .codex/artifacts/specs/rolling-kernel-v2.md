@@ -818,11 +818,12 @@ created before it.
 - **Fixtures.** Rolling fixtures that pin West, `stable_v1` or `stable_v2`
   bits are rebuilt from the oracle.
 
-## 9. PR breakdown
+## 9. Implementation commit sequence
 
-Each PR is independently revertible and red→green. It deletes what it
-replaces and runs only its focused checks locally (§12); full regression runs
-in CI. Every measurement follows §10.
+Each step is an independently revertible commit or small commit group in the
+single integrated re-architecture PR. There are no per-step PRs. Each step is
+red→green, deletes what it replaces, and runs only its focused checks locally
+(§12); full regression runs in CI. Every measurement follows §10.
 
 | PR   | Prefix      | Content                                                         | Gate           |
 |------|-------------|-----------------------------------------------------------------|----------------|
@@ -836,13 +837,14 @@ in CI. Every measurement follows §10.
 | P2.8 | `perf:`     | scalar tier, fixed costs, zero-allocation push, Python bridge   | G1, G4, G5     |
 | P2.9 | `perf:`     | run tier with pre-scan, full-tick tier                          | G2, G3         |
 
-Ordering and the #618 (P1) dependency:
+Ordering and the P1 dependency:
 
-- P2.1–P2.4 do not depend on #618 and can start now.
-- P2.5 and the session-path steps, P2.6–P2.8, start only after #618 merges.
+- P1 is already integrated in the single re-architecture PR.
+- P2.1–P2.4 do not depend on additional P1 work and can start now.
+- P2.5 and the session-path steps, P2.6–P2.8, build on the integrated session.
   P2.9 follows P2.8.
-- P2.6 needs only P2.1 and #618, so it can proceed in parallel with
-  P2.2–P2.5.
+- P2.6 needs only P2.1 and the integrated session, so it can proceed in
+  parallel with P2.2–P2.5.
 - P2.7 needs P2.5 and P2.6. Lanes, the indicator worker and the async
   checkpoint hooks are already gone by then.
 - The sync-trait migration is P2.6 (trait, session drive, Expression) plus
@@ -955,7 +957,8 @@ critique is applied.
   - Mixed indicator nodes become typed.
   - Delete the indicator subsystem and the layout 5/6 encodings.
   - Remove the P1 session's layout 5/6 rejection
-    (`runtime/streaming/session.rs:696-697`). This requires #618 merged.
+    (`runtime/streaming/session.rs:696-697`). This builds on the integrated
+  StreamSession.
 - Red tests:
   - RSI/ATR/MACD restore identity;
   - a session admits an RSI + MACD node and matches the runner;
@@ -965,8 +968,8 @@ critique is applied.
   at 1 row and 6,400 × 64, against baseline, with the TA-Lib arm as reference
   only. Four cases.
 
-**P2.6: sync operator trait, session drive, Expression.** Requires #618
-merged.
+**P2.6: sync operator trait, session drive, Expression.** Builds on the
+integrated StreamSession.
 
 - Changes:
   - Add the §6.4 trait, `SyncContext`, `Emitter` with batch-shell recycling,

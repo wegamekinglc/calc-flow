@@ -1,6 +1,6 @@
 # 流式核心重构：架构修改与实现方案
 
-日期：2026-11-15。状态：执行中；P1 的 `StreamSession` 和便捷流默认值已提交 PR，≤20 µs 门槛已移到 P2，见执行记录。
+日期：2026-11-15。状态：执行中；全部阶段在单一集成 PR #619 中交付，P1 已并入，≤20 µs 门槛已移到 P2，见执行记录。
 
 本文记录对 Calc Flow 流式引擎的一次整体 review、由此确定的目标架构，以及分阶段的实现方案。
 它是后续各阶段规格和逐任务实施计划的统一入口；各阶段的逐任务计划另行编写，本文不包含。
@@ -13,7 +13,9 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
 
 ## 执行记录
 
-- P1 `StreamSession`：[PR #618](https://github.com/wegamekinglc/calc-flow/pull/618) 交付公开的同步 push API，
+- 交付方式（2026-11-16 用户决定）：整个方案只保留一个[集成 PR #619](https://github.com/wegamekinglc/calc-flow/pull/619)，
+  所有阶段在同一分支上累积，最终按整体重构效果评估。原 #617、#618 已作为被集成 PR 取代而关闭。
+- P1 `StreamSession`：原 PR #618 的提交已并入 #619，交付公开的同步 push API，
   包括 Rust `StreamSession`、`SessionWatermark`、`SessionOutput` 和 Python `TableExpr.session`、`Program.session`。
   现有 handler 由适配器在调用线程上按拓扑序跑完，没有 source、sink 和进度任务。
   准入范围是单个动态输入，rolling（不含 RSI/ATR/MACD 指标 layout）、表达式和 union 节点，无 checkpoint。
@@ -26,11 +28,13 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   runner 对照的置信区间跨 1.0，没有回退。
   强制 GC 下的阶段归因是 Python 参数处理 18.9 µs、原生调用 126.9 µs、结果装配 7.0 µs；
   剩余成本主要在原生算子 dispatch 内，并随缓存状态大幅变化。
-- 按 7.2 的停止规则定位成本后，用户于 2026-11-15 决定：#618 作为严格改进合并；
+- 按 7.2 的停止规则定位成本后，用户于 2026-11-15 决定：P1 作为严格改进并入整体方案；
   ≤20 µs 门槛移到 P2，与每次调用的分配预算、rolling 和 projection 的同步算子 trait（4.1）一起验收。
-- 决定 5：[PR #617](https://github.com/wegamekinglc/calc-flow/pull/617) 让便捷流默认关闭 checkpoint，
+- 决定 5：原 PR #617 的提交已并入 #619，让便捷流默认关闭 checkpoint，
   有序事件时间输入在每个推进的数据批之后发出 watermark，不再等 100 ms 定时器；
-  显式 `StreamingRunner` 仍默认开启 checkpoint。合并前还需完成配对测量。
+  显式 `StreamingRunner` 仍默认开启 checkpoint。配对测量已完成并归档在
+  `benchmarks/stream-convenience-defaults/`：2 批用例按维护规则 improved（−39.24%），
+  32 批用例为 inconclusive（−9.33%）；两项默认变化合并测量，不能分别归因。
 - P1 其余项尚未开始：NumPy 路径，以及单源链路在 runner source task 内联（取代草稿 PR #616）。
 
 ## 1. 目标
