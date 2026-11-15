@@ -28,15 +28,16 @@ fn schema() -> Arc<Schema> {
 }
 
 fn rows(start: u64, prices: &[f64]) -> Result<Batch, Box<dyn Error>> {
-    let timestamps = (0..prices.len())
-        .map(|offset| BASE_MICROS + (start as i64 + offset as i64) * 1_000_000)
+    let first_micros = i64::try_from(start)?;
+    let count = i64::try_from(prices.len())?;
+    let end = start + u64::try_from(prices.len())?;
+    let timestamps = (0..count)
+        .map(|offset| BASE_MICROS + (first_micros + offset) * 1_000_000)
         .collect::<Vec<_>>();
     let columns: Vec<ArrayRef> = vec![
         Arc::new(TimestampMicrosecondArray::from(timestamps).with_timezone("UTC")),
         Arc::new(StringArray::from(vec!["A"; prices.len()])),
-        Arc::new(UInt64Array::from(
-            (start..start + prices.len() as u64).collect::<Vec<_>>(),
-        )),
+        Arc::new(UInt64Array::from((start..end).collect::<Vec<_>>())),
         Arc::new(Float64Array::from(prices.to_vec())),
     ];
     let record = RecordBatch::try_new(schema(), columns)?;
@@ -62,7 +63,7 @@ fn mean_values(
     Ok(values)
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn build_session() -> Result<(StreamSession, String, String), Box<dyn Error>> {
     let spec: RollingSpec = serde_json::from_value(serde_json::json!({
         "configuration_version": 1, "state_layout_version": 1,
         "partition_by": ["symbol"], "event_time": "ts", "sequence_by": ["seq"],
@@ -80,11 +81,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?;
 
     // No generated policy: progress comes only from explicit watermarks and finish.
-    let mut session = StreamSession::new(plan, &StreamRuntimeConfig::default(), BTreeMap::new())?;
-    let (input, output) = (
-        session.input_ids()[0].to_owned(),
-        session.output_ids()[0].to_owned(),
-    );
+    let session = StreamSession::new(plan, &StreamRuntimeConfig::default(), BTreeMap::new())?;
+    let input = session.input_ids()[0].to_owned();
+    let output = session.output_ids()[0].to_owned();
+    Ok((session, input, output))
+}
+
+fn run_session() -> Result<(SessionOutput, SessionOutput, SessionOutput, String), Box<dyn Error>> {
+    let (mut session, input, output) = build_session()?;
     let first = session.push(
         &input,
         rows(0, &[10.0, 12.0])?,
@@ -92,7 +96,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     let second = session.push(&input, rows(2, &[15.0])?, None)?;
     let final_output = session.finish()?;
+    Ok((first, second, final_output, output))
+}
 
+fn main() -> Result<(), Box<dyn Error>> {
+    let (first, second, final_output, output) = run_session()?;
     let first = mean_values(&first, &output)?;
     let second = mean_values(&second, &output)?;
     let final_values = mean_values(&final_output, &output)?;
