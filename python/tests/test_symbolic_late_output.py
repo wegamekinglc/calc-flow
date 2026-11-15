@@ -725,7 +725,9 @@ def test_paired_lifecycle_closes_resources_before_temporary_state(
 
     results = program.stream(
         {"quotes": source_binding(feed)},
-        config=cf.StreamRuntimeConfig(edge_budget=cf.EdgeBudget(2, 1024 * 1024)),
+        config=cf.StreamRuntimeConfig(
+            edge_budget=cf.EdgeBudget(2, 1024 * 1024), checkpointing=True
+        ),
     )
 
     def remove_state(path: str) -> None:

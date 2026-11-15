@@ -54,7 +54,7 @@ from calc_flow.runtime import (
     StreamRuntimeConfig,
     WatermarkPolicy,
     _finish_cleanup,
-    _runner_config,
+    _resolved_config,
 )
 from calc_flow.symbolic.expr import Parameter, TableExpr
 from calc_flow.symbolic.lower.bindings import _BatchBindings
@@ -239,9 +239,11 @@ T = TypeVar("T")
 class StreamResults(Generic[T]):
     """One-shot stream owned by ``async with``; iterate only inside its context.
 
-    Ordinary iterables have best-effort delivery and, by default, temporary
-    checkpoints, with no restart guarantee. Use an explicit runner for durable
-    recovery or sinks. Set ``config.checkpointing=False`` to omit checkpoints.
+    Ordinary iterables have best-effort delivery with no restart guarantee.
+    Checkpointing stays off unless ``config.checkpointing=True``, which adds
+    temporary checkpoints removed at close; a config that leaves
+    ``checkpointing`` unset also runs without them. Use an explicit runner for
+    durable recovery or sinks.
     """
 
     def __init__(self, request: _StreamRequest, *, table_output: bool) -> None:
@@ -288,7 +290,7 @@ class StreamResults(Generic[T]):
         policies = _selected_policies(
             self._request.inputs, expected, self._request.watermarks
         )
-        config = _runner_config(self._request.config)
+        config = _resolved_config(self._request.config, False)
         config._native()
         plan, names, outputs, snapshots = await _run_blocking_compile(
             _compile_stream, self._request

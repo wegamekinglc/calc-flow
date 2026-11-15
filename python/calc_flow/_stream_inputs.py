@@ -121,8 +121,9 @@ def _source_config(
         policy = DisabledWatermarks()
         if isinstance(event_time, CStr):
             ordered_column = event_time.value
+            # A zero emit interval advances the watermark after every data batch.
             policy = BoundedOutOfOrderness(
-                ordered_column, timedelta(microseconds=1), timedelta(milliseconds=100)
+                ordered_column, timedelta(microseconds=1), timedelta(0)
             )
     return _IterableConfig(name, schema, budget, policy, ordered_column)
 
