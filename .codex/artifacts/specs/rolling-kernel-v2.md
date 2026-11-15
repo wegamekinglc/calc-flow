@@ -4,9 +4,18 @@ Date: 2026-11-15. Source baseline: `main` `39cab2fb` (rolling, array and
 benchmark sources are unchanged on `feature/stream-session`). Branch:
 `feature/rolling-kernel-v2`. Plan:
 [streaming core re-architecture](../../../docs/plans/2026-11-15-streaming-core-rearchitecture.md),
-phase P2 (§3.6, §4.2, §4.4, §5, §7.3, §7 gates, §8). Status: draft for
-`cf-api-designer` (public removals, §4.6 and §6.3) and `cf-critic` (numeric
-contract, §4); then implementation as the PR series in §9.
+phase P2 (§3.6, §4.1, §4.2, §4.4, §5, §7.3, §7 gates, §8). Status:
+revision 2, draft for `cf-api-designer` (public removals, §4.6, §6.3 and the
+trait in §6.4) and `cf-critic` (numeric contract, §4); then implementation as
+the PR series in §9.
+
+Revision 2 (user decision, 2026-11-15) moves P1's ≤ 20 µs session gate into
+P2. P2 now also covers:
+
+- the synchronous operator trait for Rolling and Expression on the session
+  path (§6.4);
+- a per-push allocation and footprint budget (§6.5);
+- the session latency gate G0 (§10.2).
 
 Paths below are relative to `crates/calc-flow/src/` unless they start with a
 repository directory.
@@ -24,6 +33,11 @@ The plan's decisions, scope and gates are fixed inputs:
   autovectorizable safe loops.
 - §8: every PR starts with a failing test, deletes what it replaces, and
   measures at most five cases in 600 s.
+- User decision, 2026-11-15: P1 continues, and its ≤ 20 µs gate moves into
+  P2. The gate is the warm-stream session case-1 p50 in normal-GC mode;
+  forced-GC is reported but not gated. Rolling and the projection/expression
+  node move to the synchronous operator trait of plan §4.1 on the session
+  path. A per-call allocation and footprint budget joins P2's acceptance.
 
 Decisions this spec takes where the plan leaves room:
 
@@ -38,9 +52,23 @@ Decisions this spec takes where the plan leaves room:
   1–6. All declarations write one new layout, 7.
 - **D3**: the rolling entity-parallel lane path is deleted with the state it
   operates on; large-batch parallelism returns with the P6 morsel pool (§11 R1).
-- **D4**: gates G1–G3 are evaluated at the rolling-operator dispatch boundary
-  (§10.2). The plan's 6.1 µs and 329 µs figures included the projection; the
-  baseline is re-measured at the gate boundary.
+- **D4**: G1–G3 are evaluated by direct synchronous calls on the
+  `RollingOperator` (§10.2). The plan's 6.1 µs and 329 µs figures included the
+  projection, so the baseline is re-measured at this boundary. The projection,
+  session and Python costs are gated end to end by G0.
+- **D5**: the synchronous operator trait is crate-private in P2.
+  - It covers `RollingOperator` and `ExpressionOperator`.
+  - The runner drives both through an adapter in their existing async
+    operator tasks. Their async `StreamOperator` implementations are deleted.
+  - The public async `StreamOperator` trait (external operators), Union and
+    every other operator are unchanged. Exposing the trait publicly and
+    migrating the remaining operators is P7.
+- **D6**: Expression shapes that compile to a row-local program take the sync
+  path. These are column projections and the `CompiledExpression` steps
+  (`datafusion_template/compiled.rs:25-87`), compiled once at preparation from
+  the exact input schema. Shapes with UDFs or plans that do not compile keep
+  an async implementation. A session runs them through its existing
+  `block_on` adapter; they are outside the G0 graph.
 
 ## 2. Problem
 
@@ -74,6 +102,31 @@ fixed dispatch and every row costs 33–51 ns. Verified sources of that cost:
   (`operator/rolling/state_codec.rs:1158-1175`). Output after restore can
   therefore differ in the last bits from an uninterrupted run.
 
+P1's session measurement (`feature/stream-session` at `3676a502`,
+`benchmarks/stream-session/p1-20261115-summary.md`) put the case-1 1-row
+dual-SMA push p50 well above the ≤ 20 µs gate:
+
+| Mode                        | Case-1 push p50 | Native call share   |
+|-----------------------------|-----------------|---------------------|
+| forced GC (pre-registered)  | 152.9 µs        | 126.9 µs            |
+| normal GC                   | 90.5 µs         | 75.0 µs             |
+| hot tight loop (diagnostic) | 18.6 µs         | —                   |
+
+The bridge is cheap: a no-op session call costs 0.46 µs. The rest is native
+operator dispatch on the async path, and it is sensitive to cache state:
+
+- `block_on` over async handlers per push (`runtime/streaming/session.rs:430`
+  at `3676a502`);
+- `StreamOperatorContext::for_task` built per callback
+  (`runtime/streaming/operator_task.rs:2041`, `:2101`);
+- per-call `Vec`/`BTreeMap` construction (`session.rs:416`, `:436`) and the
+  expression's per-call step vector (`datafusion_template/compiled.rs:72`);
+- large async state machines;
+- the rolling data/finalize work listed above.
+
+Python argument handling (10.9 µs) and result assembly (5.1 µs) were the
+remaining normal-GC phases.
+
 ## 3. Goals and non-goals
 
 Goals:
@@ -88,15 +141,26 @@ Goals:
    removed (§6).
 5. One checkpoint layout with bit-identical restore. Layouts 1–6, their codecs
    and `RollingNumericalProfile` are deleted (§7, §8).
-6. Gates: G1 native 1-row append ≤ 1 µs; G2 ≤ 4 ns per window-row; G3
-   6,400 rows × 64 entities ≤ 100 µs (§10).
+6. Rolling and compilable Expression nodes on a synchronous operator trait.
+   A session whose graph is all-sync runs a push with no async handler,
+   future, `block_on` or per-call context construction (§6.4).
+7. A steady-state 1-row session push allocates nothing beyond the Arrow
+   output it materializes, and its footprint does not grow (§6.5).
+8. Gates (§10):
+   - G0: warm-stream session case-1 p50 ≤ 20 µs in normal-GC mode;
+   - G1: native 1-row rolling append ≤ 1 µs;
+   - G2: ≤ 4 ns per window-row;
+   - G3: 6,400 rows × 64 entities ≤ 100 µs;
+   - the allocation and footprint budget A1–A3.
 
 Non-goals:
 
-- Projection, `EnvelopeCost`, edge, runner, `StreamSession` or the sync
-  operator trait (P1/P7). Snapshot pages, dirty bitmaps, background
-  persistence and manifest v4 (P3). P2 keeps the current barrier protocol and
-  manifest v3.
+- Migrating Union, SQL, window, join, ASOF, cross-section or any other
+  operator to the sync trait, and making the trait public (P7).
+- Changing runner topology, edges or the public async `StreamOperator`
+  trait. Changing P1's session API, admission or edge budget rules.
+- Snapshot pages, dirty bitmaps, background persistence and manifest v4
+  (P3). P2 keeps the current barrier protocol and manifest v3.
 - The keyed-state core shared with group by and join (P4). P2's typed routing
   is rolling-local, and P4 may absorb it.
 - Sharding, the morsel pool and `x86-64-v3` wheels (P6). No SIMD intrinsics,
@@ -443,7 +507,7 @@ duplicate identities and picks the tier:
   `null_count == 0` and all values finite, plus no NaN under the sticky
   policy) selects a branch-free loop. Otherwise the checked loop runs.
   Cancellation is checked every 8,192 rows. Kernels contain no `.await`.
-- Thresholds are named constants that P2.6 and P2.7 tune within their
+- Thresholds are named constants that P2.8 and P2.9 tune within their
   measurement budget.
 - The finite (batch) path, the DataFusion AVG-only route (a per-partition
   single-entity slab) and array `rolling_mean`/`RollingMeanState` call the
@@ -488,6 +552,112 @@ duplicate identities and picks the tier:
   - the decay cache and quota counters.
 - New counters: `scalar_tier_calls`, `run_tier_calls`, `full_tick_calls`,
   `prescan_checked_rows` and `rebuilds`.
+- `send_wait` is measured by the runner adapter (§6.4) after the synchronous
+  call returns. Sessions record no rolling metrics (P1 spec §6.2).
+
+### 6.4 Synchronous operator trait and session drive (`cf-api-designer` confirms names)
+
+The trait lives in the crate-private module `operator/sync_operator.rs` (D5).
+Its shape:
+
+```rust
+pub(crate) trait SyncStreamOperator: OperatorMetadata + Send {
+    /// One-time preparation; may await (e.g. DataFusion planning). Never per call.
+    async fn prepare(&mut self, cx: &PrepareContext<'_>) -> Result<()>;
+    fn on_data(&mut self, ingress: usize, batch: Batch, cx: &mut SyncContext<'_>, out: &mut Emitter) -> Result<()>;
+    fn on_watermark(&mut self, watermark: EventTime, cx: &mut SyncContext<'_>, out: &mut Emitter) -> Result<()>;
+    fn on_end(&mut self, cx: &mut SyncContext<'_>, out: &mut Emitter) -> Result<()>;
+    fn checkpoint(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot>;
+    fn restore(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()>;
+    fn reset(&mut self) -> Result<()>;
+}
+```
+
+- **`SyncContext`.** The driver builds it once per node and updates it in
+  place per call. It carries:
+  - the precomputed operator id and input watermark;
+  - the ingress progress snapshot and output budget;
+  - the late-metrics sink and the optional lock-free rolling recorder;
+  - a reference to the job's cancellation token.
+
+  It replaces the per-callback `StreamOperatorContext::for_task`
+  (`operator_task.rs:2041`, `:2101`) for sync nodes. The `checkpointing()`
+  flag is not exposed.
+- **`Emitter`.** A per-node outbox with retained capacity, addressed by port
+  index. Port, kind and exact-schema validation keep today's errors, with an
+  `Arc::ptr_eq` schema fast path. No string lookup or `format!` on success.
+- **Behavior parity.** Errors, panics and ordering are as today. Each
+  callback's outputs precede the forwarded control (plan §4.1).
+- **Cancellation.** Checked at entry and every 8,192 rows. Kernels contain no
+  `.await` (§6.1).
+- **Shared control rules.** Input-watermark computation, late-port
+  watermark/idle suppression, end-of-input fan-out and output frontiers move
+  out of `runtime/streaming/operator_task.rs` into synchronous functions. The
+  operator task and the session driver both call them; the logic is not
+  copied.
+- **Runner adapter.** `CompiledStreamOperator` gains sync variants. The
+  existing async operator task calls the sync methods. It then sends the
+  outbox through the existing edges, awaiting capacity, and forwards control.
+  Runner-visible behavior is unchanged, including P1's session/runner parity.
+  The one difference: a callback's outputs are buffered until the call
+  returns, bounded by that callback's output (§11 R7).
+- **Session drive.**
+  - Session nodes are either sync, called directly, or async, run through
+    P1's existing `block_on` adapter.
+  - For a graph whose nodes are all sync, `push`, `advance` and `finish` do
+    not enter a Tokio context, poll a future or call `block_on`. The session
+    keeps no Tokio runtime after preparation.
+  - Internal edges are in-place queues with retained capacity. P1's
+    validation, oversize rule (`EnvelopeCost` computed once per emitted
+    batch, without allocating), failure semantics and the in-runtime
+    rejection are unchanged.
+- **Migrated operators.**
+  - `RollingOperator`: all output kinds.
+  - `ExpressionOperator`: the compilable shapes of D6.
+    - It compiles its row-local program at `prepare`.
+    - It keeps per-call step state such as filter coalescers across calls
+      instead of rebuilding it (`datafusion_template/compiled.rs:72`).
+    - It evaluates every record batch of a table payload in one call, checking
+      cancellation per record batch instead of `yield_now`
+      (`compiled.rs:76`).
+    - Output bits equal today's async route.
+  - Their async `StreamOperator` implementations are deleted for these shapes,
+    along with the expression route's lazy template capture
+    (`datafusion.rs:678-685`) when nothing else uses it.
+
+### 6.5 Allocation and footprint budget
+
+The G0 graph is a Rust `StreamSession` running rolling dual mean(5)/mean(20)
+into an exact projection of the spread. It is warmed with 4,096 history
+rows, then 1,000 steady-state 1-row pushes. Measurement uses the existing
+`allocation_counter` evidence seam (`performance_evidence.rs:230-234`).
+
+- **A1, zero engine allocations.** For a steady-state 1-row push:
+  - `count_total(push) ≤ count_total(probe)` and
+    `bytes_total(push) ≤ bytes_total(probe)`.
+  - The materialization probe runs in the same process and builds exactly the
+    Arrow output the push emits. For every batch emitted on any session edge,
+    it builds a `RecordBatch` from the same schema. Passed-through input
+    `ArrayRef`s are reused. Each newly computed column is built from a `Vec`
+    of the emitted length, plus a null buffer only when it has nulls. The
+    batch is wrapped as a table `Batch` with `BatchMetadata::default()`. The
+    probe also builds one `SessionOutput` holding the returned batches.
+  - Nothing else allocates: state, scratch, routing, validation, metadata
+    stamping and propagation, contexts, emitters, queues, metrics and futures.
+  - Results are identical across 1,000 consecutive pushes, at history 4,096
+    and 65,536 rows, and at windows 20 and 4,096.
+  - The same comparison is reported, not gated, for 99-row and 6,400 × 64
+    pushes. Their scratch may grow only on first use.
+- **A2, no growth.** Over 10,000 steady-state pushes, dropping each output:
+  - net live bytes (`bytes_current` across the loop) are 0;
+  - one push's peak net bytes (`bytes_max`) are at most `bytes_total(probe)`.
+- **A3, resident footprint.** The warmed G0 session holds at most 256 KiB of
+  net live heap beyond its logical history and pending bytes. This is
+  measured as `bytes_current` from before construction to after warm-up. No
+  DataFusion `SessionContext`, Tokio runtime or worker pool is retained.
+  P2.1 reports the baseline value.
+- A1–A3 are deterministic CI tests in `runtime/streaming/session/tests.rs`.
+  The release evidence run (§10) reports the same numbers.
 
 ## 7. Checkpoint
 
@@ -542,6 +712,12 @@ duplicate identities and picks the tier:
   `rebase_due`, `StableFold` and the Kahan `CompensatedSum`. `window.rs`
   keeps its own until P7.
 - **Public surface.** `RollingNumericalProfile` and every surface in §4.6.
+- **Async handlers.** The async `StreamOperator` implementations of
+  `RollingOperator` (`operator/rolling.rs:1701-1933`), with
+  `prepare_checkpoint_async` and `restore_async`, and of the compilable
+  `ExpressionOperator` shapes (`operator/expression.rs:405-442`).
+  - Also deleted: the per-callback context construction for sync nodes, and
+    the stream route's lazy template capture once unused.
 - **Fixtures.** Rolling fixtures that pin West, `stable_v1` or `stable_v2`
   bits are rebuilt from the oracle.
 
@@ -551,15 +727,25 @@ Each PR is independently revertible and red→green. It deletes what it
 replaces and runs only its focused checks locally (§12); full regression runs
 in CI. Every measurement follows §10.
 
-| PR   | Prefix      | Content                                                         | Gate   |
-|------|-------------|-----------------------------------------------------------------|--------|
-| P2.1 | `test:`     | harness extensions, baseline registration                       | —      |
-| P2.2 | `feat:`     | numeric contract, shared accumulator module, profile removal    | —      |
-| P2.3 | `refactor:` | state table, entity slab, undo log, layout 7 for typed kinds    | —      |
-| P2.4 | `feat:`     | typed plan for every output kind; delete general path, 1–4      | —      |
-| P2.5 | `feat:`     | RSI/ATR/MACD on the slab; delete indicator subsystem, 5–6       | —      |
-| P2.6 | `perf:`     | scalar tier and fixed-cost removals                             | G1     |
-| P2.7 | `perf:`     | run tier with pre-scan, full-tick tier                          | G2, G3 |
+| PR   | Prefix      | Content                                                         | Gate           |
+|------|-------------|-----------------------------------------------------------------|----------------|
+| P2.1 | `test:`     | harness extensions, baseline registration                       | —              |
+| P2.2 | `feat:`     | numeric contract, shared accumulator module, profile removal    | —              |
+| P2.3 | `refactor:` | state table, entity slab, undo log, layout 7 for typed kinds    | —              |
+| P2.4 | `feat:`     | typed plan for every output kind; delete general path, 1–4      | —              |
+| P2.5 | `feat:`     | RSI/ATR/MACD on the slab; delete indicator subsystem, 5–6       | —              |
+| P2.6 | `refactor:` | sync operator trait, session sync drive, Expression migrated    | —              |
+| P2.7 | `refactor:` | Rolling on the sync trait; delete its async handler             | —              |
+| P2.8 | `perf:`     | scalar tier, fixed costs, zero-allocation push, Python bridge   | G0, G1, A1–A3  |
+| P2.9 | `perf:`     | run tier with pre-scan, full-tick tier                          | G2, G3         |
+
+Ordering:
+
+- P2.6 depends only on P2.1 and P1, so it may proceed in parallel with
+  P2.2–P2.5.
+- P2.7 needs P2.5 and P2.6: lanes, the indicator worker and the async
+  checkpoint hooks are already gone by then.
+- P2.8 and P2.9 follow P2.7.
 
 **P2.1: harness (bench and test only).**
 
@@ -569,6 +755,9 @@ in CI. Every measurement follows §10.
     `CALC_FLOW_NATIVE_EVIDENCE_CASES`: `1x1-dual`, `99x1-dual`,
     `6400x64-dual`, `64x64-dual-tick` and `6400x64-dual-lag1`. Dual means
     mean(5) and mean(20). Keep the recorder-absent and recorder-present arms.
+  - Add a session arm: the Rust `StreamSession` G0 graph (§6.5). It reports
+    push latency and the A1–A3 quantities, including the materialization
+    probe.
   - Add a `native` subcommand to `scripts/profile_warm_stream.py`. It runs two
     prebuilt release evidence binaries alternately and summarizes them with
     `paired_summary`.
@@ -577,8 +766,11 @@ in CI. Every measurement follows §10.
     keeping oracle tolerance validation.
 - Red: the script test for the missing subcommand, and an unknown case
   selector rejected.
-- Measurement: register baseline G1–G3 numbers at this PR's merge commit in
-  `benchmarks/rolling-kernel-v2/baseline-<sha>.{json,md}`.
+- Measurement: register the baseline at this PR's merge commit in
+  `benchmarks/rolling-kernel-v2/baseline-<sha>.{json,md}`:
+  - G1–G3 at the dispatch boundary;
+  - the session arm's A1–A3 values;
+  - warm-stream session case 1 in normal-GC and forced-GC modes (§10.2).
 
 **P2.2: numeric contract.** Needs API designer and critic first.
 
@@ -670,23 +862,83 @@ in CI. Every measurement follows §10.
   at 1 row and 6,400 × 64, against baseline, with the TA-Lib arm as reference
   only. Four cases.
 
-**P2.6: scalar tier and fixed costs (G1).**
+**P2.6: sync operator trait, session drive, Expression.**
 
-- Changes: the scalar tier, F1–F6, and the §6.3 metrics changes.
+- Changes:
+  - Add the §6.4 trait, `SyncContext`, `Emitter` and runner adapter.
+  - Extract the shared control functions from `operator_task.rs`.
+  - Session nodes become sync or async.
+  - Expression's compilable shapes (D6) move to the trait. Their async route
+    and lazy template capture are deleted.
 - Red tests:
+  - a `#[cfg(test)]` counter records `block_on` or future polls during
+    pushes of an all-sync session graph (input → exact projection), and must
+    record zero;
+  - sync Expression output is bitwise equal to the DataFusion SQL route for
+    column projections, compiled projections and filters;
+  - a UDF expression still runs in a session (through the async adapter) and
+    in the runner;
+  - P1's session/runner parity tests and the existing runner expression
+    tests stay green, unmodified.
+- Measurement:
+  - warm-stream session case 1, normal GC, `drivers=session:session` against
+    P2.1;
+  - a runner 1-row control (`drivers=runner:runner`, regression below 0.95);
+  - a runner 6,400 × 64 control.
+
+**P2.7: Rolling on the sync trait.**
+
+- Changes:
+  - `RollingOperator` implements only the sync trait, including late side
+    output through the `Emitter`.
+  - The runner drives it through the adapter, with `send_wait` measured by the
+    adapter.
+  - Delete its async implementation.
+- Red tests:
+  - the all-sync counter records zero for rolling → exact projection;
+  - P1's late side-output test (session vs runner, `_cf_late_*` columns)
+    passes on the sync path;
+  - existing rolling runner and checkpoint tests stay green.
+- Measurement:
+  - warm-stream session case 1, normal GC, against P2.1;
+  - the sync `1x1-dual` (G1 boundary, informational until P2.8);
+  - a runner 6,400 × 64 control (regression below 0.95 stops the PR).
+
+**P2.8: scalar tier, fixed costs, allocations, bridge (G0, G1, A1–A3).**
+
+- Changes:
+  - the scalar tier, F1–F6, the §6.3 metrics changes, and the §6.5
+    allocation and footprint work;
+  - an allocation-free session drive: metadata stamping through shared
+    `Arc`s, queues and outboxes with retained capacity, and no per-call
+    `Vec`/`BTreeMap` except the returned `SessionOutput`;
+  - the Python bridge (`python/calc_flow/session.py` and
+    `crates/calc-flow-python/src/session.rs`):
+    - input validation is an identity or fingerprint check against the
+      cached schema, not a full schema comparison per push;
+    - metadata normalization is skipped when the batch already carries the
+      session's normalized metadata;
+    - results are assembled with the cached output schema.
+
+  The public API and errors are unchanged. Phase targets, reported but not
+  gated: argument handling ≤ 4 µs, native call ≤ 10 µs and result assembly
+  ≤ 3 µs, in normal GC.
+- Red tests:
+  - A1, A2 and A3 (§6.5) fail;
   - a `#[cfg(test)]` converter-construction counter is non-zero per dispatch;
   - a test clock observes more than one publication per callback;
-  - the allocation count of a 1-row append grows with history (harness
-    allocation counter);
-  - a forced scalar tier is bitwise equal to the run path.
+  - a forced scalar tier must be bitwise equal to the run path;
+  - Python: a push with an equal-but-not-identical schema object still passes
+    the full validation path, and a mismatched schema still raises
+    `ValueError`.
 - Measurement:
-  - `1x1-dual` recorder absent (G1);
-  - `1x1-dual` recorder present (overhead report);
-  - `99x1-dual`;
-  - a Python session 1-row push via P1's warm-stream session driver
-    (informational, requires P1).
+  - warm-stream session case 1, normal GC (G0, with the TA-Lib reference arm);
+  - the same case with forced GC (reported);
+  - sync `1x1-dual` recorder absent (G1);
+  - warm-stream session case 2 (99 rows) and case 3 (6,400 × 64), normal GC
+    (reported).
 
-**P2.7: run and full-tick tiers (G2, G3).**
+**P2.9: run and full-tick tiers (G2, G3).**
 
 - Changes: the run tier with pre-scan, the full-tick tier, and the shared tier
   functions for finite, DataFusion and array paths.
@@ -725,31 +977,61 @@ in CI. Every measurement follows §10.
 - **Python cases.** These reuse their harness's existing paired protocol.
   Both arms validate outputs against the oracle or tolerance. Cross-contract
   pairs use `--numeric-contract-change`.
+- **Warm-stream session cases.** These use P1's `scripts/profile_warm_stream.py
+  compare` protocol and configuration (P1 spec §8;
+  `stream-session-measurement.md` on `feature/stream-session`):
+  - dual-SMA spread, window 20, fast window 5;
+  - 4,096 history rows in one segment, exact projection, checkpointing off;
+  - `SourceProvidedWatermarks`, with a per-append watermark at the last
+    appended timestamp;
+  - 30 AB/BA pairs in persistent workers, `TOKIO_WORKER_THREADS=4`;
+  - seed `20261115` and the harness bootstrap (seed 771031, 20,000
+    resamples).
+
+  Baseline and candidate wheels are sealed with `profile_warm_stream.py
+  build`. The baseline is P2.1's wheel, which is P1's session over the old
+  operators. Normal-GC and forced-GC runs are separate invocations of
+  `--gc-modes`, inside one 600 s budget.
 - **Reports.** `benchmarks/rolling-kernel-v2/p2.<n>-<date>.{json,md}`.
 
 ### 10.2 Gates
 
-The gate boundary is a release current-thread `block_on` of real
-`dispatch_data` plus `dispatch_watermark_handler` for a `RollingOperator` with
-dual mean(5) and mean(20). The recorder is absent unless stated, and there is
-no projection (D4).
-
-- **G1** (P2.6): `1x1-dual` candidate p50 ≤ 1 µs.
-- **G2** (P2.7): `numeric_update` stage ns ÷ (6,400 × 2) ≤ 4 ns in
+- **G0** (P2.8): warm-stream session case 1, run as
+  `--case name=1,append_rows=1,entities=1,drivers=session:session,reference=ta_lib,p50_limit_us=20`
+  with `--gc-modes normal`. The candidate session p50 must be ≤ 20 µs.
+  - The same case with `--gc-modes forced` is reported with its phase timers
+    (argument handling, native call, result assembly) and is not gated.
+  - P1 reference values: 90.5 µs normal GC, 152.9 µs forced GC, 18.6 µs hot
+    loop.
+- **A1–A3** (P2.8): the §6.5 CI tests pass. The release evidence session arm
+  reports the same quantities.
+- **Boundary for G1–G3.**
+  - The candidate is measured by direct synchronous `on_data` plus
+    `on_watermark` calls on a `RollingOperator` with dual mean(5) and
+    mean(20). It has a reused `SyncContext` and `Emitter`, the outbox is
+    cleared inside the timer, and there is no projection (D4).
+  - The P2.1 baseline predates the trait, so it uses real `dispatch_data`
+    plus `dispatch_watermark_handler` under a current-thread `block_on`.
+  - G1–G3 are absolute. The cross-boundary ratio is informational.
+  - The recorder is absent unless stated.
+- **G1** (P2.8): `1x1-dual` candidate p50 ≤ 1 µs.
+- **G2** (P2.9): `numeric_update` stage ns ÷ (6,400 × 2) ≤ 4 ns in
   `6400x64-dual` with the recorder present (plan target 2–4 ns).
-- **G3** (P2.7): `6400x64-dual` candidate p50 ≤ 100 µs. The plan's reference
+- **G3** (P2.9): `6400x64-dual` candidate p50 ≤ 100 µs. The plan's reference
   is 329 µs including projection; the registered baseline is re-measured here.
 - **Stop rule.** If a gate misses, the PR reports the stage breakdown and stops
-  for a decision instead of expanding measurement (plan §8).
+  for a decision instead of expanding measurement (plan §8). For G0 the report
+  also carries the phase timers and the A1–A3 values.
 
 ## 11. Dependencies, indicator placement and risks
 
-- **P1.**
-  - P2 builds on `feature/stream-session`. Determinism tests include a
-    `StreamSession` push sequence (P1 spec §3).
-  - P2.5's admission change and P2.6's Python session case need P1 merged.
-  - Everything else is independent of P1. If P1's stop rule fires, P2.5 and
-    P2.6 drop those two items.
+- **P1.** P2 now depends on P1 throughout:
+  - G0, P2.6 and P2.8 modify and measure P1's session.
+  - P2 rebases onto `feature/stream-session` at or after `3676a502`, or onto
+    `main` once P1 merges, to pick up the session harness (session driver,
+    `--gc-modes`, per-arm drivers).
+  - Determinism tests include a `StreamSession` push sequence (P1 spec §3).
+  - P2.5 lifts P1's indicator rejection.
 - **P3.**
   - P2.3 defines the `state/table.rs` seam with a whole-table snapshot. P3
     replaces snapshot/restore internals and adds manifest v4, without kernel
@@ -771,6 +1053,18 @@ no projection (D4).
   sum/mean/dispersion/pair outputs on batch, stream, array and SQL AVG-rewrite
   paths; overflowed windows reading ±inf; the `{−1e308, +1e308}` mean reading
   0; old rolling checkpoints failing; and `rolling_metrics` counter changes.
+- **R6.** P1's normal-GC Python phases already total 16 µs: 10.9 µs argument
+  handling and 5.1 µs result assembly. G0 can miss even with a near-zero
+  native call, so P2.8 owns the bridge (§9). If G0 misses, the stop rule
+  applies, with phase timers and A1–A3 values.
+- **R7.** The runner adapter buffers one callback's outputs before sending,
+  where today it sends chunk by chunk under capacity waits. Peak memory per
+  callback grows by at most that callback's output columns. Input columns stay
+  shared `Arc`s.
+- **R8.** G0's normal-GC mode includes the harness's IPC and validation cache
+  pressure. Footprint (A3) and allocation-free calls (A1) are the levers. P1's
+  hot-loop result (18.6 µs on the async path) shows the budget is achievable
+  only with that footprint work.
 
 ## 12. Acceptance criteria
 
@@ -794,19 +1088,27 @@ no projection (D4).
 - [ ] No rolling primitive is `"general"`. `rg -n 'ScalarValue|checkpointing\(\)'`
   over `operator/rolling.rs` and `operator/rolling/` has no matches. No
   `RowConverter` is constructed per dispatch (test counter).
-- [ ] G1, G2 and G3 pass at §10.2 with registered reports committed. The
-  P2.2–P2.5 controls show no regression (CI upper bound ≥ 0.95).
+- [ ] For an all-sync session graph (rolling → exact projection),
+  `push`/`advance`/`finish` record zero `block_on` calls and future polls
+  (test counter). `RollingOperator` and the compilable `ExpressionOperator`
+  shapes have no async `StreamOperator` implementation. P1's session/runner
+  parity tests pass unmodified.
+- [ ] A1, A2 and A3 (§6.5) pass as CI tests.
+- [ ] G0 passes in normal-GC mode with the forced-GC run reported. G1, G2 and
+  G3 pass at §10.2. Registered reports are committed. The P2.2–P2.7 controls
+  show no regression (CI upper bound ≥ 0.95).
 - [ ] Focused local checks per PR (full regression in CI):
 
   ```bash
   cargo fmt --all --check
   cargo test -p calc-flow --lib operator::rolling
   cargo test -p calc-flow --lib accumulate state::table
+  cargo test -p calc-flow --lib runtime::streaming::session operator::expression
   cargo test -p calc-flow --test rolling_spec --test rolling_state --test project_v3
   cargo clippy -p calc-flow -p calc-flow-python --lib --tests -- -D warnings
   RUSTDOCFLAGS="-D warnings" cargo doc -p calc-flow --no-deps
   uv run maturin develop
-  JAX_PLATFORMS=cpu uv run pytest python/tests/test_rolling_numeric_contract.py python/tests/test_native_array.py -q
+  JAX_PLATFORMS=cpu uv run pytest python/tests/test_rolling_numeric_contract.py python/tests/test_native_array.py python/tests/test_stream_session.py -q
   uv run ruff check . && uv run ruff format --check .
   git diff --check
   ```
@@ -828,8 +1130,20 @@ no projection (D4).
   (≈1483).
 - `docs/symbolic-design.md#native-rolling-state`: profiles, layouts 3/4 and
   the decay transactional copy.
-- `docs/runtime-envelope.md`: rolling metrics, sparse undo and private copy,
-  entity-parallel lanes, and the state budget (≈836–940).
+- `docs/runtime-envelope.md`:
+  - rolling metrics, including `send_wait` measured by the adapter;
+  - sparse undo and private copy;
+  - entity-parallel lanes;
+  - the state budget (≈836–940);
+  - the session path: sync nodes, no `block_on` for all-sync graphs, and the
+    async adapter for the remaining nodes;
+  - the runner adapter's per-callback output buffering.
+- `docs/streaming-guide.md` and `docs/python-api.md`: session latency
+  expectations and the expression shapes that stay async (D6).
+- `AGENTS.md` Rust architecture bullets: built-in Rolling and Expression run
+  on the crate-private synchronous trait, and the public `StreamOperator`
+  stays async. Mirror the change in `CLAUDE.md` guidance only if it restates
+  the bullet.
 - `docs/sql-datafusion-performance.md`: the rolling rewrite boundary
   (≈262–267) and D1.
 - `docs/design.md` (≈228–236).
@@ -843,6 +1157,11 @@ no projection (D4).
 - `cf-api-designer`:
   - names of the removed and added `RollingMetrics` counters (§6.3);
   - the typed-transition name for `lag`/`delta` in the manifest;
-  - D2's rustdoc rewording instead of renaming the declaration constants.
-- `cf-critic`: the §4.4 bound derivations, and the pairing rule's effect on
-  the bound (factor 2 on `γ_m²`).
+  - D2's rustdoc rewording instead of renaming the declaration constants;
+  - the §6.4 trait, context and emitter names, and whether `prepare` stays
+    async or moves to plan compilation.
+- `cf-critic`:
+  - the §4.4 bound derivations, and the pairing rule's effect on the bound
+    (factor 2 on `γ_m²`);
+  - whether the §6.5 materialization probe is strict enough to stop engine
+    allocations from hiding inside "output" construction.
