@@ -33,6 +33,105 @@ use crate::{
 };
 
 /// Caller-driven, in-memory execution of one compiled stream plan.
+///
+/// [`push`](Self::push), [`advance`](Self::advance) and
+/// [`finish`](Self::finish) are synchronous. Each call runs its batch and
+/// watermark through every operator in topological order on the calling
+/// thread, using the runner's per-operator code, and returns the rows emitted
+/// by that call. There is no source, sink or progress task. The session owns
+/// one current-thread Tokio runtime (timers only) and blocks the caller on it;
+/// calling from inside a Tokio runtime context returns
+/// [`CalcFlowError::InvalidArgument`] at field `session` instead of blocking
+/// that runtime.
+///
+/// Sessions are in-memory and non-durable. The checkpoint fields of
+/// [`StreamRuntimeConfig`] are ignored, including `checkpointing = true`;
+/// `edge_budget` bounds each envelope and the SQL state budgets are applied as
+/// runners apply them. Inner edges have no queue backpressure: one call
+/// buffers what each operator emits during its turn, so memory per call is
+/// bounded by the operators' own output chunking.
+///
+/// Construction admits one dynamic input (no static inputs) feeding `Rolling`
+/// (not the indicator or MACD layouts), `Expression` and `Union` nodes, with
+/// no exactly-once output. Other graphs return
+/// [`CalcFlowError::InvalidArgument`] naming the field and should use
+/// [`StreamingRunner`](crate::StreamingRunner).
+///
+/// A validation error (unknown input, schema, budget, watermark or ordering)
+/// leaves the session unchanged. Any later error fails the session and
+/// discards rows emitted earlier in that call; operator panics are returned
+/// as [`CalcFlowError::Operator`] with a `panicked: ` message. Calls on a
+/// failed or finished session return [`CalcFlowError::InvalidArgument`] at
+/// field `session`. Dropping a session cancels its job and releases every
+/// operator.
+///
+/// ```
+/// use std::{collections::BTreeMap, sync::Arc};
+///
+/// use calc_flow::arrow::{
+///     array::{ArrayRef, Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
+///     datatypes::{DataType, Field, Schema, TimeUnit},
+///     record_batch::RecordBatch,
+/// };
+/// use calc_flow::{
+///     Batch, BatchKind, BatchMetadata, Edge, EventTime, ExpressionOperator, OperatorMetadata,
+///     PipelineBuilder, Port, PortEndpoint, RollingOperator, RollingSpec, StreamRequirements,
+///     StreamRuntimeConfig, StreamSession, UdfRegistry,
+/// };
+///
+/// let schema = Arc::new(Schema::new(vec![
+///     Field::new("ts", DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())), false),
+///     Field::new("symbol", DataType::Utf8, false),
+///     Field::new("sequence", DataType::UInt64, false),
+///     Field::new("price", DataType::Float64, false),
+/// ]));
+/// let spec: RollingSpec = serde_json::from_value(serde_json::json!({
+///     "configuration_version": 1, "state_layout_version": 1,
+///     "partition_by": ["symbol"], "event_time": "ts", "sequence_by": ["sequence"],
+///     "outputs": [{"kind": "mean", "primitive_version": 1, "input": "price",
+///         "output": "price_mean", "frame": {"kind": "rows", "size": 2}, "min_periods": 1}],
+///     "allowed_lateness_micros": 0, "late_policy": {"kind": "error", "scope": "envelope"},
+///     "value_policy": "stateful_numeric_v1",
+/// }))?;
+/// let rolling = RollingOperator::new("rolling", Arc::clone(&schema), spec)?;
+/// let rolled = rolling.output_ports()[0].schema().expect("exact schema").fields().to_vec();
+/// let project = ExpressionOperator::new(
+///     "project", "", vec!["ts".into(), "symbol".into(), "price_mean".into()], None, vec![],
+/// )?
+/// .with_ports(
+///     Port::new("input", BatchKind::Table, true, Some(rolled.iter().map(|f| f.as_ref().clone()).collect()))?,
+///     Port::new("output", BatchKind::Table, true, None)?,
+/// )?;
+/// let plan = PipelineBuilder::new("quotes")?
+///     .add_node("rolling", rolling)?
+///     .add_node("project", Box::new(project))?
+///     .connect(Edge::new(
+///         PortEndpoint::new("rolling", "output")?,
+///         PortEndpoint::new("project", "input")?,
+///     ))?
+///     .compile_stream(&UdfRegistry::new().snapshot(), &StreamRequirements::default())?;
+///
+/// let mut session = StreamSession::new(plan, &StreamRuntimeConfig::default(), BTreeMap::new())?;
+/// let (input, output) = (session.input_ids()[0].to_owned(), session.output_ids()[0].to_owned());
+/// let batch = |ts: i64, sequence: u64, price: f64| -> Result<Batch, Box<dyn std::error::Error>> {
+///     let columns: Vec<ArrayRef> = vec![
+///         Arc::new(TimestampMicrosecondArray::from(vec![ts]).with_timezone("UTC")),
+///         Arc::new(StringArray::from(vec!["a"])),
+///         Arc::new(UInt64Array::from(vec![sequence])),
+///         Arc::new(Float64Array::from(vec![price])),
+///     ];
+///     let record = RecordBatch::try_new(Arc::clone(&schema), columns)?;
+///     Ok(Batch::table(vec![record], BatchMetadata::default())?)
+/// };
+///
+/// // The explicit watermark closes each row in the same call.
+/// let first = session.push(&input, batch(10, 0, 1.0)?, Some(EventTime::from_micros(10)))?;
+/// assert_eq!(first.batches(&output)[0].num_rows(), 1);
+/// let second = session.push(&input, batch(11, 1, 3.0)?, Some(EventTime::from_micros(11)))?;
+/// assert_eq!(second.batches(&output)[0].num_rows(), 1);
+/// assert!(session.finish()?.is_empty());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub struct StreamSession {
     runtime: Option<tokio::runtime::Runtime>,
     job: StreamJobContext,
@@ -43,6 +142,12 @@ pub struct StreamSession {
 }
 
 /// How a session input's watermark advances.
+///
+/// Generated modes use the runtime's generated-watermark arithmetic after
+/// every push, with no emit interval or idle timeout. An explicit watermark
+/// passed to [`StreamSession::push`] or [`StreamSession::advance`] combines
+/// with a generated one as their maximum: the caller declares the input
+/// complete up to that time.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum SessionWatermark {
@@ -51,10 +156,15 @@ pub enum SessionWatermark {
     Explicit,
     /// Requires non-null event time that never decreases and stays after the
     /// current watermark; advances to `max(event_time) - 1 µs` after each push.
-    Ordered { event_time_column: String },
+    Ordered {
+        /// The Arrow timestamp column of the declared input schema.
+        event_time_column: String,
+    },
     /// Advances to `max(event_time) - max_out_of_orderness` after each push.
     BoundedOutOfOrderness {
+        /// The Arrow timestamp column of the declared input schema.
         event_time_column: String,
+        /// The positive delay, representable in nanoseconds.
         max_out_of_orderness: Duration,
     },
     /// Never advances; results finalize at `finish`.
@@ -62,6 +172,9 @@ pub enum SessionWatermark {
 }
 
 /// Rows emitted by one session call, by graph output ID.
+///
+/// Each output keeps emission order; outputs have no combined order.
+/// Watermark, idle and end-of-input messages are not returned.
 #[derive(Debug, Default)]
 pub struct SessionOutput(BTreeMap<String, Vec<Batch>>);
 
@@ -126,10 +239,17 @@ struct Staged {
 impl StreamSession {
     /// Consumes a compiled plan and prepares every operator.
     ///
+    /// `watermarks` is keyed by the input ID; an absent input uses
+    /// [`SessionWatermark::Explicit`].
+    ///
     /// # Errors
     ///
     /// Returns [`CalcFlowError::InvalidArgument`] for an invalid
-    /// configuration or an unsupported graph.
+    /// configuration, an unsupported graph (fields `session.inputs`,
+    /// `session.static_inputs`, `session.nodes.<id>`,
+    /// `session.requirements.delivery.<output>`), or an invalid watermark
+    /// (`session.watermarks.<key>` and its `event_time_column` or
+    /// `max_out_of_orderness`).
     pub fn new(
         mut plan: StreamExecutionPlan,
         config: &StreamRuntimeConfig,
@@ -189,11 +309,29 @@ impl StreamSession {
             .panic_on_next_dispatch();
     }
 
-    /// Runs `batch`, then an optional watermark, through every operator.
+    /// Runs `batch`, then an optional watermark, through every operator and
+    /// returns the rows this call emitted.
+    ///
+    /// The batch is stamped like a runner source batch (binding ID, a
+    /// sequence starting at 0, original attributes). The input watermark
+    /// advances to `watermark` or, for generated modes, to the larger of it
+    /// and the generated candidate; an equal or absent watermark adds none.
     ///
     /// # Errors
     ///
-    /// Returns the operator error that failed the session.
+    /// Validation errors leave the session unchanged:
+    /// [`CalcFlowError::Compile`] when the batch differs from the input's
+    /// declared kind or exact schema, [`CalcFlowError::EdgeBudgetExceeded`]
+    /// when it exceeds `edge_budget`, and [`CalcFlowError::InvalidArgument`]
+    /// for an unknown input, a regressing watermark, any watermark under
+    /// [`SessionWatermark::Disabled`], or `Ordered` event time that is null,
+    /// decreasing or at or before the current watermark. Any other error,
+    /// including an operator failure or panic, fails the session. Lifecycle
+    /// and Tokio-context errors use field `session`.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "the session takes ownership of pushed batches; stamping shares their Arrow buffers"
+    )]
     pub fn push(
         &mut self,
         input: &str,
@@ -205,22 +343,27 @@ impl StreamSession {
         self.run(staged)
     }
 
-    /// Advances the input watermark without data.
+    /// Advances the input watermark without data and returns the rows it
+    /// closes; an equal watermark is a no-op.
     ///
     /// # Errors
     ///
-    /// Returns the operator error that failed the session.
+    /// Returns [`CalcFlowError::InvalidArgument`], leaving the session
+    /// unchanged, for an unknown input, a regressing watermark or
+    /// [`SessionWatermark::Disabled`]. Any operator error fails the session.
     pub fn advance(&mut self, input: &str, watermark: EventTime) -> Result<SessionOutput> {
         self.check_callable()?;
         let staged = self.input.stage_advance(input, watermark)?;
         self.run(staged)
     }
 
-    /// Ends the input, flushes every operator and finishes the session.
+    /// Ends the input, flushes every operator and finishes the session,
+    /// returning the flushed rows. A session with no pushes still finishes.
     ///
     /// # Errors
     ///
-    /// Returns the operator error that failed the session.
+    /// Any operator error fails the session; lifecycle and Tokio-context
+    /// errors use field `session`.
     pub fn finish(&mut self) -> Result<SessionOutput> {
         self.check_callable()?;
         self.run(Staged {
@@ -260,6 +403,10 @@ impl StreamSession {
         }
     }
 
+    #[allow(
+        clippy::large_futures,
+        reason = "the drain future is polled in place by block_on; boxing would allocate per call"
+    )]
     fn drive(&mut self, messages: Vec<StreamMessage>) -> Result<SessionOutput> {
         let Self {
             runtime,

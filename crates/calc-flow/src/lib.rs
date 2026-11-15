@@ -6,7 +6,8 @@
 //! continuously running graphs executed by the streaming runtime.
 //!
 //! The removed v2 continuous-runtime owners and checkpoint store are not
-//! available after the A6 cutover.
+//! available after the A6 cutover. [`StreamSession`] is the supported
+//! caller-driven push API; the removed `StreamingRunner::step` stays absent.
 //!
 //! ```compile_fail
 //! use calc_flow::MicroBatchRunner;
@@ -142,8 +143,8 @@ pub use query_analysis::{
     QueryRowOrder, QuerySortKey, QueryTemporalIdentity, QueryTieOrder, SupportStatus, UpdateKind,
 };
 pub use runtime::{
-    ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, StreamJobContext, StreamMessage,
-    StreamMessageKind, edge_channel,
+    ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, SessionOutput, SessionWatermark,
+    StreamJobContext, StreamMessage, StreamMessageKind, StreamSession, edge_channel,
 };
 pub use state::{
     CheckpointManifest, CheckpointManifestFields, CursorManifestEntry, LocalStateBackend,

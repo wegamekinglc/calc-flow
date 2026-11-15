@@ -56,6 +56,10 @@ impl CallerDrivenOperator {
 
     /// Empties every ingress queue in FIFO order, then runs `on_end` once
     /// every ingress has seen end-of-input. Panics become operator errors.
+    #[allow(
+        clippy::large_futures,
+        reason = "one dispatch is polled at a time on the session's own runtime; boxing would allocate per message on the push path"
+    )]
     pub(in crate::runtime::streaming) async fn drain(&mut self) -> Result<()> {
         let Self {
             node_id,

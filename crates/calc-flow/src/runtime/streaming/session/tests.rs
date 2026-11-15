@@ -64,7 +64,7 @@ fn error_policy() -> Value {
     json!({"kind": "error", "scope": "envelope"})
 }
 
-fn rolling_spec(late_policy: Value) -> RollingSpec {
+fn rolling_spec(late_policy: &Value) -> RollingSpec {
     serde_json::from_value(json!({
         "configuration_version": 1, "state_layout_version": 1,
         "partition_by": ["symbol"], "event_time": "ts", "sequence_by": ["sequence"],
@@ -78,7 +78,7 @@ fn rolling_spec(late_policy: Value) -> RollingSpec {
     .unwrap()
 }
 
-fn rolling(node_id: &str, late_policy: Value) -> RollingOperator {
+fn rolling(node_id: &str, late_policy: &Value) -> RollingOperator {
     RollingOperator::new(node_id, input_schema(), rolling_spec(late_policy)).unwrap()
 }
 
@@ -123,7 +123,7 @@ fn projection(node_id: &str, rolled: &SchemaRef) -> ExpressionOperator {
 }
 
 fn rolling_projection_plan() -> StreamExecutionPlan {
-    let rolling = rolling("rolling", error_policy());
+    let rolling = rolling("rolling", &error_policy());
     let rolled = rolling.output_ports()[0].schema().unwrap().clone();
     let builder = PipelineBuilder::new("session")
         .unwrap()
@@ -304,12 +304,12 @@ fn test_rolling_projection_with_explicit_watermarks_matches_runner() {
     let mut rows = Vec::new();
     let mut emitted_per_push = Vec::new();
     for (batch_rows, watermark) in &pushes {
-        let pushed = session
+        let emitted = session
             .push(&input, input_batch(batch_rows), Some(micros(*watermark)))
             .unwrap();
-        let pushed = rendered_rows(pushed.batches(&output));
-        emitted_per_push.push(pushed.len());
-        rows.extend(pushed);
+        let emitted = rendered_rows(emitted.batches(&output));
+        emitted_per_push.push(emitted.len());
+        rows.extend(emitted);
     }
     let finished = session.finish().unwrap();
     rows.extend(rendered_rows(finished.batches(&output)));
@@ -576,7 +576,10 @@ fn test_validation_errors_leave_session_usable() {
             "1970-01-01T00:00:00.000012Z|a|2.5",
         ]
     );
+}
 
+#[test]
+fn test_ordered_validation_rejects_decreasing_time_and_stays_usable() {
     let (mut session, input, output) = ordered_session();
     let time_field = format!("session.inputs.{input}.event_time");
     session
@@ -604,9 +607,13 @@ fn test_validation_errors_leave_session_usable() {
             "1970-01-01T00:00:00.000010Z|a|1.5",
         ]
     );
+}
 
+#[test]
+fn test_disabled_watermarks_reject_explicit_watermarks_and_stay_usable() {
     let plan = rolling_projection_plan();
     let input = source_id(&plan);
+    let watermark_field = format!("session.inputs.{input}.watermark");
     let mut session = open_session(
         plan,
         BTreeMap::from([(input.clone(), SessionWatermark::Disabled)]),
@@ -767,7 +774,7 @@ fn test_late_side_output_matches_runner_including_source_columns() {
         compile(
             PipelineBuilder::new("late")
                 .unwrap()
-                .add_node("rolling", rolling("rolling", side_output))
+                .add_node("rolling", rolling("rolling", &side_output))
                 .unwrap(),
         )
     };
@@ -781,10 +788,10 @@ fn test_late_side_output_matches_runner_including_source_columns() {
     let input = session.input_ids()[0].to_owned();
     let mut rows = BTreeMap::<String, Vec<String>>::new();
     for (batch_rows, watermark) in &pushes {
-        let pushed = session
+        let emitted = session
             .push(&input, input_batch(batch_rows), Some(micros(*watermark)))
             .unwrap();
-        for (output, batches) in pushed.into_batches() {
+        for (output, batches) in emitted.into_batches() {
             rows.entry(output)
                 .or_default()
                 .extend(rendered_rows(&batches));
@@ -813,7 +820,7 @@ fn test_late_side_output_matches_runner_including_source_columns() {
 /// `input -> pass -> {fast, slow} -> {fast_out, slow_out}` plus `union(fast, slow)`.
 fn fan_out_plan() -> StreamExecutionPlan {
     let rolling_with = |node_id: &str, size: usize| {
-        let mut spec = serde_json::to_value(rolling_spec(error_policy())).unwrap();
+        let mut spec = serde_json::to_value(rolling_spec(&error_policy())).unwrap();
         spec["outputs"][0]["frame"]["size"] = json!(size);
         RollingOperator::new(
             node_id,
@@ -980,7 +987,7 @@ fn behind_pass(
 }
 
 #[test]
-fn test_admission_rejects_unsupported_graphs_with_field_paths() {
+fn test_admission_rejects_unsupported_inputs_with_field_paths() {
     assert_rejected(
         compile(two_input_union()),
         BTreeMap::new(),
@@ -1008,7 +1015,10 @@ fn test_admission_rejects_unsupported_graphs_with_field_paths() {
         }])
         .unwrap();
     assert_rejected(with_static, BTreeMap::new(), "session.static_inputs");
+}
 
+#[test]
+fn test_admission_rejects_unsupported_nodes_with_field_paths() {
     let sql = crate::SqlOperator::new("sql", "SELECT * FROM input", vec!["input".into()], vec![])
         .unwrap();
     assert_rejected(
@@ -1064,10 +1074,13 @@ fn test_admission_rejects_unsupported_graphs_with_field_paths() {
         BTreeMap::new(),
         "session.nodes.rsi",
     );
+}
 
+#[test]
+fn test_admission_rejects_unsupported_requirements_and_watermarks() {
     let output = rolling_projection_plan().sink_binding_ids()[0].to_owned();
     let rolling_builder = || {
-        let rolling = rolling("rolling", error_policy());
+        let rolling = rolling("rolling", &error_policy());
         let rolled = rolling.output_ports()[0].schema().unwrap().clone();
         let builder = PipelineBuilder::new("session")
             .unwrap()

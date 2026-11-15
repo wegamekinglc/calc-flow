@@ -80,3 +80,4 @@ pub(crate) use context::StreamJobControl;
 pub use message::{StreamMessage, StreamMessageKind};
 #[cfg(feature = "benchmark-internals")]
 pub(crate) use operator_task::benchmark_replay;
+pub use session::{SessionOutput, SessionWatermark, StreamSession};
