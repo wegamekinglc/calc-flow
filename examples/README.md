@@ -1,13 +1,13 @@
 # Calc Flow examples
 
-The 36 numbered runnable Python examples have a [Rust counterpart](../crates/calc-flow/examples/README.md),
+The 37 numbered runnable Python examples have a [Rust counterpart](../crates/calc-flow/examples/README.md),
 including connector sources/sinks, recovery, and financial streams. Each pair
 uses the same unique number and filename stem, from `01_datafusion_pipeline`
-to `36_symbolic_event_window`.
+to `37_stream_session`.
 
 Numbers 01–31 retain their existing filenames. The formerly duplicated
-19–22 SQL/streaming examples are now 32–35, and the previously unnumbered
-event-window example is 36. Shared fixture modules and the WebSocket sample
+19–22 SQL/streaming examples are now 32–35, the previously unnumbered
+event-window example is 36, and the caller-driven session example is 37. Shared fixture modules and the WebSocket sample
 server keep descriptive, unnumbered names in both languages.
 
 Start with the [documentation overview](../docs/introduction.md) and
@@ -207,7 +207,7 @@ Temporary checkpoint lineages do not demonstrate durable restart recovery.
 
 ### SQL and streaming pipelines
 
-Examples 32–36 run without external services and are included in the default
+Examples 32–37 run without external services and are included in the default
 example runner.
 
 - [32_sql_expression_pipeline.py](32_sql_expression_pipeline.py) — compose
@@ -281,6 +281,12 @@ example computes grouped one-minute trade count, volume, low, high, and
 arithmetic average price. It checks native final output with explicit source
 watermarks and a `price_range` branch sharing the same window declaration.
 Guide: [symbolic event windows](../docs/symbolic-workflows.md#aggregate-event-time-windows).
+
+- [37_stream_session.py](37_stream_session.py) — push two ordered quote batches
+  through a two-row `cf.ts.mean` in one table session. An explicit watermark
+  closes the first push at `mean_price=[10.0, 11.0]`; the second push stays open,
+  and `finish()` emits `[13.5]`. Context exit closes the in-memory session.
+  Guide: [stream sessions](../docs/python-api.md#stream-sessions).
 
 ## Rust counterparts
 

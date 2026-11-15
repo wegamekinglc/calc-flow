@@ -3,8 +3,8 @@
 
 use super::{
     AssertUnwindSafe, CalcFlowError, FutureExt, OperatorBarrierAlignment, OperatorInputProgress,
-    OperatorTaskInputs, Result, catch_unwind, dispatch_message, finish_operator, ingress_admission,
-    panic_message,
+    OperatorTaskInputs, Result, StreamMessage, catch_unwind, dispatch_message, finish_operator,
+    ingress_admission, panic_message,
 };
 
 pub(in crate::runtime::streaming) struct CallerDrivenOperator {
@@ -61,49 +61,78 @@ impl CallerDrivenOperator {
         reason = "one dispatch is polled at a time on the session's own runtime; boxing would allocate per message on the push path"
     )]
     pub(in crate::runtime::streaming) async fn drain(&mut self) -> Result<()> {
+        for index in 0..self.ingress_names.len() {
+            self.drain_ingress(index).await?;
+        }
+        self.finish_when_ended().await
+    }
+
+    #[allow(
+        clippy::large_futures,
+        reason = "one dispatch is polled at a time on the session's own runtime; boxing would allocate per message on the push path"
+    )]
+    async fn drain_ingress(&mut self, index: usize) -> Result<()> {
         let Self {
             node_id,
             ingress_names,
             inputs,
             progress,
             alignment,
-            ended,
             #[cfg(test)]
             panic_on_next_dispatch,
+            ..
         } = self;
-        for name in ingress_names.iter() {
-            while let Some(message) = inputs
-                .ingresses
-                .get_mut(name)
-                .and_then(|ingress| ingress.receiver.as_mut())
-                .ok_or_else(|| CalcFlowError::Internal {
-                    message: format!("operator {node_id:?} lost ingress {name:?}"),
-                })?
-                .try_recv()?
-            {
+        let name = &ingress_names[index];
+        while let Some(message) = next_message(inputs, node_id, name)? {
+            #[cfg(test)]
+            let inject_panic = std::mem::take(panic_on_next_dispatch);
+            let dispatch = async {
                 #[cfg(test)]
-                let inject_panic = std::mem::take(panic_on_next_dispatch);
-                let dispatch = async {
-                    #[cfg(test)]
-                    assert!(!inject_panic, "session dispatch test seam");
-                    dispatch_message(inputs, name, message, progress, alignment).await
-                };
-                contain(node_id, dispatch).await?;
-                ingress_admission::acknowledge(inputs, name, progress);
-            }
-        }
-        if !*ended
-            && inputs
-                .ingresses
-                .values()
-                .all(|ingress| ingress.saw_explicit_eof)
-        {
-            let completed_epoch = alignment.completed_epoch;
-            contain(node_id, finish_operator(inputs, progress, completed_epoch)).await?;
-            *ended = true;
+                assert!(!inject_panic, "session dispatch test seam");
+                dispatch_message(inputs, name, message, progress, alignment).await
+            };
+            contain(node_id, dispatch).await?;
+            ingress_admission::acknowledge(inputs, name, progress);
         }
         Ok(())
     }
+
+    /// Runs `on_end` once, after every ingress has seen end-of-input.
+    #[allow(
+        clippy::large_futures,
+        reason = "on_end is polled in place on the session's own runtime"
+    )]
+    async fn finish_when_ended(&mut self) -> Result<()> {
+        let all_ended = self
+            .inputs
+            .ingresses
+            .values()
+            .all(|ingress| ingress.saw_explicit_eof);
+        if self.ended || !all_ended {
+            return Ok(());
+        }
+        let completed_epoch = self.alignment.completed_epoch;
+        let finish = finish_operator(&mut self.inputs, &self.progress, completed_epoch);
+        contain(&self.node_id, finish).await?;
+        self.ended = true;
+        Ok(())
+    }
+}
+
+/// Takes the front message of one session ingress.
+fn next_message(
+    inputs: &mut OperatorTaskInputs,
+    node_id: &str,
+    name: &str,
+) -> Result<Option<StreamMessage>> {
+    inputs
+        .ingresses
+        .get_mut(name)
+        .and_then(|ingress| ingress.receiver.as_mut())
+        .ok_or_else(|| CalcFlowError::Internal {
+            message: format!("operator {node_id:?} lost ingress {name:?}"),
+        })?
+        .try_recv()
 }
 
 async fn contain(node_id: &str, operation: impl Future<Output = Result<()>>) -> Result<()> {

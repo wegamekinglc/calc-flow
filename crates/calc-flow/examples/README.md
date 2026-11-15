@@ -1,6 +1,6 @@
 # Calc Flow Rust examples
 
-The 36 numbered Python examples in [`examples/`](../../../examples/README.md)
+The 37 numbered Python examples in [`examples/`](../../../examples/README.md)
 have Rust counterparts with the same number and filename stem below. The native
 array and matrix examples use matching descriptive filenames.
 Core examples live here; examples using native
@@ -111,6 +111,7 @@ cargo run -p calc-flow --example native_sequence_stream
 | [34_streaming_outputs.py](../../../examples/34_streaming_outputs.py)                             | [34_streaming_outputs.rs](34_streaming_outputs.rs)                                             | —                  |
 | [35_stream_asof_join.py](../../../examples/35_stream_asof_join.py)                               | [35_stream_asof_join.rs](35_stream_asof_join.rs)                                               | —                  |
 | [36_symbolic_event_window.py](../../../examples/36_symbolic_event_window.py)                     | [36_symbolic_event_window.rs](36_symbolic_event_window.rs)                                     | —                  |
+| [37_stream_session.py](../../../examples/37_stream_session.py)                                   | [37_stream_session.rs](37_stream_session.rs)                                                   | —                  |
 
 `support/` contains shared Arrow fixtures, replay sources, collectors, matrix
 factories, and lazy trade/quote data. In particular,

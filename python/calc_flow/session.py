@@ -256,17 +256,7 @@ def _session_policies(
     }
 
 
-def _open_session(
-    program: Program,
-    runtime: Runtime | None,
-    config: StreamRuntimeConfig | None,
-    watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None,
-    *,
-    table_output: bool,
-) -> StreamSession[object]:
-    from calc_flow.stream import _compile_stream, _StreamRequest
-
-    _require_blocking("session")
+def _session_dynamic_inputs(program: Program) -> dict[str, TableExpr]:
     expected = {_node_name(value._node): value for value in program.inputs}
     dynamic: dict[str, TableExpr] = {}
     for name, value in expected.items():
@@ -281,9 +271,28 @@ def _open_session(
                 "use stream()"
             )
         dynamic[name] = value
+    return dynamic
+
+
+def _check_session_outputs(program: Program) -> None:
     for name, output in program.outputs:
         if not isinstance(output, TableExpr):
             raise TypeError(f"session.outputs.{name}: expected TableExpr")
+
+
+def _open_session(
+    program: Program,
+    runtime: Runtime | None,
+    config: StreamRuntimeConfig | None,
+    watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None,
+    *,
+    table_output: bool,
+) -> StreamSession[object]:
+    from calc_flow.stream import _compile_stream, _StreamRequest
+
+    _require_blocking("session")
+    dynamic = _session_dynamic_inputs(program)
+    _check_session_outputs(program)
     policies = _session_policies(watermarks, dynamic)
     native_config = _runner_config(config)._native()
     plan, names, sinks, _ = _compile_stream(

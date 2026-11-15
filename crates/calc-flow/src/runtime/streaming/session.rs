@@ -8,6 +8,7 @@ use datafusion::arrow::{
         TimestampSecondArray,
     },
     datatypes::{SchemaRef, TimeUnit},
+    record_batch::RecordBatch,
 };
 use tokio::sync::{mpsc, watch};
 
@@ -29,7 +30,10 @@ use super::{
 use crate::{
     Batch, CalcFlowError, CancellationToken, DeliveryGuarantee, EventTime, JsonMap, Port, Result,
     StreamExecutionPlan, StreamRuntimeConfig,
-    pipeline::{CompiledStreamOperator, RuntimeStreamNode, StreamRuntimePlanParts},
+    pipeline::{
+        CompiledStreamOperator, RuntimeEdge, RuntimeSourceRoute, RuntimeStreamNode,
+        StreamRuntimePlanParts,
+    },
 };
 
 /// Caller-driven, in-memory execution of one compiled stream plan.
@@ -251,32 +255,15 @@ impl StreamSession {
     /// (`session.watermarks.<key>` and its `event_time_column` or
     /// `max_out_of_orderness`).
     pub fn new(
-        mut plan: StreamExecutionPlan,
+        plan: StreamExecutionPlan,
         config: &StreamRuntimeConfig,
         watermarks: BTreeMap<String, SessionWatermark>,
     ) -> Result<Self> {
-        config.validate()?;
-        admit_plan(&plan)?;
-        plan.set_sql_budgets(config)?;
-        let job = StreamJobContext::new(
-            crate::continuous::allocate_job_id()?,
-            plan.fingerprint().to_owned(),
-            JsonMap::new(),
-            None,
-            CancellationToken::new(),
-        )
-        .with_checkpointing(false);
-        let parts = plan.into_runtime_parts(config.edge_budget)?;
-        admit_nodes(&parts.nodes)?;
+        let parts = admitted_parts(plan, config)?;
+        let job = session_job(&parts.fingerprint)?;
         let (input, nodes, outputs) = wire(parts, &job, watermarks)?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .map_err(|error| CalcFlowError::Internal {
-                message: format!("session runtime could not start: {error}"),
-            })?;
         Ok(Self {
-            runtime: Some(runtime),
+            runtime: Some(session_runtime()?),
             job,
             input,
             nodes,
@@ -428,24 +415,72 @@ impl StreamSession {
         let runtime = runtime.as_ref().ok_or_else(|| CalcFlowError::Internal {
             message: "session runtime was released".into(),
         })?;
-        runtime.block_on(async {
-            for node in nodes.iter_mut() {
-                node.drain().await?;
-            }
-            Ok::<_, CalcFlowError>(())
-        })?;
-        let mut emitted = BTreeMap::new();
-        for (output, receiver) in outputs.iter_mut() {
-            let mut batches = Vec::new();
-            while let Some(message) = receiver.try_recv()? {
-                batches.extend(message.into_data());
-            }
-            if !batches.is_empty() {
-                emitted.insert(output.clone(), batches);
-            }
-        }
-        Ok(SessionOutput(emitted))
+        runtime.block_on(drain_in_order(nodes))?;
+        collect_outputs(outputs)
     }
+}
+
+/// Runs every node to quiescence in topological order.
+#[allow(
+    clippy::large_futures,
+    reason = "one node drain is polled at a time; boxing would allocate per node"
+)]
+async fn drain_in_order(nodes: &mut [CallerDrivenOperator]) -> Result<()> {
+    for node in nodes {
+        node.drain().await?;
+    }
+    Ok(())
+}
+
+/// Takes every batch that reached a graph output during this call.
+fn collect_outputs(outputs: &mut [(String, OperatorEdgeReceiver)]) -> Result<SessionOutput> {
+    let mut emitted = BTreeMap::new();
+    for (output, receiver) in outputs.iter_mut() {
+        let mut batches = Vec::new();
+        while let Some(message) = receiver.try_recv()? {
+            batches.extend(message.into_data());
+        }
+        if !batches.is_empty() {
+            emitted.insert(output.clone(), batches);
+        }
+    }
+    Ok(SessionOutput(emitted))
+}
+
+/// Validates the configuration and plan, applies SQL budgets like runners
+/// do, and admits the decomposed nodes.
+fn admitted_parts(
+    mut plan: StreamExecutionPlan,
+    config: &StreamRuntimeConfig,
+) -> Result<StreamRuntimePlanParts> {
+    config.validate()?;
+    admit_plan(&plan)?;
+    plan.set_sql_budgets(config)?;
+    let parts = plan.into_runtime_parts(config.edge_budget)?;
+    admit_nodes(&parts.nodes)?;
+    Ok(parts)
+}
+
+/// A checkpoint-off job context built like the continuous runner's.
+fn session_job(fingerprint: &str) -> Result<StreamJobContext> {
+    Ok(StreamJobContext::new(
+        crate::continuous::allocate_job_id()?,
+        fingerprint.to_owned(),
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    )
+    .with_checkpointing(false))
+}
+
+/// The session-owned current-thread runtime: timers only, no I/O driver.
+fn session_runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .map_err(|error| CalcFlowError::Internal {
+            message: format!("session runtime could not start: {error}"),
+        })
 }
 
 fn session_error(message: &str) -> CalcFlowError {
@@ -499,26 +534,7 @@ impl SessionInput {
         self.port
             .validate(batch, &format!("session.inputs.{}", self.binding_id))?;
         let mut next = self.progress.clone();
-        let mut generated = None;
-        if let WatermarkMode::Generated {
-            event_time,
-            ordered,
-        } = &self.mode
-        {
-            if *ordered {
-                next.max_event_time = ordered_maximum(&self.binding_id, batch, event_time, &next)?;
-            }
-            let generator = next
-                .generator
-                .as_mut()
-                .ok_or_else(|| CalcFlowError::Internal {
-                    message: "generated session watermark has no generator".into(),
-                })?;
-            generated = generator
-                .observe_batch(batch, &self.binding_id)
-                .and_then(|()| generator.on_timer(&self.binding_id))
-                .map_err(|error| session_watermark_error(&self.binding_id, error))?;
-        }
+        let generated = self.stage_generated(batch, &mut next)?;
         let (sequence, data, cost) =
             sequenced_source_message(&self.binding_id, next.next_sequence, batch, None)?;
         self.sender.check_cost(&cost)?;
@@ -532,6 +548,35 @@ impl SessionInput {
             next,
             finishes: false,
         })
+    }
+
+    /// Checks `Ordered` time and computes the generated candidate on the
+    /// staged copy of the input progress.
+    fn stage_generated(
+        &self,
+        batch: &Batch,
+        next: &mut InputProgress,
+    ) -> Result<Option<EventTime>> {
+        let WatermarkMode::Generated {
+            event_time,
+            ordered,
+        } = &self.mode
+        else {
+            return Ok(None);
+        };
+        if *ordered {
+            next.max_event_time = ordered_maximum(&self.binding_id, batch, event_time, next)?;
+        }
+        let generator = next
+            .generator
+            .as_mut()
+            .ok_or_else(|| CalcFlowError::Internal {
+                message: "generated session watermark has no generator".into(),
+            })?;
+        generator
+            .observe_batch(batch, &self.binding_id)
+            .and_then(|()| generator.on_timer(&self.binding_id))
+            .map_err(|error| session_watermark_error(&self.binding_id, error))
     }
 
     fn check_input(&self, input: &str) -> Result<()> {
@@ -577,7 +622,8 @@ fn advance_watermark(next: &mut InputProgress, candidate: Option<EventTime>) -> 
 }
 
 /// Checks `Ordered` event time across every record batch and returns the new
-/// maximum. Values compare in the declared unit; the watermark in nanoseconds.
+/// maximum. Values compare in the declared unit; the first row is compared
+/// with the watermark after the runtime's import to microseconds.
 fn ordered_maximum(
     binding_id: &str,
     batch: &Batch,
@@ -585,43 +631,80 @@ fn ordered_maximum(
     progress: &InputProgress,
 ) -> Result<Option<i64>> {
     let field = format!("session.inputs.{binding_id}.event_time");
-    let invalid = |message: &str| CalcFlowError::InvalidArgument {
-        field: field.clone(),
-        message: message.into(),
-    };
     let mut maximum = progress.max_event_time;
     let mut first = None;
     for record in batch.table_payload()?.batches() {
-        let column = record.column(event_time.index);
-        if column.null_count() != 0 {
-            return Err(invalid("expected non-null event time"));
-        }
-        let values = timestamp_values(column.as_ref(), event_time.unit)
-            .ok_or_else(|| invalid("record batch column type differs from the declared schema"))?;
-        for &value in values {
-            if maximum.is_some_and(|maximum| value < maximum) {
-                return Err(invalid(
-                    "expected nondecreasing event time; use BoundedOutOfOrderness for out-of-order input",
-                ));
-            }
-            first.get_or_insert(value);
-            maximum = Some(value);
-        }
+        let values = event_time_values(record, event_time, &field)?;
+        maximum = nondecreasing_maximum(values, maximum, &field)?;
+        first = first.or_else(|| values.first().copied());
     }
     if let (Some(first), Some(watermark)) = (first, progress.watermark) {
-        // Operators see the runtime's import: nanoseconds floor to microseconds.
-        let first = EventTime::import_timestamp_unit(first, time_unit(event_time.unit), &field)
-            .map_err(|error| match error {
-                CalcFlowError::InvalidArgument { message, .. } => invalid(&message),
-                error => error,
-            })?;
-        if first <= watermark {
-            return Err(invalid(
-                "expected event time after the current watermark; earlier rows would be late",
-            ));
-        }
+        check_after_watermark(first, watermark, event_time.unit, &field)?;
     }
     Ok(maximum)
+}
+
+fn invalid_event_time(field: &str, message: &str) -> CalcFlowError {
+    CalcFlowError::InvalidArgument {
+        field: field.into(),
+        message: message.into(),
+    }
+}
+
+/// The non-null event-time values of one record batch, in its declared unit.
+fn event_time_values<'a>(
+    record: &'a RecordBatch,
+    event_time: &ResolvedEventTimeColumn,
+    field: &str,
+) -> Result<&'a [i64]> {
+    let column = record.column(event_time.index);
+    if column.null_count() != 0 {
+        return Err(invalid_event_time(field, "expected non-null event time"));
+    }
+    timestamp_values(column.as_ref(), event_time.unit).ok_or_else(|| {
+        invalid_event_time(
+            field,
+            "record batch column type differs from the declared schema",
+        )
+    })
+}
+
+/// Extends `maximum` over `values`, rejecting any decrease.
+fn nondecreasing_maximum(values: &[i64], maximum: Option<i64>, field: &str) -> Result<Option<i64>> {
+    let mut previous = maximum;
+    for &value in values {
+        if previous.is_some_and(|previous| value < previous) {
+            return Err(invalid_event_time(
+                field,
+                "expected nondecreasing event time; use BoundedOutOfOrderness for out-of-order input",
+            ));
+        }
+        previous = Some(value);
+    }
+    Ok(previous)
+}
+
+/// Operators see the runtime's import, which floors nanoseconds to
+/// microseconds, so the imported first row must follow the watermark.
+fn check_after_watermark(
+    first: i64,
+    watermark: EventTime,
+    unit: ArrowTimestampUnit,
+    field: &str,
+) -> Result<()> {
+    let first = EventTime::import_timestamp_unit(first, time_unit(unit), field).map_err(
+        |error| match error {
+            CalcFlowError::InvalidArgument { message, .. } => invalid_event_time(field, &message),
+            error => error,
+        },
+    )?;
+    if first <= watermark {
+        return Err(invalid_event_time(
+            field,
+            "expected event time after the current watermark; earlier rows would be late",
+        ));
+    }
+    Ok(())
 }
 
 fn timestamp_values(column: &dyn Array, unit: ArrowTimestampUnit) -> Option<&[i64]> {
@@ -710,38 +793,71 @@ fn admit_plan(plan: &StreamExecutionPlan) -> Result<()> {
 /// Admits `Rolling` (except indicator and MACD layouts), `Expression` and
 /// `Union` nodes; every other kind stays on `StreamingRunner`.
 fn admit_nodes(nodes: &[RuntimeStreamNode]) -> Result<()> {
-    for node in nodes {
-        let kind = match &node.operator {
-            CompiledStreamOperator::Expression(_) | CompiledStreamOperator::Union(_) => continue,
-            CompiledStreamOperator::Rolling(operator) => match operator.state_layout_version() {
-                layout @ (crate::ROLLING_INDICATOR_STATE_LAYOUT_VERSION
-                | crate::ROLLING_MACD_STATE_LAYOUT_VERSION) => {
-                    return Err(unsupported(
-                        format!("session.nodes.{}", node.node_id),
-                        format!(
-                            "rolling indicator state layout {layout} is not supported by StreamSession; use StreamingRunner"
-                        ),
-                    ));
-                }
-                _ => continue,
-            },
-            CompiledStreamOperator::External(_) => "external",
-            CompiledStreamOperator::Sql(_) => "SQL",
-            CompiledStreamOperator::SnapshotSql(_) => "snapshot SQL",
-            CompiledStreamOperator::BoundedOrder(_) => "bounded ORDER BY",
-            CompiledStreamOperator::Distinct(_) => "DISTINCT",
-            CompiledStreamOperator::CheckpointLoan => "checkpoint loan",
-            CompiledStreamOperator::Window(_) => "window",
-            CompiledStreamOperator::CrossSection(_) => "cross-section",
-            CompiledStreamOperator::StreamJoin(_) => "join",
-            CompiledStreamOperator::StreamAsofJoin(_) => "ASOF join",
-        };
-        return Err(unsupported(
-            format!("session.nodes.{}", node.node_id),
-            format!("{kind} nodes are not supported by StreamSession; use StreamingRunner"),
-        ));
+    nodes
+        .iter()
+        .try_for_each(|node| match node_rejection(&node.operator) {
+            Some(message) => Err(unsupported(
+                format!("session.nodes.{}", node.node_id),
+                message,
+            )),
+            None => Ok(()),
+        })
+}
+
+/// Why a node stays on `StreamingRunner`; `None` admits it. The match is
+/// exhaustive so a new operator kind must choose explicitly.
+fn node_rejection(operator: &CompiledStreamOperator) -> Option<String> {
+    let kind = match operator {
+        CompiledStreamOperator::Expression(_) | CompiledStreamOperator::Union(_) => return None,
+        CompiledStreamOperator::Rolling(rolling) => {
+            return rolling_rejection(rolling.state_layout_version());
+        }
+        CompiledStreamOperator::Sql(_)
+        | CompiledStreamOperator::SnapshotSql(_)
+        | CompiledStreamOperator::BoundedOrder(_)
+        | CompiledStreamOperator::Distinct(_) => relational_kind(operator),
+        CompiledStreamOperator::Window(_)
+        | CompiledStreamOperator::CrossSection(_)
+        | CompiledStreamOperator::StreamJoin(_)
+        | CompiledStreamOperator::StreamAsofJoin(_) => keyed_kind(operator),
+        CompiledStreamOperator::External(_) => "external",
+        CompiledStreamOperator::CheckpointLoan => "checkpoint loan",
+    };
+    Some(format!(
+        "{kind} nodes are not supported by StreamSession; use StreamingRunner"
+    ))
+}
+
+fn rolling_rejection(layout: u32) -> Option<String> {
+    matches!(
+        layout,
+        crate::ROLLING_INDICATOR_STATE_LAYOUT_VERSION | crate::ROLLING_MACD_STATE_LAYOUT_VERSION
+    )
+    .then(|| {
+        format!(
+            "rolling indicator state layout {layout} is not supported by StreamSession; use StreamingRunner"
+        )
+    })
+}
+
+/// Names the SQL-planned kinds grouped in `node_rejection`.
+fn relational_kind(operator: &CompiledStreamOperator) -> &'static str {
+    match operator {
+        CompiledStreamOperator::Sql(_) => "SQL",
+        CompiledStreamOperator::SnapshotSql(_) => "snapshot SQL",
+        CompiledStreamOperator::BoundedOrder(_) => "bounded ORDER BY",
+        _ => "DISTINCT",
     }
-    Ok(())
+}
+
+/// Names the keyed-state kinds grouped in `node_rejection`.
+fn keyed_kind(operator: &CompiledStreamOperator) -> &'static str {
+    match operator {
+        CompiledStreamOperator::Window(_) => "window",
+        CompiledStreamOperator::CrossSection(_) => "cross-section",
+        CompiledStreamOperator::StreamJoin(_) => "join",
+        _ => "ASOF join",
+    }
 }
 
 /// Resolves the input's watermark mode against its declared exact schema.
@@ -823,25 +939,70 @@ fn wire(
     job: &StreamJobContext,
     watermarks: BTreeMap<String, SessionWatermark>,
 ) -> Result<Wiring> {
+    let StreamRuntimePlanParts {
+        nodes,
+        edges,
+        source_routes,
+        sink_routes,
+        ..
+    } = parts;
+    let (mut senders, mut receivers) = session_edges(&edges)?;
+    let nodes = prepare_nodes(nodes, job, &mut senders, &mut receivers)?;
+    let input = session_input(source_routes, &mut senders, watermarks)?;
+    let outputs = sink_routes
+        .into_values()
+        .map(|route| Ok((route.output_id, take_edge(&mut receivers, &route.edge_id)?)))
+        .collect::<Result<Vec<_>>>()?;
+    if !senders.is_empty() || !receivers.is_empty() {
+        return Err(CalcFlowError::Internal {
+            message: "session topology left unowned edge endpoints".into(),
+        });
+    }
+    Ok((input, nodes, outputs))
+}
+
+type SessionEdges = (
+    BTreeMap<String, OperatorEdgeSender>,
+    BTreeMap<String, OperatorEdgeReceiver>,
+);
+
+/// One session FIFO per runtime edge, with the edge's configured budget.
+fn session_edges(edges: &BTreeMap<String, RuntimeEdge>) -> Result<SessionEdges> {
     let mut senders = BTreeMap::new();
     let mut receivers = BTreeMap::new();
-    for (edge_id, edge) in &parts.edges {
+    for (edge_id, edge) in edges {
         let (sender, receiver) = session_edge(edge_id.clone(), edge.budget)?;
         senders.insert(edge_id.clone(), OperatorEdgeSender::Session(sender));
         receivers.insert(edge_id.clone(), OperatorEdgeReceiver::Session(receiver));
     }
+    Ok((senders, receivers))
+}
+
+/// Prepares and resets every node in the plan's topological order.
+fn prepare_nodes(
+    nodes: Vec<RuntimeStreamNode>,
+    job: &StreamJobContext,
+    senders: &mut BTreeMap<String, OperatorEdgeSender>,
+    receivers: &mut BTreeMap<String, OperatorEdgeReceiver>,
+) -> Result<Vec<CallerDrivenOperator>> {
     let metrics = MetricsRecorder::default();
-    let nodes = parts
-        .nodes
+    nodes
         .into_iter()
         .map(|node| {
-            prepare_node(node, job, &metrics, &mut senders, &mut receivers)
+            prepare_node(node, job, &metrics, senders, receivers)
                 .and_then(CallerDrivenOperator::new)
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect()
+}
+
+/// The one dynamic input: its route port, edge sender and watermark mode.
+fn session_input(
+    source_routes: BTreeMap<String, RuntimeSourceRoute>,
+    senders: &mut BTreeMap<String, OperatorEdgeSender>,
+    watermarks: BTreeMap<String, SessionWatermark>,
+) -> Result<SessionInput> {
     let (binding_id, route) =
-        parts
-            .source_routes
+        source_routes
             .into_iter()
             .next()
             .ok_or_else(|| CalcFlowError::Internal {
@@ -854,18 +1015,8 @@ fn wire(
         true,
         route.expected_schema.clone(),
     )?;
-    let sender = take_edge(&mut senders, &route.edge_id)?.into_session()?;
-    let outputs = parts
-        .sink_routes
-        .into_iter()
-        .map(|(output, route)| Ok((output, take_edge(&mut receivers, &route.edge_id)?)))
-        .collect::<Result<Vec<_>>>()?;
-    if !senders.is_empty() || !receivers.is_empty() {
-        return Err(CalcFlowError::Internal {
-            message: "session topology left unowned edge endpoints".into(),
-        });
-    }
-    let input = SessionInput {
+    let sender = take_edge(senders, &route.edge_id)?.into_session()?;
+    Ok(SessionInput {
         binding_id,
         port,
         sender,
@@ -876,8 +1027,7 @@ fn wire(
             generator,
             max_event_time: None,
         },
-    };
-    Ok((input, nodes, outputs))
+    })
 }
 
 fn take_edge<T>(edges: &mut BTreeMap<String, T>, edge_id: &str) -> Result<T> {

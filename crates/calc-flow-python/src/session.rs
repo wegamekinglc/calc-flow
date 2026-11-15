@@ -285,22 +285,31 @@ fn input_batch(batch: &Bound<'_, PyAny>) -> PyResult<calc_flow::Batch> {
     if let Ok(native) = batch.cast::<PyBatch>() {
         return native.get().clone_inner();
     }
-    let py = batch.py();
-    let records = if batch.hasattr(intern!(py, "__arrow_c_array__"))? {
-        vec![batch.extract::<PyRecordBatch>()?.into_inner()]
-    } else if batch.hasattr(intern!(py, "__arrow_c_stream__"))? {
-        let (mut records, schema) = batch.extract::<PyTable>()?.into_inner();
-        if records.is_empty() {
-            records.push(RecordBatch::new_empty(schema));
-        }
-        records
-    } else {
-        return Err(PyTypeError::new_err(
-            "session input must be a Batch or implement the Arrow C data or stream interface",
-        ));
-    };
-    calc_flow::Batch::table(records, calc_flow::BatchMetadata::default())
+    calc_flow::Batch::table(arrow_records(batch)?, calc_flow::BatchMetadata::default())
         .map_err(crate::error::to_py_err)
+}
+
+/// Imports a record batch or table through the Arrow C data/stream interface.
+fn arrow_records(batch: &Bound<'_, PyAny>) -> PyResult<Vec<RecordBatch>> {
+    let py = batch.py();
+    if batch.hasattr(intern!(py, "__arrow_c_array__"))? {
+        return Ok(vec![batch.extract::<PyRecordBatch>()?.into_inner()]);
+    }
+    if batch.hasattr(intern!(py, "__arrow_c_stream__"))? {
+        return table_records(batch);
+    }
+    Err(PyTypeError::new_err(
+        "session input must be a Batch or implement the Arrow C data or stream interface",
+    ))
+}
+
+/// A table's record batches; an empty table keeps its schema in one batch.
+fn table_records(table: &Bound<'_, PyAny>) -> PyResult<Vec<RecordBatch>> {
+    let (mut records, schema) = table.extract::<PyTable>()?.into_inner();
+    if records.is_empty() {
+        records.push(RecordBatch::new_empty(schema));
+    }
+    Ok(records)
 }
 
 fn outputs_to_python(py: Python<'_>, output: calc_flow::SessionOutput) -> PyResult<Py<PyDict>> {
@@ -336,30 +345,37 @@ fn session_watermarks(
 }
 
 fn session_watermark(policy: &Bound<'_, PyDict>) -> PyResult<calc_flow::SessionWatermark> {
-    let item = |key: &str| {
-        policy
-            .get_item(key)?
-            .ok_or_else(|| PyValueError::new_err(format!("session watermark requires {key:?}")))
-    };
-    let kind: String = item("kind")?.extract()?;
-    Ok(match kind.as_str() {
-        "explicit" => calc_flow::SessionWatermark::Explicit,
-        "disabled" => calc_flow::SessionWatermark::Disabled,
-        "ordered" => calc_flow::SessionWatermark::Ordered {
-            event_time_column: item("event_time_column")?.extract()?,
-        },
-        "bounded_out_of_orderness" => calc_flow::SessionWatermark::BoundedOutOfOrderness {
-            event_time_column: item("event_time_column")?.extract()?,
-            max_out_of_orderness: Duration::from_micros(
-                item("max_out_of_orderness_micros")?.extract()?,
-            ),
-        },
-        other => {
-            return Err(PyValueError::new_err(format!(
-                "unsupported session watermark kind {other:?}"
-            )));
-        }
+    let kind: String = policy_item(policy, "kind")?.extract()?;
+    match kind.as_str() {
+        "explicit" => Ok(calc_flow::SessionWatermark::Explicit),
+        "disabled" => Ok(calc_flow::SessionWatermark::Disabled),
+        "ordered" => ordered_watermark(policy),
+        "bounded_out_of_orderness" => bounded_watermark(policy),
+        other => Err(PyValueError::new_err(format!(
+            "unsupported session watermark kind {other:?}"
+        ))),
+    }
+}
+
+fn ordered_watermark(policy: &Bound<'_, PyDict>) -> PyResult<calc_flow::SessionWatermark> {
+    Ok(calc_flow::SessionWatermark::Ordered {
+        event_time_column: policy_item(policy, "event_time_column")?.extract()?,
     })
+}
+
+fn bounded_watermark(policy: &Bound<'_, PyDict>) -> PyResult<calc_flow::SessionWatermark> {
+    Ok(calc_flow::SessionWatermark::BoundedOutOfOrderness {
+        event_time_column: policy_item(policy, "event_time_column")?.extract()?,
+        max_out_of_orderness: Duration::from_micros(
+            policy_item(policy, "max_out_of_orderness_micros")?.extract()?,
+        ),
+    })
+}
+
+fn policy_item<'py>(policy: &Bound<'py, PyDict>, key: &str) -> PyResult<Bound<'py, PyAny>> {
+    policy
+        .get_item(key)?
+        .ok_or_else(|| PyValueError::new_err(format!("session watermark requires {key:?}")))
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {

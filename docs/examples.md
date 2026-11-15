@@ -55,6 +55,11 @@ Use an explicit [watermark policy](streaming-guide.md#watermark-policies) for
 disorder or source-provided progress. Async iterables have no replay; use explicit
 sinks and a stable checkpoint root for durable recovery.
 
+Run [37_stream_session.py](../examples/37_stream_session.py) for the synchronous
+caller-driven alternative. It pushes ordered rows through a two-row rolling mean,
+uses an explicit watermark to close the first push, and calls `finish()` for the
+last row before context exit closes the in-memory session.
+
 Run [26_late_side_output.py](../examples/26_late_side_output.py) for paired
 normal/late outputs of one rolling stage. A single Program iterator checks
 `normal=[20.0]` and `late=[10.0]` using explicit source watermarks; the
@@ -107,7 +112,7 @@ These standalone examples declare the calculation with `cf.table_input`,
 supply explicit transport/lifecycle settings. They use temporary checkpoints,
 so rerunning starts a new lineage and remote writes remain. Follow the
 connector guide's delivery and repeat-run limits. Python and Rust counterparts
-share unique numbers 01–36; the SQL and streaming pipeline examples use 32–36.
+share unique numbers 01–37; the SQL and streaming pipeline examples use 32–37.
 
 ## Compose financial and relational calculations
 
