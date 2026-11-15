@@ -38,19 +38,19 @@ The declaration catalog is intentionally wider than the implemented project
 lowerers. Use this availability matrix when constructing user-facing formula
 editors or validating stored declarations:
 
-| Domain                    | Construct/analyze | Batch/stream compile         | Current lowering boundary                                             |
-|---------------------------|-------------------|------------------------------|-----------------------------------------------------------------------|
-| row-local columns         | yes               | yes                          | portable scalar types and the documented SQL allowlist                |
-| SQL table stages          | yes               | yes; one stream alias        | native SELECT/CTE schema; row-local expressions after SQL             |
-| rolling `ts`              | yes               | yes                          | source/alias/row-local operands and earlier rolling results           |
-| cross-section `cs`        | yes               | yes                          | staged values; event time and partitions resolve to inputs or aliases |
-| relational stream joins   | yes               | stream only                  | independent/nested native joins with proved post-join ordering        |
-| backward ASOF joins       | yes               | batch and stream             | strict final left preservation; typed identity and bounded state      |
-| NumPy/JAX matrix          | yes               | exact supported shape        | one static `weights` parameter and one allowlisted matmul             |
-| event `window`            | yes               | batch/stream with aggregates | fixed UTC tumbling/hopping; stateless table work on either side       |
-| native table-array bridge | yes               | batch and stream             | row-preserving work; at most one static-RHS matmul per table stage    |
-| native array outputs      | yes               | batch only                   | single ArrayExpr.collect_array; array/table roots; no mixed outputs   |
-| NumPy/JAX array outputs   | yes               | no                           | use the existing supported table attachment                           |
+| Domain                      | Construct/analyze   | Batch/stream compile           | Current lowering boundary                                               |
+|-----------------------------|---------------------|--------------------------------|-------------------------------------------------------------------------|
+| row-local columns           | yes                 | yes                            | portable scalar types and the documented SQL allowlist                  |
+| SQL table stages            | yes                 | yes; see SQL composition       | stream: one alias or exact-schema UNION ALL; native SELECT/CTE schema   |
+| rolling `ts`                | yes                 | yes                            | source/alias/row-local operands and earlier rolling results             |
+| cross-section `cs`          | yes                 | yes                            | staged values; event time and partitions resolve to inputs or aliases   |
+| relational stream joins     | yes                 | stream only                    | independent/nested native joins with proved post-join ordering          |
+| backward ASOF joins         | yes                 | batch and stream               | strict final left preservation; typed identity and bounded state        |
+| NumPy/JAX matrix            | yes                 | exact supported shape          | one static `weights` parameter and one allowlisted matmul               |
+| event `window`              | yes                 | batch/stream with aggregates   | fixed UTC tumbling/hopping; stateless table work on either side         |
+| native table-array bridge   | yes                 | batch and stream               | row-preserving work; at most one static-RHS matmul per table stage      |
+| native array outputs        | yes                 | batch only                     | single ArrayExpr.collect_array; array/table roots; no mixed outputs     |
+| NumPy/JAX array outputs     | yes                 | no                             | use the existing supported table attachment                             |
 
 `Program.analyze` reports `unsupported_type` for stateful operands outside
 the current materialization boundary, so a clean analysis does not advertise
@@ -190,8 +190,10 @@ SQL with `collect_array`, using explicit native provider registration.
 `Program.collect` still returns tables; mixed table/array Program results and
 NumPy/JAX standalone outputs remain unsupported.
 
-Batch SQL can join multiple aliases. Append stream compilation rejects more
-than one alias before any source opens, even if aliases share a root. Stream SQL with an
+Batch SQL can join multiple aliases. Append stream SQL accepts one alias or the
+exact-schema [UNION ALL subset](relational-frontends.md#same-schema-union).
+Other multi-alias append SQL is rejected before any source opens, even if
+aliases share a root. Stream SQL with an
 ordinary aggregate or `GROUP BY` emits the full cumulative result after every
 batch. Eligible queries, including admitted grouped ordered `LAST_VALUE`,
 update compact state; unsupported aggregate shapes rerun over retained input.
@@ -223,9 +225,11 @@ empty/EOF behavior, whole-message budgets, source restrictions and recovery.
 `Program.compile_batch(runtime=None, /)` and
 `Program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0,
 late_policy="error")` lower a program to the
-existing execution plans. Batch compilation requires `engine="sql"`; stream
-compilation requires `engine="streaming"`. Project export follows the same
-engine selection and rejects a conflicting explicit mode.
+existing execution plans. Batch compilation requires `mode="batch"`; stream
+compilation requires `mode="stream"`. Legacy `engine="sql"|"streaming"` is an
+exclusive construction alias. Project export follows the selected lifecycle
+and rejects a conflicting explicit mode. `for_mode` copies declarations into
+an independent wrapper for another lifecycle.
 Compilation is declaration processing only. On a preparation-cache miss, it
 captures one immutable capability snapshot and lowers one strict project-v3
 document. Native compilation performs final port, kind, schema,
@@ -390,15 +394,15 @@ any currently supported portable symbolic field type representable in
 project-v3, including `timestamp[ms]` and time fields. Those additional types
 do not become valid grouping or `min`/`max` inputs.
 
-| Output                       | Arrow type                 | Nullable       |
-|------------------------------|----------------------------|----------------|
-| `window_start`, `window_end` | `timestamp[us, UTC]`       | false          |
-| Grouping key                 | Preserved input field type | Input nullable |
-| `count`                      | `uint64`                   | false          |
-| Signed integer `sum`         | `int64`                    | true           |
-| Unsigned integer `sum`       | `uint64`                   | true           |
-| Floating `sum`, every `avg`  | `float64`                  | true           |
-| `min`, `max`                 | Preserved input field type | true           |
+| Output                         | Arrow type                   | Nullable         |
+|--------------------------------|------------------------------|------------------|
+| `window_start`, `window_end`   | `timestamp[us, UTC]`         | false            |
+| Grouping key                   | Preserved input field type   | Input nullable   |
+| `count`                        | `uint64`                     | false            |
+| Signed integer `sum`           | `int64`                      | true             |
+| Unsigned integer `sum`         | `uint64`                     | true             |
+| Floating `sum`, every `avg`    | `float64`                    | true             |
+| `min`, `max`                   | Preserved input field type   | true             |
 
 Output columns are exactly `window_start`, `window_end`, grouping keys in
 declaration order, then aggregate outputs in declaration order. Raw input

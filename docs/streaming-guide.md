@@ -355,8 +355,12 @@ relations. Aliases must be valid SQL identifiers without case-insensitive
 duplicates, and each input requires a fixed Arrow schema. It emits a new row
 lineage without inherited temporal ordering. Outputs currently connect
 directly to sinks; expressions or other operators after this node are rejected.
-Existing `cf.sql`, `TableExpr.sql`, and `PipelineBuilder.sql` retain their
-one-alias append behavior in streams and multi-alias behavior in batch mode.
+For append streams, named `cf.sql` declarations accept one alias or the
+[exact-schema UNION ALL subset](relational-frontends.md#same-schema-union).
+`TableExpr.sql` remains the single-table interface. Low-level
+`PipelineBuilder.sql` creates a native SQL operator with one stream alias;
+it does not perform the symbolic UNION ALL lowering. Named `cf.sql` and
+`PipelineBuilder.sql` accept multiple aliases in batch mode.
 
 Each incoming data Batch replaces one alias's **entire** relation; all of its
 RecordBatches belong to that replacement. An empty table initializes or clears

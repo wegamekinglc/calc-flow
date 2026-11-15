@@ -75,7 +75,7 @@ output sequence. Old draft layouts/policies are refused. Captures
 remain charged while alive. Finite execution starts fresh on every call; it has
 NULL batch snapshots and requires no reset between calls.
 
-Analysis schema 2/revision 9 reports conditional finality and binding obligations;
+Analysis schema 2/revision 11 reports conditional finality and binding obligations;
 it does not inspect input rows or promise a runtime budget will suffice.
 The capability is `distinct@1`, batch/stream, `group_final_append_only`, checkpoint
 layouts `(2,3)`. It has no unconditional watermark requirement; the selected window

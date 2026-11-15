@@ -332,7 +332,8 @@ SQL and expressions share one DAG. A private native planning bridge derives SQL
 result schemas without reading rows or executing queries; data execution stays
 in Rust/DataFusion. SQL output has a distinct lineage without inherited temporal
 ordering. Row-local work may follow SQL, and native rolling may precede it.
-Append stream SQL accepts one alias. Ordinary aggregates and `GROUP BY` emit
+Append stream SQL accepts one alias or the exact-schema
+[UNION ALL subset](relational-frontends.md#same-schema-union). Ordinary aggregates and `GROUP BY` emit
 full cumulative snapshots after each batch. Eligible queries update compact
 state; unsupported aggregate shapes retain input and rerun over its history.
 Other append SQL, including window functions without an ordinary aggregate,

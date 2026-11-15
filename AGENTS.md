@@ -247,12 +247,13 @@ selectors.
   cumulative snapshots. Ordinary iterables have
   no replay; temporary checkpoints do not provide durable restart or exactly-once
   application delivery.
-- `Program(name, engine="sql")` or `Program(name, engine="streaming")` fixes the
-  engine at construction. Immutable `with_input` and `output` copies preserve
-  it. `Program.execute` dispatches to finite collection or owned streaming
-  results using that engine. The same declaration graph has the same
-  fingerprint across engines. `collect`/`collect_async` and `stream` reject the
-  opposite engine.
+- `Program(name, mode="batch")` or `Program(name, mode="stream")` fixes the
+  lifecycle at construction; legacy `engine="sql"|"streaming"` is an exclusive
+  alias. Exactly one selector is required. Immutable `with_input` and `output`
+  copies preserve it; `for_mode` creates an independent wrapper for another
+  lifecycle. `Program.execute` dispatches to finite collection or owned streaming
+  results. The same declaration graph has the same fingerprint across modes.
+  `collect`/`collect_async` and `stream` reject the opposite mode.
 - `Program.to_project` exports data-only native graphs without Python logical
   aliases or payloads. Reloaded projects and explicit runners use physical
   binding names; durable recovery uses explicit bindings and managed state.

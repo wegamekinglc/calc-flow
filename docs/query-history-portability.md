@@ -6,8 +6,9 @@
 a job. Its `query` field contains deterministic node and consumption-edge paths,
 exact schemas where known, and separate batch/stream history, update, finality,
 ordering and lifecycle support. `schema_version=2` describes the report format;
-`analysis_revision=4` describes its proof rules, including exact-schema union
-and unordered append-history reduction at all-source EOF. The
+`analysis_revision=11` describes its proof rules, including exact-schema union,
+bounded final DISTINCT and analytic OVER, and unordered append-history reduction
+at all-source EOF. The
 `update_semantics` field is required. Older v1 and v2 revisions remain readable;
 latest execution requires the current proof rules.
 Runtime capability registration
@@ -63,12 +64,12 @@ analysis revision.
 
 The supported requests are:
 
-| Comparison         | History            | Cutoff            |
-|--------------------|--------------------|-------------------|
-| `per_batch`        | `current_batch`    | `batch_boundary`  |
-| `final_relation`   | `accepted_history` | `all_sources_eof` |
-| `final_relation`   | `latest_relation`  | `all_sources_eof` |
-| `final_relation`   | `event_window`     | `closed_window`   |
+| Comparison           | History              | Cutoff              |
+|----------------------|----------------------|---------------------|
+| `per_batch`          | `current_batch`      | `batch_boundary`    |
+| `final_relation`     | `accepted_history`   | `all_sources_eof`   |
+| `final_relation`     | `latest_relation`    | `all_sources_eof`   |
+| `final_relation`     | `event_window`       | `closed_window`     |
 
 Other combinations are invalid configuration. Batch must receive the same
 accepted input history H, or the same individual batch for per-batch comparison.
@@ -101,14 +102,14 @@ fingerprints, preparation-cache identities, or checkpoint bytes. Stream state
 continues across batches in one job; each batch execution remains independent.
 This diagnostic API does not add batch query checkpoint/resume.
 
-| Code                               | Meaning                                                  |
-|------------------------------------|----------------------------------------------------------|
-| `history_scope_mismatch`           | Known history scope cannot satisfy the request           |
-| `update_interpretation_mismatch`   | A complete snapshot is consumed with append semantics    |
-| `sql_semantics_unproven`           | No rule proves this SQL shape                            |
-| `query_semantics_unproven`         | No rule proves this declaration or composition           |
-| `finality_unproven`                | Cutoff or empty-history reduction is unproved            |
-| `row_order_unproven`               | Requested row/tie order is unproved                      |
+| Code                                 | Meaning                                                    |
+|--------------------------------------|------------------------------------------------------------|
+| `history_scope_mismatch`             | Known history scope cannot satisfy the request             |
+| `update_interpretation_mismatch`     | A complete snapshot is consumed with append semantics      |
+| `sql_semantics_unproven`             | No rule proves this SQL shape                              |
+| `query_semantics_unproven`           | No rule proves this declaration or composition             |
+| `finality_unproven`                  | Cutoff or empty-history reduction is unproved              |
+| `row_order_unproven`                 | Requested row/tie order is unproved                        |
 
 Existing `unsupported_mode`, `ordering_required`, `capability_mismatch` and
 schema/type codes retain their meanings. Python paths use logical output/input
@@ -118,7 +119,7 @@ logical path; adding or renaming outputs may therefore change that address.
 Rust paths use quoted node IDs and endpoint quadruples, independent of insertion
 order. Reports are data, and cannot be imported as execution authorization.
 
-## Bounded final DISTINCT (analysis revision 9)
+## Bounded final DISTINCT
 
 Explicit DISTINCT accepts final-relation comparison over accepted history at EOF,
 or one selected event window at its closed-window cutoff. The proof is conditional
@@ -128,6 +129,7 @@ ordinary per-batch SQL remains unchanged. Binding boundedness/window progress is
 rechecked before startup, including cached and imported plans.
 
 Explain states the `copy_visible_v2` owned participating peak and the temporary
-borrowed-ingress exception. Older r1–r7 reports remain readable; strict/latest
-execution requires the current schema 2/revision 9 producer. Draft r8 does not
-provide a v2 execution permit. See [budget and ownership scope](bounded-global-distinct.md).
+borrowed-ingress exception. Older reports remain readable under the supported
+decoder versions; strict/latest execution requires the current schema 2/revision
+11 producer. A readable older report is not an execution permit. See
+[budget and ownership scope](bounded-global-distinct.md).

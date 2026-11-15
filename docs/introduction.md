@@ -87,7 +87,7 @@ name, `Batch`, runtime, or plan is needed for supported Arrow data. Types remain
 strict; convenience execution does not coerce columns.
 
 Use `cf.table_input(name, schema=...)` and
-`cf.Program(name, engine="sql", outputs={...})`
+`cf.Program(name, mode="batch", outputs={...})`
 for reusable declarations, named outputs, analysis, or project export.
 Temporal calculations declare entity, event-time, and sequence keys on
 `table_input`; see [temporal ordering](python-api.md#temporal-ordering).

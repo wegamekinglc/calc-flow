@@ -9,10 +9,10 @@ The versions below describe this checkout. Published package versions can lag
 the source; use the [source installation](getting-started.md#build-and-install-from-source)
 for the contracts documented here.
 
-| Surface    | Package or path                | Purpose                                    |
-|------------|--------------------------------|--------------------------------------------|
-| Python API | `calc-flow-python==2026.11.14` | Expressions, Arrow execution, integrations |
-| Rust core  | `calc-flow = "2026.11.14"`     | Internal runtime and extension contracts   |
+| Surface      | Package or path                  | Purpose                                      |
+|--------------|----------------------------------|----------------------------------------------|
+| Python API   | `calc-flow-python==2026.11.14`   | Expressions, Arrow execution, integrations   |
+| Rust core    | `calc-flow = "2026.11.14"`       | Internal runtime and extension contracts     |
 
 For examples and lifecycle detail, see the [executable example guide](examples.md),
 [Rust runtime reference](rust-api.md), [Python API](python-api.md), and
@@ -73,14 +73,16 @@ The inferred input has no ordering. Temporal calculations declare ordering on
 
 `TableExpr` provides indexing, overloaded column operators, append-only
 `with_columns`, `select`, `filter`, `sql`, `pipe`, collection, and `stream`.
-`Program(name, /, *, engine, inputs=None, outputs=())` accepts an output mapping,
+`Program(name, /, *, mode, inputs=None, outputs=())` accepts an output mapping,
 automatically discovers omitted roots, collects by logical name, and exports
 strict native projects with `to_project`. Runtime arguments are optional;
 provider registrations require the explicitly selected runtime.
-The required `engine="sql"` or `engine="streaming"` argument fixes the engine
-at construction; immutable declaration updates preserve it. `Program.execute(inputs)`
-uses that engine. The same declaration graph has the same fingerprint in both
-engines. `collect`, `collect_async`, and `stream` reject the opposite engine.
+Pass exactly one of `mode="batch"|"stream"` or legacy
+`engine="sql"|"streaming"` at construction; there is no default. Immutable
+declaration updates preserve that choice. `Program.execute(inputs)` uses the
+selected lifecycle. The same declaration graph has the same fingerprint in both
+modes; `for_mode` creates an independent declaration wrapper for another mode.
+`collect`, `collect_async`, and `stream` reject the opposite mode.
 Explicit opposite modes in `analyze` and `explain` provide diagnostics only;
 compilation, project export, and execution stay bound to the fixed engine.
 
@@ -90,21 +92,22 @@ collection state, streaming ownership, and logical versus physical bindings.
 
 ### SQL, pipelines, and streaming results
 
-| Entry point                                                                  | Contract                                                        |
-|------------------------------------------------------------------------------|-----------------------------------------------------------------|
-| `sql(query, /, **tables)`                                                    | Lazy `TableExpr`; explicit aliases mapped to table declarations |
-| `snapshot_sql(query, /, **tables)`                                           | Stream-only query over complete latest replacement relations    |
-| `TableExpr.sql(query, /)`                                                    | Single-table SQL with the local alias `input`                   |
-| `Expr.pipe(function, /, *args, **kwargs)`                                    | Call the synchronous builder once and preserve its return type  |
-| `TableExpr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)` | `StreamResults[pyarrow.Table]`                                  |
-| `Program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`   | `StreamResults[StreamOutput]`; logical input mapping required   |
-| `Program(name, engine=...)`                                                  | Fix `"sql"` or `"streaming"` at construction                    |
-| `Program.execute(inputs, /, *, ...)`                                         | SQL: named Arrow tables; streaming: owned named events          |
-| `StreamOutput.name` / `.table`                                               | Immutable named Arrow output event                              |
-| `StreamResults` async context / iteration / `aclose()` / `.job`              | One native job, one consumer, bounded output and owned cleanup  |
+| Entry point                                                                    | Contract                                                             |
+|--------------------------------------------------------------------------------|----------------------------------------------------------------------|
+| `sql(query, /, **tables)`                                                      | Lazy `TableExpr`; explicit aliases mapped to table declarations      |
+| `snapshot_sql(query, /, **tables)`                                             | Stream-only query over complete latest replacement relations         |
+| `TableExpr.sql(query, /)`                                                      | Single-table SQL with the local alias `input`                        |
+| `Expr.pipe(function, /, *args, **kwargs)`                                      | Call the synchronous builder once and preserve its return type       |
+| `TableExpr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`   | `StreamResults[pyarrow.Table]`                                       |
+| `Program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`     | `StreamResults[StreamOutput]`; logical input mapping required        |
+| `Program(name, mode=...)`                                                      | Require `"batch"` or `"stream"`; legacy engine is an exclusive alias |
+| `Program.execute(inputs, /, *, ...)`                                           | SQL: named Arrow tables; streaming: owned named events               |
+| `StreamOutput.name` / `.table`                                                 | Immutable named Arrow output event                                   |
+| `StreamResults` async context / iteration / `aclose()` / `.job`                | One native job, one consumer, bounded output and owned cleanup       |
 
 SQL schema planning reads declarations, not data. Batch SQL accepts multiple
-aliases; append stream SQL accepts one alias. Ordinary aggregates and `GROUP BY`
+aliases; append stream SQL accepts one alias or the exact-schema
+[UNION ALL subset](relational-frontends.md#same-schema-union). Ordinary aggregates and `GROUP BY`
 emit full cumulative snapshots after each batch. Eligible aggregate queries
 update compact state; unsupported shapes rerun over retained input. Other append
 SQL executes per batch. `snapshot_sql` supports multiple aliases, waits for all
@@ -114,7 +117,10 @@ Its outputs currently connect directly to sinks and reject ExactlyOnce. See
 whole-message, state-budget, and recovery contracts.
 SQL output does not inherit temporal ordering. Row-local expressions after
 ordinary `sql` stages and rolling before those stages are supported.
-SQL-to-event-window paths and standalone array Program outputs are unsupported.
+SQL-to-event-window paths and standalone array Program collection outputs are
+unsupported. Native array declarations have a separate blocking batch entry point:
+`ArrayExpr.collect_array(inputs, /, *, runtime, options=None, array_options=None)`
+returns one `NativeArray`; see [native collection](python-api.md#native-arrayexpr-declarations-and-collection).
 
 `stream` requires `async with` and `async for`. It preserves state across batches
 and binds inputs by logical declaration name. Event-time iterables default to
@@ -140,13 +146,13 @@ and [ASOF contract](asof-join-guide.md).
 
 ### Batch
 
-| Member                                      | Contract                                                |
-|---------------------------------------------|---------------------------------------------------------|
-| `Batch.from_pyarrow(table, metadata=None)`  | Own an Arrow C Stream as an immutable table batch       |
-| `Batch.from_array(array, backend=..., ...)` | Own a read-only explicitly named array-provider payload |
-| `to_pyarrow()`                              | Return the table payload or reject a non-table batch    |
-| `array` / `backend`                         | Return array-provider data or reject a table batch      |
-| `kind` / `num_rows` / `metadata`            | Return defensive batch observations                     |
+| Member                                        | Contract                                                  |
+|-----------------------------------------------|-----------------------------------------------------------|
+| `Batch.from_pyarrow(table, metadata=None)`    | Own an Arrow C Stream as an immutable table batch         |
+| `Batch.from_array(array, backend=..., ...)`   | Own a read-only explicitly named array-provider payload   |
+| `to_pyarrow()`                                | Return the table payload or reject a non-table batch      |
+| `array` / `backend`                           | Return array-provider data or reject a table batch        |
+| `kind` / `num_rows` / `metadata`              | Return defensive batch observations                       |
 
 ### Graph and execution
 
@@ -290,7 +296,7 @@ Execution settings and deadlines are per-run values; provider-context opt-in
 belongs to the runtime registration. They are not serialized into project or
 checkpoint payloads.
 
-Capability schema version 4 contains only frozen data:
+Capability schema version 5 contains only frozen data:
 `RuntimeSessionScope`, `OperatorCapability`, `UdfCapability`,
 `ProviderCapability`, `ProviderPort`, `ProviderOptionsSchema`,
 `ProviderOption`, `CapabilityRule`, `ProviderArrayRules`, `ConnectorCapability`,
@@ -298,7 +304,7 @@ and `ConnectorCapabilities`. The snapshot includes compiled-in connector
 identities, formats, options, and transport capabilities. Operator and
 provider entries carry the lifecycle vocabulary — modes, finality,
 statefulness, micro-batch invariance, watermark requirement, checkpoint
-support and state version, determinism, and replay safety — plus the operator
+support and state version, determinism, and replay safety — plus the operator and provider
 `state_layouts` inventory, validated
 fail-closed against closed vocabularies; see the
 [Python API guide](python-api.md) for the full contract. Its session ID is
@@ -398,26 +404,27 @@ analysis, and supported SQL, row-local, rolling, cross-section, relational-DAG,
 and matrix compilation. The implementation and re-exported declarations live
 under `calc_flow.symbolic`. Convenience execution delegates to the internal
 Rust runtime. Every expression, feature, and analysis result is immutable.
-Programs are immutable, including the required engine chosen at construction.
+Programs are immutable, including the required lifecycle chosen at construction.
 Constructors copy caller-owned sequences and mappings.
 
-| Member                                                                                | Contract                                                                                                         |
-|---------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------|
-| `Expr` / `ColumnExpr` / `ArrayExpr` / `TableExpr` / `Parameter`                       | Immutable typed declaration values with v1 digests                                                               |
-| `table_input(name, *, schema, entity_by=(), event_time=None, sequence_by=())`         | Declare one named table input                                                                                    |
-| `parameter(name, *, kind=...)`                                                        | Declare one named static table or array input                                                                    |
-| `Field(name, data_type, nullable=True)`                                               | One exact table field declaration                                                                                |
-| `rows(size)` / `duration(micros)`                                                     | Row-count and exact-microsecond rolling frames                                                                   |
-| `exact_time(...)` / `event_time_bucket(...)`                                          | Cross-section group declarations                                                                                 |
-| `row` / `ts` / `cs` / `table` / `linalg` / `window`                                   | Namespace functions; `ts` includes EWMA/EMA and MACD, while `table` includes ordered relational stream-join DAGs |
-| `FeatureSet(features=())` / `.with_feature(name, value)`                              | Ordered uniquely named column expressions                                                                        |
-| `TableExpr.with_columns(features=None, /, **named)`                                   | Append a mapping, named expressions, or a feature set                                                            |
-| `Program(name, /, *, engine, inputs=None, outputs=())`                                | Immutable engine, declared inputs and outputs, and the declaration v1 fingerprint                                |
-| `Program.execute(inputs, /, *, ...)`                                                  | Finite named Arrow tables or owned streaming events, according to the selected engine                            |
-| `with_late_output(value, /, *, allowed_lateness_micros=0)`                            | Frozen `LateOutputs(output, late)`; both TableExpr references share one stream state owner and must be consumed  |
-| `Program.analyze(runtime=None, /, *, mode=None)` / `.explain(...)`                    | Static analysis plus deterministic optimization and cost facts; mode defaults to the selected engine             |
-| `Program.compile_batch(runtime=None, /)` / `.compile_stream(runtime=None, /, *, ...)` | Optimize and cache supported row-local, stateful, matrix, and relational-DAG strict project-v3 plans             |
-| `AnalysisIssue` / `AnalysisResult`                                                    | Immutable findings with stable output/input-rooted paths                                                         |
+| Member                                                                                  | Contract                                                                                                           |
+|-----------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------|
+| `Expr` / `ColumnExpr` / `ArrayExpr` / `TableExpr` / `Parameter`                         | Immutable typed declaration values with v1 digests                                                                 |
+| `table_input(name, *, schema, entity_by=(), event_time=None, sequence_by=())`           | Declare one named table input                                                                                      |
+| `parameter(name, *, kind=...)`                                                          | Declare one named static table or array input                                                                      |
+| `Field(name, data_type, nullable=True)`                                                 | One exact table field declaration                                                                                  |
+| `rows(size)` / `duration(micros)`                                                       | Row-count and exact-microsecond rolling frames                                                                     |
+| `exact_time(...)` / `event_time_bucket(...)`                                            | Cross-section group declarations                                                                                   |
+| `row` / `ts` / `cs` / `table` / `linalg` / `window`                                     | Namespace functions; `ts` includes EWMA/EMA and MACD, while `table` includes ordered relational stream-join DAGs   |
+| `FeatureSet(features=())` / `.with_feature(name, value)`                                | Ordered uniquely named column expressions                                                                          |
+| `TableExpr.with_columns(features=None, /, **named)`                                     | Append a mapping, named expressions, or a feature set                                                              |
+| `Program(name, /, *, mode, inputs=None, outputs=())`                                    | Immutable lifecycle, declared inputs and outputs, and the declaration v1 fingerprint                               |
+| `Program.for_mode(mode, /)`                                                             | Independent declaration wrapper for `"batch"` or `"stream"`, preserving update semantics                           |
+| `Program.execute(inputs, /, *, ...)`                                                    | Finite named Arrow tables or owned streaming events, according to the selected engine                              |
+| `with_late_output(value, /, *, allowed_lateness_micros=0)`                              | Frozen `LateOutputs(output, late)`; both TableExpr references share one stream state owner and must be consumed    |
+| `Program.analyze(runtime=None, /, *, mode=None)` / `.explain(...)`                      | Static analysis plus deterministic optimization and cost facts; mode defaults to the selected engine               |
+| `Program.compile_batch(runtime=None, /)` / `.compile_stream(runtime=None, /, *, ...)`   | Optimize and cache supported row-local, stateful, matrix, and relational-DAG strict project-v3 plans               |
+| `AnalysisIssue` / `AnalysisResult`                                                      | Immutable findings with stable output/input-rooted paths                                                           |
 
 Structural identity uses `identical()`; public comparison operators build
 symbolic expressions, and converting one to `bool` fails. See the
@@ -429,30 +436,30 @@ analysis, and compilation contract.
 The `calc_flow` crate re-exports its supported public types from
 [`lib.rs`](../crates/calc-flow/src/lib.rs).
 
-| Area                | Primary APIs                                                                                                                                                                                      |
-|---------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Data                | `Batch`, `BatchKind`, `BatchMetadata`, `TableBatch`                                                                                                                                               |
-| Batch graph         | `PipelineBuilder`, `Edge`, `PortEndpoint`, `BatchExecutionPlan`                                                                                                                                   |
-| Stream plan         | `StreamExecutionPlan`, `StreamRequirements`, `DeliveryGuarantee`, `StreamRuntimeConfig`                                                                                                           |
-| Operator traits     | `Port`, `OperatorMetadata`, `NodeOperator`, `BatchOperator`, `StreamOperator`, `StreamOperatorLifecycle`, `OperatorStateSnapshot`                                                                 |
-| Built-in operators  | `ExpressionOperator`, `SqlOperator`, `SnapshotSqlOperator`, `RollingOperator`, `CrossSectionOperator`, `UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator`, `StreamAsofJoinOperator` |
-| Window model        | `WindowSpec`, `WindowGeometry`, `AggregateSpec`, `AggregateFunction`, `MAX_WINDOW_OVERLAP`                                                                                                        |
-| Rolling model       | `RollingSpec`, `RollingOutputSpec`, `RollingNumericalProfile`, `LatePolicySpec`, `LateErrorScope`, `RollingValuePolicy`                                                                           |
-| Cross-section model | `CrossSectionSpec`, `CrossSectionGroupingSpec`, `CrossSectionOutputSpec`, `CrossSectionValuePolicy`, `RankTieMethod`, `SortDirection`, `NullPlacement`                                            |
-| Stream join model   | `StreamJoinSpec`, `StreamJoinType`, `JoinTimeBounds`, `JoinStateLimits`, `StreamJoinStatus`                                                                                                       |
-| ASOF join model     | `StreamAsofJoinSpec`, `AsofJoinSide`, `AsofStateLimits`, `AsofLatePolicy`, `StreamAsofJoinStatus`, `StreamAsofJoinSideStatus`                                                                     |
-| Execution           | `ExecutionOptions`, `RunResult`, `RunMetadata`, `NodeTiming`                                                                                                                                      |
-| Stream model        | `StreamMessage`, `StreamMessageKind`, `StreamJobContext`, `EventTime`, `Epoch`                                                                                                                    |
-| Stream channel      | `EdgeBudget`, `EnvelopeCost`, `ChannelMetrics`, `EdgeSender`, `EdgeReceiver`, `edge_channel`                                                                                                      |
-| State backend       | `StateBackend`, `StateLineageBackend`, `StateLineageKey`, `StateHandle`, `LocalStateBackend`                                                                                                      |
-| State manifest      | `CheckpointManifest`, `CheckpointManifestFields`, `ManifestExpectation`, `OperatorManifestEntry`, `RecoveryStatus`                                                                                |
-| UDF/providers       | `UdfRegistry`, `UdfReference`, `ProviderRegistry`, `BatchOperatorFactory`, `StreamOperatorFactory`                                                                                                |
-| Sources and sinks   | `StreamSource`, `StreamSink`, `TransactionalStreamSink`, `SourceBinding`, `SinkBinding`                                                                                                           |
-| Continuous runtime  | `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, `Cursor`, `SourceEvent`, `JobStatus`, `JobOutcome`                                                                                 |
-| Static inputs       | `StaticInputSpec`, `StaticInputDigest`, `StaticMutability`, `STATIC_INPUT_DIGEST_VERSION`, `StaticArraySnapshot`, `StaticArrayValues`                                                             |
-| Projects            | `ProjectSpec`, `compile_project`, `validate_project`                                                                                                                                              |
-| Persistence         | `FileProjectStore`, `LocalStateBackend`, `CheckpointManifest`                                                                                                                                     |
-| Errors              | `CalcFlowError`, `Result<T>`                                                                                                                                                                      |
+| Area                  | Primary APIs                                                                                                                                                                                        |
+|-----------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Data                  | `Batch`, `BatchKind`, `BatchMetadata`, `TableBatch`                                                                                                                                                 |
+| Batch graph           | `PipelineBuilder`, `Edge`, `PortEndpoint`, `BatchExecutionPlan`                                                                                                                                     |
+| Stream plan           | `StreamExecutionPlan`, `StreamRequirements`, `DeliveryGuarantee`, `StreamRuntimeConfig`                                                                                                             |
+| Operator traits       | `Port`, `OperatorMetadata`, `NodeOperator`, `BatchOperator`, `StreamOperator`, `StreamOperatorLifecycle`, `OperatorStateSnapshot`                                                                   |
+| Built-in operators    | `ExpressionOperator`, `SqlOperator`, `SnapshotSqlOperator`, `RollingOperator`, `CrossSectionOperator`, `UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator`, `StreamAsofJoinOperator`   |
+| Window model          | `WindowSpec`, `WindowGeometry`, `AggregateSpec`, `AggregateFunction`, `MAX_WINDOW_OVERLAP`                                                                                                          |
+| Rolling model         | `RollingSpec`, `RollingOutputSpec`, `RollingNumericalProfile`, `LatePolicySpec`, `LateErrorScope`, `RollingValuePolicy`                                                                             |
+| Cross-section model   | `CrossSectionSpec`, `CrossSectionGroupingSpec`, `CrossSectionOutputSpec`, `CrossSectionValuePolicy`, `RankTieMethod`, `SortDirection`, `NullPlacement`                                              |
+| Stream join model     | `StreamJoinSpec`, `StreamJoinType`, `JoinTimeBounds`, `JoinStateLimits`, `StreamJoinStatus`                                                                                                         |
+| ASOF join model       | `StreamAsofJoinSpec`, `AsofJoinSide`, `AsofStateLimits`, `AsofLatePolicy`, `StreamAsofJoinStatus`, `StreamAsofJoinSideStatus`                                                                       |
+| Execution             | `ExecutionOptions`, `RunResult`, `RunMetadata`, `NodeTiming`                                                                                                                                        |
+| Stream model          | `StreamMessage`, `StreamMessageKind`, `StreamJobContext`, `EventTime`, `Epoch`                                                                                                                      |
+| Stream channel        | `EdgeBudget`, `EnvelopeCost`, `ChannelMetrics`, `EdgeSender`, `EdgeReceiver`, `edge_channel`                                                                                                        |
+| State backend         | `StateBackend`, `StateLineageBackend`, `StateLineageKey`, `StateHandle`, `LocalStateBackend`                                                                                                        |
+| State manifest        | `CheckpointManifest`, `CheckpointManifestFields`, `ManifestExpectation`, `OperatorManifestEntry`, `RecoveryStatus`                                                                                  |
+| UDF/providers         | `UdfRegistry`, `UdfReference`, `ProviderRegistry`, `BatchOperatorFactory`, `StreamOperatorFactory`                                                                                                  |
+| Sources and sinks     | `StreamSource`, `StreamSink`, `TransactionalStreamSink`, `SourceBinding`, `SinkBinding`                                                                                                             |
+| Continuous runtime    | `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, `Cursor`, `SourceEvent`, `JobStatus`, `JobOutcome`                                                                                   |
+| Static inputs         | `StaticInputSpec`, `StaticInputDigest`, `StaticMutability`, `STATIC_INPUT_DIGEST_VERSION`, `StaticArraySnapshot`, `StaticArrayValues`                                                               |
+| Projects              | `ProjectSpec`, `compile_project`, `validate_project`                                                                                                                                                |
+| Persistence           | `FileProjectStore`, `LocalStateBackend`, `CheckpointManifest`                                                                                                                                       |
+| Errors                | `CalcFlowError`, `Result<T>`                                                                                                                                                                        |
 
 `compile_project` produces a `BatchExecutionPlan`. `compile_batch` and
 `compile_stream` are the Rust graph-compilation entry points. A
