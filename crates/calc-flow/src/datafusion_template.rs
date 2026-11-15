@@ -41,7 +41,7 @@ use parking_lot::Mutex;
 use crate::{Batch, datafusion::split_record_batches};
 
 mod compiled;
-pub(crate) use compiled::CompiledExpression;
+pub(crate) use compiled::{CompiledExpression, CompiledExpressionState};
 #[cfg(test)]
 pub(crate) use compiled::check_arrow_error_envelope;
 

@@ -455,6 +455,164 @@ fn pass_through_plan(schema: &SchemaRef) -> StreamExecutionPlan {
     )
 }
 
+fn expression_plan(
+    schema: &SchemaRef,
+    select: Vec<String>,
+    filter: Option<&str>,
+) -> StreamExecutionPlan {
+    let operator = ExpressionOperator::new(
+        "expression",
+        "",
+        select,
+        filter.map(str::to_owned),
+        vec![],
+    )
+    .unwrap()
+    .with_ports(
+        Port::with_schema_ref("input", BatchKind::Table, true, Some(Arc::clone(schema))).unwrap(),
+        Port::new("output", BatchKind::Table, true, None).unwrap(),
+    )
+    .unwrap();
+    compile(
+        PipelineBuilder::new("expression")
+            .unwrap()
+            .add_node("expression", Box::new(operator))
+            .unwrap(),
+    )
+}
+
+#[test]
+fn test_all_sync_expression_session_never_enters_async_drive() {
+    let plan = pass_through_plan(&input_schema());
+    let input = source_id(&plan);
+    let mut session = open_session(plan, BTreeMap::new());
+    let output = session.output_ids()[0].to_owned();
+    assert!(session.runtime.is_none());
+    super::reset_drive_counters_for_test();
+
+    let pushed = session
+        .push(
+            &input,
+            input_batch(&[(10, "a", 0, 1.0)]),
+            Some(micros(10)),
+        )
+        .unwrap();
+    assert_eq!(pushed.batches(&output)[0].num_rows(), 1);
+    assert!(session.advance(&input, micros(11)).unwrap().is_empty());
+    assert!(session.finish().unwrap().is_empty());
+    assert_eq!(super::drive_counters_for_test(), (0, 0));
+}
+
+fn assert_same_batches(actual: &[Batch], expected: &[Batch]) {
+    assert_eq!(actual.len(), expected.len());
+    for (actual, expected) in actual.iter().zip(expected) {
+        assert_eq!(actual.metadata(), expected.metadata());
+        assert_eq!(
+            actual.table_payload().unwrap().schema(),
+            expected.table_payload().unwrap().schema()
+        );
+        assert_eq!(
+            actual.table_payload().unwrap().batches(),
+            expected.table_payload().unwrap().batches()
+        );
+    }
+}
+
+#[test]
+fn test_sync_expression_projection_and_filter_match_runner() {
+    let rows = [(10, "a", 0, 1.0), (10, "b", 1, 3.0)];
+    for (select, filter) in [
+        (vec!["symbol".into(), "price".into()], None),
+        (vec![r#"price + 1 AS next"#.into(), "symbol".into()], None),
+        (
+            vec!["symbol".into(), "price".into()],
+            Some("price > 1"),
+        ),
+    ] {
+        let mut session = open_session(
+            expression_plan(&input_schema(), select.clone(), filter),
+            BTreeMap::new(),
+        );
+        let input = session.input_ids()[0].to_owned();
+        let output = session.output_ids()[0].to_owned();
+        let actual = session
+            .push(&input, input_batch(&rows), Some(micros(10)))
+            .unwrap();
+        assert_same_batches(
+            actual.batches(&output),
+            &runner_outputs(
+                expression_plan(&input_schema(), select, filter),
+                vec![
+                    data_event(&rows, 0),
+                    SourceEvent::Watermark(micros(10)),
+                ],
+                WatermarkPolicy::SourceProvided,
+            )[&output],
+        );
+        assert!(session.finish().unwrap().is_empty());
+    }
+}
+
+fn udf_plan() -> StreamExecutionPlan {
+    let reference = crate::UdfReference::new(
+        "test",
+        "trusted",
+        "1",
+        crate::UdfKind::DataFusionScalar,
+    )
+    .unwrap();
+    let udf = Arc::new(datafusion::logical_expr::create_udf(
+        "trusted",
+        vec![DataType::Float64],
+        DataType::Float64,
+        datafusion::logical_expr::Volatility::Immutable,
+        Arc::new(|arguments| Ok(arguments[0].clone())),
+    ));
+    let mut registry = UdfRegistry::new();
+    registry
+        .register_datafusion(reference.clone(), udf, 1)
+        .unwrap();
+    let operator = ExpressionOperator::new(
+        "udf",
+        "",
+        vec![r#"trusted("price") AS trusted_price"#.into()],
+        None,
+        vec![reference],
+    )
+    .unwrap()
+    .with_ports(
+        Port::with_schema_ref("input", BatchKind::Table, true, Some(input_schema())).unwrap(),
+        Port::new("output", BatchKind::Table, true, None).unwrap(),
+    )
+    .unwrap();
+    PipelineBuilder::new("udf")
+        .unwrap()
+        .add_node("udf", Box::new(operator))
+        .unwrap()
+        .compile_stream(&registry.snapshot(), &StreamRequirements::default())
+        .unwrap()
+}
+
+#[test]
+fn test_udf_expression_uses_async_adapter_in_session_and_runner() {
+    let rows = [(10, "a", 0, 1.0), (10, "b", 1, 3.0)];
+    let plan = udf_plan();
+    let input = source_id(&plan);
+    let output = plan.sink_binding_ids()[0].to_owned();
+    let mut session = open_session(plan, BTreeMap::new());
+    assert!(session.runtime.is_some());
+    let actual = session
+        .push(&input, input_batch(&rows), Some(micros(10)))
+        .unwrap();
+    let expected = runner_outputs(
+        udf_plan(),
+        vec![data_event(&rows, 0), SourceEvent::Watermark(micros(10))],
+        WatermarkPolicy::SourceProvided,
+    );
+    assert_same_batches(actual.batches(&output), &expected[&output]);
+    assert!(session.finish().unwrap().is_empty());
+}
+
 #[test]
 fn test_bounded_out_of_orderness_nanoseconds_matches_generated_watermark_state() {
     let plan = pass_through_plan(&nanosecond_schema());

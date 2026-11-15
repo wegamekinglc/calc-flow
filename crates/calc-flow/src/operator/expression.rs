@@ -1,19 +1,22 @@
-use std::{collections::BTreeMap, fmt};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
 use serde_json::Value;
 
 use crate::{
-    Batch, CalcFlowError, DataFusionConfig, DataFusionRuntime, EventTime, JsonMap, Port, Result,
-    RunContext, UdfReference, UdfRegistrySnapshot,
+    Batch, CalcFlowError, DataFusionConfig, DataFusionRuntime, Epoch, EventTime, JsonMap,
+    OperatorStateSnapshot, Port, Result, RunContext, UdfReference, UdfRegistrySnapshot,
+    datafusion_template::{CompiledExpression, CompiledExpressionState},
     expression::{ValidatedQuery, parse_select_query, sql_projection},
 };
 
 use super::{
     BatchOperator, BatchOperatorContext, OperatorMetadata, StreamCollector, StreamOperator,
-    StreamOperatorContext, StreamRuntimeState, table_port, udf_configuration,
-    validate_builtin_port, validate_operator_name, validate_required_input,
+    StreamOperatorContext, StreamRuntimeState,
+    sync_operator::{Emitter, PrepareContext, SyncContext, SyncStreamOperator},
+    table_port, udf_configuration, validate_builtin_port, validate_operator_name,
+    validate_required_input,
 };
 
 mod projection;
@@ -21,7 +24,7 @@ mod projection;
 #[cfg(test)]
 mod compiled_tests;
 
-use projection::ColumnProjection;
+use projection::{ColumnProjection, PreparedColumnProjection};
 
 /// A `DataFusion` expression or projection operator.
 ///
@@ -42,6 +45,67 @@ pub struct ExpressionOperator {
     output_ports: [Port; 1],
     ordered_input: bool,
     stream_state: StreamRuntimeState,
+}
+
+pub(crate) struct SyncExpressionOperator {
+    inner: ExpressionOperator,
+    projection: Option<PreparedColumnProjection>,
+    compiled: Option<Arc<CompiledExpression>>,
+    state: Option<CompiledExpressionState>,
+    input_endpoint: String,
+}
+
+pub(crate) enum PreparedExpression {
+    Sync(SyncExpressionOperator),
+    Async(ExpressionOperator),
+}
+
+impl SyncExpressionOperator {
+    fn new(
+        inner: ExpressionOperator,
+        projection: Option<PreparedColumnProjection>,
+        compiled: Option<Arc<CompiledExpression>>,
+    ) -> Self {
+        let state = compiled.as_ref().map(|program| program.state());
+        let input_endpoint = format!("{}.input", inner.name);
+        Self {
+            inner,
+            projection,
+            compiled,
+            state,
+            input_endpoint,
+        }
+    }
+
+    pub(crate) fn stream_runtime_initialized(&self) -> bool {
+        self.inner.stream_runtime_initialized()
+    }
+
+    fn evaluate_batch(
+        &mut self,
+        batch: &Batch,
+        context: &SyncContext<'_>,
+        out: &mut Emitter,
+    ) -> Result<Batch> {
+        if let Some(projection) = &self.projection {
+            self.inner.input_ports[0].validate_fast(batch, &self.input_endpoint)?;
+            let shell = (!projection.shares_input_schema(batch))
+                .then(|| out.take_table_shell())
+                .flatten();
+            projection.apply(batch, context.operator_id(), shell)
+        } else if let Some(compiled) = &self.compiled {
+            compiled.evaluate_sync(
+                self.state.as_mut().expect("compiled expression state"),
+                batch,
+                context.operator_id(),
+                context,
+            )
+        } else {
+            Err(CalcFlowError::Internal {
+                message: "prepared sync expression has no program".into(),
+            })
+        }
+    }
 }
 
 impl Clone for ExpressionOperator {
@@ -280,6 +344,56 @@ impl ExpressionOperator {
         self.stream_state.is_initialized()
     }
 
+    /// Compiles the stream program once, retaining the async operator when the
+    /// physical plan is not a supported row-local expression.
+    pub(crate) async fn prepare_sync(
+        mut self,
+        context: &PrepareContext<'_>,
+    ) -> Result<PreparedExpression> {
+        context.check_cancelled()?;
+        if self.has_stream_udfs() {
+            return Ok(PreparedExpression::Async(self));
+        }
+        let input = self.input_ports[0].schema().cloned();
+        let projection = input.as_ref().and_then(|input| {
+            self.is_exact_column_projection(input, self.output_ports[0].schema())
+                .then(|| {
+                    self.column_projection.as_ref().and_then(|projection| {
+                        PreparedColumnProjection::new(
+                            projection,
+                            input,
+                            self.output_ports[0].schema(),
+                        )
+                    })
+                })
+                .flatten()
+        });
+        if let Some(projection) = projection {
+            return prepare_sync_expression(self, Some(projection), None, context).await;
+        }
+        let Some(input) = input else {
+            return Ok(PreparedExpression::Async(self));
+        };
+        let compiled = self
+            .stream_state
+            .runtime()?
+            .compile_stream_expression(&self.query, input, &self.name)
+            .await?;
+        match compiled {
+            Some(compiled) => prepare_sync_expression(self, None, Some(compiled), context).await,
+            None => Ok(PreparedExpression::Async(self)),
+        }
+    }
+
+    fn has_stream_udfs(&self) -> bool {
+        !self.udfs.is_empty()
+            || self
+                .stream_state
+                .resources
+                .as_ref()
+                .is_some_and(|(_, _, selected)| !selected.is_empty())
+    }
+
     /// Executes input already validated by the batch plan.
     pub(crate) async fn process_validated_table(
         &mut self,
@@ -383,6 +497,90 @@ impl OperatorMetadata for ExpressionOperator {
 
     fn udf_references(&self) -> Vec<UdfReference> {
         self.udfs.clone()
+    }
+}
+
+async fn prepare_sync_expression(
+    inner: ExpressionOperator,
+    projection: Option<PreparedColumnProjection>,
+    compiled: Option<Arc<CompiledExpression>>,
+    context: &PrepareContext<'_>,
+) -> Result<PreparedExpression> {
+    let mut operator = SyncExpressionOperator::new(inner, projection, compiled);
+    operator.prepare(context).await?;
+    Ok(PreparedExpression::Sync(operator))
+}
+
+impl OperatorMetadata for SyncExpressionOperator {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn input_ports(&self) -> &[Port] {
+        self.inner.input_ports()
+    }
+
+    fn output_ports(&self) -> &[Port] {
+        self.inner.output_ports()
+    }
+
+    fn configuration(&self) -> JsonMap {
+        self.inner.configuration()
+    }
+
+    fn udf_references(&self) -> Vec<UdfReference> {
+        self.inner.udf_references()
+    }
+}
+
+#[async_trait]
+impl SyncStreamOperator for SyncExpressionOperator {
+    async fn prepare(&mut self, context: &PrepareContext<'_>) -> Result<()> {
+        context.check_cancelled()
+    }
+
+    fn on_data(
+        &mut self,
+        ingress: usize,
+        batch: Batch,
+        context: &mut SyncContext<'_>,
+        out: &mut Emitter,
+    ) -> Result<()> {
+        if ingress != 0 {
+            return Err(CalcFlowError::Operator {
+                node_id: self.inner.name.clone(),
+                message: format!("unknown ingress index {ingress}; expected 0 (\"input\")"),
+            });
+        }
+        context.check_cancelled()?;
+        let produced = self.evaluate_batch(&batch, context, out)?;
+        context.check_cancelled()?;
+        out.emit(0, produced)
+    }
+
+    fn on_watermark(
+        &mut self,
+        _watermark: EventTime,
+        _context: &mut SyncContext<'_>,
+        _out: &mut Emitter,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn on_end(&mut self, _context: &mut SyncContext<'_>, _out: &mut Emitter) -> Result<()> {
+        Ok(())
+    }
+
+    fn checkpoint(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
+        StreamOperator::checkpoint(&mut self.inner, epoch)
+    }
+
+    fn restore(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()> {
+        StreamOperator::restore(&mut self.inner, snapshot)
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        StreamOperator::reset(&mut self.inner)
     }
 }
 
@@ -719,6 +917,123 @@ mod tests {
             assert!(operator.stream_runtime_initialized());
         }
         compiled_tests::repeated_stream_batches_skip_plan_rebinding().await;
+    }
+
+    #[tokio::test]
+    async fn sync_expression_bits_match_standalone_sql_route() {
+        use std::collections::BTreeSet;
+
+        use crate::{CancellationToken, EdgeBudget, StreamJobContext};
+
+        struct Metrics;
+        impl crate::operator::LateMetricSink for Metrics {
+            fn record(&self, _delta: crate::operator::LateMetricDelta) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let input = projection_input();
+        let schema = input.table_payload().unwrap().schema().clone();
+        let job = StreamJobContext::new(
+            1,
+            "sync-expression-test",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        for (select, filter) in [
+            (vec!["symbol AS ticker".into()], None),
+            (vec![r#""Price" + 1 AS next"#.into()], None),
+            (
+                vec!["symbol AS ticker".into(), r#""Price""#.into()],
+                Some(r#""Price" > 5"#),
+            ),
+        ] {
+            let operator = ExpressionOperator::new("sync", "", select, filter, vec![])
+                .unwrap()
+                .with_ports(
+                    Port::with_schema_ref(
+                        "input",
+                        crate::BatchKind::Table,
+                        true,
+                        Some(Arc::clone(&schema)),
+                    )
+                    .unwrap(),
+                    table_port("output").unwrap(),
+                )
+                .unwrap();
+            let mut reference = operator.clone();
+            reference.column_projection = None;
+            let prepared = operator
+                .prepare_sync(&PrepareContext::new(&job))
+                .await
+                .unwrap();
+            let PreparedExpression::Sync(mut sync) = prepared else {
+                panic!("row-local expression should prepare synchronously")
+            };
+            let mut context = SyncContext::new(
+                &job,
+                Arc::from("sync"),
+                EdgeBudget::default(),
+                Arc::new(Metrics),
+            );
+            let mut emitter = Emitter::new(
+                Arc::from("sync"),
+                &BTreeMap::new(),
+                BTreeMap::new(),
+                &BTreeSet::new(),
+            );
+            for _ in 0..2 {
+                let actual = sync
+                    .evaluate_batch(&input, &context, &mut emitter)
+                    .unwrap();
+                let expected = reference.process_standalone(input.clone()).await.unwrap();
+                assert_eq!(actual.metadata(), expected.metadata());
+                assert_eq!(
+                    actual.table_payload().unwrap().schema(),
+                    expected.table_payload().unwrap().schema()
+                );
+                assert_eq!(
+                    actual.table_payload().unwrap().batches(),
+                    expected.table_payload().unwrap().batches()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_preparation_keeps_non_row_local_plans_async() {
+        use crate::{CancellationToken, StreamJobContext};
+
+        let input = projection_input();
+        let schema = input.table_payload().unwrap().schema().clone();
+        let job = StreamJobContext::new(
+            1,
+            "sync-expression-admission",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        for select in [r#"SUM("Price") AS total"#, "now() AS stamp"] {
+            let operator = ExpressionOperator::new("async", "", vec![select.into()], None, vec![])
+                .unwrap()
+                .with_ports(
+                    Port::with_schema_ref(
+                        "input",
+                        crate::BatchKind::Table,
+                        true,
+                        Some(Arc::clone(&schema)),
+                    )
+                    .unwrap(),
+                    table_port("output").unwrap(),
+                )
+                .unwrap();
+            let prepared = operator
+                .prepare_sync(&PrepareContext::new(&job))
+                .await
+                .unwrap();
+            assert!(matches!(prepared, PreparedExpression::Async(_)), "{select}");
+        }
     }
 
     #[tokio::test]

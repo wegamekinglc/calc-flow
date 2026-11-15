@@ -52,8 +52,10 @@ use super::{
 };
 
 pub(in crate::runtime::streaming) mod caller_driven;
+mod control;
 mod ingress_admission;
 pub(in crate::runtime::streaming) mod join_checkpoint_credit;
+mod sync_adapter;
 
 #[cfg(test)]
 mod performance_evidence;
@@ -806,18 +808,24 @@ async fn reset_and_acknowledge(
     inputs: &mut OperatorTaskInputs,
     task_id: TaskId,
 ) -> Result<Option<OperatorInputProgress>> {
-    let preparation_result =
-        reset_operator(inputs, task_id)
-            .await
-            .and_then(|()| match &inputs.restore {
-                Some(restore) => OperatorInputProgress::restore(
-                    inputs.ingresses.keys(),
-                    &restore.progress,
-                    restore.output_frontier,
-                ),
-                None => Ok(OperatorInputProgress::new(inputs.ingresses.keys())),
-            });
+    let preparation_result = prepare_operator_for_entry(inputs, task_id).await;
     acknowledge_entry(inputs, preparation_result)
+}
+
+async fn prepare_operator_for_entry(
+    inputs: &mut OperatorTaskInputs,
+    task_id: TaskId,
+) -> Result<OperatorInputProgress> {
+    reset_operator(inputs, task_id).await?;
+    sync_adapter::prepare(inputs).await?;
+    match &inputs.restore {
+        Some(restore) => OperatorInputProgress::restore(
+            inputs.ingresses.keys(),
+            &restore.progress,
+            restore.output_frontier,
+        ),
+        None => Ok(OperatorInputProgress::new(inputs.ingresses.keys())),
+    }
 }
 
 fn acknowledge_entry(
@@ -1220,6 +1228,9 @@ async fn finish_operator(
     input_progress: &OperatorInputProgress,
     completed_epoch: Option<Epoch>,
 ) -> Result<()> {
+    if sync_adapter::is_sync(&inputs.operator) {
+        return finish_sync_operator(inputs, input_progress, completed_epoch).await;
+    }
     let input_watermark = input_progress.input_watermark();
     let cancellation = inputs.context.job().cancellation().clone();
     let output_budget = inputs.progress.output_budget(&inputs.outputs);
@@ -1276,6 +1287,36 @@ async fn finish_operator(
         inputs.context.job(),
     )
     .await?;
+    inputs.progress.mark_ended();
+    complete_terminal_checkpoint(inputs, input_progress, completed_epoch).await
+}
+
+async fn finish_sync_operator(
+    inputs: &mut OperatorTaskInputs,
+    input_progress: &OperatorInputProgress,
+    completed_epoch: Option<Epoch>,
+) -> Result<()> {
+    inputs.progress.record_on_end()?;
+    let callback = inputs.progress.begin_rolling(
+        RollingCallback::End,
+        inputs.context.job().cancellation(),
+    );
+    let rolling = callback.as_ref().map(|callback| callback.recorder().clone());
+    let result = sync_adapter::end(
+        inputs,
+        input_progress.input_watermark(),
+        input_progress.snapshot()?,
+        rolling,
+    )
+    .await;
+    if let Some(callback) = callback {
+        callback.complete(&result);
+    }
+    if let Some(task) = &inputs.entity_work {
+        task.settle_current_scope().await;
+    }
+    result?;
+    sync_adapter::forward_control(inputs, StreamMessage::end_of_input()).await?;
     inputs.progress.mark_ended();
     complete_terminal_checkpoint(inputs, input_progress, completed_epoch).await
 }
@@ -1529,15 +1570,14 @@ async fn dispatch_progress(
     input: AggregateInput,
     input_progress: &mut OperatorInputProgress,
 ) -> Result<()> {
-    let previous = input_progress.input_watermark();
-    let emissions = input_progress.evaluate(ingress_name, input)?;
+    let transition = control::evaluate_progress(input_progress, ingress_name, input)?;
     dispatch_progress_transition(
         inputs,
         ingress_name,
-        emissions,
-        previous,
-        input_progress.snapshot()?,
-        input_progress.input_watermark(),
+        transition.emissions,
+        transition.previous_watermark,
+        transition.ingress_progress,
+        transition.aggregate_input_frontier,
         &mut input_progress.output_frontier,
     )
     .await
@@ -1560,14 +1600,13 @@ async fn dispatch_message_inner(
     }
     match message.kind() {
         StreamMessageKind::Data => {
-            let watermark = input_progress.input_watermark();
-            input_progress.evaluate(ingress_name, AggregateInput::Data)?;
+            let transition = control::evaluate_data(input_progress, ingress_name)?;
             dispatch_data(
                 inputs,
                 ingress_name,
                 message,
-                watermark,
-                input_progress.snapshot()?,
+                transition.input_watermark,
+                transition.ingress_progress,
             )
             .await
         }
@@ -1590,15 +1629,18 @@ async fn dispatch_message_inner(
             dispatch_barrier(inputs, ingress_name, &message, barrier_alignment)
         }
         StreamMessageKind::EndOfInput => {
-            let previous = input_progress.input_watermark();
-            let emissions = input_progress.evaluate(ingress_name, AggregateInput::End)?;
+            let transition = control::evaluate_progress(
+                input_progress,
+                ingress_name,
+                AggregateInput::End,
+            )?;
             dispatch_progress_transition(
                 inputs,
                 ingress_name,
-                emissions,
-                previous,
-                input_progress.snapshot()?,
-                input_progress.input_watermark(),
+                transition.emissions,
+                transition.previous_watermark,
+                transition.ingress_progress,
+                transition.aggregate_input_frontier,
                 &mut input_progress.output_frontier,
             )
             .await?;
@@ -2028,8 +2070,6 @@ async fn dispatch_data(
     inputs.metrics.record_input(cost)?;
     inputs.progress.record_input()?;
     let processing_timer = inputs.metrics.timer();
-    let output_budget = inputs.progress.output_budget(&inputs.outputs);
-    let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());
     let callback = inputs
         .progress
         .begin_rolling(RollingCallback::Data, inputs.context.job().cancellation());
@@ -2038,32 +2078,46 @@ async fn dispatch_data(
             .recorder()
             .add(RollingWork::InputRows, batch.num_rows());
     }
-    let context = StreamOperatorContext::for_task(
-        inputs.context.job(),
-        &inputs.node_id,
-        input_watermark,
-        ingress_progress,
-        output_budget,
-        late_metrics,
-    )
-    .with_task_id(inputs.context.task_id());
-    let context = attach_rolling_context(context, callback.as_ref());
-    let context = context.with_ingress_preparation(preparation.as_ref());
-    let context = attach_entity_context(context, inputs.entity_work.as_ref());
-    let mut collector = ChannelStreamCollector::new(
-        &inputs.node_id,
-        inputs.context.job().job_id(),
-        &inputs.output_ports,
-        &mut inputs.outputs,
-        inputs.context.job().cancellation(),
-        &inputs.progress,
-        &inputs.metrics,
-    )
-    .with_rolling_metrics(context.rolling_metrics());
-    let result = inputs
-        .operator
-        .process_data(ingress_name, batch, &context, &mut collector)
-        .await;
+    let result = if sync_adapter::is_sync(&inputs.operator) {
+        let rolling = callback.as_ref().map(|callback| callback.recorder().clone());
+        sync_adapter::data(
+            inputs,
+            batch,
+            input_watermark,
+            ingress_progress,
+            rolling,
+        )
+        .await
+    } else {
+        let output_budget = inputs.progress.output_budget(&inputs.outputs);
+        let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());
+        let context = StreamOperatorContext::for_task(
+            inputs.context.job(),
+            &inputs.node_id,
+            input_watermark,
+            ingress_progress,
+            output_budget,
+            late_metrics,
+        )
+        .with_task_id(inputs.context.task_id());
+        let context = attach_rolling_context(context, callback.as_ref());
+        let context = context.with_ingress_preparation(preparation.as_ref());
+        let context = attach_entity_context(context, inputs.entity_work.as_ref());
+        let mut collector = ChannelStreamCollector::new(
+            &inputs.node_id,
+            inputs.context.job().job_id(),
+            &inputs.output_ports,
+            &mut inputs.outputs,
+            inputs.context.job().cancellation(),
+            &inputs.progress,
+            &inputs.metrics,
+        )
+        .with_rolling_metrics(context.rolling_metrics());
+        inputs
+            .operator
+            .process_data(ingress_name, batch, &context, &mut collector)
+            .await
+    };
     if let Some(callback) = callback {
         callback.complete(&result);
     }
@@ -2193,6 +2247,17 @@ async fn dispatch_progress_transition(
     aggregate_input_frontier: Option<EventTime>,
     output_frontier: &mut Option<EventTime>,
 ) -> Result<()> {
+    if sync_adapter::is_sync(&inputs.operator) {
+        return sync_adapter::progress(
+            inputs,
+            emissions,
+            previous_watermark,
+            ingress_progress,
+            aggregate_input_frontier,
+            output_frontier,
+        )
+        .await;
+    }
     let output_budget = inputs.progress.output_budget(&inputs.outputs);
     let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());
     let context = StreamOperatorContext::for_task(
@@ -2288,18 +2353,17 @@ async fn forward_join_output_frontier(
     ingress_progress: &IngressProgressSnapshot,
     output_frontier: &mut Option<EventTime>,
 ) -> Result<()> {
-    if inputs
+    let has_non_late_output = inputs
         .output_ports
         .keys()
-        .all(|port| inputs.late_output_ports.contains(port))
-    {
-        return Ok(());
-    }
-    if let Some(candidate) = inputs
-        .operator
-        .output_frontier_candidate(aggregate_input_frontier, ingress_progress)?
-        .filter(|candidate| output_frontier.is_none_or(|previous| *candidate > previous))
-    {
+        .any(|port| !inputs.late_output_ports.contains(port));
+    if let Some(candidate) = control::advancing_output_frontier(
+        &inputs.operator,
+        has_non_late_output,
+        aggregate_input_frontier,
+        ingress_progress,
+        *output_frontier,
+    )? {
         forward_control(
             &mut inputs.outputs,
             &inputs.late_output_ports,
@@ -2521,9 +2585,7 @@ async fn forward_control(
     context: &super::StreamJobContext,
 ) -> Result<()> {
     for (port, senders) in outputs {
-        if late_output_ports.contains(port)
-            && (message.as_watermark().is_some() || message.is_idle())
-        {
+        if !control::forwards_control(late_output_ports.contains(port), &message) {
             continue;
         }
         for sender in senders {

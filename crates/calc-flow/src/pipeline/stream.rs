@@ -180,6 +180,9 @@ fn exact_micros(duration: Duration, field: &str) -> Result<u64> {
 pub(crate) enum CompiledStreamOperator {
     External(Box<dyn StreamOperator>),
     Expression(crate::ExpressionOperator),
+    SyncExpression(
+        crate::operator::sync_operator::SyncNode<crate::operator::SyncExpressionOperator>,
+    ),
     Sql(crate::SqlOperator),
     SnapshotSql(crate::SnapshotSqlOperator),
     BoundedOrder(crate::BoundedOrderOperator),
@@ -439,6 +442,7 @@ impl CompiledStreamOperator {
             Self::StreamAsofJoin(operator) => operator.output_frontier_candidate(ingress_progress),
             Self::External(_)
             | Self::Expression(_)
+            | Self::SyncExpression(_)
             | Self::Sql(_)
             | Self::SnapshotSql(_)
             | Self::BoundedOrder(_)
@@ -463,6 +467,7 @@ impl CompiledStreamOperator {
         match self {
             Self::External(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::Expression(operator) => operator.on_ingress_progress(ingress, context).await,
+            Self::SyncExpression(_) => Ok(()),
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::SnapshotSql(operator) => operator.on_ingress_progress(ingress, context).await,
@@ -555,6 +560,9 @@ impl CompiledStreamOperator {
         match self {
             Self::External(operator) => operator.reset(),
             Self::Expression(operator) => operator.reset(),
+            Self::SyncExpression(node) => {
+                crate::operator::sync_operator::SyncStreamOperator::reset(node.operator_mut())
+            }
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.reset(),
             Self::SnapshotSql(operator) => operator.reset(),
@@ -576,6 +584,7 @@ impl CompiledStreamOperator {
         match self {
             Self::External(operator) => operator.prepare_checkpoint_async(context).await,
             Self::Expression(operator) => operator.prepare_checkpoint_async(context).await,
+            Self::SyncExpression(_) => context.check_cancelled(),
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.prepare_checkpoint_async(context).await,
             Self::SnapshotSql(operator) => operator.prepare_checkpoint_async(context).await,
@@ -601,6 +610,12 @@ impl CompiledStreamOperator {
         match self {
             Self::External(operator) => operator.checkpoint(epoch),
             Self::Expression(operator) => operator.checkpoint(epoch),
+            Self::SyncExpression(node) => {
+                crate::operator::sync_operator::SyncStreamOperator::checkpoint(
+                    node.operator_mut(),
+                    epoch,
+                )
+            }
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.checkpoint(epoch),
             Self::SnapshotSql(operator) => operator.checkpoint(epoch),
@@ -623,6 +638,12 @@ impl CompiledStreamOperator {
         match self {
             Self::External(operator) => operator.restore(snapshot),
             Self::Expression(operator) => operator.restore(snapshot),
+            Self::SyncExpression(node) => {
+                crate::operator::sync_operator::SyncStreamOperator::restore(
+                    node.operator_mut(),
+                    snapshot,
+                )
+            }
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.restore(snapshot),
             Self::SnapshotSql(operator) => operator.restore(snapshot),
@@ -687,6 +708,7 @@ impl CompiledStreamOperator {
             Self::Expression(operator) => {
                 operator.process_data(ingress, batch, context, output).await
             }
+            Self::SyncExpression(_) => Err(sync_adapter_error()),
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.process_data(ingress, batch, context, output).await,
             Self::SnapshotSql(operator) => {
@@ -722,6 +744,7 @@ impl CompiledStreamOperator {
         match self {
             Self::External(operator) => operator.on_watermark(watermark, context, output).await,
             Self::Expression(operator) => operator.on_watermark(watermark, context, output).await,
+            Self::SyncExpression(_) => Err(sync_adapter_error()),
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.on_watermark(watermark, context, output).await,
             Self::SnapshotSql(operator) => operator.on_watermark(watermark, context, output).await,
@@ -745,6 +768,7 @@ impl CompiledStreamOperator {
         match self {
             Self::External(operator) => operator.on_end(context, output).await,
             Self::Expression(operator) => operator.on_end(context, output).await,
+            Self::SyncExpression(_) => Err(sync_adapter_error()),
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.on_end(context, output).await,
             Self::SnapshotSql(operator) => operator.on_end(context, output).await,
@@ -762,6 +786,7 @@ impl CompiledStreamOperator {
     pub(crate) fn datafusion_runtime_initialized(&self) -> bool {
         match self {
             Self::Expression(operator) => operator.stream_runtime_initialized(),
+            Self::SyncExpression(node) => node.operator().stream_runtime_initialized(),
             Self::Sql(operator) => operator.stream_runtime_initialized(),
             Self::SnapshotSql(operator) => operator.stream_runtime_initialized(),
             Self::StreamJoin(operator) => operator.stream_runtime_initialized(),
@@ -781,6 +806,12 @@ impl CompiledStreamOperator {
 fn checkpoint_loan_error() -> CalcFlowError {
     CalcFlowError::Internal {
         message: "SQL operator is owned by checkpoint work".into(),
+    }
+}
+
+fn sync_adapter_error() -> CalcFlowError {
+    CalcFlowError::Internal {
+        message: "synchronous operator callback requires the runtime sync adapter".into(),
     }
 }
 
