@@ -18,6 +18,7 @@ use crate::{
 pub(crate) struct FusionProof {
     members: Vec<(String, usize)>,
     edges: Vec<String>,
+    region: bool,
 }
 
 impl FusionProof {
@@ -26,6 +27,7 @@ impl FusionProof {
         eligible_pair(first, second).then(|| Self {
             members: vec![(first.node_id.clone(), 0), (second.node_id.clone(), 1)],
             edges: vec![first.output_edges["output"][0].clone()],
+            region: false,
         })
     }
 
@@ -44,9 +46,16 @@ impl FusionProof {
                 .zip(ids)
                 .all(|((id, _), input)| id == input)
     }
+
+    pub(crate) const fn is_region(&self) -> bool {
+        self.region
+    }
 }
 
-pub(super) fn plan_fusion(plan: &StreamRuntimePlanParts) -> BTreeMap<String, FusionProof> {
+pub(super) fn plan_fusion(
+    plan: &StreamRuntimePlanParts,
+    allow_regions: bool,
+) -> BTreeMap<String, FusionProof> {
     let node_ordinals: BTreeMap<_, _> = plan
         .nodes
         .iter()
@@ -87,7 +96,20 @@ pub(super) fn plan_fusion(plan: &StreamRuntimePlanParts) -> BTreeMap<String, Fus
         }
         if members.len() > 1 {
             claimed.extend(members.iter().map(|(_, ordinal)| *ordinal));
-            groups.insert(head.node_id.clone(), FusionProof { members, edges });
+            let region = allow_regions
+                && members.len() == 2
+                && matches!(
+                    plan.nodes[members[0].1].operator,
+                    CompiledStreamOperator::Rolling(_)
+                );
+            groups.insert(
+                head.node_id.clone(),
+                FusionProof {
+                    members,
+                    edges,
+                    region,
+                },
+            );
         }
     }
     groups
@@ -194,7 +216,7 @@ mod tests {
     use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
     use tokio::sync::mpsc;
 
-    use super::eligible_pair;
+    use super::{eligible_pair, plan_fusion};
     use crate::{
         BatchKind, CancellationToken, Edge, EdgeBudget, ExpressionOperator, JsonMap,
         OperatorMetadata, PipelineBuilder, Port, PortEndpoint, RollingOperator,
@@ -302,6 +324,8 @@ mod tests {
             ["rolling", "project"]
         );
         assert!(eligible_pair(&parts.nodes[0], &parts.nodes[1]));
+        assert!(plan_fusion(&parts, true)["rolling"].is_region());
+        assert!(!plan_fusion(&parts, false)["rolling"].is_region());
     }
 
     #[tokio::test]
@@ -332,7 +356,7 @@ mod tests {
             panic!("valid pair entry failed");
         };
         assert_eq!(runtime.supervisor.task_count(), 2);
-        assert_eq!(runtime.supervisor.ready_pair_spawn_count(), 1);
+        assert_eq!(runtime.supervisor.ready_pair_spawn_count(), 0);
         let tasks = runtime.supervisor.registry().snapshot();
         assert_eq!(tasks[&TaskId::new(0)].task_name, "operator:rolling");
         assert_eq!(tasks[&TaskId::new(1)].task_name, "operator:project");
@@ -681,7 +705,16 @@ mod tests {
         restores: BTreeMap<String, crate::runtime::streaming::operator_task::OperatorRestoreState>,
         transaction: Option<Arc<crate::state::ManifestTransaction>>,
     ) -> GraphHarness {
-        let mut parts = plan().into_runtime_parts(budget).unwrap();
+        let parts = plan().into_runtime_parts(budget).unwrap();
+        graph_harness_for_parts(parts, fused, restores, transaction).await
+    }
+
+    async fn graph_harness_for_parts(
+        mut parts: crate::pipeline::StreamRuntimePlanParts,
+        fused: bool,
+        restores: BTreeMap<String, crate::runtime::streaming::operator_task::OperatorRestoreState>,
+        transaction: Option<Arc<crate::state::ManifestTransaction>>,
+    ) -> GraphHarness {
         // A private unknown-schema proof selects the unchanged unfused route.
         if !fused {
             parts.nodes[1].input_ports.insert(
@@ -726,6 +759,7 @@ mod tests {
                 ((node.node_id.clone(), tx), (node.node_id.clone(), rx))
             })
             .unzip();
+        let cooperative = transaction.is_some() || !restores.is_empty();
         let checkpoint =
             transaction.map(|transaction| super::super::OperatorCheckpointRegistration {
                 acks: acks_tx,
@@ -746,7 +780,7 @@ mod tests {
         );
         assert_eq!(
             runtime.supervisor.ready_pair_spawn_count(),
-            usize::from(fused)
+            usize::from(fused && cooperative)
         );
         GraphHarness {
             runtime,
@@ -893,16 +927,142 @@ mod tests {
                     .errors
                     .is_empty()
             );
-            assert!(
-                harness
-                    .core
-                    .runtime_status
-                    .lock()
-                    .nodes
-                    .values()
-                    .all(|node| node.snapshot().ended && node.snapshot().on_end_calls == 1)
-            );
+            let runtime = harness.core.runtime_status.lock();
+            let rolling = runtime.nodes["rolling"].snapshot();
+            let project = runtime.nodes["project"].snapshot();
+            assert_eq!(rolling.input_batches, 2);
+            assert_eq!(rolling.fully_fanned_out_batches, 1);
+            assert_eq!(project.input_batches, 1);
+            assert_eq!(project.fully_fanned_out_batches, 1);
+            assert!(runtime.nodes.values().all(|node| {
+                let node = node.snapshot();
+                node.ended && node.on_end_calls == 1
+            }));
+            drop(runtime);
+            let metrics = harness.core.metrics.snapshot();
+            assert_eq!(metrics.nodes["rolling"].input_batches, 2);
+            assert_eq!(metrics.nodes["rolling"].fully_fanned_out_batches, 1);
+            assert_eq!(metrics.nodes["project"].input_batches, 1);
+            assert_eq!(metrics.nodes["project"].fully_fanned_out_batches, 1);
+            if fused {
+                assert_eq!(harness.runtime.supervisor.ready_pair_spawn_count(), 0);
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn compiled_region_drains_projection_during_a_chunked_rolling_callback() {
+        use crate::{EventTime, StreamMessage, StreamMessageKind};
+        use datafusion::arrow::compute::concat_batches;
+
+        let mut parts = plan()
+            .into_runtime_parts(EdgeBudget::new(4, 1 << 20).unwrap())
+            .unwrap();
+        let internal_edge = parts.nodes[0].output_edges["output"][0].clone();
+        parts.edges.get_mut(&internal_edge).unwrap().budget = EdgeBudget::new(2, 1 << 20).unwrap();
+        let mut harness = graph_harness_for_parts(parts, true, BTreeMap::new(), None).await;
+        harness.runtime.data_gate.send(true).unwrap();
+        harness
+            .send(StreamMessage::data(input_batch(
+                1,
+                &[Some(1.0), Some(2.0), Some(3.0), Some(4.0)],
+                0,
+            )))
+            .await;
+        harness
+            .send(StreamMessage::watermark(EventTime::from_micros(5)))
+            .await;
+        harness.send(StreamMessage::end_of_input()).await;
+        let mut records = Vec::new();
+        let mut controls = Vec::new();
+        loop {
+            let message = harness.receive().await;
+            if let Some(batch) = message.as_data() {
+                records.extend_from_slice(batch.table_payload().unwrap().batches());
+            } else {
+                controls.push(message.kind());
+            }
+            if message.is_end_of_input() {
+                break;
+            }
+        }
+        let result = concat_batches(&records[0].schema(), &records).unwrap();
+        assert_eq!(result.num_rows(), 4);
+        assert_eq!(records.len(), 2);
+        assert!(
+            harness.core.metrics.snapshot().edges[&internal_edge]
+                .channel
+                .blocked_sends
+                > 0
+        );
+        assert_eq!(
+            controls,
+            [StreamMessageKind::Watermark, StreamMessageKind::EndOfInput]
+        );
+        assert!(
+            harness
+                .runtime
+                .supervisor
+                .join_all()
+                .await
+                .errors
+                .is_empty()
+        );
+        assert_eq!(harness.runtime.supervisor.ready_pair_spawn_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn compiled_region_preserves_downstream_post_accept_failure_identity() {
+        let mut harness = graph_harness(true, EdgeBudget::default(), BTreeMap::new(), None).await;
+        harness
+            .core
+            .metrics
+            .preset_operator_outputs_for_test("project", u64::MAX);
+        harness.runtime.data_gate.send(true).unwrap();
+        harness
+            .send(crate::StreamMessage::data(input_batch(
+                1,
+                &[Some(1.0), Some(2.0)],
+                0,
+            )))
+            .await;
+        harness
+            .send(crate::StreamMessage::watermark(
+                crate::EventTime::from_micros(3),
+            ))
+            .await;
+        let received = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            harness
+                .runtime
+                .sink_inputs
+                .values_mut()
+                .next()
+                .unwrap()
+                .recv(),
+        )
+        .await;
+        let report = harness.runtime.supervisor.join_all().await;
+        assert!(
+            matches!(&received, Ok(Ok(Some(message))) if message.as_data().is_some_and(|batch| batch.num_rows() == 2)),
+            "received={received:?}; report={report:?}; metrics={:?}",
+            harness.core.metrics.snapshot()
+        );
+        assert_eq!(report.primary_errors().len(), 1);
+        assert_eq!(report.primary_errors()[0].task_id, TaskId::new(1));
+        assert_eq!(report.primary_errors()[0].task_name, "operator:project");
+        let runtime = harness.core.runtime_status.lock();
+        assert_eq!(
+            runtime.nodes["rolling"].snapshot().fully_fanned_out_batches,
+            1
+        );
+        assert_eq!(runtime.nodes["project"].snapshot().input_batches, 1);
+        drop(runtime);
+        assert!(harness.core.metrics.snapshot().edges.values().all(|edge| {
+            edge.channel.queue_depth == 0
+                && edge.channel.charged_rows == 0
+                && edge.channel.charged_bytes == 0
+        }));
     }
 
     async fn saturate_graph(
@@ -1536,7 +1696,7 @@ mod tests {
             panic!("native projection entry failed");
         };
         let drivers = runtime.supervisor.physical_driver_count();
-        assert_eq!(runtime.supervisor.ready_pair_spawn_count(), 1);
+        assert_eq!(runtime.supervisor.ready_pair_spawn_count(), 0);
         cancellation.cancel();
         assert!(runtime.supervisor.join_all().await.errors.is_empty());
         assert_eq!(drivers, 1);

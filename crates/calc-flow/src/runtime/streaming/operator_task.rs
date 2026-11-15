@@ -51,8 +51,11 @@ use super::{
     supervisor::{PreparedPair, TaskSupervisor},
 };
 
+mod compiled_region;
 mod ingress_admission;
 pub(in crate::runtime::streaming) mod join_checkpoint_credit;
+
+pub(crate) use compiled_region::prepare_compiled_region;
 
 #[cfg(test)]
 mod performance_evidence;

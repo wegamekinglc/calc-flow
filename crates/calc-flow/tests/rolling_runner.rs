@@ -10,11 +10,12 @@ use std::{
 };
 
 use calc_flow::{
-    Batch, BatchMetadata, Cursor, EventTime, ExecutionOptions, JobState, JsonMap,
-    ManagedCheckpointRuntime, NativeWatermarkCapability, PipelineBuilder, ReplayPositioning,
-    RollingOperator, RollingSpec, SinkBinding, SourceBinding, SourceCapabilities,
-    SourceDeliveryCapability, SourceEvent, SourceSchema, StreamExecutionPlan, StreamRequirements,
-    StreamSink, StreamSource, StreamingRunner, UdfRegistry,
+    Batch, BatchKind, BatchMetadata, Cursor, Edge, EventTime, ExecutionOptions, ExpressionOperator,
+    JobState, JsonMap, ManagedCheckpointRuntime, NativeWatermarkCapability, OperatorMetadata,
+    PipelineBuilder, Port, PortEndpoint, ReplayPositioning, RollingOperator, RollingSpec,
+    SinkBinding, SourceBinding, SourceCapabilities, SourceDeliveryCapability, SourceEvent,
+    SourceSchema, StreamExecutionPlan, StreamRequirements, StreamSink, StreamSource,
+    StreamingRunner, UdfRegistry,
 };
 use datafusion::arrow::{
     array::{
@@ -101,6 +102,72 @@ fn rolling_plan() -> StreamExecutionPlan {
     PipelineBuilder::new("rolling_runner")
         .unwrap()
         .add_node("rolling", operator)
+        .unwrap()
+        .compile_stream(
+            &UdfRegistry::new().snapshot(),
+            &StreamRequirements::default(),
+        )
+        .unwrap()
+}
+
+fn rolling_region_plan() -> StreamExecutionPlan {
+    let rolling = RollingOperator::new("rolling", input_schema(), rolling_spec()).unwrap();
+    let schema = rolling.output_ports()[0].schema().unwrap().clone();
+    let projection = ExpressionOperator::new(
+        "projection",
+        "",
+        vec![
+            "ts".into(),
+            "symbol".into(),
+            "sequence".into(),
+            "price".into(),
+            "volume".into(),
+            "price_lag_1".into(),
+            "volume_delta_1".into(),
+        ],
+        None,
+        vec![],
+    )
+    .unwrap()
+    .with_ports(
+        Port::new(
+            "input",
+            BatchKind::Table,
+            true,
+            Some(
+                schema
+                    .fields()
+                    .iter()
+                    .map(|field| field.as_ref().clone())
+                    .collect(),
+            ),
+        )
+        .unwrap(),
+        Port::new(
+            "output",
+            BatchKind::Table,
+            false,
+            Some(
+                schema
+                    .fields()
+                    .iter()
+                    .map(|field| field.as_ref().clone())
+                    .collect(),
+            ),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    PipelineBuilder::new("rolling_region")
+        .unwrap()
+        .add_node("rolling", rolling)
+        .unwrap()
+        .add_node("projection", Box::new(projection))
+        .unwrap()
+        .connect(Edge::new(
+            PortEndpoint::new("rolling", "output").unwrap(),
+            PortEndpoint::new("projection", "input").unwrap(),
+        ))
         .unwrap()
         .compile_stream(
             &UdfRegistry::new().snapshot(),
@@ -299,6 +366,61 @@ async fn checkpoint_off_single_source_skips_the_progress_driver() {
     .unwrap();
     assert_eq!(job.status().task_count, 4);
     job.cancel().await;
+}
+
+#[tokio::test]
+async fn checkpoint_off_rolling_projection_region_uses_real_source_and_sink_tasks() {
+    let rows: Vec<InputRow> = vec![
+        (10, "a", 1, Some(1.0), Some(10)),
+        (11, "a", 2, Some(2.0), Some(20)),
+    ];
+    let collected = CollectedRows::default();
+    let plan = rolling_region_plan();
+    let source_id = plan.source_binding_ids()[0].to_owned();
+    let output_id = plan.sink_binding_ids()[0].to_owned();
+    let job = StreamingRunner::without_checkpoints(
+        plan,
+        BTreeMap::from([(
+            source_id,
+            SourceBinding::new(ScriptedSource {
+                events: VecDeque::from([
+                    data_event(&rows, 1),
+                    SourceEvent::Watermark(EventTime::from_micros(100)),
+                ]),
+                hold_open: false,
+            }),
+        )]),
+        BTreeMap::from([(
+            output_id,
+            vec![
+                SinkBinding::ordinary(
+                    "sink",
+                    CollectingSink {
+                        collected: collected.clone(),
+                    },
+                )
+                .unwrap(),
+            ],
+        )]),
+    )
+    .unwrap()
+    .start()
+    .await
+    .unwrap();
+    assert_eq!(job.wait().await.state, JobState::Completed);
+    assert_eq!(
+        *collected.rows.lock().unwrap(),
+        vec![
+            (10, "a".into(), 1, None, None),
+            (11, "a".into(), 2, Some(1.0), Some(10)),
+        ]
+    );
+    let status = job.status();
+    assert_eq!(status.task_count, 0);
+    assert_eq!(status.operators.len(), 2);
+    assert!(status.operators.values().all(|operator| {
+        operator.ended && operator.input_batches == 1 && operator.fanned_out_batches == 1
+    }));
 }
 
 #[tokio::test]

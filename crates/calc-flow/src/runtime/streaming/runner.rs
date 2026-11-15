@@ -59,12 +59,14 @@ use super::{
         ContinuousJobSpec, OrdinarySinkBinding, OwningContinuousJob, StableSinkId,
         ValidatedContinuousJob, ValidatedOrdinarySink, preflight_job,
     },
-    local_edge::{LocalEdgeOwner, OperatorEdgeReceiver, OperatorEdgeSender, local_edge},
+    local_edge::{
+        LocalEdgeOwner, OperatorEdgeReceiver, OperatorEdgeSender, local_edge, region_edge,
+    },
     metrics::{M2MetricsSnapshot, MetricsRecorder, MetricsTimer, sink_metric_id},
     operator_task::{
         OperatorCheckpointAck, OperatorCheckpointCommand, OperatorCheckpointPort, OperatorIngress,
         OperatorProgress, OperatorProgressSnapshot, OperatorRestoreState, OperatorTaskInputs,
-        OperatorTerminalPort, prepare_operator_task_group,
+        OperatorTerminalPort, prepare_compiled_region, prepare_operator_task_group,
     },
     progress::{
         DurableProgressRestore, DurableSourceCut, LiveProgressCoordinator, LiveProgressEvidence,
@@ -3264,7 +3266,12 @@ fn create_runtime_edges(
 ) -> crate::Result<RuntimeChannels> {
     let local_edges: BTreeMap<_, _> = layout
         .iter()
-        .flat_map(|(head, proof)| proof.edges().iter().map(move |edge| (edge.as_str(), head)))
+        .flat_map(|(head, proof)| {
+            proof
+                .edges()
+                .iter()
+                .map(move |edge| (edge.as_str(), (head, proof.is_region())))
+        })
         .collect();
     let mut channels = RuntimeChannels {
         senders: BTreeMap::new(),
@@ -3272,18 +3279,30 @@ fn create_runtime_edges(
         local_owners: BTreeMap::new(),
     };
     for (edge_id, edge) in &plan.edges {
-        let (sender, receiver) = if let Some(head) = local_edges.get(edge_id.as_str()) {
-            let (sender, receiver, owner) =
-                local_edge(edge_id.clone(), edge.budget, metrics.clone())?;
+        let (sender, receiver) = if let Some((head, region)) = local_edges.get(edge_id.as_str()) {
+            let (sender, receiver, owner) = if *region {
+                let (sender, receiver, owner) =
+                    region_edge(edge_id.clone(), edge.budget, metrics.clone())?;
+                (
+                    OperatorEdgeSender::Region(sender),
+                    OperatorEdgeReceiver::Region(receiver),
+                    owner,
+                )
+            } else {
+                let (sender, receiver, owner) =
+                    local_edge(edge_id.clone(), edge.budget, metrics.clone())?;
+                (
+                    OperatorEdgeSender::Local(sender),
+                    OperatorEdgeReceiver::Local(receiver),
+                    owner,
+                )
+            };
             channels
                 .local_owners
                 .entry((*head).clone())
                 .or_default()
                 .push(owner);
-            (
-                OperatorEdgeSender::Local(sender),
-                OperatorEdgeReceiver::Local(receiver),
-            )
+            (sender, receiver)
         } else {
             let (sender, receiver) =
                 edge_channel_with_metrics(edge_id.clone(), edge.budget, metrics.clone())?;
@@ -3365,7 +3384,8 @@ async fn run_operator_entry(
     let (entry_tx, _) = watch::channel(false);
     let (data_tx, _) = watch::channel(false);
     let (ack_tx, mut ack_rx) = mpsc::unbounded_channel();
-    let layout = operator_fusion::plan_fusion(&plan);
+    let allow_regions = checkpoint.is_none() && restores.is_empty();
+    let layout = operator_fusion::plan_fusion(&plan, allow_regions);
     let RuntimeChannels {
         mut senders,
         mut receivers,
@@ -3508,9 +3528,23 @@ fn register_operator_nodes(
             .local_owners
             .remove(&node_id)
             .unwrap_or_default();
-        groups.push(
-            prepare_operator_task_group(members, proof, owners).map_err(preflight_entry_failure)?,
-        );
+        if proof
+            .as_ref()
+            .is_some_and(operator_fusion::FusionProof::is_region)
+        {
+            let region = prepare_compiled_region(
+                members,
+                proof.as_ref().expect("region proof is present"),
+                owners,
+            )
+            .map_err(preflight_entry_failure)?;
+            registration.supervisor.spawn_prepared_region(region);
+        } else {
+            groups.push(
+                prepare_operator_task_group(members, proof, owners)
+                    .map_err(preflight_entry_failure)?,
+            );
+        }
     }
     if !prepared.is_empty() || !layout.is_empty() || !registration.local_owners.is_empty() {
         return Err(preflight_entry_failure(CalcFlowError::Internal {

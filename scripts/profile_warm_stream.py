@@ -123,6 +123,7 @@ def matrix_cases(args: argparse.Namespace) -> list[tuple[dict[str, Any], str]]:
             "history_rows": history,
             "append_rows": append,
             "indicator": indicator,
+            "exact_projection": args.exact_projection,
             **_scalar_dimensions(args),
         }
         if active is not None:
@@ -615,6 +616,7 @@ def _validate_start(response: dict[str, Any], config: dict[str, Any]) -> None:
         "fast_window",
         "history_segment_rows",
         "indicator",
+        "exact_projection",
     }
     expanded = response.get("config")
     if not isinstance(expanded, dict) or set(expanded) != fields:
@@ -1016,6 +1018,7 @@ async def diagnose(args: argparse.Namespace) -> None:
         "append_rows": args.append_rows,
         "append_entities": args.append_entities,
         "indicator": args.indicator,
+        "exact_projection": args.exact_projection,
         **_scalar_dimensions(args),
     }
     with tempfile.TemporaryDirectory(
@@ -1074,6 +1077,7 @@ def main() -> None:
     paired.add_argument("--append-entities", type=int, nargs="+")
     paired.add_argument("--seed", type=int, default=20260905)
     _add_scalar_dimensions(paired)
+    paired.add_argument("--exact-projection", action="store_true")
     paired.add_argument(
         "--worker-threads", type=int, nargs=2, metavar=("BASELINE", "CANDIDATE")
     )
@@ -1104,6 +1108,7 @@ def main() -> None:
     )
     diagnostic.add_argument("--samples", type=int, default=30)
     diagnostic.add_argument("--forced-gc", action="store_true")
+    diagnostic.add_argument("--exact-projection", action="store_true")
     _add_scalar_dimensions(diagnostic)
     args = parser.parse_args()
     if args.command == "build":

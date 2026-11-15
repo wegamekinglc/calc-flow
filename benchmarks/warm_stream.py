@@ -543,6 +543,8 @@ def _plan_preflight(project: dict[str, Any], config: ScenarioConfig) -> dict[str
         "windows": windows,
         "min_periods": 1,
         "datafusion": datafusion,
+        "exact_projection": config.exact_projection,
+        "checkpointing": not config.exact_projection,
     }
 
 
@@ -583,8 +585,11 @@ class ScenarioConfig:
     fast_window: int = 5
     history_segment_rows: int = 64_000
     append_entities: int | None = None
+    exact_projection: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.exact_projection) is not bool:
+            raise TypeError("exact_projection must be a bool")
         sizes = (
             self.history_rows,
             self.append_rows,
@@ -625,19 +630,35 @@ def _warm_program(config: ScenarioConfig) -> Program:
         fast_window=config.fast_window,
         engine="streaming",
     )
-    if config.indicator not in DECAY_INDICATORS:
-        return program
-    quotes = program.inputs[0]
-    features = {"decay": ts.decay(quotes["price"], window=rows(config.window))}
-    if config.indicator == "decay_mean":
-        features["moving_average"] = ts.mean(
-            quotes["price"], window=rows(config.window)
+    if config.indicator in DECAY_INDICATORS:
+        quotes = program.inputs[0]
+        features = {"decay": ts.decay(quotes["price"], window=rows(config.window))}
+        if config.indicator == "decay_mean":
+            features["moving_average"] = ts.mean(
+                quotes["price"], window=rows(config.window)
+            )
+        program = Program(
+            f"warm-{config.indicator}",
+            engine="streaming",
+            inputs=program.inputs,
+            outputs=(("indicators", quotes.with_columns(features)),),
         )
+    if not config.exact_projection:
+        return program
+    value_columns = {
+        "rolling_decay": ["decay"],
+        "decay_mean": ["decay", "moving_average"],
+        "dual_sma_spread": ["dual_sma_spread"],
+        "rolling_mean": ["moving_average"],
+    }[config.indicator]
     return Program(
-        f"warm-{config.indicator}",
+        program.name,
         engine="streaming",
         inputs=program.inputs,
-        outputs=(("indicators", quotes.with_columns(features)),),
+        outputs=tuple(
+            (name, output.select(*SCHEMA.names, *value_columns))
+            for name, output in program.outputs
+        ),
     )
 
 
@@ -679,10 +700,11 @@ class WarmScenario:
                 )
             },
             {"output": [SinkBinding.ordinary("profile", sink)]},
-            ManagedCheckpointRuntime(state_root),
+            None if config.exact_projection else ManagedCheckpointRuntime(state_root),
             config=StreamRuntimeConfig(
                 checkpoint_interval=timedelta(hours=24),
                 edge_budget=EdgeBudget(max_rows=maximum, max_bytes=64 << 20),
+                checkpointing=not config.exact_projection,
             ),
         ).start_async()
         scenario = cls(config, source, sink, job)

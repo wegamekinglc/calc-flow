@@ -353,7 +353,7 @@ impl TaskFixture {
             restores: &mut restores,
             checkpoint: None,
         };
-        let proof = super::plan_fusion(&graph)
+        let proof = super::plan_fusion(&graph, false)
             .remove(&graph.nodes[0].node_id)
             .unwrap();
         let mut nodes = graph.nodes.into_iter();

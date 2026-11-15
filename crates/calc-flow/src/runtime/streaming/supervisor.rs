@@ -192,6 +192,51 @@ impl PreparedLogicalTask {
             }),
         }
     }
+
+    pub(crate) fn bind_region<F>(
+        first: Self,
+        second: Self,
+        make_future: impl FnOnce([TaskFailureSignal; 2]) -> F,
+    ) -> PreparedRegionTask<F> {
+        let first = (first.task, first.reservation);
+        let second = (second.task, second.reservation);
+        let tasks = [first.0, second.0];
+        let signals = tasks.each_ref().map(|task| task.failure_signal.clone());
+        PreparedRegionTask {
+            tasks,
+            reservations: [first.1, second.1],
+            future: make_future(signals),
+        }
+    }
+}
+
+pub(crate) struct PreparedRegionTask<F> {
+    tasks: [TaskRegistration; 2],
+    reservations: [ReservationGuard; 2],
+    future: F,
+}
+
+impl<F> PreparedRegionTask<F> {
+    async fn run<O>(self, started: bool) -> Vec<TaskId>
+    where
+        F: Future<Output = [O; 2]>,
+        O: TaskOutput,
+    {
+        let [first, second] = self.tasks;
+        let ids = if started {
+            let [first_output, second_output] = self.future.await;
+            let first = first.run(true, std::future::ready(first_output)).await;
+            let second = second.run(true, std::future::ready(second_output)).await;
+            vec![first, second]
+        } else {
+            drop(self.future);
+            let first = first.run(false, std::future::pending::<O>()).await;
+            let second = second.run(false, std::future::pending::<O>()).await;
+            vec![first, second]
+        };
+        drop(self.reservations);
+        ids
+    }
 }
 
 pub(crate) struct PreparedTaskGroup {
@@ -523,6 +568,35 @@ impl TaskSupervisor {
         start_tx
             .send(())
             .expect("the newly registered group still owns its start gate");
+        ids
+    }
+
+    pub(crate) fn spawn_prepared_region<F, O>(
+        &mut self,
+        region: PreparedRegionTask<F>,
+    ) -> [TaskId; 2]
+    where
+        F: Future<Output = [O; 2]> + Send + 'static,
+        O: TaskOutput,
+    {
+        let ids = region.tasks.each_ref().map(|task| task.task_id);
+        let launched = region
+            .reservations
+            .each_ref()
+            .map(|guard| Arc::clone(&guard.launched));
+        let (start_tx, start_rx) = oneshot::channel();
+        let abort_handle = self
+            .tasks
+            .spawn(async move { region.run(start_rx.await.is_ok()).await });
+        self.stable_ids.insert(abort_handle.id(), ids.to_vec());
+        for committed in launched {
+            committed.store(true, Ordering::SeqCst);
+        }
+        #[cfg(test)]
+        self.registry.1.lock().push(abort_handle.clone());
+        start_tx
+            .send(())
+            .expect("the newly registered region still owns its start gate");
         ids
     }
 
