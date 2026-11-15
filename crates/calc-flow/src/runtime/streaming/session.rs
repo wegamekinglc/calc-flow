@@ -7,7 +7,7 @@ use datafusion::arrow::{
         Array, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
         TimestampSecondArray,
     },
-    datatypes::SchemaRef,
+    datatypes::{SchemaRef, TimeUnit},
 };
 use tokio::sync::{mpsc, watch};
 
@@ -422,7 +422,8 @@ impl StreamSession {
             ..
         } = self;
         for message in messages {
-            input.sender.push(message)?;
+            // Staging validated the data envelope; control messages carry no rows.
+            input.sender.enqueue(message);
         }
         let runtime = runtime.as_ref().ok_or_else(|| CalcFlowError::Internal {
             message: "session runtime was released".into(),
@@ -437,7 +438,7 @@ impl StreamSession {
         for (output, receiver) in outputs.iter_mut() {
             let mut batches = Vec::new();
             while let Some(message) = receiver.try_recv()? {
-                batches.extend(message.as_data().cloned());
+                batches.extend(message.into_data());
             }
             if !batches.is_empty() {
                 emitted.insert(output.clone(), batches);
@@ -513,12 +514,14 @@ impl SessionInput {
                 .ok_or_else(|| CalcFlowError::Internal {
                     message: "generated session watermark has no generator".into(),
                 })?;
-            generator.observe_batch(batch, &self.binding_id)?;
-            generated = generator.on_timer(&self.binding_id)?;
+            generated = generator
+                .observe_batch(batch, &self.binding_id)
+                .and_then(|()| generator.on_timer(&self.binding_id))
+                .map_err(|error| session_watermark_error(&self.binding_id, error))?;
         }
-        let (sequence, data, _) =
+        let (sequence, data, cost) =
             sequenced_source_message(&self.binding_id, next.next_sequence, batch, None)?;
-        self.sender.validate_message(&data)?;
+        self.sender.check_cost(&cost)?;
         next.next_sequence = sequence.checked_add(1);
         let mut messages = vec![data];
         messages.extend(
@@ -605,13 +608,18 @@ fn ordered_maximum(
             maximum = Some(value);
         }
     }
-    if let (Some(first), Some(watermark)) = (first, progress.watermark)
-        && i128::from(first) * unit_nanos(event_time.unit)
-            <= i128::from(watermark.as_micros()) * 1_000
-    {
-        return Err(invalid(
-            "expected event time after the current watermark; earlier rows would be late",
-        ));
+    if let (Some(first), Some(watermark)) = (first, progress.watermark) {
+        // Operators see the runtime's import: nanoseconds floor to microseconds.
+        let first = EventTime::import_timestamp_unit(first, time_unit(event_time.unit), &field)
+            .map_err(|error| match error {
+                CalcFlowError::InvalidArgument { message, .. } => invalid(&message),
+                error => error,
+            })?;
+        if first <= watermark {
+            return Err(invalid(
+                "expected event time after the current watermark; earlier rows would be late",
+            ));
+        }
     }
     Ok(maximum)
 }
@@ -634,13 +642,26 @@ fn timestamp_values(column: &dyn Array, unit: ArrowTimestampUnit) -> Option<&[i6
     }
 }
 
-const fn unit_nanos(unit: ArrowTimestampUnit) -> i128 {
+const fn time_unit(unit: ArrowTimestampUnit) -> TimeUnit {
     match unit {
-        ArrowTimestampUnit::Second => 1_000_000_000,
-        ArrowTimestampUnit::Millisecond => 1_000_000,
-        ArrowTimestampUnit::Microsecond => 1_000,
-        ArrowTimestampUnit::Nanosecond => 1,
+        ArrowTimestampUnit::Second => TimeUnit::Second,
+        ArrowTimestampUnit::Millisecond => TimeUnit::Millisecond,
+        ArrowTimestampUnit::Microsecond => TimeUnit::Microsecond,
+        ArrowTimestampUnit::Nanosecond => TimeUnit::Nanosecond,
     }
+}
+
+/// Reports generator failures at the session's watermark field paths.
+fn session_watermark_error(binding_id: &str, error: CalcFlowError) -> CalcFlowError {
+    let CalcFlowError::InvalidArgument { field, message } = error else {
+        return error;
+    };
+    let field = field
+        .strip_prefix(&format!("sources.{binding_id}.watermark_policy."))
+        .map_or(field.clone(), |rest| {
+            format!("session.watermarks.{binding_id}.{rest}")
+        });
+    CalcFlowError::InvalidArgument { field, message }
 }
 
 fn unsupported(field: String, message: String) -> CalcFlowError {

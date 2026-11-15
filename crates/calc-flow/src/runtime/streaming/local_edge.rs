@@ -154,18 +154,24 @@ pub(super) fn session_edge(
 
 impl SessionEdgeSender {
     pub(super) fn validate_message(&self, message: &StreamMessage) -> Result<()> {
-        reject_oversize(
-            &self.0.edge,
-            self.0.budget,
-            &EnvelopeCost::of_message(message)?,
-        )
+        self.check_cost(&EnvelopeCost::of_message(message)?)
+    }
+
+    /// Applies the runtime edges' oversize rule to an already computed cost.
+    pub(super) fn check_cost(&self, cost: &EnvelopeCost) -> Result<()> {
+        reject_oversize(&self.0.edge, self.0.budget, cost)
     }
 
     /// Appends after the runtime edges' oversize rule; never waits.
     pub(super) fn push(&self, message: StreamMessage) -> Result<()> {
         self.validate_message(&message)?;
-        self.0.queue.lock().push_back(message);
+        self.enqueue(message);
         Ok(())
+    }
+
+    /// Appends a message whose envelope the caller already admitted.
+    pub(super) fn enqueue(&self, message: StreamMessage) {
+        self.0.queue.lock().push_back(message);
     }
 }
 

@@ -6,7 +6,7 @@ use std::{
 use datafusion::arrow::{
     array::{
         ArrayRef, Float64Array, StringArray, TimestampMicrosecondArray, TimestampNanosecondArray,
-        UInt64Array,
+        TimestampSecondArray, UInt64Array,
     },
     datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
     record_batch::RecordBatch,
@@ -1144,4 +1144,117 @@ fn test_admission_rejects_unsupported_requirements_and_watermarks() {
         )]),
         &format!("session.watermarks.{input}.max_out_of_orderness"),
     );
+}
+
+fn ordered_on(input: &str, column: &str) -> BTreeMap<String, SessionWatermark> {
+    BTreeMap::from([(
+        input.to_owned(),
+        SessionWatermark::Ordered {
+            event_time_column: column.into(),
+        },
+    )])
+}
+
+#[test]
+fn test_ordered_rejects_nanosecond_row_inside_closed_microsecond() {
+    let plan = pass_through_plan(&nanosecond_schema());
+    let input = source_id(&plan);
+    let mut session = open_session(plan, ordered_on(&input, "ts"));
+    session
+        .push(&input, nanosecond_batch(&[Some(5_000)]), Some(micros(5)))
+        .unwrap();
+    // 5 µs + 500 ns imports as event time 5 µs, which the watermark closed.
+    assert_invalid(
+        session.push(&input, nanosecond_batch(&[Some(5_500)]), None),
+        &format!("session.inputs.{input}.event_time"),
+    );
+    session
+        .push(&input, nanosecond_batch(&[Some(6_000)]), None)
+        .unwrap();
+}
+
+fn second_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![Field::new(
+        "ts",
+        DataType::Timestamp(TimeUnit::Second, Some("UTC".into())),
+        false,
+    )]))
+}
+
+fn second_batch(times: &[i64]) -> Batch {
+    let column: ArrayRef =
+        Arc::new(TimestampSecondArray::from(times.to_vec()).with_timezone("UTC"));
+    Batch::table(
+        vec![RecordBatch::try_new(second_schema(), vec![column]).unwrap()],
+        BatchMetadata::default(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn test_generated_watermark_errors_use_session_watermark_paths() {
+    let plan = pass_through_plan(&second_schema());
+    let input = source_id(&plan);
+    let mut session = open_session(
+        plan,
+        BTreeMap::from([(
+            input.clone(),
+            SessionWatermark::BoundedOutOfOrderness {
+                event_time_column: "ts".into(),
+                max_out_of_orderness: std::time::Duration::from_secs(1),
+            },
+        )]),
+    );
+    // Seconds far beyond the microsecond EventTime range.
+    assert_invalid(
+        session.push(&input, second_batch(&[i64::MAX / 2]), None),
+        &format!("session.watermarks.{input}.event_time_column"),
+    );
+    session.push(&input, second_batch(&[10]), None).unwrap();
+    assert_eq!(session.watermark_for_test(), Some(micros(9_000_000)));
+
+    let plan = pass_through_plan(&second_schema());
+    let input = source_id(&plan);
+    let mut session = open_session(plan, ordered_on(&input, "ts"));
+    assert_invalid(
+        session.push(&input, second_batch(&[i64::MAX / 2]), None),
+        &format!("session.watermarks.{input}.event_time_column"),
+    );
+    session.push(&input, second_batch(&[10]), None).unwrap();
+}
+
+#[test]
+fn test_rejected_push_leaves_generated_watermark_state_unchanged() {
+    let plan = rolling_projection_plan();
+    let input = source_id(&plan);
+    let config = StreamRuntimeConfig {
+        edge_budget: EdgeBudget {
+            max_rows: 2,
+            max_bytes: usize::MAX,
+        },
+        ..session_config()
+    };
+    let watermarks = BTreeMap::from([(
+        input.clone(),
+        SessionWatermark::BoundedOutOfOrderness {
+            event_time_column: "ts".into(),
+            max_out_of_orderness: std::time::Duration::from_micros(1),
+        },
+    )]);
+    let mut session = StreamSession::new(plan, &config, watermarks).unwrap();
+    session
+        .push(&input, input_batch(&[(10, "a", 0, 1.0)]), None)
+        .unwrap();
+    assert!(matches!(
+        session.push(
+            &input,
+            input_batch(&[(20, "a", 1, 2.0), (20, "b", 2, 2.0), (20, "c", 3, 2.0)]),
+            None,
+        ),
+        Err(CalcFlowError::EdgeBudgetExceeded { .. })
+    ));
+    session
+        .push(&input, input_batch(&[(11, "a", 1, 2.0)]), None)
+        .unwrap();
+    assert_eq!(session.watermark_for_test(), Some(micros(10)));
 }
