@@ -672,7 +672,20 @@ fn test_operator_failure_fails_session_for_later_calls() {
         "{error:?}"
     );
     assert!(error.to_string().contains("late_row"), "{error}");
+    assert!(session.is_failed());
     assert_rejects_every_call(&mut session, &input, FAILED);
+}
+
+#[test]
+fn test_validation_error_does_not_mark_session_failed() {
+    let mut session = open_session(rolling_projection_plan(), BTreeMap::new());
+    let input = session.input_ids()[0].to_owned();
+    assert!(!session.is_failed());
+    assert!(session.push("missing", input_batch(&[]), None).is_err());
+    assert!(!session.is_failed());
+    session.finish().unwrap();
+    assert!(!session.is_failed());
+    assert_lifecycle_error(session.advance(&input, micros(1)), FINISHED);
 }
 
 #[test]

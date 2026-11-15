@@ -295,6 +295,12 @@ impl StreamSession {
         self.outputs.iter().map(|(id, _)| id.as_str()).collect()
     }
 
+    /// Whether an error after validation failed the session; later calls
+    /// then return [`CalcFlowError::InvalidArgument`] at field `session`.
+    pub fn is_failed(&self) -> bool {
+        self.lifecycle == Lifecycle::Failed
+    }
+
     #[cfg(test)]
     fn watermark_for_test(&self) -> Option<EventTime> {
         self.input.progress.watermark
