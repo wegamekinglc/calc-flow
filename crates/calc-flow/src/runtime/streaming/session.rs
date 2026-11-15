@@ -265,10 +265,23 @@ impl StreamSession {
         let parts = admitted_parts(plan, config)?;
         let job = session_job(&parts.fingerprint)?;
         let runtime = session_runtime()?;
-        let (input, nodes, outputs) = session_block_on(&runtime, wire(parts, &job, watermarks))?;
+        let wired = session_block_on(&runtime, wire(parts, &job, watermarks));
+        let (input, nodes, outputs) = match wired {
+            Ok(wired) => wired,
+            Err(error) => {
+                release_session_runtime(runtime);
+                return Err(error);
+            }
+        };
         let needs_async = nodes.iter().any(|node| !node.is_sync());
+        let runtime = if needs_async {
+            Some(runtime)
+        } else {
+            release_session_runtime(runtime);
+            None
+        };
         Ok(Self {
-            runtime: needs_async.then_some(runtime),
+            runtime,
             job,
             input,
             nodes,
@@ -499,10 +512,23 @@ thread_local! {
     static FUTURE_POLLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn session_block_on<F: std::future::Future>(
-    runtime: &tokio::runtime::Runtime,
-    future: F,
-) -> F::Output {
+fn session_block_on<T, F>(runtime: &tokio::runtime::Runtime, future: F) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let mut future = Box::pin(future);
+        let waker = futures::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        #[cfg(test)]
+        FUTURE_POLLS.with(|polls| polls.set(polls.get() + 1));
+        return match std::future::Future::poll(future.as_mut(), &mut context) {
+            std::task::Poll::Ready(result) => result,
+            std::task::Poll::Pending => Err(session_error(
+                "cannot prepare pending work inside a Tokio runtime; use a blocking thread",
+            )),
+        };
+    }
     #[cfg(test)]
     {
         BLOCK_ON_CALLS.with(|calls| calls.set(calls.get() + 1));
@@ -514,6 +540,14 @@ fn session_block_on<F: std::future::Future>(
     }
     #[cfg(not(test))]
     runtime.block_on(future)
+}
+
+fn release_session_runtime(runtime: tokio::runtime::Runtime) {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        runtime.shutdown_background();
+    } else {
+        drop(runtime);
+    }
 }
 
 #[cfg(test)]
@@ -542,12 +576,7 @@ impl Drop for StreamSession {
         self.job.cancellation().cancel();
         self.nodes.clear();
         if let Some(runtime) = self.runtime.take() {
-            // Dropping a runtime inside another runtime's context panics.
-            if tokio::runtime::Handle::try_current().is_ok() {
-                runtime.shutdown_background();
-            } else {
-                drop(runtime);
-            }
+            release_session_runtime(runtime);
         }
     }
 }
