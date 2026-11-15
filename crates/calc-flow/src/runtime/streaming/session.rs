@@ -18,15 +18,18 @@ use super::{
     operator_task::{OperatorProgress, OperatorTaskInputs, caller_driven::CallerDrivenOperator},
     progress::{
         GeneratedWatermarkState,
-        prepare::{ArrowTimestampUnit, ResolvedEventTimeColumn, resolve_event_time_column},
+        prepare::{
+            ArrowTimestampUnit, ResolvedEventTimeColumn, is_logical_nanos_duration,
+            resolve_event_time_column,
+        },
     },
     runner::{take_node_ingresses, take_node_outputs},
     source_task::sequenced_source_message,
 };
 use crate::{
-    Batch, CalcFlowError, CancellationToken, EventTime, JsonMap, Port, Result, StreamExecutionPlan,
-    StreamRuntimeConfig,
-    pipeline::{RuntimeStreamNode, StreamRuntimePlanParts},
+    Batch, CalcFlowError, CancellationToken, DeliveryGuarantee, EventTime, JsonMap, Port, Result,
+    StreamExecutionPlan, StreamRuntimeConfig,
+    pipeline::{CompiledStreamOperator, RuntimeStreamNode, StreamRuntimePlanParts},
 };
 
 /// Caller-driven, in-memory execution of one compiled stream plan.
@@ -133,6 +136,7 @@ impl StreamSession {
         watermarks: BTreeMap<String, SessionWatermark>,
     ) -> Result<Self> {
         config.validate()?;
+        admit_plan(&plan)?;
         plan.set_sql_budgets(config)?;
         let job = StreamJobContext::new(
             crate::continuous::allocate_job_id()?,
@@ -143,6 +147,7 @@ impl StreamSession {
         )
         .with_checkpointing(false);
         let parts = plan.into_runtime_parts(config.edge_budget)?;
+        admit_nodes(&parts.nodes)?;
         let (input, nodes, outputs) = wire(parts, &job, watermarks)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -485,12 +490,98 @@ const fn unit_nanos(unit: ArrowTimestampUnit) -> i128 {
     }
 }
 
+fn unsupported(field: String, message: String) -> CalcFlowError {
+    CalcFlowError::InvalidArgument { field, message }
+}
+
+/// Admits plans with one dynamic input, no static inputs, no native array
+/// sequence nodes and no exactly-once outputs.
+fn admit_plan(plan: &StreamExecutionPlan) -> Result<()> {
+    let inputs = plan.source_binding_ids().len();
+    if inputs != 1 {
+        return Err(unsupported(
+            "session.inputs".into(),
+            format!(
+                "StreamSession requires exactly one dynamic input, found {inputs}; use StreamingRunner"
+            ),
+        ));
+    }
+    if !plan.static_input_ids().is_empty() {
+        return Err(unsupported(
+            "session.static_inputs".into(),
+            "static inputs are not supported by StreamSession; use StreamingRunner".into(),
+        ));
+    }
+    if let Some(node_id) = plan.native_sequence_node_ids().next() {
+        return Err(unsupported(
+            format!("session.nodes.{node_id}"),
+            "native array sequence nodes are not supported by StreamSession; use StreamingRunner"
+                .into(),
+        ));
+    }
+    if let Some((output, _)) = plan
+        .requirements()
+        .delivery
+        .iter()
+        .find(|(_, guarantee)| **guarantee == DeliveryGuarantee::ExactlyOnce)
+    {
+        return Err(unsupported(
+            format!("session.requirements.delivery.{output}"),
+            "exactly-once delivery is not supported by StreamSession; use StreamingRunner".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Admits `Rolling` (except indicator and MACD layouts), `Expression` and
+/// `Union` nodes; every other kind stays on `StreamingRunner`.
+fn admit_nodes(nodes: &[RuntimeStreamNode]) -> Result<()> {
+    for node in nodes {
+        let kind = match &node.operator {
+            CompiledStreamOperator::Expression(_) | CompiledStreamOperator::Union(_) => continue,
+            CompiledStreamOperator::Rolling(operator) => match operator.state_layout_version() {
+                layout @ (crate::ROLLING_INDICATOR_STATE_LAYOUT_VERSION
+                | crate::ROLLING_MACD_STATE_LAYOUT_VERSION) => {
+                    return Err(unsupported(
+                        format!("session.nodes.{}", node.node_id),
+                        format!(
+                            "rolling indicator state layout {layout} is not supported by StreamSession; use StreamingRunner"
+                        ),
+                    ));
+                }
+                _ => continue,
+            },
+            CompiledStreamOperator::External(_) => "external",
+            CompiledStreamOperator::Sql(_) => "SQL",
+            CompiledStreamOperator::SnapshotSql(_) => "snapshot SQL",
+            CompiledStreamOperator::BoundedOrder(_) => "bounded ORDER BY",
+            CompiledStreamOperator::Distinct(_) => "DISTINCT",
+            CompiledStreamOperator::CheckpointLoan => "checkpoint loan",
+            CompiledStreamOperator::Window(_) => "window",
+            CompiledStreamOperator::CrossSection(_) => "cross-section",
+            CompiledStreamOperator::StreamJoin(_) => "join",
+            CompiledStreamOperator::StreamAsofJoin(_) => "ASOF join",
+        };
+        return Err(unsupported(
+            format!("session.nodes.{}", node.node_id),
+            format!("{kind} nodes are not supported by StreamSession; use StreamingRunner"),
+        ));
+    }
+    Ok(())
+}
+
 /// Resolves the input's watermark mode against its declared exact schema.
 fn input_mode(
     binding_id: &str,
     schema: Option<&SchemaRef>,
     mut watermarks: BTreeMap<String, SessionWatermark>,
 ) -> Result<(WatermarkMode, Option<GeneratedWatermarkState>)> {
+    if let Some(key) = watermarks.keys().find(|key| key.as_str() != binding_id) {
+        return Err(unsupported(
+            format!("session.watermarks.{key}"),
+            format!("is not the session input {binding_id:?}"),
+        ));
+    }
     match watermarks
         .remove(binding_id)
         .unwrap_or(SessionWatermark::Explicit)
@@ -504,6 +595,13 @@ fn input_mode(
             Duration::from_micros(1),
             true,
         ),
+        SessionWatermark::BoundedOutOfOrderness {
+            max_out_of_orderness,
+            ..
+        } if !is_logical_nanos_duration(max_out_of_orderness) => Err(unsupported(
+            format!("session.watermarks.{binding_id}.max_out_of_orderness"),
+            "must be positive and representable as logical nanoseconds".into(),
+        )),
         SessionWatermark::BoundedOutOfOrderness {
             event_time_column,
             max_out_of_orderness,

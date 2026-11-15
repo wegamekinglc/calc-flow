@@ -1263,6 +1263,10 @@ impl StreamExecutionPlan {
         Ok(self)
     }
 
+    pub(crate) fn native_sequence_node_ids(&self) -> impl Iterator<Item = &str> {
+        self.native_sequence_nodes.iter().map(String::as_str)
+    }
+
     pub(crate) fn native_static_plan(&self) -> &crate::array::NativeStaticPlan {
         &self.native_statics
     }

@@ -459,8 +459,13 @@ fn normalize_capability(
     }
 }
 
+/// Whether a progress duration is positive and fits logical nanoseconds.
+pub(crate) fn is_logical_nanos_duration(duration: Duration) -> bool {
+    !duration.is_zero() && u64::try_from(duration.as_nanos()).is_ok()
+}
+
 fn validate_duration(descriptor: &SourceDescriptor, name: &str, duration: Duration) -> Result<()> {
-    if !duration.is_zero() && u64::try_from(duration.as_nanos()).is_ok() {
+    if is_logical_nanos_duration(duration) {
         return Ok(());
     }
     Err(CalcFlowError::InvalidArgument {

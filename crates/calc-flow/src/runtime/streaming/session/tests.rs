@@ -735,6 +735,8 @@ fn test_calls_inside_tokio_runtime_return_documented_error() {
         // Dropping a session inside a runtime context must not panic.
         drop(open_session(rolling_projection_plan(), BTreeMap::new()));
     }
+    let inside = open_session(rolling_projection_plan(), BTreeMap::new());
+    runtime.block_on(async move { drop(inside) });
     let output = session.output_ids()[0].to_owned();
     let pushed = session
         .push(&input, input_batch(&[(10, "a", 0, 1.0)]), Some(micros(10)))
@@ -756,4 +758,364 @@ fn test_operator_panic_is_contained_and_fails_session() {
         "{error:?}"
     );
     assert_rejects_every_call(&mut session, &input, FAILED);
+}
+
+#[test]
+fn test_late_side_output_matches_runner_including_source_columns() {
+    let plan = || {
+        let side_output = json!({"kind": "side_output", "metrics_version": 1, "schema_version": 1});
+        compile(
+            PipelineBuilder::new("late")
+                .unwrap()
+                .add_node("rolling", rolling("rolling", side_output))
+                .unwrap(),
+        )
+    };
+    let pushes = vec![
+        (vec![(10, "a", 0, 1.0), (10, "b", 1, 2.0)], 10),
+        (vec![(11, "a", 2, 3.0)], 11),
+        (vec![(5, "a", 3, 9.0), (12, "b", 4, 4.0)], 12),
+        (vec![(9, "b", 5, 8.0)], 12),
+    ];
+    let mut session = open_session(plan(), BTreeMap::new());
+    let input = session.input_ids()[0].to_owned();
+    let mut rows = BTreeMap::<String, Vec<String>>::new();
+    for (batch_rows, watermark) in &pushes {
+        let pushed = session
+            .push(&input, input_batch(batch_rows), Some(micros(*watermark)))
+            .unwrap();
+        for (output, batches) in pushed.into_batches() {
+            rows.entry(output)
+                .or_default()
+                .extend(rendered_rows(&batches));
+        }
+    }
+    for (output, batches) in session.finish().unwrap().into_batches() {
+        rows.entry(output)
+            .or_default()
+            .extend(rendered_rows(&batches));
+    }
+    let expected = runner_outputs(
+        plan(),
+        explicit_events(&pushes),
+        WatermarkPolicy::SourceProvided,
+    )
+    .into_iter()
+    .map(|(output, batches)| (output, rendered_rows(&batches)))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(rows, expected);
+    let late = &rows["late"];
+    assert_eq!(late.len(), 2);
+    assert!(late[0].contains(&format!("|{input}|2|")), "{late:?}");
+    assert!(late[1].contains(&format!("|{input}|3|")), "{late:?}");
+}
+
+/// `input -> pass -> {fast, slow} -> {fast_out, slow_out}` plus `union(fast, slow)`.
+fn fan_out_plan() -> StreamExecutionPlan {
+    let rolling_with = |node_id: &str, size: usize| {
+        let mut spec = serde_json::to_value(rolling_spec(error_policy())).unwrap();
+        spec["outputs"][0]["frame"]["size"] = json!(size);
+        RollingOperator::new(
+            node_id,
+            input_schema(),
+            serde_json::from_value(spec).unwrap(),
+        )
+        .unwrap()
+    };
+    let pass = ExpressionOperator::new(
+        "pass",
+        "",
+        vec![
+            "ts".into(),
+            "symbol".into(),
+            "sequence".into(),
+            "price".into(),
+        ],
+        None,
+        vec![],
+    )
+    .unwrap()
+    .with_ports(
+        Port::with_schema_ref("input", BatchKind::Table, true, Some(input_schema())).unwrap(),
+        Port::with_schema_ref("output", BatchKind::Table, true, Some(input_schema())).unwrap(),
+    )
+    .unwrap();
+    let fast = rolling_with("fast", 2);
+    let rolled = fast.output_ports()[0].schema().unwrap().clone();
+    let union_port = |name: &str| {
+        Port::with_schema_ref(name, BatchKind::Table, true, Some(Arc::clone(&rolled))).unwrap()
+    };
+    let union =
+        crate::UnionOperator::new("both", vec![union_port("left"), union_port("right")]).unwrap();
+    let builder = PipelineBuilder::new("fan_out")
+        .unwrap()
+        .add_node("pass", Box::new(pass))
+        .unwrap()
+        .add_node("fast", fast)
+        .unwrap()
+        .add_node("slow", rolling_with("slow", 3))
+        .unwrap()
+        .add_node("fast_out", Box::new(projection("fast_out", &rolled)))
+        .unwrap()
+        .add_node("slow_out", Box::new(projection("slow_out", &rolled)))
+        .unwrap()
+        .add_node("both", Box::new(union))
+        .unwrap();
+    let builder = [
+        (("pass", "output"), ("fast", "input")),
+        (("pass", "output"), ("slow", "input")),
+        (("fast", "output"), ("fast_out", "input")),
+        (("slow", "output"), ("slow_out", "input")),
+        (("fast", "output"), ("both", "left")),
+        (("slow", "output"), ("both", "right")),
+    ]
+    .into_iter()
+    .fold(builder, |builder, (source, target)| {
+        connect(builder, source, target)
+    });
+    compile(builder)
+}
+
+#[test]
+fn test_fan_out_outputs_and_union_match_runner() {
+    let pushes = explicit_pushes();
+    let mut session = open_session(fan_out_plan(), BTreeMap::new());
+    let input = session.input_ids()[0].to_owned();
+    assert_eq!(session.output_ids().len(), 3);
+    let mut rows = BTreeMap::<String, Vec<String>>::new();
+    let mut record = |output: super::SessionOutput| {
+        for (output, batches) in output.into_batches() {
+            rows.entry(output)
+                .or_default()
+                .extend(rendered_rows(&batches));
+        }
+    };
+    for (batch_rows, watermark) in &pushes {
+        record(
+            session
+                .push(&input, input_batch(batch_rows), Some(micros(*watermark)))
+                .unwrap(),
+        );
+    }
+    record(session.finish().unwrap());
+    let mut expected = runner_outputs(
+        fan_out_plan(),
+        explicit_events(&pushes),
+        WatermarkPolicy::SourceProvided,
+    )
+    .into_iter()
+    .map(|(output, batches)| (output, rendered_rows(&batches)))
+    .collect::<BTreeMap<_, _>>();
+    // Union order across ingresses is a runner scheduling choice.
+    for (_, union_rows) in rows
+        .iter_mut()
+        .chain(expected.iter_mut())
+        .filter(|(output, _)| output.as_str() == "both.output")
+    {
+        union_rows.sort();
+    }
+    assert_eq!(
+        rows.keys().collect::<Vec<_>>(),
+        ["both.output", "fast_out.output", "slow_out.output"]
+    );
+    assert_eq!(rows["both.output"].len(), 10);
+    assert_eq!(rows, expected);
+}
+
+fn assert_rejected(
+    plan: StreamExecutionPlan,
+    watermarks: BTreeMap<String, SessionWatermark>,
+    expected_field: &str,
+) {
+    match StreamSession::new(plan, &session_config(), watermarks) {
+        Err(CalcFlowError::InvalidArgument { field, message }) => {
+            assert_eq!(field, expected_field, "{message}");
+        }
+        Err(other) => panic!("expected InvalidArgument at {expected_field}, got {other:?}"),
+        Ok(_) => panic!("expected InvalidArgument at {expected_field}, got a session"),
+    }
+}
+
+fn table_port(name: &str) -> Port {
+    Port::with_schema_ref(name, BatchKind::Table, true, Some(input_schema())).unwrap()
+}
+
+fn two_input_union() -> PipelineBuilder {
+    PipelineBuilder::new("two")
+        .unwrap()
+        .add_node(
+            "merge",
+            Box::new(
+                crate::UnionOperator::new("merge", vec![table_port("main"), table_port("other")])
+                    .unwrap(),
+            ),
+        )
+        .unwrap()
+}
+
+/// `input -> pass -> node`: one dynamic input fans out to `ingresses`, whose
+/// ports declare `ingress_schema`.
+fn behind_pass(
+    name: &str,
+    node: impl Into<crate::NodeOperator>,
+    ingresses: &[&str],
+    ingress_schema: Option<SchemaRef>,
+) -> StreamExecutionPlan {
+    let pass = ExpressionOperator::new("pass", "", vec!["*".into()], None, vec![])
+        .unwrap()
+        .with_ports(
+            table_port("input"),
+            Port::with_schema_ref("output", BatchKind::Table, true, ingress_schema).unwrap(),
+        )
+        .unwrap();
+    let builder = PipelineBuilder::new(name)
+        .unwrap()
+        .add_node("pass", Box::new(pass))
+        .unwrap()
+        .add_node(name, node)
+        .unwrap();
+    compile(ingresses.iter().fold(builder, |builder, ingress| {
+        connect(builder, ("pass", "output"), (name, ingress))
+    }))
+}
+
+#[test]
+fn test_admission_rejects_unsupported_graphs_with_field_paths() {
+    assert_rejected(
+        compile(two_input_union()),
+        BTreeMap::new(),
+        "session.inputs",
+    );
+
+    let with_static = compile(two_input_union())
+        .with_static_input_specs(vec![crate::StaticInputSpec::Table {
+            name: "other".into(),
+            mutability: crate::StaticMutability::Static,
+            schema: input_schema()
+                .fields()
+                .iter()
+                .map(|field| crate::ArrowFieldSpec {
+                    name: field.name().clone(),
+                    data_type: match field.data_type() {
+                        DataType::Timestamp(..) => "timestamp[us, tz=UTC]".into(),
+                        DataType::Utf8 => "string".into(),
+                        DataType::UInt64 => "uint64".into(),
+                        _ => "float64".into(),
+                    },
+                    nullable: field.is_nullable(),
+                })
+                .collect(),
+        }])
+        .unwrap();
+    assert_rejected(with_static, BTreeMap::new(), "session.static_inputs");
+
+    let sql = crate::SqlOperator::new("sql", "SELECT * FROM input", vec!["input".into()], vec![])
+        .unwrap();
+    assert_rejected(
+        behind_pass("sql", Box::new(sql), &["input"], None),
+        BTreeMap::new(),
+        "session.nodes.sql",
+    );
+
+    let join = crate::StreamJoinOperator::new(
+        "join",
+        input_schema(),
+        input_schema(),
+        crate::StreamJoinSpec::inner(
+            ["symbol"],
+            ["symbol"],
+            "ts",
+            "ts",
+            crate::JoinTimeBounds::new(std::time::Duration::ZERO, std::time::Duration::ZERO)
+                .unwrap(),
+            crate::JoinStateLimits::new(100, 1_000_000, 1_000).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let join_ports = join
+        .input_ports()
+        .iter()
+        .map(|port| port.name().to_owned())
+        .collect::<Vec<_>>();
+    let join_ports = join_ports.iter().map(String::as_str).collect::<Vec<_>>();
+    assert_rejected(
+        behind_pass("join", Box::new(join), &join_ports, Some(input_schema())),
+        BTreeMap::new(),
+        "session.nodes.join",
+    );
+
+    let indicator: RollingSpec = serde_json::from_value(json!({
+        "configuration_version": 1, "state_layout_version": crate::ROLLING_INDICATOR_STATE_LAYOUT_VERSION,
+        "partition_by": ["symbol"], "event_time": "ts", "sequence_by": ["sequence"],
+        "outputs": [{"kind": "rsi", "primitive_version": 1, "input": "price", "output": "rsi", "period": 2}],
+        "allowed_lateness_micros": 0, "late_policy": {"kind": "drop", "metrics_version": 1},
+        "value_policy": "stateful_numeric_v1",
+    }))
+    .unwrap();
+    let indicator = RollingOperator::new("rsi", input_schema(), indicator).unwrap();
+    assert_rejected(
+        compile(
+            PipelineBuilder::new("rsi")
+                .unwrap()
+                .add_node("rsi", indicator)
+                .unwrap(),
+        ),
+        BTreeMap::new(),
+        "session.nodes.rsi",
+    );
+
+    let output = rolling_projection_plan().sink_binding_ids()[0].to_owned();
+    let rolling_builder = || {
+        let rolling = rolling("rolling", error_policy());
+        let rolled = rolling.output_ports()[0].schema().unwrap().clone();
+        let builder = PipelineBuilder::new("session")
+            .unwrap()
+            .add_node("rolling", rolling)
+            .unwrap()
+            .add_node("project", Box::new(projection("project", &rolled)))
+            .unwrap();
+        connect(builder, ("rolling", "output"), ("project", "input"))
+    };
+    let exactly_once = rolling_builder()
+        .compile_stream(
+            &UdfRegistry::new().snapshot(),
+            &StreamRequirements {
+                delivery: BTreeMap::from([(output.clone(), crate::DeliveryGuarantee::ExactlyOnce)]),
+            },
+        )
+        .unwrap();
+    assert_rejected(
+        exactly_once,
+        BTreeMap::new(),
+        &format!("session.requirements.delivery.{output}"),
+    );
+
+    let input = source_id(&rolling_projection_plan());
+    assert_rejected(
+        rolling_projection_plan(),
+        BTreeMap::from([("other".into(), SessionWatermark::Disabled)]),
+        "session.watermarks.other",
+    );
+    assert_rejected(
+        rolling_projection_plan(),
+        BTreeMap::from([(
+            input.clone(),
+            SessionWatermark::Ordered {
+                event_time_column: "price".into(),
+            },
+        )]),
+        &format!("session.watermarks.{input}.event_time_column"),
+    );
+    assert_rejected(
+        rolling_projection_plan(),
+        BTreeMap::from([(
+            input.clone(),
+            SessionWatermark::BoundedOutOfOrderness {
+                event_time_column: "ts".into(),
+                max_out_of_orderness: std::time::Duration::ZERO,
+            },
+        )]),
+        &format!("session.watermarks.{input}.max_out_of_orderness"),
+    );
 }
