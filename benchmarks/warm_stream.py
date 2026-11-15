@@ -1,25 +1,38 @@
-"""Reproducible warm-state measurements through the actual StreamingRunner."""
+"""Reproducible warm-state measurements through the StreamingRunner or a session."""
 
 from __future__ import annotations
 
 import asyncio
 import gc
 import hashlib
+import importlib.metadata
 import json
 import statistics
 import struct
+import sys
 import time
 from collections import deque
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import (
+    BuiltinMethodType,
+    CodeType,
+    FunctionType,
+    MethodDescriptorType,
+    ModuleType,
+)
 from typing import Any
 
 import numpy as np
 import pyarrow as pa
 
 from benchmarks.rolling_indicator_comparison import (
+    TaLibMethod,
     _native_program,
+    _timed_ta_lib,
     expected_dual_sma_spread,
     expected_rolling_mean,
 )
@@ -56,6 +69,8 @@ SCHEMA = pa.schema(
 RTOL = 1e-10
 ATOL = 1e-10
 DECAY_INDICATORS = ("rolling_decay", "decay_mean")
+# The logical input declared by ``_native_program``; sessions key inputs by it.
+SESSION_INPUT = "quotes"
 
 
 def expected_decay(prices: np.ndarray, *, entities: int, window: int) -> np.ndarray:
@@ -543,6 +558,8 @@ def _plan_preflight(project: dict[str, Any], config: ScenarioConfig) -> dict[str
         "windows": windows,
         "min_periods": 1,
         "datafusion": datafusion,
+        "exact_projection": config.exact_projection,
+        "checkpointing": not config.exact_projection,
     }
 
 
@@ -583,8 +600,11 @@ class ScenarioConfig:
     fast_window: int = 5
     history_segment_rows: int = 64_000
     append_entities: int | None = None
+    exact_projection: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.exact_projection) is not bool:
+            raise TypeError("exact_projection must be a bool")
         sizes = (
             self.history_rows,
             self.append_rows,
@@ -625,19 +645,35 @@ def _warm_program(config: ScenarioConfig) -> Program:
         fast_window=config.fast_window,
         engine="streaming",
     )
-    if config.indicator not in DECAY_INDICATORS:
-        return program
-    quotes = program.inputs[0]
-    features = {"decay": ts.decay(quotes["price"], window=rows(config.window))}
-    if config.indicator == "decay_mean":
-        features["moving_average"] = ts.mean(
-            quotes["price"], window=rows(config.window)
+    if config.indicator in DECAY_INDICATORS:
+        quotes = program.inputs[0]
+        features = {"decay": ts.decay(quotes["price"], window=rows(config.window))}
+        if config.indicator == "decay_mean":
+            features["moving_average"] = ts.mean(
+                quotes["price"], window=rows(config.window)
+            )
+        program = Program(
+            f"warm-{config.indicator}",
+            engine="streaming",
+            inputs=program.inputs,
+            outputs=(("indicators", quotes.with_columns(features)),),
         )
+    if not config.exact_projection:
+        return program
+    value_columns = {
+        "rolling_decay": ["decay"],
+        "decay_mean": ["decay", "moving_average"],
+        "dual_sma_spread": ["dual_sma_spread"],
+        "rolling_mean": ["moving_average"],
+    }[config.indicator]
     return Program(
-        f"warm-{config.indicator}",
+        program.name,
         engine="streaming",
         inputs=program.inputs,
-        outputs=(("indicators", quotes.with_columns(features)),),
+        outputs=tuple(
+            (name, output.select(*SCHEMA.names, *value_columns))
+            for name, output in program.outputs
+        ),
     )
 
 
@@ -679,10 +715,11 @@ class WarmScenario:
                 )
             },
             {"output": [SinkBinding.ordinary("profile", sink)]},
-            ManagedCheckpointRuntime(state_root),
+            None if config.exact_projection else ManagedCheckpointRuntime(state_root),
             config=StreamRuntimeConfig(
                 checkpoint_interval=timedelta(hours=24),
                 edge_budget=EdgeBudget(max_rows=maximum, max_bytes=64 << 20),
+                checkpointing=not config.exact_projection,
             ),
         ).start_async()
         scenario = cls(config, source, sink, job)
@@ -782,3 +819,441 @@ class WarmScenario:
             "before_status": self.before_status,
             "after_status": status,
         }
+
+    async def cancel(self) -> None:
+        await self.job.cancel_async()
+
+
+def _calc_flow_code_objects() -> tuple[CodeType, ...]:
+    """Return the code of every loaded pure-Python ``calc_flow`` function."""
+    modules = [
+        module
+        for name, module in tuple(sys.modules.items())
+        if (name == "calc_flow" or name.startswith("calc_flow."))
+        and isinstance(module, ModuleType)
+    ]
+    pending: list[CodeType] = []
+    for module in modules:
+        values = list(vars(module).values())
+        for value in tuple(values):
+            if isinstance(value, type) and value.__module__ == module.__name__:
+                values.extend(vars(value).values())
+        for value in values:
+            functions = (
+                (value.fget, value.fset, value.fdel)
+                if isinstance(value, property)
+                else (getattr(value, "__func__", value),)
+            )
+            pending.extend(
+                function.__code__
+                for function in functions
+                if isinstance(function, FunctionType)
+                and function.__module__ == module.__name__
+            )
+    codes: set[CodeType] = set()
+    while pending:
+        code = pending.pop()
+        if code not in codes:
+            codes.add(code)
+            pending.extend(
+                value for value in code.co_consts if isinstance(value, CodeType)
+            )
+    return tuple(codes)
+
+
+def _native_method_matcher(
+    native_type: type, name: str
+) -> Callable[[object, object], bool]:
+    """Match a call to one native method, bound or through its descriptor."""
+
+    def matches(callable_: object, arg0: object) -> bool:
+        if isinstance(callable_, MethodDescriptorType):
+            owner = arg0
+        elif isinstance(callable_, BuiltinMethodType):
+            owner = callable_.__self__
+        else:
+            return False
+        return callable_.__name__ == name and isinstance(owner, native_type)
+
+    return matches
+
+
+class _NativeCallProbe:
+    """Split one sample at a native call observed through ``sys.monitoring``.
+
+    The library is not instrumented: CALL and C_RETURN events on selected
+    Python code objects timestamp the matching native call. Every other call
+    site is disabled the first time it is seen, so warm-up leaves only the
+    matching site armed and each timed sample pays two small callbacks.
+    """
+
+    def __init__(
+        self,
+        codes: tuple[CodeType, ...],
+        matches: Callable[[object, object], bool],
+    ) -> None:
+        self._codes = codes
+        self._matches = matches
+        self._tool: int | None = None
+        self._called: object = None
+        self.calls = 0
+        self.called_ns = 0
+        self.returned_ns = 0
+
+    def install(self) -> str | None:
+        """Arm the probe, or return why phase attribution is unavailable."""
+        monitoring = getattr(sys, "monitoring", None)
+        if monitoring is None:
+            return "sys.monitoring requires Python 3.12 or newer"
+        tool = monitoring.PROFILER_ID
+        try:
+            monitoring.use_tool_id(tool, "calc-flow-warm-session")
+        except ValueError:
+            return "the sys.monitoring profiler tool ID is already in use"
+        events = monitoring.events
+        self._tool = tool
+        try:
+            monitoring.register_callback(tool, events.CALL, self._on_call)
+            # C_RETURN follows the CALL event of the same site.
+            monitoring.register_callback(tool, events.C_RETURN, self._on_return)
+            for code in self._codes:
+                monitoring.set_local_events(tool, code, events.CALL)
+        except BaseException:
+            self.close()
+            raise
+        return None
+
+    def close(self) -> None:
+        if self._tool is None:
+            return
+        monitoring = sys.monitoring
+        for code in self._codes:
+            monitoring.set_local_events(self._tool, code, 0)
+        monitoring.register_callback(self._tool, monitoring.events.CALL, None)
+        monitoring.register_callback(self._tool, monitoring.events.C_RETURN, None)
+        monitoring.free_tool_id(self._tool)
+        self._tool = None
+
+    def _on_call(self, code: CodeType, offset: int, callable_: object, arg0: object):
+        if self._matches(callable_, arg0):
+            self.calls += 1
+            self._called = callable_
+            self.called_ns = time.perf_counter_ns()
+            return None
+        return sys.monitoring.DISABLE
+
+    def _on_return(
+        self, code: CodeType, offset: int, callable_: object, arg0: object
+    ) -> None:
+        returned = time.perf_counter_ns()
+        if callable_ is self._called:
+            self.returned_ns = returned
+            self._called = None
+
+    def reset(self) -> None:
+        self.calls = 0
+        self.called_ns = self.returned_ns = 0
+        self._called = None
+
+    def phases(self, started: int, finished: int) -> dict[str, float] | str:
+        """Return contiguous phases of one sample, or why they are unavailable."""
+        if self.calls != 1:
+            return f"observed {self.calls} matching native calls"
+        if not started <= self.called_ns <= self.returned_ns <= finished:
+            return "native call timestamps fall outside the sample"
+        return {
+            "argument_handling": (self.called_ns - started) / 1e9,
+            "native_call": (self.returned_ns - self.called_ns) / 1e9,
+            "result_assembly": (finished - self.returned_ns) / 1e9,
+        }
+
+
+def _probe_calibration_target(mapping: dict[int, int]) -> int | None:
+    return mapping.get(0)
+
+
+def _probe_overhead_seconds(*, calls: int = 2_000, rounds: int = 5) -> float | None:
+    """Estimate the wall time one matched CALL/C_RETURN callback pair adds.
+
+    The calibration call is a C method descriptor matched the same way as the
+    native session method, so it pays the same matcher and both callbacks.
+    """
+    mapping: dict[int, int] = {}
+
+    def measure() -> int:
+        started = time.perf_counter_ns()
+        for _ in range(calls):
+            _probe_calibration_target(mapping)
+        return time.perf_counter_ns() - started
+
+    plain = min(measure() for _ in range(rounds))
+    probe = _NativeCallProbe(
+        (_probe_calibration_target.__code__,), _native_method_matcher(dict, "get")
+    )
+    if probe.install() is not None:
+        return None
+    try:
+        probed = min(measure() for _ in range(rounds))
+    finally:
+        probe.close()
+    return max(0, probed - plain) / calls / 1e9
+
+
+class WarmSessionScenario:
+    """Own one caller-thread StreamSession on a dedicated thread.
+
+    The session is built, warmed, sampled and finished on one thread without a
+    running event loop, as a synchronous caller would use it. IPC, executor
+    handoff, input preparation and validation are outside the timed region.
+    """
+
+    def __init__(
+        self,
+        config: ScenarioConfig,
+        executor: ThreadPoolExecutor,
+        session: Any,
+        program: Program,
+    ) -> None:
+        self.config = config
+        self.session = session
+        self.position = 0
+        self.warm_seconds = 0.0
+        self.plan_identity: dict[str, Any] = {}
+        self.phase_probe: dict[str, Any] = {}
+        self._executor = executor
+        self._output_name = program.outputs[0][0]
+        self._probe: _NativeCallProbe | None = None
+        self._probe_note = "phase probe was not installed"
+        self._warm_digest = _Float64Digest()
+        self._closed = False
+
+    @property
+    def warm_output_digest(self) -> str:
+        return self._warm_digest.hexdigest()
+
+    @classmethod
+    async def start(
+        cls, config: ScenarioConfig, state_root: Path | None = None
+    ) -> WarmSessionScenario:
+        """Start a session; it is in-memory, so ``state_root`` is unused."""
+        if not config.exact_projection:
+            raise ValueError(
+                "the session driver measures the checkpoint-off exact projection"
+            )
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="warm-session")
+        try:
+            return await asyncio.get_running_loop().run_in_executor(
+                executor, cls._open, config, executor
+            )
+        except BaseException:
+            executor.shutdown(wait=False)
+            raise
+
+    @classmethod
+    def _open(
+        cls, config: ScenarioConfig, executor: ThreadPoolExecutor
+    ) -> WarmSessionScenario:
+        _plan, identity = _prepared_plan(config)
+        program = _warm_program(config)
+        maximum = max(config.history_segment_rows, config.append_rows)
+        session = program.session(
+            watermarks={SESSION_INPUT: SourceProvidedWatermarks()},
+            config=StreamRuntimeConfig(
+                checkpointing=False,
+                edge_budget=EdgeBudget(max_rows=maximum, max_bytes=64 << 20),
+            ),
+        )
+        scenario = cls(config, executor, session, program)
+        scenario.plan_identity = identity
+        try:
+            scenario._install_probe()
+            started = time.perf_counter()
+            scenario._warm_history()
+            scenario.warm_seconds = time.perf_counter() - started
+            return scenario
+        except BaseException:
+            scenario._close()
+            raise
+
+    def _install_probe(self) -> None:
+        native_type = getattr(
+            sys.modules.get("calc_flow._native"), "_StreamSession", None
+        )
+        overhead = _probe_overhead_seconds()
+        if native_type is None:
+            self._probe_note = "calc_flow._native exposes no _StreamSession"
+        else:
+            probe = _NativeCallProbe(
+                _calc_flow_code_objects(), _native_method_matcher(native_type, "push")
+            )
+            failure = probe.install()
+            if failure is None:
+                self._probe = probe
+            else:
+                self._probe_note = failure
+        self.phase_probe = {
+            "installed": self._probe is not None,
+            "note": None if self._probe is not None else self._probe_note,
+            "overhead_seconds_estimate": overhead,
+        }
+
+    def _warm_history(self) -> None:
+        group_rows = max(self.config.history_segment_rows, self.config.entities)
+        while self.position < self.config.history_rows:
+            self._warm_group(min(group_rows, self.config.history_rows - self.position))
+
+    def _warm_group(self, rows: int) -> None:
+        # Like the runner arm, only a group of complete ticks carries a watermark.
+        start = self.position
+        end = start + rows
+        segment = self.config.history_segment_rows
+        for offset in range(0, rows, segment):
+            count = min(segment, rows - offset)
+            data, watermark = _prepared_events(self.config, start + offset, count)
+            final = offset + count >= rows
+            outputs = self.session.push(
+                {SESSION_INPUT: data.batch}, watermark=watermark if final else None
+            )
+            table = outputs[self._output_name]
+            if table.num_rows > end - self.position:
+                raise RuntimeError(
+                    "warm output must contain only the pending tick rows"
+                )
+            if table.num_rows:
+                self.validate(table, table.num_rows)
+                self._warm_digest.update(table)
+                self.position += table.num_rows
+        if self.position != end:
+            raise RuntimeError("warm watermark did not finalize every pending row")
+
+    def validate(self, table: pa.Table, rows: int) -> dict[str, Any]:
+        return _validate_output(table, self.config, start=self.position, rows=rows)
+
+    def _sample(self, collect_gc: bool) -> dict[str, Any]:
+        config = self.config
+        data, watermark = _prepared_events(config, self.position, config.append_rows)
+        inputs = {SESSION_INPUT: data.batch}
+        session, output_name, probe = self.session, self._output_name, self._probe
+        if probe is not None:
+            probe.reset()
+        if collect_gc:
+            gc.collect()
+        started = time.perf_counter_ns()
+        table = session.push(inputs, watermark=watermark)[output_name]
+        finished = time.perf_counter_ns()
+        phases = self._probe_note if probe is None else probe.phases(started, finished)
+        correctness = self.validate(table, config.append_rows)
+        sample = {
+            "start_row": self.position,
+            "seconds": (finished - started) / 1e9,
+            "correctness": correctness,
+            "phases_seconds": phases if isinstance(phases, dict) else {},
+            "phase_attribution": (
+                "native_call_probe"
+                if isinstance(phases, dict)
+                else f"unavailable: {phases}"
+            ),
+        }
+        self.position += config.append_rows
+        return sample
+
+    async def sample(self, *, collect_gc: bool) -> dict[str, Any]:
+        return await self._run(self._sample, collect_gc)
+
+    def _finish(self) -> dict[str, Any]:
+        try:
+            flushed = {
+                name: table.num_rows for name, table in self.session.finish().items()
+            }
+        finally:
+            self._close()
+        if any(flushed.values()):
+            raise RuntimeError(f"session finish emitted unexpected rows: {flushed}")
+        return {
+            "state": "completed",
+            "warm_seconds": self.warm_seconds,
+            "finish_rows": flushed,
+            "late_rows_guard": "late_policy=error fails the session on any late row",
+        }
+
+    async def finish(self) -> dict[str, Any]:
+        try:
+            return await self._run(self._finish)
+        finally:
+            self._executor.shutdown(wait=False)
+
+    def _close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.session.close()
+        finally:
+            if self._probe is not None:
+                self._probe.close()
+                self._probe = None
+
+    async def cancel(self) -> None:
+        try:
+            if not self._closed:
+                await self._run(self._close)
+        finally:
+            self._executor.shutdown(wait=False)
+
+    async def _run(self, function: Callable[..., Any], *args: Any) -> Any:
+        return await asyncio.get_running_loop().run_in_executor(
+            self._executor, function, *args
+        )
+
+
+SCENARIO_DRIVERS: dict[str, Any] = {
+    "runner": WarmScenario,
+    "session": WarmSessionScenario,
+}
+
+
+def ta_lib_reference(
+    config: ScenarioConfig, *, samples: int, collect_gc: bool
+) -> dict[str, Any]:
+    """Time TA-Lib over each paired append's bounded window context.
+
+    Sample ``i`` recalculates the ``window - 1`` rows per entity before the
+    ``i``-th paired append plus that append, returns only the appended rows and
+    matches them against the warm oracle outside the timed call.
+    """
+    if config.indicator not in ("rolling_mean", "dual_sma_spread"):
+        raise ValueError("the TA-Lib reference covers SMA indicators only")
+    if config.append_entities is not None:
+        raise ValueError("the TA-Lib reference requires complete entity ticks")
+    if type(samples) is not int or samples < 2:
+        raise ValueError("the TA-Lib reference requires at least two samples")
+    seconds = []
+    for index in range(samples):
+        start = config.history_rows + index * config.append_rows
+        context = min(start, (config.window - 1) * config.entities)
+        sequence = np.arange(
+            start - context, start + config.append_rows, dtype=np.uint64
+        )
+        method = TaLibMethod(
+            _prices(sequence, config.entities),
+            entities=config.entities,
+            window=config.window,
+            fast_window=(
+                config.fast_window if config.indicator == "dual_sma_spread" else None
+            ),
+            history_rows=context,
+        )
+        actual = method.run()
+        expected = _expected(config, start=start, rows=config.append_rows)
+        if not np.allclose(actual, expected, rtol=RTOL, atol=ATOL):
+            raise RuntimeError("TA-Lib reference does not match the warm oracle")
+        if collect_gc:
+            gc.collect()
+        seconds.append(_timed_ta_lib(method, 1))
+    return {
+        "adapter": "TaLibMethod bounded-history append",
+        "ta_lib_version": importlib.metadata.version("ta-lib"),
+        "history_rows_per_entity": config.window - 1,
+        "collect_gc": collect_gc,
+        **_summary(seconds, config.append_rows),
+    }
