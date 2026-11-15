@@ -386,23 +386,35 @@ def test_session_driver_warms_samples_and_finishes_on_one_session_thread(
     program = _SessionProgram(_warm_program(config), session)
     monkeypatch.setattr(warm, "_warm_program", lambda _config: program)
 
+    # The probe arms whenever the loaded wheel has a native session; this
+    # oracle session never calls it, so samples stay unattributed either way.
+    native_session = hasattr(sys.modules["calc_flow._native"], "_StreamSession")
+    unattributed = (
+        "unavailable: observed 0 matching native calls"
+        if native_session
+        else "unavailable: calc_flow._native exposes no _StreamSession"
+    )
+
     async def exercise() -> None:
         scenario = await WarmSessionScenario.start(config)
-        assert scenario.position == 128
-        assert scenario.plan_identity["preflight"]["exact_projection"] is True
-        assert scenario.phase_probe["installed"] is False
-        first = await scenario.sample(collect_gc=True)
-        second = await scenario.sample(collect_gc=False)
-        assert [first["start_row"], second["start_row"]] == [128, 192]
-        for sample in (first, second):
-            assert sample["correctness"]["passed"]
-            assert sample["seconds"] > 0
-            assert sample["phases_seconds"] == {}
-            assert sample["phase_attribution"].startswith("unavailable: ")
-        terminal = await scenario.finish()
-        assert terminal["state"] == "completed"
-        assert terminal["finish_rows"] == {"indicators": 0}
-        await scenario.cancel()
+        try:
+            assert scenario.position == 128
+            assert scenario.plan_identity["preflight"]["exact_projection"] is True
+            assert scenario.phase_probe["installed"] is native_session
+            first = await scenario.sample(collect_gc=True)
+            second = await scenario.sample(collect_gc=False)
+            assert [first["start_row"], second["start_row"]] == [128, 192]
+            for sample in (first, second):
+                assert sample["correctness"]["passed"]
+                assert sample["seconds"] > 0
+                assert sample["phases_seconds"] == {}
+                assert sample["phase_attribution"] == unattributed
+            terminal = await scenario.finish()
+            assert terminal["state"] == "completed"
+            assert terminal["finish_rows"] == {"indicators": 0}
+        finally:
+            # Releases the monitoring tool ID even when an assertion fails.
+            await scenario.cancel()
 
     asyncio.run(exercise())
     arguments = program.session_arguments
