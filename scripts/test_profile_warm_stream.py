@@ -241,6 +241,7 @@ class WarmProfileTests(unittest.TestCase):
             append_entities=[1, 4],
             indicators=["rolling_mean"],
             gc_modes=["forced", "normal"],
+            exact_projection=False,
             seed=7,
         )
         cases = profile.matrix_cases(args)
@@ -258,6 +259,7 @@ class WarmProfileTests(unittest.TestCase):
             append_entities=None,
             indicators=["rolling_mean", "dual_sma_spread"],
             gc_modes=["forced", "normal"],
+            exact_projection=False,
             seed=7,
         )
         cases = profile.matrix_cases(args)

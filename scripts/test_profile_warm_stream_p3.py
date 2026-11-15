@@ -79,6 +79,7 @@ def _config() -> dict:
         "fast_window": 20,
         "history_segment_rows": 1000,
         "indicator": "dual_sma_spread",
+        "exact_projection": False,
     }
 
 

@@ -24,6 +24,7 @@ from benchmarks.warm_stream import (
     _segment,
     _summary,
     _validate_output,
+    _warm_program,
 )
 
 
@@ -97,6 +98,28 @@ def test_warm_scenario_advances_one_runner_and_validates_every_append(
             assert second["correctness"]["passed"]
             assert first["seconds"] > 0
             assert first["phases_seconds"]["to_pyarrow"] >= 0
+        finally:
+            assert (await scenario.finish())["state"] == "completed"
+
+    asyncio.run(exercise())
+
+
+def test_exact_projection_warm_region_preserves_stream_results(tmp_path) -> None:
+    async def exercise() -> None:
+        config = ScenarioConfig(
+            history_rows=128,
+            append_rows=64,
+            indicator="dual_sma_spread",
+            exact_projection=True,
+        )
+        document = _warm_program(config).to_project().root
+        kinds = [node["operator"]["kind"] for node in document["graph"]["nodes"]]
+        assert "expression" in kinds
+        scenario = await WarmScenario.start(config, tmp_path)
+        try:
+            sample = await scenario.sample(collect_gc=False)
+            assert sample["correctness"]["passed"]
+            assert sample["phases_seconds"]["to_pyarrow"] >= 0
         finally:
             assert (await scenario.finish())["state"] == "completed"
 
