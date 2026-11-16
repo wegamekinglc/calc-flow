@@ -72,7 +72,7 @@ fn shifted_input(shift: f64) -> Batch {
     let record = datafusion::arrow::record_batch::RecordBatch::try_new(
         record.schema(),
         vec![
-            std::sync::Arc::new(datafusion::arrow::array::Float64Array::from(vec![
+            Arc::new(datafusion::arrow::array::Float64Array::from(vec![
                 Some(10.0 + shift),
                 None,
             ])),
@@ -165,7 +165,7 @@ fn reschema(input: &Batch, float32: bool) -> Batch {
         .map(|field| field.as_ref().clone())
         .collect::<Vec<_>>();
     if float32 {
-        columns[0] = std::sync::Arc::new(Float32Array::from(vec![Some(12.0), None]));
+        columns[0] = Arc::new(Float32Array::from(vec![Some(12.0), None]));
         fields[0] = Field::new(
             "Price",
             datafusion::arrow::datatypes::DataType::Float32,
@@ -178,7 +178,7 @@ fn reschema(input: &Batch, float32: bool) -> Batch {
             "unit".into(),
             "test".into(),
         )]));
-    let schema = std::sync::Arc::new(Schema::new_with_metadata(
+    let schema = Arc::new(Schema::new_with_metadata(
         fields,
         std::collections::HashMap::from([("origin".into(), "changed".into())]),
     ));
@@ -240,7 +240,7 @@ async fn constants_preserve_zero_column_input_rows() {
         datatypes::Schema,
         record_batch::{RecordBatch, RecordBatchOptions},
     };
-    let schema = std::sync::Arc::new(Schema::empty());
+    let schema = Arc::new(Schema::empty());
     let record = RecordBatch::try_new_with_options(
         schema,
         vec![],
@@ -252,8 +252,7 @@ async fn constants_preserve_zero_column_input_rows() {
         BatchMetadata::new("empty-schema", 11, JsonMap::new()).unwrap(),
     )
     .unwrap();
-    let cursor =
-        std::sync::Arc::new(crate::Cursor::new("empty-schema", vec![11], JsonMap::new()).unwrap());
+    let cursor = Arc::new(crate::Cursor::new("empty-schema", vec![11], JsonMap::new()).unwrap());
     let input = input.with_source_cursor(Some(cursor.clone()));
     let job = job(CancellationToken::new());
     let mut operator = operator(&["42 AS answer"], None);
@@ -265,7 +264,7 @@ async fn constants_preserve_zero_column_input_rows() {
     assert!(
         input
             .source_cursor()
-            .is_some_and(|actual| std::sync::Arc::ptr_eq(&actual, &cursor))
+            .is_some_and(|actual| Arc::ptr_eq(&actual, &cursor))
     );
     assert_eq!(
         operator
@@ -345,7 +344,7 @@ fn string_input(values: &[&str]) -> Batch {
         record.schema(),
         vec![
             record.column(0).clone(),
-            std::sync::Arc::new(datafusion::arrow::array::StringArray::from(values.to_vec())),
+            Arc::new(datafusion::arrow::array::StringArray::from(values.to_vec())),
         ],
     )
     .unwrap();
@@ -436,12 +435,12 @@ async fn selected_udfs_keep_sql_execution() {
     use datafusion::logical_expr::{Volatility, create_udf};
     let reference =
         UdfReference::new("rust", "trusted", "1", crate::UdfKind::DataFusionScalar).unwrap();
-    let udf = std::sync::Arc::new(create_udf(
+    let udf = Arc::new(create_udf(
         "trusted",
         vec![datafusion::arrow::datatypes::DataType::Float64],
         datafusion::arrow::datatypes::DataType::Float64,
         Volatility::Immutable,
-        std::sync::Arc::new(|arguments| Ok(arguments[0].clone())),
+        Arc::new(|arguments| Ok(arguments[0].clone())),
     ));
     let mut registry = crate::UdfRegistry::new();
     registry

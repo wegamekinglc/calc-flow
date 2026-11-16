@@ -1,0 +1,2474 @@
+{
+  "contract": "calc-flow.rolling-kernel-v2-evidence/1",
+  "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa",
+  "debug_assertions": false,
+  "selection": [
+    "1x1-dual",
+    "99x1-dual",
+    "6400x64-dual",
+    "64x64-dual-tick",
+    "6400x64-dual-lag1"
+  ],
+  "timed_samples": 30,
+  "boundaries": {
+    "dispatch": "current-thread block_on of real dispatch_data plus dispatch_watermark_handler on a RollingOperator, including the rolling collector, edge enqueue and callback publication; no projection; output drain outside the timer"
+  },
+  "limitations": [
+    "One evidence round: a controller pairs fresh-process rounds of two binaries (profile_warm_stream.py native).",
+    "Allocation counts are thread-local; the dispatch fixtures run on the calling thread.",
+    "Test binaries install the counting global allocator for every allocation, timed or not, in both arms.",
+    "Recorder-present numeric_update time comes from the arm's cumulative rolling metrics around each timed dispatch."
+  ],
+  "cases": [
+    {
+      "name": "1x1-dual",
+      "kind": "dispatch",
+      "workload": {
+        "rows": 1,
+        "entities": 1,
+        "window": 20,
+        "outputs": "mean5,mean20",
+        "min_periods": "full window",
+        "input": "Float64 exact binary fractions",
+        "first_payload_bytes": 0
+      },
+      "rows": 1,
+      "window_outputs": 2,
+      "history_rows": 4096,
+      "warm_dispatches": 3,
+      "samples": [
+        {
+          "index": 0,
+          "order": "AB",
+          "absent_seconds": 6.582e-6,
+          "present_seconds": 7.923e-6,
+          "present_numeric_update_seconds": 2.98e-7
+        },
+        {
+          "index": 1,
+          "order": "BA",
+          "absent_seconds": 6.465e-6,
+          "present_seconds": 8.779e-6,
+          "present_numeric_update_seconds": 3.83e-7
+        },
+        {
+          "index": 2,
+          "order": "AB",
+          "absent_seconds": 6.66e-6,
+          "present_seconds": 7.857e-6,
+          "present_numeric_update_seconds": 3.14e-7
+        },
+        {
+          "index": 3,
+          "order": "BA",
+          "absent_seconds": 6.364e-6,
+          "present_seconds": 8.065e-6,
+          "present_numeric_update_seconds": 3.11e-7
+        },
+        {
+          "index": 4,
+          "order": "AB",
+          "absent_seconds": 6.539e-6,
+          "present_seconds": 7.789e-6,
+          "present_numeric_update_seconds": 2.9e-7
+        },
+        {
+          "index": 5,
+          "order": "BA",
+          "absent_seconds": 6.294e-6,
+          "present_seconds": 8.027e-6,
+          "present_numeric_update_seconds": 3.07e-7
+        },
+        {
+          "index": 6,
+          "order": "AB",
+          "absent_seconds": 6.794e-6,
+          "present_seconds": 7.973e-6,
+          "present_numeric_update_seconds": 3.05e-7
+        },
+        {
+          "index": 7,
+          "order": "BA",
+          "absent_seconds": 6.368e-6,
+          "present_seconds": 8.076e-6,
+          "present_numeric_update_seconds": 3.2e-7
+        },
+        {
+          "index": 8,
+          "order": "AB",
+          "absent_seconds": 6.458e-6,
+          "present_seconds": 7.795e-6,
+          "present_numeric_update_seconds": 2.96e-7
+        },
+        {
+          "index": 9,
+          "order": "BA",
+          "absent_seconds": 6.144e-6,
+          "present_seconds": 7.945e-6,
+          "present_numeric_update_seconds": 3.02e-7
+        },
+        {
+          "index": 10,
+          "order": "AB",
+          "absent_seconds": 6.317e-6,
+          "present_seconds": 7.746e-6,
+          "present_numeric_update_seconds": 2.95e-7
+        },
+        {
+          "index": 11,
+          "order": "BA",
+          "absent_seconds": 6.16e-6,
+          "present_seconds": 8.12e-6,
+          "present_numeric_update_seconds": 3.1e-7
+        },
+        {
+          "index": 12,
+          "order": "AB",
+          "absent_seconds": 6.357e-6,
+          "present_seconds": 7.796e-6,
+          "present_numeric_update_seconds": 2.94e-7
+        },
+        {
+          "index": 13,
+          "order": "BA",
+          "absent_seconds": 6.339e-6,
+          "present_seconds": 8.053e-6,
+          "present_numeric_update_seconds": 3.03e-7
+        },
+        {
+          "index": 14,
+          "order": "AB",
+          "absent_seconds": 6.392e-6,
+          "present_seconds": 7.821e-6,
+          "present_numeric_update_seconds": 2.95e-7
+        },
+        {
+          "index": 15,
+          "order": "BA",
+          "absent_seconds": 6.132e-6,
+          "present_seconds": 7.97e-6,
+          "present_numeric_update_seconds": 3.17e-7
+        },
+        {
+          "index": 16,
+          "order": "AB",
+          "absent_seconds": 6.475e-6,
+          "present_seconds": 7.861e-6,
+          "present_numeric_update_seconds": 2.94e-7
+        },
+        {
+          "index": 17,
+          "order": "BA",
+          "absent_seconds": 6.204e-6,
+          "present_seconds": 7.974e-6,
+          "present_numeric_update_seconds": 3.5e-7
+        },
+        {
+          "index": 18,
+          "order": "AB",
+          "absent_seconds": 6.133e-6,
+          "present_seconds": 7.652e-6,
+          "present_numeric_update_seconds": 3.16e-7
+        },
+        {
+          "index": 19,
+          "order": "BA",
+          "absent_seconds": 5.712e-6,
+          "present_seconds": 7.604e-6,
+          "present_numeric_update_seconds": 3.28e-7
+        },
+        {
+          "index": 20,
+          "order": "AB",
+          "absent_seconds": 6.107e-6,
+          "present_seconds": 7.48e-6,
+          "present_numeric_update_seconds": 2.95e-7
+        },
+        {
+          "index": 21,
+          "order": "BA",
+          "absent_seconds": 5.853e-6,
+          "present_seconds": 7.682e-6,
+          "present_numeric_update_seconds": 3.31e-7
+        },
+        {
+          "index": 22,
+          "order": "AB",
+          "absent_seconds": 6.028e-6,
+          "present_seconds": 7.382e-6,
+          "present_numeric_update_seconds": 2.96e-7
+        },
+        {
+          "index": 23,
+          "order": "BA",
+          "absent_seconds": 9.412e-6,
+          "present_seconds": 0.000022437,
+          "present_numeric_update_seconds": 5.3e-7
+        },
+        {
+          "index": 24,
+          "order": "AB",
+          "absent_seconds": 7.042e-6,
+          "present_seconds": 8.176e-6,
+          "present_numeric_update_seconds": 3.38e-7
+        },
+        {
+          "index": 25,
+          "order": "BA",
+          "absent_seconds": 5.968e-6,
+          "present_seconds": 7.983e-6,
+          "present_numeric_update_seconds": 3.49e-7
+        },
+        {
+          "index": 26,
+          "order": "AB",
+          "absent_seconds": 6.108e-6,
+          "present_seconds": 7.63e-6,
+          "present_numeric_update_seconds": 3.11e-7
+        },
+        {
+          "index": 27,
+          "order": "BA",
+          "absent_seconds": 5.907e-6,
+          "present_seconds": 7.792e-6,
+          "present_numeric_update_seconds": 3.4e-7
+        },
+        {
+          "index": 28,
+          "order": "AB",
+          "absent_seconds": 6.155e-6,
+          "present_seconds": 7.437e-6,
+          "present_numeric_update_seconds": 2.99e-7
+        },
+        {
+          "index": 29,
+          "order": "BA",
+          "absent_seconds": 5.798e-6,
+          "present_seconds": 7.788e-6,
+          "present_numeric_update_seconds": 3.25e-7
+        }
+      ],
+      "allocation_samples": {
+        "absent": {
+          "allocation_count": 133,
+          "allocated_bytes": 17707,
+          "peak_net_allocation_count": 39,
+          "peak_net_bytes": 6876,
+          "ending_net_allocation_count": 11,
+          "ending_net_bytes": 616
+        },
+        "present": {
+          "allocation_count": 127,
+          "allocated_bytes": 18635,
+          "peak_net_allocation_count": 40,
+          "peak_net_bytes": 7460,
+          "ending_net_allocation_count": 10,
+          "ending_net_bytes": 592
+        }
+      },
+      "complete_callback_metrics": {
+        "data": {
+          "started": 35,
+          "succeeded": 35,
+          "failed": 0,
+          "cancelled": 0,
+          "interrupted": 0,
+          "callback_duration": {
+            "secs": 0,
+            "nanos": 64848
+          },
+          "input_validation_duration": {
+            "secs": 0,
+            "nanos": 8100
+          },
+          "ordering_proof_duration": {
+            "secs": 0,
+            "nanos": 45557
+          },
+          "entity_resolution_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "state_preparation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "numeric_update_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "history_maintenance_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "arrow_output_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "budget_preparation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "send_wait_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "other_duration": {
+            "secs": 0,
+            "nanos": 11191
+          },
+          "input_rows": 4130,
+          "order_proof_rows": 4130,
+          "resolved_rows": 0,
+          "touched_entities": 0,
+          "copied_entities": 0,
+          "numeric_rows": 0,
+          "numeric_lanes_started": 0,
+          "numeric_parallel_rows": 0,
+          "history_charge_scalar_rows": 0,
+          "history_charge_columnar_chunks": 0,
+          "history_append_rows_prepared": 0,
+          "history_evict_rows_prepared": 0,
+          "numeric_serial_calls": 0,
+          "numeric_general_calls": 0,
+          "numeric_parallel_calls": 0,
+          "parallel_fallback_no_work_client": 0,
+          "parallel_fallback_small_batch": 0,
+          "parallel_fallback_unsupported_plan": 0,
+          "parallel_fallback_cpu_limit": 0,
+          "parallel_fallback_prepared_ineligible": 0,
+          "parallel_fallback_lane_partition_rejected": 0,
+          "parallel_fallback_owner_busy": 0,
+          "parallel_fallback_owner_already_used": 0,
+          "parallel_fallback_generation_exhausted": 0,
+          "parallel_fallback_scratch_unrepresentable": 0,
+          "history_rows_materialized": 0,
+          "scalar_value_conversions": 0,
+          "output_rows_prepared": 0,
+          "output_chunks_prepared": 0
+        },
+        "watermark": {
+          "started": 35,
+          "succeeded": 35,
+          "failed": 0,
+          "cancelled": 0,
+          "interrupted": 0,
+          "callback_duration": {
+            "secs": 0,
+            "nanos": 391349
+          },
+          "input_validation_duration": {
+            "secs": 0,
+            "nanos": 4946
+          },
+          "ordering_proof_duration": {
+            "secs": 0,
+            "nanos": 2367
+          },
+          "entity_resolution_duration": {
+            "secs": 0,
+            "nanos": 53757
+          },
+          "state_preparation_duration": {
+            "secs": 0,
+            "nanos": 5482
+          },
+          "numeric_update_duration": {
+            "secs": 0,
+            "nanos": 169925
+          },
+          "history_maintenance_duration": {
+            "secs": 0,
+            "nanos": 39165
+          },
+          "arrow_output_duration": {
+            "secs": 0,
+            "nanos": 15627
+          },
+          "budget_preparation_duration": {
+            "secs": 0,
+            "nanos": 28140
+          },
+          "send_wait_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "other_duration": {
+            "secs": 0,
+            "nanos": 71940
+          },
+          "input_rows": 0,
+          "order_proof_rows": 0,
+          "resolved_rows": 4130,
+          "touched_entities": 35,
+          "copied_entities": 34,
+          "numeric_rows": 4130,
+          "numeric_lanes_started": 0,
+          "numeric_parallel_rows": 0,
+          "history_charge_scalar_rows": 48,
+          "history_charge_columnar_chunks": 40,
+          "history_append_rows_prepared": 54,
+          "history_evict_rows_prepared": 34,
+          "numeric_serial_calls": 35,
+          "numeric_general_calls": 0,
+          "numeric_parallel_calls": 0,
+          "parallel_fallback_no_work_client": 35,
+          "parallel_fallback_small_batch": 0,
+          "parallel_fallback_unsupported_plan": 0,
+          "parallel_fallback_cpu_limit": 0,
+          "parallel_fallback_prepared_ineligible": 0,
+          "parallel_fallback_lane_partition_rejected": 0,
+          "parallel_fallback_owner_busy": 0,
+          "parallel_fallback_owner_already_used": 0,
+          "parallel_fallback_generation_exhausted": 0,
+          "parallel_fallback_scratch_unrepresentable": 0,
+          "history_rows_materialized": 34,
+          "scalar_value_conversions": 171,
+          "output_rows_prepared": 4130,
+          "output_chunks_prepared": 35
+        },
+        "end": {
+          "started": 0,
+          "succeeded": 0,
+          "failed": 0,
+          "cancelled": 0,
+          "interrupted": 0,
+          "callback_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "input_validation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "ordering_proof_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "entity_resolution_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "state_preparation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "numeric_update_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "history_maintenance_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "arrow_output_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "budget_preparation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "send_wait_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "other_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "input_rows": 0,
+          "order_proof_rows": 0,
+          "resolved_rows": 0,
+          "touched_entities": 0,
+          "copied_entities": 0,
+          "numeric_rows": 0,
+          "numeric_lanes_started": 0,
+          "numeric_parallel_rows": 0,
+          "history_charge_scalar_rows": 0,
+          "history_charge_columnar_chunks": 0,
+          "history_append_rows_prepared": 0,
+          "history_evict_rows_prepared": 0,
+          "numeric_serial_calls": 0,
+          "numeric_general_calls": 0,
+          "numeric_parallel_calls": 0,
+          "parallel_fallback_no_work_client": 0,
+          "parallel_fallback_small_batch": 0,
+          "parallel_fallback_unsupported_plan": 0,
+          "parallel_fallback_cpu_limit": 0,
+          "parallel_fallback_prepared_ineligible": 0,
+          "parallel_fallback_lane_partition_rejected": 0,
+          "parallel_fallback_owner_busy": 0,
+          "parallel_fallback_owner_already_used": 0,
+          "parallel_fallback_generation_exhausted": 0,
+          "parallel_fallback_scratch_unrepresentable": 0,
+          "history_rows_materialized": 0,
+          "scalar_value_conversions": 0,
+          "output_rows_prepared": 0,
+          "output_chunks_prepared": 0
+        },
+        "overflowed": false
+      }
+    },
+    {
+      "name": "99x1-dual",
+      "kind": "dispatch",
+      "workload": {
+        "rows": 99,
+        "entities": 1,
+        "window": 20,
+        "outputs": "mean5,mean20",
+        "min_periods": "full window",
+        "input": "Float64 exact binary fractions",
+        "first_payload_bytes": 0
+      },
+      "rows": 99,
+      "window_outputs": 2,
+      "history_rows": 4096,
+      "warm_dispatches": 3,
+      "samples": [
+        {
+          "index": 0,
+          "order": "AB",
+          "absent_seconds": 0.000010926,
+          "present_seconds": 0.000012414,
+          "present_numeric_update_seconds": 3.426e-6
+        },
+        {
+          "index": 1,
+          "order": "BA",
+          "absent_seconds": 0.000011082,
+          "present_seconds": 0.000012628,
+          "present_numeric_update_seconds": 3.415e-6
+        },
+        {
+          "index": 2,
+          "order": "AB",
+          "absent_seconds": 0.000010961,
+          "present_seconds": 0.000012193,
+          "present_numeric_update_seconds": 3.5e-6
+        },
+        {
+          "index": 3,
+          "order": "BA",
+          "absent_seconds": 0.000010568,
+          "present_seconds": 0.000012253,
+          "present_numeric_update_seconds": 3.406e-6
+        },
+        {
+          "index": 4,
+          "order": "AB",
+          "absent_seconds": 0.000010713,
+          "present_seconds": 0.000012021,
+          "present_numeric_update_seconds": 3.422e-6
+        },
+        {
+          "index": 5,
+          "order": "BA",
+          "absent_seconds": 0.000010385,
+          "present_seconds": 0.000012373,
+          "present_numeric_update_seconds": 3.416e-6
+        },
+        {
+          "index": 6,
+          "order": "AB",
+          "absent_seconds": 0.000010731,
+          "present_seconds": 0.000012024,
+          "present_numeric_update_seconds": 3.414e-6
+        },
+        {
+          "index": 7,
+          "order": "BA",
+          "absent_seconds": 0.000010426,
+          "present_seconds": 0.000012316,
+          "present_numeric_update_seconds": 3.468e-6
+        },
+        {
+          "index": 8,
+          "order": "AB",
+          "absent_seconds": 0.000010786,
+          "present_seconds": 0.000012216,
+          "present_numeric_update_seconds": 3.417e-6
+        },
+        {
+          "index": 9,
+          "order": "BA",
+          "absent_seconds": 0.000010514,
+          "present_seconds": 0.000012209,
+          "present_numeric_update_seconds": 3.405e-6
+        },
+        {
+          "index": 10,
+          "order": "AB",
+          "absent_seconds": 0.000010807,
+          "present_seconds": 0.000012154,
+          "present_numeric_update_seconds": 3.368e-6
+        },
+        {
+          "index": 11,
+          "order": "BA",
+          "absent_seconds": 0.000010431,
+          "present_seconds": 0.000012416,
+          "present_numeric_update_seconds": 3.412e-6
+        },
+        {
+          "index": 12,
+          "order": "AB",
+          "absent_seconds": 0.000010787,
+          "present_seconds": 0.0000122,
+          "present_numeric_update_seconds": 3.419e-6
+        },
+        {
+          "index": 13,
+          "order": "BA",
+          "absent_seconds": 0.000010456,
+          "present_seconds": 0.000012207,
+          "present_numeric_update_seconds": 3.379e-6
+        },
+        {
+          "index": 14,
+          "order": "AB",
+          "absent_seconds": 0.000010749,
+          "present_seconds": 0.000012015,
+          "present_numeric_update_seconds": 3.394e-6
+        },
+        {
+          "index": 15,
+          "order": "BA",
+          "absent_seconds": 0.000010724,
+          "present_seconds": 0.000012357,
+          "present_numeric_update_seconds": 3.393e-6
+        },
+        {
+          "index": 16,
+          "order": "AB",
+          "absent_seconds": 0.00001088,
+          "present_seconds": 0.000012155,
+          "present_numeric_update_seconds": 3.404e-6
+        },
+        {
+          "index": 17,
+          "order": "BA",
+          "absent_seconds": 0.000010785,
+          "present_seconds": 0.000012651,
+          "present_numeric_update_seconds": 3.598e-6
+        },
+        {
+          "index": 18,
+          "order": "AB",
+          "absent_seconds": 0.000010718,
+          "present_seconds": 0.000012192,
+          "present_numeric_update_seconds": 3.477e-6
+        },
+        {
+          "index": 19,
+          "order": "BA",
+          "absent_seconds": 0.000010855,
+          "present_seconds": 0.000012744,
+          "present_numeric_update_seconds": 3.842e-6
+        },
+        {
+          "index": 20,
+          "order": "AB",
+          "absent_seconds": 0.000010723,
+          "present_seconds": 0.000012243,
+          "present_numeric_update_seconds": 3.433e-6
+        },
+        {
+          "index": 21,
+          "order": "BA",
+          "absent_seconds": 0.00001056,
+          "present_seconds": 0.000012138,
+          "present_numeric_update_seconds": 3.358e-6
+        },
+        {
+          "index": 22,
+          "order": "AB",
+          "absent_seconds": 0.000010652,
+          "present_seconds": 0.000012047,
+          "present_numeric_update_seconds": 3.414e-6
+        },
+        {
+          "index": 23,
+          "order": "BA",
+          "absent_seconds": 0.00001031,
+          "present_seconds": 0.000012414,
+          "present_numeric_update_seconds": 3.547e-6
+        },
+        {
+          "index": 24,
+          "order": "AB",
+          "absent_seconds": 0.000010654,
+          "present_seconds": 0.000011999,
+          "present_numeric_update_seconds": 3.397e-6
+        },
+        {
+          "index": 25,
+          "order": "BA",
+          "absent_seconds": 0.000010485,
+          "present_seconds": 0.000012132,
+          "present_numeric_update_seconds": 3.37e-6
+        },
+        {
+          "index": 26,
+          "order": "AB",
+          "absent_seconds": 0.000010574,
+          "present_seconds": 0.000012149,
+          "present_numeric_update_seconds": 3.425e-6
+        },
+        {
+          "index": 27,
+          "order": "BA",
+          "absent_seconds": 0.000010379,
+          "present_seconds": 0.00001228,
+          "present_numeric_update_seconds": 3.409e-6
+        },
+        {
+          "index": 28,
+          "order": "AB",
+          "absent_seconds": 0.000010454,
+          "present_seconds": 0.000012076,
+          "present_numeric_update_seconds": 3.401e-6
+        },
+        {
+          "index": 29,
+          "order": "BA",
+          "absent_seconds": 0.000010459,
+          "present_seconds": 0.000012065,
+          "present_numeric_update_seconds": 3.394e-6
+        }
+      ],
+      "allocation_samples": {
+        "absent": {
+          "allocation_count": 149,
+          "allocated_bytes": 23106,
+          "peak_net_allocation_count": 51,
+          "peak_net_bytes": 10591,
+          "ending_net_allocation_count": -14,
+          "ending_net_bytes": -1876
+        },
+        "present": {
+          "allocation_count": 143,
+          "allocated_bytes": 24034,
+          "peak_net_allocation_count": 52,
+          "peak_net_bytes": 11175,
+          "ending_net_allocation_count": -15,
+          "ending_net_bytes": -1900
+        }
+      },
+      "complete_callback_metrics": {
+        "data": {
+          "started": 35,
+          "succeeded": 35,
+          "failed": 0,
+          "cancelled": 0,
+          "interrupted": 0,
+          "callback_duration": {
+            "secs": 0,
+            "nanos": 69380
+          },
+          "input_validation_duration": {
+            "secs": 0,
+            "nanos": 11234
+          },
+          "ordering_proof_duration": {
+            "secs": 0,
+            "nanos": 47306
+          },
+          "entity_resolution_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "state_preparation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "numeric_update_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "history_maintenance_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "arrow_output_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "budget_preparation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "send_wait_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "other_duration": {
+            "secs": 0,
+            "nanos": 10840
+          },
+          "input_rows": 7462,
+          "order_proof_rows": 7462,
+          "resolved_rows": 0,
+          "touched_entities": 0,
+          "copied_entities": 0,
+          "numeric_rows": 0,
+          "numeric_lanes_started": 0,
+          "numeric_parallel_rows": 0,
+          "history_charge_scalar_rows": 0,
+          "history_charge_columnar_chunks": 0,
+          "history_append_rows_prepared": 0,
+          "history_evict_rows_prepared": 0,
+          "numeric_serial_calls": 0,
+          "numeric_general_calls": 0,
+          "numeric_parallel_calls": 0,
+          "parallel_fallback_no_work_client": 0,
+          "parallel_fallback_small_batch": 0,
+          "parallel_fallback_unsupported_plan": 0,
+          "parallel_fallback_cpu_limit": 0,
+          "parallel_fallback_prepared_ineligible": 0,
+          "parallel_fallback_lane_partition_rejected": 0,
+          "parallel_fallback_owner_busy": 0,
+          "parallel_fallback_owner_already_used": 0,
+          "parallel_fallback_generation_exhausted": 0,
+          "parallel_fallback_scratch_unrepresentable": 0,
+          "history_rows_materialized": 0,
+          "scalar_value_conversions": 0,
+          "output_rows_prepared": 0,
+          "output_chunks_prepared": 0
+        },
+        "watermark": {
+          "started": 35,
+          "succeeded": 35,
+          "failed": 0,
+          "cancelled": 0,
+          "interrupted": 0,
+          "callback_duration": {
+            "secs": 0,
+            "nanos": 512002
+          },
+          "input_validation_duration": {
+            "secs": 0,
+            "nanos": 4719
+          },
+          "ordering_proof_duration": {
+            "secs": 0,
+            "nanos": 2459
+          },
+          "entity_resolution_duration": {
+            "secs": 0,
+            "nanos": 60272
+          },
+          "state_preparation_duration": {
+            "secs": 0,
+            "nanos": 4828
+          },
+          "numeric_update_duration": {
+            "secs": 0,
+            "nanos": 275287
+          },
+          "history_maintenance_duration": {
+            "secs": 0,
+            "nanos": 52993
+          },
+          "arrow_output_duration": {
+            "secs": 0,
+            "nanos": 14746
+          },
+          "budget_preparation_duration": {
+            "secs": 0,
+            "nanos": 27744
+          },
+          "send_wait_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "other_duration": {
+            "secs": 0,
+            "nanos": 68954
+          },
+          "input_rows": 0,
+          "order_proof_rows": 0,
+          "resolved_rows": 7462,
+          "touched_entities": 35,
+          "copied_entities": 34,
+          "numeric_rows": 7462,
+          "numeric_lanes_started": 0,
+          "numeric_parallel_rows": 0,
+          "history_charge_scalar_rows": 20,
+          "history_charge_columnar_chunks": 68,
+          "history_append_rows_prepared": 700,
+          "history_evict_rows_prepared": 680,
+          "numeric_serial_calls": 35,
+          "numeric_general_calls": 0,
+          "numeric_parallel_calls": 0,
+          "parallel_fallback_no_work_client": 35,
+          "parallel_fallback_small_batch": 0,
+          "parallel_fallback_unsupported_plan": 0,
+          "parallel_fallback_cpu_limit": 0,
+          "parallel_fallback_prepared_ineligible": 0,
+          "parallel_fallback_lane_partition_rejected": 0,
+          "parallel_fallback_owner_busy": 0,
+          "parallel_fallback_owner_already_used": 0,
+          "parallel_fallback_generation_exhausted": 0,
+          "parallel_fallback_scratch_unrepresentable": 0,
+          "history_rows_materialized": 0,
+          "scalar_value_conversions": 35,
+          "output_rows_prepared": 7462,
+          "output_chunks_prepared": 35
+        },
+        "end": {
+          "started": 0,
+          "succeeded": 0,
+          "failed": 0,
+          "cancelled": 0,
+          "interrupted": 0,
+          "callback_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "input_validation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "ordering_proof_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "entity_resolution_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "state_preparation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "numeric_update_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "history_maintenance_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "arrow_output_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "budget_preparation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "send_wait_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "other_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "input_rows": 0,
+          "order_proof_rows": 0,
+          "resolved_rows": 0,
+          "touched_entities": 0,
+          "copied_entities": 0,
+          "numeric_rows": 0,
+          "numeric_lanes_started": 0,
+          "numeric_parallel_rows": 0,
+          "history_charge_scalar_rows": 0,
+          "history_charge_columnar_chunks": 0,
+          "history_append_rows_prepared": 0,
+          "history_evict_rows_prepared": 0,
+          "numeric_serial_calls": 0,
+          "numeric_general_calls": 0,
+          "numeric_parallel_calls": 0,
+          "parallel_fallback_no_work_client": 0,
+          "parallel_fallback_small_batch": 0,
+          "parallel_fallback_unsupported_plan": 0,
+          "parallel_fallback_cpu_limit": 0,
+          "parallel_fallback_prepared_ineligible": 0,
+          "parallel_fallback_lane_partition_rejected": 0,
+          "parallel_fallback_owner_busy": 0,
+          "parallel_fallback_owner_already_used": 0,
+          "parallel_fallback_generation_exhausted": 0,
+          "parallel_fallback_scratch_unrepresentable": 0,
+          "history_rows_materialized": 0,
+          "scalar_value_conversions": 0,
+          "output_rows_prepared": 0,
+          "output_chunks_prepared": 0
+        },
+        "overflowed": false
+      }
+    },
+    {
+      "name": "6400x64-dual",
+      "kind": "dispatch",
+      "workload": {
+        "rows": 6400,
+        "entities": 64,
+        "window": 20,
+        "outputs": "mean5,mean20",
+        "min_periods": "full window",
+        "input": "Float64 exact binary fractions",
+        "first_payload_bytes": 0
+      },
+      "rows": 6400,
+      "window_outputs": 2,
+      "history_rows": 4096,
+      "warm_dispatches": 3,
+      "samples": [
+        {
+          "index": 0,
+          "order": "AB",
+          "absent_seconds": 0.000469733,
+          "present_seconds": 0.000435847,
+          "present_numeric_update_seconds": 0.000233634
+        },
+        {
+          "index": 1,
+          "order": "BA",
+          "absent_seconds": 0.000466523,
+          "present_seconds": 0.000445747,
+          "present_numeric_update_seconds": 0.000235186
+        },
+        {
+          "index": 2,
+          "order": "AB",
+          "absent_seconds": 0.000433452,
+          "present_seconds": 0.000460881,
+          "present_numeric_update_seconds": 0.000239671
+        },
+        {
+          "index": 3,
+          "order": "BA",
+          "absent_seconds": 0.000474644,
+          "present_seconds": 0.000525474,
+          "present_numeric_update_seconds": 0.000316733
+        },
+        {
+          "index": 4,
+          "order": "AB",
+          "absent_seconds": 0.000485611,
+          "present_seconds": 0.00044314,
+          "present_numeric_update_seconds": 0.000240407
+        },
+        {
+          "index": 5,
+          "order": "BA",
+          "absent_seconds": 0.000434883,
+          "present_seconds": 0.000431263,
+          "present_numeric_update_seconds": 0.000236993
+        },
+        {
+          "index": 6,
+          "order": "AB",
+          "absent_seconds": 0.00043675,
+          "present_seconds": 0.000440838,
+          "present_numeric_update_seconds": 0.000243875
+        },
+        {
+          "index": 7,
+          "order": "BA",
+          "absent_seconds": 0.000462747,
+          "present_seconds": 0.000435761,
+          "present_numeric_update_seconds": 0.000241234
+        },
+        {
+          "index": 8,
+          "order": "AB",
+          "absent_seconds": 0.000451034,
+          "present_seconds": 0.000460309,
+          "present_numeric_update_seconds": 0.000257654
+        },
+        {
+          "index": 9,
+          "order": "BA",
+          "absent_seconds": 0.000454057,
+          "present_seconds": 0.000456684,
+          "present_numeric_update_seconds": 0.00024975
+        },
+        {
+          "index": 10,
+          "order": "AB",
+          "absent_seconds": 0.000640927,
+          "present_seconds": 0.00046225,
+          "present_numeric_update_seconds": 0.000258943
+        },
+        {
+          "index": 11,
+          "order": "BA",
+          "absent_seconds": 0.000452735,
+          "present_seconds": 0.000449588,
+          "present_numeric_update_seconds": 0.000249573
+        },
+        {
+          "index": 12,
+          "order": "AB",
+          "absent_seconds": 0.000457639,
+          "present_seconds": 0.000475156,
+          "present_numeric_update_seconds": 0.000272532
+        },
+        {
+          "index": 13,
+          "order": "BA",
+          "absent_seconds": 0.000462127,
+          "present_seconds": 0.000456947,
+          "present_numeric_update_seconds": 0.000249567
+        },
+        {
+          "index": 14,
+          "order": "AB",
+          "absent_seconds": 0.00045285,
+          "present_seconds": 0.000455998,
+          "present_numeric_update_seconds": 0.000257561
+        },
+        {
+          "index": 15,
+          "order": "BA",
+          "absent_seconds": 0.000453743,
+          "present_seconds": 0.000450366,
+          "present_numeric_update_seconds": 0.000251738
+        },
+        {
+          "index": 16,
+          "order": "AB",
+          "absent_seconds": 0.000453687,
+          "present_seconds": 0.000452226,
+          "present_numeric_update_seconds": 0.000254707
+        },
+        {
+          "index": 17,
+          "order": "BA",
+          "absent_seconds": 0.000898409,
+          "present_seconds": 0.000579955,
+          "present_numeric_update_seconds": 0.000252703
+        },
+        {
+          "index": 18,
+          "order": "AB",
+          "absent_seconds": 0.000454875,
+          "present_seconds": 0.000459447,
+          "present_numeric_update_seconds": 0.000258553
+        },
+        {
+          "index": 19,
+          "order": "BA",
+          "absent_seconds": 0.000468741,
+          "present_seconds": 0.000498965,
+          "present_numeric_update_seconds": 0.000264388
+        },
+        {
+          "index": 20,
+          "order": "AB",
+          "absent_seconds": 0.000438029,
+          "present_seconds": 0.000442606,
+          "present_numeric_update_seconds": 0.000248644
+        },
+        {
+          "index": 21,
+          "order": "BA",
+          "absent_seconds": 0.000448334,
+          "present_seconds": 0.000455486,
+          "present_numeric_update_seconds": 0.000248594
+        },
+        {
+          "index": 22,
+          "order": "AB",
+          "absent_seconds": 0.000437785,
+          "present_seconds": 0.000460013,
+          "present_numeric_update_seconds": 0.000253086
+        },
+        {
+          "index": 23,
+          "order": "BA",
+          "absent_seconds": 0.000443383,
+          "present_seconds": 0.00044864,
+          "present_numeric_update_seconds": 0.000250277
+        },
+        {
+          "index": 24,
+          "order": "AB",
+          "absent_seconds": 0.000433197,
+          "present_seconds": 0.000452404,
+          "present_numeric_update_seconds": 0.000252167
+        },
+        {
+          "index": 25,
+          "order": "BA",
+          "absent_seconds": 0.00044234,
+          "present_seconds": 0.00044583,
+          "present_numeric_update_seconds": 0.000249596
+        },
+        {
+          "index": 26,
+          "order": "AB",
+          "absent_seconds": 0.00044807,
+          "present_seconds": 0.000464939,
+          "present_numeric_update_seconds": 0.000254628
+        },
+        {
+          "index": 27,
+          "order": "BA",
+          "absent_seconds": 0.000461662,
+          "present_seconds": 0.000449799,
+          "present_numeric_update_seconds": 0.000250822
+        },
+        {
+          "index": 28,
+          "order": "AB",
+          "absent_seconds": 0.000453433,
+          "present_seconds": 0.000469886,
+          "present_numeric_update_seconds": 0.000270301
+        },
+        {
+          "index": 29,
+          "order": "BA",
+          "absent_seconds": 0.000471003,
+          "present_seconds": 0.000440167,
+          "present_numeric_update_seconds": 0.000245173
+        }
+      ],
+      "allocation_samples": {
+        "absent": {
+          "allocation_count": 1987,
+          "allocated_bytes": 423567,
+          "peak_net_allocation_count": 1498,
+          "peak_net_bytes": 343448,
+          "ending_net_allocation_count": -1589,
+          "ending_net_bytes": -156840
+        },
+        "present": {
+          "allocation_count": 1981,
+          "allocated_bytes": 424495,
+          "peak_net_allocation_count": 1499,
+          "peak_net_bytes": 344032,
+          "ending_net_allocation_count": -1590,
+          "ending_net_bytes": -156864
+        }
+      },
+      "complete_callback_metrics": {
+        "data": {
+          "started": 35,
+          "succeeded": 35,
+          "failed": 0,
+          "cancelled": 0,
+          "interrupted": 0,
+          "callback_duration": {
+            "secs": 0,
+            "nanos": 1012778
+          },
+          "input_validation_duration": {
+            "secs": 0,
+            "nanos": 219707
+          },
+          "ordering_proof_duration": {
+            "secs": 0,
+            "nanos": 771554
+          },
+          "entity_resolution_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "state_preparation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "numeric_update_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "history_maintenance_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "arrow_output_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "budget_preparation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "send_wait_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "other_duration": {
+            "secs": 0,
+            "nanos": 21517
+          },
+          "input_rows": 221696,
+          "order_proof_rows": 221696,
+          "resolved_rows": 0,
+          "touched_entities": 0,
+          "copied_entities": 0,
+          "numeric_rows": 0,
+          "numeric_lanes_started": 0,
+          "numeric_parallel_rows": 0,
+          "history_charge_scalar_rows": 0,
+          "history_charge_columnar_chunks": 0,
+          "history_append_rows_prepared": 0,
+          "history_evict_rows_prepared": 0,
+          "numeric_serial_calls": 0,
+          "numeric_general_calls": 0,
+          "numeric_parallel_calls": 0,
+          "parallel_fallback_no_work_client": 0,
+          "parallel_fallback_small_batch": 0,
+          "parallel_fallback_unsupported_plan": 0,
+          "parallel_fallback_cpu_limit": 0,
+          "parallel_fallback_prepared_ineligible": 0,
+          "parallel_fallback_lane_partition_rejected": 0,
+          "parallel_fallback_owner_busy": 0,
+          "parallel_fallback_owner_already_used": 0,
+          "parallel_fallback_generation_exhausted": 0,
+          "parallel_fallback_scratch_unrepresentable": 0,
+          "history_rows_materialized": 0,
+          "scalar_value_conversions": 0,
+          "output_rows_prepared": 0,
+          "output_chunks_prepared": 0
+        },
+        "watermark": {
+          "started": 35,
+          "succeeded": 35,
+          "failed": 0,
+          "cancelled": 0,
+          "interrupted": 0,
+          "callback_duration": {
+            "secs": 0,
+            "nanos": 14882159
+          },
+          "input_validation_duration": {
+            "secs": 0,
+            "nanos": 8022
+          },
+          "ordering_proof_duration": {
+            "secs": 0,
+            "nanos": 4173
+          },
+          "entity_resolution_duration": {
+            "secs": 0,
+            "nanos": 1383403
+          },
+          "state_preparation_duration": {
+            "secs": 0,
+            "nanos": 338148
+          },
+          "numeric_update_duration": {
+            "secs": 0,
+            "nanos": 8739820
+          },
+          "history_maintenance_duration": {
+            "secs": 0,
+            "nanos": 3780850
+          },
+          "arrow_output_duration": {
+            "secs": 0,
+            "nanos": 25907
+          },
+          "budget_preparation_duration": {
+            "secs": 0,
+            "nanos": 42873
+          },
+          "send_wait_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "other_duration": {
+            "secs": 0,
+            "nanos": 558963
+          },
+          "input_rows": 0,
+          "order_proof_rows": 0,
+          "resolved_rows": 221696,
+          "touched_entities": 2240,
+          "copied_entities": 2176,
+          "numeric_rows": 221696,
+          "numeric_lanes_started": 0,
+          "numeric_parallel_rows": 0,
+          "history_charge_scalar_rows": 1280,
+          "history_charge_columnar_chunks": 4352,
+          "history_append_rows_prepared": 44800,
+          "history_evict_rows_prepared": 43520,
+          "numeric_serial_calls": 35,
+          "numeric_general_calls": 0,
+          "numeric_parallel_calls": 0,
+          "parallel_fallback_no_work_client": 35,
+          "parallel_fallback_small_batch": 0,
+          "parallel_fallback_unsupported_plan": 0,
+          "parallel_fallback_cpu_limit": 0,
+          "parallel_fallback_prepared_ineligible": 0,
+          "parallel_fallback_lane_partition_rejected": 0,
+          "parallel_fallback_owner_busy": 0,
+          "parallel_fallback_owner_already_used": 0,
+          "parallel_fallback_generation_exhausted": 0,
+          "parallel_fallback_scratch_unrepresentable": 0,
+          "history_rows_materialized": 0,
+          "scalar_value_conversions": 2240,
+          "output_rows_prepared": 221696,
+          "output_chunks_prepared": 35
+        },
+        "end": {
+          "started": 0,
+          "succeeded": 0,
+          "failed": 0,
+          "cancelled": 0,
+          "interrupted": 0,
+          "callback_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "input_validation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "ordering_proof_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "entity_resolution_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "state_preparation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "numeric_update_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "history_maintenance_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "arrow_output_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "budget_preparation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "send_wait_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "other_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "input_rows": 0,
+          "order_proof_rows": 0,
+          "resolved_rows": 0,
+          "touched_entities": 0,
+          "copied_entities": 0,
+          "numeric_rows": 0,
+          "numeric_lanes_started": 0,
+          "numeric_parallel_rows": 0,
+          "history_charge_scalar_rows": 0,
+          "history_charge_columnar_chunks": 0,
+          "history_append_rows_prepared": 0,
+          "history_evict_rows_prepared": 0,
+          "numeric_serial_calls": 0,
+          "numeric_general_calls": 0,
+          "numeric_parallel_calls": 0,
+          "parallel_fallback_no_work_client": 0,
+          "parallel_fallback_small_batch": 0,
+          "parallel_fallback_unsupported_plan": 0,
+          "parallel_fallback_cpu_limit": 0,
+          "parallel_fallback_prepared_ineligible": 0,
+          "parallel_fallback_lane_partition_rejected": 0,
+          "parallel_fallback_owner_busy": 0,
+          "parallel_fallback_owner_already_used": 0,
+          "parallel_fallback_generation_exhausted": 0,
+          "parallel_fallback_scratch_unrepresentable": 0,
+          "history_rows_materialized": 0,
+          "scalar_value_conversions": 0,
+          "output_rows_prepared": 0,
+          "output_chunks_prepared": 0
+        },
+        "overflowed": false
+      }
+    },
+    {
+      "name": "64x64-dual-tick",
+      "kind": "dispatch",
+      "workload": {
+        "rows": 64,
+        "entities": 64,
+        "window": 20,
+        "outputs": "mean5,mean20",
+        "min_periods": "full window",
+        "input": "Float64 exact binary fractions",
+        "first_payload_bytes": 0
+      },
+      "rows": 64,
+      "window_outputs": 2,
+      "history_rows": 4096,
+      "warm_dispatches": 3,
+      "samples": [
+        {
+          "index": 0,
+          "order": "AB",
+          "absent_seconds": 0.000103367,
+          "present_seconds": 0.000121657,
+          "present_numeric_update_seconds": 8.446e-6
+        },
+        {
+          "index": 1,
+          "order": "BA",
+          "absent_seconds": 0.00010674,
+          "present_seconds": 0.000111358,
+          "present_numeric_update_seconds": 9.024e-6
+        },
+        {
+          "index": 2,
+          "order": "AB",
+          "absent_seconds": 0.000105186,
+          "present_seconds": 0.000103209,
+          "present_numeric_update_seconds": 8.302e-6
+        },
+        {
+          "index": 3,
+          "order": "BA",
+          "absent_seconds": 0.000101071,
+          "present_seconds": 0.000102522,
+          "present_numeric_update_seconds": 8.888e-6
+        },
+        {
+          "index": 4,
+          "order": "AB",
+          "absent_seconds": 0.000101206,
+          "present_seconds": 0.000100854,
+          "present_numeric_update_seconds": 8.253e-6
+        },
+        {
+          "index": 5,
+          "order": "BA",
+          "absent_seconds": 0.000104627,
+          "present_seconds": 0.000105269,
+          "present_numeric_update_seconds": 8.894e-6
+        },
+        {
+          "index": 6,
+          "order": "AB",
+          "absent_seconds": 0.000102531,
+          "present_seconds": 0.000101154,
+          "present_numeric_update_seconds": 8.292e-6
+        },
+        {
+          "index": 7,
+          "order": "BA",
+          "absent_seconds": 0.000099452,
+          "present_seconds": 0.000100697,
+          "present_numeric_update_seconds": 8.835e-6
+        },
+        {
+          "index": 8,
+          "order": "AB",
+          "absent_seconds": 0.00010024,
+          "present_seconds": 0.000100002,
+          "present_numeric_update_seconds": 8.249e-6
+        },
+        {
+          "index": 9,
+          "order": "BA",
+          "absent_seconds": 0.000111251,
+          "present_seconds": 0.000100661,
+          "present_numeric_update_seconds": 8.91e-6
+        },
+        {
+          "index": 10,
+          "order": "AB",
+          "absent_seconds": 0.000108224,
+          "present_seconds": 0.000105339,
+          "present_numeric_update_seconds": 8.442e-6
+        },
+        {
+          "index": 11,
+          "order": "BA",
+          "absent_seconds": 0.00010075,
+          "present_seconds": 0.000103944,
+          "present_numeric_update_seconds": 8.99e-6
+        },
+        {
+          "index": 12,
+          "order": "AB",
+          "absent_seconds": 0.000102313,
+          "present_seconds": 0.000103433,
+          "present_numeric_update_seconds": 8.407e-6
+        },
+        {
+          "index": 13,
+          "order": "BA",
+          "absent_seconds": 0.000123216,
+          "present_seconds": 0.00010972,
+          "present_numeric_update_seconds": 8.874e-6
+        },
+        {
+          "index": 14,
+          "order": "AB",
+          "absent_seconds": 0.000109831,
+          "present_seconds": 0.000106801,
+          "present_numeric_update_seconds": 8.552e-6
+        },
+        {
+          "index": 15,
+          "order": "BA",
+          "absent_seconds": 0.000102418,
+          "present_seconds": 0.000106917,
+          "present_numeric_update_seconds": 8.794e-6
+        },
+        {
+          "index": 16,
+          "order": "AB",
+          "absent_seconds": 0.000102287,
+          "present_seconds": 0.000102635,
+          "present_numeric_update_seconds": 8.476e-6
+        },
+        {
+          "index": 17,
+          "order": "BA",
+          "absent_seconds": 0.000088907,
+          "present_seconds": 0.000080393,
+          "present_numeric_update_seconds": 8.632e-6
+        },
+        {
+          "index": 18,
+          "order": "AB",
+          "absent_seconds": 0.000084154,
+          "present_seconds": 0.000081341,
+          "present_numeric_update_seconds": 8.547e-6
+        },
+        {
+          "index": 19,
+          "order": "BA",
+          "absent_seconds": 0.000076094,
+          "present_seconds": 0.000079435,
+          "present_numeric_update_seconds": 8.715e-6
+        },
+        {
+          "index": 20,
+          "order": "AB",
+          "absent_seconds": 0.000077436,
+          "present_seconds": 0.000076665,
+          "present_numeric_update_seconds": 8.436e-6
+        },
+        {
+          "index": 21,
+          "order": "BA",
+          "absent_seconds": 0.000075265,
+          "present_seconds": 0.000077935,
+          "present_numeric_update_seconds": 8.701e-6
+        },
+        {
+          "index": 22,
+          "order": "AB",
+          "absent_seconds": 0.00007479,
+          "present_seconds": 0.000076116,
+          "present_numeric_update_seconds": 8.429e-6
+        },
+        {
+          "index": 23,
+          "order": "BA",
+          "absent_seconds": 0.000074724,
+          "present_seconds": 0.000076213,
+          "present_numeric_update_seconds": 8.705e-6
+        },
+        {
+          "index": 24,
+          "order": "AB",
+          "absent_seconds": 0.0000744,
+          "present_seconds": 0.000075799,
+          "present_numeric_update_seconds": 8.346e-6
+        },
+        {
+          "index": 25,
+          "order": "BA",
+          "absent_seconds": 0.000073631,
+          "present_seconds": 0.000076495,
+          "present_numeric_update_seconds": 8.623e-6
+        },
+        {
+          "index": 26,
+          "order": "AB",
+          "absent_seconds": 0.000075306,
+          "present_seconds": 0.000076003,
+          "present_numeric_update_seconds": 8.527e-6
+        },
+        {
+          "index": 27,
+          "order": "BA",
+          "absent_seconds": 0.000074371,
+          "present_seconds": 0.000076478,
+          "present_numeric_update_seconds": 8.6e-6
+        },
+        {
+          "index": 28,
+          "order": "AB",
+          "absent_seconds": 0.000081934,
+          "present_seconds": 0.000083135,
+          "present_numeric_update_seconds": 8.588e-6
+        },
+        {
+          "index": 29,
+          "order": "BA",
+          "absent_seconds": 0.00007495,
+          "present_seconds": 0.00007857,
+          "present_numeric_update_seconds": 8.668e-6
+        }
+      ],
+      "allocation_samples": {
+        "absent": {
+          "allocation_count": 963,
+          "allocated_bytes": 159695,
+          "peak_net_allocation_count": 729,
+          "peak_net_bytes": 119304,
+          "ending_net_allocation_count": 11,
+          "ending_net_bytes": 1624
+        },
+        "present": {
+          "allocation_count": 957,
+          "allocated_bytes": 160623,
+          "peak_net_allocation_count": 730,
+          "peak_net_bytes": 119888,
+          "ending_net_allocation_count": 10,
+          "ending_net_bytes": 1600
+        }
+      },
+      "complete_callback_metrics": {
+        "data": {
+          "started": 35,
+          "succeeded": 35,
+          "failed": 0,
+          "cancelled": 0,
+          "interrupted": 0,
+          "callback_duration": {
+            "secs": 0,
+            "nanos": 94110
+          },
+          "input_validation_duration": {
+            "secs": 0,
+            "nanos": 13146
+          },
+          "ordering_proof_duration": {
+            "secs": 0,
+            "nanos": 67703
+          },
+          "entity_resolution_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "state_preparation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "numeric_update_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "history_maintenance_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "arrow_output_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "budget_preparation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "send_wait_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "other_duration": {
+            "secs": 0,
+            "nanos": 13261
+          },
+          "input_rows": 6272,
+          "order_proof_rows": 6272,
+          "resolved_rows": 0,
+          "touched_entities": 0,
+          "copied_entities": 0,
+          "numeric_rows": 0,
+          "numeric_lanes_started": 0,
+          "numeric_parallel_rows": 0,
+          "history_charge_scalar_rows": 0,
+          "history_charge_columnar_chunks": 0,
+          "history_append_rows_prepared": 0,
+          "history_evict_rows_prepared": 0,
+          "numeric_serial_calls": 0,
+          "numeric_general_calls": 0,
+          "numeric_parallel_calls": 0,
+          "parallel_fallback_no_work_client": 0,
+          "parallel_fallback_small_batch": 0,
+          "parallel_fallback_unsupported_plan": 0,
+          "parallel_fallback_cpu_limit": 0,
+          "parallel_fallback_prepared_ineligible": 0,
+          "parallel_fallback_lane_partition_rejected": 0,
+          "parallel_fallback_owner_busy": 0,
+          "parallel_fallback_owner_already_used": 0,
+          "parallel_fallback_generation_exhausted": 0,
+          "parallel_fallback_scratch_unrepresentable": 0,
+          "history_rows_materialized": 0,
+          "scalar_value_conversions": 0,
+          "output_rows_prepared": 0,
+          "output_chunks_prepared": 0
+        },
+        "watermark": {
+          "started": 35,
+          "succeeded": 35,
+          "failed": 0,
+          "cancelled": 0,
+          "interrupted": 0,
+          "callback_duration": {
+            "secs": 0,
+            "nanos": 3373383
+          },
+          "input_validation_duration": {
+            "secs": 0,
+            "nanos": 5563
+          },
+          "ordering_proof_duration": {
+            "secs": 0,
+            "nanos": 2843
+          },
+          "entity_resolution_duration": {
+            "secs": 0,
+            "nanos": 219686
+          },
+          "state_preparation_duration": {
+            "secs": 0,
+            "nanos": 186716
+          },
+          "numeric_update_duration": {
+            "secs": 0,
+            "nanos": 465037
+          },
+          "history_maintenance_duration": {
+            "secs": 0,
+            "nanos": 1995803
+          },
+          "arrow_output_duration": {
+            "secs": 0,
+            "nanos": 19692
+          },
+          "budget_preparation_duration": {
+            "secs": 0,
+            "nanos": 39777
+          },
+          "send_wait_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "other_duration": {
+            "secs": 0,
+            "nanos": 438266
+          },
+          "input_rows": 0,
+          "order_proof_rows": 0,
+          "resolved_rows": 6272,
+          "touched_entities": 2240,
+          "copied_entities": 2176,
+          "numeric_rows": 6272,
+          "numeric_lanes_started": 0,
+          "numeric_parallel_rows": 0,
+          "history_charge_scalar_rows": 3072,
+          "history_charge_columnar_chunks": 2560,
+          "history_append_rows_prepared": 3456,
+          "history_evict_rows_prepared": 2176,
+          "numeric_serial_calls": 35,
+          "numeric_general_calls": 0,
+          "numeric_parallel_calls": 0,
+          "parallel_fallback_no_work_client": 35,
+          "parallel_fallback_small_batch": 0,
+          "parallel_fallback_unsupported_plan": 0,
+          "parallel_fallback_cpu_limit": 0,
+          "parallel_fallback_prepared_ineligible": 0,
+          "parallel_fallback_lane_partition_rejected": 0,
+          "parallel_fallback_owner_busy": 0,
+          "parallel_fallback_owner_already_used": 0,
+          "parallel_fallback_generation_exhausted": 0,
+          "parallel_fallback_scratch_unrepresentable": 0,
+          "history_rows_materialized": 2176,
+          "scalar_value_conversions": 10944,
+          "output_rows_prepared": 6272,
+          "output_chunks_prepared": 35
+        },
+        "end": {
+          "started": 0,
+          "succeeded": 0,
+          "failed": 0,
+          "cancelled": 0,
+          "interrupted": 0,
+          "callback_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "input_validation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "ordering_proof_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "entity_resolution_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "state_preparation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "numeric_update_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "history_maintenance_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "arrow_output_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "budget_preparation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "send_wait_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "other_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "input_rows": 0,
+          "order_proof_rows": 0,
+          "resolved_rows": 0,
+          "touched_entities": 0,
+          "copied_entities": 0,
+          "numeric_rows": 0,
+          "numeric_lanes_started": 0,
+          "numeric_parallel_rows": 0,
+          "history_charge_scalar_rows": 0,
+          "history_charge_columnar_chunks": 0,
+          "history_append_rows_prepared": 0,
+          "history_evict_rows_prepared": 0,
+          "numeric_serial_calls": 0,
+          "numeric_general_calls": 0,
+          "numeric_parallel_calls": 0,
+          "parallel_fallback_no_work_client": 0,
+          "parallel_fallback_small_batch": 0,
+          "parallel_fallback_unsupported_plan": 0,
+          "parallel_fallback_cpu_limit": 0,
+          "parallel_fallback_prepared_ineligible": 0,
+          "parallel_fallback_lane_partition_rejected": 0,
+          "parallel_fallback_owner_busy": 0,
+          "parallel_fallback_owner_already_used": 0,
+          "parallel_fallback_generation_exhausted": 0,
+          "parallel_fallback_scratch_unrepresentable": 0,
+          "history_rows_materialized": 0,
+          "scalar_value_conversions": 0,
+          "output_rows_prepared": 0,
+          "output_chunks_prepared": 0
+        },
+        "overflowed": false
+      }
+    },
+    {
+      "name": "6400x64-dual-lag1",
+      "kind": "dispatch",
+      "workload": {
+        "rows": 6400,
+        "entities": 64,
+        "window": 20,
+        "outputs": "mean5,mean20,lag1",
+        "min_periods": "full window",
+        "input": "Float64 exact binary fractions",
+        "first_payload_bytes": 0
+      },
+      "rows": 6400,
+      "window_outputs": 2,
+      "history_rows": 4096,
+      "warm_dispatches": 3,
+      "samples": [
+        {
+          "index": 0,
+          "order": "AB",
+          "absent_seconds": 0.009108598,
+          "present_seconds": 0.00943401,
+          "present_numeric_update_seconds": 0.000569463
+        },
+        {
+          "index": 1,
+          "order": "BA",
+          "absent_seconds": 0.00911162,
+          "present_seconds": 0.009322053,
+          "present_numeric_update_seconds": 0.000577308
+        },
+        {
+          "index": 2,
+          "order": "AB",
+          "absent_seconds": 0.008685288,
+          "present_seconds": 0.009195315,
+          "present_numeric_update_seconds": 0.000566943
+        },
+        {
+          "index": 3,
+          "order": "BA",
+          "absent_seconds": 0.011512574,
+          "present_seconds": 0.009296597,
+          "present_numeric_update_seconds": 0.000608051
+        },
+        {
+          "index": 4,
+          "order": "AB",
+          "absent_seconds": 0.014124436,
+          "present_seconds": 0.015000015,
+          "present_numeric_update_seconds": 0.000975782
+        },
+        {
+          "index": 5,
+          "order": "BA",
+          "absent_seconds": 0.015047182,
+          "present_seconds": 0.014928816,
+          "present_numeric_update_seconds": 0.001113686
+        },
+        {
+          "index": 6,
+          "order": "AB",
+          "absent_seconds": 0.014015086,
+          "present_seconds": 0.010748628,
+          "present_numeric_update_seconds": 0.000662718
+        },
+        {
+          "index": 7,
+          "order": "BA",
+          "absent_seconds": 0.008959068,
+          "present_seconds": 0.009460011,
+          "present_numeric_update_seconds": 0.000569369
+        },
+        {
+          "index": 8,
+          "order": "AB",
+          "absent_seconds": 0.008849573,
+          "present_seconds": 0.009415155,
+          "present_numeric_update_seconds": 0.000607915
+        },
+        {
+          "index": 9,
+          "order": "BA",
+          "absent_seconds": 0.009072155,
+          "present_seconds": 0.009212398,
+          "present_numeric_update_seconds": 0.000602373
+        },
+        {
+          "index": 10,
+          "order": "AB",
+          "absent_seconds": 0.008803931,
+          "present_seconds": 0.01020586,
+          "present_numeric_update_seconds": 0.00066768
+        },
+        {
+          "index": 11,
+          "order": "BA",
+          "absent_seconds": 0.009225353,
+          "present_seconds": 0.009677904,
+          "present_numeric_update_seconds": 0.000620288
+        },
+        {
+          "index": 12,
+          "order": "AB",
+          "absent_seconds": 0.009175886,
+          "present_seconds": 0.009566558,
+          "present_numeric_update_seconds": 0.000612394
+        },
+        {
+          "index": 13,
+          "order": "BA",
+          "absent_seconds": 0.009132287,
+          "present_seconds": 0.009772804,
+          "present_numeric_update_seconds": 0.000608625
+        },
+        {
+          "index": 14,
+          "order": "AB",
+          "absent_seconds": 0.008895462,
+          "present_seconds": 0.009494968,
+          "present_numeric_update_seconds": 0.000587119
+        },
+        {
+          "index": 15,
+          "order": "BA",
+          "absent_seconds": 0.008950833,
+          "present_seconds": 0.00929664,
+          "present_numeric_update_seconds": 0.000601579
+        },
+        {
+          "index": 16,
+          "order": "AB",
+          "absent_seconds": 0.009067275,
+          "present_seconds": 0.009640216,
+          "present_numeric_update_seconds": 0.000616926
+        },
+        {
+          "index": 17,
+          "order": "BA",
+          "absent_seconds": 0.009092833,
+          "present_seconds": 0.010225909,
+          "present_numeric_update_seconds": 0.00060597
+        },
+        {
+          "index": 18,
+          "order": "AB",
+          "absent_seconds": 0.008819194,
+          "present_seconds": 0.009550717,
+          "present_numeric_update_seconds": 0.00060897
+        },
+        {
+          "index": 19,
+          "order": "BA",
+          "absent_seconds": 0.009096691,
+          "present_seconds": 0.009289669,
+          "present_numeric_update_seconds": 0.00060521
+        },
+        {
+          "index": 20,
+          "order": "AB",
+          "absent_seconds": 0.008981877,
+          "present_seconds": 0.009575358,
+          "present_numeric_update_seconds": 0.000622023
+        },
+        {
+          "index": 21,
+          "order": "BA",
+          "absent_seconds": 0.009807062,
+          "present_seconds": 0.009533499,
+          "present_numeric_update_seconds": 0.000631761
+        },
+        {
+          "index": 22,
+          "order": "AB",
+          "absent_seconds": 0.009015731,
+          "present_seconds": 0.009588606,
+          "present_numeric_update_seconds": 0.00058775
+        },
+        {
+          "index": 23,
+          "order": "BA",
+          "absent_seconds": 0.009032145,
+          "present_seconds": 0.009419689,
+          "present_numeric_update_seconds": 0.000600741
+        },
+        {
+          "index": 24,
+          "order": "AB",
+          "absent_seconds": 0.008948553,
+          "present_seconds": 0.009585835,
+          "present_numeric_update_seconds": 0.000595522
+        },
+        {
+          "index": 25,
+          "order": "BA",
+          "absent_seconds": 0.008925587,
+          "present_seconds": 0.00932267,
+          "present_numeric_update_seconds": 0.000619983
+        },
+        {
+          "index": 26,
+          "order": "AB",
+          "absent_seconds": 0.009413327,
+          "present_seconds": 0.009355601,
+          "present_numeric_update_seconds": 0.000591773
+        },
+        {
+          "index": 27,
+          "order": "BA",
+          "absent_seconds": 0.008970992,
+          "present_seconds": 0.009250495,
+          "present_numeric_update_seconds": 0.0006031
+        },
+        {
+          "index": 28,
+          "order": "AB",
+          "absent_seconds": 0.008932319,
+          "present_seconds": 0.009662677,
+          "present_numeric_update_seconds": 0.000614696
+        },
+        {
+          "index": 29,
+          "order": "BA",
+          "absent_seconds": 0.009085426,
+          "present_seconds": 0.009371646,
+          "present_numeric_update_seconds": 0.000601343
+        }
+      ],
+      "allocation_samples": {
+        "absent": {
+          "allocation_count": 95380,
+          "allocated_bytes": 14432583,
+          "peak_net_allocation_count": 71468,
+          "peak_net_bytes": 5801165,
+          "ending_net_allocation_count": 28,
+          "ending_net_bytes": 460288
+        },
+        "present": {
+          "allocation_count": 95374,
+          "allocated_bytes": 14433511,
+          "peak_net_allocation_count": 71469,
+          "peak_net_bytes": 5801749,
+          "ending_net_allocation_count": 27,
+          "ending_net_bytes": 460264
+        }
+      },
+      "complete_callback_metrics": {
+        "data": {
+          "started": 35,
+          "succeeded": 35,
+          "failed": 0,
+          "cancelled": 0,
+          "interrupted": 0,
+          "callback_duration": {
+            "secs": 0,
+            "nanos": 151820989
+          },
+          "input_validation_duration": {
+            "secs": 0,
+            "nanos": 57394255
+          },
+          "ordering_proof_duration": {
+            "secs": 0,
+            "nanos": 63304725
+          },
+          "entity_resolution_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "state_preparation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "numeric_update_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "history_maintenance_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "arrow_output_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "budget_preparation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "send_wait_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "other_duration": {
+            "secs": 0,
+            "nanos": 31122009
+          },
+          "input_rows": 221696,
+          "order_proof_rows": 221696,
+          "resolved_rows": 0,
+          "touched_entities": 0,
+          "copied_entities": 0,
+          "numeric_rows": 0,
+          "numeric_lanes_started": 0,
+          "numeric_parallel_rows": 0,
+          "history_charge_scalar_rows": 0,
+          "history_charge_columnar_chunks": 0,
+          "history_append_rows_prepared": 0,
+          "history_evict_rows_prepared": 0,
+          "numeric_serial_calls": 0,
+          "numeric_general_calls": 0,
+          "numeric_parallel_calls": 0,
+          "parallel_fallback_no_work_client": 0,
+          "parallel_fallback_small_batch": 0,
+          "parallel_fallback_unsupported_plan": 0,
+          "parallel_fallback_cpu_limit": 0,
+          "parallel_fallback_prepared_ineligible": 0,
+          "parallel_fallback_lane_partition_rejected": 0,
+          "parallel_fallback_owner_busy": 0,
+          "parallel_fallback_owner_already_used": 0,
+          "parallel_fallback_generation_exhausted": 0,
+          "parallel_fallback_scratch_unrepresentable": 0,
+          "history_rows_materialized": 0,
+          "scalar_value_conversions": 886784,
+          "output_rows_prepared": 0,
+          "output_chunks_prepared": 0
+        },
+        "watermark": {
+          "started": 35,
+          "succeeded": 35,
+          "failed": 0,
+          "cancelled": 0,
+          "interrupted": 0,
+          "callback_duration": {
+            "secs": 0,
+            "nanos": 188194309
+          },
+          "input_validation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "ordering_proof_duration": {
+            "secs": 0,
+            "nanos": 62722053
+          },
+          "entity_resolution_duration": {
+            "secs": 0,
+            "nanos": 13947402
+          },
+          "state_preparation_duration": {
+            "secs": 0,
+            "nanos": 3504744
+          },
+          "numeric_update_duration": {
+            "secs": 0,
+            "nanos": 21757397
+          },
+          "history_maintenance_duration": {
+            "secs": 0,
+            "nanos": 28310055
+          },
+          "arrow_output_duration": {
+            "secs": 0,
+            "nanos": 28427247
+          },
+          "budget_preparation_duration": {
+            "secs": 0,
+            "nanos": 204312
+          },
+          "send_wait_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "other_duration": {
+            "secs": 0,
+            "nanos": 29321099
+          },
+          "input_rows": 0,
+          "order_proof_rows": 0,
+          "resolved_rows": 221696,
+          "touched_entities": 2240,
+          "copied_entities": 2176,
+          "numeric_rows": 221696,
+          "numeric_lanes_started": 0,
+          "numeric_parallel_rows": 0,
+          "history_charge_scalar_rows": 88320,
+          "history_charge_columnar_chunks": 0,
+          "history_append_rows_prepared": 44800,
+          "history_evict_rows_prepared": 43520,
+          "numeric_serial_calls": 0,
+          "numeric_general_calls": 35,
+          "numeric_parallel_calls": 0,
+          "parallel_fallback_no_work_client": 0,
+          "parallel_fallback_small_batch": 0,
+          "parallel_fallback_unsupported_plan": 0,
+          "parallel_fallback_cpu_limit": 0,
+          "parallel_fallback_prepared_ineligible": 0,
+          "parallel_fallback_lane_partition_rejected": 0,
+          "parallel_fallback_owner_busy": 0,
+          "parallel_fallback_owner_already_used": 0,
+          "parallel_fallback_generation_exhausted": 0,
+          "parallel_fallback_scratch_unrepresentable": 0,
+          "history_rows_materialized": 0,
+          "scalar_value_conversions": 0,
+          "output_rows_prepared": 221696,
+          "output_chunks_prepared": 35
+        },
+        "end": {
+          "started": 0,
+          "succeeded": 0,
+          "failed": 0,
+          "cancelled": 0,
+          "interrupted": 0,
+          "callback_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "input_validation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "ordering_proof_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "entity_resolution_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "state_preparation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "numeric_update_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "history_maintenance_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "arrow_output_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "budget_preparation_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "send_wait_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "other_duration": {
+            "secs": 0,
+            "nanos": 0
+          },
+          "input_rows": 0,
+          "order_proof_rows": 0,
+          "resolved_rows": 0,
+          "touched_entities": 0,
+          "copied_entities": 0,
+          "numeric_rows": 0,
+          "numeric_lanes_started": 0,
+          "numeric_parallel_rows": 0,
+          "history_charge_scalar_rows": 0,
+          "history_charge_columnar_chunks": 0,
+          "history_append_rows_prepared": 0,
+          "history_evict_rows_prepared": 0,
+          "numeric_serial_calls": 0,
+          "numeric_general_calls": 0,
+          "numeric_parallel_calls": 0,
+          "parallel_fallback_no_work_client": 0,
+          "parallel_fallback_small_batch": 0,
+          "parallel_fallback_unsupported_plan": 0,
+          "parallel_fallback_cpu_limit": 0,
+          "parallel_fallback_prepared_ineligible": 0,
+          "parallel_fallback_lane_partition_rejected": 0,
+          "parallel_fallback_owner_busy": 0,
+          "parallel_fallback_owner_already_used": 0,
+          "parallel_fallback_generation_exhausted": 0,
+          "parallel_fallback_scratch_unrepresentable": 0,
+          "history_rows_materialized": 0,
+          "scalar_value_conversions": 0,
+          "output_rows_prepared": 0,
+          "output_chunks_prepared": 0
+        },
+        "overflowed": false
+      }
+    }
+  ]
+}

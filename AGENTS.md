@@ -263,7 +263,8 @@ selectors.
   watermarks; synchronous caller-thread `push`, `advance`, and `finish` return
   Arrow tables (programs: every declared output name), and `close` releases
   state without flushing. State is in memory and checkpoint configuration is
-  ignored. The PyO3 `_StreamSession` binding releases the GIL per call and
+  ignored. The PyO3 `_StreamSession` binding releases the global interpreter
+  lock (GIL) per call and
   raises `RuntimeError` for busy, closed, finished, or failed sessions. See
   `docs/python-api.md`.
 - `Program(name, mode="batch")` or `Program(name, mode="stream")` fixes the

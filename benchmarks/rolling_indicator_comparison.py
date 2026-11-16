@@ -170,7 +170,10 @@ class FinancePythonWorker:
         fast_window: int = DEFAULT_FAST_WINDOW,
     ) -> None:
         runner = Path(__file__).with_name("finance_python_rolling_runner.py")
-        self._process = subprocess.Popen(  # nosec B603  # nosemgrep
+        # The benchmark owns the executable and every argument; no shell is used.
+        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args  # noqa: E501
+        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit.dangerous-subprocess-use-audit  # noqa: E501
+        self._process = subprocess.Popen(  # nosec B603  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args  # noqa: E501
             [
                 str(python),
                 str(runner),

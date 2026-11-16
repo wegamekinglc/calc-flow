@@ -32,6 +32,15 @@ def _dispatch_case(name: str, rows: int, seconds: float, numeric_ns: float) -> d
         "window_outputs": 2,
         "history_rows": profile.NATIVE_HISTORY_ROWS,
         "warm_dispatches": profile.NATIVE_WARM_DISPATCHES,
+        "workload": {
+            "rows": rows,
+            "entities": profile.NATIVE_CASE_ENTITIES[name],
+            "window": 20,
+            "outputs": profile.NATIVE_CASE_OUTPUTS[name],
+            "min_periods": "full window",
+            "input": "Float64 exact binary fractions",
+            "first_payload_bytes": 0,
+        },
         "samples": [
             {
                 "index": index,
@@ -229,8 +238,19 @@ def test_native_rounds_alternate_binaries_and_pair_round_medians(tmp_path) -> No
     _assert_aligned_markdown_tables(markdown)
 
 
+def test_g2_requires_a_positive_measured_numeric_update() -> None:
+    arm = {
+        "case": "6400x64-dual",
+        "arm": "present",
+        "numeric_update_ns_per_window_row": {"candidate": 0.0},
+    }
+    assert profile._native_g2_gate([arm], True)["met"] is False
+    arm["numeric_update_ns_per_window_row"]["candidate"] = 3.0
+    assert profile._native_g2_gate([arm], True)["met"] is True
+
+
 @pytest.mark.parametrize(
-    "defect", ("contract", "debug", "selection", "samples", "kind", "time")
+    "defect", ("contract", "debug", "selection", "samples", "kind", "entities", "time")
 )
 def test_native_evidence_rejects_debug_mismatched_or_invalid_runs(defect) -> None:
     cases = ("1x1-dual", "6400x64-dual")
@@ -245,6 +265,8 @@ def test_native_evidence_rejects_debug_mismatched_or_invalid_runs(defect) -> Non
         evidence["cases"][0]["samples"].pop()
     elif defect == "kind":
         evidence["cases"][1]["kind"] = "session"
+    elif defect == "entities":
+        evidence["cases"][1]["workload"]["entities"] = 1
     else:
         evidence["cases"][0]["samples"][3]["present_seconds"] = 0.0
     with pytest.raises(ValueError):

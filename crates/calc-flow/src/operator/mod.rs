@@ -26,6 +26,7 @@ pub(crate) use snapshot_sql::{PreparedSnapshotCapture, PreparedSnapshotRestore};
 pub(crate) use sql::{PreparedSqlCheckpoint, PreparedSqlRestore};
 mod state_budget;
 mod stream;
+pub(crate) mod sync_operator;
 mod union;
 mod window;
 
@@ -42,6 +43,7 @@ pub use cross_section::{
     CrossSectionValuePolicy, NullPlacement, RankTieMethod, SortDirection,
 };
 pub use expression::ExpressionOperator;
+pub(crate) use expression::{PreparedExpression, SyncExpressionOperator};
 pub(crate) use join::admission_masks::IngressPlan as JoinIngressPlan;
 #[cfg(feature = "benchmark-checkpoint-diagnostic")]
 pub(crate) use join::run_checkpoint_history_diagnostic;
@@ -264,13 +266,17 @@ impl Port {
         }
         if let Some(expected) = &self.schema {
             let actual = batch.table_payload()?.schema();
-            if actual != expected {
+            if !Arc::ptr_eq(actual, expected) && actual != expected {
                 return Err(CalcFlowError::Compile {
                     message: format!("{endpoint} schema mismatch"),
                 });
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn validate_fast(&self, batch: &Batch, endpoint: &str) -> Result<()> {
+        self.validate(batch, endpoint)
     }
 }
 
