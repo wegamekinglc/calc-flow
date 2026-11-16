@@ -157,6 +157,7 @@ impl Ring {
     }
 }
 
+#[derive(Clone)]
 struct NumericHistory<'a> {
     ring: &'a Ring,
     offset: usize,
@@ -456,6 +457,25 @@ impl StatePartition {
             .map(|page| page.logical_bytes())
             .sum()
     }
+
+    fn deep_copy(&self) -> Self {
+        let mut copied = StatePartition::new(self.id);
+        copied.keyed = vec![Vec::new(); self.keyed.len()];
+        copied.rings = vec![Vec::new(); self.rings.len()];
+        copied.value_logs = vec![ValueLog::default(); self.value_logs.len()];
+        for slot in self.locations.keys() {
+            let page = self.page(*slot).expect("located page");
+            copied.insert(page.cow(page.id().generation));
+        }
+        let value_log_lengths = copied.metadata.value.value_log_lengths.clone();
+        for (column, log) in copied.value_logs.iter_mut().enumerate() {
+            log.len = value_log_lengths.get(column).copied().unwrap_or(0);
+        }
+        copied.allocator = self.allocator.clone();
+        copied.dirty = self.dirty.clone();
+        copied.stamps = self.stamps.clone();
+        copied
+    }
 }
 
 fn set_page<T>(pages: &mut Vec<Option<Page<T>>>, index: usize, page: Page<T>) {
@@ -746,13 +766,13 @@ struct KeyedSnapshot {
 }
 
 #[derive(Clone)]
-struct RingSnapshot {
+pub(super) struct RingSnapshot {
     name: String,
     kind: RingKind,
     retention: Retention,
-    values: ArrayRef,
-    offsets: Vec<usize>,
-    capacities: Vec<usize>,
+    pub(super) values: ArrayRef,
+    pub(super) offsets: Vec<usize>,
+    pub(super) capacities: Vec<usize>,
     numeric: Option<Vec<NumericAccumulator>>,
 }
 
@@ -768,7 +788,7 @@ struct ValueLogSnapshot {
 pub(crate) struct TableSnapshot {
     keys: Vec<EntityKey>,
     keyed: Vec<KeyedSnapshot>,
-    rings: Vec<RingSnapshot>,
+    pub(super) rings: Vec<RingSnapshot>,
     value_logs: Vec<ValueLogSnapshot>,
     logical_bytes: usize,
     lineage: TableLineage,
@@ -794,6 +814,32 @@ pub(crate) struct StateTable {
     checkpointing: bool,
     durable: Arc<TableLineage>,
     active: Option<ActiveFreeze>,
+}
+
+impl Clone for StateTable {
+    fn clone(&self) -> Self {
+        assert!(
+            self.transaction.is_none() && self.active.is_none(),
+            "state-table clones occur between transactions and freezes"
+        );
+        Self {
+            keyed: self.keyed.clone(),
+            rings: self.rings.clone(),
+            value_logs: self.value_logs.clone(),
+            partitions: self
+                .partitions
+                .iter()
+                .map(|(group, partition)| (*group, partition.deep_copy()))
+                .collect(),
+            entities: self.entities.clone(),
+            next_entity: self.next_entity,
+            transaction: None,
+            next_transaction: self.next_transaction,
+            checkpointing: self.checkpointing,
+            durable: Arc::new(self.durable.deep_copy()),
+            active: None,
+        }
+    }
 }
 
 impl Default for StateTable {
@@ -1958,16 +2004,7 @@ impl StateTable {
             .enumerate()
             .map(|(column, schema)| self.ring_snapshot(column, schema, &ordered))
             .collect();
-        let value_logs = self
-            .partitions
-            .keys()
-            .flat_map(|group| {
-                self.value_logs
-                    .iter()
-                    .enumerate()
-                    .map(move |(column, name)| self.value_log_snapshot(*group, column, name))
-            })
-            .collect();
+        let value_logs = self.value_log_snapshots();
         TableSnapshot {
             keys,
             keyed,
@@ -2026,6 +2063,16 @@ impl StateTable {
             capacities,
             numeric,
         }
+    }
+
+    fn value_log_snapshots(&self) -> Vec<ValueLogSnapshot> {
+        let mut snapshots = Vec::new();
+        for group in self.partitions.keys() {
+            for (column, name) in self.value_logs.iter().enumerate() {
+                snapshots.push(self.value_log_snapshot(*group, column, name));
+            }
+        }
+        snapshots
     }
 
     fn value_log_snapshot(&self, group: KeyGroupId, column: usize, name: &str) -> ValueLogSnapshot {
@@ -2274,7 +2321,7 @@ impl StateTable {
             .numeric
             .as_ref()
             .is_none_or(|numeric| numeric.len() == entities);
-        populated && (column.numeric.is_none() || snapshot.numeric.is_some())
+        populated && (!column.numeric || snapshot.numeric.is_some())
     }
 
     fn ring_offsets_are_valid(snapshot: &RingSnapshot, entities: usize) -> bool {

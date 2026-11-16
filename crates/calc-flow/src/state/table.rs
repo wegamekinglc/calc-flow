@@ -7,10 +7,7 @@
 mod core;
 mod pages;
 
-pub(crate) use self::core::{
-    EntityId, EntityKey, KeyGroupId, PageId, Retention, RingKind, StateTable, TableFreeze,
-    TableLineage, TableSnapshot, ValueKind,
-};
+pub(crate) use self::core::{EntityId, EntityKey, RingKind, StateTable, ValueKind};
 
 use self::core::{KeyedValue, RingValue};
 use std::sync::Arc;
@@ -131,7 +128,7 @@ fn internal(message: &str) -> CalcFlowError {
 
 #[cfg(test)]
 mod tests {
-    use super::{EntityKey, Retention, RingKind, StateTable, ValueKind};
+    use super::{EntityKey, RingKind, StateTable, ValueKind, core::Retention};
     use datafusion::arrow::array::{Array, Float64Array, StringArray};
     use std::sync::Arc;
 

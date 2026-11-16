@@ -1,4 +1,8 @@
-use super::{EntityKey, KeyGroupId, Retention, RingKind, StateTable, ValueKind};
+use super::{
+    EntityKey, RingKind, StateTable, ValueKind,
+    core::{KeyGroupId, PageId, Retention},
+};
+use datafusion::arrow::array::StringArray;
 
 fn entity(table: &mut StateTable, key: &[u8]) -> super::EntityId {
     table.begin().unwrap();
@@ -7,6 +11,42 @@ fn entity(table: &mut StateTable, key: &[u8]) -> super::EntityId {
         .unwrap();
     table.commit().unwrap();
     entity
+}
+
+#[test]
+fn cloned_table_has_independent_page_storage_and_undo() {
+    let mut table = StateTable::with_checkpointing(true);
+    let history = table.add_ring_column("history", RingKind::Float64, Retention::Rows(4));
+    let entity = entity(&mut table, b"a");
+    table.begin().unwrap();
+    table.push_f64(history, entity, Some(1.0)).unwrap();
+    table.commit().unwrap();
+    let log = table.add_value_log("values");
+    table.begin().unwrap();
+    table
+        .append_strings(log, StringArray::from(vec!["x"]))
+        .unwrap();
+    table.commit().unwrap();
+
+    let mut cloned = table.clone();
+    assert_eq!(cloned.value_log_len(log), 1);
+    cloned.begin().unwrap();
+    cloned.push_f64(history, entity, Some(2.0)).unwrap();
+    cloned.commit().unwrap();
+    assert_eq!(table.f64_history(history, entity).unwrap(), vec![Some(1.0)]);
+    assert_eq!(
+        cloned.f64_history(history, entity).unwrap(),
+        vec![Some(1.0), Some(2.0)]
+    );
+
+    cloned.begin().unwrap();
+    cloned.push_f64(history, entity, Some(3.0)).unwrap();
+    cloned.rollback().unwrap();
+    assert_eq!(
+        cloned.f64_history(history, entity).unwrap(),
+        vec![Some(1.0), Some(2.0)]
+    );
+    assert_eq!(table.f64_history(history, entity).unwrap(), vec![Some(1.0)]);
 }
 
 #[test]
@@ -120,7 +160,7 @@ fn rollback_restores_transaction_stamp_and_first_touch_undo() {
     table.push_f64(history, entity, Some(1.0)).unwrap();
     table.commit().unwrap();
 
-    for rejected in [2, 3, 4] {
+    for rejected in [2_u32, 3, 4] {
         table.begin().unwrap();
         table.set_u64(counter, entity, u64::from(rejected)).unwrap();
         table
@@ -192,7 +232,7 @@ fn keyed_pages_split_and_duration_ring_growth_changes_generation() {
     let mut table = StateTable::with_checkpointing(true);
     let keyed = table.add_keyed_column("keyed", ValueKind::UInt64);
     let history = table.add_ring_column("history", RingKind::Float64, Retention::Duration);
-    let mut previous = None;
+    let mut previous: Option<PageId> = None;
     table.begin().unwrap();
     let duration = table
         .resolve_or_append(EntityKey::new(b"duration".to_vec()))
