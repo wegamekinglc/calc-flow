@@ -107,7 +107,7 @@ impl KeyedValue {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct KeyedColumn {
     name: String,
     kind: ValueKind,
@@ -140,7 +140,7 @@ impl KeyedColumn {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Ring {
     head: usize,
     len: usize,
@@ -188,7 +188,7 @@ impl Iterator for NumericHistory<'_> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct RingColumn {
     name: String,
     kind: RingKind,
@@ -251,7 +251,7 @@ impl RingColumn {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct ValueLog {
     name: String,
     chunks: Vec<ArrayRef>,
@@ -267,7 +267,7 @@ impl ValueLog {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Undo {
     Entity,
     Keyed {
@@ -302,7 +302,7 @@ enum Undo {
     },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Transaction {
     id: u64,
     undo: Vec<Undo>,
@@ -348,7 +348,7 @@ impl TableSnapshot {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct StateTable {
     keys: Vec<EntityKey>,
     entities: HashMap<Vec<u8>, EntityId>,
@@ -623,6 +623,45 @@ impl StateTable {
         let numeric =
             self.rings[column].numeric.as_ref().expect("numeric group")[self.row(entity)?];
         Ok((numeric.valid_count > 0).then(|| numeric.mean()))
+    }
+
+    pub(crate) fn numeric_valid_count(&self, column: usize, entity: EntityId) -> Result<u64> {
+        Ok(
+            self.rings[column].numeric.as_ref().expect("numeric group")[self.row(entity)?]
+                .valid_count,
+        )
+    }
+
+    pub(crate) fn logical_rows(&self) -> usize {
+        self.rings.iter().map(|column| column.logical_samples).sum()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn canonical_state_for_test(&self) -> String {
+        let keyed = self
+            .keyed
+            .iter()
+            .map(|column| (&column.name, column.kind, &column.values))
+            .collect::<Vec<_>>();
+        let rings = self
+            .rings
+            .iter()
+            .map(|column| {
+                let rings = column
+                    .rings
+                    .iter()
+                    .map(|ring| (ring.head, ring.len, &ring.slots))
+                    .collect::<Vec<_>>();
+                (
+                    &column.name,
+                    column.kind,
+                    column.retention,
+                    rings,
+                    &column.numeric,
+                )
+            })
+            .collect::<Vec<_>>();
+        format!("{:?}", (&self.keys, keyed, rings, &self.value_logs))
     }
 
     fn push_ring(

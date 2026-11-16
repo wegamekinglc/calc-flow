@@ -335,6 +335,12 @@ impl RollingOperator {
     }
 
     fn can_defer_ordered_history(&self, context: &StreamOperatorContext<'_>) -> bool {
+        if !context.job().checkpointing()
+            && self.compiled.kernel_plan.supports_slab()
+            && self.state.histories.by_entity.is_empty()
+        {
+            return true;
+        }
         self.state.typed_kernel_state.is_none()
             && self.state.histories.by_entity.is_empty()
             && !context.job().checkpointing()
@@ -412,10 +418,32 @@ impl RollingOperator {
         context: &StreamOperatorContext<'_>,
         defer_history: bool,
     ) -> Result<StreamKernelUpdate> {
+        let observer = context.rolling_metrics();
+        let use_slab = !context.job().checkpointing() && {
+            let plan = &self.compiled.kernel_plan;
+            let prior = self
+                .state
+                .typed_kernel_state
+                .as_deref()
+                .expect("state initialized above");
+            plan.can_use_slab(prior)
+        };
+        if use_slab {
+            let plan = &self.compiled.kernel_plan;
+            let state = self.state.owned_mut()?;
+            return plan.prepare_slab_ordered_stream(
+                state
+                    .typed_kernel_state
+                    .as_deref_mut()
+                    .expect("state initialized above"),
+                input,
+                context.operator_id(),
+                observer,
+            );
+        }
         if let Some(update) = self.prepare_ordered_update_in_place(input, context, defer_history) {
             return update;
         }
-        let observer = context.rolling_metrics();
         let plan = &self.compiled.kernel_plan;
         let prior = self
             .state

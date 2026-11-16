@@ -12,12 +12,13 @@ mod segment;
 mod source_history;
 #[allow(
     dead_code,
-    reason = "P2.3 lands the state-table seam before migrating rolling group storage"
+    reason = "P2.3 layout-7 migration still consumes the remaining state-table columns"
 )]
 mod table;
 mod transaction;
 
 pub(crate) use preloaded_snapshot::PreloadedSnapshot;
+pub(crate) use table::{EntityId, EntityKey, StateTable, ValueKind};
 
 #[cfg(test)]
 pub(crate) use transaction::ManifestTransactionFaultPoint;
