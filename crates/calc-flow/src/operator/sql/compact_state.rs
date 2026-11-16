@@ -41,6 +41,7 @@ pub(in crate::operator::sql) struct NativeStateDescriptor {
     pub(in crate::operator::sql) group_count: usize,
     pub(in crate::operator::sql) ordered_last: Option<OrderedLastDescriptor>,
     pub(in crate::operator::sql) policy: &'static str,
+    pub(in crate::operator::sql) key_layout: Option<String>,
     _reservation: MemoryReservation,
 }
 
@@ -56,6 +57,18 @@ pub(in crate::operator::sql) struct PaidNativeStateRecords {
 }
 
 impl PaidNativeStateRecords {
+    fn new(
+        records: Vec<RecordBatch>,
+        descriptor: NativeStateDescriptor,
+        reservation: MemoryReservation,
+    ) -> Self {
+        Self {
+            records,
+            descriptor,
+            _reservation: reservation,
+        }
+    }
+
     pub(in crate::operator::sql) fn into_descriptor(self) -> NativeStateDescriptor {
         let Self {
             records,
@@ -187,9 +200,16 @@ impl IncrementalSql {
             post_filter,
             post_order,
             expression_identity_bytes,
-            group_count: self.groups.len(),
+            group_count: self.group_count(),
             ordered_last,
             policy: self.native_policy(),
+            key_layout: self.keyed_sum.as_ref().map(|keyed| {
+                keyed
+                    .layout_fingerprint()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect()
+            }),
             _reservation: reservation,
         })
     }
@@ -387,6 +407,9 @@ impl IncrementalSql {
         mut check_cancelled: impl FnMut() -> Result<()>,
     ) -> Result<PaidNativeStateRecords> {
         check_cancelled()?;
+        if self.keyed_sum.is_some() {
+            return self.export_keyed(None, name, &mut check_cancelled);
+        }
         let mut cursor = export::ExportCursor::new(self, name)?;
         while !cursor.step(&mut check_cancelled)? {}
         check_cancelled()?;
@@ -398,7 +421,37 @@ impl IncrementalSql {
     }
 
     pub(in crate::operator::sql) fn group_count(&self) -> usize {
-        self.groups.len()
+        self.keyed_sum
+            .as_ref()
+            .map_or(self.groups.len(), super::keyed_sum::KeyedSum::len)
+    }
+
+    fn export_keyed(
+        &self,
+        slots: Option<Vec<usize>>,
+        name: &str,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<PaidNativeStateRecords> {
+        let keyed = self.keyed_sum.as_ref().expect("keyed SUM plan");
+        let mut descriptor = self.native_descriptor(name)?;
+        let rows = slots.as_ref().map_or(keyed.len(), Vec::len);
+        descriptor.group_count = rows;
+        let record_count = rows.div_ceil(super::MORSEL_ROWS).max(1);
+        let columns = checked_bytes(0, [(descriptor.wire_schema.fields().len(), 512)], name)?;
+        let charge = checked_bytes(
+            4096,
+            [
+                (record_count, size_of::<RecordBatch>()),
+                (record_count, columns),
+            ],
+            name,
+        )?;
+        let charge = checked_bytes(charge, [(keyed.output_charge(slots.as_deref())?, 1)], name)?;
+        let reservation = self.scratch.new_empty();
+        ensure_reservation(&reservation, charge, name)?;
+        let records = keyed.export(slots.as_deref(), descriptor.wire_schema.clone(), check)?;
+        check()?;
+        Ok(PaidNativeStateRecords::new(records, descriptor, reservation))
     }
 
     pub(in crate::operator::sql) fn export_dirty_state(
@@ -406,6 +459,11 @@ impl IncrementalSql {
         name: &str,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<PaidNativeStateRecords> {
+        if self.keyed_sum.is_some() {
+            let mut slots = self.dirty.slots().to_vec();
+            slots.sort_unstable();
+            return self.export_keyed(Some(slots), name, &mut || check());
+        }
         let mut cursor = export::ExportCursor::dirty(self, name)?;
         while !cursor.step(&mut || check())? {}
         check()?;
@@ -417,6 +475,11 @@ impl IncrementalSql {
         name: &str,
         mut check: impl FnMut() -> Result<()>,
     ) -> Result<PaidNativeStateRecords> {
+        if self.keyed_sum.is_some() {
+            let mut slots = self.dirty.slots().to_vec();
+            slots.sort_unstable();
+            return self.export_keyed(Some(slots), name, &mut check);
+        }
         let mut cursor = export::ExportCursor::dirty(self, name)?;
         loop {
             if cursor.step(&mut check)? {
@@ -435,6 +498,9 @@ impl IncrementalSql {
         mut check_cancelled: impl FnMut() -> Result<()>,
     ) -> Result<PaidNativeStateRecords> {
         check_cancelled()?;
+        if self.keyed_sum.is_some() {
+            return self.export_keyed(None, name, &mut check_cancelled);
+        }
         let mut cursor = export::ExportCursor::new(self, name)?;
         loop {
             let complete = cursor.step(&mut check_cancelled)?;
@@ -456,7 +522,10 @@ impl IncrementalSql {
         name: &str,
     ) -> Result<Self> {
         check_cancelled()?;
-        if !self.groups.is_empty() || !self.index.is_empty() {
+        if !self.groups.is_empty()
+            || !self.index.is_empty()
+            || self.keyed_sum.as_ref().is_some_and(|keyed| !keyed.is_empty())
+        {
             return Err(df_error(name, "native state import requires an empty plan"));
         }
         let ValidatedNativeImport {
@@ -555,8 +624,7 @@ impl IncrementalSql {
             name,
         )?;
         let capacity = self
-            .groups
-            .len()
+            .group_count()
             .checked_add(groups)
             .ok_or_else(|| df_error(name, "native delta capacity overflowed"))?;
         self.reserve_groups(groups, capacity, name)?;
@@ -571,7 +639,7 @@ impl IncrementalSql {
         name: &str,
     ) -> Result<()> {
         validate_ledger(
-            self.groups.len(),
+            self.group_count(),
             rows,
             seen,
             self.keys.is_empty(),
@@ -610,6 +678,15 @@ impl IncrementalSql {
         check_cancelled: &mut impl FnMut() -> Result<()>,
         name: &str,
     ) -> Result<()> {
+        if let Some(keyed) = &self.keyed_sum {
+            return keyed.restore_records(
+                records,
+                self.keys.len(),
+                replace,
+                self.compact_budget,
+                check_cancelled,
+            );
+        }
         let workspace = self.scratch.new_empty();
         let mut seen = std::collections::BTreeSet::new();
         let _seen_credit = self.load_seen_credit(records, replace, name)?;
@@ -816,12 +893,7 @@ impl IncrementalSql {
         Ok(Group {
             key: Arc::from(key),
             values: Arc::from(values),
-            aggregates: GroupAggregates::restored(
-                self.inline_integer_sum(),
-                states,
-                results,
-                name,
-            )?,
+            aggregates: GroupAggregates::restored(states, results, name)?,
             reservation,
         })
     }
