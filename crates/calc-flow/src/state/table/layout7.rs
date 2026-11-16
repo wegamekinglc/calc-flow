@@ -10,8 +10,8 @@ use datafusion::arrow::{
 };
 
 use super::{
-    EntityKey, KeyedSnapshot, Retention, RingKind, RingSnapshot, StateTable, TableSnapshot,
-    ValueKind, validate_inventory,
+    EntityKey, RingKind, StateTable, ValueKind,
+    core::{KeyedSnapshot, Layout7Schema, Retention, RingSnapshot, TableSnapshot},
 };
 use crate::{
     CalcFlowError, Result,
@@ -24,7 +24,7 @@ const HEADER_BYTES: usize = 8 + 4 + COMPONENTS * 8;
 
 pub(crate) fn encode_layout7(table: &StateTable) -> Result<Vec<u8>> {
     validate_shape(table)?;
-    let snapshot = table.snapshot();
+    let snapshot = table.snapshot_for_layout7();
     let entity = encode_entity(&snapshot)?;
     let offsets = encode_offsets(&snapshot)?;
     let values = encode_values(&snapshot)?;
@@ -47,31 +47,20 @@ pub(crate) fn encode_layout7(table: &StateTable) -> Result<Vec<u8>> {
 }
 
 pub(crate) fn decode_layout7(table: &StateTable, bytes: &[u8]) -> Result<TableSnapshot> {
-    validate_shape(table)?;
+    let schema = validate_shape(table)?;
     let components = decode_components(bytes)?;
     let entity = read_component(&components[0])?;
     let offsets = read_component(&components[1])?;
     let values = read_component(&components[2])?;
-    let snapshot = decode_snapshot(table, &entity, &offsets, &values)?;
-    validate_inventory(table, &snapshot)?;
-    validate_numeric(table, &snapshot)?;
+    let snapshot = decode_snapshot(table, &schema, &entity, &offsets, &values)?;
+    validate_numeric(&schema, &snapshot)?;
     Ok(snapshot)
 }
 
-fn validate_shape(table: &StateTable) -> Result<()> {
-    let keyed = table.keyed.as_slice();
-    let rings = table.rings.as_slice();
-    if !table.value_logs.is_empty()
-        || !matches!(keyed, [column] if column.kind == ValueKind::UInt64)
-        || !matches!(rings, [column] if column.kind == RingKind::Float64
-            && column.numeric.is_some()
-            && matches!(column.retention, Retention::Rows(_)))
-    {
-        return Err(layout7_error(
-            "layout 7 requires one UInt64 counter and one Float64 Rows numeric group",
-        ));
-    }
-    Ok(())
+fn validate_shape(table: &StateTable) -> Result<Layout7Schema> {
+    table.layout7_schema().ok_or_else(|| {
+        layout7_error("layout 7 requires one UInt64 counter and one Float64 Rows numeric group")
+    })
 }
 
 fn encode_entity(snapshot: &TableSnapshot) -> Result<Vec<u8>> {
@@ -271,6 +260,7 @@ fn read_component(bytes: &[u8]) -> Result<RecordBatch> {
 
 fn decode_snapshot(
     table: &StateTable,
+    schema: &Layout7Schema,
     entity: &RecordBatch,
     offsets: &RecordBatch,
     values: &RecordBatch,
@@ -307,25 +297,27 @@ fn decode_snapshot(
         .ok_or_else(|| layout7_error("rolling layout-7 logical size is absent"))?
         .parse::<usize>()
         .map_err(|_| layout7_error("rolling layout-7 logical size is invalid"))?;
-    Ok(TableSnapshot {
-        keys,
-        keyed: vec![KeyedSnapshot {
-            name: table.keyed[0].name.clone(),
-            kind: table.keyed[0].kind,
-            values: entity.column(1).clone(),
-        }],
-        rings: vec![RingSnapshot {
-            name: table.rings[0].name.clone(),
-            kind: table.rings[0].kind,
-            retention: table.rings[0].retention,
-            values: values.column(0).clone(),
-            offsets,
-            capacities,
-            numeric: Some(numeric),
-        }],
-        value_logs: Vec::new(),
-        logical_bytes,
-    })
+    let keyed = vec![KeyedSnapshot {
+        name: schema.counter_name.clone(),
+        kind: ValueKind::UInt64,
+        values: entity.column(1).clone(),
+    }];
+    let rings = vec![RingSnapshot {
+        name: schema.numeric_name.clone(),
+        kind: RingKind::Float64,
+        retention: schema.retention,
+        values: values.column(0).clone(),
+        offsets,
+        capacities,
+        numeric: Some(numeric),
+    }];
+    let (snapshot, actual_bytes) = table.from_layout7_snapshot(keys, keyed, rings)?;
+    if actual_bytes != logical_bytes {
+        return Err(layout7_error(
+            "rolling layout-7 logical size differs from restored pages",
+        ));
+    }
+    Ok(snapshot)
 }
 
 fn decode_numeric(record: &RecordBatch) -> Result<Vec<NumericAccumulator>> {
@@ -379,8 +371,8 @@ fn numeric_parts(snapshot: &TableSnapshot) -> Vec<NumericAccumulatorLayout7> {
         .collect()
 }
 
-fn validate_numeric(table: &StateTable, snapshot: &TableSnapshot) -> Result<()> {
-    let Retention::Rows(window) = table.rings[0].retention else {
+fn validate_numeric(schema: &Layout7Schema, snapshot: &TableSnapshot) -> Result<()> {
+    let Retention::Rows(window) = schema.retention else {
         return Err(layout7_error("rolling layout-7 numeric frame mismatch"));
     };
     let history = snapshot.rings[0]
