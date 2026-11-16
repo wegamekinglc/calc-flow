@@ -412,6 +412,40 @@ impl RollingOperator {
         Some(update.map(|update| update.expect("in-place update was checked above")))
     }
 
+    fn prepare_slab_update(
+        &mut self,
+        input: &RecordBatch,
+        context: &StreamOperatorContext<'_>,
+    ) -> Option<Result<StreamKernelUpdate>> {
+        if context.job().checkpointing() {
+            return None;
+        }
+        let plan = &self.compiled.kernel_plan;
+        let prior = self
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .expect("state initialized above");
+        if !plan.can_use_slab(prior) {
+            return None;
+        }
+        let state = match self.state.owned_mut() {
+            Ok(state) => state,
+            Err(error) => return Some(Err(error)),
+        };
+        Some(
+            plan.prepare_slab_ordered_stream(
+                state
+                    .typed_kernel_state
+                    .as_deref_mut()
+                    .expect("state initialized above"),
+                input,
+                context.operator_id(),
+                context.rolling_metrics(),
+            ),
+        )
+    }
+
     async fn prepare_ordered_update(
         &mut self,
         input: &RecordBatch,
@@ -419,27 +453,8 @@ impl RollingOperator {
         defer_history: bool,
     ) -> Result<StreamKernelUpdate> {
         let observer = context.rolling_metrics();
-        let use_slab = !context.job().checkpointing() && {
-            let plan = &self.compiled.kernel_plan;
-            let prior = self
-                .state
-                .typed_kernel_state
-                .as_deref()
-                .expect("state initialized above");
-            plan.can_use_slab(prior)
-        };
-        if use_slab {
-            let plan = &self.compiled.kernel_plan;
-            let state = self.state.owned_mut()?;
-            return plan.prepare_slab_ordered_stream(
-                state
-                    .typed_kernel_state
-                    .as_deref_mut()
-                    .expect("state initialized above"),
-                input,
-                context.operator_id(),
-                observer,
-            );
+        if let Some(update) = self.prepare_slab_update(input, context) {
+            return update;
         }
         if let Some(update) = self.prepare_ordered_update_in_place(input, context, defer_history) {
             return update;

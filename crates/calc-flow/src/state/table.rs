@@ -274,6 +274,7 @@ enum Undo {
         column: usize,
         row: usize,
         value: KeyedValue,
+        stamp: u64,
     },
     RingMetadata {
         column: usize,
@@ -283,17 +284,20 @@ enum Undo {
         capacity: usize,
         logical_slots: usize,
         logical_samples: usize,
+        stamp: u64,
     },
     RingSlot {
         column: usize,
         row: usize,
         slot: usize,
         value: RingValue,
+        stamp: u64,
     },
     Numeric {
         column: usize,
         row: usize,
         value: NumericAccumulator,
+        stamp: u64,
     },
     ValueLog {
         column: usize,
@@ -456,7 +460,16 @@ impl StateTable {
                         column.truncate(len);
                     }
                 }
-                Undo::Keyed { column, row, value } => self.keyed[column].values[row] = value,
+                Undo::Keyed {
+                    column,
+                    row,
+                    value,
+                    stamp,
+                } => {
+                    let column = &mut self.keyed[column];
+                    column.values[row] = value;
+                    column.stamps[row] = stamp;
+                }
                 Undo::RingMetadata {
                     column,
                     row,
@@ -465,8 +478,10 @@ impl StateTable {
                     capacity,
                     logical_slots,
                     logical_samples,
+                    stamp,
                 } => {
                     let column = &mut self.rings[column];
+                    column.stamps[row] = stamp;
                     let ring = &mut column.rings[row];
                     ring.slots.resize(capacity, column.kind.empty());
                     ring.slot_stamps.resize(capacity, 0);
@@ -480,9 +495,21 @@ impl StateTable {
                     row,
                     slot,
                     value,
-                } => self.rings[column].rings[row].slots[slot] = value,
-                Undo::Numeric { column, row, value } => {
-                    self.rings[column].numeric.as_mut().expect("numeric group")[row] = value;
+                    stamp,
+                } => {
+                    let ring = &mut self.rings[column].rings[row];
+                    ring.slots[slot] = value;
+                    ring.slot_stamps[slot] = stamp;
+                }
+                Undo::Numeric {
+                    column,
+                    row,
+                    value,
+                    stamp,
+                } => {
+                    let column = &mut self.rings[column];
+                    column.numeric.as_mut().expect("numeric group")[row] = value;
+                    column.stamps[row] = stamp;
                 }
                 Undo::ValueLog {
                     column,
@@ -491,6 +518,7 @@ impl StateTable {
                 } => self.value_logs[column].truncate(chunks, len),
             }
         }
+        self.next_transaction = transaction.id;
         Ok(())
     }
 
@@ -539,11 +567,13 @@ impl StateTable {
             return Err(internal("keyed column type mismatch"));
         }
         if column.stamps[row] != transaction.id {
+            let stamp = column.stamps[row];
             column.stamps[row] = transaction.id;
             transaction.undo.push(Undo::Keyed {
                 column: column_index,
                 row,
                 value: column.values[row],
+                stamp,
             });
         }
         column.values[row] = KeyedValue::UInt64(value);
@@ -595,6 +625,7 @@ impl StateTable {
             .as_ref()
             .ok_or_else(|| internal("numeric update requires a transaction"))?;
         if self.rings[column].stamps[row] != transaction.id {
+            let stamp = self.rings[column].stamps[row];
             let previous = self.rings[column].numeric.as_ref().expect("numeric group")[row];
             self.transaction
                 .as_mut()
@@ -604,6 +635,7 @@ impl StateTable {
                     column,
                     row,
                     value: previous,
+                    stamp,
                 });
         }
         let leaving = self.push_f64(column, entity, value)?.flatten();
@@ -700,6 +732,7 @@ impl StateTable {
         let id = transaction.id;
         let column = &mut self.rings[column_index];
         if column.stamps[row] != id {
+            let stamp = column.stamps[row];
             column.stamps[row] = id;
             let ring = &column.rings[row];
             transaction.undo.push(Undo::RingMetadata {
@@ -710,6 +743,7 @@ impl StateTable {
                 capacity: ring.capacity(),
                 logical_slots: column.logical_slots,
                 logical_samples: column.logical_samples,
+                stamp,
             });
         }
         let ring = &mut column.rings[row];
@@ -732,12 +766,14 @@ impl StateTable {
         }
         let slot = ring.position(ring.len);
         if ring.slot_stamps[slot] != id {
+            let stamp = ring.slot_stamps[slot];
             ring.slot_stamps[slot] = id;
             transaction.undo.push(Undo::RingSlot {
                 column: column_index,
                 row,
                 slot,
                 value: ring.slots[slot],
+                stamp,
             });
         }
         let evicted = (ring.len == ring.capacity()).then_some(ring.slots[slot]);

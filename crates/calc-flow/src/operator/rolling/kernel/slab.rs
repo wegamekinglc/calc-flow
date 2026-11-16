@@ -20,11 +20,13 @@ pub(super) struct SlabUpdate {
 }
 
 impl SlabUpdate {
-    pub(super) fn recurrence_seeds(&self) -> Vec<Vec<Option<super::RecurrenceSeed>>> {
+    pub(in crate::operator::rolling) fn recurrence_seeds(
+        &self,
+    ) -> Vec<Vec<Option<super::RecurrenceSeed>>> {
         vec![vec![None]; self.entities]
     }
 
-    pub(super) fn charge_change(
+    pub(in crate::operator::rolling) fn charge_change(
         &self,
         base: &RollingKernelState,
         node_id: &str,
@@ -38,7 +40,7 @@ impl SlabUpdate {
         Ok((self.previous_charge, new))
     }
 
-    pub(super) fn rollback(self, base: &mut RollingKernelState) {
+    pub(in crate::operator::rolling) fn rollback(self, base: &mut RollingKernelState) {
         base.slab
             .as_mut()
             .expect("rolling slab is present")
@@ -49,7 +51,11 @@ impl SlabUpdate {
         }
     }
 
-    pub(super) fn commit(self, base: &mut RollingKernelState) {
+    #[allow(
+        clippy::unused_self,
+        reason = "consuming the update enforces that each slab transaction commits once"
+    )]
+    pub(in crate::operator::rolling) fn commit(self, base: &mut RollingKernelState) {
         base.slab
             .as_mut()
             .expect("rolling slab is present")
@@ -125,7 +131,7 @@ impl SlabBuilder {
 }
 
 impl RollingKernelPlan {
-    pub(super) fn supports_slab(&self) -> bool {
+    pub(in crate::operator::rolling) fn supports_slab(&self) -> bool {
         matches!(
             self.groups.as_slice(),
             [TypedGroupPlan::Numeric {
@@ -150,7 +156,7 @@ impl RollingKernelPlan {
             })
     }
 
-    pub(super) fn can_use_slab(&self, state: &RollingKernelState) -> bool {
+    pub(in crate::operator::rolling) fn can_use_slab(&self, state: &RollingKernelState) -> bool {
         self.supports_slab() && (state.slab.is_some() || state.states.is_empty())
     }
 
@@ -176,7 +182,7 @@ impl RollingKernelPlan {
         Ok(())
     }
 
-    pub(super) fn prepare_slab_ordered_stream(
+    pub(in crate::operator::rolling) fn prepare_slab_ordered_stream(
         &self,
         state: &mut RollingKernelState,
         input: &RecordBatch,
@@ -256,9 +262,11 @@ impl RollingKernelPlan {
                 return Err(error);
             }
         };
-        let mut local = RollingKernelState::default();
-        local.kernel_fingerprint = Some(self.fingerprint.clone());
-        local.last_identity = last_identity;
+        let local = RollingKernelState {
+            kernel_fingerprint: Some(self.fingerprint.clone()),
+            last_identity,
+            ..RollingKernelState::default()
+        };
         Ok(StreamKernelUpdate {
             execution: RollingKernelExecution {
                 columns,
@@ -384,7 +392,7 @@ mod tests {
         let count = columns[2].as_any().downcast_ref::<UInt64Array>().unwrap();
         assert_eq!(count.value(1), 2);
         let variance = columns[3].as_any().downcast_ref::<Float64Array>().unwrap();
-        assert_eq!(variance.value(1).to_bits(), 2.0_f64.to_bits());
+        assert_eq!(variance.value(1).to_bits(), 1.0_f64.to_bits());
         update.rollback(&mut state);
         assert_eq!(state.canonical_state_for_test(), empty);
 

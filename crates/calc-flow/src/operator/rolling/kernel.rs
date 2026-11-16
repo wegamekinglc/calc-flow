@@ -1789,6 +1789,7 @@ impl RollingKernelState {
                 entities,
                 direct_entities: HashMap::new(),
                 states,
+                slab: None,
                 last_identity: None,
             },
             entity_ids,
