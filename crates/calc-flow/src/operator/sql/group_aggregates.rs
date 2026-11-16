@@ -35,11 +35,6 @@ impl GroupAggregates {
         StateView::Borrowed(&self.states[index])
     }
 
-    #[cfg(test)]
-    pub(super) fn states(&self) -> impl ExactSizeIterator<Item = StateView<'_>> {
-        (0..self.len()).map(|index| self.state(index))
-    }
-
     pub(super) fn state_scalar(&self, aggregate: usize, field: usize) -> Cow<'_, ScalarValue> {
         Cow::Borrowed(&self.states[aggregate][field])
     }

@@ -24,6 +24,12 @@ const HASH_EQUALITY: &str = "typed-row-hash-exact-column-equality-v1";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct GroupId(u32);
 
+pub(crate) enum ExportValue {
+    Scalar(ScalarValue),
+    Utf8(Option<Arc<str>>),
+    LargeUtf8(Option<Arc<str>>),
+}
+
 impl GroupId {
     pub(crate) fn new(index: usize) -> Result<Self> {
         u32::try_from(index)
@@ -118,6 +124,26 @@ impl KeyStore {
 
     pub(crate) fn layout_fingerprint(&self) -> [u8; 32] {
         self.fingerprint
+    }
+
+    pub(crate) fn fields_len(&self) -> usize {
+        self.schema.fields.len()
+    }
+
+    pub(crate) fn export_value(&self, group: GroupId, column: usize) -> Result<ExportValue> {
+        let field = &self.schema.fields[column];
+        match &self.columns[column] {
+            KeyColumn::Utf8(values) => Ok(ExportValue::Utf8(values[group.index()].clone())),
+            KeyColumn::LargeUtf8(values) => {
+                Ok(ExportValue::LargeUtf8(values[group.index()].clone()))
+            }
+            column => {
+                let array = column.array(std::slice::from_ref(&group), field.data_type())?;
+                let value = ScalarValue::try_from_array(&array, 0)
+                    .map_err(|error| keyed_error(error.to_string()))?;
+                Ok(ExportValue::Scalar(value))
+            }
+        }
     }
 
     pub(crate) fn canonical(&self, group: GroupId) -> Arc<[u8]> {
@@ -230,6 +256,16 @@ impl KeyStore {
     ) -> Result<Vec<GroupId>> {
         check()?;
         let rows = validate_arrays(&self.schema, arrays)?;
+        let _credit = self.route_credit(rows, selection)?;
+        let hashes = hash_rows(&self.schema, arrays, selection, check)?;
+        self.route_rows(arrays, selection, limit, collide, hashes, check)
+    }
+
+    fn route_credit(
+        &self,
+        rows: usize,
+        selection: Option<&BooleanArray>,
+    ) -> Result<MemoryReservation> {
         if rows > MORSEL_ROWS {
             return Err(keyed_error("key routing morsel exceeds 4,096 rows"));
         }
@@ -243,9 +279,20 @@ impl KeyStore {
         credit
             .try_grow(scratch)
             .map_err(|error| keyed_error(error.to_string()))?;
-        let hashes = hash_rows(&self.schema, arrays, selection, check)?;
+        Ok(credit)
+    }
+
+    fn route_rows(
+        &mut self,
+        arrays: &[ArrayRef],
+        selection: Option<&BooleanArray>,
+        limit: usize,
+        collide: bool,
+        hashes: Vec<u64>,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Vec<GroupId>> {
         let mut variable = VariableWork::new(check);
-        let mut groups = Vec::with_capacity(rows);
+        let mut groups = Vec::with_capacity(hashes.len());
         for (row, hash) in hashes.into_iter().enumerate() {
             if selection.is_some_and(|selection| selection.is_null(row) || !selection.value(row)) {
                 groups.push(GroupId(0));
@@ -321,6 +368,11 @@ impl KeyStore {
         }
         let group = GroupId::new(self.next)?;
         let canonical = canonical_row(arrays, row, variable)?;
+        self.charge_birth(&canonical, arrays, row)?;
+        self.install_birth(arrays, row, hash, group, canonical)
+    }
+
+    fn charge_birth(&mut self, canonical: &[u8], arrays: &[ArrayRef], row: usize) -> Result<()> {
         let charge = birth_charge(&self.schema, arrays, row, canonical.len())?;
         self.reservation
             .try_grow(charge)
@@ -329,6 +381,17 @@ impl KeyStore {
             .logical_bytes
             .checked_add(charge)
             .ok_or_else(|| keyed_error("key logical-byte charge overflowed"))?;
+        Ok(())
+    }
+
+    fn install_birth(
+        &mut self,
+        arrays: &[ArrayRef],
+        row: usize,
+        hash: u64,
+        group: GroupId,
+        canonical: Vec<u8>,
+    ) -> Result<GroupId> {
         for (column, array) in self.columns.iter_mut().zip(arrays) {
             column.push(array, row)?;
         }
@@ -498,16 +561,7 @@ fn birth_charge(
         .iter()
         .zip(arrays)
         .try_fold(256usize, |total, (field, array)| {
-            let width = match field.data_type() {
-                DataType::Utf8 | DataType::LargeUtf8 => {
-                    2 * size_of::<String>() + string_value(array, row)?.len()
-                }
-                DataType::Boolean => 2 * size_of::<Option<bool>>(),
-                DataType::Int8 | DataType::UInt8 => 2,
-                DataType::Int16 | DataType::UInt16 => 4,
-                DataType::Int32 | DataType::UInt32 | DataType::Date32 => 8,
-                _ => 16,
-            };
+            let width = birth_value_width(field, array, row)?;
             total
                 .checked_add(width)
                 .ok_or_else(|| keyed_error("key birth charge overflowed"))
@@ -516,6 +570,19 @@ fn birth_charge(
         .checked_add(canonical)
         .and_then(|total| total.checked_add(4 * size_of::<usize>()))
         .ok_or_else(|| keyed_error("key birth charge overflowed"))
+}
+
+fn birth_value_width(field: &FieldRef, array: &ArrayRef, row: usize) -> Result<usize> {
+    match field.data_type() {
+        DataType::Utf8 | DataType::LargeUtf8 => {
+            Ok(2 * size_of::<Arc<str>>() + string_value(array, row)?.len())
+        }
+        DataType::Boolean => Ok(2 * size_of::<Option<bool>>()),
+        DataType::Int8 | DataType::UInt8 => Ok(2),
+        DataType::Int16 | DataType::UInt16 => Ok(4),
+        DataType::Int32 | DataType::UInt32 | DataType::Date32 => Ok(8),
+        _ => Ok(16),
+    }
 }
 
 fn keyed_error(message: impl Into<String>) -> CalcFlowError {
@@ -580,68 +647,169 @@ fn hash_rows(
     Ok(hashes.into_iter().map(StableHash::finish).collect())
 }
 
+macro_rules! hash_primitive {
+    ($array:expr, $hashes:expr, $selection:expr, $kind:ty) => {{
+        let values = $array
+            .as_any()
+            .downcast_ref::<PrimitiveArray<$kind>>()
+            .ok_or_else(|| keyed_error("typed key array differs from schema"))?;
+        for (row, hash) in $hashes.iter_mut().enumerate() {
+            if $selection.is_some_and(|selection| selection.is_null(row) || !selection.value(row)) {
+                continue;
+            }
+            hash.bytes(&[u8::from(values.is_null(row))]);
+            if values.is_valid(row) {
+                values.value(row).write_key(hash);
+            }
+        }
+    }};
+}
+
 fn hash_array(
     array: &ArrayRef,
     hashes: &mut [StableHash],
     selection: Option<&BooleanArray>,
     variable: &mut VariableWork<'_>,
 ) -> Result<()> {
-    macro_rules! primitive {
-        ($kind:ty) => {{
-            let values = array
-                .as_any()
-                .downcast_ref::<PrimitiveArray<$kind>>()
-                .ok_or_else(|| keyed_error("typed key array differs from schema"))?;
-            for (row, hash) in hashes.iter_mut().enumerate() {
-                if selection
-                    .is_some_and(|selection| selection.is_null(row) || !selection.value(row))
-                {
-                    continue;
-                }
-                hash.bytes(&[u8::from(values.is_null(row))]);
-                if values.is_valid(row) {
-                    values.value(row).write_key(hash);
-                }
-            }
-        }};
-    }
     match array.data_type() {
-        DataType::Boolean => {
-            let values = array
-                .as_any()
-                .downcast_ref::<BooleanArray>()
-                .ok_or_else(|| keyed_error("Boolean key array differs"))?;
-            for (row, hash) in hashes.iter_mut().enumerate() {
-                if selection
-                    .is_some_and(|selection| selection.is_null(row) || !selection.value(row))
-                {
-                    continue;
-                }
-                hash.bytes(&[u8::from(values.is_null(row))]);
-                if values.is_valid(row) {
-                    hash.bytes(&[u8::from(values.value(row))]);
-                }
-            }
+        DataType::Boolean => hash_boolean(array, hashes, selection),
+        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+            hash_signed(array, hashes, selection)
         }
-        DataType::Int8 => primitive!(datafusion::arrow::datatypes::Int8Type),
-        DataType::Int16 => primitive!(datafusion::arrow::datatypes::Int16Type),
-        DataType::Int32 => primitive!(datafusion::arrow::datatypes::Int32Type),
-        DataType::Int64 => primitive!(datafusion::arrow::datatypes::Int64Type),
-        DataType::UInt8 => primitive!(datafusion::arrow::datatypes::UInt8Type),
-        DataType::UInt16 => primitive!(datafusion::arrow::datatypes::UInt16Type),
-        DataType::UInt32 => primitive!(datafusion::arrow::datatypes::UInt32Type),
-        DataType::UInt64 => primitive!(datafusion::arrow::datatypes::UInt64Type),
-        DataType::Date32 => primitive!(datafusion::arrow::datatypes::Date32Type),
-        DataType::Date64 => primitive!(datafusion::arrow::datatypes::Date64Type),
-        DataType::Timestamp(TimeUnit::Second, _) => primitive!(TimestampSecondType),
-        DataType::Timestamp(TimeUnit::Millisecond, _) => primitive!(TimestampMillisecondType),
-        DataType::Timestamp(TimeUnit::Microsecond, _) => primitive!(TimestampMicrosecondType),
-        DataType::Timestamp(TimeUnit::Nanosecond, _) => primitive!(TimestampNanosecondType),
-        DataType::Utf8 => hash_strings::<StringArray>(array, hashes, selection, variable)?,
-        DataType::LargeUtf8 => {
-            hash_strings::<LargeStringArray>(array, hashes, selection, variable)?;
+        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+            hash_unsigned(array, hashes, selection)
         }
-        _ => return Err(keyed_error("unsupported key hash type")),
+        DataType::Date32 | DataType::Date64 | DataType::Timestamp(..) => {
+            hash_temporal(array, hashes, selection)
+        }
+        DataType::Utf8 => hash_strings::<StringArray>(array, hashes, selection, variable),
+        DataType::LargeUtf8 => hash_strings::<LargeStringArray>(array, hashes, selection, variable),
+        _ => Err(keyed_error("unsupported key hash type")),
+    }
+}
+
+fn hash_boolean(
+    array: &ArrayRef,
+    hashes: &mut [StableHash],
+    selection: Option<&BooleanArray>,
+) -> Result<()> {
+    let values = array
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .ok_or_else(|| keyed_error("Boolean key array differs"))?;
+    for (row, hash) in hashes.iter_mut().enumerate() {
+        if selection.is_some_and(|selection| selection.is_null(row) || !selection.value(row)) {
+            continue;
+        }
+        hash.bytes(&[u8::from(values.is_null(row))]);
+        if values.is_valid(row) {
+            hash.bytes(&[u8::from(values.value(row))]);
+        }
+    }
+    Ok(())
+}
+
+fn hash_signed(
+    array: &ArrayRef,
+    hashes: &mut [StableHash],
+    selection: Option<&BooleanArray>,
+) -> Result<()> {
+    match array.data_type() {
+        DataType::Int8 => hash_primitive!(
+            array,
+            hashes,
+            selection,
+            datafusion::arrow::datatypes::Int8Type
+        ),
+        DataType::Int16 => hash_primitive!(
+            array,
+            hashes,
+            selection,
+            datafusion::arrow::datatypes::Int16Type
+        ),
+        DataType::Int32 => hash_primitive!(
+            array,
+            hashes,
+            selection,
+            datafusion::arrow::datatypes::Int32Type
+        ),
+        DataType::Int64 => hash_primitive!(
+            array,
+            hashes,
+            selection,
+            datafusion::arrow::datatypes::Int64Type
+        ),
+        _ => return Err(keyed_error("signed key hash type differs")),
+    }
+    Ok(())
+}
+
+fn hash_unsigned(
+    array: &ArrayRef,
+    hashes: &mut [StableHash],
+    selection: Option<&BooleanArray>,
+) -> Result<()> {
+    match array.data_type() {
+        DataType::UInt8 => hash_primitive!(
+            array,
+            hashes,
+            selection,
+            datafusion::arrow::datatypes::UInt8Type
+        ),
+        DataType::UInt16 => hash_primitive!(
+            array,
+            hashes,
+            selection,
+            datafusion::arrow::datatypes::UInt16Type
+        ),
+        DataType::UInt32 => hash_primitive!(
+            array,
+            hashes,
+            selection,
+            datafusion::arrow::datatypes::UInt32Type
+        ),
+        DataType::UInt64 => hash_primitive!(
+            array,
+            hashes,
+            selection,
+            datafusion::arrow::datatypes::UInt64Type
+        ),
+        _ => return Err(keyed_error("unsigned key hash type differs")),
+    }
+    Ok(())
+}
+
+fn hash_temporal(
+    array: &ArrayRef,
+    hashes: &mut [StableHash],
+    selection: Option<&BooleanArray>,
+) -> Result<()> {
+    match array.data_type() {
+        DataType::Date32 => hash_primitive!(
+            array,
+            hashes,
+            selection,
+            datafusion::arrow::datatypes::Date32Type
+        ),
+        DataType::Date64 => hash_primitive!(
+            array,
+            hashes,
+            selection,
+            datafusion::arrow::datatypes::Date64Type
+        ),
+        DataType::Timestamp(TimeUnit::Second, _) => {
+            hash_primitive!(array, hashes, selection, TimestampSecondType);
+        }
+        DataType::Timestamp(TimeUnit::Millisecond, _) => {
+            hash_primitive!(array, hashes, selection, TimestampMillisecondType);
+        }
+        DataType::Timestamp(TimeUnit::Microsecond, _) => {
+            hash_primitive!(array, hashes, selection, TimestampMicrosecondType);
+        }
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+            hash_primitive!(array, hashes, selection, TimestampNanosecondType);
+        }
+        _ => return Err(keyed_error("temporal key hash type differs")),
     }
     Ok(())
 }
@@ -710,26 +878,53 @@ fn canonical_row(
 }
 
 fn canonical_tag(data_type: &DataType) -> Result<u8> {
-    Ok(match data_type {
-        DataType::Boolean => 1,
-        DataType::Int8 => 2,
-        DataType::Int16 => 3,
-        DataType::Int32 => 4,
-        DataType::Int64 => 5,
-        DataType::UInt8 => 6,
-        DataType::UInt16 => 7,
-        DataType::UInt32 => 8,
-        DataType::UInt64 => 9,
-        DataType::Utf8 => 10,
-        DataType::LargeUtf8 => 11,
-        DataType::Date32 => 12,
-        DataType::Date64 => 13,
-        DataType::Timestamp(TimeUnit::Second, _) => 14,
-        DataType::Timestamp(TimeUnit::Millisecond, _) => 15,
-        DataType::Timestamp(TimeUnit::Microsecond, _) => 16,
-        DataType::Timestamp(TimeUnit::Nanosecond, _) => 17,
-        _ => return Err(keyed_error("unsupported canonical key type")),
-    })
+    match data_type {
+        DataType::Boolean => Ok(1),
+        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+            canonical_signed_tag(data_type)
+        }
+        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+            canonical_unsigned_tag(data_type)
+        }
+        DataType::Utf8 => Ok(10),
+        DataType::LargeUtf8 => Ok(11),
+        DataType::Date32 | DataType::Date64 | DataType::Timestamp(..) => {
+            canonical_temporal_tag(data_type)
+        }
+        _ => Err(keyed_error("unsupported canonical key type")),
+    }
+}
+
+fn canonical_signed_tag(data_type: &DataType) -> Result<u8> {
+    match data_type {
+        DataType::Int8 => Ok(2),
+        DataType::Int16 => Ok(3),
+        DataType::Int32 => Ok(4),
+        DataType::Int64 => Ok(5),
+        _ => Err(keyed_error("signed canonical key type differs")),
+    }
+}
+
+fn canonical_unsigned_tag(data_type: &DataType) -> Result<u8> {
+    match data_type {
+        DataType::UInt8 => Ok(6),
+        DataType::UInt16 => Ok(7),
+        DataType::UInt32 => Ok(8),
+        DataType::UInt64 => Ok(9),
+        _ => Err(keyed_error("unsigned canonical key type differs")),
+    }
+}
+
+fn canonical_temporal_tag(data_type: &DataType) -> Result<u8> {
+    match data_type {
+        DataType::Date32 => Ok(12),
+        DataType::Date64 => Ok(13),
+        DataType::Timestamp(TimeUnit::Second, _) => Ok(14),
+        DataType::Timestamp(TimeUnit::Millisecond, _) => Ok(15),
+        DataType::Timestamp(TimeUnit::Microsecond, _) => Ok(16),
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => Ok(17),
+        _ => Err(keyed_error("temporal canonical key type differs")),
+    }
 }
 
 fn canonical_value(
@@ -738,6 +933,43 @@ fn canonical_value(
     variable: &mut VariableWork<'_>,
 ) -> Result<()> {
     output.push(u8::from(value.is_null()));
+    match value {
+        ScalarValue::Boolean(value) => {
+            if let Some(value) = value {
+                output.push(u8::from(*value));
+            }
+            Ok(())
+        }
+        ScalarValue::Utf8(value) | ScalarValue::LargeUtf8(value) => {
+            canonical_string(value.as_deref(), output, variable)
+        }
+        ScalarValue::TimestampSecond(..)
+        | ScalarValue::TimestampMillisecond(..)
+        | ScalarValue::TimestampMicrosecond(..)
+        | ScalarValue::TimestampNanosecond(..) => canonical_timestamp(value, output),
+        _ => canonical_integer(value, output),
+    }
+}
+
+fn canonical_string(
+    value: Option<&str>,
+    output: &mut Vec<u8>,
+    variable: &mut VariableWork<'_>,
+) -> Result<()> {
+    if let Some(value) = value {
+        output.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        let bytes = value.as_bytes();
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let count = variable.chunk(bytes.len() - offset)?;
+            output.extend_from_slice(&bytes[offset..offset + count]);
+            offset += count;
+        }
+    }
+    Ok(())
+}
+
+fn canonical_integer(value: &ScalarValue, output: &mut Vec<u8>) -> Result<()> {
     macro_rules! fixed {
         ($value:expr) => {
             if let Some(value) = $value {
@@ -746,11 +978,6 @@ fn canonical_value(
         };
     }
     match value {
-        ScalarValue::Boolean(value) => {
-            if let Some(value) = value {
-                output.push(u8::from(*value));
-            }
-        }
         ScalarValue::Int8(value) => fixed!(value),
         ScalarValue::Int16(value) => fixed!(value),
         ScalarValue::Int32(value) | ScalarValue::Date32(value) => fixed!(value),
@@ -758,25 +985,24 @@ fn canonical_value(
         ScalarValue::UInt16(value) => fixed!(value),
         ScalarValue::UInt32(value) => fixed!(value),
         ScalarValue::UInt64(value) => fixed!(value),
-        ScalarValue::Int64(value)
-        | ScalarValue::Date64(value)
-        | ScalarValue::TimestampSecond(value, _)
-        | ScalarValue::TimestampMillisecond(value, _)
-        | ScalarValue::TimestampMicrosecond(value, _)
-        | ScalarValue::TimestampNanosecond(value, _) => fixed!(value),
-        ScalarValue::Utf8(value) | ScalarValue::LargeUtf8(value) => {
-            if let Some(value) = value {
-                output.extend_from_slice(&(value.len() as u64).to_le_bytes());
-                let bytes = value.as_bytes();
-                let mut offset = 0;
-                while offset < bytes.len() {
-                    let count = variable.chunk(bytes.len() - offset)?;
-                    output.extend_from_slice(&bytes[offset..offset + count]);
-                    offset += count;
-                }
-            }
-        }
+        ScalarValue::Int64(value) | ScalarValue::Date64(value) => fixed!(value),
         _ => return Err(keyed_error("canonical scalar differs from the key schema")),
+    }
+    Ok(())
+}
+
+fn canonical_timestamp(value: &ScalarValue, output: &mut Vec<u8>) -> Result<()> {
+    let (ScalarValue::TimestampSecond(value, _)
+    | ScalarValue::TimestampMillisecond(value, _)
+    | ScalarValue::TimestampMicrosecond(value, _)
+    | ScalarValue::TimestampNanosecond(value, _)) = value
+    else {
+        return Err(keyed_error(
+            "canonical timestamp differs from the key schema",
+        ));
+    };
+    if let Some(value) = value {
+        output.extend_from_slice(&value.to_le_bytes());
     }
     Ok(())
 }
@@ -791,8 +1017,8 @@ enum KeyColumn {
     UInt16(Vec<Option<u16>>),
     UInt32(Vec<Option<u32>>),
     UInt64(Vec<Option<u64>>),
-    Utf8(Vec<Option<String>>),
-    LargeUtf8(Vec<Option<String>>),
+    Utf8(Vec<Option<Arc<str>>>),
+    LargeUtf8(Vec<Option<Arc<str>>>),
     Date32(Vec<Option<i32>>),
     Date64(Vec<Option<i64>>),
     TimestampSecond(Vec<Option<i64>>),
@@ -801,43 +1027,100 @@ enum KeyColumn {
     TimestampNanosecond(Vec<Option<i64>>),
 }
 
+macro_rules! push_primitive {
+    ($self:ident, $array:ident, $row:ident, $variant:ident, $kind:ty) => {{
+        let input = $array
+            .as_any()
+            .downcast_ref::<PrimitiveArray<$kind>>()
+            .ok_or_else(|| keyed_error("typed key birth array differs"))?;
+        let Self::$variant(values) = $self else {
+            return Err(keyed_error("typed key birth column differs"));
+        };
+        values.push(input.is_valid($row).then_some(input.value($row)));
+    }};
+}
+
+macro_rules! equals_primitive {
+    ($self:ident, $array:ident, $group:ident, $row:ident, $variant:ident, $kind:ty) => {{
+        let input = $array
+            .as_any()
+            .downcast_ref::<PrimitiveArray<$kind>>()
+            .ok_or_else(|| keyed_error("typed key equality array differs"))?;
+        let Self::$variant(values) = $self else {
+            return Err(keyed_error("typed key equality column differs"));
+        };
+        let value = input.is_valid($row).then_some(input.value($row));
+        Ok(values[$group] == value)
+    }};
+}
+
+macro_rules! output_primitive {
+    ($self:ident, $groups:ident, $variant:ident, $kind:ty) => {{
+        let Self::$variant(values) = $self else {
+            return Err(keyed_error("typed key output column differs"));
+        };
+        Ok(primitive_output::<$kind>(values, $groups))
+    }};
+}
+
 impl KeyColumn {
     fn new(data_type: &DataType) -> Option<Self> {
-        Some(match data_type {
-            DataType::Boolean => Self::Boolean(Vec::new()),
-            DataType::Int8 => Self::Int8(Vec::new()),
-            DataType::Int16 => Self::Int16(Vec::new()),
-            DataType::Int32 => Self::Int32(Vec::new()),
-            DataType::Int64 => Self::Int64(Vec::new()),
-            DataType::UInt8 => Self::UInt8(Vec::new()),
-            DataType::UInt16 => Self::UInt16(Vec::new()),
-            DataType::UInt32 => Self::UInt32(Vec::new()),
-            DataType::UInt64 => Self::UInt64(Vec::new()),
-            DataType::Utf8 => Self::Utf8(Vec::new()),
-            DataType::LargeUtf8 => Self::LargeUtf8(Vec::new()),
-            DataType::Date32 => Self::Date32(Vec::new()),
-            DataType::Date64 => Self::Date64(Vec::new()),
-            DataType::Timestamp(TimeUnit::Second, _) => Self::TimestampSecond(Vec::new()),
-            DataType::Timestamp(TimeUnit::Millisecond, _) => Self::TimestampMillisecond(Vec::new()),
-            DataType::Timestamp(TimeUnit::Microsecond, _) => Self::TimestampMicrosecond(Vec::new()),
-            DataType::Timestamp(TimeUnit::Nanosecond, _) => Self::TimestampNanosecond(Vec::new()),
-            _ => return None,
-        })
+        match data_type {
+            DataType::Boolean => Some(Self::Boolean(Vec::new())),
+            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+                Self::new_signed(data_type)
+            }
+            DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+                Self::new_unsigned(data_type)
+            }
+            DataType::Utf8 => Some(Self::Utf8(Vec::new())),
+            DataType::LargeUtf8 => Some(Self::LargeUtf8(Vec::new())),
+            DataType::Date32 | DataType::Date64 | DataType::Timestamp(..) => {
+                Self::new_temporal(data_type)
+            }
+            _ => None,
+        }
+    }
+
+    fn new_signed(data_type: &DataType) -> Option<Self> {
+        match data_type {
+            DataType::Int8 => Some(Self::Int8(Vec::new())),
+            DataType::Int16 => Some(Self::Int16(Vec::new())),
+            DataType::Int32 => Some(Self::Int32(Vec::new())),
+            DataType::Int64 => Some(Self::Int64(Vec::new())),
+            _ => None,
+        }
+    }
+
+    fn new_unsigned(data_type: &DataType) -> Option<Self> {
+        match data_type {
+            DataType::UInt8 => Some(Self::UInt8(Vec::new())),
+            DataType::UInt16 => Some(Self::UInt16(Vec::new())),
+            DataType::UInt32 => Some(Self::UInt32(Vec::new())),
+            DataType::UInt64 => Some(Self::UInt64(Vec::new())),
+            _ => None,
+        }
+    }
+
+    fn new_temporal(data_type: &DataType) -> Option<Self> {
+        match data_type {
+            DataType::Date32 => Some(Self::Date32(Vec::new())),
+            DataType::Date64 => Some(Self::Date64(Vec::new())),
+            DataType::Timestamp(TimeUnit::Second, _) => Some(Self::TimestampSecond(Vec::new())),
+            DataType::Timestamp(TimeUnit::Millisecond, _) => {
+                Some(Self::TimestampMillisecond(Vec::new()))
+            }
+            DataType::Timestamp(TimeUnit::Microsecond, _) => {
+                Some(Self::TimestampMicrosecond(Vec::new()))
+            }
+            DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+                Some(Self::TimestampNanosecond(Vec::new()))
+            }
+            _ => None,
+        }
     }
 
     fn push(&mut self, array: &ArrayRef, row: usize) -> Result<()> {
-        macro_rules! push {
-            ($variant:ident, $kind:ty) => {{
-                let input = array
-                    .as_any()
-                    .downcast_ref::<PrimitiveArray<$kind>>()
-                    .ok_or_else(|| keyed_error("typed key birth array differs"))?;
-                let Self::$variant(values) = self else {
-                    return Err(keyed_error("typed key birth column differs"));
-                };
-                values.push(input.is_valid(row).then_some(input.value(row)));
-            }};
-        }
         match self {
             Self::Boolean(values) => {
                 let input = array
@@ -845,45 +1128,158 @@ impl KeyColumn {
                     .downcast_ref::<BooleanArray>()
                     .ok_or_else(|| keyed_error("Boolean key birth array differs"))?;
                 values.push(input.is_valid(row).then_some(input.value(row)));
+                Ok(())
             }
-            Self::Int8(_) => push!(Int8, datafusion::arrow::datatypes::Int8Type),
-            Self::Int16(_) => push!(Int16, datafusion::arrow::datatypes::Int16Type),
-            Self::Int32(_) => push!(Int32, datafusion::arrow::datatypes::Int32Type),
-            Self::Int64(_) => push!(Int64, datafusion::arrow::datatypes::Int64Type),
-            Self::UInt8(_) => push!(UInt8, datafusion::arrow::datatypes::UInt8Type),
-            Self::UInt16(_) => push!(UInt16, datafusion::arrow::datatypes::UInt16Type),
-            Self::UInt32(_) => push!(UInt32, datafusion::arrow::datatypes::UInt32Type),
-            Self::UInt64(_) => push!(UInt64, datafusion::arrow::datatypes::UInt64Type),
+            Self::Int8(_) | Self::Int16(_) | Self::Int32(_) | Self::Int64(_) => {
+                self.push_signed(array, row)
+            }
+            Self::UInt8(_) | Self::UInt16(_) | Self::UInt32(_) | Self::UInt64(_) => {
+                self.push_unsigned(array, row)
+            }
             Self::Utf8(values) => {
-                values.push(typed_string::<StringArray>(array)?.is_valid(row).then(|| {
-                    typed_string::<StringArray>(array)
-                        .unwrap()
-                        .value(row)
-                        .to_owned()
-                }));
+                let input = typed_string::<StringArray>(array)?;
+                values.push(
+                    input
+                        .is_valid(row)
+                        .then(|| Arc::<str>::from(input.value(row))),
+                );
+                Ok(())
             }
-            Self::LargeUtf8(values) => values.push(
-                typed_string::<LargeStringArray>(array)?
-                    .is_valid(row)
-                    .then(|| {
-                        typed_string::<LargeStringArray>(array)
-                            .unwrap()
-                            .value(row)
-                            .to_owned()
-                    }),
+            Self::LargeUtf8(values) => {
+                let input = typed_string::<LargeStringArray>(array)?;
+                values.push(
+                    input
+                        .is_valid(row)
+                        .then(|| Arc::<str>::from(input.value(row))),
+                );
+                Ok(())
+            }
+            Self::Date32(_)
+            | Self::Date64(_)
+            | Self::TimestampSecond(_)
+            | Self::TimestampMillisecond(_)
+            | Self::TimestampMicrosecond(_)
+            | Self::TimestampNanosecond(_) => self.push_temporal(array, row),
+        }
+    }
+
+    fn push_signed(&mut self, array: &ArrayRef, row: usize) -> Result<()> {
+        match self {
+            Self::Int8(_) => push_primitive!(
+                self,
+                array,
+                row,
+                Int8,
+                datafusion::arrow::datatypes::Int8Type
             ),
-            Self::Date32(_) => push!(Date32, datafusion::arrow::datatypes::Date32Type),
-            Self::Date64(_) => push!(Date64, datafusion::arrow::datatypes::Date64Type),
-            Self::TimestampSecond(_) => push!(TimestampSecond, TimestampSecondType),
+            Self::Int16(_) => push_primitive!(
+                self,
+                array,
+                row,
+                Int16,
+                datafusion::arrow::datatypes::Int16Type
+            ),
+            Self::Int32(_) => push_primitive!(
+                self,
+                array,
+                row,
+                Int32,
+                datafusion::arrow::datatypes::Int32Type
+            ),
+            Self::Int64(_) => push_primitive!(
+                self,
+                array,
+                row,
+                Int64,
+                datafusion::arrow::datatypes::Int64Type
+            ),
+            _ => return Err(keyed_error("signed key birth column differs")),
+        }
+        Ok(())
+    }
+
+    fn push_unsigned(&mut self, array: &ArrayRef, row: usize) -> Result<()> {
+        match self {
+            Self::UInt8(_) => push_primitive!(
+                self,
+                array,
+                row,
+                UInt8,
+                datafusion::arrow::datatypes::UInt8Type
+            ),
+            Self::UInt16(_) => push_primitive!(
+                self,
+                array,
+                row,
+                UInt16,
+                datafusion::arrow::datatypes::UInt16Type
+            ),
+            Self::UInt32(_) => push_primitive!(
+                self,
+                array,
+                row,
+                UInt32,
+                datafusion::arrow::datatypes::UInt32Type
+            ),
+            Self::UInt64(_) => push_primitive!(
+                self,
+                array,
+                row,
+                UInt64,
+                datafusion::arrow::datatypes::UInt64Type
+            ),
+            _ => return Err(keyed_error("unsigned key birth column differs")),
+        }
+        Ok(())
+    }
+
+    fn push_temporal(&mut self, array: &ArrayRef, row: usize) -> Result<()> {
+        match self {
+            Self::Date32(_) => push_primitive!(
+                self,
+                array,
+                row,
+                Date32,
+                datafusion::arrow::datatypes::Date32Type
+            ),
+            Self::Date64(_) => push_primitive!(
+                self,
+                array,
+                row,
+                Date64,
+                datafusion::arrow::datatypes::Date64Type
+            ),
+            Self::TimestampSecond(_) => {
+                push_primitive!(self, array, row, TimestampSecond, TimestampSecondType);
+            }
             Self::TimestampMillisecond(_) => {
-                push!(TimestampMillisecond, TimestampMillisecondType);
+                push_primitive!(
+                    self,
+                    array,
+                    row,
+                    TimestampMillisecond,
+                    TimestampMillisecondType
+                );
             }
             Self::TimestampMicrosecond(_) => {
-                push!(TimestampMicrosecond, TimestampMicrosecondType);
+                push_primitive!(
+                    self,
+                    array,
+                    row,
+                    TimestampMicrosecond,
+                    TimestampMicrosecondType
+                );
             }
             Self::TimestampNanosecond(_) => {
-                push!(TimestampNanosecond, TimestampNanosecondType);
+                push_primitive!(
+                    self,
+                    array,
+                    row,
+                    TimestampNanosecond,
+                    TimestampNanosecondType
+                );
             }
+            _ => return Err(keyed_error("temporal key birth column differs")),
         }
         Ok(())
     }
@@ -895,19 +1291,6 @@ impl KeyColumn {
         row: usize,
         variable: &mut VariableWork<'_>,
     ) -> Result<bool> {
-        macro_rules! equals {
-            ($variant:ident, $kind:ty) => {{
-                let input = array
-                    .as_any()
-                    .downcast_ref::<PrimitiveArray<$kind>>()
-                    .ok_or_else(|| keyed_error("typed key equality array differs"))?;
-                let Self::$variant(values) = self else {
-                    return Err(keyed_error("typed key equality column differs"));
-                };
-                let value = input.is_valid(row).then_some(input.value(row));
-                return Ok(values[group] == value);
-            }};
-        }
         match self {
             Self::Boolean(values) => {
                 let input = array
@@ -916,14 +1299,12 @@ impl KeyColumn {
                     .ok_or_else(|| keyed_error("Boolean key equality array differs"))?;
                 Ok(values[group] == input.is_valid(row).then_some(input.value(row)))
             }
-            Self::Int8(_) => equals!(Int8, datafusion::arrow::datatypes::Int8Type),
-            Self::Int16(_) => equals!(Int16, datafusion::arrow::datatypes::Int16Type),
-            Self::Int32(_) => equals!(Int32, datafusion::arrow::datatypes::Int32Type),
-            Self::Int64(_) => equals!(Int64, datafusion::arrow::datatypes::Int64Type),
-            Self::UInt8(_) => equals!(UInt8, datafusion::arrow::datatypes::UInt8Type),
-            Self::UInt16(_) => equals!(UInt16, datafusion::arrow::datatypes::UInt16Type),
-            Self::UInt32(_) => equals!(UInt32, datafusion::arrow::datatypes::UInt32Type),
-            Self::UInt64(_) => equals!(UInt64, datafusion::arrow::datatypes::UInt64Type),
+            Self::Int8(_) | Self::Int16(_) | Self::Int32(_) | Self::Int64(_) => {
+                self.equals_signed(group, array, row)
+            }
+            Self::UInt8(_) | Self::UInt16(_) | Self::UInt32(_) | Self::UInt64(_) => {
+                self.equals_unsigned(group, array, row)
+            }
             Self::Utf8(values) => string_equality(
                 values[group].as_deref(),
                 typed_string::<StringArray>(array)?,
@@ -936,18 +1317,150 @@ impl KeyColumn {
                 row,
                 variable,
             ),
-            Self::Date32(_) => equals!(Date32, datafusion::arrow::datatypes::Date32Type),
-            Self::Date64(_) => equals!(Date64, datafusion::arrow::datatypes::Date64Type),
-            Self::TimestampSecond(_) => equals!(TimestampSecond, TimestampSecondType),
+            Self::Date32(_)
+            | Self::Date64(_)
+            | Self::TimestampSecond(_)
+            | Self::TimestampMillisecond(_)
+            | Self::TimestampMicrosecond(_)
+            | Self::TimestampNanosecond(_) => self.equals_temporal(group, array, row),
+        }
+    }
+
+    fn equals_signed(&self, group: usize, array: &ArrayRef, row: usize) -> Result<bool> {
+        match self {
+            Self::Int8(_) => equals_primitive!(
+                self,
+                array,
+                group,
+                row,
+                Int8,
+                datafusion::arrow::datatypes::Int8Type
+            ),
+            Self::Int16(_) => equals_primitive!(
+                self,
+                array,
+                group,
+                row,
+                Int16,
+                datafusion::arrow::datatypes::Int16Type
+            ),
+            Self::Int32(_) => equals_primitive!(
+                self,
+                array,
+                group,
+                row,
+                Int32,
+                datafusion::arrow::datatypes::Int32Type
+            ),
+            Self::Int64(_) => equals_primitive!(
+                self,
+                array,
+                group,
+                row,
+                Int64,
+                datafusion::arrow::datatypes::Int64Type
+            ),
+            _ => Err(keyed_error("signed key equality column differs")),
+        }
+    }
+
+    fn equals_unsigned(&self, group: usize, array: &ArrayRef, row: usize) -> Result<bool> {
+        match self {
+            Self::UInt8(_) => equals_primitive!(
+                self,
+                array,
+                group,
+                row,
+                UInt8,
+                datafusion::arrow::datatypes::UInt8Type
+            ),
+            Self::UInt16(_) => equals_primitive!(
+                self,
+                array,
+                group,
+                row,
+                UInt16,
+                datafusion::arrow::datatypes::UInt16Type
+            ),
+            Self::UInt32(_) => equals_primitive!(
+                self,
+                array,
+                group,
+                row,
+                UInt32,
+                datafusion::arrow::datatypes::UInt32Type
+            ),
+            Self::UInt64(_) => equals_primitive!(
+                self,
+                array,
+                group,
+                row,
+                UInt64,
+                datafusion::arrow::datatypes::UInt64Type
+            ),
+            _ => Err(keyed_error("unsigned key equality column differs")),
+        }
+    }
+
+    fn equals_temporal(&self, group: usize, array: &ArrayRef, row: usize) -> Result<bool> {
+        match self {
+            Self::Date32(_) => equals_primitive!(
+                self,
+                array,
+                group,
+                row,
+                Date32,
+                datafusion::arrow::datatypes::Date32Type
+            ),
+            Self::Date64(_) => equals_primitive!(
+                self,
+                array,
+                group,
+                row,
+                Date64,
+                datafusion::arrow::datatypes::Date64Type
+            ),
+            Self::TimestampSecond(_) => {
+                equals_primitive!(
+                    self,
+                    array,
+                    group,
+                    row,
+                    TimestampSecond,
+                    TimestampSecondType
+                )
+            }
             Self::TimestampMillisecond(_) => {
-                equals!(TimestampMillisecond, TimestampMillisecondType)
+                equals_primitive!(
+                    self,
+                    array,
+                    group,
+                    row,
+                    TimestampMillisecond,
+                    TimestampMillisecondType
+                )
             }
             Self::TimestampMicrosecond(_) => {
-                equals!(TimestampMicrosecond, TimestampMicrosecondType)
+                equals_primitive!(
+                    self,
+                    array,
+                    group,
+                    row,
+                    TimestampMicrosecond,
+                    TimestampMicrosecondType
+                )
             }
             Self::TimestampNanosecond(_) => {
-                equals!(TimestampNanosecond, TimestampNanosecondType)
+                equals_primitive!(
+                    self,
+                    array,
+                    group,
+                    row,
+                    TimestampNanosecond,
+                    TimestampNanosecondType
+                )
             }
+            _ => Err(keyed_error("temporal key equality column differs")),
         }
     }
 
@@ -981,14 +1494,6 @@ impl KeyColumn {
     }
 
     fn array(&self, groups: &[GroupId], data_type: &DataType) -> Result<ArrayRef> {
-        macro_rules! output {
-            ($variant:ident, $kind:ty) => {{
-                let Self::$variant(values) = self else {
-                    return Err(keyed_error("typed key output column differs"));
-                };
-                return Ok(primitive_output::<$kind>(values, groups));
-            }};
-        }
         match self {
             Self::Boolean(values) => Ok(Arc::new(BooleanArray::from(
                 groups
@@ -996,14 +1501,12 @@ impl KeyColumn {
                     .map(|group| values[group.index()])
                     .collect::<Vec<_>>(),
             ))),
-            Self::Int8(_) => output!(Int8, datafusion::arrow::datatypes::Int8Type),
-            Self::Int16(_) => output!(Int16, datafusion::arrow::datatypes::Int16Type),
-            Self::Int32(_) => output!(Int32, datafusion::arrow::datatypes::Int32Type),
-            Self::Int64(_) => output!(Int64, datafusion::arrow::datatypes::Int64Type),
-            Self::UInt8(_) => output!(UInt8, datafusion::arrow::datatypes::UInt8Type),
-            Self::UInt16(_) => output!(UInt16, datafusion::arrow::datatypes::UInt16Type),
-            Self::UInt32(_) => output!(UInt32, datafusion::arrow::datatypes::UInt32Type),
-            Self::UInt64(_) => output!(UInt64, datafusion::arrow::datatypes::UInt64Type),
+            Self::Int8(_) | Self::Int16(_) | Self::Int32(_) | Self::Int64(_) => {
+                self.array_signed(groups)
+            }
+            Self::UInt8(_) | Self::UInt16(_) | Self::UInt32(_) | Self::UInt64(_) => {
+                self.array_unsigned(groups)
+            }
             Self::Utf8(values) => Ok(Arc::new(StringArray::from(
                 groups
                     .iter()
@@ -1016,8 +1519,68 @@ impl KeyColumn {
                     .map(|group| values[group.index()].as_deref())
                     .collect::<Vec<_>>(),
             ))),
-            Self::Date32(_) => output!(Date32, datafusion::arrow::datatypes::Date32Type),
-            Self::Date64(_) => output!(Date64, datafusion::arrow::datatypes::Date64Type),
+            Self::Date32(_)
+            | Self::Date64(_)
+            | Self::TimestampSecond(_)
+            | Self::TimestampMillisecond(_)
+            | Self::TimestampMicrosecond(_)
+            | Self::TimestampNanosecond(_) => self.array_temporal(groups, data_type),
+        }
+    }
+
+    fn array_signed(&self, groups: &[GroupId]) -> Result<ArrayRef> {
+        match self {
+            Self::Int8(_) => {
+                output_primitive!(self, groups, Int8, datafusion::arrow::datatypes::Int8Type)
+            }
+            Self::Int16(_) => {
+                output_primitive!(self, groups, Int16, datafusion::arrow::datatypes::Int16Type)
+            }
+            Self::Int32(_) => {
+                output_primitive!(self, groups, Int32, datafusion::arrow::datatypes::Int32Type)
+            }
+            Self::Int64(_) => {
+                output_primitive!(self, groups, Int64, datafusion::arrow::datatypes::Int64Type)
+            }
+            _ => Err(keyed_error("signed key output column differs")),
+        }
+    }
+
+    fn array_unsigned(&self, groups: &[GroupId]) -> Result<ArrayRef> {
+        match self {
+            Self::UInt8(_) => {
+                output_primitive!(self, groups, UInt8, datafusion::arrow::datatypes::UInt8Type)
+            }
+            Self::UInt16(_) => output_primitive!(
+                self,
+                groups,
+                UInt16,
+                datafusion::arrow::datatypes::UInt16Type
+            ),
+            Self::UInt32(_) => output_primitive!(
+                self,
+                groups,
+                UInt32,
+                datafusion::arrow::datatypes::UInt32Type
+            ),
+            Self::UInt64(_) => output_primitive!(
+                self,
+                groups,
+                UInt64,
+                datafusion::arrow::datatypes::UInt64Type
+            ),
+            _ => Err(keyed_error("unsigned key output column differs")),
+        }
+    }
+
+    fn array_temporal(&self, groups: &[GroupId], data_type: &DataType) -> Result<ArrayRef> {
+        match self {
+            Self::Date32(values) => {
+                Ok(primitive_output::<datafusion::arrow::datatypes::Date32Type>(values, groups))
+            }
+            Self::Date64(values) => {
+                Ok(primitive_output::<datafusion::arrow::datatypes::Date64Type>(values, groups))
+            }
             Self::TimestampSecond(values) => {
                 timestamp_output::<TimestampSecondType>(values, groups, data_type)
             }
@@ -1030,6 +1593,7 @@ impl KeyColumn {
             Self::TimestampNanosecond(values) => {
                 timestamp_output::<TimestampNanosecondType>(values, groups, data_type)
             }
+            _ => Err(keyed_error("temporal key output column differs")),
         }
     }
 }

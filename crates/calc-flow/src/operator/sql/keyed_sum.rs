@@ -1,9 +1,9 @@
 use super::{
     AggregateFunctionExpr, ArrayRef, BooleanArray, CHUNK_ROWS, GroupKey, Int64Array, RecordBatch,
-    Result, SchemaRef, UInt64Array, grouped_sum, predicate,
+    Result, ScalarValue, SchemaRef, UInt64Array, grouped_sum, predicate,
 };
 use crate::StateBudget;
-use crate::operator::keyed::{GroupId, KeyCut, KeySchema, KeyStore, MORSEL_ROWS};
+use crate::operator::keyed::{ExportValue, GroupId, KeyCut, KeySchema, KeyStore, MORSEL_ROWS};
 use datafusion::arrow::{array::Array, datatypes::DataType};
 use datafusion::execution::memory_pool::MemoryReservation;
 use std::{
@@ -16,7 +16,7 @@ pub(super) struct KeyedSum {
     state: Arc<Mutex<KeyedSumState>>,
 }
 
-struct KeyedSumState {
+pub(super) struct KeyedSumState {
     keys: KeyStore,
     sums: SumColumn,
     marks: Vec<u64>,
@@ -41,7 +41,7 @@ pub(super) struct Committed {
     pub affected: Vec<GroupId>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum SumValue {
     Int64(Option<i64>),
     UInt64(Option<u64>),
@@ -55,6 +55,15 @@ enum SumColumn {
 enum SumInput<'a> {
     Int64(&'a Int64Array),
     UInt64(&'a UInt64Array),
+}
+
+impl SumValue {
+    fn scalar(self) -> ScalarValue {
+        match self {
+            Self::Int64(value) => ScalarValue::Int64(value),
+            Self::UInt64(value) => ScalarValue::UInt64(value),
+        }
+    }
 }
 
 impl KeyedSum {
@@ -99,11 +108,6 @@ impl KeyedSum {
         self.lock().keys.layout_fingerprint()
     }
 
-    pub(super) fn canonical_slot(&self, slot: usize) -> Result<Arc<[u8]>> {
-        let group = GroupId::new(slot)?;
-        Ok(self.lock().keys.canonical(group))
-    }
-
     pub(super) fn begin(&self, budget: Option<StateBudget>) -> Result<Transaction> {
         let mut state = self.lock();
         if state.active {
@@ -136,6 +140,22 @@ impl KeyedSum {
             undo_reservation,
             active: true,
         })
+    }
+
+    pub(super) fn export_rows(&self, slots: Option<&[usize]>) -> Result<Vec<Vec<ExportValue>>> {
+        let state = self.lock();
+        let count = slots.map_or(state.keys.len(), <[usize]>::len);
+        (0..count)
+            .map(|row| {
+                let slot = slots.map_or(row, |slots| slots[row]);
+                let group = GroupId::new(slot)?;
+                let mut values = (0..state.keys.fields_len())
+                    .map(|column| state.keys.export_value(group, column))
+                    .collect::<Result<Vec<_>>>()?;
+                values.push(ExportValue::Scalar(state.sums.value(group).scalar()));
+                Ok(values)
+            })
+            .collect()
     }
 
     pub(super) fn export(
@@ -211,37 +231,56 @@ impl Transaction {
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
         let input = SumInput::new(values)?;
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = self.state.clone();
+        let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
         let groups = state
             .keys
             .route_selected_with_limit(keys, selection, self.limit, check)?;
         grow(&mut state)?;
         for (row, group) in groups.into_iter().enumerate() {
-            if selection.is_some_and(|selection| !predicate::selected(selection, row)) {
-                continue;
-            }
-            touch(
-                &mut state,
-                group,
-                self.generation,
-                self.old_groups,
-                &mut TouchUndo {
-                    affected: &mut self.affected,
-                    leased: &mut self.leased,
-                    undo: &mut self.undo,
-                    reservation: &mut self.undo_reservation,
-                },
-            )?;
-            if filter.is_some_and(|filter| !predicate::selected(filter, row)) {
-                continue;
-            }
-            if let Some(value) = input.value(row) {
-                state.sums.add(group, value);
-            }
+            self.apply_row(&mut state, &input, selection, filter, row, group)?;
         }
         Ok(())
     }
 
+    fn undo_parts(&mut self) -> TouchUndo<'_> {
+        TouchUndo {
+            affected: &mut self.affected,
+            leased: &mut self.leased,
+            undo: &mut self.undo,
+            reservation: &mut self.undo_reservation,
+        }
+    }
+
+    fn apply_row(
+        &mut self,
+        state: &mut KeyedSumState,
+        input: &SumInput,
+        selection: Option<&BooleanArray>,
+        filter: Option<&BooleanArray>,
+        row: usize,
+        group: GroupId,
+    ) -> Result<()> {
+        if selection.is_some_and(|selection| !predicate::selected(selection, row)) {
+            return Ok(());
+        }
+        touch(
+            state,
+            group,
+            self.generation,
+            self.old_groups,
+            &mut self.undo_parts(),
+        )?;
+        if filter.is_some_and(|filter| !predicate::selected(filter, row)) {
+            return Ok(());
+        }
+        if let Some(value) = input.value(row) {
+            state.sums.add(group, value);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(super) fn records(
         &self,
         schema: SchemaRef,
@@ -251,6 +290,56 @@ impl Transaction {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .records(None, schema, check)
+    }
+
+    pub(super) fn group_count(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys
+            .len()
+    }
+
+    pub(super) fn first_key(&self, slot: usize) -> Result<Arc<[u8]>> {
+        let group = GroupId::new(slot)?;
+        Ok(self
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys
+            .canonical(group))
+    }
+
+    pub(super) fn record(
+        &self,
+        start: usize,
+        end: usize,
+        schema: SchemaRef,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<RecordBatch> {
+        check()?;
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .record(start, end, None, schema)
+    }
+
+    pub(super) fn dirty_output_chunks(&self) -> std::collections::BTreeSet<usize> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut chunks = std::collections::BTreeSet::new();
+        for (group, previous) in &self.undo {
+            if state.sums.value(*group) != *previous {
+                chunks.insert(group.index() / CHUNK_ROWS);
+            }
+        }
+        for group in self
+            .affected
+            .iter()
+            .filter(|group| group.index() >= self.old_groups)
+        {
+            chunks.insert(group.index() / CHUNK_ROWS);
+        }
+        chunks
     }
 
     pub(super) fn output_charge(&self) -> Result<usize> {
@@ -281,30 +370,39 @@ impl Transaction {
     ) -> Result<()> {
         let keys = chunk.columns()[..key_count].to_vec();
         let input = SumInput::new(chunk.column(key_count))?;
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = self.state.clone();
+        let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
         let groups = state.keys.route_with_limit(&keys, self.limit, check)?;
         grow(&mut state)?;
         for (row, group) in groups.into_iter().enumerate() {
-            if !seen.insert(group) || (group.index() < self.old_groups && !replace) {
-                return Err(super::df_error(
-                    "keyed SUM",
-                    "native state contains duplicate keys",
-                ));
-            }
-            touch(
-                &mut state,
-                group,
-                self.generation,
-                self.old_groups,
-                &mut TouchUndo {
-                    affected: &mut self.affected,
-                    leased: &mut self.leased,
-                    undo: &mut self.undo,
-                    reservation: &mut self.undo_reservation,
-                },
-            )?;
-            state.sums.set(group, input.value(row));
+            self.restore_row(&mut state, &input, replace, seen, row, group)?;
         }
+        Ok(())
+    }
+
+    fn restore_row(
+        &mut self,
+        state: &mut KeyedSumState,
+        input: &SumInput,
+        replace: bool,
+        seen: &mut std::collections::BTreeSet<GroupId>,
+        row: usize,
+        group: GroupId,
+    ) -> Result<()> {
+        if !seen.insert(group) || (group.index() < self.old_groups && !replace) {
+            return Err(super::df_error(
+                "keyed SUM",
+                "native state contains duplicate keys",
+            ));
+        }
+        touch(
+            state,
+            group,
+            self.generation,
+            self.old_groups,
+            &mut self.undo_parts(),
+        )?;
+        state.sums.set(group, input.value(row));
         Ok(())
     }
 
@@ -400,20 +498,27 @@ impl KeyedSumState {
         for start in (0..count).step_by(CHUNK_ROWS) {
             check()?;
             let end = count.min(start + CHUNK_ROWS);
-            let groups = (start..end)
-                .map(|row| {
-                    let slot = slots.map_or(row, |slots| slots[row]);
-                    GroupId::new(slot)
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let mut columns = self.keys.columns(&groups)?;
-            columns.push(self.sums.array(&groups));
-            records.push(
-                RecordBatch::try_new(schema.clone(), columns)
-                    .map_err(|error| super::df_error("keyed SUM", error))?,
-            );
+            records.push(self.record(start, end, slots, schema.clone())?);
         }
         Ok(records)
+    }
+
+    fn record(
+        &self,
+        start: usize,
+        end: usize,
+        slots: Option<&[usize]>,
+        schema: SchemaRef,
+    ) -> Result<RecordBatch> {
+        let groups = (start..end)
+            .map(|row| {
+                let slot = slots.map_or(row, |slots| slots[row]);
+                GroupId::new(slot)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut columns = self.keys.columns(&groups)?;
+        columns.push(self.sums.array(&groups));
+        RecordBatch::try_new(schema, columns).map_err(|error| super::df_error("keyed SUM", error))
     }
 
     fn output_charge(&self, slots: Option<&[usize]>) -> Result<usize> {

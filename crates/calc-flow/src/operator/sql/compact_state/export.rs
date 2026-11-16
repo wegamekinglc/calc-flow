@@ -1,3 +1,4 @@
+use crate::operator::keyed::ExportValue;
 use datafusion::arrow::array::builder::{
     ArrayBuilder, BooleanBuilder, Date32Builder, Date64Builder, Decimal32Builder, Decimal64Builder,
     Decimal128Builder, Decimal256Builder, DurationMicrosecondBuilder, DurationMillisecondBuilder,
@@ -356,6 +357,57 @@ impl ColumnExport {
         Ok(self.row == groups.len())
     }
 
+    fn step_scalars(
+        &mut self,
+        rows: &[Vec<ExportValue>],
+        key_count: usize,
+        aggregate_offsets: &[usize],
+        column: StateColumn,
+        name: &str,
+        check: &mut impl FnMut() -> Result<()>,
+    ) -> Result<bool> {
+        check()?;
+        let mut bytes = 0;
+        for _ in 0..STATE_CHUNK_ROWS {
+            if self.row == rows.len() {
+                return Ok(true);
+            }
+            let value = match column {
+                StateColumn::Key(key) => &rows[self.row][key],
+                StateColumn::Aggregate(aggregate, state) => {
+                    &rows[self.row][key_count + aggregate_offsets[aggregate] + state]
+                }
+            };
+            let copied = self.copy_export_value(value, STRING_STEP_BYTES - bytes, name)?;
+            bytes += copied;
+            #[cfg(test)]
+            super::super::super::compact::direct_async_tests::after_bytes(name, copied);
+            if bytes == STRING_STEP_BYTES || self.offset != 0 {
+                break;
+            }
+        }
+        Ok(self.row == rows.len())
+    }
+
+    fn copy_export_value(
+        &mut self,
+        value: &ExportValue,
+        limit: usize,
+        name: &str,
+    ) -> Result<usize> {
+        match value {
+            ExportValue::Utf8(value) => self.string::<StringBuilder>(value.as_deref(), limit, name),
+            ExportValue::LargeUtf8(value) => {
+                self.string::<LargeStringBuilder>(value.as_deref(), limit, name)
+            }
+            ExportValue::Scalar(value) => {
+                append_fixed(self.builder.as_mut(), value, name)?;
+                self.row += 1;
+                Ok(0)
+            }
+        }
+    }
+
     fn copy_scalar(&mut self, value: &ScalarValue, limit: usize, name: &str) -> Result<usize> {
         match value {
             ScalarValue::Utf8(value) => self.string::<StringBuilder>(value.as_deref(), limit, name),
@@ -565,4 +617,145 @@ fn export_structure_charge(
         name,
     )?;
     Ok((record_count, charge))
+}
+
+pub(super) struct ScalarExportCursor {
+    rows: Vec<Vec<ExportValue>>,
+    descriptor: NativeStateDescriptor,
+    columns: Vec<StateColumn>,
+    offsets: Vec<usize>,
+    records: Vec<RecordBatch>,
+    arrays: Vec<ArrayRef>,
+    builder: Option<ColumnExport>,
+    census_row: usize,
+    census_complete: bool,
+    record_count: usize,
+    reservation: MemoryReservation,
+    name: String,
+}
+
+impl ScalarExportCursor {
+    pub(super) fn new(
+        rows: Vec<Vec<ExportValue>>,
+        mut descriptor: NativeStateDescriptor,
+        reservation: MemoryReservation,
+        name: &str,
+    ) -> Self {
+        let count = rows.len();
+        descriptor.group_count = count;
+        let columns =
+            (0..descriptor.key_fields.len())
+                .map(StateColumn::Key)
+                .chain(descriptor.state_fields.iter().enumerate().flat_map(
+                    |(aggregate, fields)| {
+                        (0..fields.len()).map(move |state| StateColumn::Aggregate(aggregate, state))
+                    },
+                ))
+                .collect::<Vec<_>>();
+        let offsets = descriptor
+            .state_fields
+            .iter()
+            .scan(0usize, |offset, fields| {
+                let current = *offset;
+                *offset += fields.len();
+                Some(current)
+            })
+            .collect::<Vec<_>>();
+        let record_count = count.div_ceil(CHUNK_ROWS).max(1);
+        Self {
+            rows,
+            descriptor,
+            columns,
+            offsets,
+            records: Vec::with_capacity(record_count),
+            arrays: Vec::new(),
+            builder: None,
+            census_row: 0,
+            census_complete: false,
+            record_count,
+            reservation,
+            name: name.to_owned(),
+        }
+    }
+
+    pub(super) fn step(&mut self, check: &mut impl FnMut() -> Result<()>) -> Result<bool> {
+        check()?;
+        if !self.census_complete {
+            self.census_step();
+            return Ok(false);
+        }
+        if self.arrays.len() == self.columns.len() {
+            self.finish_record()?;
+            return Ok(self.records.len() == self.record_count);
+        }
+        self.step_column(check)
+    }
+
+    fn census_step(&mut self) {
+        self.census_row = (self.census_row + STATE_CHUNK_ROWS).min(self.rows.len());
+        if self.census_row == self.rows.len() {
+            self.census_complete = true;
+        }
+        #[cfg(test)]
+        super::super::super::compact::direct_async_tests::after_census(
+            self.name.as_str(),
+            self.census_row,
+        );
+    }
+
+    fn step_column(&mut self, check: &mut impl FnMut() -> Result<()>) -> Result<bool> {
+        if self.builder.is_none() {
+            let start = self.records.len() * CHUNK_ROWS;
+            let rows = self.rows.len().saturating_sub(start).min(CHUNK_ROWS);
+            let column = self.arrays.len();
+            self.builder = Some(ColumnExport::new(
+                self.descriptor.wire_schema.field(column).data_type(),
+                rows,
+                0,
+                self.name.as_str(),
+            )?);
+        }
+        let start = self.records.len() * CHUNK_ROWS;
+        let end = (start + CHUNK_ROWS).min(self.rows.len());
+        let column = self.arrays.len();
+        let complete = self
+            .builder
+            .as_mut()
+            .expect("started export column")
+            .step_scalars(
+                &self.rows[start..end],
+                self.descriptor.key_fields.len(),
+                &self.offsets,
+                self.columns[column],
+                self.name.as_str(),
+                check,
+            )?;
+        if complete {
+            let array = self
+                .builder
+                .take()
+                .expect("finished export column")
+                .builder
+                .finish();
+            #[cfg(test)]
+            super::super::super::compact::direct_async_tests::after_array(
+                self.name.as_str(),
+                &array,
+            );
+            self.arrays.push(array);
+        }
+        Ok(false)
+    }
+
+    fn finish_record(&mut self) -> Result<()> {
+        let arrays = std::mem::replace(&mut self.arrays, Vec::with_capacity(self.columns.len()));
+        let record = RecordBatch::try_new(self.descriptor.wire_schema.clone(), arrays)
+            .map_err(|error| df_error(self.name.as_str(), error))?;
+        self.records.push(record);
+        Ok(())
+    }
+
+    pub(super) fn finish(self) -> PaidNativeStateRecords {
+        PaidNativeStateRecords::new(self.records, self.descriptor, self.reservation)
+    }
 }

@@ -262,14 +262,14 @@ fn native_state_rows(operator: &super::super::SqlOperator) -> Vec<Vec<ScalarValu
         .incremental
         .as_ref()
         .expect("real callback must select the existing native plan")
-        .groups
-        .iter()
-        .map(|group| {
-            group
-                .values
-                .iter()
-                .cloned()
-                .chain(group.aggregates.states().flat_map(|state| state.to_vec()))
+        .keyed_state
+        .as_ref()
+        .expect("typed aggregate state")
+        .snapshot()
+        .into_iter()
+        .map(|(keys, states, _)| {
+            keys.into_iter()
+                .chain(states.into_iter().flatten())
                 .collect()
         })
         .collect()

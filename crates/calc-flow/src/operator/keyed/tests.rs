@@ -172,15 +172,8 @@ fn test_keyed_typed_routing_matches_naive_oracle_for_every_supported_type() {
     }
 }
 
-#[test]
-fn test_keyed_composite_null_collisions_and_batch_splits_preserve_identity() {
-    let runtime = runtime();
-    let schema = vec![
-        field(DataType::Int64),
-        field(DataType::Utf8),
-        field(DataType::Boolean),
-    ];
-    let rows = (0..513)
+fn composite_rows() -> Vec<Vec<ScalarValue>> {
+    (0..513)
         .map(|row| {
             let number = match row % 11 {
                 0 => ScalarValue::Int64(None),
@@ -200,13 +193,49 @@ fn test_keyed_composite_null_collisions_and_batch_splits_preserve_identity() {
             };
             vec![number, string, flag]
         })
-        .collect::<Vec<_>>();
-    let expected = scalar_oracle(&rows);
-    let columns = (0..3)
+        .collect()
+}
+
+fn composite_columns(rows: &[Vec<ScalarValue>]) -> Vec<ArrayRef> {
+    (0..3)
         .map(|column| {
             ScalarValue::iter_to_array(rows.iter().map(|row| row[column].clone())).unwrap()
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn route_in_splits(store: &mut KeyStore, columns: &[ArrayRef], step: usize) -> Vec<GroupId> {
+    let rows = columns[0].len();
+    let mut groups = Vec::new();
+    for start in (0..rows).step_by(step) {
+        let end = (start + step).min(rows);
+        let chunk = columns
+            .iter()
+            .map(|array| array.slice(start, end - start))
+            .collect::<Vec<_>>();
+        groups.extend(store.route(&chunk, &mut || Ok(())).unwrap());
+    }
+    groups
+}
+
+fn assert_same_canonical(left: &KeyStore, right: &KeyStore, distinct: usize) {
+    for group in 0..distinct {
+        let id = GroupId::new(group).unwrap();
+        assert_eq!(left.canonical(id), right.canonical(id));
+    }
+}
+
+#[test]
+fn test_keyed_composite_null_collisions_and_batch_splits_preserve_identity() {
+    let runtime = runtime();
+    let schema = vec![
+        field(DataType::Int64),
+        field(DataType::Utf8),
+        field(DataType::Boolean),
+    ];
+    let rows = composite_rows();
+    let expected = scalar_oracle(&rows);
+    let columns = composite_columns(&rows);
     let mut whole = store(&runtime, schema.clone());
     let actual = whole.route_colliding(&columns, &mut || Ok(())).unwrap();
     assert_eq!(
@@ -218,21 +247,10 @@ fn test_keyed_composite_null_collisions_and_batch_splits_preserve_identity() {
     assert_eq!(whole.canonical_births(), distinct);
 
     let mut split = store(&runtime, schema);
-    let mut split_ids = Vec::new();
-    for start in (0..rows.len()).step_by(37) {
-        let end = (start + 37).min(rows.len());
-        let chunk = columns
-            .iter()
-            .map(|array| array.slice(start, end - start))
-            .collect::<Vec<_>>();
-        split_ids.extend(split.route(&chunk, &mut || Ok(())).unwrap());
-    }
+    let split_ids = route_in_splits(&mut split, &columns, 37);
     assert_eq!(actual, split_ids);
     assert_eq!(split.canonical_births(), distinct);
-    for group in 0..distinct {
-        let id = GroupId::new(group).unwrap();
-        assert_eq!(whole.canonical(id), split.canonical(id));
-    }
+    assert_same_canonical(&whole, &split, distinct);
     let births = split.canonical_births();
     split.route(&columns, &mut || Ok(())).unwrap();
     assert_eq!(split.canonical_births(), births);

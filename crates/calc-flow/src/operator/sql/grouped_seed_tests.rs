@@ -4,81 +4,13 @@ use crate::{
     StreamJobContext, StreamOperatorContext,
 };
 use datafusion::arrow::{
-    array::{BooleanArray, Float32Array, Float64Array, Int64Array},
+    array::{Float32Array, Float64Array, Int64Array},
     datatypes::{Field, Schema},
     record_batch::RecordBatch,
 };
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 const QUERY: &str = "SELECT key, SUM(value), AVG(value), MIN(value), MAX(value), COUNT(value), COUNT(*) FROM events GROUP BY key";
-type MergeRows = Arc<Mutex<Vec<usize>>>;
-
-struct ObservedAccumulator {
-    native: Box<dyn GroupsAccumulator>,
-    merge_rows: MergeRows,
-}
-
-impl GroupsAccumulator for ObservedAccumulator {
-    fn update_batch(
-        &mut self,
-        values: &[ArrayRef],
-        indices: &[usize],
-        filter: Option<&BooleanArray>,
-        count: usize,
-    ) -> DataFusionResult<()> {
-        self.native.update_batch(values, indices, filter, count)
-    }
-
-    fn evaluate(&mut self, emit_to: EmitTo) -> DataFusionResult<ArrayRef> {
-        self.native.evaluate(emit_to)
-    }
-
-    fn state(&mut self, emit_to: EmitTo) -> DataFusionResult<Vec<ArrayRef>> {
-        self.native.state(emit_to)
-    }
-
-    fn merge_batch(
-        &mut self,
-        values: &[ArrayRef],
-        indices: &[usize],
-        count: usize,
-    ) -> DataFusionResult<()> {
-        self.merge_rows.lock().unwrap().push(indices.len());
-        self.native.merge_batch(values, indices, count)
-    }
-
-    fn convert_to_state(
-        &self,
-        values: &[ArrayRef],
-        filter: Option<&BooleanArray>,
-    ) -> DataFusionResult<Vec<ArrayRef>> {
-        self.native.convert_to_state(values, filter)
-    }
-
-    fn size(&self) -> usize {
-        self.native.size()
-    }
-}
-
-fn observe(accumulator: PartialAccumulator) -> (PartialAccumulator, MergeRows) {
-    let merge_rows = Arc::new(Mutex::new(Vec::new()));
-    (
-        PartialAccumulator {
-            ordered_last: false,
-            ignore_nulls: false,
-            native: Box::new(ObservedAccumulator {
-                native: accumulator.native,
-                merge_rows: merge_rows.clone(),
-            }),
-            merge_kind: accumulator.merge_kind,
-        },
-        merge_rows,
-    )
-}
-
 fn record(dtype: &DataType, start: i64, end: i64, phase: usize) -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![
         Field::new("key", DataType::Int64, false),
@@ -175,64 +107,39 @@ async fn case(dtype: &DataType) {
     assert!(plan.sequential.is_some());
 
     let records = vec![record(dtype, 0, 64, 1), record(dtype, 64, 160, 2)];
-    let (reservation, workspace, mut candidates) = plan.input_candidates(160, "seed").unwrap();
-    let partial = candidates.partial.as_mut().unwrap();
-    let (accumulators, observations): (Vec<_>, Vec<MergeRows>) =
-        partial.accumulators.drain(..).map(observe).unzip();
-    partial.accumulators = accumulators;
-    plan.update_records(
-        &records,
-        &mut candidates,
-        (&reservation, workspace),
-        &context,
-        "seed",
-    )
-    .await
-    .unwrap();
-    plan.finish_candidates(&mut candidates, &context, "seed")
-        .await
-        .unwrap();
-    let count = plan.output_count(&candidates, "seed").unwrap();
-    let actual = plan
-        .output_records(count, &candidates.groups, &reservation, &context, "seed")
-        .await
-        .unwrap();
     let mut prefix = vec![first];
-    prefix.extend(records);
-    let expected = runtime
-        .sql(
-            QUERY,
-            &BTreeMap::from([(
-                "events".into(),
-                Batch::table(prefix, BatchMetadata::default()).unwrap(),
-            )]),
-            Some("seed"),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        &actual[0].schema(),
-        expected.table_payload().unwrap().schema()
-    );
-    assert_eq!(
-        rows(&actual),
-        rows(expected.table_payload().unwrap().batches())
-    );
-    for (expression, observation) in plan.aggregates.iter().zip(observations) {
-        if !super::super::grouped_float::selected(expression) {
-            continue;
-        }
-        let calls = observation.lock().unwrap();
-        let limit = if selected(expression) { 2 } else { 4 };
-        assert!(
-            calls.len() <= limit,
-            "{} seeded {} singleton batches instead of columns",
-            expression.fun().name(),
-            calls.len()
+    for record in records {
+        prefix.push(record.clone());
+        let transaction = plan
+            .update(
+                &Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                &context,
+                "seed",
+            )
+            .await
+            .unwrap();
+        let expected = runtime
+            .sql(
+                QUERY,
+                &BTreeMap::from([(
+                    "events".into(),
+                    Batch::table(prefix.clone(), BatchMetadata::default()).unwrap(),
+                )]),
+                Some("seed"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            &transaction.records[0].schema(),
+            expected.table_payload().unwrap().schema()
         );
-        assert!(calls.iter().all(|rows| *rows > 1));
+        assert_eq!(
+            rows(&transaction.records),
+            rows(expected.table_payload().unwrap().batches())
+        );
+        plan.commit(transaction);
     }
-    drop((candidates, reservation, plan, initial, actual, expected));
+    drop((plan, initial));
     assert!(job.gather_owner().close_and_drain().await.is_empty());
     drop(context);
     drop(job);

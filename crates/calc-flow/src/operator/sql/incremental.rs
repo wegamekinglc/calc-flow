@@ -51,6 +51,9 @@ mod grouped_sum;
 #[path = "keyed_sum.rs"]
 mod keyed_sum;
 
+#[path = "keyed_state.rs"]
+mod keyed_state;
+
 #[path = "predicate.rs"]
 mod predicate;
 
@@ -64,7 +67,7 @@ mod variable_extrema;
 pub(in crate::operator::sql) mod global_record;
 
 #[path = "native_expression.rs"]
-mod native_expression;
+pub(in crate::operator::sql) mod native_expression;
 
 #[path = "group_key.rs"]
 mod group_key;
@@ -87,6 +90,10 @@ mod grouped_inline_tests;
 mod keyed_sum_tests;
 
 #[cfg(test)]
+#[path = "keyed_state_tests.rs"]
+mod keyed_state_tests;
+
+#[cfg(test)]
 #[path = "snapshot_key_cache_tests.rs"]
 mod snapshot_key_cache_tests;
 
@@ -100,8 +107,37 @@ mod output_order;
 #[path = "snapshot_keys.rs"]
 mod snapshot_keys;
 
+struct PlanParts<'a> {
+    schema: SchemaRef,
+    aggregate: &'a datafusion::logical_expr::Aggregate,
+    analyzed: &'a LogicalPlan,
+    post_order: Option<output_order::OutputOrder>,
+    aggregates: Vec<Arc<AggregateFunctionExpr>>,
+    projection: Vec<Arc<dyn PhysicalExpr>>,
+    aggregate_filters: Vec<Option<Arc<dyn PhysicalExpr>>>,
+    predicate: Option<predicate::InputPredicate>,
+    post_filter: Option<Arc<dyn PhysicalExpr>>,
+    keys: Vec<GroupKey>,
+    input_columns: InputColumns,
+    aggregate_bytes: usize,
+    global_records: Option<global_record::Proof>,
+    sequential: Option<grouped_float::Proof>,
+    converter: Option<RowConverter>,
+    finalizer_bytes: usize,
+    plan_bytes: usize,
+    reservation: MemoryReservation,
+    scratch: MemoryReservation,
+    projection_nodes: usize,
+    input_nodes: usize,
+    input_checks: Vec<Arc<dyn PhysicalExpr>>,
+    variable_columns: Vec<usize>,
+    keyed_sum: Option<keyed_sum::KeyedSum>,
+    keyed_state: Option<keyed_state::KeyedState>,
+}
+
 pub(super) struct IncrementalSql {
     keyed_sum: Option<keyed_sum::KeyedSum>,
+    keyed_state: Option<keyed_state::KeyedState>,
     schema: SchemaRef,
     ordered_last: bool,
     pub(in crate::operator::sql) compact_budget: Option<crate::StateBudget>,
@@ -670,6 +706,7 @@ struct GroupContainer {
 
 pub(super) struct Transaction {
     keyed_sum: Option<keyed_sum::Transaction>,
+    keyed_state: Option<keyed_state::Transaction>,
     container: Option<GroupContainer>,
     dirty: Option<dirty::DirtyGroups>,
     pub records: Vec<RecordBatch>,
@@ -679,6 +716,7 @@ pub(super) struct Transaction {
     track_updates: bool,
     checkpointing: bool,
     new_groups: Vec<Option<Group>>,
+    _finalizer_reservation: Option<MemoryReservation>,
     _reservation: MemoryReservation,
     proof: Option<grouped_float::Proof>,
     coalesced: Option<Arc<global_record::coalescer::State>>,
@@ -689,8 +727,82 @@ impl Transaction {
         self.keyed_sum
             .as_ref()
             .is_some_and(keyed_sum::Transaction::changes_state)
+            || self
+                .keyed_state
+                .as_ref()
+                .is_some_and(keyed_state::Transaction::changes_state)
             || (self.track_updates && !self.groups.is_empty())
             || self.new_groups.iter().any(Option::is_some)
+    }
+}
+
+trait SnapshotTransaction {
+    fn group_count(&self) -> usize;
+    fn first_key(&self, slot: usize) -> Result<Arc<[u8]>>;
+    fn dirty_chunks(&self) -> std::collections::BTreeSet<usize>;
+    fn charge(&self) -> Result<usize>;
+    fn record(
+        &self,
+        start: usize,
+        end: usize,
+        schema: SchemaRef,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<RecordBatch>;
+}
+
+impl SnapshotTransaction for keyed_sum::Transaction {
+    fn group_count(&self) -> usize {
+        self.group_count()
+    }
+
+    fn first_key(&self, slot: usize) -> Result<Arc<[u8]>> {
+        self.first_key(slot)
+    }
+
+    fn dirty_chunks(&self) -> std::collections::BTreeSet<usize> {
+        self.dirty_output_chunks()
+    }
+
+    fn charge(&self) -> Result<usize> {
+        self.output_charge()
+    }
+
+    fn record(
+        &self,
+        start: usize,
+        end: usize,
+        schema: SchemaRef,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<RecordBatch> {
+        self.record(start, end, schema, check)
+    }
+}
+
+impl SnapshotTransaction for keyed_state::Transaction {
+    fn group_count(&self) -> usize {
+        self.group_count()
+    }
+
+    fn first_key(&self, slot: usize) -> Result<Arc<[u8]>> {
+        self.first_key(slot)
+    }
+
+    fn dirty_chunks(&self) -> std::collections::BTreeSet<usize> {
+        self.dirty_output_chunks()
+    }
+
+    fn charge(&self) -> Result<usize> {
+        self.output_charge()
+    }
+
+    fn record(
+        &self,
+        start: usize,
+        end: usize,
+        schema: SchemaRef,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<RecordBatch> {
+        self.record(start, end, schema, check)
     }
 }
 
@@ -801,16 +913,23 @@ impl IncrementalSql {
         };
         let (converter, finalizer_bytes) = grouped_layout(&keys, &aggregates, name)?;
         let keyed_sum = keyed_sum::KeyedSum::plan(&keys, &aggregates, reservation.new_empty())?;
-        Ok(Some(Self {
+        let keyed_state = if keyed_sum.is_some() {
+            None
+        } else {
+            Some(keyed_state::KeyedState::new(
+                &keys,
+                &aggregates,
+                aggregate_bytes,
+                reservation.new_empty(),
+            )?)
+        };
+        Ok(Some(Self::from_parts(PlanParts {
             keyed_sum,
-            ordered_last: aggregates.iter().any(|expr| ordered_last::selected(expr)),
-            variable_extrema: variable_extrema_slots(&aggregates),
-            compact_budget: None,
+            keyed_state,
             scratch: runtime.incremental_reservation(name),
-            snapshot_keys: snapshot_keys::SnapshotKeys::new(reservation.new_empty()),
             schema,
-            aggregate_schema: Arc::new(aggregate.schema.as_arrow().clone()),
-            output_schema: Arc::new(analyzed.schema().as_arrow().clone()),
+            aggregate,
+            analyzed,
             aggregates,
             aggregate_filters,
             predicate,
@@ -827,13 +946,50 @@ impl IncrementalSql {
             keys,
             variable_columns,
             converter,
-            groups: Vec::new(),
-            dirty: dirty::DirtyGroups::empty(reservation.new_empty()),
             sequential,
             global_records,
+            reservation,
+        })))
+    }
+
+    fn from_parts(parts: PlanParts<'_>) -> Self {
+        Self {
+            keyed_sum: parts.keyed_sum,
+            keyed_state: parts.keyed_state,
+            ordered_last: parts
+                .aggregates
+                .iter()
+                .any(|expression| ordered_last::selected(expression)),
+            variable_extrema: variable_extrema_slots(&parts.aggregates),
+            compact_budget: None,
+            scratch: parts.scratch,
+            snapshot_keys: snapshot_keys::SnapshotKeys::new(parts.reservation.new_empty()),
+            schema: parts.schema,
+            aggregate_schema: Arc::new(parts.aggregate.schema.as_arrow().clone()),
+            output_schema: Arc::new(parts.analyzed.schema().as_arrow().clone()),
+            aggregates: parts.aggregates,
+            aggregate_filters: parts.aggregate_filters,
+            predicate: parts.predicate,
+            aggregate_bytes: parts.aggregate_bytes,
+            finalizer_bytes: parts.finalizer_bytes,
+            plan_bytes: parts.plan_bytes,
+            projection: parts.projection,
+            post_filter: parts.post_filter,
+            post_order: parts.post_order,
+            projection_nodes: parts.projection_nodes,
+            input_nodes: parts.input_nodes,
+            input_checks: parts.input_checks,
+            input_columns: parts.input_columns,
+            keys: parts.keys,
+            variable_columns: parts.variable_columns,
+            converter: parts.converter,
+            groups: Vec::new(),
+            dirty: dirty::DirtyGroups::empty(parts.reservation.new_empty()),
+            sequential: parts.sequential,
+            global_records: parts.global_records,
             container_fee: None,
             index: HashMap::with_hasher(RandomState::new()),
-            reservation,
+            reservation: parts.reservation,
             #[cfg(test)]
             finalized_groups: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
@@ -842,7 +998,7 @@ impl IncrementalSql {
             historical_key_lookups: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
             encoded_rows: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        }))
+        }
     }
 
     pub(super) fn requires_ordered_last_proof(&self) -> bool {
@@ -928,6 +1084,10 @@ impl IncrementalSql {
                 .keyed_sum
                 .as_ref()
                 .is_some_and(|keyed| !keyed.is_empty())
+            || self
+                .keyed_state
+                .as_ref()
+                .is_some_and(|keyed| !keyed.is_empty())
         {
             return Err(df_error(name, "restored proof requires an empty candidate"));
         }
@@ -967,7 +1127,7 @@ impl IncrementalSql {
                 grouped_float::Proof::new(
                     self.scratch.new_empty(),
                     previous.policy.config,
-                    self.groups.len(),
+                    self.group_count(),
                     rows,
                     layout,
                     &self.aggregates,
@@ -1125,6 +1285,11 @@ impl IncrementalSql {
         if self.keyed_sum.is_some() {
             return self.update_keyed_sum(batch, context, name).await;
         }
+        if self.keyed_state.is_some() {
+            return self
+                .update_keyed_aggregates(batch, input_owner, context, name)
+                .await;
+        }
         let proof = self.prepare_grouped_proof(table.batches(), name)?;
         let (reservation, workspace, mut candidates) =
             self.input_candidates(batch.num_rows(), name)?;
@@ -1162,6 +1327,261 @@ impl IncrementalSql {
         .await
     }
 
+    async fn update_global_keyed(
+        &self,
+        transaction: &mut keyed_state::Transaction,
+        records: &[RecordBatch],
+        input_owner: Option<Arc<MemoryReservation>>,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<(usize, Option<Arc<global_record::coalescer::State>>)> {
+        let global = self.global_records.as_ref().expect("global record proof");
+        transaction.touch_global()?;
+        let previous = transaction.global_states();
+        let values = global
+            .update(
+                (records, input_owner),
+                (
+                    &self.aggregates,
+                    &self.aggregate_filters,
+                    &previous,
+                    self.predicate.as_ref(),
+                    &self.input_checks,
+                ),
+                self.scratch.new_empty(),
+                context,
+                name,
+            )
+            .await?;
+        let coalesced = values.coalesced;
+        for (index, state) in values.values.into_iter().enumerate() {
+            let result = global.result(index, &state, name)?;
+            transaction.set_global(index, state, result)?;
+        }
+        Ok((records.iter().map(RecordBatch::num_rows).sum(), coalesced))
+    }
+
+    async fn update_grouped_keyed(
+        &self,
+        transaction: &mut keyed_state::Transaction,
+        records: &[RecordBatch],
+        proof: &mut Option<grouped_float::Proof>,
+        workspace: (&MemoryReservation, usize),
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<usize> {
+        if self.keys.is_empty() {
+            transaction.init_global(&self.aggregates, name)?;
+        } else {
+            transaction.init_partial(
+                &self.aggregates,
+                self.ordered_last,
+                self.sequential.is_some(),
+                self.reservation.new_empty(),
+                name,
+            )?;
+        }
+        let rows = self.update_keyed_aggregate_records(
+            records,
+            transaction,
+            proof,
+            workspace,
+            context,
+            name,
+        )?;
+        if rows != 0 || !self.ordered_last {
+            transaction
+                .finish(
+                    &self.aggregates,
+                    &mut || context.check_cancelled(),
+                    name,
+                    &mut || {
+                        #[cfg(test)]
+                        self.finalized_groups
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    },
+                )
+                .await?;
+        }
+        Ok(rows)
+    }
+
+    async fn update_keyed_aggregates(
+        &self,
+        batch: &Batch,
+        input_owner: Option<Arc<MemoryReservation>>,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<Transaction> {
+        let keyed = self.keyed_state.as_ref().expect("keyed aggregate plan");
+        let table = batch.table_payload()?;
+        let (reservation, workspace) = self.input_workspace(batch.num_rows(), name)?;
+        let mut proof = self.prepare_grouped_proof(table.batches(), name)?;
+        let mut transaction = keyed.begin(self.compact_budget)?;
+        let (rows, coalesced) = if self.global_records.is_some() {
+            self.update_global_keyed(
+                &mut transaction,
+                table.batches(),
+                input_owner,
+                context,
+                name,
+            )
+            .await?
+        } else {
+            (
+                self.update_grouped_keyed(
+                    &mut transaction,
+                    table.batches(),
+                    &mut proof,
+                    (&reservation, workspace),
+                    context,
+                    name,
+                )
+                .await?,
+                None,
+            )
+        };
+        #[cfg(not(test))]
+        let _ = rows;
+        let finalizer_reservation = self.reservation.new_empty();
+        ensure_reservation(&finalizer_reservation, self.finalizer_bytes, name)?;
+        let output_charge = self.keyed_sum_output_charge(&transaction, name)?;
+        reservation
+            .try_grow(output_charge)
+            .map_err(|error| df_error(name, error))?;
+        let mut check = || context.check_cancelled();
+        self.snapshot_keys.begin();
+        let records = self.keyed_snapshot_records(&transaction, &mut check, name)?;
+        let records = self
+            .apply_output_order(records, &reservation, context, name)
+            .await?;
+        let checkpointing = context.job().checkpointing();
+        let dirty = if checkpointing {
+            self.dirty.prepare(keyed.len(), name)?
+        } else {
+            None
+        };
+        Ok(Transaction {
+            keyed_sum: None,
+            keyed_state: Some(transaction),
+            container: None,
+            dirty,
+            records,
+            #[cfg(test)]
+            rows,
+            groups: Vec::new(),
+            track_updates: batch.num_rows() != 0,
+            checkpointing,
+            new_groups: Vec::new(),
+            _finalizer_reservation: Some(finalizer_reservation),
+            _reservation: reservation,
+            proof,
+            coalesced,
+        })
+    }
+
+    fn update_keyed_aggregate_records(
+        &self,
+        records: &[RecordBatch],
+        transaction: &mut keyed_state::Transaction,
+        proof: &mut Option<grouped_float::Proof>,
+        workspace: (&MemoryReservation, usize),
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<usize> {
+        let mut processed = 0;
+        #[cfg(test)]
+        let mut previous_touched = 0;
+        context.check_cancelled()?;
+        for record in records {
+            for offset in (0..record.num_rows()).step_by(MORSEL_ROWS) {
+                context.check_cancelled()?;
+                let chunk = record.slice(offset, MORSEL_ROWS.min(record.num_rows() - offset));
+                self.update_keyed_aggregate_chunk(
+                    &chunk,
+                    transaction,
+                    workspace.0,
+                    workspace.1,
+                    context,
+                    name,
+                )?;
+                #[cfg(test)]
+                {
+                    let touched = transaction.affected_count();
+                    self.historical_key_lookups.fetch_add(
+                        touched - previous_touched,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    previous_touched = touched;
+                    self.partial_groups.fetch_max(
+                        transaction.partial_count(),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                }
+                if let Some(proof) = proof.as_ref() {
+                    let count = self
+                        .keyed_state
+                        .as_ref()
+                        .expect("keyed aggregate plan")
+                        .len();
+                    let (_, width) =
+                        grouped_float::group_layout(&self.keys).expect("certified grouped key");
+                    proof.grow(count, width, &self.aggregates, name)?;
+                }
+                processed += chunk.num_rows();
+            }
+        }
+        #[cfg(test)]
+        self.encoded_rows.fetch_add(
+            transaction.partial_count(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        Ok(processed)
+    }
+
+    fn update_keyed_aggregate_chunk(
+        &self,
+        chunk: &RecordBatch,
+        transaction: &mut keyed_state::Transaction,
+        reservation: &MemoryReservation,
+        workspace: usize,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<()> {
+        self.reserve_chunk(chunk, reservation, workspace, name)?;
+        let selection = self
+            .predicate
+            .as_ref()
+            .map(|predicate| predicate.evaluate(chunk, name))
+            .transpose()?;
+        let filtered = self.selected_chunk(chunk, selection.as_ref(), name)?;
+        let (chunk, selection) = filtered
+            .as_ref()
+            .map_or((chunk, selection.as_ref()), |filtered| (filtered, None));
+        if chunk.num_rows() == 0 {
+            return Ok(());
+        }
+        let input = self.chunk_input(chunk, name)?;
+        let filters = input.filters.iter().map(Option::as_ref).collect::<Vec<_>>();
+        let combined = predicate::combine(selection, &filters, self.aggregates.len(), name)?;
+        let filters = if selection.is_some() {
+            combined.iter().map(Option::as_ref).collect::<Vec<_>>()
+        } else {
+            filters
+        };
+        transaction.apply_chunk(
+            &input.keys,
+            chunk.num_rows(),
+            &input.arguments,
+            &filters,
+            selection,
+            &self.variable_extrema,
+            &mut || context.check_cancelled(),
+            name,
+        )?;
+        Ok(())
+    }
+
     async fn update_keyed_sum(
         &self,
         batch: &Batch,
@@ -1186,12 +1606,7 @@ impl IncrementalSql {
             .map_err(|error| df_error(name, error))?;
         let mut check = || context.check_cancelled();
         self.snapshot_keys.begin();
-        let records = transaction.records(self.aggregate_schema.clone(), &mut check)?;
-        let records = self.keyed_snapshot_records(records, name)?;
-        let records = records
-            .iter()
-            .map(|record| self.keyed_output_record(record, name))
-            .collect::<Result<Vec<_>>>()?;
+        let records = self.keyed_snapshot_records(&transaction, &mut check, name)?;
         let records = self
             .apply_output_order(records, &reservation, context, name)
             .await?;
@@ -1203,6 +1618,7 @@ impl IncrementalSql {
         };
         Ok(Transaction {
             keyed_sum: Some(transaction),
+            keyed_state: None,
             container: None,
             dirty,
             records,
@@ -1212,6 +1628,7 @@ impl IncrementalSql {
             track_updates: batch.num_rows() != 0,
             checkpointing,
             new_groups: Vec::new(),
+            _finalizer_reservation: None,
             _reservation: reservation,
             proof: None,
             coalesced: None,
@@ -1278,9 +1695,9 @@ impl IncrementalSql {
         )
     }
 
-    fn keyed_sum_output_charge(
+    fn keyed_sum_output_charge<T: SnapshotTransaction>(
         &self,
-        transaction: &keyed_sum::Transaction,
+        transaction: &T,
         name: &str,
     ) -> Result<usize> {
         let width = checked_bytes(
@@ -1289,44 +1706,60 @@ impl IncrementalSql {
             name,
         )?;
         checked_bytes(
-            transaction.output_charge()?,
-            [(
-                self.keyed_sum.as_ref().expect("keyed SUM plan").len(),
-                width,
-            )],
+            transaction.charge()?,
+            [(transaction.group_count(), width)],
             name,
         )
     }
 
-    fn keyed_snapshot_records(
+    fn keyed_snapshot_records<T: SnapshotTransaction>(
         &self,
-        records: Vec<RecordBatch>,
+        transaction: &T,
+        check: &mut dyn FnMut() -> Result<()>,
         name: &str,
     ) -> Result<Vec<RecordBatch>> {
-        records
-            .into_iter()
-            .enumerate()
-            .map(|(chunk, record)| {
-                let rows = record.num_rows();
-                if rows == 0 {
-                    return Ok(record);
-                }
-                let keyed = self.keyed_sum.as_ref().expect("keyed SUM plan");
-                let first_key = keyed.canonical_slot(chunk * CHUNK_ROWS)?;
-                if let Some(keys) = self.snapshot_keys.get(chunk, rows, &first_key) {
-                    let columns = keys
-                        .iter()
-                        .cloned()
-                        .chain(record.columns()[self.keys.len()..].iter().cloned())
-                        .collect::<Vec<_>>();
-                    return RecordBatch::try_new(record.schema(), columns)
-                        .map_err(|error| df_error(name, error));
-                }
-                let columns = Arc::<[ArrayRef]>::from(record.columns()[..self.keys.len()].to_vec());
-                self.snapshot_keys.stage(chunk, rows, first_key, columns);
-                Ok(record)
-            })
-            .collect()
+        let count = transaction.group_count();
+        if count == 0 {
+            let aggregate = transaction.record(0, 0, self.aggregate_schema.clone(), check)?;
+            return Ok(vec![self.keyed_output_record(&aggregate, name)?]);
+        }
+        let dirty = transaction.dirty_chunks();
+        let schema = self.keyed_snapshot_schema();
+        let mut records = Vec::with_capacity(count.div_ceil(CHUNK_ROWS));
+        for start in (0..count).step_by(CHUNK_ROWS) {
+            check()?;
+            let chunk = start / CHUNK_ROWS;
+            let first_key = transaction.first_key(start)?;
+            if !dirty.contains(&chunk)
+                && let Some(columns) = self.snapshot_keys.get_clean(chunk, &first_key)
+            {
+                records.push(
+                    RecordBatch::try_new(schema.clone(), columns.to_vec())
+                        .map_err(|error| df_error(name, error))?,
+                );
+                continue;
+            }
+            let end = count.min(start + CHUNK_ROWS);
+            let aggregate = transaction.record(start, end, self.aggregate_schema.clone(), check)?;
+            let record = self.keyed_output_record(&aggregate, name)?;
+            let columns = Arc::<[ArrayRef]>::from(record.columns().to_vec());
+            self.snapshot_keys
+                .stage(chunk, record.num_rows(), first_key, columns);
+            records.push(record);
+        }
+        Ok(records)
+    }
+
+    fn keyed_snapshot_schema(&self) -> SchemaRef {
+        if self
+            .post_order
+            .as_ref()
+            .is_some_and(output_order::OutputOrder::project_after_limit)
+        {
+            self.aggregate_schema.clone()
+        } else {
+            self.output_schema.clone()
+        }
     }
 
     fn keyed_output_record(&self, aggregate: &RecordBatch, name: &str) -> Result<RecordBatch> {
@@ -1365,6 +1798,7 @@ impl IncrementalSql {
         };
         Ok(Transaction {
             keyed_sum: None,
+            keyed_state: None,
             records,
             track_updates: input.0,
             checkpointing,
@@ -1373,6 +1807,7 @@ impl IncrementalSql {
             rows: input.1,
             groups,
             new_groups,
+            _finalizer_reservation: None,
             _reservation: reservation,
             proof,
             container,
@@ -2404,7 +2839,7 @@ impl IncrementalSql {
     }
 
     fn reserve_groups(&mut self, new_count: usize, count: usize, name: &str) -> Result<()> {
-        if self.keyed_sum.is_some() {
+        if self.keyed_sum.is_some() || self.keyed_state.is_some() {
             return Ok(());
         }
         if self.sequential.is_some() {
@@ -2473,20 +2908,33 @@ impl IncrementalSql {
         Ok((groups, new_groups))
     }
 
-    #[cfg(test)]
-    pub(super) fn capacity_charge(&self) -> (usize, usize, usize) {
-        (
-            self.groups.capacity(),
-            self.index.capacity(),
-            self.reservation.size(),
-        )
-    }
-
     pub fn commit(&mut self, mut transaction: Transaction) {
         if let Some(keyed) = transaction.keyed_sum.take() {
             let committed = keyed.commit();
             if let Some(dirty) = transaction.dirty {
                 self.dirty = dirty;
+            }
+            if transaction.checkpointing && transaction.track_updates {
+                for group in committed.affected {
+                    self.dirty.mark(group.index());
+                }
+            }
+            self.snapshot_keys.install_staged();
+            return;
+        }
+        if let Some(keyed) = transaction.keyed_state.take() {
+            let committed = keyed.commit();
+            if let Some(coalesced) = transaction.coalesced {
+                self.global_records
+                    .as_mut()
+                    .expect("global coalescer model")
+                    .coalesced = Some(coalesced);
+            }
+            if let Some(dirty) = transaction.dirty {
+                self.dirty = dirty;
+            }
+            if let Some(proof) = transaction.proof {
+                self.sequential = Some(proof);
             }
             if transaction.checkpointing && transaction.track_updates {
                 for group in committed.affected {
@@ -2749,9 +3197,10 @@ fn row_converter(keys: &[GroupKey], name: &str) -> Result<Option<RowConverter>> 
 }
 
 fn native_groups_supported(aggregates: &[Arc<AggregateFunctionExpr>]) -> bool {
-    aggregates
-        .iter()
-        .all(|expr| expr.groups_accumulator_supported() && expr.create_groups_accumulator().is_ok())
+    aggregates.iter().all(|expr| {
+        grouped_sum::boolean_extrema(expr)
+            || (expr.groups_accumulator_supported() && expr.create_groups_accumulator().is_ok())
+    })
 }
 
 fn variable_columns(
@@ -2985,6 +3434,7 @@ fn extrema_argument_supported(data_type: &DataType, global: bool) -> bool {
             data_type,
             DataType::Utf8
                 | DataType::LargeUtf8
+                | DataType::Boolean
                 | DataType::Date32
                 | DataType::Date64
                 | DataType::Time32(_)
@@ -3993,8 +4443,16 @@ mod tests {
             .unwrap();
         collector.drain("output");
         let incremental = operator.incremental.as_mut().unwrap();
-        let GroupAggregates { states, .. } = &mut incremental.groups[0].aggregates;
-        states[0][0] = ScalarValue::UInt64(Some(count));
+        incremental
+            .keyed_state
+            .as_ref()
+            .expect("typed aggregate state")
+            .set_state_field_for_test(
+                0,
+                0,
+                crate::operator::keyed::GroupId::new(0).unwrap(),
+                ScalarValue::UInt64(Some(count)),
+            );
         let before = operator.checkpoint(crate::Epoch::INITIAL).unwrap();
         let failed = std::panic::AssertUnwindSafe(operator.process_data(
             "events",
@@ -4014,9 +4472,14 @@ mod tests {
             &after.segments["group-state"].bytes_arc()
         ));
         assert_eq!(
-            operator.incremental.as_ref().unwrap().groups[0]
-                .aggregates
-                .state(0)[0],
+            operator
+                .incremental
+                .as_ref()
+                .unwrap()
+                .keyed_state
+                .as_ref()
+                .expect("typed aggregate state")
+                .state_field_for_test(0, 0, crate::operator::keyed::GroupId::new(0).unwrap()),
             ScalarValue::UInt64(Some(count))
         );
         operator

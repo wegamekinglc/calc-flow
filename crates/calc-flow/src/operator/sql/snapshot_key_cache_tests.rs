@@ -1,15 +1,12 @@
-//! Snapshot key-column reuse tests: sealed output chunks share their key
-//! arrays across snapshots, and only a chunk whose row count changed is
-//! rebuilt. Uses `Arc::ptr_eq` on the emitted records, so the property is
-//! observable through the public snapshot contract.
+//! Complete snapshot-chunk reuse tests: dirty 8,192-group chunks rebuild
+//! their projected columns, while clean chunks share every array across
+//! snapshots. Cache installation is commit-scoped.
 
 use super::*;
 use crate::{CancellationToken, DataFusionConfig, JsonMap, StreamJobContext};
 use datafusion::arrow::array::{Array, Int64Array, StringArray};
 
 const NAME: &str = "key-cache";
-
-/// `CHUNK_ROWS` groups plus a partial tail in the second chunk.
 const SEALED_ROWS: usize = 8192;
 const TAIL_ROWS: usize = 5;
 
@@ -53,15 +50,29 @@ fn key_column(record: &RecordBatch) -> &ArrayRef {
     record.columns().first().expect("key column")
 }
 
-fn assert_shared_key_columns(previous: &[RecordBatch], current: &[RecordBatch], label: &str) {
-    assert_eq!(previous.len(), current.len(), "{label} chunk count");
-    for (chunk, (before, after)) in previous.iter().zip(current).enumerate() {
-        assert_eq!(before.num_rows(), after.num_rows(), "{label} chunk {chunk}");
+fn total_column(record: &RecordBatch) -> &ArrayRef {
+    record.columns().get(1).expect("SUM column")
+}
+
+fn assert_shared_chunk(before: &RecordBatch, after: &RecordBatch, label: &str) {
+    assert_eq!(before.num_rows(), after.num_rows(), "{label} row count");
+    for (ordinal, (before, after)) in before.columns().iter().zip(after.columns()).enumerate() {
         assert!(
-            Arc::ptr_eq(key_column(before), key_column(after)),
-            "{label} chunk {chunk} key column must be the shared snapshot array"
+            Arc::ptr_eq(before, after),
+            "{label} column {ordinal} must be shared"
         );
     }
+}
+
+fn assert_rebuilt_chunk(before: &RecordBatch, after: &RecordBatch, label: &str) {
+    assert!(
+        !Arc::ptr_eq(key_column(before), key_column(after)),
+        "{label} key column must be rebuilt"
+    );
+    assert!(
+        !Arc::ptr_eq(total_column(before), total_column(after)),
+        "{label} SUM column must be rebuilt"
+    );
 }
 
 fn totals(records: &[RecordBatch]) -> std::collections::BTreeMap<String, i64> {
@@ -88,7 +99,7 @@ fn totals(records: &[RecordBatch]) -> std::collections::BTreeMap<String, i64> {
 }
 
 #[tokio::test]
-async fn snapshots_reuse_sealed_chunk_key_columns() {
+async fn snapshots_reuse_clean_chunks_and_rebuild_dirty_chunks() {
     let initial_keys = (0..SEALED_ROWS + TAIL_ROWS)
         .map(|index| format!("k{index:05}"))
         .collect::<Vec<_>>();
@@ -109,17 +120,18 @@ async fn snapshots_reuse_sealed_chunk_key_columns() {
     );
     plan.commit(first);
 
-    let touched = vec![
-        initial_keys[0].clone(),
-        initial_keys[5].clone(),
-        initial_keys[SEALED_ROWS + TAIL_ROWS - 1].clone(),
-    ];
+    let touched = vec![initial_keys[0].clone(), initial_keys[5].clone()];
     let second = plan
         .update(&keyed_input(&touched, 10), &context, NAME)
         .await
         .unwrap();
     let second_records = second.records.clone();
-    assert_shared_key_columns(&first_records, &second_records, "unchanged group set");
+    assert_rebuilt_chunk(
+        &first_records[0],
+        &second_records[0],
+        "touched sealed chunk",
+    );
+    assert_shared_chunk(&first_records[1], &second_records[1], "clean tail");
     plan.commit(second);
 
     let grown = plan
@@ -132,17 +144,8 @@ async fn snapshots_reuse_sealed_chunk_key_columns() {
         .unwrap();
     let grown_records = grown.records.clone();
     assert_eq!(grown_records[1].num_rows(), TAIL_ROWS + 1);
-    assert!(
-        Arc::ptr_eq(key_column(&first_records[0]), key_column(&grown_records[0])),
-        "the sealed chunk stays shared when only the tail grows"
-    );
-    assert!(
-        !Arc::ptr_eq(
-            key_column(&second_records[1]),
-            key_column(&grown_records[1])
-        ),
-        "the grown tail chunk is rebuilt"
-    );
+    assert_shared_chunk(&second_records[0], &grown_records[0], "clean sealed chunk");
+    assert_rebuilt_chunk(&second_records[1], &grown_records[1], "grown tail");
     plan.commit(grown);
 
     let fourth = plan
@@ -154,21 +157,45 @@ async fn snapshots_reuse_sealed_chunk_key_columns() {
         .await
         .unwrap();
     let fourth_records = fourth.records.clone();
-    assert_shared_key_columns(&grown_records, &fourth_records, "after tail growth");
+    assert_rebuilt_chunk(
+        &grown_records[0],
+        &fourth_records[0],
+        "second sealed update",
+    );
+    assert_shared_chunk(&grown_records[1], &fourth_records[1], "clean grown tail");
     plan.commit(fourth);
 
-    let mut expected = (0..=(SEALED_ROWS + TAIL_ROWS))
+    let empty = plan
+        .update(&keyed_input(&[], 0), &context, NAME)
+        .await
+        .unwrap();
+    let empty_records = empty.records.clone();
+    for (chunk, (before, after)) in fourth_records.iter().zip(&empty_records).enumerate() {
+        assert_shared_chunk(before, after, &format!("empty input chunk {chunk}"));
+    }
+    plan.commit(empty);
+
+    let unchanged = plan
+        .update(&keyed_input(&[initial_keys[0].clone()], 0), &context, NAME)
+        .await
+        .unwrap();
+    let unchanged_records = unchanged.records.clone();
+    for (chunk, (before, after)) in empty_records.iter().zip(&unchanged_records).enumerate() {
+        assert_shared_chunk(before, after, &format!("unchanged value chunk {chunk}"));
+    }
+    plan.commit(unchanged);
+
+    let mut expected = (0..=SEALED_ROWS + TAIL_ROWS)
         .map(|index| (format!("k{index:05}"), 1))
         .collect::<std::collections::BTreeMap<_, _>>();
     expected.insert(initial_keys[0].clone(), 11);
     expected.insert(initial_keys[1].clone(), 101);
     expected.insert(initial_keys[5].clone(), 11);
-    expected.insert(initial_keys[SEALED_ROWS + TAIL_ROWS - 1].clone(), 11);
-    assert_eq!(totals(&fourth_records), expected);
+    assert_eq!(totals(&unchanged_records), expected);
 }
 
 #[tokio::test]
-async fn discarded_growth_does_not_install_tail_key_columns() {
+async fn discarded_growth_does_not_install_tail_columns() {
     let initial_keys = (0..SEALED_ROWS + TAIL_ROWS)
         .map(|index| format!("k{index:05}"))
         .collect::<Vec<_>>();
@@ -190,12 +217,15 @@ async fn discarded_growth_does_not_install_tail_key_columns() {
         .unwrap();
     let discarded_records = discarded.records.clone();
     assert_eq!(discarded_records[1].num_rows(), TAIL_ROWS + 1);
-    assert!(
-        !Arc::ptr_eq(
-            key_column(&first_records[1]),
-            key_column(&discarded_records[1])
-        ),
-        "growing the tail builds candidate columns"
+    assert_shared_chunk(
+        &first_records[0],
+        &discarded_records[0],
+        "clean discarded chunk",
+    );
+    assert_rebuilt_chunk(
+        &first_records[1],
+        &discarded_records[1],
+        "discarded tail growth",
     );
     drop(discarded);
 
@@ -204,7 +234,12 @@ async fn discarded_growth_does_not_install_tail_key_columns() {
         .await
         .unwrap();
     let retried_records = retried.records.clone();
-    assert_shared_key_columns(&first_records, &retried_records, "discarded tail growth");
+    assert_rebuilt_chunk(&first_records[0], &retried_records[0], "retry update");
+    assert_shared_chunk(
+        &first_records[1],
+        &retried_records[1],
+        "committed tail after rollback",
+    );
     let mut expected = (0..SEALED_ROWS + TAIL_ROWS)
         .map(|index| (format!("k{index:05}"), 1))
         .collect::<std::collections::BTreeMap<_, _>>();

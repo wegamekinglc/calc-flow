@@ -350,7 +350,9 @@ async fn global_continuation(floating: bool) {
         let plan = operator.incremental.as_ref().unwrap();
         assert!(!plan.inline_integer_sum());
         assert!(plan.keyed_sum.is_none());
-        assert_eq!(plan.groups.len(), 1);
+        assert!(plan.keyed_state.is_some());
+        assert_eq!(plan.group_count(), 1);
+        assert!(plan.groups.is_empty());
         assert!(plan.requires_global_coalescer());
         let expected = if floating {
             ScalarValue::Float64(Some(f64::from(total)))
