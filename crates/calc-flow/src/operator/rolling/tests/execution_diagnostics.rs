@@ -326,7 +326,7 @@ async fn test_execution_diagnostics_distinguish_small_batch_from_actual_parallel
         );
         assert_cached_rolling_charge(&operator);
         let actual = store.snapshot().watermark;
-        let parallel = rows == 64_000;
+        let parallel = rows == 64_000 && !operator.compiled.kernel_plan.supports_slab();
         assert_eq!(actual.numeric_rows, u64::try_from(rows).unwrap());
         assert_eq!(
             actual.numeric_parallel_rows,

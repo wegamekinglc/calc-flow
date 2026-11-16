@@ -28,6 +28,7 @@ use super::{
 #[derive(Clone, Default)]
 pub(super) struct OrderedStreamBuffer {
     records: VecDeque<RecordBatch>,
+    retry_records: Vec<RecordBatch>,
     last_identity: Option<Vec<u8>>,
 }
 
@@ -45,6 +46,11 @@ impl OrderedStreamBuffer {
         records: Vec<RecordBatch>,
         last_identity: Option<Vec<u8>>,
     ) {
+        for record in &records {
+            if !self.retry_records.contains(record) {
+                self.retry_records.push(record.clone());
+            }
+        }
         for record in records.into_iter().rev() {
             self.records.push_front(record);
         }
@@ -53,6 +59,7 @@ impl OrderedStreamBuffer {
 
     pub(super) fn clear(&mut self) {
         self.records.clear();
+        self.retry_records.clear();
         self.last_identity = None;
     }
 
@@ -62,7 +69,12 @@ impl OrderedStreamBuffer {
 
     pub(super) fn take_all(&mut self) -> Vec<RecordBatch> {
         self.last_identity = None;
+        self.retry_records.clear();
         self.records.drain(..).collect()
+    }
+
+    pub(super) fn is_retry_record(&self, candidate: &RecordBatch) -> bool {
+        self.retry_records.iter().any(|record| record == candidate)
     }
 
     pub(super) fn take_closed(
@@ -95,6 +107,9 @@ impl OrderedStreamBuffer {
         }
         if self.records.is_empty() {
             self.last_identity = None;
+        }
+        if !closed.is_empty() {
+            self.retry_records.clear();
         }
         Ok(closed)
     }
@@ -214,6 +229,11 @@ impl RollingOperator {
             else {
                 return Ok(false);
             };
+            if self.state.ordered.is_retry_record(record) {
+                // A rejected emission restores its records for retry. Reoffering
+                // one of those exact records is idempotent; it is not new state.
+                continue;
+            }
             if last.as_ref().is_some_and(|previous| previous >= &first) {
                 return Ok(false);
             }
