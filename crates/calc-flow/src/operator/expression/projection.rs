@@ -136,7 +136,7 @@ impl PreparedColumnProjection {
                     batch.metadata().clone(),
                     batch.source_cursor(),
                 )
-                .map_err(|error| projection_error(node_id, error));
+                .map_err(|error| projection_error(node_id, &error));
         }
         let table = batch.table_payload()?;
         let records = table
@@ -149,7 +149,7 @@ impl PreparedColumnProjection {
                     .map(|&index| record.column(index).clone())
                     .collect();
                 RecordBatch::try_new(Arc::clone(&self.schema), columns)
-                    .map_err(|error| projection_error(node_id, error))
+                    .map_err(|error| projection_error(node_id, &error))
             })
             .collect::<Result<Vec<_>>>()?;
         Batch::table(records, batch.metadata().clone())
@@ -157,7 +157,7 @@ impl PreparedColumnProjection {
     }
 }
 
-fn projection_error(node_id: &str, error: datafusion::arrow::error::ArrowError) -> CalcFlowError {
+fn projection_error(node_id: &str, error: &datafusion::arrow::error::ArrowError) -> CalcFlowError {
     CalcFlowError::Operator {
         node_id: node_id.into(),
         message: format!("column projection failed: {error}"),

@@ -1,6 +1,6 @@
 //! Caller-driven, in-memory execution of one compiled stream plan.
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration};
 
 use datafusion::arrow::{
     array::{
@@ -522,7 +522,7 @@ where
         let mut context = std::task::Context::from_waker(&waker);
         #[cfg(test)]
         FUTURE_POLLS.with(|polls| polls.set(polls.get() + 1));
-        return match std::future::Future::poll(future.as_mut(), &mut context) {
+        return match Future::poll(future.as_mut(), &mut context) {
             std::task::Poll::Ready(result) => result,
             std::task::Poll::Pending => Err(session_error(
                 "cannot prepare pending work inside a Tokio runtime; use a blocking thread",
@@ -533,10 +533,10 @@ where
     {
         BLOCK_ON_CALLS.with(|calls| calls.set(calls.get() + 1));
         let mut future = Box::pin(future);
-        return runtime.block_on(std::future::poll_fn(|context| {
+        runtime.block_on(std::future::poll_fn(|context| {
             FUTURE_POLLS.with(|polls| polls.set(polls.get() + 1));
-            std::future::Future::poll(future.as_mut(), context)
-        }));
+            Future::poll(future.as_mut(), context)
+        }))
     }
     #[cfg(not(test))]
     runtime.block_on(future)
@@ -1025,7 +1025,7 @@ async fn wire(
         ..
     } = parts;
     let (mut senders, mut receivers) = session_edges(&edges)?;
-    let nodes = prepare_nodes(nodes, job, &mut senders, &mut receivers).await?;
+    let nodes = Box::pin(prepare_nodes(nodes, job, &mut senders, &mut receivers)).await?;
     let input = session_input(source_routes, &mut senders, watermarks)?;
     let outputs = sink_routes
         .into_values()

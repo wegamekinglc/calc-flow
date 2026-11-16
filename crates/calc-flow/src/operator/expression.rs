@@ -949,19 +949,20 @@ mod tests {
                 Some(r#""Price" > 5"#),
             ),
         ] {
-            let operator = ExpressionOperator::new("sync", "", select, filter, vec![])
-                .unwrap()
-                .with_ports(
-                    Port::with_schema_ref(
-                        "input",
-                        crate::BatchKind::Table,
-                        true,
-                        Some(Arc::clone(&schema)),
+            let operator =
+                ExpressionOperator::new("sync", "", select, filter.map(str::to_owned), vec![])
+                    .unwrap()
+                    .with_ports(
+                        Port::with_schema_ref(
+                            "input",
+                            crate::BatchKind::Table,
+                            true,
+                            Some(Arc::clone(&schema)),
+                        )
+                        .unwrap(),
+                        table_port("output").unwrap(),
                     )
-                    .unwrap(),
-                    table_port("output").unwrap(),
-                )
-                .unwrap();
+                    .unwrap();
             let mut reference = operator.clone();
             reference.column_projection = None;
             let prepared = operator
@@ -971,7 +972,7 @@ mod tests {
             let PreparedExpression::Sync(mut sync) = prepared else {
                 panic!("row-local expression should prepare synchronously")
             };
-            let mut context = SyncContext::new(
+            let context = SyncContext::new(
                 &job,
                 Arc::from("sync"),
                 EdgeBudget::default(),
@@ -984,9 +985,7 @@ mod tests {
                 &BTreeSet::new(),
             );
             for _ in 0..2 {
-                let actual = sync
-                    .evaluate_batch(&input, &context, &mut emitter)
-                    .unwrap();
+                let actual = sync.evaluate_batch(&input, &context, &mut emitter).unwrap();
                 let expected = reference.process_standalone(input.clone()).await.unwrap();
                 assert_eq!(actual.metadata(), expected.metadata());
                 assert_eq!(

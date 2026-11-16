@@ -147,7 +147,7 @@ fn finish<C: Cancellation>(
         node_id,
         context,
     )?;
-    context.check_cancelled()?;
+    context.check()?;
     if output.batches.is_empty() {
         output
             .batches
@@ -274,14 +274,7 @@ fn push<C: Cancellation>(
             coalescer
                 .push_batch(record)
                 .map_err(|error| datafusion_error(Some(node_id), error))?;
-            drain(
-                coalescer,
-                tail,
-                active_tail,
-                output,
-                node_id,
-                context,
-            )
+            drain(coalescer, tail, active_tail, output, node_id, context)
         }
     }
 }
@@ -324,14 +317,7 @@ fn flush<C: Cancellation>(
             coalescer
                 .finish()
                 .map_err(|error| datafusion_error(Some(node_id), error))?;
-            drain(
-                coalescer,
-                tail_steps,
-                tail_active,
-                output,
-                node_id,
-                context,
-            )?;
+            drain(coalescer, tail_steps, tail_active, output, node_id, context)?;
         }
     }
     Ok(())

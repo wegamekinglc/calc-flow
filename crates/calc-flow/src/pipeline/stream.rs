@@ -181,7 +181,7 @@ pub(crate) enum CompiledStreamOperator {
     External(Box<dyn StreamOperator>),
     Expression(crate::ExpressionOperator),
     SyncExpression(
-        crate::operator::sync_operator::SyncNode<crate::operator::SyncExpressionOperator>,
+        Box<crate::operator::sync_operator::SyncNode<crate::operator::SyncExpressionOperator>>,
     ),
     Sql(crate::SqlOperator),
     SnapshotSql(crate::SnapshotSqlOperator),

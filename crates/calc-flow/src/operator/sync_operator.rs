@@ -8,10 +8,7 @@ use std::{
 
 use async_trait::async_trait;
 
-use super::{
-    LateMetricSink, OperatorMetadata,
-    rolling_metrics::RollingMetricsRecorder,
-};
+use super::{LateMetricSink, OperatorMetadata, rolling_metrics::RollingMetricsRecorder};
 use crate::{
     Batch, CalcFlowError, EdgeBudget, Epoch, EventTime, IngressProgressSnapshot,
     OperatorStateSnapshot, Port, Result, StreamJobContext,
@@ -167,12 +164,12 @@ impl Emitter {
 
     /// Validates and buffers one output without looking up a port by name.
     pub(crate) fn emit(&mut self, port: usize, batch: Batch) -> Result<()> {
-        let output = self.outputs.get(port).ok_or_else(|| CalcFlowError::Compile {
-            message: format!(
-                "node.{}.outputs.index.{port} is unknown",
-                self.node_id
-            ),
-        })?;
+        let output = self
+            .outputs
+            .get(port)
+            .ok_or_else(|| CalcFlowError::Compile {
+                message: format!("node.{}.outputs.index.{port} is unknown", self.node_id),
+            })?;
         output.port.validate_fast(&batch, &output.endpoint)?;
         let message = StreamMessage::data(batch);
         let cost = EnvelopeCost::of_message(&message)?;
@@ -220,7 +217,10 @@ impl Emitter {
 fn validate_routes(node_id: &str, output: &EmitterOutput, cost: &EnvelopeCost) -> Result<()> {
     if output.senders.is_empty() {
         return Err(CalcFlowError::Internal {
-            message: format!("node {node_id:?} output {:?} has no runtime routes", output.port.name()),
+            message: format!(
+                "node {node_id:?} output {:?} has no runtime routes",
+                output.port.name()
+            ),
         });
     }
     for sender in &output.senders {
@@ -265,9 +265,7 @@ impl<O: SyncStreamOperator> SyncNode<O> {
         &mut self.emitter
     }
 
-    pub(crate) fn parts_mut(
-        &mut self,
-    ) -> (&mut O, &mut SyncContext<'static>, &mut Emitter) {
+    pub(crate) fn parts_mut(&mut self) -> (&mut O, &mut SyncContext<'static>, &mut Emitter) {
         (&mut self.operator, &mut self.context, &mut self.emitter)
     }
 
@@ -278,7 +276,7 @@ impl<O: SyncStreamOperator> SyncNode<O> {
 
 #[async_trait]
 pub(crate) trait SyncStreamOperator: OperatorMetadata + Send {
-    /// One-time preparation; may await DataFusion planning, never row work.
+    /// One-time preparation; may await `DataFusion` planning, never row work.
     async fn prepare(&mut self, cx: &PrepareContext<'_>) -> Result<()>;
 
     fn on_data(

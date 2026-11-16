@@ -275,22 +275,21 @@ pub(crate) struct TableBatchShell {
     empty_schema: SchemaRef,
 }
 
+static EMPTY_TABLE_SCHEMA: OnceLock<SchemaRef> = OnceLock::new();
+
 impl TableBatchShell {
     fn new(mut table: TableBatch) -> Option<Self> {
         Arc::get_mut(&mut table.estimated_bytes_cache)?.take();
         let batches = Arc::get_mut(&mut table.batches)?;
-        let empty_schema = Arc::new(Schema::empty());
+        let empty_schema = Arc::clone(EMPTY_TABLE_SCHEMA.get_or_init(|| Arc::new(Schema::empty())));
         let options = RecordBatchOptions::new().with_row_count(Some(0));
         for slot in batches {
-            let previous = std::mem::replace(slot, RecordBatch::new_empty(Arc::clone(&empty_schema)));
+            let previous =
+                std::mem::replace(slot, RecordBatch::new_empty(Arc::clone(&empty_schema)));
             let (_, mut columns, _) = previous.into_parts();
             columns.clear();
-            *slot = RecordBatch::try_new_with_options(
-                Arc::clone(&empty_schema),
-                columns,
-                &options,
-            )
-            .expect("an empty table shell is valid");
+            *slot = RecordBatch::try_new_with_options(Arc::clone(&empty_schema), columns, &options)
+                .expect("an empty table shell is valid");
         }
         Some(Self {
             batches: Arc::clone(&table.batches),
@@ -314,13 +313,13 @@ impl TableBatchShell {
         metadata: BatchMetadata,
         source_cursor: Option<Arc<crate::Cursor>>,
     ) -> std::result::Result<Batch, ArrowError> {
-        let input = input.table_payload().expect("table shell input was validated");
+        let input = input
+            .table_payload()
+            .expect("table shell input was validated");
         let slots = Arc::get_mut(&mut self.batches).expect("recycled table shell is unique");
         for (slot, input) in slots.iter_mut().zip(input.batches.iter()) {
-            let previous = std::mem::replace(
-                slot,
-                RecordBatch::new_empty(Arc::clone(&self.empty_schema)),
-            );
+            let previous =
+                std::mem::replace(slot, RecordBatch::new_empty(Arc::clone(&self.empty_schema)));
             let (_, mut columns, _) = previous.into_parts();
             columns.clear();
             columns.extend(indices.iter().map(|&index| input.column(index).clone()));
@@ -1249,9 +1248,7 @@ mod tests {
         assert_ne!(payload_values.as_ptr(), snapshot_values.as_ptr());
 
         let table = Batch::table(
-            vec![RecordBatch::new_empty(Arc::new(
-                datafusion::arrow::datatypes::Schema::empty(),
-            ))],
+            vec![RecordBatch::new_empty(Arc::new(Schema::empty()))],
             BatchMetadata::default(),
         )
         .unwrap();
@@ -1270,9 +1267,7 @@ mod tests {
         let batch = Batch::table(vec![record], BatchMetadata::default()).unwrap();
         batch.estimated_bytes().unwrap();
         let batches = Arc::as_ptr(&batch.table_payload().unwrap().batches);
-        let columns = batch.table_payload().unwrap().batches[0]
-            .columns()
-            .as_ptr();
+        let columns = batch.table_payload().unwrap().batches[0].columns().as_ptr();
         let unique = batch.clone();
         assert!(batch.recycle_table_shell().is_none());
         let shell = unique.recycle_table_shell().unwrap();

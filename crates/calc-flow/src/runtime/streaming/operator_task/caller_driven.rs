@@ -78,11 +78,7 @@ impl CallerDrivenOperator {
             .try_recv_envelope()
     }
 
-    fn dispatch_sync(
-        &mut self,
-        ingress: usize,
-        message: StreamMessage,
-    ) -> Result<Option<Batch>> {
+    fn dispatch_sync(&mut self, ingress: usize, message: StreamMessage) -> Result<Option<Batch>> {
         #[cfg(test)]
         let inject_panic = std::mem::take(&mut self.panic_on_next_dispatch);
         match catch_unwind(AssertUnwindSafe(|| {
@@ -267,7 +263,7 @@ fn sync_progress(
         inputs,
         transition.emissions,
         transition.previous_watermark,
-        transition.ingress_progress,
+        &transition.ingress_progress,
         transition.aggregate_input_frontier,
         &mut progress.output_frontier,
     )?;

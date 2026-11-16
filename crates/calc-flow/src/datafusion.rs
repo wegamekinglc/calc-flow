@@ -677,7 +677,7 @@ impl DataFusionRuntime {
         self.ensure_open()?;
         let input = Batch::table(
             vec![RecordBatch::new_empty(input)],
-            crate::BatchMetadata::default(),
+            BatchMetadata::default(),
         )?;
         let tables = BTreeMap::from([("input".into(), input)]);
         let context = self.context_for_rows(0, None, "not_evaluated");

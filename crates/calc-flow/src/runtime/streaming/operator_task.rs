@@ -1297,11 +1297,12 @@ async fn finish_sync_operator(
     completed_epoch: Option<Epoch>,
 ) -> Result<()> {
     inputs.progress.record_on_end()?;
-    let callback = inputs.progress.begin_rolling(
-        RollingCallback::End,
-        inputs.context.job().cancellation(),
-    );
-    let rolling = callback.as_ref().map(|callback| callback.recorder().clone());
+    let callback = inputs
+        .progress
+        .begin_rolling(RollingCallback::End, inputs.context.job().cancellation());
+    let rolling = callback
+        .as_ref()
+        .map(|callback| callback.recorder().clone());
     let result = sync_adapter::end(
         inputs,
         input_progress.input_watermark(),
@@ -1629,11 +1630,8 @@ async fn dispatch_message_inner(
             dispatch_barrier(inputs, ingress_name, &message, barrier_alignment)
         }
         StreamMessageKind::EndOfInput => {
-            let transition = control::evaluate_progress(
-                input_progress,
-                ingress_name,
-                AggregateInput::End,
-            )?;
+            let transition =
+                control::evaluate_progress(input_progress, ingress_name, AggregateInput::End)?;
             dispatch_progress_transition(
                 inputs,
                 ingress_name,
@@ -1776,13 +1774,17 @@ async fn complete_barrier_if_ready(
     let next_epoch = epoch.next()?;
     let ack = capture_operator_checkpoint(inputs, input_progress, epoch).await?;
     send_operator_checkpoint_ack(inputs, ack).await?;
-    forward_control(
-        &mut inputs.outputs,
-        &inputs.late_output_ports,
-        StreamMessage::barrier(epoch),
-        inputs.context.job(),
-    )
-    .await?;
+    if sync_adapter::is_sync(&inputs.operator) {
+        sync_adapter::forward_control(inputs, StreamMessage::barrier(epoch)).await?;
+    } else {
+        forward_control(
+            &mut inputs.outputs,
+            &inputs.late_output_ports,
+            StreamMessage::barrier(epoch),
+            inputs.context.job(),
+        )
+        .await?;
+    }
     alignment.complete(epoch, next_epoch);
     Ok(())
 }
@@ -2079,15 +2081,10 @@ async fn dispatch_data(
             .add(RollingWork::InputRows, batch.num_rows());
     }
     let result = if sync_adapter::is_sync(&inputs.operator) {
-        let rolling = callback.as_ref().map(|callback| callback.recorder().clone());
-        sync_adapter::data(
-            inputs,
-            batch,
-            input_watermark,
-            ingress_progress,
-            rolling,
-        )
-        .await
+        let rolling = callback
+            .as_ref()
+            .map(|callback| callback.recorder().clone());
+        sync_adapter::data(inputs, batch, input_watermark, ingress_progress, rolling).await
     } else {
         let output_budget = inputs.progress.output_budget(&inputs.outputs);
         let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());

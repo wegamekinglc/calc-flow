@@ -460,19 +460,15 @@ fn expression_plan(
     select: Vec<String>,
     filter: Option<&str>,
 ) -> StreamExecutionPlan {
-    let operator = ExpressionOperator::new(
-        "expression",
-        "",
-        select,
-        filter.map(str::to_owned),
-        vec![],
-    )
-    .unwrap()
-    .with_ports(
-        Port::with_schema_ref("input", BatchKind::Table, true, Some(Arc::clone(schema))).unwrap(),
-        Port::new("output", BatchKind::Table, true, None).unwrap(),
-    )
-    .unwrap();
+    let operator =
+        ExpressionOperator::new("expression", "", select, filter.map(str::to_owned), vec![])
+            .unwrap()
+            .with_ports(
+                Port::with_schema_ref("input", BatchKind::Table, true, Some(Arc::clone(schema)))
+                    .unwrap(),
+                Port::new("output", BatchKind::Table, true, None).unwrap(),
+            )
+            .unwrap();
     compile(
         PipelineBuilder::new("expression")
             .unwrap()
@@ -491,11 +487,7 @@ fn test_all_sync_expression_session_never_enters_async_drive() {
     super::reset_drive_counters_for_test();
 
     let pushed = session
-        .push(
-            &input,
-            input_batch(&[(10, "a", 0, 1.0)]),
-            Some(micros(10)),
-        )
+        .push(&input, input_batch(&[(10, "a", 0, 1.0)]), Some(micros(10)))
         .unwrap();
     assert_eq!(pushed.batches(&output)[0].num_rows(), 1);
     assert!(session.advance(&input, micros(11)).unwrap().is_empty());
@@ -523,11 +515,8 @@ fn test_sync_expression_projection_and_filter_match_runner() {
     let rows = [(10, "a", 0, 1.0), (10, "b", 1, 3.0)];
     for (select, filter) in [
         (vec!["symbol".into(), "price".into()], None),
-        (vec![r#"price + 1 AS next"#.into(), "symbol".into()], None),
-        (
-            vec!["symbol".into(), "price".into()],
-            Some("price > 1"),
-        ),
+        (vec!["price + 1 AS next".into(), "symbol".into()], None),
+        (vec!["symbol".into(), "price".into()], Some("price > 1")),
     ] {
         let mut session = open_session(
             expression_plan(&input_schema(), select.clone(), filter),
@@ -542,10 +531,7 @@ fn test_sync_expression_projection_and_filter_match_runner() {
             actual.batches(&output),
             &runner_outputs(
                 expression_plan(&input_schema(), select, filter),
-                vec![
-                    data_event(&rows, 0),
-                    SourceEvent::Watermark(micros(10)),
-                ],
+                vec![data_event(&rows, 0), SourceEvent::Watermark(micros(10))],
                 WatermarkPolicy::SourceProvided,
             )[&output],
         );
@@ -554,13 +540,8 @@ fn test_sync_expression_projection_and_filter_match_runner() {
 }
 
 fn udf_plan() -> StreamExecutionPlan {
-    let reference = crate::UdfReference::new(
-        "test",
-        "trusted",
-        "1",
-        crate::UdfKind::DataFusionScalar,
-    )
-    .unwrap();
+    let reference =
+        crate::UdfReference::new("test", "trusted", "1", crate::UdfKind::DataFusionScalar).unwrap();
     let udf = Arc::new(datafusion::logical_expr::create_udf(
         "trusted",
         vec![DataType::Float64],

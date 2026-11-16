@@ -50,9 +50,9 @@ pub(super) async fn prepare(inputs: &mut OperatorTaskInputs) -> Result<()> {
                 std::mem::take(&mut inputs.outputs),
                 &inputs.late_output_ports,
             );
-            inputs.operator = CompiledStreamOperator::SyncExpression(SyncNode::new(
+            inputs.operator = CompiledStreamOperator::SyncExpression(Box::new(SyncNode::new(
                 operator, context, emitter,
-            ));
+            )));
         }
     }
     Ok(())
@@ -153,7 +153,9 @@ async fn watermark_callback(
         crate::operator::rolling_metrics::RollingCallback::Watermark,
         inputs.context.job().cancellation(),
     );
-    let rolling = callback.as_ref().map(|callback| callback.recorder().clone());
+    let rolling = callback
+        .as_ref()
+        .map(|callback| callback.recorder().clone());
     let result = {
         let node = node_mut(&mut inputs.operator);
         node.context_mut().update(input_watermark, ingress_progress);
@@ -276,19 +278,16 @@ pub(super) fn data_session(
         inputs.context.job().cancellation(),
     );
     if let Some(callback) = &callback {
-        callback
-            .recorder()
-            .add(crate::operator::rolling_metrics::RollingWork::InputRows, batch.num_rows());
+        callback.recorder().add(
+            crate::operator::rolling_metrics::RollingWork::InputRows,
+            batch.num_rows(),
+        );
     }
-    let rolling = callback.as_ref().map(|callback| callback.recorder().clone());
-    let result = data_callback(
-        inputs,
-        batch,
-        input_watermark,
-        ingress_progress,
-        rolling,
-    )
-    .and_then(|()| flush_session(inputs));
+    let rolling = callback
+        .as_ref()
+        .map(|callback| callback.recorder().clone());
+    let result = data_callback(inputs, batch, input_watermark, ingress_progress, rolling)
+        .and_then(|()| flush_session(inputs));
     if let Some(callback) = callback {
         callback.complete(&result);
     }
@@ -305,7 +304,7 @@ pub(super) fn progress_session(
     inputs: &mut OperatorTaskInputs,
     emissions: Vec<ProgressEmissionKind>,
     mut previous_watermark: Option<EventTime>,
-    ingress_progress: IngressProgressSnapshot,
+    ingress_progress: &IngressProgressSnapshot,
     aggregate_input_frontier: Option<EventTime>,
     output_frontier: &mut Option<EventTime>,
 ) -> Result<()> {
@@ -335,14 +334,14 @@ pub(super) fn progress_session(
         &inputs.operator,
         has_non_late_output,
         aggregate_input_frontier,
-        &ingress_progress,
+        ingress_progress,
         *output_frontier,
     )? {
-        forward_control_session(inputs, StreamMessage::watermark(candidate))?;
+        forward_control_session(inputs, &StreamMessage::watermark(candidate))?;
         *output_frontier = Some(candidate);
     }
     if emit_idle && !inputs.operator.suppresses_output_idle() {
-        forward_control_session(inputs, StreamMessage::idle())?;
+        forward_control_session(inputs, &StreamMessage::idle())?;
     }
     Ok(())
 }
@@ -358,7 +357,9 @@ fn watermark_session(
         crate::operator::rolling_metrics::RollingCallback::Watermark,
         inputs.context.job().cancellation(),
     );
-    let rolling = callback.as_ref().map(|callback| callback.recorder().clone());
+    let rolling = callback
+        .as_ref()
+        .map(|callback| callback.recorder().clone());
     let result = {
         let node = node_mut(&mut inputs.operator);
         node.context_mut().update(input_watermark, ingress_progress);
@@ -384,7 +385,9 @@ pub(super) fn end_session(
         crate::operator::rolling_metrics::RollingCallback::End,
         inputs.context.job().cancellation(),
     );
-    let rolling = callback.as_ref().map(|callback| callback.recorder().clone());
+    let rolling = callback
+        .as_ref()
+        .map(|callback| callback.recorder().clone());
     let result = {
         let node = node_mut(&mut inputs.operator);
         node.context_mut().update(input_watermark, ingress_progress);
@@ -397,7 +400,7 @@ pub(super) fn end_session(
         callback.complete(&result);
     }
     result?;
-    forward_control_session(inputs, StreamMessage::end_of_input())?;
+    forward_control_session(inputs, &StreamMessage::end_of_input())?;
     inputs.progress.mark_ended();
     Ok(())
 }
@@ -431,13 +434,10 @@ fn flush_session(inputs: &mut OperatorTaskInputs) -> Result<()> {
     }
 }
 
-fn forward_control_session(
-    inputs: &mut OperatorTaskInputs,
-    message: StreamMessage,
-) -> Result<()> {
-    let cost = crate::runtime::streaming::EnvelopeCost::of_message(&message)?;
+fn forward_control_session(inputs: &mut OperatorTaskInputs, message: &StreamMessage) -> Result<()> {
+    let cost = crate::runtime::streaming::EnvelopeCost::of_message(message)?;
     for output in node_mut(&mut inputs.operator).emitter_mut().outputs_mut() {
-        if !control::forwards_control(output.late, &message) {
+        if !control::forwards_control(output.late, message) {
             continue;
         }
         for sender in &mut output.senders {
@@ -453,9 +453,7 @@ pub(super) fn recycle(operator: &mut CompiledStreamOperator, batch: crate::Batch
     }
 }
 
-fn node_mut(
-    operator: &mut CompiledStreamOperator,
-) -> &mut SyncNode<SyncExpressionOperator> {
+fn node_mut(operator: &mut CompiledStreamOperator) -> &mut SyncNode<SyncExpressionOperator> {
     let CompiledStreamOperator::SyncExpression(node) = operator else {
         unreachable!("sync adapter called for an async operator")
     };
