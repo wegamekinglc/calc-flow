@@ -465,25 +465,25 @@ fn append_other_fixed(
         ScalarValue::Date64(value) => append!(builder, Date64Builder, value, name),
         ScalarValue::Time32Second(value) => append!(builder, Time32SecondBuilder, value, name),
         ScalarValue::Time32Millisecond(value) => {
-            append!(builder, Time32MillisecondBuilder, value, name)
+            append!(builder, Time32MillisecondBuilder, value, name);
         }
         ScalarValue::Time64Microsecond(value) => {
-            append!(builder, Time64MicrosecondBuilder, value, name)
+            append!(builder, Time64MicrosecondBuilder, value, name);
         }
         ScalarValue::Time64Nanosecond(value) => {
-            append!(builder, Time64NanosecondBuilder, value, name)
+            append!(builder, Time64NanosecondBuilder, value, name);
         }
         ScalarValue::DurationSecond(value) => {
-            append!(builder, DurationSecondBuilder, value, name)
+            append!(builder, DurationSecondBuilder, value, name);
         }
         ScalarValue::DurationMillisecond(value) => {
-            append!(builder, DurationMillisecondBuilder, value, name)
+            append!(builder, DurationMillisecondBuilder, value, name);
         }
         ScalarValue::DurationMicrosecond(value) => {
-            append!(builder, DurationMicrosecondBuilder, value, name)
+            append!(builder, DurationMicrosecondBuilder, value, name);
         }
         ScalarValue::DurationNanosecond(value) => {
-            append!(builder, DurationNanosecondBuilder, value, name)
+            append!(builder, DurationNanosecondBuilder, value, name);
         }
         ScalarValue::TimestampSecond(value, _) => {
             append!(builder, TimestampSecondBuilder, value, name);
