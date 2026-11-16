@@ -190,6 +190,7 @@ struct RingColumn {
     kind: RingKind,
     retention: Retention,
     numeric: bool,
+    numeric_windows: Vec<usize>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -216,7 +217,7 @@ struct RingPage {
     kind: RingKind,
     ring: Ring,
     slot_stamps: Vec<u64>,
-    numeric: Option<NumericAccumulator>,
+    numeric: Option<Vec<NumericAccumulator>>,
 }
 
 #[derive(Clone, Debug)]
@@ -323,11 +324,9 @@ impl PageRef {
             Self::Ring { page, .. } => {
                 page.value.ring.value_bytes(page.value.kind)
                     + size_of::<Ring>()
-                    + page
-                        .value
-                        .numeric
-                        .as_ref()
-                        .map_or(0, |_| size_of::<NumericAccumulator>())
+                    + page.value.numeric.as_ref().map_or(0, |values| {
+                        values.capacity() * size_of::<NumericAccumulator>()
+                    })
             }
             Self::ValueLog { page, .. } => page.value.logical_bytes,
         }
@@ -744,7 +743,7 @@ enum Undo {
     Numeric {
         group: KeyGroupId,
         slot: u32,
-        value: NumericAccumulator,
+        value: Vec<NumericAccumulator>,
     },
     ValueLog {
         group: KeyGroupId,
@@ -785,7 +784,7 @@ pub(super) struct RingSnapshot {
     pub(super) values: ArrayRef,
     pub(super) offsets: Vec<usize>,
     pub(super) capacities: Vec<usize>,
-    pub(super) numeric: Option<Vec<NumericAccumulator>>,
+    pub(super) numeric: Option<Vec<Vec<NumericAccumulator>>>,
 }
 
 #[derive(Clone)]
@@ -817,6 +816,7 @@ pub(super) struct Layout7Schema {
     pub(super) counter_name: String,
     pub(super) numeric_name: String,
     pub(super) retention: Retention,
+    pub(super) numeric_windows: Vec<usize>,
 }
 
 #[derive(Debug)]
@@ -939,6 +939,7 @@ impl StateTable {
             kind,
             retention,
             numeric: false,
+            numeric_windows: Vec::new(),
         });
         for partition in self.partitions.values_mut() {
             partition.rings.push(Vec::new());
@@ -950,7 +951,23 @@ impl StateTable {
         assert!(window > 0, "rolling Rows windows must be non-empty");
         let column = self.add_ring_column(name, RingKind::Float64, Retention::Rows(window));
         self.rings[column].numeric = true;
+        self.rings[column].numeric_windows = vec![window];
         column
+    }
+
+    pub(crate) fn add_numeric_window(&mut self, column: usize, window: usize) -> usize {
+        assert!(window > 0, "rolling Rows windows must be non-empty");
+        assert!(
+            self.transaction.is_none() && self.next_entity == 0,
+            "numeric windows must precede entities"
+        );
+        assert!(self.rings[column].numeric, "numeric Rows group is required");
+        let Retention::Rows(retained) = self.rings[column].retention else {
+            panic!("shared numeric windows require Rows retention");
+        };
+        self.rings[column].retention = Retention::Rows(retained.max(window));
+        self.rings[column].numeric_windows.push(window);
+        self.rings[column].numeric_windows.len() - 1
     }
 
     pub(crate) fn add_value_log(&mut self, name: &str) -> usize {
@@ -981,6 +998,7 @@ impl StateTable {
         if counter.kind != ValueKind::UInt64
             || numeric.kind != RingKind::Float64
             || !numeric.numeric
+            || numeric.numeric_windows.is_empty()
             || !matches!(numeric.retention, Retention::Rows(_))
         {
             return None;
@@ -989,6 +1007,7 @@ impl StateTable {
             counter_name: counter.name.clone(),
             numeric_name: numeric.name.clone(),
             retention: numeric.retention,
+            numeric_windows: numeric.numeric_windows.clone(),
         })
     }
 
@@ -1283,7 +1302,13 @@ impl StateTable {
             Retention::Duration => 0,
         };
         let kind = schema.kind;
-        let numeric = schema.numeric.then(NumericAccumulator::default);
+        let numeric = schema.numeric.then(|| {
+            schema
+                .numeric_windows
+                .iter()
+                .map(|_| NumericAccumulator::default())
+                .collect::<Vec<_>>()
+        });
         self.create_page_in_group(group, |id| PageRef::Ring {
             column,
             row: row as usize,
@@ -1541,9 +1566,17 @@ impl StateTable {
         value: Option<f64>,
     ) -> Result<()> {
         let (group, row) = self.location(entity)?;
-        let window = match self.rings[column].retention {
+        let max_window = match self.rings[column].retention {
             Retention::Rows(window) if self.rings[column].numeric => window,
             _ => return Err(internal("numeric Rows group type mismatch")),
+        };
+        let (previous_head, previous_len) = {
+            let ring = &self.partitions[&group].rings[column][row]
+                .as_ref()
+                .expect("ring page")
+                .value
+                .ring;
+            (ring.head, ring.len)
         };
         let slot = self.partitions[&group].rings[column][row]
             .as_ref()
@@ -1556,6 +1589,7 @@ impl StateTable {
                 .expect("ring page")
                 .value
                 .numeric
+                .clone()
                 .expect("numeric group");
             self.push_undo(Undo::Numeric {
                 group,
@@ -1563,7 +1597,8 @@ impl StateTable {
                 value: previous,
             });
         }
-        let leaving = self.push_f64(column, entity, value)?.flatten();
+        let evicted = self.push_f64(column, entity, value)?.flatten();
+        let windows = &self.rings[column].numeric_windows;
         let partition = self.partitions.get_mut(&group).expect("prepared group");
         let page = partition.rings[column][row].as_mut().expect("ring page");
         let page = Arc::get_mut(&mut page.value).expect("unfrozen numeric page");
@@ -1572,32 +1607,81 @@ impl StateTable {
             offset: 0,
         };
         let numeric = page.numeric.as_mut().expect("numeric group");
-        numeric
-            .rows(leaving, value)
-            .and_then(|()| numeric.finish_rows(window, history))
-            .map_err(|error| internal(&format!("rolling numeric arithmetic failed: {error:?}")))
+        for (numeric, &window) in numeric.iter_mut().zip(windows) {
+            let leaving = if previous_len < window {
+                None
+            } else if window == max_window {
+                evicted
+            } else {
+                let offset = previous_len - window;
+                let slot = (previous_head + offset) % page.ring.capacity();
+                match page.ring.slots[slot] {
+                    RingValue::Float64(value) => value,
+                    _ => unreachable!(),
+                }
+            };
+            numeric
+                .rows(leaving, value)
+                .and_then(|()| numeric.finish_rows(window, history.clone()))
+                .map_err(|error| {
+                    internal(&format!("rolling numeric arithmetic failed: {error:?}"))
+                })?;
+        }
+        Ok(())
     }
 
-    fn numeric_accumulator(&self, column: usize, entity: EntityId) -> Result<NumericAccumulator> {
-        let (group, row) = self.location(entity)?;
-        self.partitions[&group].rings[column]
+    fn numeric_accumulator(
+        &self,
+        column: usize,
+        group: usize,
+        entity: EntityId,
+    ) -> Result<NumericAccumulator> {
+        let (key_group, row) = self.location(entity)?;
+        self.partitions[&key_group].rings[column]
             .get(row)
             .and_then(Option::as_ref)
-            .and_then(|page| page.value.numeric)
+            .and_then(|page| page.value.numeric.as_ref()?.get(group).copied())
             .ok_or_else(|| internal("numeric group is absent"))
     }
 
     pub(crate) fn numeric_mean(&self, column: usize, entity: EntityId) -> Result<Option<f64>> {
-        let numeric = self.numeric_accumulator(column, entity)?;
+        self.numeric_mean_at(column, 0, entity)
+    }
+
+    pub(crate) fn numeric_mean_at(
+        &self,
+        column: usize,
+        group: usize,
+        entity: EntityId,
+    ) -> Result<Option<f64>> {
+        let numeric = self.numeric_accumulator(column, group, entity)?;
         Ok((numeric.valid_count > 0).then(|| numeric.mean()))
     }
 
     pub(crate) fn numeric_valid_count(&self, column: usize, entity: EntityId) -> Result<u64> {
-        Ok(self.numeric_accumulator(column, entity)?.valid_count)
+        self.numeric_valid_count_at(column, 0, entity)
+    }
+
+    pub(crate) fn numeric_valid_count_at(
+        &self,
+        column: usize,
+        group: usize,
+        entity: EntityId,
+    ) -> Result<u64> {
+        Ok(self.numeric_accumulator(column, group, entity)?.valid_count)
     }
 
     pub(crate) fn numeric_sum(&self, column: usize, entity: EntityId) -> Result<f64> {
-        Ok(self.numeric_accumulator(column, entity)?.sum())
+        self.numeric_sum_at(column, 0, entity)
+    }
+
+    pub(crate) fn numeric_sum_at(
+        &self,
+        column: usize,
+        group: usize,
+        entity: EntityId,
+    ) -> Result<f64> {
+        Ok(self.numeric_accumulator(column, group, entity)?.sum())
     }
 
     pub(crate) fn numeric_variance(
@@ -1606,11 +1690,35 @@ impl StateTable {
         entity: EntityId,
         ddof: u8,
     ) -> Result<f64> {
-        Ok(self.numeric_accumulator(column, entity)?.variance(ddof))
+        self.numeric_variance_at(column, 0, entity, ddof)
+    }
+
+    pub(crate) fn numeric_variance_at(
+        &self,
+        column: usize,
+        group: usize,
+        entity: EntityId,
+        ddof: u8,
+    ) -> Result<f64> {
+        Ok(self
+            .numeric_accumulator(column, group, entity)?
+            .variance(ddof))
     }
 
     pub(crate) fn numeric_stddev(&self, column: usize, entity: EntityId, ddof: u8) -> Result<f64> {
-        Ok(self.numeric_accumulator(column, entity)?.stddev(ddof))
+        self.numeric_stddev_at(column, 0, entity, ddof)
+    }
+
+    pub(crate) fn numeric_stddev_at(
+        &self,
+        column: usize,
+        group: usize,
+        entity: EntityId,
+        ddof: u8,
+    ) -> Result<f64> {
+        Ok(self
+            .numeric_accumulator(column, group, entity)?
+            .stddev(ddof))
     }
 
     pub(crate) fn f64_history(&self, column: usize, entity: EntityId) -> Result<Vec<Option<f64>>> {
@@ -1665,7 +1773,9 @@ impl StateTable {
     pub(crate) fn ring_slot_addresses(&self, column: usize) -> Vec<usize> {
         let mut addresses = Vec::new();
         for (entity, _) in self.ordered_entities() {
-            if let Some(page) = &self.partitions[&entity.key_group].rings[column][entity.row as usize] {
+            if let Some(page) =
+                &self.partitions[&entity.key_group].rings[column][entity.row as usize]
+            {
                 addresses.extend(
                     page.value
                         .ring
@@ -2093,7 +2203,7 @@ impl StateTable {
                         self.partitions[&entity.key_group].rings[column]
                             .get(entity.row as usize)
                             .and_then(Option::as_ref)
-                            .and_then(|page| page.value.numeric)
+                            .and_then(|page| page.value.numeric.clone())
                     })
                     .collect::<Vec<_>>();
                 (&schema.name, schema.kind, schema.retention, values, numeric)
@@ -2293,12 +2403,18 @@ impl StateTable {
                 values.extend(page.value.ring.history());
                 capacities.push(page.value.ring.capacity());
                 if let Some(numeric) = &mut numeric {
-                    numeric.push(page.value.numeric.expect("numeric group"));
+                    numeric.push(page.value.numeric.clone().expect("numeric group"));
                 }
             } else {
                 capacities.push(0);
                 if let Some(numeric) = &mut numeric {
-                    numeric.push(NumericAccumulator::default());
+                    numeric.push(
+                        schema
+                            .numeric_windows
+                            .iter()
+                            .map(|_| NumericAccumulator::default())
+                            .collect(),
+                    );
                 }
             }
             offsets.push(values.len());

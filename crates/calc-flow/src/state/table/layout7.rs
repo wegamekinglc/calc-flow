@@ -19,22 +19,25 @@ use crate::{
 };
 
 const MAGIC: &[u8; 8] = b"CFST7\0\0\0";
-const COMPONENTS: usize = 3;
-const HEADER_BYTES: usize = 8 + 4 + COMPONENTS * 8;
+const BASE_COMPONENTS: usize = 3;
+const MIN_HEADER_BYTES: usize = 8 + 4 + BASE_COMPONENTS * 8;
 
 pub(crate) fn encode_layout7(table: &StateTable) -> Result<Vec<u8>> {
-    validate_shape(table)?;
+    let schema = validate_shape(table)?;
     let snapshot = table.snapshot_for_layout7();
-    let entity = encode_entity(&snapshot)?;
-    let offsets = encode_offsets(&snapshot)?;
-    let values = encode_values(&snapshot)?;
-    let components = [entity, offsets, values];
+    let mut components = Vec::with_capacity(BASE_COMPONENTS + schema.numeric_windows.len() - 1);
+    components.push(encode_entity(&snapshot)?);
+    components.push(encode_offsets(&snapshot)?);
+    components.push(encode_values(&snapshot)?);
+    for group in 1..schema.numeric_windows.len() {
+        components.push(encode_shared_entity(&snapshot, group)?);
+    }
     let mut encoded =
-        Vec::with_capacity(HEADER_BYTES + components.iter().map(Vec::len).sum::<usize>());
+        Vec::with_capacity(MIN_HEADER_BYTES + components.iter().map(Vec::len).sum::<usize>());
     encoded.extend_from_slice(MAGIC);
     encoded.extend_from_slice(
-        &u32::try_from(COMPONENTS)
-            .expect("three components fit u32")
+        &u32::try_from(components.len())
+            .map_err(|_| layout7_error("rolling layout-7 component count exceeds u32"))?
             .to_le_bytes(),
     );
     for component in &components {
@@ -48,11 +51,14 @@ pub(crate) fn encode_layout7(table: &StateTable) -> Result<Vec<u8>> {
 
 pub(crate) fn decode_layout7(table: &StateTable, bytes: &[u8]) -> Result<TableSnapshot> {
     let schema = validate_shape(table)?;
-    let components = decode_components(bytes)?;
+    let components = decode_components(bytes, schema.numeric_windows.len())?;
     let entity = read_component(&components[0])?;
     let offsets = read_component(&components[1])?;
     let values = read_component(&components[2])?;
-    let snapshot = decode_snapshot(table, &schema, &entity, &offsets, &values)?;
+    let shared = (1..schema.numeric_windows.len())
+        .map(|group| read_component(&components[BASE_COMPONENTS + group - 1]))
+        .collect::<Result<Vec<_>>>()?;
+    let snapshot = decode_snapshot(table, &schema, &entity, &offsets, &values, &shared)?;
     validate_numeric(&schema, &snapshot)?;
     Ok(snapshot)
 }
@@ -64,7 +70,7 @@ fn validate_shape(table: &StateTable) -> Result<Layout7Schema> {
 }
 
 fn encode_entity(snapshot: &TableSnapshot) -> Result<Vec<u8>> {
-    let parts = numeric_parts(snapshot);
+    let parts = numeric_parts(snapshot, 0);
     let fields = entity_fields();
     let columns: Vec<ArrayRef> = vec![
         Arc::new(BinaryArray::from_iter_values(
@@ -139,6 +145,68 @@ fn encode_entity(snapshot: &TableSnapshot) -> Result<Vec<u8>> {
     write_component(fields, columns, metadata)
 }
 
+fn encode_shared_entity(snapshot: &TableSnapshot, group: usize) -> Result<Vec<u8>> {
+    let parts = numeric_parts(snapshot, group);
+    let fields = entity_fields().into_iter().skip(3).collect::<Vec<_>>();
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(UInt64Array::from_iter_values(
+            parts.iter().map(|part| part.valid_count),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            parts.iter().map(|part| part.finite_count),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            parts.iter().map(|part| part.nan_count),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            parts.iter().map(|part| part.pos_inf),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            parts.iter().map(|part| part.neg_inf),
+        )),
+        Arc::new(Float64Array::from_iter_values(
+            parts.iter().map(|part| part.sum_value),
+        )),
+        Arc::new(Float64Array::from_iter_values(
+            parts.iter().map(|part| part.sum_error),
+        )),
+        Arc::new(
+            parts
+                .iter()
+                .map(|part| part.sum_enabled)
+                .collect::<BooleanArray>(),
+        ),
+        Arc::new(Float64Array::from(
+            parts.iter().map(|part| part.shift).collect::<Vec<_>>(),
+        )),
+        Arc::new(Float64Array::from_iter_values(
+            parts.iter().map(|part| part.offsets_value),
+        )),
+        Arc::new(Float64Array::from_iter_values(
+            parts.iter().map(|part| part.offsets_error),
+        )),
+        Arc::new(Float64Array::from_iter_values(
+            parts.iter().map(|part| part.squares_value),
+        )),
+        Arc::new(Float64Array::from_iter_values(
+            parts.iter().map(|part| part.squares_error),
+        )),
+        Arc::new(
+            parts
+                .iter()
+                .map(|part| part.dispersion_enabled)
+                .collect::<BooleanArray>(),
+        ),
+        Arc::new(UInt32Array::from_iter_values(
+            parts.iter().map(|part| part.since_rebuild),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            parts.iter().map(|part| part.n_prev),
+        )),
+    ];
+    write_component(fields, columns, HashMap::new())
+}
+
 fn entity_fields() -> Vec<Field> {
     [
         ("entity_key", DataType::Binary, false),
@@ -205,19 +273,23 @@ fn write_component(
     Ok(bytes)
 }
 
-fn decode_components(bytes: &[u8]) -> Result<Vec<Vec<u8>>> {
-    if bytes.len() < HEADER_BYTES || &bytes[..8] != MAGIC {
+fn decode_components(bytes: &[u8], windows: usize) -> Result<Vec<Vec<u8>>> {
+    if bytes.len() < MIN_HEADER_BYTES || &bytes[..8] != MAGIC {
         return Err(layout7_error(
             "rolling state layout is not 7; start a new lineage",
         ));
     }
     let count = read_u32(bytes, 8)? as usize;
-    if count != COMPONENTS {
+    if count != BASE_COMPONENTS + windows - 1 {
         return Err(layout7_error(
             "rolling layout-7 component count mismatch; start a new lineage",
         ));
     }
-    let mut cursor = HEADER_BYTES;
+    let header_bytes = 12 + count * 8;
+    if bytes.len() < header_bytes {
+        return Err(layout7_error("rolling layout-7 header is truncated"));
+    }
+    let mut cursor = header_bytes;
     let mut components = Vec::with_capacity(count);
     for index in 0..count {
         let len = usize::try_from(read_u64(bytes, 12 + index * 8)?)
@@ -264,6 +336,7 @@ fn decode_snapshot(
     entity: &RecordBatch,
     offsets: &RecordBatch,
     values: &RecordBatch,
+    shared: &[RecordBatch],
 ) -> Result<TableSnapshot> {
     if entity.num_columns() != 19 || offsets.num_columns() != 1 || values.num_columns() != 1 {
         return Err(layout7_error("rolling layout-7 column inventory mismatch"));
@@ -273,7 +346,21 @@ fn decode_snapshot(
         .map(|key| key.map(|key| EntityKey::new(key.to_vec())))
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| layout7_error("rolling layout-7 entity key is null"))?;
-    let numeric = decode_numeric(entity)?;
+    let mut numeric = decode_numeric(entity, 3)?
+        .into_iter()
+        .map(|value| vec![value])
+        .collect::<Vec<_>>();
+    for record in shared {
+        let family = decode_numeric(record, 0)?;
+        if family.len() != numeric.len() {
+            return Err(layout7_error(
+                "rolling layout-7 shared family census mismatch",
+            ));
+        }
+        for (accumulators, value) in numeric.iter_mut().zip(family) {
+            accumulators.push(value);
+        }
+    }
     let offsets = column::<UInt64Array>(offsets, 0)?
         .values()
         .iter()
@@ -320,23 +407,28 @@ fn decode_snapshot(
     Ok(snapshot)
 }
 
-fn decode_numeric(record: &RecordBatch) -> Result<Vec<NumericAccumulator>> {
-    let valid = column::<UInt64Array>(record, 3)?;
-    let finite = column::<UInt64Array>(record, 4)?;
-    let nan = column::<UInt64Array>(record, 5)?;
-    let positive = column::<UInt64Array>(record, 6)?;
-    let negative = column::<UInt64Array>(record, 7)?;
-    let sum_value = column::<Float64Array>(record, 8)?;
-    let sum_error = column::<Float64Array>(record, 9)?;
-    let sum_enabled = column::<BooleanArray>(record, 10)?;
-    let shift = column::<Float64Array>(record, 11)?;
-    let offsets_value = column::<Float64Array>(record, 12)?;
-    let offsets_error = column::<Float64Array>(record, 13)?;
-    let squares_value = column::<Float64Array>(record, 14)?;
-    let squares_error = column::<Float64Array>(record, 15)?;
-    let dispersion_enabled = column::<BooleanArray>(record, 16)?;
-    let since_rebuild = column::<UInt32Array>(record, 17)?;
-    let n_prev = column::<UInt64Array>(record, 18)?;
+fn decode_numeric(record: &RecordBatch, offset: usize) -> Result<Vec<NumericAccumulator>> {
+    macro_rules! at {
+        ($ty:ty, $index:expr) => {
+            column::<$ty>(record, offset + $index)?
+        };
+    }
+    let valid = at!(UInt64Array, 0);
+    let finite = at!(UInt64Array, 1);
+    let nan = at!(UInt64Array, 2);
+    let positive = at!(UInt64Array, 3);
+    let negative = at!(UInt64Array, 4);
+    let sum_value = at!(Float64Array, 5);
+    let sum_error = at!(Float64Array, 6);
+    let sum_enabled = at!(BooleanArray, 7);
+    let shift = at!(Float64Array, 8);
+    let offsets_value = at!(Float64Array, 9);
+    let offsets_error = at!(Float64Array, 10);
+    let squares_value = at!(Float64Array, 11);
+    let squares_error = at!(Float64Array, 12);
+    let dispersion_enabled = at!(BooleanArray, 13);
+    let since_rebuild = at!(UInt32Array, 14);
+    let n_prev = at!(UInt64Array, 15);
     Ok((0..record.num_rows())
         .map(|row| {
             NumericAccumulator::from_layout7(NumericAccumulatorLayout7 {
@@ -361,18 +453,18 @@ fn decode_numeric(record: &RecordBatch) -> Result<Vec<NumericAccumulator>> {
         .collect())
 }
 
-fn numeric_parts(snapshot: &TableSnapshot) -> Vec<NumericAccumulatorLayout7> {
+fn numeric_parts(snapshot: &TableSnapshot, group: usize) -> Vec<NumericAccumulatorLayout7> {
     snapshot.rings[0]
         .numeric
         .as_ref()
         .expect("numeric shape checked")
         .iter()
-        .map(|numeric| numeric.layout7())
+        .map(|values| values[group].layout7())
         .collect()
 }
 
 fn validate_numeric(schema: &Layout7Schema, snapshot: &TableSnapshot) -> Result<()> {
-    let Retention::Rows(window) = schema.retention else {
+    let Retention::Rows(_) = schema.retention else {
         return Err(layout7_error("rolling layout-7 numeric frame mismatch"));
     };
     let history = snapshot.rings[0]
@@ -384,52 +476,66 @@ fn validate_numeric(schema: &Layout7Schema, snapshot: &TableSnapshot) -> Result<
         .numeric
         .as_ref()
         .expect("numeric shape checked");
-    for (entity, accumulator) in numeric.iter().enumerate() {
-        let mut valid = 0;
-        let mut finite = 0;
-        let mut nan = 0;
-        let mut positive = 0;
-        let mut negative = 0;
-        for row in snapshot.rings[0].offsets[entity]..snapshot.rings[0].offsets[entity + 1] {
-            if history.is_valid(row) {
-                valid += 1;
-                let value = history.value(row);
-                if value.is_finite() {
-                    finite += 1;
-                }
-                if value.is_nan() {
-                    nan += 1;
-                }
-                if value == f64::INFINITY {
-                    positive += 1;
-                }
-                if value == f64::NEG_INFINITY {
-                    negative += 1;
+    if numeric
+        .iter()
+        .any(|values| values.len() != schema.numeric_windows.len())
+    {
+        return Err(layout7_error(
+            "rolling layout-7 numeric family count mismatch",
+        ));
+    }
+    for (group, &window) in schema.numeric_windows.iter().enumerate() {
+        for (entity, accumulators) in numeric.iter().enumerate() {
+            let mut valid = 0;
+            let mut finite = 0;
+            let mut nan = 0;
+            let mut positive = 0;
+            let mut negative = 0;
+            let end = snapshot.rings[0].offsets[entity + 1];
+            let start = end
+                .saturating_sub(window)
+                .max(snapshot.rings[0].offsets[entity]);
+            for row in start..end {
+                if history.is_valid(row) {
+                    valid += 1;
+                    let value = history.value(row);
+                    if value.is_finite() {
+                        finite += 1;
+                    }
+                    if value.is_nan() {
+                        nan += 1;
+                    }
+                    if value == f64::INFINITY {
+                        positive += 1;
+                    }
+                    if value == f64::NEG_INFINITY {
+                        negative += 1;
+                    }
                 }
             }
-        }
-        let parts = accumulator.layout7();
-        if (
-            parts.valid_count,
-            parts.finite_count,
-            parts.nan_count,
-            parts.pos_inf,
-            parts.neg_inf,
-        ) != (valid, finite, nan, positive, negative)
-        {
-            return Err(layout7_error(
-                "rolling layout-7 counters do not match retained history",
-            ));
-        }
-        if parts.shift.is_some() != (parts.dispersion_enabled && finite > 0) {
-            return Err(layout7_error(
-                "rolling layout-7 dispersion shift invariant failed",
-            ));
-        }
-        if u64::from(parts.since_rebuild) >= (window.max(64) as u64) {
-            return Err(layout7_error(
-                "rolling layout-7 rebuild cadence invariant failed",
-            ));
+            let parts = accumulators[group].layout7();
+            if (
+                parts.valid_count,
+                parts.finite_count,
+                parts.nan_count,
+                parts.pos_inf,
+                parts.neg_inf,
+            ) != (valid, finite, nan, positive, negative)
+            {
+                return Err(layout7_error(
+                    "rolling layout-7 counters do not match retained history",
+                ));
+            }
+            if parts.shift.is_some() != (parts.dispersion_enabled && finite > 0) {
+                return Err(layout7_error(
+                    "rolling layout-7 dispersion shift invariant failed",
+                ));
+            }
+            if u64::from(parts.since_rebuild) >= (window.max(64) as u64) {
+                return Err(layout7_error(
+                    "rolling layout-7 rebuild cadence invariant failed",
+                ));
+            }
         }
     }
     Ok(())

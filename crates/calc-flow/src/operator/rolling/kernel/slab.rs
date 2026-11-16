@@ -93,7 +93,7 @@ impl SlabBuilder {
         entity: EntityId,
         output: &TypedOutputPlan,
     ) -> Result<()> {
-        let valid = table.numeric_valid_count(0, entity)?;
+        let valid = table.numeric_valid_count_at(0, output.group, entity)?;
         if valid < output.min_periods {
             match self {
                 Self::Float(builder) => builder.append_null(),
@@ -106,16 +106,26 @@ impl SlabBuilder {
                 builder.append_value(valid);
             }
             (Self::Float(builder), TypedOutputKind::Statistic(Statistic::Sum)) => {
-                builder.append_value(table.numeric_sum(0, entity)?);
+                builder.append_value(table.numeric_sum_at(0, output.group, entity)?);
             }
             (Self::Float(builder), TypedOutputKind::Statistic(Statistic::Mean)) => {
-                builder.append_option(table.numeric_mean(0, entity)?);
+                builder.append_option(table.numeric_mean_at(0, output.group, entity)?);
             }
             (Self::Float(builder), TypedOutputKind::Statistic(Statistic::Variance)) => {
-                builder.append_value(table.numeric_variance(0, entity, output.ddof)?);
+                builder.append_value(table.numeric_variance_at(
+                    0,
+                    output.group,
+                    entity,
+                    output.ddof,
+                )?);
             }
             (Self::Float(builder), TypedOutputKind::Statistic(Statistic::Stddev)) => {
-                builder.append_value(table.numeric_stddev(0, entity, output.ddof)?);
+                builder.append_value(table.numeric_stddev_at(
+                    0,
+                    output.group,
+                    entity,
+                    output.ddof,
+                )?);
             }
             _ => return Err(internal_error("rolling slab output kind mismatch")),
         }
@@ -132,15 +142,21 @@ impl SlabBuilder {
 
 impl RollingKernelPlan {
     pub(in crate::operator::rolling) fn supports_slab(&self) -> bool {
-        matches!(
-            self.groups.as_slice(),
-            [TypedGroupPlan::Numeric {
-                frame: TypedFrame::Rows(_),
-                ..
-            }]
-        ) && !self.outputs.is_empty()
+        let Some(TypedGroupPlan::Numeric { input_index, .. }) = self.groups.first() else {
+            return false;
+        };
+        self.groups.iter().all(|group| {
+            matches!(
+                group,
+                TypedGroupPlan::Numeric {
+                    input_index: candidate,
+                    frame: TypedFrame::Rows(_),
+                    ..
+                } if candidate == input_index
+            )
+        }) && !self.outputs.is_empty()
             && self.outputs.iter().all(|output| {
-                output.group == 0
+                output.group < self.groups.len()
                     && match output.kind {
                         TypedOutputKind::Statistic(Statistic::Count) => {
                             output.storage == OutputStorage::Count
@@ -164,20 +180,24 @@ impl RollingKernelPlan {
         if state.slab.is_some() {
             return Ok(());
         }
-        let [
+        let mut windows = self.groups.iter().map(|group| match group {
             TypedGroupPlan::Numeric {
                 frame: TypedFrame::Rows(window),
                 ..
-            },
-        ] = self.groups.as_slice()
-        else {
-            return Err(internal_error(
-                "rolling slab plan is not one Float64 Rows group",
-            ));
+            } => Ok(*window),
+            _ => Err(internal_error(
+                "rolling slab plan contains a non-numeric Rows group",
+            )),
+        });
+        let Some(first) = windows.next() else {
+            return Err(internal_error("rolling slab plan has no numeric groups"));
         };
         let mut table = StateTable::new();
         table.add_keyed_column("transition_count", ValueKind::UInt64);
-        table.add_numeric_rows_column("numeric", *window);
+        let column = table.add_numeric_rows_column("numeric", first?);
+        for window in windows {
+            table.add_numeric_window(column, window?);
+        }
         state.slab = Some(table);
         Ok(())
     }
@@ -269,10 +289,16 @@ impl RollingKernelPlan {
         let created = state.slab.is_none();
         self.ensure_slab(state)?;
         let columns = self.typed_inputs(input, node_id)?;
-        let [TypedGroupInput::Single(values)] = columns.as_slice() else {
+        if !columns
+            .iter()
+            .all(|input| matches!(input, TypedGroupInput::Single(_)))
+        {
             return Err(internal_error(
-                "rolling slab input is not one Float64 column",
+                "rolling slab input is not one shared Float64 column",
             ));
+        }
+        let Some(TypedGroupInput::Single(values)) = columns.first() else {
+            return Err(internal_error("rolling slab has no Float64 input"));
         };
         let last_identity = self.last_ordered_identity(input, node_id)?;
         let started = Instant::now();
@@ -490,5 +516,78 @@ mod tests {
         assert_eq!(mean.value(0).to_bits(), 4.0_f64.to_bits());
         update.rollback(&mut state);
         assert_eq!(state.canonical_state_for_test(), committed);
+    }
+
+    #[test]
+    fn multi_window_slab_shares_history_and_restores_every_accumulator() {
+        let mut plan = plan();
+        plan.groups = vec![
+            TypedGroupPlan::Numeric {
+                input_index: 2,
+                frame: TypedFrame::Rows(2),
+                dispersion: true,
+            },
+            TypedGroupPlan::Numeric {
+                input_index: 2,
+                frame: TypedFrame::Rows(4),
+                dispersion: true,
+            },
+        ];
+        plan.outputs = vec![
+            TypedOutputPlan {
+                group: 0,
+                kind: TypedOutputKind::Statistic(Statistic::Mean),
+                storage: OutputStorage::Float64,
+                min_periods: 1,
+                ddof: 0,
+            },
+            TypedOutputPlan {
+                group: 1,
+                kind: TypedOutputKind::Statistic(Statistic::Mean),
+                storage: OutputStorage::Float64,
+                min_periods: 1,
+                ddof: 0,
+            },
+        ];
+        let mut state = RollingKernelState::default();
+        let first = input(&[1, 2, 3, 4], &[Some(1.0), Some(3.0), Some(5.0), Some(7.0)]);
+        let update = plan
+            .prepare_slab_ordered_stream(&mut state, &first, "r", None)
+            .unwrap();
+        update.commit(&mut state);
+        assert_eq!(
+            RollingKernelPlan::slab_history_for_test(&state)
+                .unwrap()
+                .len(),
+            4,
+            "dual windows must retain one shared history"
+        );
+
+        let encoded = RollingKernelPlan::encode_slab_state(&state).unwrap();
+        let mut restored = plan.decode_slab_state(&encoded, None).unwrap();
+        assert_eq!(
+            restored.canonical_state_for_test(),
+            state.canonical_state_for_test()
+        );
+        let second = input(&[5], &[Some(9.0)]);
+        let mut uninterrupted = state.clone();
+        for current in [&mut state, &mut restored] {
+            let update = plan
+                .prepare_slab_ordered_stream(current, &second, "r", None)
+                .unwrap();
+            update.commit(current);
+        }
+        assert_eq!(
+            restored.canonical_state_for_test(),
+            state.canonical_state_for_test()
+        );
+        let update = plan
+            .prepare_slab_ordered_stream(&mut uninterrupted, &second, "r", None)
+            .unwrap();
+        let columns = update.execution.columns;
+        let fast = columns[0].as_any().downcast_ref::<Float64Array>().unwrap();
+        let slow = columns[1].as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(fast.value(0).to_bits(), 8.0_f64.to_bits());
+        assert_eq!(slow.value(0).to_bits(), 6.0_f64.to_bits());
     }
 }
