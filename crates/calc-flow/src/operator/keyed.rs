@@ -689,10 +689,30 @@ fn hash_signed(
     selection: Option<&BooleanArray>,
 ) -> Result<()> {
     match array.data_type() {
-        DataType::Int8 => hash_primitive!(array, hashes, selection, datafusion::arrow::datatypes::Int8Type),
-        DataType::Int16 => hash_primitive!(array, hashes, selection, datafusion::arrow::datatypes::Int16Type),
-        DataType::Int32 => hash_primitive!(array, hashes, selection, datafusion::arrow::datatypes::Int32Type),
-        DataType::Int64 => hash_primitive!(array, hashes, selection, datafusion::arrow::datatypes::Int64Type),
+        DataType::Int8 => hash_primitive!(
+            array,
+            hashes,
+            selection,
+            datafusion::arrow::datatypes::Int8Type
+        ),
+        DataType::Int16 => hash_primitive!(
+            array,
+            hashes,
+            selection,
+            datafusion::arrow::datatypes::Int16Type
+        ),
+        DataType::Int32 => hash_primitive!(
+            array,
+            hashes,
+            selection,
+            datafusion::arrow::datatypes::Int32Type
+        ),
+        DataType::Int64 => hash_primitive!(
+            array,
+            hashes,
+            selection,
+            datafusion::arrow::datatypes::Int64Type
+        ),
         _ => return Err(keyed_error("signed key hash type differs")),
     }
     Ok(())
@@ -704,10 +724,30 @@ fn hash_unsigned(
     selection: Option<&BooleanArray>,
 ) -> Result<()> {
     match array.data_type() {
-        DataType::UInt8 => hash_primitive!(array, hashes, selection, datafusion::arrow::datatypes::UInt8Type),
-        DataType::UInt16 => hash_primitive!(array, hashes, selection, datafusion::arrow::datatypes::UInt16Type),
-        DataType::UInt32 => hash_primitive!(array, hashes, selection, datafusion::arrow::datatypes::UInt32Type),
-        DataType::UInt64 => hash_primitive!(array, hashes, selection, datafusion::arrow::datatypes::UInt64Type),
+        DataType::UInt8 => hash_primitive!(
+            array,
+            hashes,
+            selection,
+            datafusion::arrow::datatypes::UInt8Type
+        ),
+        DataType::UInt16 => hash_primitive!(
+            array,
+            hashes,
+            selection,
+            datafusion::arrow::datatypes::UInt16Type
+        ),
+        DataType::UInt32 => hash_primitive!(
+            array,
+            hashes,
+            selection,
+            datafusion::arrow::datatypes::UInt32Type
+        ),
+        DataType::UInt64 => hash_primitive!(
+            array,
+            hashes,
+            selection,
+            datafusion::arrow::datatypes::UInt64Type
+        ),
         _ => return Err(keyed_error("unsigned key hash type differs")),
     }
     Ok(())
@@ -719,8 +759,18 @@ fn hash_temporal(
     selection: Option<&BooleanArray>,
 ) -> Result<()> {
     match array.data_type() {
-        DataType::Date32 => hash_primitive!(array, hashes, selection, datafusion::arrow::datatypes::Date32Type),
-        DataType::Date64 => hash_primitive!(array, hashes, selection, datafusion::arrow::datatypes::Date64Type),
+        DataType::Date32 => hash_primitive!(
+            array,
+            hashes,
+            selection,
+            datafusion::arrow::datatypes::Date32Type
+        ),
+        DataType::Date64 => hash_primitive!(
+            array,
+            hashes,
+            selection,
+            datafusion::arrow::datatypes::Date64Type
+        ),
         DataType::Timestamp(TimeUnit::Second, _) => {
             hash_primitive!(array, hashes, selection, TimestampSecondType)
         }
@@ -962,7 +1012,7 @@ macro_rules! push_primitive {
         let Self::$variant(values) = $self else {
             return Err(keyed_error("typed key birth column differs"));
         };
-        values.push(input.is_valid(row).then_some(input.value(row)));
+        values.push(input.is_valid($row).then_some(input.value($row)));
     }};
 }
 
@@ -975,8 +1025,8 @@ macro_rules! equals_primitive {
         let Self::$variant(values) = $self else {
             return Err(keyed_error("typed key equality column differs"));
         };
-        let value = input.is_valid(row).then_some(input.value(row));
-        Ok(values[group] == value)
+        let value = input.is_valid($row).then_some(input.value($row));
+        Ok(values[$group] == value)
     }};
 }
 
@@ -1083,10 +1133,34 @@ impl KeyColumn {
 
     fn push_signed(&mut self, array: &ArrayRef, row: usize) -> Result<()> {
         match self {
-            Self::Int8(_) => push_primitive!(self, array, row, Int8, datafusion::arrow::datatypes::Int8Type),
-            Self::Int16(_) => push_primitive!(self, array, row, Int16, datafusion::arrow::datatypes::Int16Type),
-            Self::Int32(_) => push_primitive!(self, array, row, Int32, datafusion::arrow::datatypes::Int32Type),
-            Self::Int64(_) => push_primitive!(self, array, row, Int64, datafusion::arrow::datatypes::Int64Type),
+            Self::Int8(_) => push_primitive!(
+                self,
+                array,
+                row,
+                Int8,
+                datafusion::arrow::datatypes::Int8Type
+            ),
+            Self::Int16(_) => push_primitive!(
+                self,
+                array,
+                row,
+                Int16,
+                datafusion::arrow::datatypes::Int16Type
+            ),
+            Self::Int32(_) => push_primitive!(
+                self,
+                array,
+                row,
+                Int32,
+                datafusion::arrow::datatypes::Int32Type
+            ),
+            Self::Int64(_) => push_primitive!(
+                self,
+                array,
+                row,
+                Int64,
+                datafusion::arrow::datatypes::Int64Type
+            ),
             _ => return Err(keyed_error("signed key birth column differs")),
         }
         Ok(())
@@ -1094,10 +1168,34 @@ impl KeyColumn {
 
     fn push_unsigned(&mut self, array: &ArrayRef, row: usize) -> Result<()> {
         match self {
-            Self::UInt8(_) => push_primitive!(self, array, row, UInt8, datafusion::arrow::datatypes::UInt8Type),
-            Self::UInt16(_) => push_primitive!(self, array, row, UInt16, datafusion::arrow::datatypes::UInt16Type),
-            Self::UInt32(_) => push_primitive!(self, array, row, UInt32, datafusion::arrow::datatypes::UInt32Type),
-            Self::UInt64(_) => push_primitive!(self, array, row, UInt64, datafusion::arrow::datatypes::UInt64Type),
+            Self::UInt8(_) => push_primitive!(
+                self,
+                array,
+                row,
+                UInt8,
+                datafusion::arrow::datatypes::UInt8Type
+            ),
+            Self::UInt16(_) => push_primitive!(
+                self,
+                array,
+                row,
+                UInt16,
+                datafusion::arrow::datatypes::UInt16Type
+            ),
+            Self::UInt32(_) => push_primitive!(
+                self,
+                array,
+                row,
+                UInt32,
+                datafusion::arrow::datatypes::UInt32Type
+            ),
+            Self::UInt64(_) => push_primitive!(
+                self,
+                array,
+                row,
+                UInt64,
+                datafusion::arrow::datatypes::UInt64Type
+            ),
             _ => return Err(keyed_error("unsigned key birth column differs")),
         }
         Ok(())
@@ -1105,19 +1203,49 @@ impl KeyColumn {
 
     fn push_temporal(&mut self, array: &ArrayRef, row: usize) -> Result<()> {
         match self {
-            Self::Date32(_) => push_primitive!(self, array, row, Date32, datafusion::arrow::datatypes::Date32Type),
-            Self::Date64(_) => push_primitive!(self, array, row, Date64, datafusion::arrow::datatypes::Date64Type),
+            Self::Date32(_) => push_primitive!(
+                self,
+                array,
+                row,
+                Date32,
+                datafusion::arrow::datatypes::Date32Type
+            ),
+            Self::Date64(_) => push_primitive!(
+                self,
+                array,
+                row,
+                Date64,
+                datafusion::arrow::datatypes::Date64Type
+            ),
             Self::TimestampSecond(_) => {
                 push_primitive!(self, array, row, TimestampSecond, TimestampSecondType)
             }
             Self::TimestampMillisecond(_) => {
-                push_primitive!(self, array, row, TimestampMillisecond, TimestampMillisecondType)
+                push_primitive!(
+                    self,
+                    array,
+                    row,
+                    TimestampMillisecond,
+                    TimestampMillisecondType
+                )
             }
             Self::TimestampMicrosecond(_) => {
-                push_primitive!(self, array, row, TimestampMicrosecond, TimestampMicrosecondType)
+                push_primitive!(
+                    self,
+                    array,
+                    row,
+                    TimestampMicrosecond,
+                    TimestampMicrosecondType
+                )
             }
             Self::TimestampNanosecond(_) => {
-                push_primitive!(self, array, row, TimestampNanosecond, TimestampNanosecondType)
+                push_primitive!(
+                    self,
+                    array,
+                    row,
+                    TimestampNanosecond,
+                    TimestampNanosecondType
+                )
             }
             _ => return Err(keyed_error("temporal key birth column differs")),
         }
@@ -1168,39 +1296,137 @@ impl KeyColumn {
 
     fn equals_signed(&self, group: usize, array: &ArrayRef, row: usize) -> Result<bool> {
         match self {
-            Self::Int8(_) => equals_primitive!(self, array, group, row, Int8, datafusion::arrow::datatypes::Int8Type),
-            Self::Int16(_) => equals_primitive!(self, array, group, row, Int16, datafusion::arrow::datatypes::Int16Type),
-            Self::Int32(_) => equals_primitive!(self, array, group, row, Int32, datafusion::arrow::datatypes::Int32Type),
-            Self::Int64(_) => equals_primitive!(self, array, group, row, Int64, datafusion::arrow::datatypes::Int64Type),
+            Self::Int8(_) => equals_primitive!(
+                self,
+                array,
+                group,
+                row,
+                Int8,
+                datafusion::arrow::datatypes::Int8Type
+            ),
+            Self::Int16(_) => equals_primitive!(
+                self,
+                array,
+                group,
+                row,
+                Int16,
+                datafusion::arrow::datatypes::Int16Type
+            ),
+            Self::Int32(_) => equals_primitive!(
+                self,
+                array,
+                group,
+                row,
+                Int32,
+                datafusion::arrow::datatypes::Int32Type
+            ),
+            Self::Int64(_) => equals_primitive!(
+                self,
+                array,
+                group,
+                row,
+                Int64,
+                datafusion::arrow::datatypes::Int64Type
+            ),
             _ => Err(keyed_error("signed key equality column differs")),
         }
     }
 
     fn equals_unsigned(&self, group: usize, array: &ArrayRef, row: usize) -> Result<bool> {
         match self {
-            Self::UInt8(_) => equals_primitive!(self, array, group, row, UInt8, datafusion::arrow::datatypes::UInt8Type),
-            Self::UInt16(_) => equals_primitive!(self, array, group, row, UInt16, datafusion::arrow::datatypes::UInt16Type),
-            Self::UInt32(_) => equals_primitive!(self, array, group, row, UInt32, datafusion::arrow::datatypes::UInt32Type),
-            Self::UInt64(_) => equals_primitive!(self, array, group, row, UInt64, datafusion::arrow::datatypes::UInt64Type),
+            Self::UInt8(_) => equals_primitive!(
+                self,
+                array,
+                group,
+                row,
+                UInt8,
+                datafusion::arrow::datatypes::UInt8Type
+            ),
+            Self::UInt16(_) => equals_primitive!(
+                self,
+                array,
+                group,
+                row,
+                UInt16,
+                datafusion::arrow::datatypes::UInt16Type
+            ),
+            Self::UInt32(_) => equals_primitive!(
+                self,
+                array,
+                group,
+                row,
+                UInt32,
+                datafusion::arrow::datatypes::UInt32Type
+            ),
+            Self::UInt64(_) => equals_primitive!(
+                self,
+                array,
+                group,
+                row,
+                UInt64,
+                datafusion::arrow::datatypes::UInt64Type
+            ),
             _ => Err(keyed_error("unsigned key equality column differs")),
         }
     }
 
     fn equals_temporal(&self, group: usize, array: &ArrayRef, row: usize) -> Result<bool> {
         match self {
-            Self::Date32(_) => equals_primitive!(self, array, group, row, Date32, datafusion::arrow::datatypes::Date32Type),
-            Self::Date64(_) => equals_primitive!(self, array, group, row, Date64, datafusion::arrow::datatypes::Date64Type),
+            Self::Date32(_) => equals_primitive!(
+                self,
+                array,
+                group,
+                row,
+                Date32,
+                datafusion::arrow::datatypes::Date32Type
+            ),
+            Self::Date64(_) => equals_primitive!(
+                self,
+                array,
+                group,
+                row,
+                Date64,
+                datafusion::arrow::datatypes::Date64Type
+            ),
             Self::TimestampSecond(_) => {
-                equals_primitive!(self, array, group, row, TimestampSecond, TimestampSecondType)
+                equals_primitive!(
+                    self,
+                    array,
+                    group,
+                    row,
+                    TimestampSecond,
+                    TimestampSecondType
+                )
             }
             Self::TimestampMillisecond(_) => {
-                equals_primitive!(self, array, group, row, TimestampMillisecond, TimestampMillisecondType)
+                equals_primitive!(
+                    self,
+                    array,
+                    group,
+                    row,
+                    TimestampMillisecond,
+                    TimestampMillisecondType
+                )
             }
             Self::TimestampMicrosecond(_) => {
-                equals_primitive!(self, array, group, row, TimestampMicrosecond, TimestampMicrosecondType)
+                equals_primitive!(
+                    self,
+                    array,
+                    group,
+                    row,
+                    TimestampMicrosecond,
+                    TimestampMicrosecondType
+                )
             }
             Self::TimestampNanosecond(_) => {
-                equals_primitive!(self, array, group, row, TimestampNanosecond, TimestampNanosecondType)
+                equals_primitive!(
+                    self,
+                    array,
+                    group,
+                    row,
+                    TimestampNanosecond,
+                    TimestampNanosecondType
+                )
             }
             _ => Err(keyed_error("temporal key equality column differs")),
         }
@@ -1272,28 +1498,57 @@ impl KeyColumn {
 
     fn array_signed(&self, groups: &[GroupId]) -> Result<ArrayRef> {
         match self {
-            Self::Int8(_) => output_primitive!(self, groups, Int8, datafusion::arrow::datatypes::Int8Type),
-            Self::Int16(_) => output_primitive!(self, groups, Int16, datafusion::arrow::datatypes::Int16Type),
-            Self::Int32(_) => output_primitive!(self, groups, Int32, datafusion::arrow::datatypes::Int32Type),
-            Self::Int64(_) => output_primitive!(self, groups, Int64, datafusion::arrow::datatypes::Int64Type),
+            Self::Int8(_) => {
+                output_primitive!(self, groups, Int8, datafusion::arrow::datatypes::Int8Type)
+            }
+            Self::Int16(_) => {
+                output_primitive!(self, groups, Int16, datafusion::arrow::datatypes::Int16Type)
+            }
+            Self::Int32(_) => {
+                output_primitive!(self, groups, Int32, datafusion::arrow::datatypes::Int32Type)
+            }
+            Self::Int64(_) => {
+                output_primitive!(self, groups, Int64, datafusion::arrow::datatypes::Int64Type)
+            }
             _ => Err(keyed_error("signed key output column differs")),
         }
     }
 
     fn array_unsigned(&self, groups: &[GroupId]) -> Result<ArrayRef> {
         match self {
-            Self::UInt8(_) => output_primitive!(self, groups, UInt8, datafusion::arrow::datatypes::UInt8Type),
-            Self::UInt16(_) => output_primitive!(self, groups, UInt16, datafusion::arrow::datatypes::UInt16Type),
-            Self::UInt32(_) => output_primitive!(self, groups, UInt32, datafusion::arrow::datatypes::UInt32Type),
-            Self::UInt64(_) => output_primitive!(self, groups, UInt64, datafusion::arrow::datatypes::UInt64Type),
+            Self::UInt8(_) => {
+                output_primitive!(self, groups, UInt8, datafusion::arrow::datatypes::UInt8Type)
+            }
+            Self::UInt16(_) => output_primitive!(
+                self,
+                groups,
+                UInt16,
+                datafusion::arrow::datatypes::UInt16Type
+            ),
+            Self::UInt32(_) => output_primitive!(
+                self,
+                groups,
+                UInt32,
+                datafusion::arrow::datatypes::UInt32Type
+            ),
+            Self::UInt64(_) => output_primitive!(
+                self,
+                groups,
+                UInt64,
+                datafusion::arrow::datatypes::UInt64Type
+            ),
             _ => Err(keyed_error("unsigned key output column differs")),
         }
     }
 
     fn array_temporal(&self, groups: &[GroupId], data_type: &DataType) -> Result<ArrayRef> {
         match self {
-            Self::Date32(values) => Ok(primitive_output::<datafusion::arrow::datatypes::Date32Type>(values, groups)),
-            Self::Date64(values) => Ok(primitive_output::<datafusion::arrow::datatypes::Date64Type>(values, groups)),
+            Self::Date32(values) => {
+                Ok(primitive_output::<datafusion::arrow::datatypes::Date32Type>(values, groups))
+            }
+            Self::Date64(values) => {
+                Ok(primitive_output::<datafusion::arrow::datatypes::Date64Type>(values, groups))
+            }
             Self::TimestampSecond(values) => {
                 timestamp_output::<TimestampSecondType>(values, groups, data_type)
             }
