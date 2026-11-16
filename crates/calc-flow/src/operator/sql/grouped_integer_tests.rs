@@ -362,29 +362,35 @@ async fn test_utf8_key_output_avoids_per_group_string_allocations() {
     let context = StreamOperatorContext::new(&job, "utf8-output", None);
     let batch = Batch::table(vec![input], crate::BatchMetadata::default()).unwrap();
     let transaction = plan.update(&batch, &context, "utf8-output").await.unwrap();
-    plan.commit(transaction);
-    assert_eq!(plan.groups.len(), 256);
-    let candidates = CandidateMap::with_hasher(RandomState::new());
+    assert_eq!(plan.group_count(), 256);
+    assert!(plan.groups.is_empty());
+    let keyed = transaction.keyed_sum.as_ref().unwrap();
     let reservation = plan.scratch.new_empty();
-    let charge = plan
-        .output_charge(256, &candidates, &context, "utf8-output")
-        .await
-        .unwrap();
+    let charge = plan.keyed_sum_output_charge(keyed, "utf8-output").unwrap();
     reservation.try_grow(charge).unwrap();
     let mut output = None;
     let allocations = allocation_counter::measure(|| {
         output = Some(
-            plan.aggregate_output_chunk(0, 256, &candidates, "utf8-output")
+            keyed
+                .records(plan.aggregate_schema.clone(), &mut || Ok(()))
                 .unwrap(),
         );
     });
-    assert_eq!(output.as_ref().unwrap().num_rows(), 256);
+    assert_eq!(
+        output
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>(),
+        256
+    );
     eprintln!("UTF8 output allocation evidence: {allocations:?}");
     assert!(
         allocations.count_total < 256,
         "two UTF8 key columns must not allocate a String per output group: {allocations:?}"
     );
-    drop((output, reservation, plan));
+    drop((output, reservation, transaction, plan));
     assert_eq!(runtime.incremental_memory_pool().reserved(), 0);
 }
 
@@ -567,20 +573,17 @@ async fn assert_utf8_output_fits_charge(input: Batch) {
     );
     let context = StreamOperatorContext::new(&job, "utf8-charge", None);
     let transaction = plan.update(&input, &context, "utf8-charge").await.unwrap();
-    plan.commit(transaction);
-    let candidates = CandidateMap::with_hasher(RandomState::new());
-    let count = plan.groups.len();
-    let charge = plan
-        .output_charge(count, &candidates, &context, "utf8-charge")
-        .await
-        .unwrap();
+    let count = plan.group_count();
+    let keyed = transaction.keyed_sum.as_ref().unwrap();
+    let charge = plan.keyed_sum_output_charge(keyed, "utf8-charge").unwrap();
     let (reservation, _) = plan.input_workspace(0, "utf8-charge").unwrap();
     reservation.try_grow(charge).unwrap();
     let prepaid = reservation.size();
     let mut output = None;
     let allocations = allocation_counter::measure(|| {
         output = Some(
-            plan.aggregate_output_chunk(0, count, &candidates, "utf8-charge")
+            keyed
+                .records(plan.aggregate_schema.clone(), &mut || Ok(()))
                 .unwrap(),
         );
     });
@@ -588,8 +591,16 @@ async fn assert_utf8_output_fits_charge(input: Batch) {
         allocations.bytes_max <= u64::try_from(prepaid).unwrap(),
         "UTF8 buffers exceed output/scratch prepayment {prepaid}: {allocations:?}"
     );
-    assert_eq!(output.as_ref().unwrap().num_rows(), count);
-    drop((output, reservation, plan));
+    assert_eq!(
+        output
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>(),
+        count
+    );
+    drop((output, reservation, transaction, plan));
     assert_eq!(runtime.incremental_memory_pool().reserved(), 0);
 }
 

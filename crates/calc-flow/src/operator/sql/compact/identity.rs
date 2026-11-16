@@ -248,6 +248,9 @@ fn native_output_json(
         "post_order":descriptor.post_order.as_ref().map(|order| order_json(&order.keys, order.skip, order.fetch)).transpose()?,
         "wire_schema_sha256":retention::schema_digest(&descriptor.wire_schema)?,
         "output_schema_sha256":retention::schema_digest(&descriptor.output_schema)?});
+    if let Some(key_layout) = &descriptor.key_layout {
+        value["key_layout"] = json!(key_layout);
+    }
     if let Some(ordered) = &descriptor.ordered_last {
         value["ordered_last"] = json!({
             "version":1, "model":"df55_single_linear_fifo_groups_v1",

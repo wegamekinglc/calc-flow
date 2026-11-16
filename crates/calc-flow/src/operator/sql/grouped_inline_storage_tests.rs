@@ -1,137 +1,69 @@
 use super::*;
-
-type LegacyStorage = (Vec<Vec<ScalarValue>>, Vec<ScalarValue>);
-type LegacyGroup = (
-    Arc<[u8]>,
-    Arc<[ScalarValue]>,
-    LegacyStorage,
-    MemoryReservation,
-);
-type LegacyCandidate = (
-    Vec<Option<Box<dyn Accumulator>>>,
-    LegacyGroup,
-    Option<Box<variable_extrema::Bounds>>,
-);
+use crate::{CancellationToken, JsonMap, StreamJobContext};
 
 #[test]
 fn test_grouped_inline_compact_layout_preserves_generic_container_sizes() {
-    eprintln!(
-        "Inline state layout: ScalarValue={} payload={}/{} Group={}/{} Candidate={}/{} map-row={}/{} plan={}",
-        size_of::<ScalarValue>(),
-        size_of::<GroupAggregates>(),
-        size_of::<LegacyStorage>(),
-        size_of::<Group>(),
-        size_of::<LegacyGroup>(),
-        size_of::<Candidate>(),
-        size_of::<LegacyCandidate>(),
-        size_of::<(usize, Candidate)>(),
-        size_of::<(usize, LegacyCandidate)>(),
-        size_of::<IncrementalSql>()
-    );
+    type LegacyStorage = (Vec<Vec<ScalarValue>>, Vec<ScalarValue>);
     assert!(size_of::<GroupAggregates>() <= size_of::<LegacyStorage>());
-    assert!(size_of::<Group>() <= size_of::<LegacyGroup>());
-    assert!(size_of::<Candidate>() <= size_of::<LegacyCandidate>());
-    assert!(size_of::<(usize, Candidate)>() <= size_of::<(usize, LegacyCandidate)>());
     assert!(
         size_of::<IncrementalSql>() <= 4096,
-        "cached inline kind must fit the existing plan structural floor"
+        "keyed SUM must retain the existing plan structural floor"
     );
 }
 
-async fn full_container_case(single: bool) -> allocation_counter::AllocationInfo {
-    let fixture = allocation_fixture(single).await;
-    let mut retained = None;
-    let allocations = allocation_counter::measure(|| {
-        let mut candidates = CandidateMap::with_hasher(RandomState::new());
-        for (rank, previous) in fixture.plan.groups.iter().enumerate() {
-            let candidate = updated_candidate(&fixture, previous, rank);
-            candidates.insert(rank, candidate);
-        }
-        let container = fixture
-            .plan
-            .prepare_container(&candidates, GROUPS, "inline-container")
-            .unwrap();
-        retained = Some((candidates, container));
-    });
-    let (candidates, container) = retained.unwrap();
-    let paid = candidates
-        .values()
-        .map(|candidate| candidate.group.reservation.size())
-        .sum::<usize>()
-        + container.reservation.size();
-    eprintln!(
-        "Full staged inline={single}: heap={allocations:?}, paid={paid}, map_capacity={}, group_capacity={}, index_capacity={}",
-        candidates.capacity(),
-        container.groups.capacity(),
-        container.index.capacity()
+#[tokio::test]
+async fn test_grouped_inline_new_key_budget_refusal_is_atomic() {
+    let mut fixture = allocation_fixture(true).await;
+    let before = fixture
+        .plan
+        .export_native_state("inline-budget", || Ok(()))
+        .unwrap();
+    let baseline = fixture.runtime.compact_state_bytes();
+    let groups = fixture.plan.keyed_sum.as_ref().unwrap().len();
+    fixture
+        .runtime
+        .set_compact_state_limit(
+            Some(u64::try_from(baseline).unwrap()),
+            "inline-budget",
+        )
+        .unwrap();
+    let record = RecordBatch::try_from_iter(vec![
+        (
+            "key",
+            Arc::new(StringArray::from(vec![Some("new-account")])) as ArrayRef,
+        ),
+        (
+            "value",
+            Arc::new(Int64Array::from(vec![Some(9)])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    let input = Batch::table(vec![record], crate::BatchMetadata::default()).unwrap();
+    let job = StreamJobContext::new(
+        973,
+        "inline-budget",
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
     );
-    assert!(allocations.bytes_max <= u64::try_from(paid).unwrap());
-    assert!(container.groups.capacity() >= GROUPS);
-    assert!(container.index.capacity() >= GROUPS);
-    drop((candidates, container, fixture.partial, fixture.plan));
+    let context = StreamOperatorContext::new(&job, "inline-budget", None);
+    let error = fixture
+        .plan
+        .update(&input, &context, "inline-budget")
+        .await;
+    assert!(error.is_err());
+    assert_eq!(fixture.runtime.compact_state_bytes(), baseline);
+    assert_eq!(fixture.plan.keyed_sum.as_ref().unwrap().len(), groups);
+    let after = fixture
+        .plan
+        .export_native_state("inline-budget", || Ok(()))
+        .unwrap();
+    assert_eq!(before.records(), after.records());
+    fixture
+        .runtime
+        .set_compact_state_limit(None, "inline-budget")
+        .unwrap();
+    drop((before, after, fixture.plan));
     assert_eq!(fixture.runtime.incremental_memory_pool().reserved(), 0);
-    allocations
-}
-
-#[tokio::test]
-async fn test_grouped_inline_full_candidate_map_and_group_container_are_funded() {
-    let single = full_container_case(true).await;
-    let mixed = full_container_case(false).await;
-    assert!(single.bytes_current > 0);
-    assert!(
-        mixed.bytes_current > single.bytes_current,
-        "generic aggregate state must remain represented in the full owned footprint"
-    );
-}
-
-#[tokio::test]
-async fn test_grouped_inline_candidate_exact_credit_and_one_byte_shortfall_are_atomic() {
-    for single in [true, false] {
-        let fixture = allocation_fixture(single).await;
-        let previous = &fixture.plan.groups[0];
-        let candidate = fixture
-            .plan
-            .candidate(Some(previous), &previous.key, None, "inline-budget")
-            .unwrap();
-        let credit = candidate.group.reservation.size();
-        drop(candidate);
-        let baseline = fixture.runtime.compact_state_bytes();
-        let before = fixture
-            .plan
-            .export_native_state("inline-budget", || Ok(()))
-            .unwrap();
-        fixture
-            .runtime
-            .set_compact_state_limit(
-                Some(u64::try_from(baseline + credit - 1).unwrap()),
-                "inline-budget",
-            )
-            .unwrap();
-        assert!(
-            fixture
-                .plan
-                .candidate(Some(previous), &previous.key, None, "inline-budget")
-                .is_err()
-        );
-        assert_eq!(fixture.runtime.compact_state_bytes(), baseline);
-        let after = fixture
-            .plan
-            .export_native_state("inline-budget", || Ok(()))
-            .unwrap();
-        assert_eq!(before.records(), after.records());
-        fixture
-            .runtime
-            .set_compact_state_limit(
-                Some(u64::try_from(baseline + credit).unwrap()),
-                "inline-budget",
-            )
-            .unwrap();
-        let admitted = fixture
-            .plan
-            .candidate(Some(previous), &previous.key, None, "inline-budget")
-            .unwrap();
-        assert_eq!(fixture.runtime.compact_state_bytes(), baseline + credit);
-        drop(admitted);
-        assert_eq!(fixture.runtime.compact_state_bytes(), baseline);
-    }
+    assert_eq!(fixture.runtime.compact_state_bytes(), 0);
 }

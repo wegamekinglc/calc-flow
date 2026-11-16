@@ -32,6 +32,7 @@ use crate::{
     Batch, CalcFlowError, DataFusionRuntime, Result, StreamOperatorContext,
     expression::ValidatedQuery,
 };
+use crate::operator::keyed::MORSEL_ROWS;
 
 const CHUNK_ROWS: usize = 8192;
 
@@ -46,6 +47,9 @@ pub(in crate::operator::sql) mod grouped_float;
 
 #[path = "grouped_sum.rs"]
 mod grouped_sum;
+
+#[path = "keyed_sum.rs"]
+mod keyed_sum;
 
 #[path = "predicate.rs"]
 mod predicate;
@@ -79,12 +83,16 @@ use native_expression::output_work;
 mod grouped_inline_tests;
 
 #[cfg(test)]
+#[path = "keyed_sum_tests.rs"]
+mod keyed_sum_tests;
+
+#[cfg(test)]
 #[path = "snapshot_key_cache_tests.rs"]
 mod snapshot_key_cache_tests;
 
 #[path = "group_aggregates.rs"]
 mod group_aggregates;
-use group_aggregates::{GroupAggregates, InlineSum, StateView};
+use group_aggregates::{GroupAggregates, StateView};
 
 #[path = "output_order.rs"]
 mod output_order;
@@ -93,7 +101,7 @@ mod output_order;
 mod snapshot_keys;
 
 pub(super) struct IncrementalSql {
-    inline_sum: Option<InlineSum>,
+    keyed_sum: Option<keyed_sum::KeyedSum>,
     schema: SchemaRef,
     ordered_last: bool,
     pub(in crate::operator::sql) compact_budget: Option<crate::StateBudget>,
@@ -519,30 +527,10 @@ impl PartialGroups {
         rank: usize,
         name: &str,
     ) -> Result<()> {
-        if candidate.group.aggregates.is_inline() {
-            return Self::merge_inline(candidate, states, rank, name);
-        }
         for (index, arrays) in states.iter().enumerate() {
             self.merge_aggregate_rank(candidate, index, arrays, rank, name)?;
         }
         Ok(())
-    }
-
-    fn merge_inline(
-        candidate: &mut Candidate,
-        states: &[Vec<ArrayRef>],
-        rank: usize,
-        name: &str,
-    ) -> Result<()> {
-        let [arrays] = states else {
-            return Err(df_error(name, "inline SUM aggregate state count differs"));
-        };
-        let [array] = arrays.as_slice() else {
-            return Err(df_error(name, "inline SUM field count differs"));
-        };
-        let value =
-            ScalarValue::try_from_array(array, rank).map_err(|error| df_error(name, error))?;
-        candidate.group.aggregates.replace_inline(&value, name)
     }
 
     fn merge_aggregate_rank(
@@ -684,6 +672,7 @@ struct GroupContainer {
 }
 
 pub(super) struct Transaction {
+    keyed_sum: Option<keyed_sum::Transaction>,
     container: Option<GroupContainer>,
     dirty: Option<dirty::DirtyGroups>,
     pub records: Vec<RecordBatch>,
@@ -700,7 +689,10 @@ pub(super) struct Transaction {
 
 impl Transaction {
     pub(super) fn changes_state(&self) -> bool {
-        (self.track_updates && !self.groups.is_empty())
+        self.keyed_sum
+            .as_ref()
+            .is_some_and(keyed_sum::Transaction::changes_state)
+            || (self.track_updates && !self.groups.is_empty())
             || self.new_groups.iter().any(Option::is_some)
     }
 }
@@ -811,8 +803,9 @@ impl IncrementalSql {
             return Ok(None);
         };
         let (converter, finalizer_bytes) = grouped_layout(&keys, &aggregates, name)?;
+        let keyed_sum = keyed_sum::KeyedSum::plan(&keys, &aggregates, reservation.new_empty())?;
         Ok(Some(Self {
-            inline_sum: group_aggregates::bind_inline_sum(&keys, &aggregates),
+            keyed_sum,
             ordered_last: aggregates.iter().any(|expr| ordered_last::selected(expr)),
             variable_extrema: variable_extrema_slots(&aggregates),
             compact_budget: None,
@@ -864,7 +857,7 @@ impl IncrementalSql {
         budget: Option<crate::StateBudget>,
         name: &str,
     ) -> Result<()> {
-        Self::check_group_budget(self.groups.len(), budget, name)?;
+        Self::check_group_budget(self.group_count(), budget, name)?;
         self.compact_budget = budget;
         Ok(())
     }
@@ -932,7 +925,10 @@ impl IncrementalSql {
         name: &str,
     ) -> Result<()> {
         policy.validate(&self.checkpoint_policy(), rows, name)?;
-        if !self.groups.is_empty() || !self.index.is_empty() {
+        if !self.groups.is_empty()
+            || !self.index.is_empty()
+            || self.keyed_sum.as_ref().is_some_and(|keyed| !keyed.is_empty())
+        {
             return Err(df_error(name, "restored proof requires an empty candidate"));
         }
         if let grouped_float::Policy::SequentialGroupedFloatV1(policy) = policy {
@@ -1041,14 +1037,12 @@ impl IncrementalSql {
         })
     }
 
+    #[cfg(test)]
     fn inline_integer_sum(&self) -> bool {
-        self.inline_sum.is_some()
+        self.keyed_sum.is_some()
     }
 
     fn candidate_values(&self, previous: Option<&Group>) -> GroupAggregates {
-        if let Some(value) = self.inline_sum {
-            return GroupAggregates::IntegerSum(value);
-        }
         let states = self
             .aggregates
             .iter()
@@ -1082,9 +1076,6 @@ impl IncrementalSql {
         previous: Option<&Group>,
         name: &str,
     ) -> Result<Vec<Option<Box<dyn Accumulator>>>> {
-        if self.inline_sum.is_some() {
-            return Ok(Vec::new());
-        }
         self.aggregates
             .iter()
             .enumerate()
@@ -1131,6 +1122,9 @@ impl IncrementalSql {
     ) -> Result<Transaction> {
         let table = batch.table_payload()?;
         self.validate_input_schema(batch.num_rows(), table.schema())?;
+        if self.keyed_sum.is_some() {
+            return self.update_keyed_sum(batch, context, name).await;
+        }
         let proof = self.prepare_grouped_proof(table.batches(), name)?;
         let (reservation, workspace, mut candidates) =
             self.input_candidates(batch.num_rows(), name)?;
@@ -1168,6 +1162,145 @@ impl IncrementalSql {
         .await
     }
 
+    async fn update_keyed_sum(
+        &self,
+        batch: &Batch,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<Transaction> {
+        let keyed = self.keyed_sum.as_ref().expect("keyed SUM plan");
+        let (reservation, workspace) = self.input_workspace(batch.num_rows(), name)?;
+        let mut transaction = keyed.begin(self.compact_budget)?;
+        let rows = self.update_keyed_records(
+            batch.table_payload()?.batches(),
+            &mut transaction,
+            (&reservation, workspace),
+            context,
+            name,
+        )?;
+        #[cfg(not(test))]
+        let _ = rows;
+        let output_charge = self.keyed_sum_output_charge(&transaction, name)?;
+        reservation
+            .try_grow(output_charge)
+            .map_err(|error| df_error(name, error))?;
+        let mut check = || context.check_cancelled();
+        let records = transaction.records(self.aggregate_schema.clone(), &mut check)?;
+        let records = records
+            .iter()
+            .map(|record| self.keyed_output_record(record, name))
+            .collect::<Result<Vec<_>>>()?;
+        let records = self
+            .apply_output_order(records, &reservation, context, name)
+            .await?;
+        let checkpointing = context.job().checkpointing();
+        let dirty = if checkpointing {
+            self.dirty.prepare(keyed.len(), name)?
+        } else {
+            None
+        };
+        Ok(Transaction {
+            keyed_sum: Some(transaction),
+            container: None,
+            dirty,
+            records,
+            #[cfg(test)]
+            rows,
+            groups: Vec::new(),
+            track_updates: batch.num_rows() != 0,
+            checkpointing,
+            new_groups: Vec::new(),
+            _reservation: reservation,
+            proof: None,
+            coalesced: None,
+        })
+    }
+
+    fn update_keyed_records(
+        &self,
+        records: &[RecordBatch],
+        transaction: &mut keyed_sum::Transaction,
+        workspace: (&MemoryReservation, usize),
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<usize> {
+        let mut processed = 0;
+        context.check_cancelled()?;
+        for record in records {
+            for offset in (0..record.num_rows()).step_by(MORSEL_ROWS) {
+                context.check_cancelled()?;
+                let chunk = record.slice(offset, MORSEL_ROWS.min(record.num_rows() - offset));
+                self.update_keyed_chunk(&chunk, transaction, workspace.0, workspace.1, context, name)?;
+                processed += chunk.num_rows();
+            }
+        }
+        Ok(processed)
+    }
+
+    fn update_keyed_chunk(
+        &self,
+        chunk: &RecordBatch,
+        transaction: &mut keyed_sum::Transaction,
+        reservation: &MemoryReservation,
+        workspace: usize,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<()> {
+        self.reserve_chunk(chunk, reservation, workspace, name)?;
+        let selection = self
+            .predicate
+            .as_ref()
+            .map(|predicate| predicate.evaluate(chunk, name))
+            .transpose()?;
+        let filtered = self.selected_chunk(chunk, selection.as_ref(), name)?;
+        let (chunk, selection) = filtered
+            .as_ref()
+            .map_or((chunk, selection.as_ref()), |filtered| (filtered, None));
+        if chunk.num_rows() == 0 {
+            return Ok(());
+        }
+        let input = self.chunk_input(chunk, name)?;
+        transaction.apply(
+            &input.keys,
+            &input.arguments[0][0],
+            selection,
+            input.filters[0].as_ref(),
+            &mut || context.check_cancelled(),
+        )
+    }
+
+    fn keyed_sum_output_charge(
+        &self,
+        transaction: &keyed_sum::Transaction,
+        name: &str,
+    ) -> Result<usize> {
+        let width = checked_bytes(
+            0,
+            [
+                (self.aggregates.len(), 128),
+                (self.projection_nodes, 128),
+            ],
+            name,
+        )?;
+        checked_bytes(
+            transaction.output_charge()?,
+            [(self.keyed_sum.as_ref().expect("keyed SUM plan").len(), width)],
+            name,
+        )
+    }
+
+    fn keyed_output_record(&self, aggregate: &RecordBatch, name: &str) -> Result<RecordBatch> {
+        let aggregate = self.apply_having(aggregate.clone(), name)?;
+        if self
+            .post_order
+            .as_ref()
+            .is_some_and(output_order::OutputOrder::project_after_limit)
+        {
+            return Ok(aggregate);
+        }
+        self.project_output(&aggregate, name)
+    }
+
     async fn finish_transaction(
         &mut self,
         mut candidates: InputCandidates,
@@ -1191,6 +1324,7 @@ impl IncrementalSql {
             None
         };
         Ok(Transaction {
+            keyed_sum: None,
             records,
             track_updates: input.0,
             checkpointing,
@@ -1914,9 +2048,6 @@ impl IncrementalSql {
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<()> {
-        if self.inline_sum.is_some() {
-            return Ok(());
-        }
         for (index, candidate) in candidates.values_mut().enumerate() {
             if index % 128 == 0 {
                 if index != 0 {
@@ -2130,29 +2261,6 @@ impl IncrementalSql {
         column: usize,
         name: &str,
     ) -> Result<ArrayRef> {
-        if column == self.keys.len() {
-            match self.inline_sum {
-                Some(InlineSum::Int64(_)) => {
-                    let values = groups
-                        .map(|group| match &group.aggregates {
-                            GroupAggregates::IntegerSum(InlineSum::Int64(value)) => Ok(*value),
-                            _ => Err(df_error(name, "inline Int64 SUM output state differs")),
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    return Ok(Arc::new(Int64Array::from(values)));
-                }
-                Some(InlineSum::UInt64(_)) => {
-                    let values = groups
-                        .map(|group| match &group.aggregates {
-                            GroupAggregates::IntegerSum(InlineSum::UInt64(value)) => Ok(*value),
-                            _ => Err(df_error(name, "inline UInt64 SUM output state differs")),
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    return Ok(Arc::new(UInt64Array::from(values)));
-                }
-                None => {}
-            }
-        }
         ScalarValue::iter_to_array(groups.map(|group| {
             if column < self.keys.len() {
                 group.values[column].clone()
@@ -2266,6 +2374,9 @@ impl IncrementalSql {
     }
 
     fn reserve_groups(&mut self, new_count: usize, count: usize, name: &str) -> Result<()> {
+        if self.keyed_sum.is_some() {
+            return Ok(());
+        }
         if self.sequential.is_some() {
             let container = self.prepare_container(
                 &CandidateMap::with_hasher(RandomState::new()),
@@ -2341,7 +2452,20 @@ impl IncrementalSql {
         )
     }
 
-    pub fn commit(&mut self, transaction: Transaction) {
+    pub fn commit(&mut self, mut transaction: Transaction) {
+        if let Some(keyed) = transaction.keyed_sum.take() {
+            let committed = keyed.commit();
+            if let Some(dirty) = transaction.dirty {
+                self.dirty = dirty;
+            }
+            if transaction.checkpointing && transaction.track_updates {
+                for group in committed.affected {
+                    self.dirty.mark(group.index());
+                }
+            }
+            self.snapshot_keys.install_staged();
+            return;
+        }
         if let Some(coalesced) = transaction.coalesced {
             self.global_records
                 .as_mut()
