@@ -130,7 +130,8 @@ fn internal(message: &str) -> CalcFlowError {
 #[cfg(test)]
 mod tests {
     use super::{EntityKey, Retention, RingKind, StateTable, ValueKind};
-    use datafusion::arrow::array::{Array, StringArray};
+    use datafusion::arrow::array::{Array, Float64Array, StringArray};
+    use std::sync::Arc;
 
     #[test]
     fn rollback_restores_dictionary_keyed_rows_and_overwritten_ring_slots() {
@@ -216,6 +217,59 @@ mod tests {
             f64::from_bits(0x7ff8_0000_0000_0042).to_bits()
         );
         assert_eq!(restored[2].unwrap().to_bits(), 4.0_f64.to_bits());
+    }
+
+    #[test]
+    fn cold_restore_accepts_a_nonempty_snapshot() {
+        let mut source = StateTable::new();
+        let counter = source.add_keyed_column("counter", ValueKind::UInt64);
+        let history = source.add_ring_column("history", RingKind::Float64, Retention::Rows(2));
+        source.begin().unwrap();
+        let entity = source
+            .resolve_or_append(EntityKey::new(b"entity".to_vec()))
+            .unwrap();
+        source.set_u64(counter, entity, 7).unwrap();
+        source.push_f64(history, entity, Some(3.0)).unwrap();
+        source.commit().unwrap();
+        let snapshot = source.snapshot();
+
+        let mut cold = StateTable::new();
+        let cold_counter = cold.add_keyed_column("counter", ValueKind::UInt64);
+        let cold_history = cold.add_ring_column("history", RingKind::Float64, Retention::Rows(2));
+        cold.restore(snapshot).unwrap();
+
+        assert_eq!(cold.entity_count(), 1);
+        cold.begin().unwrap();
+        let restored = cold
+            .resolve_or_append(EntityKey::new(b"entity".to_vec()))
+            .unwrap();
+        cold.commit().unwrap();
+        assert_eq!(cold.u64(cold_counter, restored).unwrap(), 7);
+        assert_eq!(
+            cold.f64_history(cold_history, restored).unwrap(),
+            vec![Some(3.0)]
+        );
+    }
+
+    #[test]
+    fn restore_rejects_ring_entity_count_mismatch() {
+        let mut source = StateTable::new();
+        let history = source.add_ring_column("history", RingKind::Float64, Retention::Rows(2));
+        source.begin().unwrap();
+        let entity = source
+            .resolve_or_append(EntityKey::new(b"entity".to_vec()))
+            .unwrap();
+        source.push_f64(history, entity, Some(3.0)).unwrap();
+        source.commit().unwrap();
+        let mut snapshot = source.snapshot();
+        snapshot.rings[0].capacities.clear();
+        snapshot.rings[0].offsets = vec![0];
+        snapshot.rings[0].values = Arc::new(Float64Array::from(Vec::<Option<f64>>::new()));
+
+        let mut cold = StateTable::new();
+        cold.add_ring_column("history", RingKind::Float64, Retention::Rows(2));
+        assert!(cold.restore(snapshot).is_err());
+        assert_eq!(cold.entity_count(), 0);
     }
 
     #[test]
