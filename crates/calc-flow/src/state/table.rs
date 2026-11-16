@@ -7,6 +7,7 @@
 mod core;
 mod layout7;
 mod pages;
+mod v4;
 
 pub(crate) use layout7::{decode_layout7, encode_layout7};
 

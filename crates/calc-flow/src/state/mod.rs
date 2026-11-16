@@ -16,6 +16,7 @@ mod source_history;
 )]
 mod table;
 mod transaction;
+mod v4;
 
 pub(crate) use preloaded_snapshot::PreloadedSnapshot;
 pub(crate) use table::{

@@ -31,7 +31,7 @@ pub(crate) struct EntityId {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct EntityKey {
-    bytes: Vec<u8>,
+    pub(super) bytes: Vec<u8>,
 }
 
 impl EntityKey {
@@ -72,7 +72,7 @@ impl RingKind {
         usize::from(self != Self::PairFloat64) + usize::from(self == Self::PairFloat64) * 2
     }
 
-    fn empty(self) -> RingValue {
+    pub(super) fn empty(self) -> RingValue {
         match self {
             Self::Float64 => RingValue::Float64(None),
             Self::Int64 => RingValue::Int64(None),
@@ -129,10 +129,10 @@ struct KeyedColumn {
 }
 
 #[derive(Clone, Debug)]
-struct Ring {
-    head: usize,
-    len: usize,
-    slots: Vec<RingValue>,
+pub(super) struct Ring {
+    pub(super) head: usize,
+    pub(super) len: usize,
+    pub(super) slots: Vec<RingValue>,
 }
 
 impl Ring {
@@ -144,15 +144,15 @@ impl Ring {
         }
     }
 
-    fn capacity(&self) -> usize {
+    pub(super) fn capacity(&self) -> usize {
         self.slots.len()
     }
 
-    fn position(&self, offset: usize) -> usize {
+    pub(super) fn position(&self, offset: usize) -> usize {
         (self.head + offset) % self.capacity()
     }
 
-    fn history(&self) -> Vec<RingValue> {
+    pub(super) fn history(&self) -> Vec<RingValue> {
         (0..self.len)
             .map(|offset| self.slots[self.position(offset)])
             .collect()
@@ -193,38 +193,38 @@ struct RingColumn {
 }
 
 #[derive(Clone, Debug, Default)]
-struct PartitionMetadata {
-    entities: Vec<PartitionEntity>,
-    dictionary_bytes: usize,
-    value_log_lengths: Vec<u32>,
+pub(super) struct PartitionMetadata {
+    pub(super) entities: Vec<PartitionEntity>,
+    pub(super) dictionary_bytes: usize,
+    pub(super) value_log_lengths: Vec<u32>,
 }
 
 #[derive(Clone, Debug)]
-struct PartitionEntity {
-    index: u32,
-    key: EntityKey,
+pub(super) struct PartitionEntity {
+    pub(super) index: u32,
+    pub(super) key: EntityKey,
 }
 
 #[derive(Clone, Debug)]
-struct KeyedPage {
-    kind: ValueKind,
-    values: Vec<KeyedValue>,
+pub(super) struct KeyedPage {
+    pub(super) kind: ValueKind,
+    pub(super) values: Vec<KeyedValue>,
 }
 
 #[derive(Clone, Debug)]
-struct RingPage {
-    kind: RingKind,
-    ring: Ring,
-    slot_stamps: Vec<u64>,
-    numeric: Option<NumericAccumulator>,
+pub(super) struct RingPage {
+    pub(super) kind: RingKind,
+    pub(super) ring: Ring,
+    pub(super) slot_stamps: Vec<u64>,
+    pub(super) numeric: Option<NumericAccumulator>,
 }
 
 #[derive(Clone, Debug)]
-struct ValueLogPage {
-    chunks: Vec<ArrayRef>,
-    start: u32,
-    len: u32,
-    logical_bytes: usize,
+pub(super) struct ValueLogPage {
+    pub(super) chunks: Vec<ArrayRef>,
+    pub(super) start: u32,
+    pub(super) len: u32,
+    pub(super) logical_bytes: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -234,7 +234,7 @@ struct ValueLog {
 }
 
 #[derive(Clone, Debug)]
-enum PageRef {
+pub(super) enum PageRef {
     Metadata(Page<PartitionMetadata>),
     Keyed {
         column: usize,
@@ -254,7 +254,7 @@ enum PageRef {
 }
 
 impl PageRef {
-    fn id(&self) -> PageId {
+    pub(super) fn id(&self) -> PageId {
         match self {
             Self::Metadata(page) => page.id,
             Self::Keyed { page, .. } => page.id,
@@ -314,7 +314,7 @@ impl PageRef {
         }
     }
 
-    fn logical_bytes(&self) -> usize {
+    pub(super) fn logical_bytes(&self) -> usize {
         match self {
             Self::Metadata(page) => page.value.dictionary_bytes,
             Self::Keyed { page, .. } => {
@@ -494,15 +494,15 @@ fn set_page<T>(pages: &mut Vec<Option<Page<T>>>, index: usize, page: Page<T>) {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TableLineage {
-    epoch: u64,
-    partitions: BTreeMap<KeyGroupId, PartitionLineage>,
-    retained_bytes: usize,
+    pub(super) epoch: u64,
+    pub(super) partitions: BTreeMap<KeyGroupId, PartitionLineage>,
+    pub(super) retained_bytes: usize,
 }
 
 #[derive(Clone, Debug, Default)]
-struct PartitionLineage {
-    pages: BTreeMap<u32, PageRef>,
-    allocator: SlotAllocator,
+pub(super) struct PartitionLineage {
+    pub(super) pages: BTreeMap<u32, PageRef>,
+    pub(super) allocator: SlotAllocator,
 }
 
 impl TableLineage {
@@ -533,24 +533,24 @@ impl TableLineage {
 }
 
 #[derive(Clone, Debug)]
-enum FrozenChange {
+pub(super) enum FrozenChange {
     Write(PageRef),
     Delete(PageId),
 }
 
 #[derive(Clone, Debug)]
-struct PartitionFreeze {
-    id: KeyGroupId,
-    metadata: Page<PartitionMetadata>,
-    changes: Vec<FrozenChange>,
-    allocator: SlotAllocator,
-    dirty_slots: Vec<u32>,
+pub(super) struct PartitionFreeze {
+    pub(super) id: KeyGroupId,
+    pub(super) metadata: Page<PartitionMetadata>,
+    pub(super) changes: Vec<FrozenChange>,
+    pub(super) allocator: SlotAllocator,
+    pub(super) dirty_slots: Vec<u32>,
 }
 
 pub(crate) struct TableFreeze {
-    epoch: u64,
-    previous: Arc<TableLineage>,
-    partitions: Vec<PartitionFreeze>,
+    pub(super) epoch: u64,
+    pub(super) previous: Arc<TableLineage>,
+    pub(super) partitions: Vec<PartitionFreeze>,
     reservation_bytes: usize,
 }
 
@@ -966,10 +966,7 @@ impl StateTable {
     }
 
     pub(super) fn layout7_schema(&self) -> Option<Layout7Schema> {
-        if !self.value_logs.is_empty()
-            || self.partitions.len() != 1
-            || !self.partitions.contains_key(&KeyGroupId(0))
-        {
+        if !self.value_logs.is_empty() || !self.partitions.contains_key(&KeyGroupId(0)) {
             return None;
         }
         let [counter] = self.keyed.as_slice() else {
@@ -1665,7 +1662,9 @@ impl StateTable {
     pub(crate) fn ring_slot_addresses(&self, column: usize) -> Vec<usize> {
         let mut addresses = Vec::new();
         for (entity, _) in self.ordered_entities() {
-            if let Some(page) = &self.partitions[&entity.key_group].rings[column][entity.row as usize] {
+            if let Some(page) =
+                &self.partitions[&entity.key_group].rings[column][entity.row as usize]
+            {
                 addresses.extend(
                     page.value
                         .ring
@@ -2161,6 +2160,27 @@ impl StateTable {
             lineage,
             next_entity: self.next_entity,
         }
+    }
+
+    pub(super) fn from_v4_lineage(
+        &self,
+        keys: Vec<EntityKey>,
+        keyed: Vec<KeyedSnapshot>,
+        rings: Vec<RingSnapshot>,
+        lineage: TableLineage,
+        next_entity: u32,
+    ) -> Result<TableSnapshot> {
+        let snapshot = TableSnapshot {
+            keys,
+            keyed,
+            rings,
+            value_logs: Vec::new(),
+            logical_bytes: lineage.retained_bytes,
+            lineage,
+            next_entity,
+        };
+        self.validate_inventory(&snapshot)?;
+        Ok(snapshot)
     }
 
     pub(super) fn layout7_from_snapshot(
