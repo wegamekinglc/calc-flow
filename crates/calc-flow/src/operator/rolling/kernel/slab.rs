@@ -229,7 +229,7 @@ impl RollingKernelPlan {
     pub(in crate::operator::rolling) fn slab_history_for_test(
         state: &RollingKernelState,
     ) -> Option<Vec<Option<f64>>> {
-        Some(state.slab.as_ref()?.first_f64_history(0))
+        state.slab.as_ref()?.first_f64_history(0)
     }
 
     #[cfg(test)]
@@ -237,14 +237,14 @@ impl RollingKernelPlan {
         state: &RollingKernelState,
         offset: usize,
     ) -> Option<usize> {
-        Some(state.slab.as_ref()?.first_f64_slot_address(0, offset))
+        state.slab.as_ref()?.first_f64_slot_address(0, offset)
     }
 
     #[cfg(test)]
     pub(in crate::operator::rolling) fn slab_transition_count_for_test(
         state: &RollingKernelState,
     ) -> Option<u64> {
-        Some(state.slab.as_ref()?.first_u64(0))
+        state.slab.as_ref()?.first_u64(0)
     }
 
     #[cfg(test)]

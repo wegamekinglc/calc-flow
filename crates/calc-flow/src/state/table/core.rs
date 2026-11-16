@@ -38,6 +38,10 @@ impl EntityKey {
     pub(crate) fn new(bytes: Vec<u8>) -> Self {
         Self { bytes }
     }
+
+    pub(in crate::state::table) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -211,6 +215,7 @@ struct KeyedPage {
 struct RingPage {
     kind: RingKind,
     ring: Ring,
+    slot_stamps: Vec<u64>,
     numeric: Option<NumericAccumulator>,
 }
 
@@ -697,6 +702,11 @@ enum Undo {
         was_dirty: bool,
         first_dirty_len: usize,
     },
+    Stamp {
+        group: KeyGroupId,
+        key: StampKey,
+        previous: Option<u64>,
+    },
     PageCreate {
         group: KeyGroupId,
         slot: u32,
@@ -1037,19 +1047,52 @@ impl StateTable {
 
     fn note_stamp(&mut self, group: KeyGroupId, slot: u32, kind: StampKind, sub: u32) -> bool {
         let id = self.transaction_id().expect("transaction checked");
-        let stamp = self
-            .partitions
+        let key = StampKey { slot, kind, sub };
+        if kind == StampKind::RingSlot {
+            let index = usize::try_from(sub).expect("u32 slot stamp index fits usize");
+            let partition = &self.partitions[&group];
+            let PageLocation::Ring { column, row } = partition.locations[&slot] else {
+                panic!("ring stamp points to a non-ring page")
+            };
+            let previous = partition.rings[column][row]
+                .as_ref()
+                .expect("ring page")
+                .value
+                .slot_stamps[index];
+            if previous == id {
+                return false;
+            }
+            self.push_undo(Undo::Stamp {
+                group,
+                key,
+                previous: Some(previous),
+            });
+            let page = &mut self
+                .partitions
+                .get_mut(&group)
+                .expect("prepared group")
+                .rings[column][row]
+                .as_mut()
+                .expect("ring page")
+                .value;
+            Arc::get_mut(page).expect("unfrozen ring stamp").slot_stamps[index] = id;
+            return true;
+        }
+        let previous = self.partitions[&group].stamps.get(&key).copied();
+        if previous == Some(id) {
+            return false;
+        }
+        self.push_undo(Undo::Stamp {
+            group,
+            key,
+            previous,
+        });
+        self.partitions
             .get_mut(&group)
             .expect("prepared group")
             .stamps
-            .entry(StampKey { slot, kind, sub })
-            .or_insert(0);
-        if *stamp == id {
-            false
-        } else {
-            *stamp = id;
-            true
-        }
+            .insert(key, id);
+        true
     }
 
     fn mark_dirty(&mut self, group: KeyGroupId, slot: u32) -> Result<()> {
@@ -1249,6 +1292,7 @@ impl StateTable {
                 RingPage {
                     kind,
                     ring: Ring::new(kind, capacity),
+                    slot_stamps: vec![0; capacity],
                     numeric,
                 },
             ),
@@ -1478,6 +1522,15 @@ impl StateTable {
         .ring
         .slots
         .resize(capacity, kind.empty());
+        Arc::get_mut(
+            &mut partition.rings[column][row]
+                .as_mut()
+                .expect("ring page")
+                .value,
+        )
+        .expect("unfrozen ring")
+        .slot_stamps
+        .resize(capacity, 0);
         Ok(())
     }
 
@@ -1612,8 +1665,7 @@ impl StateTable {
     pub(crate) fn ring_slot_addresses(&self, column: usize) -> Vec<usize> {
         let mut addresses = Vec::new();
         for (entity, _) in self.ordered_entities() {
-            for page in self.partitions[&entity.key_group].rings[column][entity.row as usize].iter()
-            {
+            if let Some(page) = &self.partitions[&entity.key_group].rings[column][entity.row as usize] {
                 addresses.extend(
                     page.value
                         .ring
@@ -2056,7 +2108,10 @@ impl StateTable {
     }
 
     pub(super) fn snapshot_for_layout7(&self) -> TableSnapshot {
-        self.clone().snapshot()
+        let logical_bytes = self.logical_bytes();
+        let mut snapshot = self.clone().snapshot();
+        snapshot.logical_bytes = logical_bytes;
+        snapshot
     }
 
     pub(crate) fn snapshot(&mut self) -> TableSnapshot {
@@ -2108,7 +2163,7 @@ impl StateTable {
         }
     }
 
-    pub(super) fn from_layout7_snapshot(
+    pub(super) fn layout7_from_snapshot(
         &self,
         keys: Vec<EntityKey>,
         keyed: Vec<KeyedSnapshot>,
@@ -2140,9 +2195,9 @@ impl StateTable {
     fn install_layout7_pages(&self, snapshot: &TableSnapshot) -> Result<(TableLineage, usize)> {
         let groups = self.partitions.keys().copied().collect::<Vec<_>>();
         let mut restored = StateTable::with_key_groups(self.checkpointing, &groups)?;
-        restored.keyed = self.keyed.clone();
-        restored.rings = self.rings.clone();
-        restored.value_logs = self.value_logs.clone();
+        restored.keyed.clone_from(&self.keyed);
+        restored.rings.clone_from(&self.rings);
+        restored.value_logs.clone_from(&self.value_logs);
         for partition in restored.partitions.values_mut() {
             partition.keyed = vec![Vec::new(); restored.keyed.len()];
             partition.rings = vec![Vec::new(); restored.rings.len()];
@@ -2197,6 +2252,7 @@ impl StateTable {
         let page = Arc::get_mut(&mut page.value).expect("new layout-7 ring page");
         let kind = page.kind;
         page.ring.slots.resize(capacity, kind.empty());
+        page.slot_stamps = vec![0; capacity];
         page.ring.head = 0;
         page.ring.len = end - start;
         for offset in 0..page.ring.len {
@@ -2564,6 +2620,7 @@ impl StateTable {
         match undo {
             undo @ (Undo::Entity { .. }
             | Undo::Dirty { .. }
+            | Undo::Stamp { .. }
             | Undo::PageCreate { .. }
             | Undo::PageReplace { .. }
             | Undo::PageRemove { .. }) => self.apply_page_undo(undo),
@@ -2595,6 +2652,31 @@ impl StateTable {
                     dirty.bits.remove(&slot);
                 }
                 dirty.first_dirty.truncate(first_dirty_len);
+            }
+            Undo::Stamp {
+                group,
+                key,
+                previous,
+            } => {
+                let partition = self.partitions.get_mut(&group).expect("prepared group");
+                if key.kind == StampKind::RingSlot {
+                    let PageLocation::Ring { column, row } = partition.locations[&key.slot] else {
+                        return Err(internal("ring stamp undo page kind mismatch"));
+                    };
+                    let index = usize::try_from(key.sub)
+                        .map_err(|_| internal("ring stamp index exceeds usize"))?;
+                    let page = &mut partition.rings[column][row]
+                        .as_mut()
+                        .expect("ring page")
+                        .value;
+                    Arc::get_mut(page)
+                        .expect("unfrozen ring stamp undo")
+                        .slot_stamps[index] = previous.unwrap_or(0);
+                } else if let Some(previous) = previous {
+                    partition.stamps.insert(key, previous);
+                } else {
+                    partition.stamps.remove(&key);
+                }
             }
             Undo::PageCreate {
                 group,
@@ -2663,17 +2745,17 @@ impl StateTable {
                 let PageLocation::Ring { column, row } = partition.locations[&slot] else {
                     return Err(internal("ring undo page kind mismatch"));
                 };
-                let ring = &mut Arc::get_mut(
+                let page = Arc::get_mut(
                     &mut partition.rings[column][row]
                         .as_mut()
                         .expect("ring page")
                         .value,
                 )
-                .expect("unfrozen ring undo")
-                .ring;
-                ring.slots.resize(capacity, kind.empty());
-                ring.head = head;
-                ring.len = len;
+                .expect("unfrozen ring undo");
+                page.ring.slots.resize(capacity, kind.empty());
+                page.slot_stamps.resize(capacity, 0);
+                page.ring.head = head;
+                page.ring.len = len;
             }
             Undo::RingSlot {
                 group,

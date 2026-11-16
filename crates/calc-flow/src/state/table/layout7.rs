@@ -68,7 +68,7 @@ fn encode_entity(snapshot: &TableSnapshot) -> Result<Vec<u8>> {
     let fields = entity_fields();
     let columns: Vec<ArrayRef> = vec![
         Arc::new(BinaryArray::from_iter_values(
-            snapshot.keys.iter().map(|key| key.bytes.as_slice()),
+            snapshot.keys.iter().map(EntityKey::bytes),
         )),
         snapshot.keyed[0].values.clone(),
         Arc::new(UInt64Array::from_iter_values(
@@ -311,11 +311,11 @@ fn decode_snapshot(
         capacities,
         numeric: Some(numeric),
     }];
-    let (snapshot, actual_bytes) = table.from_layout7_snapshot(keys, keyed, rings)?;
+    let (snapshot, actual_bytes) = table.layout7_from_snapshot(keys, keyed, rings)?;
     if actual_bytes != logical_bytes {
-        return Err(layout7_error(
-            "rolling layout-7 logical size differs from restored pages",
-        ));
+        return Err(layout7_error(&format!(
+            "rolling layout-7 logical size differs from restored pages: encoded {logical_bytes}, restored {actual_bytes}"
+        )));
     }
     Ok(snapshot)
 }
