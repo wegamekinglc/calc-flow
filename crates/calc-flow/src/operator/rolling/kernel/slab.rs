@@ -2,14 +2,14 @@
 
 use std::{sync::Arc, time::Instant};
 
-use datafusion::arrow::array::{ArrayRef, Float64Builder, UInt64Builder};
+use datafusion::arrow::array::{ArrayRef, Float64Array, Float64Builder, UInt64Builder};
 use datafusion::arrow::record_batch::RecordBatch;
 
 use super::{
-    OutputStorage, Result, RollingKernelExecution, RollingKernelMetrics, RollingKernelPlan,
-    RollingKernelState, RollingMetricsRecorder, RollingStage, RollingWork, StateCharge, Statistic,
-    StreamKernelUpdate, TypedFrame, TypedGroupInput, TypedGroupPlan, TypedOutputKind,
-    TypedOutputPlan, internal_error, nanos, operator_error, valid_float64,
+    EntityRouting, OutputStorage, Result, RollingKernelExecution, RollingKernelMetrics,
+    RollingKernelPlan, RollingKernelState, RollingMetricsRecorder, RollingStage, RollingWork,
+    StateCharge, Statistic, StreamKernelUpdate, TypedFrame, TypedGroupInput, TypedGroupPlan,
+    TypedOutputKind, TypedOutputPlan, internal_error, nanos, operator_error, valid_float64,
 };
 use crate::state::{EntityId, EntityKey, StateTable, ValueKind};
 
@@ -95,23 +95,42 @@ impl SlabBuilder {
     ) -> Result<()> {
         let valid = table.numeric_valid_count_at(0, output.group, entity)?;
         if valid < output.min_periods {
-            match self {
-                Self::Float(builder) => builder.append_null(),
-                Self::Count(builder) => builder.append_null(),
-            }
+            self.append_null();
             return Ok(());
         }
-        match (self, output.kind) {
-            (Self::Count(builder), TypedOutputKind::Statistic(Statistic::Count)) => {
-                builder.append_value(valid);
-            }
-            (Self::Float(builder), TypedOutputKind::Statistic(Statistic::Sum)) => {
+        match self {
+            Self::Count(builder) => match output.kind {
+                TypedOutputKind::Statistic(Statistic::Count) => {
+                    builder.append_value(valid);
+                    Ok(())
+                }
+                _ => Err(internal_error("rolling slab output kind mismatch")),
+            },
+            Self::Float(builder) => Self::append_float(builder, table, entity, output),
+        }
+    }
+
+    fn append_null(&mut self) {
+        match self {
+            Self::Float(builder) => builder.append_null(),
+            Self::Count(builder) => builder.append_null(),
+        }
+    }
+
+    fn append_float(
+        builder: &mut Float64Builder,
+        table: &StateTable,
+        entity: EntityId,
+        output: &TypedOutputPlan,
+    ) -> Result<()> {
+        match output.kind {
+            TypedOutputKind::Statistic(Statistic::Sum) => {
                 builder.append_value(table.numeric_sum_at(0, output.group, entity)?);
             }
-            (Self::Float(builder), TypedOutputKind::Statistic(Statistic::Mean)) => {
+            TypedOutputKind::Statistic(Statistic::Mean) => {
                 builder.append_option(table.numeric_mean_at(0, output.group, entity)?);
             }
-            (Self::Float(builder), TypedOutputKind::Statistic(Statistic::Variance)) => {
+            TypedOutputKind::Statistic(Statistic::Variance) => {
                 builder.append_value(table.numeric_variance_at(
                     0,
                     output.group,
@@ -119,7 +138,7 @@ impl SlabBuilder {
                     output.ddof,
                 )?);
             }
-            (Self::Float(builder), TypedOutputKind::Statistic(Statistic::Stddev)) => {
+            TypedOutputKind::Statistic(Statistic::Stddev) => {
                 builder.append_value(table.numeric_stddev_at(
                     0,
                     output.group,
@@ -138,6 +157,11 @@ impl SlabBuilder {
             Self::Count(mut builder) => Arc::new(builder.finish()),
         }
     }
+}
+
+struct SlabInput {
+    values: Float64Array,
+    last_identity: Option<Vec<u8>>,
 }
 
 impl RollingKernelPlan {
@@ -295,20 +319,7 @@ impl RollingKernelPlan {
         Some(state.slab.as_ref()?.ring_slot_addresses(0))
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "slab preparation keeps transaction, output and rollback ordering in one function"
-    )]
-    pub(in crate::operator::rolling) fn prepare_slab_ordered_stream(
-        &self,
-        state: &mut RollingKernelState,
-        input: &RecordBatch,
-        node_id: &str,
-        observer: Option<&RollingMetricsRecorder>,
-    ) -> Result<StreamKernelUpdate> {
-        self.validate_state(state, node_id)?;
-        let created = state.slab.is_none();
-        self.ensure_slab(state)?;
+    fn slab_input(&self, input: &RecordBatch, node_id: &str) -> Result<SlabInput> {
         let columns = self.typed_inputs(input, node_id)?;
         if !columns
             .iter()
@@ -321,7 +332,19 @@ impl RollingKernelPlan {
         let Some(TypedGroupInput::Single(values)) = columns.first() else {
             return Err(internal_error("rolling slab has no Float64 input"));
         };
-        let last_identity = self.last_ordered_identity(input, node_id)?;
+        Ok(SlabInput {
+            values: values.clone(),
+            last_identity: self.last_ordered_identity(input, node_id)?,
+        })
+    }
+
+    fn route_slab(
+        &self,
+        state: &RollingKernelState,
+        input: &RecordBatch,
+        node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
+    ) -> Result<(EntityRouting, u64)> {
         let started = Instant::now();
         let routing = self.encoded_entity_routing(
             input,
@@ -332,53 +355,79 @@ impl RollingKernelPlan {
             recorder.add(RollingWork::ResolvedRows, routing.entity_ids.len());
             recorder.add(RollingWork::TouchedEntities, routing.keys.len());
         }
-        let entity_encode_ns = nanos(started.elapsed());
+        Ok((routing, nanos(started.elapsed())))
+    }
+
+    fn fill_slab_rows(
+        &self,
+        table: &mut StateTable,
+        values: &Float64Array,
+        routing: &EntityRouting,
+        input_rows: usize,
+        node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
+    ) -> Result<Vec<ArrayRef>> {
+        let resolved = routing
+            .keys
+            .iter()
+            .map(|key| table.resolve_or_append(EntityKey::new(key.clone())))
+            .collect::<Result<Vec<EntityId>>>()?;
+        let ids = routing
+            .entity_ids
+            .iter()
+            .map(|&local| resolved[local])
+            .collect::<Vec<_>>();
+        let mut builders = self
+            .outputs
+            .iter()
+            .map(|output| SlabBuilder::new(output, input_rows))
+            .collect::<Result<Vec<_>>>()?;
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
+        for (row, &entity) in ids.iter().enumerate() {
+            let transitions = table.u64(0, entity)?.checked_add(1).ok_or_else(|| {
+                operator_error(node_id, "rolling entity transition count overflowed")
+            })?;
+            table.set_u64(0, entity, transitions)?;
+            table.push_numeric_rows(0, entity, valid_float64(values, row, self.nan_as_value))?;
+            for (builder, output) in builders.iter_mut().zip(&self.outputs) {
+                builder.append(table, entity, output)?;
+            }
+        }
+        if let Some(recorder) = observer {
+            recorder.add(RollingWork::NumericRows, input_rows);
+            recorder.add(RollingWork::NumericSerialCalls, 1);
+        }
+        Ok(builders
+            .into_iter()
+            .map(SlabBuilder::finish)
+            .collect::<Vec<_>>())
+    }
+
+    pub(in crate::operator::rolling) fn prepare_slab_ordered_stream(
+        &self,
+        state: &mut RollingKernelState,
+        input: &RecordBatch,
+        node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
+    ) -> Result<StreamKernelUpdate> {
+        self.validate_state(state, node_id)?;
+        let created = state.slab.is_none();
+        self.ensure_slab(state)?;
+        let batch = self.slab_input(input, node_id)?;
+        let (routing, entity_encode_ns) = self.route_slab(state, input, node_id, observer)?;
         let previous_charge = charge(state.slab.as_ref().expect("slab initialized"), node_id)?;
         state.slab.as_mut().expect("slab initialized").begin()?;
         let entities = routing.keys.len();
         let entity_rows = routing.rows.clone();
         let local_ids = routing.entity_ids.clone();
-        let result = (|| {
-            let table = state.slab.as_mut().expect("slab initialized");
-            let resolved = routing
-                .keys
-                .iter()
-                .map(|key| table.resolve_or_append(EntityKey::new(key.clone())))
-                .collect::<Result<Vec<EntityId>>>()?;
-            let ids = routing
-                .entity_ids
-                .iter()
-                .map(|&local| resolved[local])
-                .collect::<Vec<_>>();
-            let mut builders = self
-                .outputs
-                .iter()
-                .map(|output| SlabBuilder::new(output, input.num_rows()))
-                .collect::<Result<Vec<_>>>()?;
-            let _stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
-            for (row, &entity) in ids.iter().enumerate() {
-                let transitions = table.u64(0, entity)?.checked_add(1).ok_or_else(|| {
-                    operator_error(node_id, "rolling entity transition count overflowed")
-                })?;
-                table.set_u64(0, entity, transitions)?;
-                table.push_numeric_rows(
-                    0,
-                    entity,
-                    valid_float64(values, row, self.nan_as_value),
-                )?;
-                for (builder, output) in builders.iter_mut().zip(&self.outputs) {
-                    builder.append(table, entity, output)?;
-                }
-            }
-            if let Some(recorder) = observer {
-                recorder.add(RollingWork::NumericRows, input.num_rows());
-                recorder.add(RollingWork::NumericSerialCalls, 1);
-            }
-            Ok(builders
-                .into_iter()
-                .map(SlabBuilder::finish)
-                .collect::<Vec<_>>())
-        })();
+        let result = self.fill_slab_rows(
+            state.slab.as_mut().expect("slab initialized"),
+            &batch.values,
+            &routing,
+            input.num_rows(),
+            node_id,
+            observer,
+        );
         let columns = match result {
             Ok(columns) => columns,
             Err(error) => {
@@ -391,7 +440,7 @@ impl RollingKernelPlan {
         };
         let local = RollingKernelState {
             kernel_fingerprint: Some(self.fingerprint.clone()),
-            last_identity,
+            last_identity: batch.last_identity,
             ..RollingKernelState::default()
         };
         Ok(StreamKernelUpdate {

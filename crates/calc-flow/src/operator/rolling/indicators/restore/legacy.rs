@@ -42,46 +42,52 @@ impl RollingOperator {
     }
     fn legacy_restore_charge(&self, restored: &mut DecodedRollingState) -> Result<StateCharge> {
         if restored.deferred_history {
-            let charge = crate::operator::rolling::kernel::RollingKernelPlan::slab_charge(
-                restored.typed_kernel_state.as_deref().ok_or_else(|| {
-                    crate::operator::checkpoint::checkpoint_mismatch(
-                        "rolling layout-7 restore is missing typed state",
-                    )
-                })?,
-                &self.name,
-            )?
-            .ok_or_else(|| {
-                crate::operator::checkpoint::checkpoint_mismatch(
-                    "rolling layout-7 restore is missing its state table",
-                )
-            })?;
-            let pending = budget::ordered_buffer_charge(
-                restored.ordered.records(),
-                &self.compiled,
-                &self.name,
-            )?
-            .ok_or_else(|| {
-                crate::operator::checkpoint::checkpoint_mismatch(
-                    "rolling layout-7 pending state has unsupported charge",
-                )
-            })?;
-            let charge = charge.checked_add(pending, &self.name)?;
-            if !self.state_budget.allows(charge.rows, charge.bytes) {
-                return Err(crate::operator::checkpoint::checkpoint_mismatch(
-                    "restored rolling state exceeds the configured state budget",
-                ));
-            }
-            return Ok(charge);
+            self.slab_restore_charge(restored)
+        } else {
+            self.history_restore_charge(restored)
         }
+    }
+
+    fn slab_restore_charge(&self, restored: &DecodedRollingState) -> Result<StateCharge> {
+        let charge = crate::operator::rolling::kernel::RollingKernelPlan::slab_charge(
+            restored.typed_kernel_state.as_deref().ok_or_else(|| {
+                crate::operator::checkpoint::checkpoint_mismatch(
+                    "rolling layout-7 restore is missing typed state",
+                )
+            })?,
+            &self.name,
+        )?
+        .ok_or_else(|| {
+            crate::operator::checkpoint::checkpoint_mismatch(
+                "rolling layout-7 restore is missing its state table",
+            )
+        })?;
+        let pending =
+            budget::ordered_buffer_charge(restored.ordered.records(), &self.compiled, &self.name)?
+                .ok_or_else(|| {
+                    crate::operator::checkpoint::checkpoint_mismatch(
+                        "rolling layout-7 pending state has unsupported charge",
+                    )
+                })?;
+        let charge = charge.checked_add(pending, &self.name)?;
+        self.check_restore_budget(charge)
+    }
+
+    fn history_restore_charge(&self, restored: &mut DecodedRollingState) -> Result<StateCharge> {
         let buffered = budget::buffered_charge(restored.buffer.values(), &self.name)?;
         let (histories, cache) = restored.histories.prepare_charge_cache(&self.name)?;
         let charge = buffered.checked_add(histories, &self.name)?;
+        self.check_restore_budget(charge)?;
+        restored.histories.install_charge_cache(cache);
+        Ok(charge)
+    }
+
+    fn check_restore_budget(&self, charge: StateCharge) -> Result<StateCharge> {
         if !self.state_budget.allows(charge.rows, charge.bytes) {
             return Err(crate::operator::checkpoint::checkpoint_mismatch(
                 "restored rolling state exceeds the configured state budget",
             ));
         }
-        restored.histories.install_charge_cache(cache);
         Ok(charge)
     }
 }

@@ -774,29 +774,7 @@ pub(super) fn validate_metadata_header(
     metadata: &RollingSnapshotMetadata,
     compiled: &CompiledRollingSpec,
 ) -> Result<()> {
-    if compiled.kernel_plan.supports_slab()
-        && metadata.state_layout_version != super::ROLLING_STATE_TABLE_LAYOUT_VERSION
-    {
-        return Err(checkpoint_mismatch(format!(
-            "rolling state layout version {} is not 7; start a new lineage",
-            metadata.state_layout_version
-        )));
-    }
-    let expected_schema_fingerprint = if (compiled.kernel_plan.supports_slab()
-        && metadata.state_layout_version == super::ROLLING_STATE_TABLE_LAYOUT_VERSION)
-        || metadata.state_layout_version == compiled.state_layout_version
-    {
-        &compiled.state_schema_fingerprint
-    } else if metadata.state_layout_version == compiled.legacy_state_layout_version {
-        &compiled.legacy_state_schema_fingerprint
-    } else {
-        return Err(checkpoint_mismatch(format!(
-            "rolling state layout version {} does not match current {} or declared legacy {}",
-            metadata.state_layout_version,
-            compiled.state_layout_version,
-            compiled.legacy_state_layout_version
-        )));
-    };
+    let expected_schema_fingerprint = expected_schema_fingerprint(metadata, compiled)?;
     if metadata.configuration_hash != compiled.configuration_hash {
         return Err(checkpoint_mismatch(
             "rolling operator configuration hash does not match the compiled operator",
@@ -807,6 +785,42 @@ pub(super) fn validate_metadata_header(
             "rolling state schema fingerprint does not match the compiled operator",
         ));
     }
+    validate_kernel_fingerprint(metadata, compiled)
+}
+
+fn expected_schema_fingerprint<'a>(
+    metadata: &RollingSnapshotMetadata,
+    compiled: &'a CompiledRollingSpec,
+) -> Result<&'a String> {
+    if compiled.kernel_plan.supports_slab()
+        && metadata.state_layout_version != super::ROLLING_STATE_TABLE_LAYOUT_VERSION
+    {
+        return Err(checkpoint_mismatch(format!(
+            "rolling state layout version {} is not 7; start a new lineage",
+            metadata.state_layout_version
+        )));
+    }
+    if (compiled.kernel_plan.supports_slab()
+        && metadata.state_layout_version == super::ROLLING_STATE_TABLE_LAYOUT_VERSION)
+        || metadata.state_layout_version == compiled.state_layout_version
+    {
+        Ok(&compiled.state_schema_fingerprint)
+    } else if metadata.state_layout_version == compiled.legacy_state_layout_version {
+        Ok(&compiled.legacy_state_schema_fingerprint)
+    } else {
+        Err(checkpoint_mismatch(format!(
+            "rolling state layout version {} does not match current {} or declared legacy {}",
+            metadata.state_layout_version,
+            compiled.state_layout_version,
+            compiled.legacy_state_layout_version
+        )))
+    }
+}
+
+fn validate_kernel_fingerprint(
+    metadata: &RollingSnapshotMetadata,
+    compiled: &CompiledRollingSpec,
+) -> Result<()> {
     if matches!(
         metadata.state_layout_version,
         ROLLING_COLUMNAR_STATE_LAYOUT_VERSION

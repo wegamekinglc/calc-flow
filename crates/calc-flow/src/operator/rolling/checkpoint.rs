@@ -10,11 +10,7 @@ type Segments = BTreeMap<String, StateSegment>;
 
 impl RollingOperator {
     pub(super) fn checkpoint_legacy(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
-        if self.state.deferred_history && !self.compiled.kernel_plan.supports_slab() {
-            return Err(checkpoint_mismatch(
-                "rolling checkpointing is disabled for the deferred-history stream state",
-            ));
-        }
+        self.validate_checkpoint_admission()?;
         self.validate_legacy_epoch(epoch)?;
         self.materialize_legacy_capture()?;
         self.recount_legacy_capture()?;
@@ -22,6 +18,15 @@ impl RollingOperator {
         let snapshot = self.legacy_snapshot(epoch, descriptor, segments)?;
         self.state.owned_mut()?.last_checkpoint_epoch = Some(epoch);
         Ok(snapshot)
+    }
+
+    fn validate_checkpoint_admission(&self) -> Result<()> {
+        if self.state.deferred_history && !self.compiled.kernel_plan.supports_slab() {
+            return Err(checkpoint_mismatch(
+                "rolling checkpointing is disabled for the deferred-history stream state",
+            ));
+        }
+        Ok(())
     }
 
     fn validate_legacy_epoch(&self, epoch: Epoch) -> Result<()> {
