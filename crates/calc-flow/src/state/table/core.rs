@@ -724,8 +724,8 @@ enum Undo {
     Keyed {
         group: KeyGroupId,
         slot: u32,
-        row: usize,
-        value: KeyedValue,
+        values: Vec<KeyedValue>,
+        capacity: usize,
     },
     RingMetadata {
         group: KeyGroupId,
@@ -1388,12 +1388,19 @@ impl StateTable {
                 .as_ref()
                 .expect("keyed page")
                 .value
-                .values[row_in_page];
+                .values
+                .clone();
+            let capacity = self.partitions[&group].keyed[column][page_index]
+                .as_ref()
+                .expect("keyed page")
+                .value
+                .values
+                .capacity();
             self.push_undo(Undo::Keyed {
                 group,
                 slot,
-                row: row_in_page,
-                value: old,
+                values: old,
+                capacity,
             });
         }
         let partition = self.partitions.get_mut(&group).expect("prepared group");
@@ -2853,22 +2860,24 @@ impl StateTable {
             Undo::Keyed {
                 group,
                 slot,
-                row,
-                value,
+                values,
+                capacity,
             } => {
                 let partition = self.partitions.get_mut(&group).expect("prepared group");
                 let location = partition.locations[&slot];
                 let PageLocation::Keyed { column, page_index } = location else {
                     return Err(internal("keyed undo page kind mismatch"));
                 };
-                Arc::get_mut(
+                let page = Arc::get_mut(
                     &mut partition.keyed[column][page_index]
                         .as_mut()
                         .expect("keyed page")
                         .value,
                 )
-                .expect("unfrozen keyed undo")
-                .values[row] = value;
+                .expect("unfrozen keyed undo");
+                let mut restored = Vec::with_capacity(capacity);
+                restored.extend_from_slice(&values);
+                page.values = restored;
             }
             Undo::RingMetadata {
                 group,

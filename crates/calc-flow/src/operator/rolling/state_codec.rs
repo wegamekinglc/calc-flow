@@ -750,7 +750,7 @@ pub(super) fn parse_snapshot_metadata(
     .map_err(|error| {
         if error.to_string().contains("numerical_profile") {
             checkpoint_mismatch(
-                "rolling numerical profile is no longer supported; start a new lineage",
+                "rolling numerical_profile is no longer supported; start a new lineage",
             )
         } else {
             format_error(&error)

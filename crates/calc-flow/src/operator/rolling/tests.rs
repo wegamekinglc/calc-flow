@@ -2261,6 +2261,10 @@ impl StreamCollector for RejectParallelOutput {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the parallel rollback regression intentionally covers the full failure lifecycle"
+)]
 async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
@@ -2378,11 +2382,27 @@ async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
         }
     );
     let after = committed(&operator);
-    assert_eq!(after.0, before.0, "layout-7 bytes changed on rollback");
+    if after.1 != before.1 {
+        let index = after
+            .1
+            .bytes()
+            .zip(before.1.bytes())
+            .position(|(left, right)| left != right)
+            .unwrap_or(after.1.len().min(before.1.len()));
+        let start = index.saturating_sub(100);
+        let after_end = (index + 160).min(after.1.len());
+        let before_end = (index + 160).min(before.1.len());
+        eprintln!(
+            "canonical diff at {index}: after={} before={}",
+            &after.1[start..after_end],
+            &before.1[start..before_end]
+        );
+    }
     assert_eq!(
         after.1, before.1,
         "canonical kernel state changed on rollback"
     );
+    assert_eq!(after.0, before.0, "layout-7 bytes changed on rollback");
     assert_eq!(
         after.2, before.2,
         "scalar operator state changed on rollback"
@@ -3084,6 +3104,10 @@ fn incremental_scans_keep_ties_zero_signs_and_invalid_rows_across_batches() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the compaction regression covers checkpoint, fallback and continuation in one scenario"
+)]
 async fn columnar_history_compacts_input_and_survives_checkpoint_or_fallback() {
     use crate::{CancellationToken, StreamJobContext};
 

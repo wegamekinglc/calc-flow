@@ -2125,6 +2125,10 @@ impl RollingOperator {
     // accounting, and history application in one ordered pass so a partial
     // failure leaves consistent in-memory state.
     // #lizard forgives
+    #[allow(
+        clippy::too_many_lines,
+        reason = "final emission deliberately keeps one ordered compute-and-commit pass"
+    )]
     async fn emit_rows(
         &mut self,
         rows: Vec<BufferedRow>,
