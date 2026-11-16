@@ -2288,7 +2288,7 @@ impl StateTable {
         }
     }
 
-    pub(super) fn from_v4_lineage(
+    pub(super) fn v4_from_lineage(
         &self,
         keys: Vec<EntityKey>,
         keyed: Vec<KeyedSnapshot>,
@@ -2352,11 +2352,7 @@ impl StateTable {
         Ok(restored)
     }
 
-    fn install_layout7_entities(
-        &self,
-        restored: &mut StateTable,
-        snapshot: &TableSnapshot,
-    ) -> Result<()> {
+    fn install_layout7_entities(restored: &mut StateTable, snapshot: &TableSnapshot) -> Result<()> {
         let counters = snapshot.keyed[0]
             .values
             .as_any()
@@ -2383,7 +2379,7 @@ impl StateTable {
     fn install_layout7_pages(&self, snapshot: &TableSnapshot) -> Result<(TableLineage, usize)> {
         let mut restored = self.prepare_layout7_restore()?;
         restored.begin()?;
-        self.install_layout7_entities(&mut restored, snapshot)?;
+        Self::install_layout7_entities(&mut restored, snapshot)?;
         restored.commit()?;
         Self::clear_restore_tracking(&mut restored);
         let logical_bytes = restored.logical_bytes();
@@ -2872,7 +2868,10 @@ impl StateTable {
                 slot,
                 was_dirty,
                 first_dirty_len,
-            } => self.undo_dirty(group, slot, was_dirty, first_dirty_len),
+            } => {
+                self.undo_dirty(group, slot, was_dirty, first_dirty_len);
+                Ok(())
+            }
             Undo::Stamp {
                 group,
                 key,
@@ -2892,7 +2891,10 @@ impl StateTable {
                 group,
                 page,
                 allocator,
-            } => self.undo_page_replace(group, page, allocator),
+            } => {
+                self.undo_page_replace(group, page, allocator);
+                Ok(())
+            }
             _ => unreachable!(),
         }
     }
@@ -2903,7 +2905,7 @@ impl StateTable {
         slot: u32,
         was_dirty: bool,
         first_dirty_len: usize,
-    ) -> Result<()> {
+    ) {
         let dirty = &mut self
             .partitions
             .get_mut(&group)
@@ -2915,7 +2917,6 @@ impl StateTable {
             dirty.bits.remove(&slot);
         }
         dirty.first_dirty.truncate(first_dirty_len);
-        Ok(())
     }
 
     fn undo_stamp(
@@ -2958,19 +2959,17 @@ impl StateTable {
         Ok(())
     }
 
-    fn undo_page_replace(
-        &mut self,
-        group: KeyGroupId,
-        page: PageRef,
-        allocator: AllocatorUndo,
-    ) -> Result<()> {
+    fn undo_page_replace(&mut self, group: KeyGroupId, page: PageRef, allocator: AllocatorUndo) {
         let slot = page.id().slot;
         let partition = self.partitions.get_mut(&group).expect("prepared group");
         partition.insert(page);
         partition.allocator.restore(slot, allocator);
-        Ok(())
     }
 
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "value undo consumes one owned transaction record"
+    )]
     fn apply_value_undo(&mut self, undo: Undo) -> Result<()> {
         match undo {
             Undo::Keyed {

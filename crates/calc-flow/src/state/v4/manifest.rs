@@ -1,3 +1,7 @@
+#![allow(
+    dead_code,
+    reason = "P3.4 wires these production v4 APIs into the checkpoint coordinator"
+)]
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
@@ -270,7 +274,7 @@ where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
 {
-    T::deserialize(deserializer).map(Some)
+    Option::<T>::deserialize(deserializer)
 }
 
 fn validate_document_version(value: &Value) -> Result<()> {

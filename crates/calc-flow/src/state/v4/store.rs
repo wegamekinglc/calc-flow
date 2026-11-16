@@ -1,3 +1,7 @@
+#![allow(
+    dead_code,
+    reason = "P3.4 wires the v4 store and failure injection into the checkpoint coordinator"
+)]
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
@@ -88,9 +92,10 @@ impl V4Store {
                     let root = root.clone();
                     let object = object.clone();
                     tokio::task::spawn_blocking(move || {
-                        if fault == Some(V4Fault::WorkerPanic) {
-                            panic!("injected checkpoint-v4 worker panic");
-                        }
+                        assert!(
+                            fault != Some(V4Fault::WorkerPanic),
+                            "injected checkpoint-v4 worker panic"
+                        );
                         encode_object(&object, &root, epoch)
                     })
                 })
@@ -103,35 +108,27 @@ impl V4Store {
                 let object = result.map_err(|error| {
                     format_error(format!("checkpoint-v4 encode worker failed: {error}"))
                 })?;
-                encoded.push(object);
+                encoded.push(object?);
             }
         }
         encoded.sort_by(|left, right| {
-            (
-                &left.handle.owner,
-                &left.handle.object_id,
-                left.handle.generation,
-            )
-                .cmp(&(
-                    &right.handle.owner,
-                    &right.handle.object_id,
-                    right.handle.generation,
-                ))
+            (&left.handle.owner, &left.handle.object_id)
+                .cmp(&(&right.handle.owner, &right.handle.object_id))
         });
         self.stats.content_hashes += encoded.len() as u64;
         if let Some(fault) = fault {
             match fault {
-                Some(V4Fault::Write) => return Err(format_error("injected write failure".into())),
-                Some(V4Fault::Checksum) => {
+                V4Fault::Write => return Err(format_error("injected write failure".into())),
+                V4Fault::Checksum => {
                     return Err(mismatch("injected checksum failure".into()));
                 }
-                Some(V4Fault::DiskFull) => {
+                V4Fault::DiskFull => {
                     return Err(io_error(
                         &self.root,
                         std::io::Error::from(std::io::ErrorKind::StorageFull),
                     ));
                 }
-                Some(V4Fault::WorkerPanic) | None => {}
+                V4Fault::WorkerPanic => {}
             }
         }
         self.prepare_directories(&encoded)?;
@@ -163,20 +160,12 @@ impl V4Store {
             for result in settled {
                 encoded.push(result.map_err(|error| {
                     format_error(format!("checkpoint-v4 opaque worker failed: {error}"))
-                })?);
+                })??);
             }
         }
         encoded.sort_by(|left, right| {
-            (
-                &left.handle.owner,
-                &left.handle.object_id,
-                left.handle.generation,
-            )
-                .cmp(&(
-                    &right.handle.owner,
-                    &right.handle.object_id,
-                    right.handle.generation,
-                ))
+            (&left.handle.owner, &left.handle.object_id)
+                .cmp(&(&right.handle.owner, &right.handle.object_id))
         });
         self.stats.opaque_blocks += encoded.len() as u64;
         self.prepare_directories(&encoded)?;
@@ -208,7 +197,7 @@ impl V4Store {
         Ok(committed)
     }
 
-    pub(in crate::state) fn read_manifest(&self, path: &Path) -> Result<V4Manifest> {
+    pub(in crate::state) fn read_manifest(path: &Path) -> Result<V4Manifest> {
         let bytes = std::fs::read(path).map_err(|source| io_error(path, source))?;
         V4Manifest::from_bytes(&bytes)
     }
@@ -232,10 +221,8 @@ impl V4Store {
         for object in objects {
             let committed = self.absolute(&object.handle);
             let staging = staging_path(&committed);
-            for directory in [committed.parent(), staging.parent()] {
-                if let Some(directory) = directory {
-                    parents.insert(directory.to_path_buf());
-                }
+            for directory in [committed.parent(), staging.parent()].into_iter().flatten() {
+                parents.insert(directory.to_path_buf());
             }
         }
         for directory in parents {
@@ -265,7 +252,7 @@ impl V4Store {
             for result in settled {
                 result.map_err(|error| {
                     format_error(format!("checkpoint-v4 write worker failed: {error}"))
-                })?;
+                })??;
             }
         }
         self.stats.file_syncs += objects.len() as u64;

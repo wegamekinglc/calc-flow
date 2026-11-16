@@ -1,3 +1,7 @@
+#![allow(
+    dead_code,
+    reason = "P3.4 wires opaque v4 objects into the checkpoint coordinator"
+)]
 use std::{
     collections::HashMap,
     mem::size_of,

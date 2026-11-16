@@ -175,15 +175,8 @@ impl V4TableCapture {
         for partition in &self.freeze.partitions {
             for change in &partition.changes {
                 if let FrozenChange::Write(page) = change {
-                    let object = page_object(page)?;
-                    identities.insert(
-                        (
-                            object.owner.clone(),
-                            object.object_id.clone(),
-                            object.generation,
-                        ),
-                        page.id(),
-                    );
+                    let object = page_object(page);
+                    identities.insert((object.owner.clone(), object.object_id.clone()), page.id());
                     objects.push(object);
                 }
             }
@@ -192,16 +185,14 @@ impl V4TableCapture {
         for partition in lineage.partitions.values() {
             for page in partition.pages.values() {
                 if !self.previous.contains_key(&page.id()) {
-                    let object = page_object(page)?;
-                    identities.insert(
-                        (
-                            object.owner.clone(),
-                            object.object_id.clone(),
-                            object.generation,
-                        ),
-                        page.id(),
-                    );
-                    objects.push(object);
+                    let object = page_object(page);
+                    let identity = (object.owner.clone(), object.object_id.clone());
+                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                        identities.entry(identity)
+                    {
+                        entry.insert(page.id());
+                        objects.push(object);
+                    }
                 }
             }
         }
@@ -209,11 +200,7 @@ impl V4TableCapture {
         let mut handles = self.previous.clone();
         for object in encoded {
             let id = identities
-                .get(&(
-                    object.handle.owner.clone(),
-                    object.handle.object_id.clone(),
-                    object.handle.generation,
-                ))
+                .get(&(object.handle.owner.clone(), object.handle.object_id.clone()))
                 .copied()
                 .ok_or_else(|| mismatch("persisted page identity is unknown".into()))?;
             handles.insert(id, object.handle);
@@ -228,7 +215,7 @@ impl V4TableCapture {
                     mismatch("partition index references a page without a handle".into())
                 })?;
                 live.insert(page.id(), handle.clone());
-                entries.push(page_entry(page, handle)?);
+                entries.push(page_entry(page, handle));
             }
             let index = PartitionIndex {
                 format_version: 4,
@@ -294,6 +281,10 @@ impl V4TableCapture {
     }
 }
 
+#[allow(
+    clippy::unused_async,
+    reason = "the coordinator awaits recovery as one operation"
+)]
 pub(in crate::state) async fn restore_table_v4(
     store: &mut V4Store,
     table: &StateTable,
@@ -419,24 +410,24 @@ fn snapshot_from_lineage(table: &StateTable, lineage: TableLineage) -> Result<Ta
             numeric: Some(numeric),
         });
     }
-    table.from_v4_lineage(keys, keyed, rings, lineage, next_entity)
+    table.v4_from_lineage(keys, keyed, rings, lineage, next_entity)
 }
 
-fn page_object(page: &PageRef) -> Result<NewObject> {
+fn page_object(page: &PageRef) -> NewObject {
     let id = page.id();
-    let payload = page_payload(page)?;
-    Ok(NewObject {
+    let payload = page_payload(page);
+    NewObject {
         kind: ObjectKind::Page,
         owner: "rolling".into(),
         object_id: format!("{}/{}/{}", id.key_group.0, id.slot, id.generation),
         generation: id.generation,
         payload: ObjectPayload::Arrow(payload),
-    })
+    }
 }
 
-fn page_entry(page: &PageRef, handle: V4Handle) -> Result<PageEntry> {
-    let (column, kind, range) = page_location(page)?;
-    Ok(PageEntry {
+fn page_entry(page: &PageRef, handle: V4Handle) -> PageEntry {
+    let (column, kind, range) = page_location(page);
+    PageEntry {
         page_id: V4PageId {
             key_group: page.id().key_group.0,
             slot: page.id().slot,
@@ -451,47 +442,51 @@ fn page_entry(page: &PageRef, handle: V4Handle) -> Result<PageEntry> {
         byte_len: handle.byte_len,
         sha256: handle.sha256.clone(),
         handle,
-    })
+    }
 }
 
-fn page_location(page: &PageRef) -> Result<(String, &'static str, (u64, u64))> {
+fn page_location(page: &PageRef) -> (String, &'static str, (u64, u64)) {
     match page {
-        PageRef::Metadata(page) => Ok((
+        PageRef::Metadata(page) => (
             "metadata".into(),
             "metadata",
             (0, page.value.entities.len() as u64),
-        )),
+        ),
         PageRef::Keyed {
             column: column_index,
             page,
             ..
-        } => Ok((
-            column.to_string(),
+        } => (
+            column_index.to_string(),
             "keyed",
             (0, page.value.values.len() as u64),
-        )),
+        ),
         PageRef::Ring {
             column: column_index,
             page,
             ..
-        } => Ok((column.to_string(), "ring", (0, page.value.ring.len as u64))),
+        } => (
+            column_index.to_string(),
+            "ring",
+            (0, page.value.ring.len as u64),
+        ),
         PageRef::ValueLog {
             column: column_index,
             page,
             ..
-        } => Ok((
-            column.to_string(),
+        } => (
+            column_index.to_string(),
             "value_log",
             (
                 u64::from(page.value.start),
                 u64::from(page.value.start + page.value.len),
             ),
-        )),
+        ),
     }
 }
 
-fn page_payload(page: &PageRef) -> Result<ArrowPayload> {
-    let mut metadata = page_metadata(page)?;
+fn page_payload(page: &PageRef) -> ArrowPayload {
+    let mut metadata = page_metadata(page);
     let (fields, columns) = match page {
         PageRef::Metadata(page) => {
             metadata.insert(
@@ -563,15 +558,15 @@ fn page_payload(page: &PageRef) -> Result<ArrowPayload> {
             (fields, page.value.chunks.clone())
         }
     };
-    Ok(ArrowPayload {
+    ArrowPayload {
         fields,
         columns,
         metadata,
-    })
+    }
 }
 
-fn page_metadata(page: &PageRef) -> Result<HashMap<String, String>> {
-    let (column, kind, _) = page_location(page)?;
+fn page_metadata(page: &PageRef) -> HashMap<String, String> {
+    let (column, kind, _) = page_location(page);
     let mut metadata =
         HashMap::from([("page_kind".into(), kind.into()), ("column".into(), column)]);
     match page {
@@ -583,7 +578,7 @@ fn page_metadata(page: &PageRef) -> Result<HashMap<String, String>> {
             metadata.insert("row".into(), row.to_string());
         }
     }
-    Ok(metadata)
+    metadata
 }
 
 fn numeric_metadata(parts: &NumericAccumulatorLayout7) -> HashMap<String, String> {
@@ -971,7 +966,7 @@ mod tests {
         assert_eq!(store.stats().file_syncs, 6);
         assert_eq!(store.stats().read_back_hashes, 0);
 
-        let stored_manifest = store.read_manifest(&persisted.manifest_path).unwrap();
+        let stored_manifest = V4Store::read_manifest(&persisted.manifest_path).unwrap();
         let mut cold = schema();
         let snapshot = restore_table_v4(&mut store, &cold, &stored_manifest)
             .await
@@ -999,7 +994,7 @@ mod tests {
             .persist(&mut store, &manifest())
             .await
             .unwrap();
-        let stored_manifest = store.read_manifest(&persisted.manifest_path).unwrap();
+        let stored_manifest = V4Store::read_manifest(&persisted.manifest_path).unwrap();
         let root = persisted.roots[&KeyGroupId(0)].clone();
         let page = persisted.handles.values().next().unwrap().clone();
         for handle in [root, page] {
