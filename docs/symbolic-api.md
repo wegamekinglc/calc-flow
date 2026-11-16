@@ -862,8 +862,9 @@ options; event-window programs apply the option checks described above.
 Cumulative sum/min/max/variance require declaration and writer
 `state_layout_version` 4, persisting exact summaries and progress. Other
 declarations use version 1, or version 2 when they include EWMA/cumulative mean,
-and retain writer layout 3. Existing checkpoint identities remain unchanged;
-see [native rolling state](symbolic-design.md#native-rolling-state).
+and retain writer layout 3. Restore validates the compensated numeric contract
+and rejects checkpoints carrying prior rolling-kernel identities instead of
+migrating them; see [native rolling state](symbolic-design.md#native-rolling-state).
 
 `cs.rank`, `cs.percentile`, `cs.demean`, `cs.mean`, `cs.zscore`, `cs.winsorize`,
 `cs.top`, `cs.bottom`, `cs.top_quantile`, `cs.bottom_quantile`, and

@@ -979,8 +979,8 @@ state. Its string copies and hash-table storage grow with resident entities and
 are not included in the logical state charge. Both routes check the entity that
 last followed the previous row's entity
 before hashing a key. Only touched entities prepare transactional kernel state;
-numerical state needed by the released West/M2/refold
-behavior is retained even for mean-only outputs. Plans whose one or two
+the shared compensated numeric accumulator is retained even for mean-only
+outputs. Plans whose one or two
 row-window numeric groups feed only one or two Float64 mean or
 mean-difference outputs run a fixed-arity loop over that same state; other
 shapes use the generic typed kernel. Retained-history tails reuse each
@@ -1001,13 +1001,13 @@ representation.
 Ordered typed plans can assign whole entities to owned CPU lanes when every
 group supports the same independent owned transition and every output is
 Float64. This includes Rows, Duration and mixed windows, multiple groups and
-readouts, and both numerical profiles. The workers preserve the plan's profile
-and NaN policy. Scan groups and Count, integer or Float32 outputs use the serial
-path. Cold and restored state can use lanes after reconstruction from the
-authoritative history. A finalized batch has at least 64,000 rows and two
-touched entities. The lane count is the minimum of available CPU capacity, the
-batch's 16,000-row work units and touched entities; fewer than two lanes use the
-serial path. Routing uses incoming transitions, groups, readouts and retained
+readouts under the single compensated numeric contract. The workers preserve
+the plan's numeric contract and NaN policy. Scan groups and Count, integer or
+Float32 outputs use the serial path. Cold and restored state can use lanes after
+reconstruction from the authoritative history. A finalized batch has at least
+64,000 rows and two touched entities. The lane count is the minimum of available
+CPU capacity, the batch's 16,000-row work units and touched entities; fewer than
+two lanes use the serial path. Routing uses incoming transitions, groups, readouts and retained
 work to estimate lane balance; no lane may own more than 5/8 of that estimate.
 This estimate is a scheduling heuristic, not a work quota. Unsupported shapes,
 small or skewed batches and unavailable admission use the original serial loop.

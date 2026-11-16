@@ -168,9 +168,8 @@ fresh recurrence; managed streaming state continues to belong to its operator.
 
 `array::rolling_mean` computes one ordered sequence directly, without a graph,
 DataFusion session or Python process. `RollingMeanOptions::new(window)` selects
-one minimum valid sample and the existing `RollingNumericalProfile::StableV1`.
-Use `with_min_periods` for a count between one and the window, or explicitly
-select `StableV2Preview` with `with_numerical_profile`.
+one minimum valid sample. Use `with_min_periods` for a count between one and the
+window.
 
 ```rust
 use calc_flow::{Result, array::{ArrayExecutionOptions, FloatView, RollingMeanOptions, rolling_mean}};
@@ -187,12 +186,14 @@ fn rolling_prices(values: &[f64]) -> Result<calc_flow::array::NativeArray> {
 The Float64 output has one position per input, including for Float32 input.
 Nulls and NaNs consume window positions but do not count as valid samples;
 infinities remain valid. A missing current input still reads the surviving
-window, and insufficient valid samples produce null. The default matches the
-native `StatefulNumericV1` table path, including its released extreme-value
-limits. It does not adopt ordinary array mean's exact summation or the SQL AVG
-rewrite's sticky NaN-value policy. Array and table execution share add/remove,
-mean/M2 repair, preview rebase and readout arithmetic; checkpoint fields and
-the table's shared-history owner remain unchanged.
+window, and insufficient valid samples produce null. Array and table rolling
+means share a compensated sliding sum over finite valid samples, divided only
+at readout. A finite window whose sum overflows reads the corresponding
+infinity for sum and mean; opposite extremes `{-1e308, +1e308}` read zero.
+This contract does not adopt ordinary array mean's exact summation or the SQL
+AVG rewrite's sticky NaN-value policy. Array and table execution share validity
+classification, scheduled and family-local overflow rebuilds, and readout
+arithmetic; the table retains its shared-history owner.
 
 Execution limits cover output buffers, validity, shape, and bounded numeric
 scratch/history. History has fixed storage for at most
@@ -225,10 +226,10 @@ fn across_chunks() -> Result<calc_flow::array::NativeArray> {
 
 Each result owns a Float64 vector with one output position per input position.
 The existing eager mean and EWMA numerical contracts apply, including missing
-positions, warm-up, infinities, operation order and mean/M2 repair. StableV2's
-rebase cadence counts all sequence positions across chunks. An empty vector
-does not advance or repair state. Input buffers remain read-only; output buffers
-outlive the input borrow, reset and state drop.
+positions, warm-up, infinities, operation order and compensated rebuilds.
+Rolling-mean rebuild cadence counts all sequence positions across chunks. An
+empty vector does not advance or rebuild state. Input buffers remain read-only;
+output buffers outlive the input borrow, reset and state drop.
 
 The default retained-state limit is 256 MiB. `state_bytes()` charges 64 bytes
 plus 16 per allocated mean history slot, including spare capacity, or 24 bytes
@@ -259,7 +260,8 @@ accepts `{"function":"rsi","period":...}` on rank-one prices and
 `{"function":"atr","period":...}` on packed row-major `[n,3]` inputs with
 high, low and close in that order. ATR reads those rows directly without three
 intermediate vectors; `[0,3]` is valid. Every kernel returns an aligned float64
-vector. IR2 retains the old kernels' layout and numeric identity.
+vector. IR2 retains those kernels' checkpoint layouts and current numeric
+contracts.
 
 Declare exactly one required Array port `input` and one required Array port
 `output`, without Arrow schemas. Scalars, Boolean arrays, foreign payloads,
@@ -283,7 +285,10 @@ Output-element limits count ATR rows, rather than its three input operands.
 The allocation limit includes
 old state, candidate, output, numerical scratch and retained encoded captures.
 Distinct immutable capture allocations are charged once until their final
-owner drops. EWMA/rolling mean retain byte-identical layout 1. RSI/ATR use
+owner drops. EWMA retains its layout-1 encoding. Rolling mean also uses layout
+1, storing the compensated sum, correction and finite sample count under its
+compensated numeric marker; checkpoints carrying earlier mean markers are
+rejected rather than migrated. RSI/ATR use
 layout 2 with fixed 116/108-byte state segments, raw floating bits, complete
 previous/seed/mean/counter state and an identity fingerprint including the shape
 rule and normalized parameters. Even empty or missing-reset sequences retain
@@ -484,8 +489,9 @@ fixed across this provider's stream.
 The fixed 156-byte layout 3 checkpoint preserves all three recurrence counts
 and raw floating bits, including active infinities, NaNs and signed zero.
 Ordinary and terminal managed recovery validate parameters, identity and state
-invariants before any source opens. Existing IR1/layout1 and IR2/layout2 kernels
-retain their versions and byte layouts; IR3 also accepts those kernels.
+invariants before any source opens. IR3 also accepts the IR1/IR2 kernels. EWMA,
+RSI and ATR retain their checkpoint encodings; rolling mean follows the
+compensated layout-1 contract above.
 The standalone [MACD example](../crates/calc-flow/examples/native_macd.rs)
 shows carried-line updates and immutable component ownership.
 
@@ -528,8 +534,8 @@ IR1 keeps rank zero/one and its original closed node fields. `input`, typed
 `literal`, `unary`, `binary`, `where`, `reduce`, `rolling_mean`, and `ewma`
 nodes reuse the eager kernels. Full reductions accept numeric scalars/vectors;
 rolling nodes require numeric vectors, return float64, and
-start fresh for each batch. Rolling means admit explicit `stable_v1` and
-`stable_v2` profiles. Node order and port list order need not be topological or
+start fresh for each batch with the shared compensated rolling-mean contract.
+Node order and port list order need not be topological or
 identical. Missing references, cycles and unreachable nodes are rejected.
 
 Shape `[]` is scalar; `[n]` is a vector, and `[null]` has an unknown vector
@@ -814,9 +820,9 @@ amounts in an expression stage:
 
 The run-scoped physical planner can rewrite bounded ascending `AVG(Float64)`
 windows and compatible same-column, same-frame `COUNT` guards through the
-crate-private `CalcFlowRollingExec`. AVG-only queries use the shared Native
-numerical profile; queries admitted by COUNT use SQL sum/count transitions
-throughout. The optimizer requires proven partition/order keys and sorted
+crate-private `CalcFlowRollingExec`. AVG-only queries use the shared compensated
+sliding-mean contract and sticky-NaN policy; queries admitted by COUNT use SQL
+sum/count transitions throughout. The optimizer requires proven partition/order keys and sorted
 physical input. Any logical eligibility fallback keeps the original DataFusion
 plan for the whole query, including AVG-only queries. If physical rewriting
 cannot cover every candidate window in
@@ -1006,10 +1012,10 @@ Cumulative sum/min/max/variance require
 `ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION` (4) in both declarations and writer
 state. Layout 4 extends the columnar layout with exact per-group summaries
 (including binary64 bits), alongside entity keys, history and pending rows.
-Other declarations keep their existing layout and checkpoint fingerprints.
-Recovery validates the layout, complete summary inventory, configuration,
-schema, kernel and numerical profile before installing state. Unknown versions
-and incompatible configurations fail closed.
+Other declarations retain their declaration layouts. Recovery validates the
+layout, complete summary inventory, configuration, schema, kernel and numeric
+contract before installing state. Unknown versions and incompatible
+configurations fail closed.
 
 A frame is `rows(size)` —
 the `size` rows through the current row of the entity total order — or
@@ -1023,7 +1029,7 @@ EWMA or cumulative mean use `ROLLING_STATE_LAYOUT_VERSION` (1), while either rec
 documents and configuration fingerprints. Old-only operators without cumulative
 summaries write `ROLLING_COLUMNAR_STATE_LAYOUT_VERSION` (3): one deterministic entity
 dictionary, projected retained history, a columnar reorder buffer, recurrence
-state, and kernel/numerical fingerprints. Restore continues to read the
+state, and kernel/numeric-contract fingerprints. Restore continues to read the
 declaration's v1/v2 layout, while newly emitted descriptors and pipeline
 capabilities report writer layout v3. `allowed_lateness_micros` and a
 `LatePolicySpec` of `Error` (envelope scope), `Drop` (metrics version 1), or
@@ -1064,7 +1070,7 @@ excludes no computational or payload containers and does not shorten their
 funded lifetime when ownership moves into a lease.
 
 Layout 5 preserves complete indicator groups and mixed old state with strict
-schema/configuration/kernel/numerical fingerprints. Preparation runs through
+schema/configuration/kernel/numeric-contract fingerprints. Preparation runs through
 the controlled asynchronous worker path. Capture only attaches prepared bytes
 for the exact state revision; an unprepared synchronous capture returns a
 preparation error. Unchanged payload storage can be reused across epochs;
@@ -1082,14 +1088,13 @@ the executable
 The new `RollingOutputSpec::Rsi` and `RollingOutputSpec::Atr` variants require
 Rust callers with exhaustive matches to update those matches.
 
-`numerical_profile` is optional. Its default `stable_v1` is omitted from the
-canonical configuration, preserving existing project and checkpoint hashes.
-The explicit `stable_v2` value is a preview: floating numeric and pair windows
-periodically rebuild from retained values with shifted compensated sums. The
-per-entity transition count is stored in the existing nullable columnar-state
-position field, so the cadence survives checkpoint recovery without changing
-the layout-v3 field schema. The profile is part of both configuration and
-kernel fingerprints, and restore rejects a profile mismatch.
+`RollingSpec` and the project-v3 schema have no numerical selector. Sliding
+floating sum, mean, dispersion and pair outputs use the single
+`compensated-sliding-1` contract. Its identity contributes to kernel and
+checkpoint fingerprints; restore rejects checkpoints carrying prior
+rolling-kernel identities or earlier numerical markers instead of migrating
+them. Start a new lineage for state written under an incompatible numeric
+contract.
 
 Validation rejects unknown fields, empty or duplicate keys, duplicate
 or input-colliding output names, nullable or floating sequence columns,
@@ -1120,29 +1125,34 @@ Aggregates count valid samples — values that are neither null nor NaN;
 infinities are numeric samples and count toward `min_periods`. A window with
 fewer than `min_periods` valid samples reads null, and a computed NaN stays
 observably distinct from that gate. `min` and `max` read a monotonic queue of
-valid samples and preserve the input type. Floating sums follow IEEE
-arithmetic: a window holding both signs of infinity sums to NaN, and a window
-holding one sign sums to that infinity. Integer sums stay exact and checked:
-the slide runs through a wide transient accumulator and narrows with a
-checked conversion at readout, so a window whose true sum is representable
-never reports a false overflow, while a genuine `int64` or `uint64` overflow
-fails the run loudly. Mean, variance, and standard deviation read a
-reversible West accumulator that also counts the window's positive and
-negative infinities: a mean over both signs is NaN (the undefined ∞ − ∞), a
-mean over one sign is that infinity, and a finite window keeps the
-incremental West value. Variance and standard deviation over any window
-holding an infinity are NaN — a pinned contract — and their divisor is
-`valid_count − ddof`: a non-positive divisor reads null after the
-`min_periods` gate and before the NaN classification. Negative `M2` drift
-from reversible removal clamps to zero at readout.
+valid samples and preserve the input type.
 
-`covariance` and `correlation` read a reversible West co-moment accumulator
-over the pairwise-valid positions — rows where both operands are non-null
-and non-NaN — so `min_periods` counts pairwise samples and their divisor is
-that count minus `ddof`. Their classification order is frozen: the
-`min_periods` and divisor null gates come first, then a window holding ±inf
-on either side reads NaN, and only a finite window with a zero-variance side
-reads null for `correlation` — an infinity window therefore never reads null.
+Floating sum and mean use a compensated sliding sum over finite valid samples,
+keeping the correction separate from the main sum and dividing only at mean
+readout. A window holding both signs of infinity reads NaN for sum and mean;
+one sign reads that infinity. A finite window whose compensated sum overflows
+reads the corresponding infinity for both sum and mean. Integer sums stay exact
+and checked: the slide runs through a wide transient accumulator and narrows
+with a checked conversion at readout, so a window whose true sum is
+representable never reports a false overflow, while a genuine `int64` or
+`uint64` overflow fails the run loudly. Integer mean converts the exact wide
+numerator to float64 and divides once at readout.
+
+Variance and standard deviation use shifted compensated sums of deviations and
+squared deviations. Any infinity in the window reads NaN after the
+`min_periods` and `valid_count − ddof` null gates; a non-positive divisor reads
+null before NaN classification. A negative centered moment is clamped to zero;
+NaN is never clamped, including NaN from an overflowed `inf − inf` subtraction;
+finite inputs can therefore read infinity or NaN when moment arithmetic
+overflows.
+
+`covariance` and `correlation` use shifted compensated co-moments over the
+pairwise-valid positions — rows where both operands are non-null and non-NaN —
+so `min_periods` counts pairwise samples and their divisor is that count minus
+`ddof`. Their classification order is the same: the `min_periods` and divisor
+null gates come first, then a window holding ±inf on either side reads NaN,
+and only a finite window with a zero-variance side reads null for
+`correlation` — an infinity window therefore never reads null.
 
 Outputs over the same input column and frame share one accumulator group —
 numeric, or one monotonic extrema group per direction for `min` and `max` —
@@ -1167,18 +1177,23 @@ cumulative summaries and processed-row counts;
 restore validates the schema and fingerprints before rebuilding the kernel.
 See [symbolic compiler design](symbolic-design.md#native-rolling-state) for
 the distinction between declaration versions and checkpoint writer layout.
-Sliding arithmetic that becomes non-finite re-folds the current window,
-keeping the classification exact at an O(frame) cost per row for those
-windows.
+Rows groups rebuild every `max(window_size, 64)` finalized entity positions.
+Duration groups count the same positions with cadence `max(n_prev, 64)`, where
+`n_prev` is the group row count after its previous scheduled rebuild (64 before
+the first). A rebuild chooses the newest finite sample as the
+shift and folds retained finite samples oldest-to-newest. Non-finite floating
+state triggers a family-local overflow rebuild, so dispersion overflow cannot
+change mean bits. For one ordered row sequence, compensated outputs are
+bit-identical across data batch boundaries and `StreamSession` push sequences.
 
-Three settled corner properties of this algorithm family are identical on
-every path: the incremental mean can overflow opposite-sign extremes
-({−1e308, +1e308} reads +inf though the true mean is 0); a floating sum can
-overflow its finite partial sum before reaching an infinity ({−1e308,
-−1e308, +inf} sums to NaN while the mean reads +inf); and `min`/`max` order
-floating samples by the IEEE total order, so −0.0 and +0.0 are
-distinguishable extrema — a self-consistent deterministic choice, not SQL
-`MIN`/`MAX` semantics, which compare them equal.
+The corner properties are deterministic on every path. Compensated opposite
+extremes `{-1e308, +1e308}` have sum and mean zero. The finite window
+`{+1e308, +1e308}` reads positive infinity for both sum and mean because its
+sum overflows before mean division. Overflowed dispersion reads infinity when
+its centered moment is infinite and NaN when the subtraction is undefined;
+NaN is not clamped to zero. `min`/`max` order floating samples by the IEEE
+total order, so −0.0 and +0.0 are distinguishable extrema — a self-consistent
+deterministic choice, not SQL `MIN`/`MAX` semantics, which compare them equal.
 
 ## Cross-section statistics
 

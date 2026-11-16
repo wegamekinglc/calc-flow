@@ -1002,8 +1002,8 @@ The table bridge reports
 work and an optional
 latched static matrix RHS. Its stream mode does not add high-level ArrayExpr
 streaming. All three native factories report `deterministic=True` and
-`replay_safe=True` for identical inputs on the same implementation and numerical
-profile; these claims do not promise cross-platform bitwise equality or delivery
+`replay_safe=True` for identical inputs on the same implementation and numeric
+contract; these claims do not promise cross-platform bitwise equality or delivery
 guarantees. The sequence factory instead reports `modes=("stream",)`,
 `stateful=True`, `microbatch_invariant=True`, `requires_watermark=False`,
 `checkpoint_support="checkpointed_stateful"`, `state_version=1`,
@@ -1465,11 +1465,10 @@ seeds from the first valid value, and shares the table EWMA transition.
 Null and NaN observations are skipped; their readout carries prior state once
 the valid-observation warmup is met. `min_periods` may exceed `span`.
 
-`rolling_mean(values, window=..., min_periods=1, numerical_profile="stable_v1")`
-uses a row window: nulls and NaNs occupy positions without counting as valid
-samples. `min_periods` must be between one and the window size. The default
-retains the table `stable_v1` transition; `stable_v2` selects the existing
-preview profile explicitly. Both return aligned float64 vectors.
+`rolling_mean(values, window=..., min_periods=1)` uses a row window: nulls and
+NaNs occupy positions without counting as valid samples. `min_periods` must be
+between one and the window size. It returns an aligned float64 vector and shares
+the table rolling mean's compensated sliding sum, divided only at readout.
 
 `rsi(values, period=n)` and `atr(high, low, close, period=n)` use Wilder
 transitions and return nullable float64 vectors aligned to the inputs. Period
@@ -1607,16 +1606,19 @@ reordering continue to use table operators.
 
 The strict options object requires `ir_version`, `input_dtype` and `kernel`.
 IR1 accepts `{"function":"rolling_mean","window":20}` with optional
-`min_periods` and `numerical_profile`, or `{"function":"ewma","span":20}` with
-optional `min_periods`. IR2 retains those kernels and adds
+`min_periods`, or `{"function":"ewma","span":20}` with optional `min_periods`.
+IR2 retains those kernels and adds
 `{"function":"rsi","period":14}` and `{"function":"atr","period":14}` with
 mandatory positive-u64 period. Missing/NaN resets and finite-domain errors use
 the indicator contract above. `execution` holds output/allocation limits and `state`
 holds `max_state_bytes`; both are optional and reject unknown keys. These options
 use the sequence factory's schema, independently of array_expr IR1/IR2.
 Compile it through `PipelineBuilder.external` with an explicitly registered
-Runtime and run it through explicit native source/sink bindings. The old kernels
-retain checkpoint layout 1 in every IR; RSI and ATR use layout 2. IR3 additionally
+Runtime and run it through explicit native source/sink bindings. EWMA and
+rolling mean use checkpoint layout 1 in every IR; RSI and ATR use layout 2.
+Layout-1 rolling-mean state stores the compensated sum, correction and finite
+sample count and accepts only its compensated numeric marker; checkpoints
+carrying earlier mean markers are rejected rather than migrated. IR3 additionally
 accepts `{"function":"macd_components"}` with the five optional MACD parameters
 and their 12/26/9/1/1 defaults. Input is one float32/float64 vector; its single
 float64 output has shape `[n, 3]` in line/signal/histogram order. The element

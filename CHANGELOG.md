@@ -9,6 +9,24 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-16: Replace selectable rolling numerical profiles with one
+  compensated sliding numeric contract. Remove Rust `RollingNumericalProfile`,
+  `RollingSpec.numerical_profile`, the rolling-mean profile accessors, every
+  Python/IR `numerical_profile` option, and the project-v3 enum/property;
+  documents and options carrying the removed field are rejected. Rolling
+  floating sum/mean, variance/stddev and covariance/correlation now share
+  compensated sliding arithmetic, so their last bits can change; integer sums
+  remain exact and checked, and EWMA, cumulative, decay, RSI, ATR and MACD
+  recurrences are unchanged. A finite window whose sum overflows reads the
+  corresponding infinity for sum and mean, while opposite extremes
+  `{-1e308, +1e308}` read zero; dispersion preserves overflow-produced NaN
+  rather than clamping it to zero. Native array rolling mean and the AVG-only
+  DataFusion rewrite use the same arithmetic, with sticky NaN retained for the
+  rewrite. Rolling checkpoints carrying removed profile markers or prior kernel
+  identities are rejected rather than recovered; start a new lineage. See
+  [rolling windows](docs/rust-api.md#rolling-windows) and
+  [native arrays](docs/python-api.md#native-arrays).
+
 - 2026-11-15: Add the synchronous `StreamSession` push API. Rust
   `StreamSession`, `SessionWatermark`, and `SessionOutput`, and Python
   `TableExpr.session()` and `Program.session()`, run one admitted stream plan

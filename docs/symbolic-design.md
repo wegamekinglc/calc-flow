@@ -202,26 +202,30 @@ reference path. Retained history remains authoritative for recovery; see the
 Project declarations carry the validated configuration and declaration layout
 versions. Operators without cumulative sum/min/max/variance write columnar state layout `3`, with
 an entity dictionary, projected history, a reorder buffer, recurrence state,
-and kernel/numerical fingerprints. Restore also supports the declaration's
+and kernel/numeric-contract fingerprints. Restore also supports the declaration's
 layout `1` or `2` state. Writer layout is distinct from the declaration fields.
 Cumulative sum/min/max/variance use declaration and writer layout `4`, adding
 complete per-entity/per-group summaries. Counts, exact integer totals, extrema,
 the variance origin/mean/M2 IEEE bits and infinity classification survive
 recovery without replaying prefix history. Layout `4` requires an entity
-processed-row count for both numerical profiles, distinguishing cumulative
+processed-row count for the cumulative layout, distinguishing cumulative
 prefixes from entities with only pending rows; snapshots without this evidence
 fail closed. Missing, duplicate, malformed or mismatched summaries fail closed
 before state installation. Primitive numeric cumulative outputs use the typed
 Arrow transition and ordered columnar buffering, including stages shared with
 cumulative mean or supported rolling outputs. Other shapes retain the general
-fallback. Both paths update the same constant summaries; checkpoint encodings
-and kernel identities remain compatible with earlier layout `4` snapshots.
+fallback. Both paths update the same constant summaries. Restore validates the
+compensated numeric contract and rejects snapshots carrying prior kernel
+identities instead of migrating them.
 The [columnar state implementation](../crates/calc-flow/src/operator/rolling/state_v3.rs)
 owns this encoding.
 
-The default numerical profile is `stable_v1`. Explicit `stable_v2` enables
-shifted compensated sums with periodic rebasing. Profile identity contributes
-to configuration and kernel fingerprints and is checked on recovery.
+Sliding floating sum and mean use compensated sums, with division at readout.
+Variance, standard deviation, covariance and correlation use shifted compensated
+moments and co-moments. Scheduled rebuilds and family-local overflow rebuilds
+fold retained finite samples oldest-to-newest. Integer sums and unchanged
+recurrences keep their existing behavior. The `compensated-sliding-1` numeric
+contract contributes to kernel and checkpoint fingerprints.
 The [Rust runtime reference](rust-api.md#rolling-windows) specifies types, null/NaN handling,
 infinity classification, numerical limits, and late-row behavior.
 
