@@ -552,27 +552,12 @@ fn with_field(schema: &Schema, index: usize, replacement: &Field) -> Schema {
 // ------------------------------------------------------------------
 
 #[test]
-fn stable_v2_profile_is_explicit_and_fingerprinted() {
-    let mut document = valid_spec_json();
-    document["numerical_profile"] = json!("stable_v2");
-    let preview: RollingSpec = serde_json::from_value(document.clone()).unwrap();
-    let stable = valid_spec();
-
-    assert_eq!(
-        preview.numerical_profile,
-        RollingNumericalProfile::StableV2Preview
-    );
-    assert_eq!(serde_json::to_value(&preview).unwrap(), document);
-    assert_ne!(
-        compile_spec(&stable, &input_schema())
-            .unwrap()
-            .kernel_plan
-            .fingerprint(),
-        compile_spec(&preview, &input_schema())
-            .unwrap()
-            .kernel_plan
-            .fingerprint()
-    );
+fn removed_numerical_profiles_are_rejected() {
+    for profile in ["stable_v1", "stable_v2"] {
+        let mut document = valid_spec_json();
+        document["numerical_profile"] = json!(profile);
+        assert!(serde_json::from_value::<RollingSpec>(document).is_err());
+    }
 }
 
 // ------------------------------------------------------------------
@@ -782,15 +767,14 @@ fn float_column(outputs: &ComputedOutputs, index: usize) -> Vec<Option<f64>> {
 }
 
 #[test]
-fn stable_v2_rebases_large_offset_variance_with_shifted_sums() {
-    let mut spec = kernel_spec(json!([ddof_output(
+fn compensated_rebuild_handles_large_offset_variance_with_shifted_sums() {
+    let spec = kernel_spec(json!([ddof_output(
         "variance",
         "price",
         "price_variance",
         64,
         0
     )]));
-    spec.numerical_profile = RollingNumericalProfile::StableV2Preview;
     let prices = (0..64)
         .map(|index| 1.0e12 + f64::from(index % 9) / 10.0)
         .collect::<Vec<_>>();
@@ -810,13 +794,14 @@ fn stable_v2_rebases_large_offset_variance_with_shifted_sums() {
 
     let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
     let actual = float_column(&outputs, 0)[63].unwrap();
-    let shift = prices[0];
+    let shift = prices[63];
     let shifted = prices.iter().map(|value| value - shift).collect::<Vec<_>>();
     let sum = shifted.iter().sum::<f64>();
     let expected =
         shifted.iter().map(|value| value * value).sum::<f64>() / 64.0 - (sum / 64.0).powi(2);
 
-    assert_eq!(actual.to_bits(), expected.to_bits());
+    let tolerance = 1.0e-12 * expected.abs().max(1.0);
+    assert!((actual - expected).abs() <= tolerance);
     assert_eq!(outputs.touched[0].1.transition_count, 64);
 }
 
@@ -918,7 +903,6 @@ fn ewma_layout_two_restores_without_retained_history() {
         configuration_hash: compiled.configuration_hash.clone(),
         state_schema_fingerprint: compiled.legacy_state_schema_fingerprint.clone(),
         kernel_fingerprint: None,
-        numerical_profile: None,
         epoch: Epoch::new(1).unwrap(),
         pipeline_fingerprint: Some(TEST_FINGERPRINT.into()),
         operator_id: Some("rolling".into()),
@@ -990,7 +974,6 @@ fn layout_one_history_bootstraps_the_typed_transition() {
         configuration_hash: compiled.configuration_hash.clone(),
         state_schema_fingerprint: compiled.legacy_state_schema_fingerprint.clone(),
         kernel_fingerprint: None,
-        numerical_profile: None,
         epoch: Epoch::new(1).unwrap(),
         pipeline_fingerprint: Some(TEST_FINGERPRINT.into()),
         operator_id: Some("rolling".into()),
@@ -3738,7 +3721,6 @@ fn typed_exponential_means_resume_from_columnar_checkpoints() {
             configuration_hash: compiled.configuration_hash.clone(),
             state_schema_fingerprint: compiled.state_schema_fingerprint.clone(),
             kernel_fingerprint: Some(compiled.kernel_plan.fingerprint().to_owned()),
-            numerical_profile: Some(compiled.kernel_plan.numerical_profile().to_owned()),
             epoch: Epoch::new(1).unwrap(),
             pipeline_fingerprint: Some(TEST_FINGERPRINT.into()),
             operator_id: Some("rolling".into()),
@@ -3786,65 +3768,6 @@ fn typed_exponential_means_resume_from_columnar_checkpoints() {
             .collect::<Vec<_>>();
         assert_eq!(actual, float_column(&expected, 0));
     }
-}
-
-#[test]
-fn stable_v2_transition_count_round_trips_in_columnar_state() {
-    let mut spec = kernel_spec(json!([aggregate_output("mean", "price", "price_mean", 64)]));
-    spec.numerical_profile = RollingNumericalProfile::StableV2Preview;
-    let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
-    let rows = (0..64)
-        .map(|index| {
-            let sequence = u64::try_from(index + 1).unwrap();
-            full_row(
-                i64::from(index + 1),
-                "a",
-                sequence,
-                vec![ScalarValue::Float64(Some(1.0e12 + f64::from(index)))],
-            )
-        })
-        .collect::<Vec<_>>();
-    let outputs =
-        compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling").unwrap();
-    let mut histories = RollingHistories::default();
-    histories.apply(outputs.touched);
-    let bytes = encode_state_segment(
-        &histories,
-        &BTreeMap::new(),
-        &kernel_schema(),
-        &compiled,
-        TEST_FINGERPRINT,
-        "rolling",
-    )
-    .unwrap();
-    let metadata = RollingSnapshotMetadata {
-        late_output: None,
-        state_layout_version: ROLLING_COLUMNAR_STATE_LAYOUT_VERSION,
-        configuration_hash: compiled.configuration_hash.clone(),
-        state_schema_fingerprint: compiled.state_schema_fingerprint.clone(),
-        kernel_fingerprint: Some(compiled.kernel_plan.fingerprint().to_owned()),
-        numerical_profile: Some("stable_v2".into()),
-        epoch: Epoch::new(1).unwrap(),
-        pipeline_fingerprint: Some(TEST_FINGERPRINT.into()),
-        operator_id: Some("rolling".into()),
-        last_input_watermark: None,
-        next_output_sequence: 0,
-        ended: false,
-        metrics: LateMetricDelta::default(),
-        segment_inventory: Vec::new(),
-    };
-
-    let restored = decode_state_segment(&bytes, &kernel_schema(), &compiled, &metadata).unwrap();
-    assert_eq!(
-        restored
-            .histories
-            .by_entity
-            .values()
-            .next()
-            .unwrap()
-            .transition_count,
-        64
-    );
 }
 
 #[test]
@@ -4385,17 +4308,13 @@ fn negative_infinity_departure_restores_finite_window_outputs() {
 }
 
 #[test]
-fn a4_near_overflow_finite_window_keeps_the_west_mean() {
+fn a4_near_overflow_window_mean_reads_positive_infinity() {
     let spec = kernel_spec(json!([aggregate_output("mean", "price", "price_mean", 2)]));
     let rows = entity_prices("a", &[Some(1e308), Some(1e308)]);
     let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
     let means = float_column(&outputs, 0);
-    let value = means[1].expect("finite window mean must be non-null");
-    assert!(
-        value.is_finite(),
-        "naive sum/count readout would overflow to infinity"
-    );
-    assert!((value - 1e308).abs() <= 1e308 * 1e-15);
+    let value = means[1].expect("overflowed window mean must be non-null");
+    assert_eq!(value.to_bits(), f64::INFINITY.to_bits());
 }
 
 #[test]
@@ -4411,8 +4330,7 @@ fn a5_variance_and_stddev_with_inf_are_nan_after_the_null_gates() {
     assert_eq!(variances[0], None);
     // Two valid samples with an inf present: NaN, not null and not inf.
     assert!(variances[1].unwrap().is_nan());
-    // The inf has left the window: back to finite values (the removal
-    // step carries West drift well inside the frozen D13 tolerance).
+    // The inf has left the window: compensated finite moments are restored.
     assert!((variances[2].unwrap() - 4.5).abs() <= 4.5 * 1e-10);
     assert!((variances[3].unwrap() - 0.5).abs() <= 1e-12);
     let stddevs = float_column(&outputs, 1);

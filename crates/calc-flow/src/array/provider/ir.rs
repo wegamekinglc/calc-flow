@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
 use super::super::{ArrayDType, ArrayExecutionOptions, invalid};
-use crate::{Result, RollingNumericalProfile};
+use crate::Result;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -105,23 +105,6 @@ impl Reduce {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum Profile {
-    #[default]
-    StableV1,
-    StableV2,
-}
-
-impl Profile {
-    pub(super) const fn native(self) -> RollingNumericalProfile {
-        match self {
-            Self::StableV1 => RollingNumericalProfile::StableV1,
-            Self::StableV2 => RollingNumericalProfile::StableV2Preview,
-        }
-    }
-}
-
 pub(super) const fn one() -> u64 {
     1
 }
@@ -172,8 +155,6 @@ pub(super) enum Node {
         window: u64,
         #[serde(default = "one")]
         min_periods: u64,
-        #[serde(default)]
-        numerical_profile: Profile,
     },
     Ewma {
         id: String,

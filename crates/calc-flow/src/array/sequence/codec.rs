@@ -2,7 +2,7 @@ use sha2::{Digest as _, Sha256};
 
 use super::{ArrayStateOptions, AtrState, EwmaState, MacdState, RollingMeanState, RsiState};
 use crate::{
-    CalcFlowError, Result, RollingNumericalProfile,
+    CalcFlowError, Result,
     array::{
         ArrayDType, ArrayExecutionOptions, AtrOptions, EwmaOptions, MacdOptions,
         RollingMeanOptions, RsiOptions,
@@ -32,7 +32,7 @@ impl KernelOptions {
         match self {
             Self::Mean(options) => {
                 serde_json::json!({"function":"rolling_mean", "window":options.window(),
-                "min_periods":options.min_periods(), "numerical_profile":profile_name(options.numerical_profile())})
+                "min_periods":options.min_periods()})
             }
             Self::Ewma(options) => {
                 serde_json::json!({"function":"ewma", "span":options.span(), "min_periods":options.min_periods()})
@@ -41,13 +41,6 @@ impl KernelOptions {
             Self::Atr(options) => serde_json::json!({"function":"atr", "period":options.period()}),
             Self::Macd(options) => macd::document(options),
         }
-    }
-}
-
-fn profile_name(profile: RollingNumericalProfile) -> &'static str {
-    match profile {
-        RollingNumericalProfile::StableV1 => "stable_v1",
-        RollingNumericalProfile::StableV2Preview => "stable_v2",
     }
 }
 
@@ -133,16 +126,7 @@ impl SequenceSpec {
             _ => 2,
         };
         match self.kernel {
-            KernelOptions::Mean(options) => [
-                1,
-                dtype,
-                if options.numerical_profile() == RollingNumericalProfile::StableV1 {
-                    1
-                } else {
-                    2
-                },
-                0,
-            ],
+            KernelOptions::Mean(_) => [1, dtype, 3, 0],
             KernelOptions::Ewma(_) => [2, dtype, 0, 0],
             KernelOptions::Rsi(_) => [3, dtype, 0, 0],
             KernelOptions::Atr(_) => [4, dtype, 0, 0],
@@ -405,8 +389,22 @@ fn read_header(spec: &SequenceSpec, reader: &mut Reader<'_>) -> Result<u64> {
     reader.require(MAGIC, "magic")?;
     reader.require(&VERSION.to_le_bytes(), "layout")?;
     reader.require(&VERSION.to_le_bytes(), "numeric_semantics")?;
-    reader.require(&spec.markers(), "kernel/dtype/profile")?;
+    read_markers(spec, reader)?;
     read_identity(spec, reader)
+}
+
+fn read_markers(spec: &SequenceSpec, reader: &mut Reader<'_>) -> Result<()> {
+    let actual = reader.take::<4>()?;
+    if actual == spec.markers() {
+        return Ok(());
+    }
+    if actual[0] == 1 && matches!(actual[2], 1 | 2) {
+        return Err(mismatch(
+            "kernel.profile",
+            "mean markers for removed stable_v1 and stable_v2 profiles are not restorable",
+        ));
+    }
+    Err(mismatch("kernel/dtype/marker", "unexpected value"))
 }
 
 fn read_identity(spec: &SequenceSpec, reader: &mut Reader<'_>) -> Result<u64> {

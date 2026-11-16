@@ -29,16 +29,14 @@ use super::budget::StateCharge;
 use super::{
     CompiledAggregate, CompiledDifference, CompiledEvaluation, CompiledEwma, CompiledFloatReadout,
     CompiledFrame, CompiledKeyColumn, CompiledPairAggregate, CompiledRollingOutput,
-    CompiledWindowGroup, IncrementalScanState, PairAccumulator, RollingNumericalProfile, ScanKind,
-    Statistic, SumClass, SumState, WindowAccumulator,
+    CompiledWindowGroup, IncrementalScanState, PairAccumulator, ScanKind, Statistic, SumClass,
+    SumState, WindowAccumulator,
     generated_kernel_manifest::{
         GeneratedComplexity, GeneratedTransition, generated_kernel_capability,
     },
     internal_error, operator_error,
 };
-use crate::array::rolling_mean_math::{
-    self, ArithmeticError, CompensatedSum, FloatSummary, SummaryMut,
-};
+use crate::accumulate::ArithmeticError;
 use crate::{
     Result,
     operator::rolling_metrics::{
@@ -106,7 +104,6 @@ pub(super) enum KernelComplexity {
 pub(super) struct RollingKernelPlan {
     version: u32,
     state_layout_version: u32,
-    numerical_profile: RollingNumericalProfile,
     selection: KernelSelection,
     complexity: KernelComplexity,
     event_time_index: usize,
@@ -761,7 +758,6 @@ impl RollingKernelPlan {
     pub(super) fn compile(
         input_schema: &Schema,
         state_layout_version: u32,
-        numerical_profile: RollingNumericalProfile,
         event_time_index: usize,
         partition_columns: &[CompiledKeyColumn],
         sequence_columns: &[CompiledKeyColumn],
@@ -783,7 +779,6 @@ impl RollingKernelPlan {
         Self::compile_with_order(
             input_schema,
             state_layout_version,
-            numerical_profile,
             event_time_index,
             order_columns,
             partition_columns,
@@ -800,7 +795,6 @@ impl RollingKernelPlan {
     pub(super) fn compile_with_order(
         input_schema: &Schema,
         state_layout_version: u32,
-        numerical_profile: RollingNumericalProfile,
         event_time_index: usize,
         order_columns: Vec<usize>,
         partition_columns: Vec<usize>,
@@ -841,7 +835,6 @@ impl RollingKernelPlan {
         let fingerprint_input = KernelFingerprintInput {
             input_schema,
             state_layout_version,
-            numerical_profile,
             selection,
             complexity,
             event_time_index,
@@ -871,7 +864,6 @@ impl RollingKernelPlan {
         let mut plan = Self {
             version: ROLLING_KERNEL_PLAN_VERSION,
             state_layout_version,
-            numerical_profile,
             selection,
             complexity,
             event_time_index,
@@ -931,20 +923,16 @@ impl RollingKernelPlan {
             .unwrap_or(&self.fingerprint)
     }
 
+    pub(super) const fn numeric_contract() -> &'static str {
+        "compensated-sliding-1"
+    }
+
     pub(super) fn with_nan_as_value(mut self) -> Self {
         self.nan_as_value = true;
         self.fingerprint = hex::encode(Sha256::digest(
             format!("{}|nan=value", self.fingerprint).as_bytes(),
         ));
         self
-    }
-
-    pub(super) const fn numerical_profile(&self) -> &'static str {
-        self.numerical_profile.name()
-    }
-
-    pub(super) const fn numerical_profile_kind(&self) -> RollingNumericalProfile {
-        self.numerical_profile
     }
 
     pub(super) const fn version(&self) -> u32 {
@@ -1068,11 +1056,8 @@ impl RollingKernelPlan {
         entity: &mut TypedEntityState,
         transition_count: u64,
         values: &[Option<RecurrenceSeed>],
-        node_id: &str,
+        _node_id: &str,
     ) -> Result<()> {
-        if self.numerical_profile == RollingNumericalProfile::StableV2Preview {
-            entity.force_stable_v2_rebase(node_id)?;
-        }
         entity.transition_count = transition_count;
         self.seed_recurrence_entity(entity, values)
     }
@@ -1850,7 +1835,6 @@ fn fill_typed_rows_impl<const HAS_DECAY: bool>(
                 inputs.event_times.value(row_index),
                 entity,
                 row_index,
-                plan.numerical_profile,
                 plan.nan_as_value,
                 node_id,
             )?;
@@ -1889,7 +1873,6 @@ fn update_typed_groups(
     event_time: i64,
     entity: &mut TypedEntityState,
     row_index: usize,
-    numerical_profile: RollingNumericalProfile,
     nan_as_value: bool,
     node_id: &str,
 ) -> Result<()> {
@@ -1898,21 +1881,12 @@ fn update_typed_groups(
             entity,
             inputs,
             row_index,
-            numerical_profile,
             nan_as_value,
             node_id,
         );
     }
     for (state, input) in entity.groups.iter_mut().zip(inputs) {
-        state.update(
-            event_time,
-            input,
-            row_index,
-            numerical_profile,
-            nan_as_value,
-            entity.transition_count,
-            node_id,
-        )?;
+        state.update(event_time, input, row_index, nan_as_value, node_id)?;
     }
     Ok(())
 }
@@ -2401,7 +2375,6 @@ fn duplicate_identity_error(
 struct KernelFingerprintInput<'a> {
     input_schema: &'a Schema,
     state_layout_version: u32,
-    numerical_profile: RollingNumericalProfile,
     selection: KernelSelection,
     complexity: KernelComplexity,
     event_time_index: usize,
@@ -2443,7 +2416,7 @@ fn kernel_fingerprint(input: &KernelFingerprintInput<'_>) -> String {
     let descriptor = format!(
         "version={ROLLING_KERNEL_PLAN_VERSION}|state={}|numeric={}|selection={:?}|complexity={:?}|schema={schema:?}|event_time={}|order={:?}|partition={:?}|duplicates={:?}|groups={:?}|outputs={:?}|fallback={:?}",
         input.state_layout_version,
-        input.numerical_profile.name(),
+        "compensated-sliding-1",
         input.selection,
         input.complexity,
         input.event_time_index,
@@ -2659,16 +2632,6 @@ impl TypedEntityState {
         }
     }
 
-    fn force_stable_v2_rebase(&mut self, node_id: &str) -> Result<()> {
-        if self.shared_rows.is_some() {
-            return self.rebase_shared_rows(node_id);
-        }
-        for group in &mut self.groups {
-            group.force_stable_v2_rebase(node_id)?;
-        }
-        Ok(())
-    }
-
     fn estimated_bytes(&self) -> usize {
         size_of::<Self>()
             + self
@@ -2786,9 +2749,7 @@ impl TypedWindowState {
         event_time: i64,
         input: &TypedGroupInput,
         row_index: usize,
-        numerical_profile: RollingNumericalProfile,
         nan_as_value: bool,
-        transition_count: u64,
         node_id: &str,
     ) -> Result<()> {
         match (self, input) {
@@ -2796,8 +2757,6 @@ impl TypedWindowState {
             (Self::Numeric(state), TypedGroupInput::Single(input)) => state.update(
                 event_time,
                 valid_float64(input, row_index, nan_as_value),
-                numerical_profile,
-                transition_count,
                 node_id,
             ),
             (Self::Exact(state), input) => {
@@ -2809,8 +2768,6 @@ impl TypedWindowState {
             (Self::Pair(state), TypedGroupInput::Pair(left, right)) => state.update(
                 event_time,
                 valid_float64_pair(left, right, row_index),
-                numerical_profile,
-                transition_count,
                 node_id,
             ),
             (Self::Ewma(state), TypedGroupInput::Single(input)) => {
@@ -2835,19 +2792,6 @@ impl TypedWindowState {
             _ => Err(internal_error(
                 "typed rolling group state does not match its input plan",
             )),
-        }
-    }
-
-    fn force_stable_v2_rebase(&mut self, node_id: &str) -> Result<()> {
-        match self {
-            Self::Numeric(state) => state.rebase_stable_v2(node_id),
-            Self::Pair(state) => state.rebase_stable_v2(node_id),
-            Self::Exact(_)
-            | Self::Extrema(_)
-            | Self::Ewma(_)
-            | Self::Scan(_)
-            | Self::Decay(_)
-            | Self::Cumulative(_) => Ok(()),
         }
     }
 
@@ -3065,10 +3009,56 @@ impl ExactNumericState {
 
     fn update(&mut self, event_time: i64, value: Option<ExactValue>, node_id: &str) -> Result<()> {
         if let Some(value) = value {
-            add_exact(&mut self.accumulator, value, node_id)?;
+            add_exact_sum(&mut self.accumulator, value, node_id)?;
         }
-        self.samples.push(event_time, value);
-        self.expire(event_time)
+        match self.samples.frame {
+            TypedFrame::Rows(window) => {
+                let leaving = (self.samples.values.len() >= window)
+                    .then(|| self.samples.values.front().and_then(|sample| sample.value))
+                    .flatten();
+                if let Some(leaving) = leaving {
+                    remove_exact_sum(&mut self.accumulator, leaving)?;
+                }
+                self.accumulator
+                    .numeric
+                    .rows(leaving.map(exact_as_f64), value.map(exact_as_f64))
+                    .map_err(|error| float_arithmetic_error(error, node_id))?;
+                self.samples.push(event_time, value);
+                if self.samples.values.len() > window {
+                    self.samples.values.pop_front();
+                }
+                let history = self
+                    .samples
+                    .values
+                    .iter()
+                    .map(|sample| sample.value.map(exact_as_f64));
+                self.accumulator
+                    .numeric
+                    .finish_rows(window, history)
+                    .map_err(|error| float_arithmetic_error(error, node_id))?;
+            }
+            TypedFrame::Duration(_) => {
+                self.expire(event_time)?;
+                self.accumulator.numeric.reset_if_empty();
+                if let Some(value) = value {
+                    self.accumulator
+                        .numeric
+                        .insert(exact_as_f64(value))
+                        .map_err(|error| float_arithmetic_error(error, node_id))?;
+                }
+                self.samples.push(event_time, value);
+                let history = self
+                    .samples
+                    .values
+                    .iter()
+                    .map(|sample| sample.value.map(exact_as_f64));
+                self.accumulator
+                    .numeric
+                    .finish_duration(history)
+                    .map_err(|error| float_arithmetic_error(error, node_id))?;
+            }
+        }
+        Ok(())
     }
 
     fn expire(&mut self, event_time: i64) -> Result<()> {
@@ -3092,54 +3082,42 @@ impl Float64NumericState {
     }
 
     #[inline]
-    fn update(
-        &mut self,
-        event_time: i64,
-        sample: Option<f64>,
-        numerical_profile: RollingNumericalProfile,
-        transition_count: u64,
-        node_id: &str,
-    ) -> Result<()> {
-        if let Some(sample) = sample {
-            add_float64(&mut self.accumulator, sample, node_id)?;
+    fn update(&mut self, event_time: i64, sample: Option<f64>, node_id: &str) -> Result<()> {
+        match self.samples.frame {
+            TypedFrame::Rows(window) => {
+                let leaving = (self.samples.values.len() >= window)
+                    .then(|| self.samples.values.front().and_then(|sample| sample.value))
+                    .flatten();
+                self.accumulator
+                    .numeric
+                    .rows(leaving, sample)
+                    .map_err(|error| float_arithmetic_error(error, node_id))?;
+                self.samples.push(event_time, sample);
+                if self.samples.values.len() > window {
+                    self.samples.values.pop_front();
+                }
+                self.accumulator
+                    .numeric
+                    .finish_rows(
+                        window,
+                        self.samples.values.iter().map(|sample| sample.value),
+                    )
+                    .map_err(|error| float_arithmetic_error(error, node_id))?;
+            }
+            TypedFrame::Duration(_) => {
+                self.expire(event_time)?;
+                self.accumulator.numeric.reset_if_empty();
+                if let Some(sample) = sample {
+                    add_float64(&mut self.accumulator, sample, node_id)?;
+                }
+                self.samples.push(event_time, sample);
+                self.accumulator
+                    .numeric
+                    .finish_duration(self.samples.values.iter().map(|sample| sample.value))
+                    .map_err(|error| float_arithmetic_error(error, node_id))?;
+            }
         }
-        self.samples.push(event_time, sample);
-        self.expire(event_time)?;
-        self.repair_accumulator(numerical_profile, transition_count, node_id)
-    }
-
-    #[inline]
-    fn repair_accumulator(
-        &mut self,
-        numerical_profile: RollingNumericalProfile,
-        transition_count: u64,
-        node_id: &str,
-    ) -> Result<()> {
-        // DataFusion 54's sliding AVG accumulator remains NaN after a NaN has
-        // entered the partition, even after that row leaves a bounded frame.
-        // The compatibility plan preserves that observable behavior.
-        if self.accumulator.nan_count > 0 {
-            return Ok(());
-        }
-        if numerical_profile == RollingNumericalProfile::StableV2Preview
-            && stable_v2_rebase_due(
-                transition_count,
-                self.samples.len(),
-                self.accumulator.is_non_finite(),
-            )
-        {
-            self.rebase_stable_v2(node_id)?;
-        } else if self.accumulator.is_non_finite() {
-            refold_float64(&mut self.accumulator, &self.samples.values, node_id)?;
-        }
-        Ok(())
-    }
-
-    fn rebase_stable_v2(&mut self, node_id: &str) -> Result<()> {
-        self.accumulator = stable_v2_float64_accumulator(
-            self.samples.values.iter().filter_map(|sample| sample.value),
-            node_id,
-        )?;
+        self.accumulator.sync_float_sum();
         Ok(())
     }
 
@@ -3316,54 +3294,40 @@ impl Float64PairState {
         }
     }
 
-    fn update(
-        &mut self,
-        event_time: i64,
-        value: Option<(f64, f64)>,
-        numerical_profile: RollingNumericalProfile,
-        transition_count: u64,
-        node_id: &str,
-    ) -> Result<()> {
-        if let Some((left, right)) = value {
-            add_pair_float64(&mut self.accumulator, left, right, node_id)?;
+    fn update(&mut self, event_time: i64, value: Option<(f64, f64)>, node_id: &str) -> Result<()> {
+        match self.samples.frame {
+            TypedFrame::Rows(window) => {
+                let leaving = (self.samples.values.len() >= window)
+                    .then(|| self.samples.values.front().and_then(|sample| sample.value))
+                    .flatten();
+                self.accumulator.rows_values(leaving, value, node_id)?;
+                self.samples.push(event_time, value);
+                if self.samples.values.len() > window {
+                    self.samples.values.pop_front();
+                }
+                self.accumulator.finish_rows(
+                    window,
+                    self.samples.values.iter().map(|sample| sample.value),
+                )?;
+            }
+            TypedFrame::Duration(_) => {
+                self.expire(event_time)?;
+                self.accumulator.reset_if_empty();
+                if let Some((left, right)) = value {
+                    self.accumulator.add_values(left, right, node_id)?;
+                }
+                self.samples.push(event_time, value);
+                self.accumulator
+                    .finish_duration(self.samples.values.iter().map(|sample| sample.value))?;
+            }
         }
-        self.samples.push(event_time, value);
-        self.expire(event_time)?;
-        self.repair_accumulator(numerical_profile, transition_count, node_id)
-    }
-
-    fn repair_accumulator(
-        &mut self,
-        numerical_profile: RollingNumericalProfile,
-        transition_count: u64,
-        node_id: &str,
-    ) -> Result<()> {
-        if numerical_profile == RollingNumericalProfile::StableV2Preview
-            && stable_v2_rebase_due(
-                transition_count,
-                self.samples.len(),
-                self.accumulator.is_non_finite(),
-            )
-        {
-            self.rebase_stable_v2(node_id)?;
-        } else if self.accumulator.is_non_finite() {
-            refold_pair_float64(&mut self.accumulator, &self.samples.values, node_id)?;
-        }
-        Ok(())
-    }
-
-    fn rebase_stable_v2(&mut self, node_id: &str) -> Result<()> {
-        self.accumulator = stable_v2_pair_accumulator(
-            self.samples.values.iter().filter_map(|sample| sample.value),
-            node_id,
-        )?;
         Ok(())
     }
 
     fn expire(&mut self, event_time: i64) -> Result<()> {
         let accumulator = &mut self.accumulator;
         self.samples.expire(event_time, |(left, right)| {
-            remove_pair_float64(accumulator, left, right)
+            accumulator.remove_values(left, right)
         })
     }
 
@@ -3410,23 +3374,10 @@ impl TypedEwmaState {
     }
 }
 
-#[inline]
-fn float_summary_mut(accumulator: &mut WindowAccumulator) -> SummaryMut<'_> {
-    SummaryMut {
-        valid_count: &mut accumulator.valid_count,
-        sum: match &mut accumulator.sum {
-            Some(SumState::Float(total)) => Some(total),
-            _ => None,
-        },
-        mean: &mut accumulator.mean,
-        m2: &mut accumulator.m2,
-        nan_count: &mut accumulator.nan_count,
-        pos_inf: &mut accumulator.pos_inf,
-        neg_inf: &mut accumulator.neg_inf,
-    }
-}
-
-fn float_arithmetic_error(error: ArithmeticError, node_id: &str) -> crate::CalcFlowError {
+pub(super) fn float_arithmetic_error(
+    error: ArithmeticError,
+    node_id: &str,
+) -> crate::CalcFlowError {
     match error {
         ArithmeticError::CountOverflow => {
             operator_error(node_id, "rolling valid sample count overflowed")
@@ -3445,45 +3396,30 @@ fn float_arithmetic_error(error: ArithmeticError, node_id: &str) -> crate::CalcF
 
 #[inline]
 fn add_float64(accumulator: &mut WindowAccumulator, sample: f64, node_id: &str) -> Result<()> {
-    float_summary_mut(accumulator)
-        .add(sample)
-        .map_err(|error| float_arithmetic_error(error, node_id))
+    if !matches!(accumulator.sum, Some(SumState::Float(_))) {
+        return Err(float_arithmetic_error(
+            ArithmeticError::NonFloatingSum,
+            node_id,
+        ));
+    }
+    accumulator
+        .numeric
+        .insert(sample)
+        .map_err(|error| float_arithmetic_error(error, node_id))?;
+    accumulator.sync_float_sum();
+    Ok(())
 }
 
 #[inline]
 fn remove_float64(accumulator: &mut WindowAccumulator, sample: f64) -> Result<()> {
-    float_summary_mut(accumulator)
-        .remove(sample)
-        .map_err(|error| float_arithmetic_error(error, ""))
-}
-
-fn refold_float64(
-    accumulator: &mut WindowAccumulator,
-    values: &VecDeque<TimedSample<f64>>,
-    node_id: &str,
-) -> Result<()> {
-    *accumulator = WindowAccumulator::new(SumClass::Float);
-    for sample in values.iter().filter_map(|sample| sample.value) {
-        add_float64(accumulator, sample, node_id)?;
+    if !matches!(accumulator.sum, Some(SumState::Float(_))) {
+        return Err(float_arithmetic_error(ArithmeticError::NonFloatingSum, ""));
     }
-    Ok(())
-}
-
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "the frozen integer mean and variance output type is Float64"
-)]
-fn add_exact(accumulator: &mut WindowAccumulator, value: ExactValue, node_id: &str) -> Result<()> {
-    accumulator.valid_count = accumulator
-        .valid_count
-        .checked_add(1)
-        .ok_or_else(|| operator_error(node_id, "rolling valid sample count overflowed"))?;
-    add_exact_sum(accumulator, value, node_id)?;
-    let sample = exact_as_f64(value);
-    let count = accumulator.valid_count as f64;
-    let delta = sample - accumulator.mean;
-    accumulator.mean += delta / count;
-    accumulator.m2 += delta * (sample - accumulator.mean);
+    accumulator
+        .numeric
+        .evict(sample)
+        .map_err(|error| float_arithmetic_error(error, ""))?;
+    accumulator.sync_float_sum();
     Ok(())
 }
 
@@ -3512,27 +3448,12 @@ fn add_exact_sum(
     Ok(())
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "the frozen integer mean and variance output type is Float64"
-)]
 fn remove_exact(accumulator: &mut WindowAccumulator, value: ExactValue) -> Result<()> {
-    accumulator.valid_count = accumulator
-        .valid_count
-        .checked_sub(1)
-        .ok_or_else(|| internal_error("rolling removal without a matching add"))?;
     remove_exact_sum(accumulator, value)?;
-    if accumulator.valid_count == 0 {
-        accumulator.mean = 0.0;
-        accumulator.m2 = 0.0;
-        return Ok(());
-    }
-    let sample = exact_as_f64(value);
-    let count = accumulator.valid_count as f64;
-    let delta = sample - accumulator.mean;
-    accumulator.mean -= delta / count;
-    accumulator.m2 -= delta * (sample - accumulator.mean);
-    Ok(())
+    accumulator
+        .numeric
+        .evict(exact_as_f64(value))
+        .map_err(|error| float_arithmetic_error(error, ""))
 }
 
 fn remove_exact_sum(accumulator: &mut WindowAccumulator, value: ExactValue) -> Result<()> {
@@ -3567,206 +3488,14 @@ fn exact_as_f64(value: ExactValue) -> f64 {
     }
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "the frozen covariance/correlation output type is Float64"
-)]
+#[cfg(test)]
 fn add_pair_float64(
     accumulator: &mut PairAccumulator,
     left: f64,
     right: f64,
     node_id: &str,
 ) -> Result<()> {
-    accumulator.valid_count = accumulator
-        .valid_count
-        .checked_add(1)
-        .ok_or_else(|| operator_error(node_id, "rolling pair sample count overflowed"))?;
-    update_pair_infinity_counts(accumulator, left, right, true);
-    let count = accumulator.valid_count as f64;
-    let delta_x = left - accumulator.mean_x;
-    accumulator.mean_x += delta_x / count;
-    let delta_y = right - accumulator.mean_y;
-    accumulator.mean_y += delta_y / count;
-    accumulator.co_moment += delta_x * (right - accumulator.mean_y);
-    accumulator.m2_x += delta_x * (left - accumulator.mean_x);
-    accumulator.m2_y += delta_y * (right - accumulator.mean_y);
-    Ok(())
-}
-
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "the frozen covariance/correlation output type is Float64"
-)]
-fn remove_pair_float64(accumulator: &mut PairAccumulator, left: f64, right: f64) -> Result<()> {
-    accumulator.valid_count = accumulator
-        .valid_count
-        .checked_sub(1)
-        .ok_or_else(|| internal_error("rolling pair removal without a matching add"))?;
-    update_pair_infinity_counts(accumulator, left, right, false);
-    if accumulator.valid_count == 0 {
-        reset_pair_values(accumulator);
-        return Ok(());
-    }
-    let count = accumulator.valid_count as f64;
-    let delta_x = left - accumulator.mean_x;
-    accumulator.mean_x -= delta_x / count;
-    let delta_y = right - accumulator.mean_y;
-    accumulator.mean_y -= delta_y / count;
-    accumulator.co_moment -= delta_x * (right - accumulator.mean_y);
-    accumulator.m2_x -= delta_x * (left - accumulator.mean_x);
-    accumulator.m2_y -= delta_y * (right - accumulator.mean_y);
-    Ok(())
-}
-
-fn update_pair_infinity_counts(
-    accumulator: &mut PairAccumulator,
-    left: f64,
-    right: f64,
-    add: bool,
-) {
-    update_infinity_count(
-        &mut accumulator.pos_inf_x,
-        &mut accumulator.neg_inf_x,
-        left,
-        add,
-    );
-    update_infinity_count(
-        &mut accumulator.pos_inf_y,
-        &mut accumulator.neg_inf_y,
-        right,
-        add,
-    );
-}
-
-fn update_infinity_count(positive: &mut u64, negative: &mut u64, value: f64, add: bool) {
-    if !value.is_infinite() {
-        return;
-    }
-    let count = if value > 0.0 { positive } else { negative };
-    *count = if add {
-        count.saturating_add(1)
-    } else {
-        count.saturating_sub(1)
-    };
-}
-
-fn reset_pair_values(accumulator: &mut PairAccumulator) {
-    accumulator.mean_x = 0.0;
-    accumulator.mean_y = 0.0;
-    accumulator.co_moment = 0.0;
-    accumulator.m2_x = 0.0;
-    accumulator.m2_y = 0.0;
-}
-
-fn refold_pair_float64(
-    accumulator: &mut PairAccumulator,
-    values: &VecDeque<TimedSample<(f64, f64)>>,
-    node_id: &str,
-) -> Result<()> {
-    *accumulator = PairAccumulator::default();
-    for (left, right) in values.iter().filter_map(|sample| sample.value) {
-        add_pair_float64(accumulator, left, right, node_id)?;
-    }
-    Ok(())
-}
-
-pub(super) fn stable_v2_rebase_due(
-    transition_count: u64,
-    retained_samples: usize,
-    numerical_risk: bool,
-) -> bool {
-    rolling_mean_math::rebase_due(transition_count, retained_samples, numerical_risk)
-}
-
-fn float_summary_accumulator(summary: FloatSummary) -> WindowAccumulator {
-    WindowAccumulator {
-        valid_count: summary.valid_count,
-        sum: Some(SumState::Float(summary.sum)),
-        mean: summary.mean,
-        m2: summary.m2,
-        nan_count: summary.nan_count,
-        pos_inf: summary.pos_inf,
-        neg_inf: summary.neg_inf,
-        expired_through: i128::MIN,
-    }
-}
-
-pub(super) fn stable_v2_float64_accumulator(
-    values: impl Iterator<Item = f64>,
-    node_id: &str,
-) -> Result<WindowAccumulator> {
-    rolling_mean_math::stable_fold(values)
-        .map(float_summary_accumulator)
-        .map_err(|error| float_arithmetic_error(error, node_id))
-}
-
-#[derive(Default)]
-struct StablePairFold {
-    accumulator: PairAccumulator,
-    origin: Option<(f64, f64)>,
-    finite_count: u64,
-    left_offsets: CompensatedSum,
-    right_offsets: CompensatedSum,
-    left_squares: CompensatedSum,
-    right_squares: CompensatedSum,
-    cross_products: CompensatedSum,
-}
-
-impl StablePairFold {
-    fn push(&mut self, left: f64, right: f64, node_id: &str) -> Result<()> {
-        self.accumulator.valid_count = self
-            .accumulator
-            .valid_count
-            .checked_add(1)
-            .ok_or_else(|| operator_error(node_id, "rolling pair sample count overflowed"))?;
-        update_pair_infinity_counts(&mut self.accumulator, left, right, true);
-        if !left.is_finite() || !right.is_finite() {
-            return Ok(());
-        }
-        let (origin_x, origin_y) = *self.origin.get_or_insert((left, right));
-        let x = left - origin_x;
-        let y = right - origin_y;
-        self.left_offsets.add(x);
-        self.right_offsets.add(y);
-        self.left_squares.add(x * x);
-        self.right_squares.add(y * y);
-        self.cross_products.add(x * y);
-        self.finite_count = self
-            .finite_count
-            .checked_add(1)
-            .ok_or_else(|| operator_error(node_id, "rolling finite pair count overflowed"))?;
-        Ok(())
-    }
-
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "the stable_v2 preview retains the frozen Float64 output type"
-    )]
-    fn finish(mut self) -> PairAccumulator {
-        if let Some((origin_x, origin_y)) = self.origin {
-            let count = self.finite_count as f64;
-            self.accumulator.mean_x = origin_x + self.left_offsets.value / count;
-            self.accumulator.mean_y = origin_y + self.right_offsets.value / count;
-            self.accumulator.m2_x =
-                self.left_squares.value - self.left_offsets.value * self.left_offsets.value / count;
-            self.accumulator.m2_y = self.right_squares.value
-                - self.right_offsets.value * self.right_offsets.value / count;
-            self.accumulator.co_moment = self.cross_products.value
-                - self.left_offsets.value * self.right_offsets.value / count;
-        }
-        self.accumulator
-    }
-}
-
-pub(super) fn stable_v2_pair_accumulator(
-    values: impl Iterator<Item = (f64, f64)>,
-    node_id: &str,
-) -> Result<PairAccumulator> {
-    let mut fold = StablePairFold::default();
-    for (left, right) in values {
-        fold.push(left, right, node_id)?;
-    }
-    Ok(fold.finish())
+    accumulator.add_values(left, right, node_id)
 }
 
 enum DerivedBuilder {
@@ -4137,10 +3866,7 @@ fn dispersion_value(
     if divisor == 0 {
         return None;
     }
-    if accumulator.nan_count > 0 || accumulator.pos_inf > 0 || accumulator.neg_inf > 0 {
-        return Some(f64::NAN);
-    }
-    let variance = accumulator.m2.max(0.0) / divisor as f64;
+    let variance = accumulator.numeric.variance(ddof);
     Some(if standard_deviation {
         variance.sqrt()
     } else {
@@ -4188,7 +3914,7 @@ fn append_exact_float(
 ) -> Result<()> {
     match statistic {
         Statistic::Mean => {
-            builder.append_value(accumulator.mean);
+            builder.append_value(accumulator.mean_value());
             Ok(())
         }
         Statistic::Variance | Statistic::Stddev => {
@@ -4221,7 +3947,11 @@ fn append_pair(
     }
     match output.kind {
         TypedOutputKind::Covariance => {
-            builder.append_value(accumulator.co_moment / divisor as f64);
+            builder.append_value(
+                accumulator
+                    .family
+                    .covariance(accumulator.valid_count, output.ddof),
+            );
         }
         TypedOutputKind::Correlation => {
             append_correlation(builder, accumulator);
@@ -4247,12 +3977,10 @@ fn append_pair(
 }
 
 fn append_correlation(builder: &mut Float64Builder, accumulator: &PairAccumulator) {
-    let m2_x = accumulator.m2_x.max(0.0);
-    let m2_y = accumulator.m2_y.max(0.0);
-    if m2_x == 0.0 || m2_y == 0.0 {
-        builder.append_null();
+    if let Some(value) = accumulator.family.correlation(accumulator.valid_count) {
+        builder.append_value(value);
     } else {
-        builder.append_value(accumulator.co_moment / (m2_x.sqrt() * m2_y.sqrt()));
+        builder.append_null();
     }
 }
 
@@ -4279,23 +4007,18 @@ fn append_float(
 }
 
 fn append_sum(builder: &mut Float64Builder, accumulator: &WindowAccumulator) -> Result<()> {
-    let Some(SumState::Float(total)) = accumulator.sum else {
+    let Some(SumState::Float(_)) = accumulator.sum else {
         return Err(internal_error(
             "typed Float64 sum has a non-floating accumulator",
         ));
     };
-    builder.append_value(total);
+    builder.append_value(accumulator.numeric.sum());
     Ok(())
 }
 
 #[inline]
 fn float_mean(accumulator: &WindowAccumulator) -> f64 {
-    rolling_mean_math::read_mean(
-        accumulator.nan_count,
-        accumulator.pos_inf,
-        accumulator.neg_inf,
-        accumulator.mean,
-    )
+    accumulator.mean_value()
 }
 
 #[allow(
@@ -4338,7 +4061,7 @@ mod tests {
 
     #[test]
     fn batch_update_preserves_untouched_resident_entities() {
-        let kernel = numeric_plan(RollingNumericalProfile::StableV1);
+        let kernel = numeric_plan();
         let first = batch(
             vec![Some(1), Some(2)],
             vec![Some(1), Some(2)],
@@ -4362,7 +4085,7 @@ mod tests {
 
     #[test]
     fn stream_update_copies_only_touched_entities_until_commit() {
-        let kernel = numeric_plan(RollingNumericalProfile::StableV1);
+        let kernel = numeric_plan();
         let first = batch(
             vec![Some(1), Some(2)],
             vec![Some(1), Some(2)],
@@ -4408,7 +4131,7 @@ mod tests {
 
     #[test]
     fn prepared_stream_entities_are_owned_before_parallel_admission() {
-        let kernel = numeric_plan(RollingNumericalProfile::StableV1);
+        let kernel = numeric_plan();
         let first = batch(
             vec![Some(1), Some(2)],
             vec![Some(1), Some(2)],
@@ -4492,15 +4215,10 @@ mod tests {
         .unwrap()
     }
 
-    fn plan(
-        groups: Vec<TypedGroupPlan>,
-        outputs: Vec<TypedOutputPlan>,
-        numerical_profile: RollingNumericalProfile,
-    ) -> RollingKernelPlan {
+    fn plan(groups: Vec<TypedGroupPlan>, outputs: Vec<TypedOutputPlan>) -> RollingKernelPlan {
         let mut plan = RollingKernelPlan {
             version: ROLLING_KERNEL_PLAN_VERSION,
             state_layout_version: 3,
-            numerical_profile,
             selection: KernelSelection::OrderedPrimitive,
             complexity: KernelComplexity::AmortizedConstant,
             event_time_index: 0,
@@ -4521,7 +4239,7 @@ mod tests {
         plan
     }
 
-    fn numeric_plan(profile: RollingNumericalProfile) -> RollingKernelPlan {
+    fn numeric_plan() -> RollingKernelPlan {
         plan(
             vec![TypedGroupPlan::Numeric {
                 input_index: 3,
@@ -4534,14 +4252,13 @@ mod tests {
                 min_periods: 1,
                 ddof: 0,
             }],
-            profile,
         )
     }
 
     #[test]
     fn ordered_stream_key_allocations_depend_on_entities_instead_of_rows() {
         fn allocations(row_count: usize, warm: bool) -> u64 {
-            let kernel = numeric_plan(RollingNumericalProfile::StableV1);
+            let kernel = numeric_plan();
             let input = batch(
                 (0..row_count)
                     .map(|index| Some(i64::try_from(index).unwrap()))
@@ -4585,7 +4302,7 @@ mod tests {
     fn stream_order_plan() -> RollingKernelPlan {
         RollingKernelPlan {
             order_columns: vec![0, 2, 1],
-            ..numeric_plan(RollingNumericalProfile::StableV1)
+            ..numeric_plan()
         }
     }
 
@@ -4914,7 +4631,7 @@ mod tests {
             }
             let input = order_rows(&rows);
             assert_order_parity(&stream_order_plan(), &input);
-            assert_order_parity(&numeric_plan(RollingNumericalProfile::StableV1), &input);
+            assert_order_parity(&numeric_plan(), &input);
             for plan in redundant_stream_order_plans() {
                 assert_order_parity(&plan, &input);
             }
@@ -5071,30 +4788,22 @@ mod tests {
         let mut resident = Float64NumericState::new(TypedFrame::Rows(20), 32);
         for index in 1..=32_u32 {
             resident
-                .update(
-                    i64::from(index),
-                    Some(f64::from(index)),
-                    RollingNumericalProfile::StableV1,
-                    u64::from(index),
-                    "rolling",
-                )
+                .update(i64::from(index), Some(f64::from(index)), "rolling")
                 .unwrap();
         }
         let measured = allocation_counter::measure(|| {
             let mut prepared = resident.clone();
-            prepared
-                .update(
-                    33,
-                    Some(33.0),
-                    RollingNumericalProfile::StableV1,
-                    33,
-                    "rolling",
-                )
-                .unwrap();
+            prepared.update(33, Some(33.0), "rolling").unwrap();
             assert_eq!(prepared.accumulator.valid_count, 20);
-            assert_eq!(prepared.accumulator.mean.to_bits(), 23.5_f64.to_bits());
+            assert_eq!(
+                prepared.accumulator.mean_value().to_bits(),
+                23.5_f64.to_bits()
+            );
         });
-        assert_eq!(resident.accumulator.mean.to_bits(), 22.5_f64.to_bits());
+        assert_eq!(
+            resident.accumulator.mean_value().to_bits(),
+            22.5_f64.to_bits()
+        );
         println!("prepared row-window copy allocations: {measured:?}");
         assert_eq!(measured.count_total, 1, "{measured:?}");
     }
@@ -5104,30 +4813,22 @@ mod tests {
         let mut resident = Float64NumericState::new(TypedFrame::Duration(20), 32);
         for index in 1..=32_u32 {
             resident
-                .update(
-                    i64::from(index),
-                    Some(f64::from(index)),
-                    RollingNumericalProfile::StableV1,
-                    u64::from(index),
-                    "rolling",
-                )
+                .update(i64::from(index), Some(f64::from(index)), "rolling")
                 .unwrap();
         }
         let measured = allocation_counter::measure(|| {
             let mut prepared = resident.clone();
-            prepared
-                .update(
-                    33,
-                    Some(33.0),
-                    RollingNumericalProfile::StableV1,
-                    33,
-                    "rolling",
-                )
-                .unwrap();
+            prepared.update(33, Some(33.0), "rolling").unwrap();
             assert_eq!(prepared.accumulator.valid_count, 20);
-            assert_eq!(prepared.accumulator.mean.to_bits(), 23.5_f64.to_bits());
+            assert_eq!(
+                prepared.accumulator.mean_value().to_bits(),
+                23.5_f64.to_bits()
+            );
         });
-        assert_eq!(resident.accumulator.mean.to_bits(), 22.5_f64.to_bits());
+        assert_eq!(
+            resident.accumulator.mean_value().to_bits(),
+            22.5_f64.to_bits()
+        );
         assert_eq!(measured.count_total, 1, "{measured:?}");
     }
 
@@ -5144,65 +4845,34 @@ mod tests {
     #[test]
     fn duration_clone_releases_unused_burst_capacity() {
         let mut resident = Float64NumericState::new(TypedFrame::Duration(20), 4096);
-        for count in 1..=4096_u64 {
-            resident
-                .update(
-                    0,
-                    Some(1.0),
-                    RollingNumericalProfile::StableV1,
-                    count,
-                    "rolling",
-                )
-                .unwrap();
+        for _count in 1..=4096_u64 {
+            resident.update(0, Some(1.0), "rolling").unwrap();
         }
-        resident
-            .update(
-                1000,
-                Some(2.0),
-                RollingNumericalProfile::StableV1,
-                4097,
-                "rolling",
-            )
-            .unwrap();
+        resident.update(1000, Some(2.0), "rolling").unwrap();
         let copied = resident.clone();
         assert_eq!(copied.samples.len(), 1);
         assert!(copied.samples.values.capacity() < resident.samples.values.capacity() / 2);
         assert_eq!(
-            copied.accumulator.mean.to_bits(),
-            resident.accumulator.mean.to_bits()
+            copied.accumulator.mean_value().to_bits(),
+            resident.accumulator.mean_value().to_bits()
         );
     }
 
     #[test]
-    fn mean_only_state_still_requires_the_m2_refold_trigger() {
-        let mut current = Float64NumericState::new(TypedFrame::Rows(2), 4);
-        let mut without_m2 = current.clone();
-        for (index, sample) in [1e155, 1e155, 1e155, -1e155].into_iter().enumerate() {
+    fn typed_dispersion_overflow_does_not_change_mean_bits() {
+        let mut full = Float64NumericState::new(TypedFrame::Rows(2), 4);
+        let mut mean_only = full.clone();
+        mean_only.accumulator.numeric = crate::accumulate::NumericAccumulator::mean_only();
+        for (index, sample) in [1e200, -1e200].into_iter().enumerate() {
             let time = i64::try_from(index).unwrap();
-            let count = u64::try_from(index + 1).unwrap();
-            current
-                .update(
-                    time,
-                    Some(sample),
-                    RollingNumericalProfile::StableV1,
-                    count,
-                    "r",
-                )
-                .unwrap();
-            add_float64(&mut without_m2.accumulator, sample, "r").unwrap();
-            without_m2.samples.push(time, Some(sample));
-            without_m2.expire(time).unwrap();
-            without_m2.accumulator.m2 = 0.0;
-            without_m2
-                .repair_accumulator(RollingNumericalProfile::StableV1, count, "r")
-                .unwrap();
+            full.update(time, Some(sample), "r").unwrap();
+            mean_only.update(time, Some(sample), "r").unwrap();
+            assert_eq!(
+                full.accumulator.mean_value().to_bits(),
+                mean_only.accumulator.mean_value().to_bits()
+            );
         }
-        println!(
-            "mean-only specialization counterexample: current={}, without_m2={}",
-            current.accumulator.mean, without_m2.accumulator.mean
-        );
-        assert_eq!(current.accumulator.mean.to_bits(), 0.0_f64.to_bits());
-        assert!(without_m2.accumulator.mean.abs() > 1e130);
+        assert!(full.accumulator.numeric.variance(0).is_nan());
     }
 
     #[test]
@@ -5217,20 +4887,8 @@ mod tests {
             #[allow(clippy::cast_precision_loss, reason = "fixture values 0..4")]
             let step = index as f64;
             let _ = exact.update(index, Some(ExactValue::Signed(index)), "node");
-            let _ = float.update(
-                index,
-                Some(step),
-                RollingNumericalProfile::StableV1,
-                0,
-                "node",
-            );
-            let _ = pair.update(
-                index,
-                Some((step, 1.0)),
-                RollingNumericalProfile::StableV1,
-                0,
-                "node",
-            );
+            let _ = float.update(index, Some(step), "node");
+            let _ = pair.update(index, Some((step, 1.0)), "node");
         }
 
         // The exact and pair states size by the full timed sample; the float
@@ -5268,7 +4926,6 @@ mod tests {
                 },
             ],
             Vec::new(),
-            RollingNumericalProfile::StableV2Preview,
         );
         let entities = batch(
             vec![Some(1), Some(2)],
@@ -5349,7 +5006,7 @@ mod tests {
 
     #[test]
     fn canonical_order_contract_covers_batch_and_stream_boundaries() {
-        let kernel = numeric_plan(RollingNumericalProfile::StableV1);
+        let kernel = numeric_plan();
         let first = batch(vec![Some(1)], vec![Some(1)], vec!["a"], vec![Some(1.0)]);
         let first_output = kernel.open_and_fill(&first, "r").unwrap().unwrap();
 
@@ -5389,75 +5046,36 @@ mod tests {
     }
 
     #[test]
-    fn stable_preview_refolds_numeric_and_pair_windows() {
-        assert!(stable_v2_rebase_due(1, 1, true));
-        assert!(!stable_v2_rebase_due(1, 1, false));
-        assert!(stable_v2_rebase_due(64, 64, false));
-
-        let finite =
-            stable_v2_float64_accumulator([1.0e12, 1.0e12 + 0.25, 1.0e12 + 0.5].into_iter(), "r")
-                .unwrap();
-        assert_eq!(finite.valid_count, 3);
-        assert!(finite.m2 > 0.0);
-        assert!(matches!(
-            stable_v2_float64_accumulator([f64::INFINITY].into_iter(), "r")
-                .unwrap()
-                .sum,
-            Some(SumState::Float(value)) if value == f64::INFINITY
-        ));
-        assert!(matches!(
-            stable_v2_float64_accumulator([f64::NEG_INFINITY].into_iter(), "r")
-                .unwrap()
-                .sum,
-            Some(SumState::Float(value)) if value == f64::NEG_INFINITY
-        ));
-        let mixed =
-            stable_v2_float64_accumulator([f64::INFINITY, f64::NEG_INFINITY].into_iter(), "r")
-                .unwrap();
-        assert!(matches!(mixed.sum, Some(SumState::Float(value)) if value.is_nan()));
-
-        let pair = stable_v2_pair_accumulator(
-            [
-                (1.0e12, -1.0e12),
-                (1.0e12 + 1.0, -1.0e12 + 2.0),
-                (f64::INFINITY, 3.0),
-            ]
-            .into_iter(),
-            "r",
-        )
-        .unwrap();
-        assert_eq!(pair.valid_count, 3);
-        assert_eq!(pair.pos_inf_x, 1);
-        assert!(pair.co_moment > 0.0);
-
-        let mut numeric = Float64NumericState::new(TypedFrame::Rows(64), 64);
-        for transition in 1_i32..=64 {
+    fn typed_rebuilds_preserve_constant_and_pair_readouts() {
+        let mut numeric = Float64NumericState::new(TypedFrame::Rows(2), 70);
+        let mut pairs = Float64PairState::new(TypedFrame::Rows(2), 70);
+        for transition in 1_i32..=70 {
             numeric
-                .update(
-                    i64::from(transition),
-                    Some(1.0e12 + f64::from(transition)),
-                    RollingNumericalProfile::StableV2Preview,
-                    u64::try_from(transition).unwrap(),
-                    "r",
-                )
+                .update(i64::from(transition), Some(7.0), "r")
                 .unwrap();
-        }
-        assert_eq!(numeric.samples.len(), 64);
-
-        let mut pairs = Float64PairState::new(TypedFrame::Rows(64), 64);
-        for transition in 1_i32..=64 {
             pairs
                 .update(
                     i64::from(transition),
                     Some((f64::from(transition), f64::from(transition * 2))),
-                    RollingNumericalProfile::StableV2Preview,
-                    u64::try_from(transition).unwrap(),
                     "r",
                 )
                 .unwrap();
         }
-        assert_eq!(pairs.samples.len(), 64);
-        assert!(pairs.accumulator.co_moment > 0.0);
+        assert_eq!(
+            numeric.accumulator.mean_value().to_bits(),
+            7.0_f64.to_bits()
+        );
+        assert_eq!(
+            numeric.accumulator.numeric.variance(0).to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert!(
+            pairs
+                .accumulator
+                .family
+                .covariance(pairs.accumulator.valid_count, 0)
+                > 0.0
+        );
     }
 
     #[test]
@@ -5504,22 +5122,8 @@ mod tests {
         assert_eq!((ewma.valid_count, ewma.value), (2, 12.0));
 
         let mut pair = Float64PairState::new(TypedFrame::Duration(2), 0);
-        pair.update(
-            1,
-            Some((1.0, 2.0)),
-            RollingNumericalProfile::StableV1,
-            1,
-            "r",
-        )
-        .unwrap();
-        pair.update(
-            3,
-            Some((3.0, 6.0)),
-            RollingNumericalProfile::StableV1,
-            2,
-            "r",
-        )
-        .unwrap();
+        pair.update(1, Some((1.0, 2.0)), "r").unwrap();
+        pair.update(3, Some((3.0, 6.0)), "r").unwrap();
         assert_eq!(pair.accumulator.valid_count, 1);
     }
 
@@ -5542,7 +5146,7 @@ mod tests {
         assert!(remove_float64(&mut wrong_remove, 1.0).is_err());
 
         let mut signed = WindowAccumulator::new(SumClass::Signed);
-        assert!(add_exact(&mut signed, ExactValue::Unsigned(1), "r").is_err());
+        assert!(add_exact_sum(&mut signed, ExactValue::Unsigned(1), "r").is_err());
         let mut unsigned = WindowAccumulator::new(SumClass::Unsigned);
         assert!(remove_exact(&mut unsigned, ExactValue::Unsigned(1)).is_err());
         unsigned.valid_count = 1;
@@ -5557,21 +5161,14 @@ mod tests {
         };
         assert!(add_pair_float64(&mut pair, 1.0, 2.0, "r").is_err());
         let mut empty_pair = PairAccumulator::default();
-        assert!(remove_pair_float64(&mut empty_pair, 1.0, 2.0).is_err());
+        assert!(empty_pair.remove_values(1.0, 2.0).is_err());
         add_pair_float64(&mut empty_pair, f64::INFINITY, f64::NEG_INFINITY, "r").unwrap();
-        remove_pair_float64(&mut empty_pair, f64::INFINITY, f64::NEG_INFINITY).unwrap();
+        empty_pair
+            .remove_values(f64::INFINITY, f64::NEG_INFINITY)
+            .unwrap();
         assert_eq!(empty_pair.valid_count, 0);
+        assert_eq!(empty_pair.finite_count, 0);
         assert_eq!((empty_pair.pos_inf_x, empty_pair.neg_inf_y), (0, 0));
-        assert_eq!(
-            (
-                empty_pair.mean_x,
-                empty_pair.mean_y,
-                empty_pair.co_moment,
-                empty_pair.m2_x,
-                empty_pair.m2_y,
-            ),
-            (0.0, 0.0, 0.0, 0.0, 0.0)
-        );
     }
 
     #[test]
@@ -5584,9 +5181,7 @@ mod tests {
             ddof: 0,
         };
         let mut numeric = Float64NumericState::new(TypedFrame::Rows(2), 2);
-        numeric
-            .update(1, Some(4.0), RollingNumericalProfile::StableV1, 1, "r")
-            .unwrap();
+        numeric.update(1, Some(4.0), "r").unwrap();
         let states = vec![TypedWindowState::Numeric(numeric.clone())];
 
         let mut wrong_builder = DerivedBuilder::new(
@@ -5678,9 +5273,7 @@ mod tests {
     #[test]
     fn typed_pair_and_float_builders_reject_invalid_output_kinds() {
         let mut numeric = Float64NumericState::new(TypedFrame::Rows(2), 2);
-        numeric
-            .update(1, Some(4.0), RollingNumericalProfile::StableV1, 1, "r")
-            .unwrap();
+        numeric.update(1, Some(4.0), "r").unwrap();
         let bad_ewma_readout = TypedFloatReadout {
             group: 0,
             kind: TypedFloatReadoutKind::Ewma,

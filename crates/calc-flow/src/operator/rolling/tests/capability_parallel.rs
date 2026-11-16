@@ -23,8 +23,7 @@ async fn test_work_invariant_parallel_preparation_qualifies_each_entity_once() {
 
 #[tokio::test]
 async fn test_capability_parallel_cold_rows37_matches_serial_output_and_state() {
-    let mut spec = kernel_spec(json!([aggregate_output("mean", "price", "mean", 37)]));
-    spec.numerical_profile = RollingNumericalProfile::StableV1;
+    let spec = kernel_spec(json!([aggregate_output("mean", "price", "mean", 37)]));
     let input = parallel_rollback_record(0, 64_000);
     assert_cold_parallel(spec, input).await;
 }

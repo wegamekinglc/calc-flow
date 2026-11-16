@@ -121,15 +121,12 @@ fn rolling_cost(node: &Node, len: usize) -> Result<Cost> {
     let Node::RollingMean {
         window,
         min_periods,
-        numerical_profile,
         ..
     } = node
     else {
         unreachable!("rolling node was selected")
     };
-    let options = RollingMeanOptions::new(*window)?
-        .with_min_periods(*min_periods)?
-        .with_numerical_profile(numerical_profile.native());
+    let options = RollingMeanOptions::new(*window)?.with_min_periods(*min_periods)?;
     from_parts(rolling_mean::required_bytes(len, options)?)
 }
 fn ewma_cost(output: Descriptor) -> Result<Cost> {

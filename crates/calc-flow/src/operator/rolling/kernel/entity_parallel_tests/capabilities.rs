@@ -9,7 +9,6 @@ fn test_work_invariant_lanes_reuse_const_core_and_direct_float_writer() {
         frame: TypedFrame::Rows(37),
     };
     mean_plan.outputs[0].min_periods = 3;
-    mean_plan.numerical_profile = RollingNumericalProfile::StableV2Preview;
     mean_plan.nan_as_value = true;
     let mean = assert_parity(&mean_plan, &batch);
 
@@ -29,10 +28,9 @@ fn test_work_invariant_lanes_reuse_const_core_and_direct_float_writer() {
 }
 
 #[test]
-fn test_capability_parallel_shared_rows_preserve_v2_rebase_and_nan_policy() {
+fn test_capability_parallel_shared_rows_preserve_rebuilds_and_nan_policy() {
     let batch = input(64_000, 64, true);
     let mut plan = lane_plan(true);
-    plan.numerical_profile = RollingNumericalProfile::StableV2Preview;
     plan.nan_as_value = true;
     for (group, width) in plan.groups.iter_mut().zip([37, 71]) {
         *group = TypedGroupPlan::Numeric {

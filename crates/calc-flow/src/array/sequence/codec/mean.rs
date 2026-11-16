@@ -67,10 +67,11 @@ pub(super) fn write(
 }
 
 fn write_summary(summary: &FloatSummary, bytes: &mut Vec<u8>) {
+    let (sum, error) = summary.raw_sum_parts();
     word(bytes, summary.valid_count);
-    word(bytes, summary.sum.to_bits());
-    word(bytes, summary.mean.to_bits());
-    word(bytes, summary.m2.to_bits());
+    word(bytes, sum.to_bits());
+    word(bytes, error.to_bits());
+    word(bytes, summary.finite_count);
     word(bytes, summary.nan_count);
     word(bytes, summary.pos_inf);
     word(bytes, summary.neg_inf);
@@ -79,18 +80,20 @@ fn write_summary(summary: &FloatSummary, bytes: &mut Vec<u8>) {
 fn read_summary(reader: &mut Reader<'_>) -> Result<FloatSummary> {
     let valid_count = reader.u64()?;
     let sum = f64::from_bits(reader.u64()?);
-    let mean = f64::from_bits(reader.u64()?);
-    let m2 = f64::from_bits(reader.u64()?);
+    let error = f64::from_bits(reader.u64()?);
+    let finite_count = reader.u64()?;
     let (nan_count, pos_inf, neg_inf) = read_counts(reader)?;
-    Ok(FloatSummary {
+    let mut summary = FloatSummary::mean_only();
+    summary.restore_mean_parts(
         valid_count,
-        sum,
-        mean,
-        m2,
+        finite_count,
         nan_count,
         pos_inf,
         neg_inf,
-    })
+        sum,
+        error,
+    );
+    Ok(summary)
 }
 
 fn read_counts(reader: &mut Reader<'_>) -> Result<(u64, u64, u64)> {
@@ -139,8 +142,14 @@ impl Counts {
     }
 
     fn validate(&self, summary: &FloatSummary) -> Result<()> {
-        if (self.present, self.positive, self.negative)
-            != (summary.valid_count, summary.pos_inf, summary.neg_inf)
+        let finite = self.present.saturating_sub(self.positive + self.negative);
+        if (self.present, self.positive, self.negative, finite)
+            != (
+                summary.valid_count,
+                summary.pos_inf,
+                summary.neg_inf,
+                summary.finite_count,
+            )
             || summary.nan_count != 0
         {
             return Err(mismatch(

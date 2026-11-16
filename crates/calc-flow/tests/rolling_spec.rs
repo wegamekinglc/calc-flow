@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use calc_flow::{CalcFlowError, RollingNumericalProfile, RollingSpec};
+use calc_flow::{CalcFlowError, RollingSpec};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use serde_json::{Value, json};
 
@@ -71,8 +71,17 @@ fn with_field(schema: &Schema, index: usize, replacement: &Field) -> Schema {
 #[test]
 fn canonical_lag_delta_spec_round_trips_the_frozen_json() {
     let spec: RollingSpec = serde_json::from_value(valid_spec_json()).unwrap();
-    assert_eq!(spec.numerical_profile, RollingNumericalProfile::StableV1);
     assert_eq!(serde_json::to_value(&spec).unwrap(), valid_spec_json());
+}
+
+#[test]
+fn removed_numerical_profile_is_rejected_as_an_unknown_field() {
+    for profile in ["stable_v1", "stable_v2"] {
+        let mut document = valid_spec_json();
+        document["numerical_profile"] = json!(profile);
+        let error = serde_json::from_value::<RollingSpec>(document).unwrap_err();
+        assert!(error.to_string().contains("numerical_profile"));
+    }
 }
 
 #[test]

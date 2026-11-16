@@ -33,6 +33,7 @@
 
 pub mod array;
 
+mod accumulate;
 mod batch;
 mod config;
 mod connector;
@@ -116,8 +117,8 @@ pub use operator::{
     ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION, ROLLING_EWMA_STATE_LAYOUT_VERSION,
     ROLLING_INDICATOR_STATE_LAYOUT_VERSION, ROLLING_MACD_STATE_LAYOUT_VERSION,
     ROLLING_STATE_LAYOUT_VERSION, RankTieMethod, RollingFloatPrimitiveSpec, RollingFrameSpec,
-    RollingNumericalProfile, RollingOperator, RollingOutputSpec, RollingSpec, RollingValuePolicy,
-    RowsFrame, STREAM_JOIN_MAX_SAFE_JSON_INTEGER, STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1,
+    RollingOperator, RollingOutputSpec, RollingSpec, RollingValuePolicy, RowsFrame,
+    STREAM_JOIN_MAX_SAFE_JSON_INTEGER, STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1,
     SnapshotSqlOperator, SortDirection, SortHistory, SortKey, SortSpec, SortTies, SortWindow,
     SqlOperator, StateBudget, StateSegment, StreamAsofJoinOperator, StreamAsofJoinSideStatus,
     StreamAsofJoinSpec, StreamAsofJoinStatus, StreamCollector, StreamJoinOperator,

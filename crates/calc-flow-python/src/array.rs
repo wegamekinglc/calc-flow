@@ -240,24 +240,12 @@ fn _native_array_rolling_mean(
     array: &PyNativeArray,
     window: u64,
     min_periods: u64,
-    numerical_profile: &str,
     max_elements: usize,
     max_allocation_bytes: usize,
 ) -> PyResult<PyNativeArray> {
-    let profile = match numerical_profile {
-        "stable_v1" => calc_flow::RollingNumericalProfile::StableV1,
-        "stable_v2" => calc_flow::RollingNumericalProfile::StableV2Preview,
-        _ => {
-            return Err(invalid(
-                "options.numerical_profile",
-                "expected stable_v1 or stable_v2",
-            ));
-        }
-    };
     let options = RollingMeanOptions::new(window)
         .and_then(|options| options.with_min_periods(min_periods))
-        .map_err(crate::error::to_py_err)?
-        .with_numerical_profile(profile);
+        .map_err(crate::error::to_py_err)?;
     let input = &array.inner;
     let execution = execution_limits(max_elements, max_allocation_bytes);
     py.detach(move || calc_flow::array::rolling_mean(input.float_view()?, options, &execution))

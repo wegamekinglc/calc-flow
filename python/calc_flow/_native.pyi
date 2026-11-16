@@ -124,7 +124,6 @@ def _native_array_rolling_mean(
     array: NativeArray,
     window: int,
     min_periods: int,
-    numerical_profile: str,
     max_elements: int,
     max_allocation_bytes: int,
 ) -> NativeArray: ...

@@ -46,7 +46,6 @@ fn lane_plan(dual: bool) -> RollingKernelPlan {
     let mut plan = RollingKernelPlan {
         version: ROLLING_KERNEL_PLAN_VERSION,
         state_layout_version: 3,
-        numerical_profile: RollingNumericalProfile::StableV1,
         selection: KernelSelection::OrderedPrimitive,
         complexity: KernelComplexity::AmortizedConstant,
         event_time_index: 0,
@@ -667,6 +666,7 @@ fn entity_parallel_group_error_is_not_erased_by_the_post_cancel_check() {
         unreachable!()
     };
     numeric.accumulator.valid_count = u64::MAX;
+    numeric.samples.values.clear();
     let token = Arc::new(AtomicBool::new(false));
     let cancel = Arc::clone(&token);
     request.test_hook = Some(Arc::new(move |point| {
@@ -1926,6 +1926,10 @@ fn entity_parallel_difference_readout_keeps_minimum_and_builder_error_order() {
 }
 
 #[test]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "the test deliberately converts an integral float mean to an exact sum"
+)]
 fn entity_parallel_mean_only_difference_keeps_exact_fallback_and_float_bits() {
     let plan = lane_plan(true);
     let readout = |group, min_periods| TypedFloatReadout {
@@ -1959,8 +1963,20 @@ fn entity_parallel_mean_only_difference_keeps_exact_fallback_and_float_bits() {
                 TypedWindowState::Exact(state) => &mut state.accumulator,
                 _ => unreachable!(),
             };
-            accumulator.valid_count = 1;
-            accumulator.mean = mean;
+            if exact {
+                accumulator.sum = Some(SumState::Signed(mean as i128));
+                accumulator.valid_count = 1;
+            } else {
+                accumulator.numeric.restore_mean_parts(
+                    1,
+                    u64::from(mean.is_finite()),
+                    u64::from(mean.is_nan()),
+                    u64::from(mean == f64::INFINITY),
+                    u64::from(mean == f64::NEG_INFINITY),
+                    mean,
+                    0.0,
+                );
+            }
             let before = format!("{states:?}");
             for min_periods in [0, 1, 2] {
                 let mut expected = DerivedBuilder::new(plan.outputs[0], 1);
@@ -1977,7 +1993,7 @@ fn entity_parallel_mean_only_difference_keeps_exact_fallback_and_float_bits() {
                 let actual = actual.as_any().downcast_ref::<Float64Array>().unwrap();
                 assert_eq!(actual.nulls(), expected.nulls());
                 assert_eq!(actual.value(0).to_bits(), expected.value(0).to_bits());
-                if min_periods <= 1 && !mean.is_finite() {
+                if !exact && min_periods <= 1 && !mean.is_finite() {
                     assert!(
                         actual.value(0).is_nan(),
                         "same-group nonfinite difference is not zero"
@@ -2361,9 +2377,7 @@ fn private_readout_input(
     } else {
         for entity in &mut request.entities {
             let mut extra = Float64NumericState::new(TypedFrame::Rows(5), 20);
-            extra
-                .update(-1, Some(73.0), RollingNumericalProfile::StableV1, 1, "r")
-                .unwrap();
+            extra.update(-1, Some(73.0), "r").unwrap();
             Arc::make_mut(&mut entity.state)
                 .groups
                 .push(TypedWindowState::Numeric(extra));

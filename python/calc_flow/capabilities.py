@@ -752,11 +752,6 @@ def _sequence_schema_version(value: object, versions: tuple[int, ...]) -> None:
 def _sequence_schema_kernel_defaults(properties: dict[str, Any]) -> None:
     if "min_periods" in properties:
         _sequence_schema_count(properties["min_periods"], 1, 1)
-    if "numerical_profile" in properties and properties["numerical_profile"] != {
-        "enum": ["stable_v1", "stable_v2"],
-        "default": "stable_v1",
-    }:
-        raise _sequence_schema_error("numerical_profile")
 
 
 def _sequence_schema_kernel_branch(value: object, function: str) -> None:
@@ -764,7 +759,7 @@ def _sequence_schema_kernel_branch(value: object, function: str) -> None:
         _sequence_schema_macd(value)
         return
     count, optional = {
-        "rolling_mean": ("window", ("min_periods", "numerical_profile")),
+        "rolling_mean": ("window", ("min_periods",)),
         "ewma": ("span", ("min_periods",)),
         "rsi": ("period", ()),
         "atr": ("period", ()),

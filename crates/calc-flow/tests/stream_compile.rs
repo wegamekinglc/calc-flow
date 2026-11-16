@@ -887,7 +887,6 @@ fn late_rolling(policy: calc_flow::LatePolicySpec) -> calc_flow::RollingOperator
     let spec = calc_flow::RollingSpec {
         configuration_version: 1,
         state_layout_version: 1,
-        numerical_profile: calc_flow::RollingNumericalProfile::default(),
         partition_by: vec!["key".into()],
         event_time: "ts".into(),
         sequence_by: vec!["seq".into()],

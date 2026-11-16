@@ -267,16 +267,15 @@ def test_native_where_and_shape_errors_use_core_rules() -> None:
         cfa.add(left, scalar, execution=cfa.ArrayExecutionOptions(max_elements=0))
 
 
-@pytest.mark.parametrize("profile", ["stable_v1", "stable_v2"])
-def test_native_rolling_mean_preserves_row_window_and_profile(profile: str) -> None:
+def test_native_rolling_mean_preserves_row_window_and_rejects_removed_profile() -> None:
     array = cfa.from_arrow(pa.array([1.0, None, 3.0, float("nan"), 5.0]))
-    result = cfa.rolling_mean(array, window=3, min_periods=2, numerical_profile=profile)
+    result = cfa.rolling_mean(array, window=3, min_periods=2)
     assert result.to_arrow().to_pylist() == [None, None, 2.0, None, 4.0]
     assert result.dtype == "float64"
     with pytest.raises(ConfigError, match="options.min_periods"):
         cfa.rolling_mean(array, window=2, min_periods=3)
-    with pytest.raises(ConfigError, match="options.numerical_profile"):
-        cfa.rolling_mean(array, window=2, numerical_profile="unknown")
+    with pytest.raises(TypeError, match="numerical_profile"):
+        cfa.rolling_mean(array, window=2, numerical_profile="stable_v1")
 
 
 def test_native_arrow_path_does_not_import_optional_array_backends() -> None:

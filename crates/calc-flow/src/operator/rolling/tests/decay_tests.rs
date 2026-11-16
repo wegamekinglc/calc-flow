@@ -118,33 +118,22 @@ async fn step(
     concat_batches(operator.output_ports()[0].schema().unwrap(), &records).unwrap()
 }
 
-#[tokio::test]
-async fn p2_old_source_snapshots_restore_and_continue_mixed_outputs() {
+#[test]
+fn p2_old_source_snapshots_with_removed_numeric_profiles_are_rejected() {
     let captured: Value =
         serde_json::from_str(include_str!("fixtures/decay-main-8d8be7d9.json")).unwrap();
     assert_eq!(
         captured["runtime_baseline"],
         "8d8be7d907a095dbc0dc2b73dafcfdd842979cdf"
     );
-    let prefix = [
-        (1, "a", 1, Some(1e20)),
-        (2, "a", 2, None),
-        (3, "a", 3, Some(1.0)),
-    ];
-    let suffix = [
-        (4, "a", 4, Some(1.0)),
-        (5, "a", 5, None),
-        (6, "a", 6, Some(-2.0)),
-        (7, "a", 7, Some(f64::INFINITY)),
-        (8, "a", 8, Some(3.0)),
-        (9, "a", 9, None),
-        (10, "a", 10, Some(4.0)),
-    ];
     for fixture in captured["fixtures"].as_array().unwrap() {
-        let spec: RollingSpec = serde_json::from_value(fixture["spec"].clone()).unwrap();
-        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
-        let mut uninterrupted =
-            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
+        let spec = match serde_json::from_value::<RollingSpec>(fixture["spec"].clone()) {
+            Ok(spec) => spec,
+            Err(error) => {
+                assert!(error.to_string().contains("numerical_profile"), "{error}");
+                continue;
+            }
+        };
         let mut restored =
             RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
         let snapshot = crate::OperatorStateSnapshot {
@@ -161,49 +150,8 @@ async fn p2_old_source_snapshots_restore_and_continue_mixed_outputs() {
                 })
                 .collect(),
         };
-        StreamOperator::restore(&mut restored, &snapshot).unwrap();
-        let job = crate::StreamJobContext::new(
-            7,
-            TEST_FINGERPRINT,
-            JsonMap::new(),
-            None,
-            crate::CancellationToken::new(),
-        );
-        step(&mut uninterrupted, &job, float64_fast_record(&prefix), 3).await;
-        for chunk in suffix.chunks(2) {
-            let end = chunk.last().unwrap().0;
-            let actual = step(&mut restored, &job, float64_fast_record(chunk), end).await;
-            let continuous = step(&mut uninterrupted, &job, float64_fast_record(chunk), end).await;
-            assert_equivalent_columns(&actual, &continuous);
-            let complete = prefix
-                .iter()
-                .chain(suffix.iter().filter(|row| row.0 <= end))
-                .copied()
-                .collect::<Vec<_>>();
-            let input = float64_fast_record(&complete);
-            let rows = (0..input.num_rows())
-                .map(|row| read_buffered_row(&input, row, &compiled, "rolling").unwrap())
-                .collect::<Vec<_>>();
-            let general =
-                compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
-                    .unwrap();
-            let expected = build_output_record(
-                &rows,
-                general.columns,
-                &Arc::new(output_schema(&kernel_schema(), &compiled.outputs)),
-                "rolling",
-            )
-            .unwrap();
-            assert_equivalent_columns(
-                &actual,
-                &expected.slice(expected.num_rows() - chunk.len(), chunk.len()),
-            );
-        }
-        let checkpoint = restored.checkpoint(Epoch::new(2).unwrap()).unwrap();
-        assert_eq!(
-            checkpoint.inline_metadata["kernel_fingerprint"],
-            fixture["metadata"]["kernel_fingerprint"]
-        );
+        let error = StreamOperator::restore(&mut restored, &snapshot).unwrap_err();
+        assert!(error.to_string().contains("numerical_profile"), "{error}");
     }
 }
 
@@ -283,34 +231,10 @@ async fn p2_cache_refusal_and_recovery_preserve_mean_and_logical_budget() {
     );
 }
 
-fn old_snapshot() -> (RollingSpec, crate::OperatorStateSnapshot) {
-    let captured: Value =
-        serde_json::from_str(include_str!("fixtures/decay-main-8d8be7d9.json")).unwrap();
-    let fixture = &captured["fixtures"][0];
-    let snapshot = crate::OperatorStateSnapshot {
-        inline_metadata: serde_json::from_value(fixture["metadata"].clone()).unwrap(),
-        segments: fixture["segments"]
-            .as_object()
-            .unwrap()
-            .iter()
-            .map(|(id, value)| {
-                (
-                    id.clone(),
-                    crate::StateSegment::new(hex::decode(value.as_str().unwrap()).unwrap()),
-                )
-            })
-            .collect(),
-    };
-    (
-        serde_json::from_value(fixture["spec"].clone()).unwrap(),
-        snapshot,
-    )
-}
-
 #[tokio::test]
-async fn p2_extra_wrong_checkpoint_identity_profile_and_budget_preserve_installed_state() {
-    let (spec, snapshot) = old_snapshot();
-    let mut operator =
+async fn p2_extra_wrong_checkpoint_identity_and_budget_preserve_installed_state() {
+    let spec = decay_spec(2, true);
+    let mut source =
         RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
     let job = crate::StreamJobContext::new(
         7,
@@ -319,6 +243,16 @@ async fn p2_extra_wrong_checkpoint_identity_profile_and_budget_preserve_installe
         None,
         crate::CancellationToken::new(),
     );
+    step(
+        &mut source,
+        &job,
+        float64_fast_record(&[(1, "a", 1, Some(2.0)), (2, "a", 2, Some(3.0))]),
+        2,
+    )
+    .await;
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    let mut operator =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
     step(
         &mut operator,
         &job,
@@ -330,7 +264,6 @@ async fn p2_extra_wrong_checkpoint_identity_profile_and_budget_preserve_installe
     let charge = operator.state.charge;
     for (field, value) in [
         ("kernel_fingerprint", "foreign"),
-        ("numerical_profile", "stable_v2"),
         ("state_schema_fingerprint", "foreign"),
     ] {
         let mut bad = snapshot.clone();
@@ -480,20 +413,14 @@ async fn buffered_step(
 }
 
 #[tokio::test]
-async fn p2_buffered_profiles_mix_cache_reference_and_recover_without_rephasing_mean() {
-    for profile in [
-        RollingNumericalProfile::StableV1,
-        RollingNumericalProfile::StableV2Preview,
-    ] {
-        assert_mixed_buffered_decay_profile(profile).await;
-    }
+async fn p2_buffered_contract_mixes_cache_reference_and_recovers_without_rephasing_mean() {
+    assert_mixed_buffered_decay().await;
 }
 
-async fn assert_mixed_buffered_decay_profile(profile: RollingNumericalProfile) {
+async fn assert_mixed_buffered_decay() {
     use crate::operator::rolling_metrics::RollingMetricsStore;
     use datafusion::execution::memory_pool::MemoryConsumer;
-    let mut spec = decay_spec(2, true);
-    spec.numerical_profile = profile;
+    let spec = decay_spec(2, true);
     let mut cached =
         RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
     let mut reference = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();

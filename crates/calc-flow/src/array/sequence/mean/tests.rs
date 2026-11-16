@@ -81,39 +81,30 @@ fn test_owned_mean_cancels_long_history_copy_without_committing_capacity() {
 }
 
 #[test]
-fn test_owned_mean_cancels_long_m2_repair_in_each_profile_then_retries() {
+fn test_owned_mean_cancels_long_compensated_rebuild_then_retries() {
     let execution = ArrayExecutionOptions::default();
-    let prefix = vec![1e155; 8193];
-    for (profile, stop) in [
-        (RollingNumericalProfile::StableV1, 12),
-        (RollingNumericalProfile::StableV2Preview, 13),
-    ] {
-        let options = RollingMeanOptions::new(9000)
-            .unwrap()
-            .with_numerical_profile(profile);
-        let mut state = RollingMeanState::new(options, ArrayStateOptions::default()).unwrap();
-        state.process(view(&prefix), &execution).unwrap();
-        let bytes = state.state_bytes();
-        assert!(matches!(
-            state.process_checked(view(&[-1e155]), &execution, &mut cancel_at(stop)),
-            Err(CalcFlowError::Cancelled { .. })
-        ));
-        assert_eq!(state.state_bytes(), bytes);
-        let actual = state.process(view(&[-1e155]), &execution).unwrap();
-        let mut full = prefix.clone();
-        full.push(-1e155);
-        let expected = rolling_mean(FloatView::from_f64(&full), options, &execution).unwrap();
-        assert_eq!(bits(&actual)[0], bits(&expected).last().copied().unwrap());
-    }
+    let prefix = vec![1e155; 8191];
+    let options = RollingMeanOptions::new(8192).unwrap();
+    let mut state = RollingMeanState::new(options, ArrayStateOptions::default()).unwrap();
+    state.process(view(&prefix), &execution).unwrap();
+    let bytes = state.state_bytes();
+    assert!(matches!(
+        state.process_checked(view(&[-1e155]), &execution, &mut cancel_at(12)),
+        Err(CalcFlowError::Cancelled { .. })
+    ));
+    assert_eq!(state.state_bytes(), bytes);
+    let actual = state.process(view(&[-1e155]), &execution).unwrap();
+    let mut full = prefix.clone();
+    full.push(-1e155);
+    let expected = rolling_mean(FloatView::from_f64(&full), options, &execution).unwrap();
+    assert_eq!(bits(&actual)[0], bits(&expected).last().copied().unwrap());
 }
 
 #[test]
-fn test_owned_mean_peak_includes_stable_fold_scratch() {
-    let options = RollingMeanOptions::new(2)
-        .unwrap()
-        .with_numerical_profile(RollingNumericalProfile::StableV2Preview);
+fn test_owned_mean_peak_excludes_removed_profile_scratch() {
+    let options = RollingMeanOptions::new(2).unwrap();
     let mut state = RollingMeanState::new(options, ArrayStateOptions::default()).unwrap();
-    let peak = 64 + 80 + 17 + rolling_mean_math::stable_scratch_bytes();
+    let peak = 64 + 80 + 17;
     let execution = ArrayExecutionOptions::default();
     assert!(
         matches!(state.process(view(&[1.0]), &execution.with_max_allocation_bytes(peak - 1)),

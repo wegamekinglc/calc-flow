@@ -5,16 +5,15 @@ use crate::runtime::streaming::entity_work::JobEntityWorkOwner;
 use super::*;
 
 #[tokio::test]
-async fn test_capability_parallel_stable_v2_mixed_rebases_across_restore() {
+async fn test_capability_parallel_compensated_mixed_rebuilds_across_restore() {
     let mut deviation = duration_output("stddev", "price", "time_stddev", 8_192);
     deviation["ddof"] = json!(1);
-    let mut spec = kernel_spec(json!([
+    let spec = kernel_spec(json!([
         aggregate_output("mean", "price", "row_mean", 37),
         duration_output("sum", "price", "time_sum", 4_096),
         ddof_output("variance", "price", "row_variance", 73, 1),
         deviation,
     ]));
-    spec.numerical_profile = RollingNumericalProfile::StableV2Preview;
     let names = entity_names();
     let inputs = (0..3)
         .map(|batch| {

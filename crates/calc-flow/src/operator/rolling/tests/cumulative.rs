@@ -31,47 +31,26 @@ fn mixed_cumulative_spec() -> RollingSpec {
 #[test]
 fn test_cumulative_single_and_mixed_stages_select_typed_transition() {
     let mut selections = Vec::new();
-    for profile in [
-        RollingNumericalProfile::StableV1,
-        RollingNumericalProfile::StableV2Preview,
-    ] {
-        let mut mixed = mixed_cumulative_spec();
-        mixed.numerical_profile = profile;
-        let mut cumulative = cumulative_spec();
-        cumulative.numerical_profile = profile;
-        let compiled = compile_spec(&cumulative, &kernel_schema()).unwrap();
-        let expected = match profile {
-            RollingNumericalProfile::StableV1 => {
-                "241fc56daeb51a3fea8f780c215658956b3b75437852305f4ac6c657bb4f131a"
-            }
-            RollingNumericalProfile::StableV2Preview => {
-                "37d8c3f0e6b451348349c5fd69da6346be96cbb0e69d584830f35ae1cd473646"
-            }
+    let mixed = mixed_cumulative_spec();
+    let cumulative = cumulative_spec();
+    for output in &cumulative.outputs {
+        let single = RollingSpec {
+            outputs: vec![output.clone()],
+            ..cumulative.clone()
         };
-        assert_eq!(
-            compiled.kernel_plan.fingerprint(),
-            expected,
-            "layout 4 identity at e59f26cb"
-        );
-        for output in &cumulative.outputs {
-            let single = RollingSpec {
-                outputs: vec![output.clone()],
-                ..cumulative.clone()
-            };
-            selections.push(
-                compile_spec(&single, &kernel_schema())
-                    .unwrap()
-                    .kernel_plan
-                    .selection(),
-            );
-        }
         selections.push(
-            compile_spec(&mixed, &kernel_schema())
+            compile_spec(&single, &kernel_schema())
                 .unwrap()
                 .kernel_plan
                 .selection(),
         );
     }
+    selections.push(
+        compile_spec(&mixed, &kernel_schema())
+            .unwrap()
+            .kernel_plan
+            .selection(),
+    );
     assert!(
         selections
             .iter()
@@ -80,14 +59,12 @@ fn test_cumulative_single_and_mixed_stages_select_typed_transition() {
     );
 }
 
-fn cumulative_volume_spec(profile: RollingNumericalProfile) -> RollingSpec {
+fn cumulative_volume_spec() -> RollingSpec {
     let mut value = serde_json::to_value(cumulative_spec()).unwrap();
     for output in value["outputs"].as_array_mut().unwrap() {
         output["input"] = json!("volume");
     }
-    let mut spec: RollingSpec = serde_json::from_value(value).unwrap();
-    spec.numerical_profile = profile;
-    spec
+    serde_json::from_value(value).unwrap()
 }
 
 #[test]
@@ -161,14 +138,9 @@ fn test_cumulative_typed_primitives_match_general() {
         Some(1.0),
     ])));
     cases.push(Arc::new(Float64Array::new_null(0)));
-    for profile in [
-        RollingNumericalProfile::StableV1,
-        RollingNumericalProfile::StableV2Preview,
-    ] {
-        for values in &cases {
-            let (schema, input) = primitive_volume_record(Arc::clone(values));
-            assert_typed_matches_general(&cumulative_volume_spec(profile), &schema, &input);
-        }
+    for values in &cases {
+        let (schema, input) = primitive_volume_record(Arc::clone(values));
+        assert_typed_matches_general(&cumulative_volume_spec(), &schema, &input);
     }
 }
 
@@ -180,11 +152,7 @@ fn test_cumulative_typed_integer_overflow_matches_general() {
     ];
     for values in cases {
         let (schema, input) = primitive_volume_record(values);
-        let compiled = compile_spec(
-            &cumulative_volume_spec(RollingNumericalProfile::StableV1),
-            &schema,
-        )
-        .unwrap();
+        let compiled = compile_spec(&cumulative_volume_spec(), &schema).unwrap();
         let fast = compiled
             .kernel_plan
             .open_and_fill(&input, "rolling")
@@ -199,7 +167,7 @@ fn test_cumulative_typed_integer_overflow_matches_general() {
                 .unwrap();
         assert_eq!(fast.to_string(), general.to_string());
     }
-    let mut spec = cumulative_volume_spec(RollingNumericalProfile::StableV1);
+    let mut spec = cumulative_volume_spec();
     spec.outputs.truncate(1);
     let mut value = serde_json::to_value(spec).unwrap();
     value["outputs"][0]["min_periods"] = json!(3);
@@ -260,9 +228,8 @@ async fn advance_cumulative_stream(
     drain(&mut output).remove(0)
 }
 
-async fn cumulative_stream_roundtrip(profile: RollingNumericalProfile, rolling: bool) {
+async fn cumulative_stream_roundtrip(rolling: bool) {
     let mut spec = mixed_cumulative_spec();
-    spec.numerical_profile = profile;
     if !rolling {
         spec.outputs.pop();
     }
@@ -328,13 +295,8 @@ async fn cumulative_stream_roundtrip(profile: RollingNumericalProfile, rolling: 
 
 #[tokio::test]
 async fn test_cumulative_ordered_and_fallback_streams_match_across_batches_and_restore() {
-    for profile in [
-        RollingNumericalProfile::StableV1,
-        RollingNumericalProfile::StableV2Preview,
-    ] {
-        for rolling in [false, true] {
-            cumulative_stream_roundtrip(profile, rolling).await;
-        }
+    for rolling in [false, true] {
+        cumulative_stream_roundtrip(rolling).await;
     }
 }
 
@@ -371,56 +333,50 @@ async fn assert_cumulative_prefix_overflow_is_atomic(
 
 #[tokio::test]
 async fn test_cumulative_mixed_integer_restore_replays_only_window_history() {
-    for profile in [
-        RollingNumericalProfile::StableV1,
-        RollingNumericalProfile::StableV2Preview,
-    ] {
-        let mut spec = cumulative_volume_spec(profile);
-        spec.outputs.truncate(1);
-        spec.outputs.push(
-            serde_json::from_value(aggregate_output("mean", "volume", "rolling_mean", 2)).unwrap(),
-        );
-        let mut source =
-            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
-        let job = crate::StreamJobContext::new(
-            7,
-            TEST_FINGERPRINT,
-            JsonMap::new(),
-            None,
-            crate::CancellationToken::new(),
-        );
-        let input = int64_fast_record(&[
-            Some(-i64::MAX),
-            Some(i64::MAX),
-            Some(i64::MAX),
-            Some(0),
-            Some(1),
-        ]);
-        let prefix = advance_cumulative_stream(&mut source, &input.slice(0, 3), 3, &job).await;
-        let totals = prefix
-            .column_by_name("total")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(totals.values().as_ref(), &[-i64::MAX, 0, i64::MAX]);
-        let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
-        let mut restored =
-            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
-        StreamOperator::restore(&mut restored, &snapshot).unwrap();
-        let expected = advance_cumulative_stream(&mut source, &input.slice(3, 1), 4, &job).await;
-        let actual = advance_cumulative_stream(&mut restored, &input.slice(3, 1), 4, &job).await;
-        assert_eq!(actual, expected, "{profile:?}");
-        let total = actual
-            .column_by_name("total")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(total.value(0), i64::MAX);
-        for operator in [&mut source, &mut restored] {
-            assert_cumulative_prefix_overflow_is_atomic(operator, &input.slice(4, 1), &job).await;
-        }
+    let mut spec = cumulative_volume_spec();
+    spec.outputs.truncate(1);
+    spec.outputs.push(
+        serde_json::from_value(aggregate_output("mean", "volume", "rolling_mean", 2)).unwrap(),
+    );
+    let mut source =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
+    let job = crate::StreamJobContext::new(
+        7,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let input = int64_fast_record(&[
+        Some(-i64::MAX),
+        Some(i64::MAX),
+        Some(i64::MAX),
+        Some(0),
+        Some(1),
+    ]);
+    let prefix = advance_cumulative_stream(&mut source, &input.slice(0, 3), 3, &job).await;
+    let totals = prefix
+        .column_by_name("total")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(totals.values().as_ref(), &[-i64::MAX, 0, i64::MAX]);
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    let mut restored = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    let expected = advance_cumulative_stream(&mut source, &input.slice(3, 1), 4, &job).await;
+    let actual = advance_cumulative_stream(&mut restored, &input.slice(3, 1), 4, &job).await;
+    assert_eq!(actual, expected);
+    let total = actual
+        .column_by_name("total")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(total.value(0), i64::MAX);
+    for operator in [&mut source, &mut restored] {
+        assert_cumulative_prefix_overflow_is_atomic(operator, &input.slice(4, 1), &job).await;
     }
 }
 
@@ -480,15 +436,13 @@ fn remove_cumulative_summaries(
 }
 
 async fn pending_checkpoint(
-    profile: RollingNumericalProfile,
     prefix: bool,
 ) -> (
     RollingOperator,
     crate::OperatorStateSnapshot,
     crate::StreamJobContext,
 ) {
-    let mut spec = cumulative_spec();
-    spec.numerical_profile = profile;
+    let spec = cumulative_spec();
     let mut source = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
     let job = crate::StreamJobContext::new(
         7,
@@ -526,73 +480,61 @@ async fn pending_checkpoint(
 
 #[tokio::test]
 async fn test_cumulative_snapshot_rejects_missing_prefix_inventory() {
-    for profile in [
-        RollingNumericalProfile::StableV1,
-        RollingNumericalProfile::StableV2Preview,
-    ] {
-        let (mut source, snapshot, job) = pending_checkpoint(profile, true).await;
-        let mut restored =
-            RollingOperator::new("rolling", Arc::new(kernel_schema()), source.spec().clone())
-                .unwrap();
-        StreamOperator::restore(&mut restored, &snapshot).unwrap();
-        let corrupted = remove_cumulative_summaries(&snapshot);
-        assert!(
-            StreamOperator::restore(&mut restored, &corrupted).is_err(),
-            "{profile:?}: restore accepted a processed prefix without any cumulative summaries"
-        );
-        let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(1)));
-        let mut output = crate::EdgeCollector::new(source.output_ports().to_vec());
-        for operator in [&mut source, &mut restored] {
-            operator
-                .on_watermark(EventTime::from_micros(2), &context, &mut output)
-                .await
-                .unwrap();
-        }
-        let output = drain(&mut output);
-        assert_eq!(output[0], output[1]);
-        let total = output[1]
-            .column_by_name("total")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Float64Array>()
+    let (mut source, snapshot, job) = pending_checkpoint(true).await;
+    let mut restored =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), source.spec().clone()).unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    let corrupted = remove_cumulative_summaries(&snapshot);
+    assert!(
+        StreamOperator::restore(&mut restored, &corrupted).is_err(),
+        "restore accepted a processed prefix without any cumulative summaries"
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(1)));
+    let mut output = crate::EdgeCollector::new(source.output_ports().to_vec());
+    for operator in [&mut source, &mut restored] {
+        operator
+            .on_watermark(EventTime::from_micros(2), &context, &mut output)
+            .await
             .unwrap();
-        assert_eq!(total.value(0).to_bits(), 30.0_f64.to_bits());
     }
+    let output = drain(&mut output);
+    assert_eq!(output[0], output[1]);
+    let total = output[1]
+        .column_by_name("total")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert_eq!(total.value(0).to_bits(), 30.0_f64.to_bits());
 }
 
 #[tokio::test]
 async fn test_cumulative_snapshot_restores_pending_only_entity() {
-    for profile in [
-        RollingNumericalProfile::StableV1,
-        RollingNumericalProfile::StableV2Preview,
-    ] {
-        let (mut source, snapshot, job) = pending_checkpoint(profile, false).await;
-        let mut restored =
-            RollingOperator::new("rolling", Arc::new(kernel_schema()), source.spec().clone())
-                .unwrap();
-        restored
-            .set_state_budget(StateBudget::new(1, 1 << 20).unwrap())
+    let (mut source, snapshot, job) = pending_checkpoint(false).await;
+    let mut restored =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), source.spec().clone()).unwrap();
+    restored
+        .set_state_budget(StateBudget::new(1, 1 << 20).unwrap())
+        .unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    assert!(restored.state.histories.by_entity.is_empty());
+    let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(1)));
+    let mut output = crate::EdgeCollector::new(source.output_ports().to_vec());
+    for operator in [&mut source, &mut restored] {
+        operator
+            .on_watermark(EventTime::from_micros(2), &context, &mut output)
+            .await
             .unwrap();
-        StreamOperator::restore(&mut restored, &snapshot).unwrap();
-        assert!(restored.state.histories.by_entity.is_empty());
-        let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(1)));
-        let mut output = crate::EdgeCollector::new(source.output_ports().to_vec());
-        for operator in [&mut source, &mut restored] {
-            operator
-                .on_watermark(EventTime::from_micros(2), &context, &mut output)
-                .await
-                .unwrap();
-        }
-        let output = drain(&mut output);
-        assert_eq!(output[0], output[1]);
-        let total = output[1]
-            .column_by_name("total")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert_eq!(total.value(0).to_bits(), 20.0_f64.to_bits());
     }
+    let output = drain(&mut output);
+    assert_eq!(output[0], output[1]);
+    let total = output[1]
+        .column_by_name("total")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert_eq!(total.value(0).to_bits(), 20.0_f64.to_bits());
 }
 
 #[tokio::test]

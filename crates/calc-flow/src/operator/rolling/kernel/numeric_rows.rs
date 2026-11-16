@@ -12,12 +12,13 @@ use datafusion::execution::memory_pool::{
 };
 
 use super::{
-    Float64NumericState, RollingMetricsRecorder, RollingNumericalProfile, SumClass, TimedSample,
-    TypedEntityState, TypedFrame, TypedGroupInput, TypedGroupPlan, TypedWindowState,
-    WindowAccumulator, add_float64, internal_error, remove_float64, stable_v2_float64_accumulator,
-    stable_v2_rebase_due, valid_float64,
+    Float64NumericState, RollingMetricsRecorder, TimedSample, TypedEntityState, TypedFrame,
+    TypedGroupInput, TypedGroupPlan, TypedWindowState, internal_error, valid_float64,
 };
 use crate::Result;
+
+#[cfg(test)]
+use super::WindowAccumulator;
 
 const CACHE_LIMIT: usize = 64 << 20;
 const REGISTRATION_BYTES: usize = 256;
@@ -160,11 +161,11 @@ impl RowsTape {
         Some(Arc::new(copied))
     }
 
-    fn window_values(&self, window: usize) -> impl Iterator<Item = f64> + Clone + '_ {
+    fn window_history(&self, window: usize) -> impl Iterator<Item = Option<f64>> + Clone + '_ {
         self.rows
             .iter()
             .skip(self.rows.len().saturating_sub(window))
-            .filter_map(|value| *value)
+            .copied()
     }
 
     pub(super) fn bytes(&self) -> usize {
@@ -291,25 +292,6 @@ impl TypedEntityState {
         }
     }
 
-    pub(super) fn rebase_shared_rows(&mut self, node: &str) -> Result<()> {
-        let tape = self
-            .shared_rows
-            .as_ref()
-            .ok_or_else(|| internal_error("shared numeric rows are missing"))?;
-        for group in self.groups.iter_mut().take(2) {
-            let TypedWindowState::Numeric(state) = group else {
-                return Err(internal_error(
-                    "typed rolling group state does not match its input plan",
-                ));
-            };
-            let TypedFrame::Rows(width) = state.samples.frame else {
-                return Err(internal_error("shared numeric group is not a Rows frame"));
-            };
-            state.accumulator = stable_v2_float64_accumulator(tape.window_values(width), node)?;
-        }
-        Ok(())
-    }
-
     pub(super) fn push_shared_row(&mut self, sample: Option<f64>) {
         let tape = self
             .shared_rows
@@ -335,7 +317,6 @@ impl TypedEntityState {
         &mut self,
         ordinal: usize,
         sample: Option<f64>,
-        profile: RollingNumericalProfile,
         node: &str,
     ) -> Result<()> {
         let tape = self
@@ -350,15 +331,7 @@ impl TypedEntityState {
         let TypedFrame::Rows(width) = state.samples.frame else {
             return Err(internal_error("shared numeric group is not a Rows frame"));
         };
-        update_shared_numeric(
-            state,
-            tape,
-            width,
-            sample,
-            profile,
-            self.transition_count,
-            node,
-        )
+        update_shared_numeric(state, tape, width, sample, node)
     }
 }
 
@@ -366,7 +339,6 @@ pub(super) fn update_shared_groups(
     entity: &mut TypedEntityState,
     inputs: &[TypedGroupInput],
     row: usize,
-    profile: RollingNumericalProfile,
     nan_as_value: bool,
     node: &str,
 ) -> Result<()> {
@@ -378,7 +350,7 @@ pub(super) fn update_shared_groups(
     let sample = valid_float64(first, row, nan_as_value);
     entity.push_shared_row(sample);
     for ordinal in 0..entity.groups.len().min(inputs.len()) {
-        entity.update_shared_group(ordinal, sample, profile, node)?;
+        entity.update_shared_group(ordinal, sample, node)?;
     }
     entity.trim_shared_rows();
     Ok(())
@@ -389,53 +361,24 @@ fn update_shared_numeric(
     tape: &RowsTape,
     width: usize,
     sample: Option<f64>,
-    profile: RollingNumericalProfile,
-    transitions: u64,
     node: &str,
 ) -> Result<()> {
-    if let Some(value) = sample {
-        add_float64(&mut state.accumulator, value, node)?;
-    }
     let leaving = tape
         .rows
         .len()
         .checked_sub(width.saturating_add(1))
         .and_then(|index| tape.rows[index]);
-    if let Some(value) = leaving {
-        remove_float64(&mut state.accumulator, value)?;
-    }
-    repair_shared_numeric(
-        &mut state.accumulator,
-        tape,
-        width,
-        profile,
-        transitions,
-        node,
-    )
-}
-
-fn repair_shared_numeric(
-    accumulator: &mut WindowAccumulator,
-    tape: &RowsTape,
-    width: usize,
-    profile: RollingNumericalProfile,
-    transitions: u64,
-    node: &str,
-) -> Result<()> {
-    if accumulator.nan_count > 0 {
-        return Ok(());
-    }
-    let count = width.min(tape.rows.len());
-    if profile == RollingNumericalProfile::StableV2Preview
-        && stable_v2_rebase_due(transitions, count, accumulator.is_non_finite())
-    {
-        *accumulator = stable_v2_float64_accumulator(tape.window_values(width), node)?;
-    } else if accumulator.is_non_finite() {
-        *accumulator = WindowAccumulator::new(SumClass::Float);
-        for sample in tape.window_values(width) {
-            add_float64(accumulator, sample, node)?;
-        }
-    }
+    state
+        .accumulator
+        .numeric
+        .rows(leaving, sample)
+        .map_err(|error| super::float_arithmetic_error(error, node))?;
+    state
+        .accumulator
+        .numeric
+        .finish_rows(width, tape.window_history(width))
+        .map_err(|error| super::float_arithmetic_error(error, node))?;
+    state.accumulator.sync_float_sum();
     Ok(())
 }
 
@@ -454,15 +397,15 @@ mod tests {
             .collect()
     }
 
-    fn accumulator_bits(value: &WindowAccumulator) -> [u64; 8] {
-        let Some(super::super::SumState::Float(sum)) = value.sum else {
-            panic!("float summary required");
-        };
+    fn accumulator_bits(value: &WindowAccumulator) -> [u64; 10] {
+        let (sum, error) = value.numeric.raw_sum_parts();
         [
             value.valid_count,
+            value.finite_count,
             sum.to_bits(),
-            value.mean.to_bits(),
-            value.m2.to_bits(),
+            error.to_bits(),
+            value.numeric.mean().to_bits(),
+            value.numeric.variance(0).to_bits(),
             value.nan_count,
             value.pos_inf,
             value.neg_inf,
@@ -477,17 +420,11 @@ mod tests {
         state
     }
 
-    fn advance(
-        entity: &mut TypedEntityState,
-        value: Option<f64>,
-        profile: RollingNumericalProfile,
-    ) {
+    fn advance(entity: &mut TypedEntityState, value: Option<f64>) {
         entity.transition_count += 1;
         entity.push_shared_row(value);
         for ordinal in 0..2 {
-            entity
-                .update_shared_group(ordinal, value, profile, "r")
-                .unwrap();
+            entity.update_shared_group(ordinal, value, "r").unwrap();
         }
         entity.trim_shared_rows();
     }
@@ -512,116 +449,62 @@ mod tests {
             Some(-1.0),
             Some(1e-300),
         ];
-        for profile in [
-            RollingNumericalProfile::StableV1,
-            RollingNumericalProfile::StableV2Preview,
-        ] {
-            for windows in [[2, 4], [5, 20], [64, 80]] {
-                for nan_as_value in [false, true] {
-                    let plans = groups(windows);
-                    let mut shared = TypedEntityState::new(&plans, 300);
-                    shared.try_share_rows(
-                        SharedRowsShape::compile(&plans).unwrap(),
-                        Arc::new(GreedyMemoryPool::new(CACHE_LIMIT)),
-                    );
-                    let mut independent = TypedEntityState::new(&plans, 300);
-                    for row in 0..300 {
-                        let value = special[row % special.len()]
-                            .filter(|value| nan_as_value || !value.is_nan());
-                        advance(&mut shared, value, profile);
-                        independent.transition_count += 1;
-                        for ordinal in 0..2 {
-                            let TypedWindowState::Numeric(state) = &mut independent.groups[ordinal]
-                            else {
-                                unreachable!();
-                            };
-                            state
-                                .update(
-                                    i64::try_from(row).unwrap(),
-                                    value,
-                                    profile,
-                                    independent.transition_count,
-                                    "r",
-                                )
-                                .unwrap();
-                            assert_eq!(
-                                accumulator_bits(&numeric(&shared, ordinal).accumulator),
-                                accumulator_bits(&state.accumulator),
-                                "{profile:?} windows={windows:?} row={row} group={ordinal} nan={nan_as_value}"
-                            );
-                            let actual = shared
-                                .shared_rows
-                                .as_ref()
-                                .unwrap()
-                                .rows
-                                .iter()
-                                .skip(
-                                    shared
-                                        .shared_rows
-                                        .as_ref()
-                                        .unwrap()
-                                        .rows
-                                        .len()
-                                        .saturating_sub(windows[ordinal]),
-                                )
-                                .map(|value| value.map(f64::to_bits))
-                                .collect::<Vec<_>>();
-                            let expected = state
-                                .samples
-                                .values
-                                .iter()
-                                .map(|sample| sample.value.map(f64::to_bits))
-                                .collect::<Vec<_>>();
-                            assert_eq!(actual, expected);
-                            assert!(numeric(&shared, ordinal).samples.values.is_empty());
-                        }
+        for windows in [[2, 4], [5, 20], [64, 80]] {
+            for nan_as_value in [false, true] {
+                let plans = groups(windows);
+                let mut shared = TypedEntityState::new(&plans, 300);
+                shared.try_share_rows(
+                    SharedRowsShape::compile(&plans).unwrap(),
+                    Arc::new(GreedyMemoryPool::new(CACHE_LIMIT)),
+                );
+                let mut independent = TypedEntityState::new(&plans, 300);
+                for row in 0..300 {
+                    let value = special[row % special.len()]
+                        .filter(|value| nan_as_value || !value.is_nan());
+                    advance(&mut shared, value);
+                    independent.transition_count += 1;
+                    for ordinal in 0..2 {
+                        let TypedWindowState::Numeric(state) = &mut independent.groups[ordinal]
+                        else {
+                            unreachable!();
+                        };
+                        state
+                            .update(i64::try_from(row).unwrap(), value, "r")
+                            .unwrap();
+                        assert_eq!(
+                            accumulator_bits(&numeric(&shared, ordinal).accumulator),
+                            accumulator_bits(&state.accumulator),
+                            "windows={windows:?} row={row} group={ordinal} nan={nan_as_value}"
+                        );
+                        let actual = shared
+                            .shared_rows
+                            .as_ref()
+                            .unwrap()
+                            .rows
+                            .iter()
+                            .skip(
+                                shared
+                                    .shared_rows
+                                    .as_ref()
+                                    .unwrap()
+                                    .rows
+                                    .len()
+                                    .saturating_sub(windows[ordinal]),
+                            )
+                            .map(|value| value.map(f64::to_bits))
+                            .collect::<Vec<_>>();
+                        let expected = state
+                            .samples
+                            .values
+                            .iter()
+                            .map(|sample| sample.value.map(f64::to_bits))
+                            .collect::<Vec<_>>();
+                        assert_eq!(actual, expected);
+                        assert!(numeric(&shared, ordinal).samples.values.is_empty());
                     }
                 }
             }
         }
-    }
-
-    #[test]
-    fn shared_rows_restore_rebase_uses_each_borrowed_window_without_copying_tape() {
-        let plans = groups([5, 80]);
-        let mut shared = TypedEntityState::new(&plans, 160);
-        shared.try_share_rows(
-            SharedRowsShape::compile(&plans).unwrap(),
-            Arc::new(GreedyMemoryPool::new(CACHE_LIMIT)),
-        );
-        let mut independent = TypedEntityState::new(&plans, 160);
-        for row in 0..160_u32 {
-            let value = Some(1e12 + f64::from(row) * 0.3);
-            advance(&mut shared, value, RollingNumericalProfile::StableV2Preview);
-            independent.transition_count += 1;
-            for group in &mut independent.groups {
-                let TypedWindowState::Numeric(state) = group else {
-                    unreachable!();
-                };
-                state
-                    .update(
-                        i64::from(row),
-                        value,
-                        RollingNumericalProfile::StableV2Preview,
-                        independent.transition_count,
-                        "r",
-                    )
-                    .unwrap();
-            }
-        }
-        let old = Arc::clone(shared.shared_rows.as_ref().unwrap());
-        let credit = old.pool.reserved();
-        let mut restored = shared.clone();
-        restored.force_stable_v2_rebase("r").unwrap();
-        independent.force_stable_v2_rebase("r").unwrap();
-        for ordinal in 0..2 {
-            assert_eq!(
-                accumulator_bits(&numeric(&restored, ordinal).accumulator),
-                accumulator_bits(&numeric(&independent, ordinal).accumulator)
-            );
-        }
-        assert!(Arc::ptr_eq(restored.shared_rows.as_ref().unwrap(), &old));
-        assert_eq!(old.pool.reserved(), credit);
     }
 
     #[test]
@@ -632,11 +515,7 @@ mod tests {
         let mut resident = TypedEntityState::new(&plans, 32);
         resident.try_share_rows(shape, pool.clone());
         for value in 1..=32 {
-            advance(
-                &mut resident,
-                Some(f64::from(value)),
-                RollingNumericalProfile::StableV1,
-            );
+            advance(&mut resident, Some(f64::from(value)));
         }
         let old = Arc::clone(resident.shared_rows.as_ref().unwrap());
         let one_credit = old.bytes();
@@ -657,11 +536,7 @@ mod tests {
         let capacity = copied.rows.capacity();
         drop(copied);
         let no_allocations = allocation_counter::measure(|| {
-            advance(
-                &mut candidate,
-                Some(33.0),
-                RollingNumericalProfile::StableV1,
-            );
+            advance(&mut candidate, Some(33.0));
         });
         assert_eq!(no_allocations.count_total, 0, "{no_allocations:?}");
         assert_eq!(
@@ -689,11 +564,7 @@ mod tests {
         let mut resident = TypedEntityState::new(&plans, 8);
         resident.try_share_rows(shape, pool.clone());
         for value in [1e155, 1e155, 1e155, -1e155, -0.0, 0.0] {
-            advance(
-                &mut resident,
-                Some(value),
-                RollingNumericalProfile::StableV1,
-            );
+            advance(&mut resident, Some(value));
         }
         let prior = [
             accumulator_bits(&numeric(&resident, 0).accumulator),
@@ -717,21 +588,13 @@ mod tests {
                 shape.windows[ordinal]
             );
         }
-        advance(&mut resident, Some(1.0), RollingNumericalProfile::StableV1);
+        advance(&mut resident, Some(1.0));
         candidate.transition_count += 1;
         for ordinal in 0..2 {
             let TypedWindowState::Numeric(state) = &mut candidate.groups[ordinal] else {
                 unreachable!();
             };
-            state
-                .update(
-                    7,
-                    Some(1.0),
-                    RollingNumericalProfile::StableV1,
-                    candidate.transition_count,
-                    "r",
-                )
-                .unwrap();
+            state.update(7, Some(1.0), "r").unwrap();
             assert_eq!(
                 accumulator_bits(&state.accumulator),
                 accumulator_bits(&numeric(&resident, ordinal).accumulator)

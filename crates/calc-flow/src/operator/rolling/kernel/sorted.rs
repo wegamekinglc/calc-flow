@@ -216,7 +216,6 @@ impl RollingKernelPlan {
             inputs.event_times.value(row_index),
             current,
             row_index,
-            self.numerical_profile,
             self.nan_as_value,
             node_id,
         )?;

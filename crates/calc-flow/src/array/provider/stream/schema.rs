@@ -26,7 +26,7 @@ fn kernel(version: u64) -> Value {
     let mut values = vec![
         object(
             json!({"function":{"const":"rolling_mean"}, "window":positive(),
-            "min_periods":minimum(), "numerical_profile":{"enum":["stable_v1","stable_v2"],"default":"stable_v1"}}),
+            "min_periods":minimum()}),
             &["function", "window"],
         ),
         object(

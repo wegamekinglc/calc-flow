@@ -15,11 +15,11 @@ use super::{
     Array, ArrayRef, DataType, DerivedBuilder, ENTITY_PARALLEL_MIN_ROWS, Float64Array,
     Float64Builder, KernelSelection, OutputStorage, PreparedTypedFill, RecordBatch,
     RollingKernelExecution, RollingKernelPlan, RollingKernelState, RollingMetricsRecorder,
-    RollingNumericalProfile, RollingWork, RollingWorkBatch, Statistic, StreamKernelUpdate,
-    TimestampMicrosecondArray, TypedEntityState, TypedFloatReadout, TypedFloatReadoutKind,
-    TypedFrame, TypedGroupInput, TypedGroupPlan, TypedOutputKind, TypedOutputPlan,
-    TypedWindowState, append_numeric_float64, internal_error, operator_error, read_typed_float,
-    typed_output_mismatch, valid_float64, with_float64_builder,
+    RollingWork, RollingWorkBatch, Statistic, StreamKernelUpdate, TimestampMicrosecondArray,
+    TypedEntityState, TypedFloatReadout, TypedFloatReadoutKind, TypedFrame, TypedGroupInput,
+    TypedGroupPlan, TypedOutputKind, TypedOutputPlan, TypedWindowState, append_numeric_float64,
+    internal_error, operator_error, read_typed_float, typed_output_mismatch, valid_float64,
+    with_float64_builder,
 };
 use crate::{CalcFlowError, Result};
 
@@ -125,7 +125,6 @@ struct PreparedNumericInput {
     event_times: TimestampMicrosecondArray,
     outputs: Vec<TypedOutputPlan>,
     numeric_groups: Option<NumericGroups>,
-    numerical_profile: RollingNumericalProfile,
     nan_as_value: bool,
     node_id: String,
 }
@@ -641,7 +640,6 @@ impl<'a> EligibleOrderedKernel<'a> {
             event_times,
             outputs: prepared.plan.outputs.clone(),
             numeric_groups: NumericGroups::compile(prepared.plan),
-            numerical_profile: prepared.plan.numerical_profile,
             nan_as_value: prepared.plan.nan_as_value,
             node_id: prepared.node_id.to_owned(),
         });
@@ -1397,11 +1395,9 @@ impl<'a, const GROUPS: usize> NumericLaneContext<'a, GROUPS> {
             return entity.update_shared_group(
                 site.ordinal,
                 valid_float64(values, site.row as usize, self.input.nan_as_value),
-                self.input.numerical_profile,
                 &self.input.node_id,
             );
         }
-        let transition_count = entity.transition_count;
         let state = &mut entity.groups[site.ordinal];
         // Expiration and numerical repair use the serial transition unchanged.
         let event_time = self.input.event_times.value(site.row as usize);
@@ -1410,17 +1406,13 @@ impl<'a, const GROUPS: usize> NumericLaneContext<'a, GROUPS> {
                 state,
                 event_time,
                 valid_float64(values, site.row as usize, self.input.nan_as_value),
-                self.input.numerical_profile,
-                transition_count,
                 &self.input.node_id,
             ),
             (state, _) => state.update(
                 event_time,
                 column,
                 site.row as usize,
-                self.input.numerical_profile,
                 self.input.nan_as_value,
-                transition_count,
                 &self.input.node_id,
             ),
         }

@@ -203,15 +203,7 @@ impl Evaluation<'_> {
         if let Some(recorder) = self.observer {
             recorder.add(RollingWork::NumericRows, 1);
         }
-        slide_windows(
-            view,
-            position,
-            row,
-            *state.count,
-            self.compiled,
-            state.windows,
-            self.node,
-        )?;
+        slide_windows(view, position, row, self.compiled, state.windows, self.node)?;
         super::advance(
             &self.compiled.indicator_groups,
             state.indicators,

@@ -13,7 +13,7 @@ use datafusion::{
 
 use super::{footprint::Footprint, scalar_output_plan};
 use crate::operator::rolling::{
-    CompiledRollingSpec, KeyValue, RollingStreamState, key_scalar,
+    CompiledRollingSpec, KeyValue, RollingKernelPlan, RollingStreamState, key_scalar,
     state_codec::{FreshStateSchema, state_schema_prepared},
 };
 use crate::{CalcFlowError, Result};
@@ -226,7 +226,7 @@ fn fresh_schema(
         configuration: &inputs.compiled.configuration_hash,
         state_schema: &inputs.compiled.state_schema_fingerprint,
         kernel: inputs.compiled.kernel_plan.fingerprint(),
-        numerical: inputs.compiled.kernel_plan.numerical_profile(),
+        numerical: RollingKernelPlan::numeric_contract(),
     };
     let quote = schema::plan(inputs.input_schema, metadata, control.check)?;
     control.reserve(0, schema::add(workspace, quote.construction_peak)?)?;

@@ -62,8 +62,7 @@ pub use rolling::{
     ROLLING_CONFIGURATION_VERSION, ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION,
     ROLLING_EWMA_STATE_LAYOUT_VERSION, ROLLING_INDICATOR_STATE_LAYOUT_VERSION,
     ROLLING_MACD_STATE_LAYOUT_VERSION, ROLLING_STATE_LAYOUT_VERSION, RollingFloatPrimitiveSpec,
-    RollingFrameSpec, RollingNumericalProfile, RollingOperator, RollingOutputSpec, RollingSpec,
-    RollingValuePolicy,
+    RollingFrameSpec, RollingOperator, RollingOutputSpec, RollingSpec, RollingValuePolicy,
 };
 pub use snapshot_sql::SnapshotSqlOperator;
 pub use sql::SqlOperator;
