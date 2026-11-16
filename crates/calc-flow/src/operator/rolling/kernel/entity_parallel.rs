@@ -551,6 +551,7 @@ impl<'a> PreparedOrderedKernel<'a> {
             .map(|execution| StreamKernelUpdate {
                 execution,
                 in_place: None,
+                slab: None,
             })
     }
 
@@ -1978,6 +1979,7 @@ pub(crate) fn merge_numeric_results(
     Ok(StreamKernelUpdate {
         execution: seed.execution,
         in_place: None,
+        slab: None,
     })
 }
 
