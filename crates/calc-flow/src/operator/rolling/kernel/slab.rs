@@ -253,6 +253,27 @@ impl RollingKernelPlan {
     }
 
     #[cfg(test)]
+    pub(in crate::operator::rolling) fn slab_histories_for_test(
+        state: &RollingKernelState,
+    ) -> Option<Vec<Vec<Option<f64>>>> {
+        Some(state.slab.as_ref()?.all_f64_histories(0))
+    }
+
+    #[cfg(test)]
+    pub(in crate::operator::rolling) fn slab_transition_counts_for_test(
+        state: &RollingKernelState,
+    ) -> Option<Vec<u64>> {
+        Some(state.slab.as_ref()?.all_u64(0))
+    }
+
+    #[cfg(test)]
+    pub(in crate::operator::rolling) fn slab_window_count_for_test(
+        state: &RollingKernelState,
+    ) -> Option<usize> {
+        Some(state.slab.as_ref()?.numeric_window_count(0))
+    }
+
+    #[cfg(test)]
     pub(in crate::operator::rolling) fn slab_history_address_for_test(
         state: &RollingKernelState,
         offset: usize,
@@ -564,7 +585,9 @@ mod tests {
         );
 
         let encoded = RollingKernelPlan::encode_slab_state(&state).unwrap();
-        let mut restored = plan.decode_slab_state(&encoded, None).unwrap();
+        let mut restored = plan
+            .decode_slab_state(&encoded, RollingKernelPlan::slab_last_identity(&state))
+            .unwrap();
         assert_eq!(
             restored.canonical_state_for_test(),
             state.canonical_state_for_test()

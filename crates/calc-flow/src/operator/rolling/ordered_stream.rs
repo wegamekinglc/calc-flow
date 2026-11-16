@@ -41,6 +41,17 @@ impl OrderedStreamBuffer {
         self.last_identity.clone()
     }
 
+    pub(super) fn restore_pending(
+        &mut self,
+        records: Vec<RecordBatch>,
+        last_identity: Option<Vec<u8>>,
+    ) {
+        for record in records.into_iter().rev() {
+            self.records.push_front(record);
+        }
+        self.last_identity = last_identity;
+    }
+
     pub(super) fn restore_front(
         &mut self,
         records: Vec<RecordBatch>,
@@ -51,10 +62,7 @@ impl OrderedStreamBuffer {
                 self.retry_records.push(record.clone());
             }
         }
-        for record in records.into_iter().rev() {
-            self.records.push_front(record);
-        }
-        self.last_identity = last_identity;
+        self.restore_pending(records, last_identity);
     }
 
     pub(super) fn clear(&mut self) {
@@ -587,6 +595,36 @@ impl RollingOperator {
             .ok_or_else(|| internal_error("ordered rolling state has unsupported state charge"))
     }
 
+    pub(super) async fn emit_slab_rows(
+        &mut self,
+        rows: Vec<BufferedRow>,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        let record = self.slab_input_record(&rows, context.operator_id())?;
+        let removed = super::budget::buffered_charge(rows.iter(), context.operator_id())?;
+        self.emit_ordered_with_removed_charge(vec![record], None, removed, context, output)
+            .await
+    }
+
+    pub(super) fn slab_input_record(
+        &self,
+        rows: &[BufferedRow],
+        node_id: &str,
+    ) -> Result<RecordBatch> {
+        let schema = self.input_ports[0]
+            .schema()
+            .expect("rolling input has an exact schema");
+        let columns = (0..rows[0].values.len())
+            .map(|index| {
+                ScalarValue::iter_to_array(rows.iter().map(|row| row.values[index].clone()))
+                    .map_err(|error| operator_error(node_id, &error.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        RecordBatch::try_new(Arc::clone(schema), columns)
+            .map_err(|error| operator_error(node_id, &error.to_string()))
+    }
+
     pub(super) async fn emit_ordered(
         &mut self,
         records: Vec<RecordBatch>,
@@ -594,9 +632,25 @@ impl RollingOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        let removed = self.ordered_buffer_removal_charge(&records, context.operator_id())?;
+        self.emit_ordered_with_removed_charge(records, last_identity, removed, context, output)
+            .await
+    }
+
+    async fn emit_ordered_with_removed_charge(
+        &mut self,
+        records: Vec<RecordBatch>,
+        last_identity: Option<Vec<u8>>,
+        removed: super::budget::StateCharge,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
         let original_charge = self.state.charge;
         let observer = context.rolling_metrics();
-        match self.emit_ordered_inner(&records, context, output).await {
+        match self
+            .emit_ordered_inner(&records, removed, context, output)
+            .await
+        {
             Ok(()) => Ok(()),
             Err(failure) if failure.restore => self.restore_ordered_failure(
                 records,
@@ -613,11 +667,11 @@ impl RollingOperator {
     async fn emit_ordered_inner(
         &mut self,
         records: &[RecordBatch],
+        removed: super::budget::StateCharge,
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> std::result::Result<(), OrderedEmitError> {
         let observer = context.rolling_metrics();
-        let removed = self.ordered_buffer_removal_charge(records, context.operator_id())?;
         let input = {
             let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
             combine_ordered_records(records, context.operator_id())?

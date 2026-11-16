@@ -2363,7 +2363,14 @@ async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
             .contains("expected parallel collector rejection"),
         "{error}"
     );
-    assert_eq!(launches.load(AtomicOrdering::SeqCst), 2);
+    assert_eq!(
+        launches.load(AtomicOrdering::SeqCst),
+        if operator.compiled.kernel_plan.supports_slab() {
+            0
+        } else {
+            2
+        }
+    );
     assert_eq!(committed(&operator), before);
     assert!(operator.state.buffer.is_empty());
     assert!(operator.state.ordered.is_empty());
@@ -3101,22 +3108,24 @@ async fn columnar_history_compacts_input_and_survives_checkpoint_or_fallback() {
             .await
             .unwrap();
         collector.drain("output");
-        for history in operator.state.histories.by_entity.values() {
-            assert!(history.rows.is_empty());
-            assert_eq!(history.transition_count, 64);
-            let retained = history.columnar.records.front().unwrap().columnar_record();
-            assert_eq!(retained.num_rows(), 5);
-            assert!(
-                retained.column(3).get_buffer_memory_size()
-                    < input.column(3).get_buffer_memory_size() / 4
-            );
-        }
+        let histories = RollingKernelPlan::slab_histories_for_test(
+            operator.state.typed_kernel_state.as_deref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(histories.len(), 2);
+        assert!(histories.iter().all(|history| history.len() == 5));
+        let transitions = RollingKernelPlan::slab_transition_counts_for_test(
+            operator.state.typed_kernel_state.as_deref().unwrap(),
+        )
+        .unwrap();
+        assert!(transitions.iter().all(|&count| count == 64));
         if checkpoint {
             let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
-            for history in operator.state.histories.by_entity.values() {
-                assert!(history.columnar.records.is_empty());
-                assert_eq!(history.rows.len(), 5);
-            }
+            let histories = RollingKernelPlan::slab_histories_for_test(
+                operator.state.typed_kernel_state.as_deref().unwrap(),
+            )
+            .unwrap();
+            assert!(histories.iter().all(|history| history.len() == 5));
             let mut restored =
                 RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
             StreamOperator::restore(&mut restored, &snapshot).unwrap();
@@ -3152,7 +3161,14 @@ async fn columnar_history_compacts_input_and_survives_checkpoint_or_fallback() {
             .downcast_ref::<Float64Array>()
             .unwrap();
         assert_eq!(means.values().as_ref(), &[126.0, 128.0]);
-        assert_eq!(operator.state.histories.by_entity.len(), 2);
+        assert_eq!(
+            RollingKernelPlan::slab_histories_for_test(
+                operator.state.typed_kernel_state.as_deref().unwrap(),
+            )
+            .unwrap()
+            .len(),
+            2
+        );
     }
 }
 

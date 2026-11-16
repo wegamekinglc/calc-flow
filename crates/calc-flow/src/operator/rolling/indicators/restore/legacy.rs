@@ -55,6 +55,17 @@ impl RollingOperator {
                     "rolling layout-7 restore is missing its state table",
                 )
             })?;
+            let pending = budget::ordered_buffer_charge(
+                restored.ordered.records(),
+                &self.compiled,
+                &self.name,
+            )?
+            .ok_or_else(|| {
+                crate::operator::checkpoint::checkpoint_mismatch(
+                    "rolling layout-7 pending state has unsupported charge",
+                )
+            })?;
+            let charge = charge.checked_add(pending, &self.name)?;
             if !self.state_budget.allows(charge.rows, charge.bytes) {
                 return Err(crate::operator::checkpoint::checkpoint_mismatch(
                     "restored rolling state exceeds the configured state budget",
@@ -82,7 +93,7 @@ fn legacy_state(
 ) -> RollingStreamState {
     RollingStreamState {
         buffer: restored.buffer,
-        ordered: crate::operator::rolling::ordered_stream::OrderedStreamBuffer::default(),
+        ordered: restored.ordered,
         histories: restored.histories,
         last_input_watermark: metadata.last_input_watermark,
         next_output_sequence: metadata.next_output_sequence,

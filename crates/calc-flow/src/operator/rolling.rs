@@ -2134,6 +2134,15 @@ impl RollingOperator {
         if rows.is_empty() {
             return Ok(());
         }
+        if self.compiled.kernel_plan.supports_slab()
+            && self
+                .state
+                .typed_kernel_state
+                .as_deref()
+                .is_none_or(|state| self.compiled.kernel_plan.can_use_slab(state))
+        {
+            return self.emit_slab_rows(rows, context, output).await;
+        }
         let observer = context.rolling_metrics();
         self.materialize_histories_with_charge(context.operator_id(), observer)?;
         let output_schema = self.output_ports[0]
@@ -2304,6 +2313,62 @@ impl RollingOperator {
         Ok(Some((segment_id, bytes)))
     }
 
+    fn encode_layout7_pending(&self, epoch: Epoch) -> Result<Option<(String, Vec<u8>)>> {
+        if !self.state.deferred_history {
+            return Ok(None);
+        }
+        let mut records = self.state.ordered.records().cloned().collect::<Vec<_>>();
+        if !self.state.buffer.is_empty() {
+            let rows = self.state.buffer.values().cloned().collect::<Vec<_>>();
+            records.push(self.slab_input_record(&rows, &self.name)?);
+        }
+        if records.is_empty() {
+            return Ok(None);
+        }
+        let record = if records.len() == 1 {
+            records[0].clone()
+        } else {
+            concat_batches(&records[0].schema(), &records)
+                .map_err(|error| operator_error(&self.name, &error.to_string()))?
+        };
+        let mut bytes = Vec::new();
+        let mut writer = FileWriter::try_new(&mut bytes, record.schema().as_ref())
+            .map_err(|error| format_error(&error))?;
+        writer
+            .write(&record)
+            .map_err(|error| format_error(&error))?;
+        writer.finish().map_err(|error| format_error(&error))?;
+        drop(writer);
+        Ok(Some((
+            format!("pending-{:020}-00000001", epoch.as_u64()),
+            bytes,
+        )))
+    }
+
+    fn decode_layout7_pending(&self, bytes: &[u8]) -> Result<Vec<RecordBatch>> {
+        let mut reader =
+            FileReader::try_new(Cursor::new(bytes), None).map_err(|error| format_error(&error))?;
+        let mut records = Vec::new();
+        while let Some(record) = reader
+            .next()
+            .transpose()
+            .map_err(|error| format_error(&error))?
+        {
+            if record.schema().as_ref()
+                != self.input_ports[0]
+                    .schema()
+                    .expect("rolling input schema")
+                    .as_ref()
+            {
+                return Err(checkpoint_mismatch(
+                    "rolling layout-7 pending schema does not match the input",
+                ));
+            }
+            records.push(record);
+        }
+        Ok(records)
+    }
+
     fn snapshot_segment_descriptor(
         &self,
         epoch: Epoch,
@@ -2344,21 +2409,37 @@ impl RollingOperator {
         snapshot: &crate::OperatorStateSnapshot,
     ) -> Result<DecodedRollingState> {
         let segments = snapshot_segments(snapshot, &metadata.segment_inventory)?;
+        let mut segments = segments.into_iter();
         if metadata.state_layout_version == ROLLING_STATE_TABLE_LAYOUT_VERSION {
-            let bytes = segments.into_iter().next().ok_or_else(|| {
+            let bytes = segments.next().ok_or_else(|| {
                 checkpoint_mismatch("rolling layout-7 snapshot is missing its state-table segment")
             })?;
             let typed = self
                 .compiled
                 .kernel_plan
                 .decode_slab_state(&bytes, metadata.typed_last_identity.clone())?;
+            let mut ordered = ordered_stream::OrderedStreamBuffer::default();
+            if let Some(pending) = segments.next() {
+                let records = self.decode_layout7_pending(&pending)?;
+                let last_identity = records
+                    .last()
+                    .map(|record| {
+                        self.compiled
+                            .kernel_plan
+                            .ordered_stream_bounds(record, &self.name, None)
+                    })
+                    .transpose()?
+                    .map(|(_, end)| end);
+                ordered.restore_pending(records, last_identity);
+            }
             return Ok(DecodedRollingState {
+                ordered,
                 typed_kernel_state: Some(Box::new(typed)),
                 deferred_history: true,
                 ..DecodedRollingState::default()
             });
         }
-        let Some(bytes) = segments.into_iter().next() else {
+        let Some(bytes) = segments.next() else {
             return Ok(DecodedRollingState::default());
         };
         decode_state_segment(
@@ -2375,6 +2456,7 @@ impl RollingOperator {
 #[derive(Default)]
 struct DecodedRollingState {
     buffer: BTreeMap<RowIdentity, BufferedRow>,
+    ordered: ordered_stream::OrderedStreamBuffer,
     histories: RollingHistories,
     typed_kernel_state: Option<Box<RollingKernelState>>,
     deferred_history: bool,

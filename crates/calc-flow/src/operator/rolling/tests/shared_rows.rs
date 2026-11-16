@@ -250,23 +250,20 @@ async fn shared_rows_removed_profile_checkpoint_rejection_preserves_existing_cac
         )
         .unwrap();
     assert_eq!(
-        target
-            .state
-            .typed_kernel_state
-            .as_ref()
-            .unwrap()
-            .shared_rows_count(),
-        1
+        RollingKernelPlan::slab_window_count_for_test(
+            target.state.typed_kernel_state.as_deref().unwrap()
+        ),
+        Some(2)
     );
     let before = (
         target.encode_state(Epoch::new(1).unwrap()).unwrap(),
         format!("{:?}", target.state.typed_kernel_state),
     );
     let installed_credit = pool.reserved();
-    assert!(installed_credit > 0);
+    assert_eq!(installed_credit, 0);
     assert!(matches!(
         StreamOperator::restore(&mut target, &snapshot),
-        Err(CalcFlowError::Format { .. })
+        Err(CalcFlowError::CheckpointMismatch { .. })
     ));
     assert_eq!(
         (target.state.charge.rows, target.state.charge.bytes),
@@ -371,8 +368,11 @@ async fn p3_check_serial_rollback(cancelled: bool) {
     let alias = operator.state.typed_kernel_state.clone().unwrap();
     let before = p3_serial_resident(&operator);
     let resident_credit = pool.reserved();
-    assert!(resident_credit > 0);
-    assert_eq!(alias.shared_rows_count(), 1);
+    assert_eq!(resident_credit, 0);
+    assert_eq!(
+        RollingKernelPlan::slab_window_count_for_test(&alias),
+        Some(2)
+    );
     let next = p3_serial_record(33, 1);
     let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(32)));
     p3_admit_owned_record(&mut operator, &next);

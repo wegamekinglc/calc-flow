@@ -39,11 +39,6 @@ impl RollingOperator {
 
     fn materialize_legacy_capture(&mut self) -> Result<()> {
         if self.state.deferred_history {
-            if !self.state.buffer.is_empty() || !self.state.ordered.is_empty() {
-                return Err(checkpoint_mismatch(
-                    "rolling layout-7 checkpoint requires finalized state without pending rows",
-                ));
-            }
             return Ok(());
         }
         self.materialize_ordered_buffer(None)?;
@@ -63,6 +58,16 @@ impl RollingOperator {
                 &self.name,
             )?
             .ok_or_else(|| internal_error("rolling layout-7 table is absent"))?;
+            let pending = budget::ordered_buffer_charge(
+                self.state.ordered.records(),
+                &self.compiled,
+                &self.name,
+            )?
+            .ok_or_else(|| internal_error("rolling ordered state has unsupported state charge"))?;
+            let buffered = budget::buffered_charge(self.state.buffer.values(), &self.name)?;
+            let charge = charge
+                .checked_add(pending, &self.name)?
+                .checked_add(buffered, &self.name)?;
             self.check_state_budget(charge, &self.name)?;
             self.state.owned_mut()?.charge = charge;
             return Ok(());
@@ -84,25 +89,29 @@ impl RollingOperator {
         Ok(())
     }
 
-    fn capture_legacy_segment(
-        &self,
-        epoch: Epoch,
-    ) -> Result<(Option<SegmentDescriptor>, Segments)> {
-        let Some((id, bytes)) = self.encode_state(epoch)? else {
-            return Ok((None, BTreeMap::new()));
-        };
-        let segment = StateSegment::new(bytes);
-        let descriptor = self.snapshot_segment_descriptor(epoch, &id, &segment)?;
-        Ok((Some(descriptor), BTreeMap::from([(id, segment)])))
+    fn capture_legacy_segment(&self, epoch: Epoch) -> Result<(Vec<SegmentDescriptor>, Segments)> {
+        let mut descriptors = Vec::new();
+        let mut segments = BTreeMap::new();
+        if let Some((id, bytes)) = self.encode_state(epoch)? {
+            let segment = StateSegment::new(bytes);
+            descriptors.push(self.snapshot_segment_descriptor(epoch, &id, &segment)?);
+            segments.insert(id, segment);
+        }
+        if let Some((id, bytes)) = self.encode_layout7_pending(epoch)? {
+            let segment = StateSegment::new(bytes);
+            descriptors.push(self.snapshot_segment_descriptor(epoch, &id, &segment)?);
+            segments.insert(id, segment);
+        }
+        Ok((descriptors, segments))
     }
 
     fn legacy_snapshot(
         &self,
         epoch: Epoch,
-        descriptor: Option<SegmentDescriptor>,
+        descriptor: Vec<SegmentDescriptor>,
         segments: Segments,
     ) -> Result<OperatorStateSnapshot> {
-        let inventory = StateInventory::new(descriptor.into_iter().collect())
+        let inventory = StateInventory::new(descriptor)
             .map_err(|error| checkpoint_mismatch(error.to_string()))?;
         let metadata = self.legacy_capture_metadata(epoch, &inventory);
         let Value::Object(inline) =

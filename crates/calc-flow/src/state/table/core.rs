@@ -1788,6 +1788,27 @@ impl StateTable {
         addresses
     }
 
+    #[cfg(test)]
+    pub(crate) fn all_f64_histories(&self, column: usize) -> Vec<Vec<Option<f64>>> {
+        self.ordered_entities()
+            .into_iter()
+            .map(|(entity, _)| self.f64_history(column, entity).expect("entity history"))
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn all_u64(&self, column: usize) -> Vec<u64> {
+        self.ordered_entities()
+            .into_iter()
+            .map(|(entity, _)| self.u64(column, entity).expect("entity counter"))
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn numeric_window_count(&self, column: usize) -> usize {
+        self.rings[column].numeric_windows.len()
+    }
+
     pub(crate) fn ring_logical_bytes(&self, column: usize) -> usize {
         let kind = self.rings[column].kind;
         self.partitions
@@ -2355,7 +2376,7 @@ impl StateTable {
             .numeric
             .as_ref()
             .and_then(|values| values.get(index))
-            .copied();
+            .cloned();
         let (group, row) = self.location(entity)?;
         let partition = self.partitions.get_mut(&group).expect("prepared group");
         let page = partition.rings[column][row].as_mut().expect("ring page");
