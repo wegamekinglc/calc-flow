@@ -9,9 +9,11 @@ use std::{
 use datafusion::arrow::{
     array::{ArrayRef, Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
     datatypes::{DataType, Field, Schema, TimeUnit},
+    ipc::writer::StreamWriter,
     record_batch::RecordBatch,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 
 use super::{
@@ -612,6 +614,18 @@ fn dispatch_both(
     );
 }
 
+fn output_digest(records: &[RecordBatch]) -> String {
+    let mut bytes = Vec::new();
+    if let Some(first) = records.first() {
+        let mut writer = StreamWriter::try_new(&mut bytes, first.schema()).unwrap();
+        for record in records {
+            writer.write(record).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+    hex::encode(Sha256::digest(bytes))
+}
+
 /// One round of one dispatch case: history, warm-up, then alternating timed
 /// recorder-absent and recorder-present dispatches (spec §10.1, §10.2).
 fn dispatch_case(runtime: &tokio::runtime::Runtime, name: &str, workload: Workload) -> Value {
@@ -641,14 +655,15 @@ fn dispatch_case(runtime: &tokio::runtime::Runtime, name: &str, workload: Worklo
             .checked_sub(numeric_before)
             .expect("cumulative stage time never decreases");
         let [absent, present] = &mut arms;
-        assert_eq!(
-            runtime.block_on(absent.drain()),
-            runtime.block_on(present.drain())
-        );
+        let absent_output = runtime.block_on(absent.drain());
+        let present_output = runtime.block_on(present.drain());
+        assert_eq!(absent_output, present_output);
+        let digest = output_digest(&absent_output);
         samples.push(
             json!({"index": index, "order": if index % 2 == 0 { "AB" } else { "BA" },
             "absent_seconds": seconds[0], "present_seconds": seconds[1],
-            "present_numeric_update_seconds": numeric.as_secs_f64()}),
+            "present_numeric_update_seconds": numeric.as_secs_f64(),
+            "output_digest": digest}),
         );
         start += workload.rows;
     }

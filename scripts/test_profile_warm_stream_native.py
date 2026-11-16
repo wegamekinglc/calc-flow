@@ -48,6 +48,7 @@ def _dispatch_case(name: str, rows: int, seconds: float, numeric_ns: float) -> d
                 "absent_seconds": seconds * (1 + index / 100),
                 "present_seconds": seconds * (2 + index / 100),
                 "present_numeric_update_seconds": rows * 2 * numeric_ns * 1e-9,
+                "output_digest": "0" * 64,
             }
             for index in range(SAMPLES)
         ],
@@ -271,6 +272,16 @@ def test_native_evidence_rejects_debug_mismatched_or_invalid_runs(defect) -> Non
         evidence["cases"][0]["samples"][3]["present_seconds"] = 0.0
     with pytest.raises(ValueError):
         profile._validate_native_evidence(evidence, cases)
+
+
+def test_native_numeric_contract_change_controls_cross_arm_digest_equality() -> None:
+    evidence = _evidence(("1x1-dual",), 1.0)
+    changed = json.loads(json.dumps(evidence))
+    changed["cases"][0]["samples"][0]["output_digest"] = "1" * 64
+    pair = {"baseline": evidence, "candidate": changed}
+    with pytest.raises(ValueError, match="digest changed"):
+        profile._validate_native_digests(pair, ("1x1-dual",), False)
+    profile._validate_native_digests(pair, ("1x1-dual",), True)
 
 
 def test_native_budget_stop_settles_the_running_process_and_keeps_completed_rounds(

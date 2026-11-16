@@ -1762,6 +1762,9 @@ def _validate_native_sample(sample: Any, index: int) -> None:
     for arm in NATIVE_ARMS:
         _native_number(sample.get(f"{arm}_seconds"), positive=True)
     _native_number(sample.get("present_numeric_update_seconds"), positive=False)
+    digest = sample.get("output_digest")
+    if digest is not None and (not isinstance(digest, str) or len(digest) != 64):
+        raise ValueError("native evidence output digests must be SHA-256 hex")
 
 
 def _validate_native_case_metadata(case: dict[str, Any], name: str) -> None:
@@ -1908,11 +1911,27 @@ def _verify_native_binaries(binaries: list[dict[str, Any]]) -> None:
             )
 
 
+def _validate_native_digests(
+    evidence: dict[str, dict[str, Any]], selected: tuple[str, ...], allow_change: bool
+) -> None:
+    if allow_change:
+        return
+    for name in selected:
+        baseline = _native_case(evidence["baseline"], name)["samples"]
+        candidate = _native_case(evidence["candidate"], name)["samples"]
+        for left, right in zip(baseline, candidate, strict=True):
+            if left.get("output_digest") is None or left.get(
+                "output_digest"
+            ) != right.get("output_digest"):
+                raise ValueError(f"native evidence output digest changed for {name}")
+
+
 async def _native_round(
     binaries: list[dict[str, Any]],
     selected: tuple[str, ...],
     work: Path,
     number: int,
+    numeric_contract_change: bool,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     by_side = {binary["side"]: binary for binary in binaries}
     order = NATIVE_SIDES if number % 2 else tuple(reversed(NATIVE_SIDES))
@@ -1923,6 +1942,7 @@ async def _native_round(
             Path(by_side[side]["path"]), selected, paths[side]
         )
         _validate_native_evidence(evidence[side], selected)
+    _validate_native_digests(evidence, selected, numeric_contract_change)
     outputs = {
         side: {
             "path": str(paths[side].resolve()),
@@ -2286,7 +2306,9 @@ async def _native_rounds(
         deadline = asyncio.timeout(remaining)
         try:
             async with deadline:
-                paired, record = await _native_round(binaries, selected, work, number)
+                paired, record = await _native_round(
+                    binaries, selected, work, number, args.numeric_contract_change
+                )
         except TimeoutError:
             if not deadline.expired():
                 raise
