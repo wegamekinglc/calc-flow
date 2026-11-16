@@ -262,9 +262,16 @@ pub fn validate(bundle: &GoldenBundle) -> Result<RestoredGolden, String> {
         serde_json::from_value(bundle.manifest.clone()).map_err(|error| json_error(&error))?;
     validate_identity(&manifest, &bundle.recovery)?;
     validate_participants(&manifest)?;
-    let source = &manifest.sources["input"];
-    let operator = &manifest.operators["rolling"];
-    let groups = operator
+    validate_partition_groups(&manifest)?;
+    let state_bytes = restore_partitions(bundle, &manifest)?;
+    Ok(RestoredGolden {
+        source_sequence: manifest.sources["input"].next_sequence,
+        state_bytes,
+    })
+}
+
+fn validate_partition_groups(manifest: &Manifest) -> Result<(), String> {
+    let groups = manifest.operators["rolling"]
         .partitions
         .iter()
         .map(|partition| partition.key_group)
@@ -272,14 +279,15 @@ pub fn validate(bundle: &GoldenBundle) -> Result<RestoredGolden, String> {
     if groups != [0, 1] {
         return Err("partition groups differ from prepared key groups".into());
     }
+    Ok(())
+}
+
+fn restore_partitions(bundle: &GoldenBundle, manifest: &Manifest) -> Result<Vec<u8>, String> {
     let mut state_bytes = Vec::new();
-    for partition in &operator.partitions {
-        validate_partition(bundle, &manifest, partition, &mut state_bytes)?;
+    for partition in &manifest.operators["rolling"].partitions {
+        validate_partition(bundle, manifest, partition, &mut state_bytes)?;
     }
-    Ok(RestoredGolden {
-        source_sequence: source.next_sequence,
-        state_bytes,
-    })
+    Ok(state_bytes)
 }
 
 fn validate_version(manifest: &Value) -> Result<(), String> {
@@ -304,15 +312,30 @@ fn validate_manifest_fingerprint(manifest: &Value) -> Result<(), String> {
 }
 
 fn validate_identity(manifest: &Manifest, recovery: &Value) -> Result<(), String> {
+    validate_pipeline_identity(manifest)?;
+    validate_recovery_identity(manifest, recovery)?;
+    validate_fingerprint_identity(manifest)?;
+    validate_static_identity(manifest)
+}
+
+fn validate_pipeline_identity(manifest: &Manifest) -> Result<(), String> {
     if manifest.pipeline_name != PIPELINE_NAME
         || manifest.pipeline_fingerprint != PIPELINE_FINGERPRINT
     {
         return Err("pipeline identity mismatch".into());
     }
+    Ok(())
+}
+
+fn validate_recovery_identity(manifest: &Manifest, recovery: &Value) -> Result<(), String> {
     let expected_recovery = hex::encode(Sha256::digest(canonical(recovery).as_bytes()));
     if manifest.recovery_fingerprint != expected_recovery {
         return Err("recovery fingerprint mismatch".into());
     }
+    Ok(())
+}
+
+fn validate_fingerprint_identity(manifest: &Manifest) -> Result<(), String> {
     if manifest.fingerprint.len() != 64
         || !manifest
             .fingerprint
@@ -321,6 +344,10 @@ fn validate_identity(manifest: &Manifest, recovery: &Value) -> Result<(), String
     {
         return Err("manifest fingerprint identity mismatch".into());
     }
+    Ok(())
+}
+
+fn validate_static_identity(manifest: &Manifest) -> Result<(), String> {
     if manifest.format_version != 4
         || manifest.epoch != 7
         || manifest.created_at != "2026-11-16T00:00:00Z"
@@ -335,6 +362,14 @@ fn validate_identity(manifest: &Manifest, recovery: &Value) -> Result<(), String
 }
 
 fn validate_participants(manifest: &Manifest) -> Result<(), String> {
+    validate_participant_sets(manifest)?;
+    validate_operator_kind(&manifest.operators["rolling"])?;
+    validate_source_contract(&manifest.sources["input"])?;
+    validate_sink_contract(&manifest.sinks["output"])?;
+    validate_operator_contract(&manifest.operators["rolling"])
+}
+
+fn validate_participant_sets(manifest: &Manifest) -> Result<(), String> {
     if manifest
         .sources
         .keys()
@@ -365,11 +400,17 @@ fn validate_participants(manifest: &Manifest) -> Result<(), String> {
     if !manifest.static_inputs.is_empty() {
         return Err("static-input participants differ".into());
     }
-    let operator = &manifest.operators["rolling"];
+    Ok(())
+}
+
+fn validate_operator_kind(operator: &Operator) -> Result<(), String> {
     if operator.kind != "table" {
         return Err("operator kind mismatch".into());
     }
-    let source = &manifest.sources["input"];
+    Ok(())
+}
+
+fn validate_source_contract(source: &Source) -> Result<(), String> {
     if source.cursor.is_none()
         || source.identity_hash
             != "4444444444444444444444444444444444444444444444444444444444444444"
@@ -379,13 +420,20 @@ fn validate_participants(manifest: &Manifest) -> Result<(), String> {
     {
         return Err("source state contract mismatch".into());
     }
-    let sink = &manifest.sinks["output"];
+    Ok(())
+}
+
+fn validate_sink_contract(sink: &Sink) -> Result<(), String> {
     if sink.delivery.get("kind").and_then(Value::as_str) != Some("ordinary")
         || sink.pre_commit.is_some()
         || !sink.blocks.is_empty()
     {
         return Err("ordinary sink state contract mismatch".into());
     }
+    Ok(())
+}
+
+fn validate_operator_contract(operator: &Operator) -> Result<(), String> {
     if operator
         .progress
         .keys()
@@ -407,34 +455,50 @@ fn validate_partition(
     partition: &Partition,
     state_bytes: &mut Vec<u8>,
 ) -> Result<(), String> {
-    let (document, expected_path) = match partition.key_group {
-        0 => (&bundle.partition0, ROOT0_PATH),
-        1 => (&bundle.partition1, ROOT1_PATH),
-        _ => return Err("partition groups differ from prepared key groups".into()),
-    };
-    if partition.root.relative_path != expected_path {
-        return Err("partition root path mismatch".into());
-    }
-    let bytes = canonical(document).into_bytes();
-    if partition.root.byte_len != bytes.len() as u64
-        || partition.root.sha256 != hex::encode(Sha256::digest(&bytes))
-    {
-        return Err("partition index checksum mismatch".into());
-    }
-    let index: PartitionIndex =
-        serde_json::from_value(document.clone()).map_err(|error| json_error(&error))?;
-    if index.format_version != 4 || index.kind != "partition_index" {
-        return Err("partition index identity mismatch".into());
-    }
-    if index.key_group != partition.key_group {
-        return Err("partition index key group mismatch".into());
-    }
+    let (document, expected_path) = partition_document(bundle, partition.key_group)?;
+    validate_partition_root(&partition.root, expected_path, document)?;
+    let index = decode_partition_index(document, partition.key_group)?;
     validate_index_order(&index)?;
     validate_partition_metadata(&index)?;
     for page in &index.pages {
         validate_page(bundle, manifest, &index, page, state_bytes)?;
     }
     Ok(())
+}
+
+fn partition_document(bundle: &GoldenBundle, group: u32) -> Result<(&Value, &'static str), String> {
+    match group {
+        0 => Ok((&bundle.partition0, ROOT0_PATH)),
+        1 => Ok((&bundle.partition1, ROOT1_PATH)),
+        _ => Err("partition groups differ from prepared key groups".into()),
+    }
+}
+
+fn validate_partition_root(
+    root: &Handle,
+    expected_path: &str,
+    document: &Value,
+) -> Result<(), String> {
+    if root.relative_path != expected_path {
+        return Err("partition root path mismatch".into());
+    }
+    let bytes = canonical(document).into_bytes();
+    if root.byte_len != bytes.len() as u64 || root.sha256 != hex::encode(Sha256::digest(&bytes)) {
+        return Err("partition index checksum mismatch".into());
+    }
+    Ok(())
+}
+
+fn decode_partition_index(document: &Value, group: u32) -> Result<PartitionIndex, String> {
+    let index: PartitionIndex =
+        serde_json::from_value(document.clone()).map_err(|error| json_error(&error))?;
+    if index.format_version != 4 || index.kind != "partition_index" {
+        return Err("partition index identity mismatch".into());
+    }
+    if index.key_group != group {
+        return Err("partition index key group mismatch".into());
+    }
+    Ok(index)
 }
 
 fn validate_index_order(index: &PartitionIndex) -> Result<(), String> {
@@ -459,38 +523,43 @@ fn validate_index_order(index: &PartitionIndex) -> Result<(), String> {
 
 fn validate_partition_metadata(index: &PartitionIndex) -> Result<(), String> {
     match index.key_group {
-        0 => {
-            if index.pages.len() != 1
-                || index.pages[0].page_id
-                    != (GoldenPageId {
-                        key_group: 0,
-                        slot: 0,
-                        generation: 3,
-                    })
-                || index.next_generations.get(&0) != Some(&4)
-                || !index.free_slots.is_empty()
-            {
-                return Err("page inventory or generation metadata mismatch".into());
-            }
-            let page = &index.pages[0];
-            if page.column != "price"
-                || page.kind != "ring"
-                || page.logical_range.start != 0
-                || page.logical_range.end != 4
-            {
-                return Err("page logical contract mismatch".into());
-            }
-        }
-        1 => {
-            if !index.pages.is_empty()
-                || index.next_generations.get(&1) != Some(&2)
-                || index.next_generations.get(&3) != Some(&1)
-                || index.free_slots != [1, 3]
-            {
-                return Err("empty partition metadata mismatch".into());
-            }
-        }
-        _ => return Err("partition groups differ from prepared key groups".into()),
+        0 => validate_ring_partition_metadata(index),
+        1 => validate_empty_partition_metadata(index),
+        _ => Err("partition groups differ from prepared key groups".into()),
+    }
+}
+
+fn validate_ring_partition_metadata(index: &PartitionIndex) -> Result<(), String> {
+    if index.pages.len() != 1
+        || index.pages[0].page_id
+            != (GoldenPageId {
+                key_group: 0,
+                slot: 0,
+                generation: 3,
+            })
+        || index.next_generations.get(&0) != Some(&4)
+        || !index.free_slots.is_empty()
+    {
+        return Err("page inventory or generation metadata mismatch".into());
+    }
+    let page = &index.pages[0];
+    if page.column != "price"
+        || page.kind != "ring"
+        || page.logical_range.start != 0
+        || page.logical_range.end != 4
+    {
+        return Err("page logical contract mismatch".into());
+    }
+    Ok(())
+}
+
+fn validate_empty_partition_metadata(index: &PartitionIndex) -> Result<(), String> {
+    if !index.pages.is_empty()
+        || index.next_generations.get(&1) != Some(&2)
+        || index.next_generations.get(&3) != Some(&1)
+        || index.free_slots != [1, 3]
+    {
+        return Err("empty partition metadata mismatch".into());
     }
     Ok(())
 }
@@ -501,6 +570,20 @@ fn validate_page(
     index: &PartitionIndex,
     page: &PageEntry,
     state_bytes: &mut Vec<u8>,
+) -> Result<(), String> {
+    validate_page_identity(manifest, index, page)?;
+    validate_page_payload(bundle, page)?;
+    let id = page.page_id;
+    state_bytes
+        .extend_from_slice(format!("{}:{}:{}:", id.key_group, id.slot, id.generation).as_bytes());
+    state_bytes.extend_from_slice(&bundle.page0);
+    Ok(())
+}
+
+fn validate_page_identity(
+    manifest: &Manifest,
+    index: &PartitionIndex,
+    page: &PageEntry,
 ) -> Result<(), String> {
     let id = page.page_id;
     if id.key_group != index.key_group {
@@ -519,17 +602,19 @@ fn validate_page(
     if page.handle.relative_path != PAGE0_PATH {
         return Err("page path mismatch".into());
     }
+    Ok(())
+}
+
+fn validate_page_payload(bundle: &GoldenBundle, page: &PageEntry) -> Result<(), String> {
     if page.byte_len != bundle.page0.len() as u64
         || page.sha256 != hex::encode(Sha256::digest(&bundle.page0))
     {
+        let id = page.page_id;
         return Err(format!(
             "page checksum mismatch: rolling/{}/{}/{}",
             id.key_group, id.slot, id.generation
         ));
     }
-    state_bytes
-        .extend_from_slice(format!("{}:{}:{}:", id.key_group, id.slot, id.generation).as_bytes());
-    state_bytes.extend_from_slice(&bundle.page0);
     Ok(())
 }
 

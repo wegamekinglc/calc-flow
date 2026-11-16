@@ -252,13 +252,7 @@ impl ProtocolHarness {
             return Ok(());
         }
         let freeze = active.freeze.clone();
-        let fault = match active.fault {
-            Some(Fault::Write) => Some(PersistenceFault::Write),
-            Some(Fault::Checksum) => Some(PersistenceFault::Checksum),
-            Some(Fault::DiskFullState) => Some(PersistenceFault::DiskFull),
-            Some(Fault::WorkerPanic) => Some(PersistenceFault::WorkerPanic),
-            _ => None,
-        };
+        let fault = persistence_fault(active.fault);
         match self.persistence.persist(&freeze, fault) {
             Ok(persisted) => {
                 self.active_mut(epoch)?.persisted = Some(persisted);
@@ -542,7 +536,17 @@ impl ProtocolHarness {
     }
 }
 
-const fn persistence_failure(error: PersistenceFailure) -> FailureKind {
+const fn persistence_fault(fault: Option<Fault>) -> Option<PersistenceFault> {
+    match fault {
+        Some(Fault::Write) => Some(PersistenceFault::Write),
+        Some(Fault::Checksum) => Some(PersistenceFault::Checksum),
+        Some(Fault::DiskFullState) => Some(PersistenceFault::DiskFull),
+        Some(Fault::WorkerPanic) => Some(PersistenceFault::WorkerPanic),
+        _ => None,
+    }
+}
+
+fn persistence_failure(error: PersistenceFailure) -> FailureKind {
     match error {
         PersistenceFailure::Write => FailureKind::Write,
         PersistenceFailure::Checksum => FailureKind::Checksum,
