@@ -693,42 +693,62 @@ impl Float64NumericState {
     ) -> Result<()> {
         match self.samples.frame {
             TypedFrame::Rows(window) => {
-                let leaving = (self.samples.values.len() >= window)
-                    .then(|| self.samples.values.front().and_then(|sample| sample.value))
-                    .flatten();
-                self.accumulator
-                    .numeric
-                    .rows(leaving, sample)
-                    .map_err(|error| super::float_arithmetic_error(error, node_id))?;
-                self.samples.push(event_time, sample);
-                self.samples
-                    .expire_reversible(event_time, undo, |_| Ok(()))?;
-                self.accumulator
-                    .numeric
-                    .finish_rows(
-                        window,
-                        self.samples.values.iter().map(|sample| sample.value),
-                    )
-                    .map_err(|error| super::float_arithmetic_error(error, node_id))?;
+                self.update_rows_reversible(event_time, sample, window, undo, node_id)
             }
             TypedFrame::Duration(_) => {
-                let accumulator = &mut self.accumulator;
-                self.samples.expire_reversible(event_time, undo, |value| {
-                    remove_float64(accumulator, value)
-                })?;
-                self.accumulator.numeric.reset_if_empty();
-                if let Some(sample) = sample {
-                    add_float64(&mut self.accumulator, sample, node_id)?;
-                }
-                self.samples.push(event_time, sample);
-                self.accumulator
-                    .numeric
-                    .finish_duration(self.samples.values.iter().map(|sample| sample.value))
-                    .map_err(|error| super::float_arithmetic_error(error, node_id))?;
+                self.update_duration_reversible(event_time, sample, undo, node_id)
             }
-        }
+        }?;
         self.accumulator.sync_float_sum();
         Ok(())
+    }
+
+    fn update_rows_reversible(
+        &mut self,
+        event_time: i64,
+        sample: Option<f64>,
+        window: usize,
+        undo: &mut Float64NumericUndo,
+        node_id: &str,
+    ) -> Result<()> {
+        let leaving = (self.samples.values.len() >= window)
+            .then(|| self.samples.values.front().and_then(|sample| sample.value))
+            .flatten();
+        self.accumulator
+            .numeric
+            .rows(leaving, sample)
+            .map_err(|error| super::float_arithmetic_error(error, node_id))?;
+        self.samples.push(event_time, sample);
+        self.samples
+            .expire_reversible(event_time, undo, |_| Ok(()))?;
+        self.accumulator
+            .numeric
+            .finish_rows(
+                window,
+                self.samples.values.iter().map(|sample| sample.value),
+            )
+            .map_err(|error| super::float_arithmetic_error(error, node_id))
+    }
+
+    fn update_duration_reversible(
+        &mut self,
+        event_time: i64,
+        sample: Option<f64>,
+        undo: &mut Float64NumericUndo,
+        node_id: &str,
+    ) -> Result<()> {
+        let accumulator = &mut self.accumulator;
+        self.samples
+            .expire_reversible(event_time, undo, |value| remove_float64(accumulator, value))?;
+        self.accumulator.numeric.reset_if_empty();
+        if let Some(sample) = sample {
+            add_float64(&mut self.accumulator, sample, node_id)?;
+        }
+        self.samples.push(event_time, sample);
+        self.accumulator
+            .numeric
+            .finish_duration(self.samples.values.iter().map(|sample| sample.value))
+            .map_err(|error| super::float_arithmetic_error(error, node_id))
     }
 }
 

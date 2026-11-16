@@ -268,15 +268,35 @@ fn push<C: Cancellation>(
                 .map_err(|error| datafusion_error(Some(node_id), error))?;
             push(tail, active_tail, record, output, node_id, context)
         }
-        Step::Filter(filter) => {
-            let record = filter_record(filter, record, node_id)?;
-            let coalescer = active_head.coalescer.as_mut().expect("filter call state");
-            coalescer
-                .push_batch(record)
-                .map_err(|error| datafusion_error(Some(node_id), error))?;
-            drain(coalescer, tail, active_tail, output, node_id, context)
-        }
+        Step::Filter(filter) => push_filter(
+            filter,
+            active_head,
+            tail,
+            active_tail,
+            record,
+            output,
+            node_id,
+            context,
+        ),
     }
+}
+
+fn push_filter<C: Cancellation>(
+    filter: &Filter,
+    active: &mut ActiveStep,
+    tail: &[Step],
+    active_tail: &mut [ActiveStep],
+    record: RecordBatch,
+    output: &mut Output,
+    node_id: &str,
+    context: &C,
+) -> Result<()> {
+    let record = filter_record(filter, record, node_id)?;
+    let coalescer = active.coalescer.as_mut().expect("filter call state");
+    coalescer
+        .push_batch(record)
+        .map_err(|error| datafusion_error(Some(node_id), error))?;
+    drain(coalescer, tail, active_tail, output, node_id, context)
 }
 
 fn filter_record(filter: &Filter, record: RecordBatch, node_id: &str) -> Result<RecordBatch> {

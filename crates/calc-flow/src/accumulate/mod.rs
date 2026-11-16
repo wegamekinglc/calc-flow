@@ -383,16 +383,28 @@ impl NumericAccumulator {
         leaving: Option<f64>,
         entering: Option<f64>,
     ) -> Result<(), ArithmeticError> {
-        let paired = leaving.is_some_and(f64::is_finite)
+        if leaving.is_some_and(f64::is_finite)
             && entering.is_some_and(f64::is_finite)
-            && self.finite_count > 1;
-        if paired {
-            self.evict_counters(leaving.unwrap())?;
-            self.insert_counters(entering.unwrap())?;
-            self.sum.pair(entering.unwrap(), leaving.unwrap());
-            self.dispersion.pair(entering.unwrap(), leaving.unwrap());
-            return Ok(());
+            && self.finite_count > 1
+        {
+            return self.paired_rows(leaving.unwrap(), entering.unwrap());
         }
+        self.unpaired_rows(leaving, entering)
+    }
+
+    fn paired_rows(&mut self, leaving: f64, entering: f64) -> Result<(), ArithmeticError> {
+        self.evict_counters(leaving)?;
+        self.insert_counters(entering)?;
+        self.sum.pair(entering, leaving);
+        self.dispersion.pair(entering, leaving);
+        Ok(())
+    }
+
+    fn unpaired_rows(
+        &mut self,
+        leaving: Option<f64>,
+        entering: Option<f64>,
+    ) -> Result<(), ArithmeticError> {
         if let Some(sample) = leaving {
             self.evict(sample)?;
         }

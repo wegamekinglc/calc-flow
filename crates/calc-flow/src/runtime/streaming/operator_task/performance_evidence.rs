@@ -617,7 +617,7 @@ fn dispatch_both(
 fn output_digest(records: &[RecordBatch]) -> String {
     let mut bytes = Vec::new();
     if let Some(first) = records.first() {
-        let mut writer = StreamWriter::try_new(&mut bytes, first.schema()).unwrap();
+        let mut writer = StreamWriter::try_new(&mut bytes, &first.schema()).unwrap();
         for record in records {
             writer.write(record).unwrap();
         }

@@ -105,16 +105,7 @@ impl CallerDrivenOperator {
         } = self;
         let ingress = ingress_names[ingress].as_str();
         match message.kind() {
-            StreamMessageKind::Data => {
-                let transition = control::evaluate_data(progress, ingress)?;
-                sync_adapter::data_session(
-                    inputs,
-                    &message,
-                    transition.input_watermark,
-                    transition.ingress_progress,
-                )?;
-                Ok(message.into_data())
-            }
+            StreamMessageKind::Data => sync_data(inputs, progress, ingress, message),
             StreamMessageKind::Watermark => sync_progress(
                 inputs,
                 progress,
@@ -128,15 +119,7 @@ impl CallerDrivenOperator {
             StreamMessageKind::Idle => {
                 sync_progress(inputs, progress, ingress, AggregateInput::Idle)
             }
-            StreamMessageKind::EndOfInput => {
-                sync_progress(inputs, progress, ingress, AggregateInput::End)?;
-                inputs
-                    .ingresses
-                    .get_mut(ingress)
-                    .expect("session ingress remains registered")
-                    .saw_explicit_eof = true;
-                Ok(None)
-            }
+            StreamMessageKind::EndOfInput => sync_end(inputs, progress, ingress),
             StreamMessageKind::Barrier => {
                 dispatch_barrier(inputs, ingress, &message, alignment)?;
                 Ok(None)
@@ -250,6 +233,36 @@ pub(in crate::runtime::streaming) fn drain_in_order_sync(
         nodes[node].finish_sync_when_ended()?;
     }
     Ok(())
+}
+
+fn sync_data(
+    inputs: &mut OperatorTaskInputs,
+    progress: &mut OperatorInputProgress,
+    ingress: &str,
+    message: StreamMessage,
+) -> Result<Option<Batch>> {
+    let transition = control::evaluate_data(progress, ingress)?;
+    sync_adapter::data_session(
+        inputs,
+        &message,
+        transition.input_watermark,
+        transition.ingress_progress,
+    )?;
+    Ok(message.into_data())
+}
+
+fn sync_end(
+    inputs: &mut OperatorTaskInputs,
+    progress: &mut OperatorInputProgress,
+    ingress: &str,
+) -> Result<Option<Batch>> {
+    sync_progress(inputs, progress, ingress, AggregateInput::End)?;
+    inputs
+        .ingresses
+        .get_mut(ingress)
+        .expect("session ingress remains registered")
+        .saw_explicit_eof = true;
+    Ok(None)
 }
 
 fn sync_progress(

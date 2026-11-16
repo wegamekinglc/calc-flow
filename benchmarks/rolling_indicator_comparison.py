@@ -17,8 +17,7 @@ normalization are outside the timed boundary. Every timed call creates and
 materializes one complete rolling output. Finance-Python runs in an isolated
 legacy interpreter and is driven synchronously between Calc Flow samples.
 TA-Lib's per-symbol slicing, contiguous input ownership, calls, and output
-assembly are all inside its timed boundary. Its optional warm-history mode
-recalculates that bounded context and returns only the valid appended rows.
+assembly are all inside its timed boundary.
 """
 
 from __future__ import annotations
@@ -114,13 +113,6 @@ class TaLibMethod:
     entities: int
     window: int
     fast_window: int | None = None
-    history_rows: int = 0
-
-    def __post_init__(self) -> None:
-        if type(self.history_rows) is not int or not 0 <= self.history_rows < len(
-            self.prices
-        ):
-            raise ValueError("TA-Lib history must leave at least one appended row")
 
     def run(self) -> np.ndarray:
         """Calculate and restore timestamp-major order without mutating input."""
@@ -141,7 +133,7 @@ class TaLibMethod:
                 if self.fast_window is None
                 else talib.SMA(entity_values, timeperiod=self.fast_window) - slow
             )
-        return output[self.history_rows :]
+        return output
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,10 +162,7 @@ class FinancePythonWorker:
         fast_window: int = DEFAULT_FAST_WINDOW,
     ) -> None:
         runner = Path(__file__).with_name("finance_python_rolling_runner.py")
-        # The benchmark owns the executable and every argument; no shell is used.
-        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args  # noqa: E501
-        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit.dangerous-subprocess-use-audit  # noqa: E501
-        self._process = subprocess.Popen(  # nosec B603  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args  # noqa: E501
+        self._process = subprocess.Popen(  # nosec B603  # nosemgrep
             [
                 str(python),
                 str(runner),
@@ -567,7 +556,7 @@ def _timed_ta_lib(method: TaLibMethod, iterations: int) -> float:
     finally:
         if gc_was_enabled:
             gc.enable()
-    if len(result) != len(method.prices) - method.history_rows:
+    if len(result) != len(method.prices):
         raise RuntimeError("TA-Lib benchmark produced an invalid row count")
     return seconds / iterations
 

@@ -275,7 +275,7 @@ def test_native_rolling_mean_preserves_row_window_and_rejects_removed_profile() 
     with pytest.raises(ConfigError, match="options.min_periods"):
         cfa.rolling_mean(array, window=2, min_periods=3)
     with pytest.raises(TypeError, match="numerical_profile"):
-        cfa.rolling_mean(array, window=2, numerical_profile="stable_v1")
+        cfa.rolling_mean(array, window=2, **{"numerical_profile": "stable_v1"})
 
 
 def test_native_arrow_path_does_not_import_optional_array_backends() -> None:

@@ -71,6 +71,14 @@ def _sum_abs(values: list[float]) -> Fraction:
     return sum((abs(Fraction(value)) for value in values), Fraction(0))
 
 
+def _cadence(rows: int | None, n_prev: int) -> int:
+    return max(rows, 64) if rows is not None else max(n_prev, 64)
+
+
+def _finite_pair(value: tuple[float | None, float | None] | None) -> bool:
+    return value is not None and _finite(value[0]) and _finite(value[1])
+
+
 @dataclass
 class SeriesOracle:
     rows: int | None = None
@@ -126,6 +134,18 @@ class SeriesOracle:
             self.times.pop(0)
         return [value for value in leaving if _finite(value)]
 
+    def _shift_for(self, value: float) -> float:
+        return float(value) if self.integer else value
+
+    def _rebuild(self) -> None:
+        finite = [item for item in self.history if _finite(item)]
+        self.shift = self._shift_for(finite[-1]) if finite else None
+        self.since = 0
+        self.a_sum = self.a_d = self.a_q = Fraction(0)
+        self.operands = 0
+        self._accumulate(finite)
+        self.n_prev = len(self.history)
+
     def advance(self, value: float | None, timestamp: int) -> None:
         leaving = self._evictions(timestamp)
         self._accumulate(leaving)
@@ -135,24 +155,33 @@ class SeriesOracle:
         self.times.append(timestamp)
         if _finite(value):
             if self.shift is None:
-                self.shift = float(value) if self.integer else value
+                self.shift = self._shift_for(value)
             self._accumulate([value])
         self.since += 1
-        cadence = max(self.rows, 64) if self.rows is not None else max(self.n_prev, 64)
-        if self.since >= cadence:
-            finite = [item for item in self.history if _finite(item)]
-            self.shift = (
-                float(finite[-1])
-                if finite and self.integer
-                else finite[-1]
-                if finite
-                else None
-            )
-            self.since = 0
-            self.a_sum = self.a_d = self.a_q = Fraction(0)
-            self.operands = 0
-            self._accumulate(finite)
-            self.n_prev = len(self.history)
+        if self.since >= _cadence(self.rows, self.n_prev):
+            self._rebuild()
+
+    def _variance_values(self, valid: list[float]) -> list[Fraction]:
+        return [
+            Fraction(float(item)) if self.integer else Fraction(item) for item in valid
+        ]
+
+    def _qk(self, values: list[Fraction]) -> Fraction:
+        if self.shift is None:
+            return Fraction(0)
+        return sum(
+            ((value - Fraction(self.shift)) ** 2 for value in values), Fraction(0)
+        )
+
+    @staticmethod
+    def _exact_variance(
+        values: list[Fraction], mean: Fraction | None, n: int, ddof: int
+    ) -> Fraction | None:
+        return (
+            sum(((value - mean) ** 2 for value in values), Fraction(0)) / (n - ddof)
+            if n > ddof
+            else None
+        )
 
     def exact(self, ddof: int = 0) -> dict[str, Fraction | int | bool | None]:
         valid = [item for item in self.history if _valid(item)]
@@ -163,27 +192,10 @@ class SeriesOracle:
             return {"count": n, "nonfinite": True}
         total = sum(finite, Fraction(0))
         mean = total / n if n else None
-        variance_values = [
-            Fraction(float(item)) if self.integer else Fraction(item) for item in valid
-        ]
+        variance_values = self._variance_values(valid)
         variance_mean = sum(variance_values, Fraction(0)) / n if n else None
-        qk = (
-            sum(
-                ((value - Fraction(self.shift)) ** 2 for value in variance_values),
-                Fraction(0),
-            )
-            if self.shift is not None
-            else Fraction(0)
-        )
-        variance = (
-            sum(
-                ((value - variance_mean) ** 2 for value in variance_values),
-                Fraction(0),
-            )
-            / (n - ddof)
-            if n > ddof
-            else None
-        )
+        qk = self._qk(variance_values)
+        variance = self._exact_variance(variance_values, variance_mean, n, ddof)
         return {
             "count": n,
             "sum": total,
@@ -247,39 +259,42 @@ class SeriesOracle:
             and max(self.a_sum, self.a_q, exact["count"] * qk) <= DOMAIN
         )
 
-    def check(self, actual: dict[str, float | int | None], ddof: int = 0) -> None:
-        exact = self.exact(ddof)
-        n = exact["count"]
-        assert isinstance(n, int)
-        if exact["nonfinite"]:
-            positive = any(item == math.inf for item in self.history)
-            negative = any(item == -math.inf for item in self.history)
-            expected = (
-                math.nan
-                if positive and negative
-                else math.inf
-                if positive
-                else -math.inf
-            )
-            for name in ("sum", "mean"):
-                value = actual[name]
-                if positive and negative:
-                    assert value is not None and math.isnan(value)
-                else:
-                    assert value == expected
-            for name in ("variance", "stddev"):
-                value = actual[name]
-                if n <= ddof:
-                    assert value is None
-                else:
-                    assert value is not None and math.isnan(value)
-            return
-        if n == 0:
-            assert all(value is None for value in actual.values())
-            return
-        if not self._in_domain(exact):
-            return
-        bounds = self.bounds(ddof)
+    @staticmethod
+    def _check_nonfinite_moments(
+        actual: dict[str, float | int | None], mixed: bool, expected: float
+    ) -> None:
+        for name in ("sum", "mean"):
+            value = actual[name]
+            if mixed:
+                assert value is not None and math.isnan(value)
+            else:
+                assert value == expected
+
+    @staticmethod
+    def _check_nonfinite_spread(
+        actual: dict[str, float | int | None], n: int, ddof: int
+    ) -> None:
+        for name in ("variance", "stddev"):
+            value = actual[name]
+            if n <= ddof:
+                assert value is None
+            else:
+                assert value is not None and math.isnan(value)
+
+    def _check_nonfinite(
+        self, actual: dict[str, float | int | None], n: int, ddof: int
+    ) -> None:
+        positive = any(item == math.inf for item in self.history)
+        negative = any(item == -math.inf for item in self.history)
+        mixed = positive and negative
+        expected = math.nan if mixed else math.inf if positive else -math.inf
+        self._check_nonfinite_moments(actual, mixed, expected)
+        self._check_nonfinite_spread(actual, n, ddof)
+
+    @staticmethod
+    def _check_finite_moments(
+        actual: dict[str, float | int | None], exact: dict, bounds: dict[str, Fraction]
+    ) -> None:
         for name in ("sum", "mean"):
             value = actual[name]
             assert value is not None and math.isfinite(value)
@@ -290,22 +305,64 @@ class SeriesOracle:
                 value,
                 reference,
             )
+
+    @staticmethod
+    def _spread_error(name: str, value: float, reference: Fraction) -> Fraction:
+        if name == "variance":
+            return abs(Fraction(value) - reference)
+        return _interval_error(
+            value, _sqrt(reference, upper=False), _sqrt(reference, upper=True)
+        )
+
+    @staticmethod
+    def _check_spread_value(
+        name: str,
+        value: float | int | None,
+        exact: dict,
+        bounds: dict[str, Fraction],
+        n: int,
+        ddof: int,
+    ) -> None:
+        if n <= ddof:
+            assert value is None
+            return
+        assert value is not None and math.isfinite(value)
+        reference = exact["variance" if name == "stddev" else name]
+        assert isinstance(reference, Fraction)
+        error = SeriesOracle._spread_error(name, value, reference)
+        assert error <= bounds[name], (name, value, reference, bounds[name])
+
+    def _check_spread(
+        self,
+        actual: dict[str, float | int | None],
+        exact: dict,
+        bounds: dict[str, Fraction],
+        n: int,
+        ddof: int,
+    ) -> None:
         for name in ("variance", "stddev"):
-            value = actual[name]
-            if n <= ddof:
-                assert value is None
-                continue
-            assert value is not None and math.isfinite(value)
-            reference = exact["variance" if name == "stddev" else name]
-            assert isinstance(reference, Fraction)
-            error = (
-                abs(Fraction(value) - reference)
-                if name == "variance"
-                else _interval_error(
-                    value, _sqrt(reference, upper=False), _sqrt(reference, upper=True)
-                )
-            )
-            assert error <= bounds[name], (name, value, reference, bounds[name])
+            self._check_spread_value(name, actual[name], exact, bounds, n, ddof)
+
+    def _check_finite(
+        self, actual: dict[str, float | int | None], exact: dict, n: int, ddof: int
+    ) -> None:
+        bounds = self.bounds(ddof)
+        self._check_finite_moments(actual, exact, bounds)
+        self._check_spread(actual, exact, bounds, n, ddof)
+
+    def check(self, actual: dict[str, float | int | None], ddof: int = 0) -> None:
+        exact = self.exact(ddof)
+        n = exact["count"]
+        assert isinstance(n, int)
+        if exact["nonfinite"]:
+            self._check_nonfinite(actual, n, ddof)
+            return
+        if n == 0:
+            assert all(value is None for value in actual.values())
+            return
+        if not self._in_domain(exact):
+            return
+        self._check_finite(actual, exact, n, ddof)
 
 
 @dataclass
@@ -339,14 +396,17 @@ class PairOracle:
         self.history = []
         self.times = []
 
-    def _reset(self) -> None:
-        self.shifts = None
+    def _reset_error_terms(self) -> None:
         self.changed_left = self.changed_right = False
         self.since = 0
-        self.n_prev = 64
         self.a_p = self.a_dx = self.a_dy = Fraction(0)
         self.a_qx = self.a_qy = Fraction(0)
         self.operands = 0
+
+    def _reset(self) -> None:
+        self.shifts = None
+        self.n_prev = 64
+        self._reset_error_terms()
 
     def _accumulate(self, values: list[tuple[float, float]]) -> None:
         if self.shifts is None:
@@ -375,72 +435,59 @@ class PairOracle:
         ):
             leaving.append(self.history.pop(0))
             self.times.pop(0)
-        return [
-            value
-            for value in leaving
-            if value is not None and _finite(value[0]) and _finite(value[1])
-        ]
+        return [value for value in leaving if _finite_pair(value)]
+
+    def _shift_for(self, value: tuple[float, float]) -> tuple[float, float]:
+        return (float(value[0]), float(value[1])) if self.integer else value
+
+    def _rebuild(self) -> None:
+        finite = [item for item in self.history if _finite_pair(item)]
+        self.shifts = self._shift_for(finite[-1]) if finite else None
+        self._reset_error_terms()
+        self._accumulate(finite)
+        self.n_prev = len(self.history)
 
     def advance(
         self, value: tuple[float | None, float | None] | None, timestamp: int
     ) -> None:
         leaving = self._evictions(timestamp)
         self._accumulate(leaving)
-        if not any(
-            item is not None and _finite(item[0]) and _finite(item[1])
-            for item in self.history
-        ):
+        if not any(_finite_pair(item) for item in self.history):
             self._reset()
         self.history.append(value)
         self.times.append(timestamp)
-        if value is not None and _finite(value[0]) and _finite(value[1]):
+        if _finite_pair(value):
             if self.shifts is None:
-                self.shifts = (
-                    (float(value[0]), float(value[1])) if self.integer else value
-                )
+                self.shifts = self._shift_for(value)
                 self.changed_left = self.changed_right = False
             self._accumulate([value])
         self.since += 1
-        cadence = max(self.rows, 64) if self.rows is not None else max(self.n_prev, 64)
-        if self.since >= cadence:
-            finite = [
-                item
-                for item in self.history
-                if item is not None and _finite(item[0]) and _finite(item[1])
-            ]
-            self.shifts = (
-                (float(finite[-1][0]), float(finite[-1][1]))
-                if finite and self.integer
-                else finite[-1]
-                if finite
-                else None
-            )
-            self.since = 0
-            self.a_p = self.a_dx = self.a_dy = Fraction(0)
-            self.a_qx = self.a_qy = Fraction(0)
-            self.operands = 0
-            self.changed_left = self.changed_right = False
-            self._accumulate(finite)
-            self.n_prev = len(self.history)
+        if self.since >= _cadence(self.rows, self.n_prev):
+            self._rebuild()
 
-    def exact(self, ddof: int = 0) -> dict[str, Fraction | int | bool | None]:
-        valid = [item for item in self.history if item is not None]
-        n = len(valid)
-        if any(not math.isfinite(x) or not math.isfinite(y) for x, y in valid):
-            return {"count": n, "nonfinite": True}
-        values = [
+    def _exact_values(
+        self, valid: list[tuple[float, float]]
+    ) -> list[tuple[Fraction, Fraction]]:
+        return [
             (Fraction(float(x)), Fraction(float(y)))
             if self.integer
             else (Fraction(x), Fraction(y))
             for x, y in valid
         ]
-        if n <= ddof:
-            return {
-                "count": n,
-                "nonfinite": False,
-                "covariance": None,
-                "correlation": None,
-            }
+
+    @staticmethod
+    def _correlation(
+        covariance: Fraction, vx: Fraction, vy: Fraction
+    ) -> Fraction | None:
+        if vx == 0 or vy == 0:
+            return None
+        return covariance / _sqrt(vx * vy, upper=False)
+
+    @staticmethod
+    def _moments(
+        values: list[tuple[Fraction, Fraction]], ddof: int
+    ) -> tuple[Fraction, Fraction, Fraction]:
+        n = len(values)
         mx = sum((x for x, _ in values), Fraction(0)) / n
         my = sum((y for _, y in values), Fraction(0)) / n
         vx = sum(((x - mx) ** 2 for x, _ in values), Fraction(0)) / n
@@ -448,9 +495,23 @@ class PairOracle:
         covariance = sum(((x - mx) * (y - my) for x, y in values), Fraction(0)) / (
             n - ddof
         )
-        correlation = (
-            None if vx == 0 or vy == 0 else covariance / _sqrt(vx * vy, upper=False)
-        )
+        return vx, vy, covariance
+
+    def exact(self, ddof: int = 0) -> dict[str, Fraction | int | bool | None]:
+        valid = [item for item in self.history if item is not None]
+        n = len(valid)
+        if any(not _finite_pair(item) for item in valid):
+            return {"count": n, "nonfinite": True}
+        values = self._exact_values(valid)
+        if n <= ddof:
+            return {
+                "count": n,
+                "nonfinite": False,
+                "covariance": None,
+                "correlation": None,
+            }
+        vx, vy, covariance = self._moments(values, ddof)
+        correlation = self._correlation(covariance, vx, vy)
         return {
             "count": n,
             "nonfinite": False,
@@ -500,44 +561,53 @@ class PairOracle:
         )
         return bracket, bracket / (n - ddof), variance_x / n, variance_y / n
 
-    def check(
-        self, covariance: float | None, correlation: float | None, ddof: int = 0
+    @staticmethod
+    def _check_nonfinite(
+        covariance: float | None,
+        correlation: float | None,
+        n: int,
+        ddof: int,
     ) -> None:
-        exact = self.exact(ddof)
-        n = exact["count"]
-        assert isinstance(n, int)
-        if exact["nonfinite"]:
-            if n <= ddof:
-                assert covariance is None and correlation is None
-            else:
-                assert covariance is not None and math.isnan(covariance)
-                assert correlation is not None and math.isnan(correlation)
-            return
         if n <= ddof:
             assert covariance is None and correlation is None
-            return
-        assert covariance is not None and math.isfinite(covariance)
-        reference = exact["covariance"]
-        assert isinstance(reference, Fraction)
-        bracket, delta, delta_x, delta_y = self._bounds(exact, ddof)
-        assert abs(Fraction(covariance) - reference) <= delta + U * abs(reference)
-        if not self.changed_left or not self.changed_right:
-            assert correlation is None
-            return
-        vx, vy = exact["vx"], exact["vy"]
-        assert isinstance(vx, Fraction) and isinstance(vy, Fraction)
-        if vx == 0 or vy == 0:
-            assert correlation is None
-            return
+        else:
+            assert covariance is not None and math.isnan(covariance)
+            assert correlation is not None and math.isnan(correlation)
+
+    @staticmethod
+    def _assert_correlation_present(
+        correlation: float | None,
+        vx: Fraction,
+        vy: Fraction,
+        delta_x: Fraction,
+        delta_y: Fraction,
+    ) -> None:
         if delta_x < vx and delta_y < vy and correlation is None:
             raise AssertionError(
                 "correlation must be finite when both error bounds are smaller"
             )
-        if correlation is None or delta_x > vx / 2 or delta_y > vy / 2:
-            return
+
+    @staticmethod
+    def _skip_correlation(
+        correlation: float | None,
+        vx: Fraction,
+        vy: Fraction,
+        delta_x: Fraction,
+        delta_y: Fraction,
+    ) -> bool:
+        return correlation is None or delta_x > vx / 2 or delta_y > vy / 2
+
+    @staticmethod
+    def _assert_correlation(
+        correlation: float,
+        covariance: Fraction,
+        vx: Fraction,
+        vy: Fraction,
+        bracket: Fraction,
+        delta_x: Fraction,
+        delta_y: Fraction,
+    ) -> None:
         product = vx * vy
-        covariance = exact["covariance"]
-        assert isinstance(covariance, Fraction)
         lower = (
             covariance / _sqrt(product, upper=True)
             if covariance >= 0
@@ -563,6 +633,59 @@ class PairOracle:
             float(_interval_error(correlation, lower, upper)),
             bound,
         )
+
+    def _check_correlation(
+        self,
+        correlation: float | None,
+        exact: dict,
+        bracket: Fraction,
+        delta_x: Fraction,
+        delta_y: Fraction,
+    ) -> None:
+        vx, vy = exact["vx"], exact["vy"]
+        assert isinstance(vx, Fraction) and isinstance(vy, Fraction)
+        if vx == 0 or vy == 0:
+            assert correlation is None
+            return
+        self._assert_correlation_present(correlation, vx, vy, delta_x, delta_y)
+        if self._skip_correlation(correlation, vx, vy, delta_x, delta_y):
+            return
+        covariance = exact["covariance"]
+        assert isinstance(covariance, Fraction)
+        self._assert_correlation(
+            correlation, covariance, vx, vy, bracket, delta_x, delta_y
+        )
+
+    def _check_finite(
+        self,
+        covariance: float | None,
+        correlation: float | None,
+        exact: dict,
+        ddof: int,
+    ) -> None:
+        assert covariance is not None and math.isfinite(covariance)
+        reference = exact["covariance"]
+        assert isinstance(reference, Fraction)
+        bracket, delta, delta_x, delta_y = self._bounds(exact, ddof)
+        assert abs(Fraction(covariance) - reference) <= delta + U * abs(reference)
+        if not self.changed_left or not self.changed_right:
+            assert correlation is None
+            return
+        self._check_correlation(correlation, exact, bracket, delta_x, delta_y)
+
+    def check(
+        self, covariance: float | None, correlation: float | None, ddof: int = 0
+    ) -> None:
+        exact = self.exact(ddof)
+        n = exact["count"]
+        assert isinstance(n, int)
+        if exact["nonfinite"]:
+            self._check_nonfinite(covariance, correlation, n, ddof)
+            return
+        if n <= ddof:
+            assert covariance is None and correlation is None
+            return
+        self._check_finite(covariance, correlation, exact, ddof)
 
 
 def _program(window, *, integer: bool = False, unsigned: bool = False) -> Program:
@@ -667,6 +790,12 @@ def _execute(
     return {name: batch[name].to_pylist() for name in names}
 
 
+def _pair_value(
+    x: float | int | None, y: float | int | None
+) -> tuple[float | int | None, float | int | None] | None:
+    return (x, y) if _valid(x) and _valid(y) else None
+
+
 def _check_values(
     values: list[tuple[float | int | None, float | int | None]],
     window: int | None = None,
@@ -687,11 +816,12 @@ def _check_values(
         integer,
         unsigned,
     )
-    series = SeriesOracle(window, duration_us, integer=integer or unsigned)
-    pair = PairOracle(window, duration_us, integer=integer or unsigned)
+    exact_integer = integer or unsigned
+    series = SeriesOracle(window, duration_us, integer=exact_integer)
+    pair = PairOracle(window, duration_us, integer=exact_integer)
     for index, (x, y) in enumerate(values):
         series.advance(x, timestamps[index])
-        pair.advance((x, y) if _valid(x) and _valid(y) else None, timestamps[index])
+        pair.advance(_pair_value(x, y), timestamps[index])
         series.check(
             {
                 name: actual[name][index]

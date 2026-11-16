@@ -18,6 +18,7 @@ from benchmarks.rolling_indicator_comparison import (
     ta_lib_iterations_per_sample,
     ta_lib_valid_rows,
 )
+from benchmarks.ta_lib_bounded_history import BoundedHistoryTaLibMethod
 
 
 def test_native_benchmark_program_selects_engine_before_compilation() -> None:
@@ -61,7 +62,7 @@ def test_ta_lib_sma_matches_oracle_after_its_warmup() -> None:
 
 def test_ta_lib_warm_history_returns_only_valid_appended_rows() -> None:
     workload = rolling_workload(rows=257, entities=8)
-    actual = TaLibMethod(
+    actual = BoundedHistoryTaLibMethod(
         workload.prices,
         entities=8,
         window=20,

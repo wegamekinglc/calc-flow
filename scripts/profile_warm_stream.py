@@ -1762,7 +1762,10 @@ def _validate_native_sample(sample: Any, index: int) -> None:
     for arm in NATIVE_ARMS:
         _native_number(sample.get(f"{arm}_seconds"), positive=True)
     _native_number(sample.get("present_numeric_update_seconds"), positive=False)
-    digest = sample.get("output_digest")
+    _validate_native_digest(sample.get("output_digest"))
+
+
+def _validate_native_digest(digest: Any) -> None:
     if digest is not None and (not isinstance(digest, str) or len(digest) != 64):
         raise ValueError("native evidence output digests must be SHA-256 hex")
 

@@ -108,21 +108,26 @@ pub(super) async fn progress(
         .observe_datafusion_runtime(inputs.operator.datafusion_runtime_initialized());
     let mut emit_idle = false;
     for emission in emissions {
-        match emission {
-            ProgressEmissionKind::Watermark(watermark) => {
-                watermark_callback(
-                    inputs,
-                    watermark,
-                    previous_watermark,
-                    ingress_progress.clone(),
-                )
-                .await?;
-                previous_watermark = Some(watermark);
-            }
-            ProgressEmissionKind::Idle => emit_idle = true,
-            ProgressEmissionKind::EndOfInput => {}
-        }
+        emit_idle |=
+            runner_emission(inputs, emission, &mut previous_watermark, &ingress_progress).await?;
     }
+    forward_runner_progress(
+        inputs,
+        aggregate_input_frontier,
+        &ingress_progress,
+        output_frontier,
+        emit_idle,
+    )
+    .await
+}
+
+async fn forward_runner_progress(
+    inputs: &mut OperatorTaskInputs,
+    aggregate_input_frontier: Option<EventTime>,
+    ingress_progress: &IngressProgressSnapshot,
+    output_frontier: &mut Option<EventTime>,
+    emit_idle: bool,
+) -> Result<()> {
     let has_non_late_output = node_mut(&mut inputs.operator)
         .emitter()
         .has_non_late_output();
@@ -130,7 +135,7 @@ pub(super) async fn progress(
         &inputs.operator,
         has_non_late_output,
         aggregate_input_frontier,
-        &ingress_progress,
+        ingress_progress,
         *output_frontier,
     )? {
         forward_control(inputs, StreamMessage::watermark(candidate)).await?;
@@ -140,6 +145,29 @@ pub(super) async fn progress(
         forward_control(inputs, StreamMessage::idle()).await?;
     }
     Ok(())
+}
+
+async fn runner_emission(
+    inputs: &mut OperatorTaskInputs,
+    emission: ProgressEmissionKind,
+    previous_watermark: &mut Option<EventTime>,
+    ingress_progress: &IngressProgressSnapshot,
+) -> Result<bool> {
+    match emission {
+        ProgressEmissionKind::Watermark(watermark) => {
+            watermark_callback(
+                inputs,
+                watermark,
+                *previous_watermark,
+                ingress_progress.clone(),
+            )
+            .await?;
+            *previous_watermark = Some(watermark);
+            Ok(false)
+        }
+        ProgressEmissionKind::Idle => Ok(true),
+        ProgressEmissionKind::EndOfInput => Ok(false),
+    }
 }
 
 async fn watermark_callback(
@@ -313,20 +341,24 @@ pub(super) fn progress_session(
         .observe_datafusion_runtime(inputs.operator.datafusion_runtime_initialized());
     let mut emit_idle = false;
     for emission in emissions {
-        match emission {
-            ProgressEmissionKind::Watermark(watermark) => {
-                watermark_session(
-                    inputs,
-                    watermark,
-                    previous_watermark,
-                    ingress_progress.clone(),
-                )?;
-                previous_watermark = Some(watermark);
-            }
-            ProgressEmissionKind::Idle => emit_idle = true,
-            ProgressEmissionKind::EndOfInput => {}
-        }
+        emit_idle |= session_emission(inputs, emission, &mut previous_watermark, ingress_progress)?;
     }
+    forward_session_progress(
+        inputs,
+        aggregate_input_frontier,
+        ingress_progress,
+        output_frontier,
+        emit_idle,
+    )
+}
+
+fn forward_session_progress(
+    inputs: &mut OperatorTaskInputs,
+    aggregate_input_frontier: Option<EventTime>,
+    ingress_progress: &IngressProgressSnapshot,
+    output_frontier: &mut Option<EventTime>,
+    emit_idle: bool,
+) -> Result<()> {
     let has_non_late_output = node_mut(&mut inputs.operator)
         .emitter()
         .has_non_late_output();
@@ -344,6 +376,28 @@ pub(super) fn progress_session(
         forward_control_session(inputs, &StreamMessage::idle())?;
     }
     Ok(())
+}
+
+fn session_emission(
+    inputs: &mut OperatorTaskInputs,
+    emission: ProgressEmissionKind,
+    previous_watermark: &mut Option<EventTime>,
+    ingress_progress: &IngressProgressSnapshot,
+) -> Result<bool> {
+    match emission {
+        ProgressEmissionKind::Watermark(watermark) => {
+            watermark_session(
+                inputs,
+                watermark,
+                *previous_watermark,
+                ingress_progress.clone(),
+            )?;
+            *previous_watermark = Some(watermark);
+            Ok(false)
+        }
+        ProgressEmissionKind::Idle => Ok(true),
+        ProgressEmissionKind::EndOfInput => Ok(false),
+    }
 }
 
 fn watermark_session(

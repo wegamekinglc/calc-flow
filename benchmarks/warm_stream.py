@@ -30,11 +30,13 @@ import numpy as np
 import pyarrow as pa
 
 from benchmarks.rolling_indicator_comparison import (
-    TaLibMethod,
     _native_program,
-    _timed_ta_lib,
     expected_dual_sma_spread,
     expected_rolling_mean,
+)
+from benchmarks.ta_lib_bounded_history import (
+    BoundedHistoryTaLibMethod,
+    timed_ta_lib_append,
 )
 from calc_flow import (
     Batch,
@@ -1242,12 +1244,12 @@ def _require_ta_lib_layout(config: ScenarioConfig, samples: int) -> None:
         raise ValueError("the TA-Lib reference requires at least two samples")
 
 
-def _ta_lib_append(config: ScenarioConfig, start: int) -> TaLibMethod:
+def _ta_lib_append(config: ScenarioConfig, start: int) -> BoundedHistoryTaLibMethod:
     """Return TA-Lib over one append and its ``window - 1`` rows per entity."""
     context = min(start, (config.window - 1) * config.entities)
     sequence = np.arange(start - context, start + config.append_rows, dtype=np.uint64)
     fast_window = config.fast_window if config.indicator == "dual_sma_spread" else None
-    return TaLibMethod(
+    return BoundedHistoryTaLibMethod(
         _prices(sequence, config.entities),
         entities=config.entities,
         window=config.window,
@@ -1265,7 +1267,7 @@ def _timed_ta_lib_append(config: ScenarioConfig, index: int, collect_gc: bool) -
         raise RuntimeError("TA-Lib reference does not match the warm oracle")
     if collect_gc:
         gc.collect()
-    return _timed_ta_lib(method, 1)
+    return timed_ta_lib_append(method, 1)
 
 
 def ta_lib_reference(

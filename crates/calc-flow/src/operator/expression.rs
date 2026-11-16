@@ -355,19 +355,7 @@ impl ExpressionOperator {
             return Ok(PreparedExpression::Async(self));
         }
         let input = self.input_ports[0].schema().cloned();
-        let projection = input.as_ref().and_then(|input| {
-            self.is_exact_column_projection(input, self.output_ports[0].schema())
-                .then(|| {
-                    self.column_projection.as_ref().and_then(|projection| {
-                        PreparedColumnProjection::new(
-                            projection,
-                            input,
-                            self.output_ports[0].schema(),
-                        )
-                    })
-                })
-                .flatten()
-        });
+        let projection = self.prepared_column_projection(input.as_ref());
         if let Some(projection) = projection {
             return prepare_sync_expression(self, Some(projection), None, context).await;
         }
@@ -383,6 +371,19 @@ impl ExpressionOperator {
             Some(compiled) => prepare_sync_expression(self, None, Some(compiled), context).await,
             None => Ok(PreparedExpression::Async(self)),
         }
+    }
+
+    fn prepared_column_projection(
+        &self,
+        input: Option<&SchemaRef>,
+    ) -> Option<PreparedColumnProjection> {
+        let input = input?;
+        if !self.is_exact_column_projection(input, self.output_ports[0].schema()) {
+            return None;
+        }
+        self.column_projection.as_ref().and_then(|projection| {
+            PreparedColumnProjection::new(projection, input, self.output_ports[0].schema())
+        })
     }
 
     fn has_stream_udfs(&self) -> bool {
