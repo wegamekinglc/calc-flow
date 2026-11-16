@@ -2892,6 +2892,10 @@ enum SumState {
 
 impl WindowAccumulator {
     fn new(sum_class: SumClass) -> Self {
+        Self::with_dispersion(sum_class, true)
+    }
+
+    fn with_dispersion(sum_class: SumClass, dispersion: bool) -> Self {
         let sum = match sum_class {
             SumClass::Signed => Some(SumState::Signed(0)),
             SumClass::Unsigned => Some(SumState::Unsigned(0)),
@@ -2900,7 +2904,11 @@ impl WindowAccumulator {
         };
         Self {
             sum,
-            numeric: crate::accumulate::NumericAccumulator::default(),
+            numeric: if dispersion {
+                crate::accumulate::NumericAccumulator::default()
+            } else {
+                crate::accumulate::NumericAccumulator::mean_only()
+            },
             expired_through: i128::MIN,
         }
     }

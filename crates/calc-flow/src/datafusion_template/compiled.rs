@@ -281,6 +281,10 @@ fn push<C: Cancellation>(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the filter step forwards the existing output and cancellation context"
+)]
 fn push_filter<C: Cancellation>(
     filter: &Filter,
     active: &mut ActiveStep,

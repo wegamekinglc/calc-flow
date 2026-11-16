@@ -27,7 +27,7 @@ pub(super) struct InPlaceUpdate {
 }
 
 struct EntityUndo {
-    previous: Option<Box<TypedEntityUndo>>,
+    previous: Option<TypedEntityUndo>,
     is_new: bool,
 }
 
@@ -36,8 +36,12 @@ struct TypedEntityUndo {
     groups: NumericGroupsUndo,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "single-group undo stays on the stack to avoid a per-batch allocation"
+)]
 enum NumericGroupsUndo {
-    One(Box<Float64NumericUndo>),
+    One(Float64NumericUndo),
     Many(Vec<Float64NumericUndo>),
 }
 
@@ -51,7 +55,7 @@ impl NumericGroupsUndo {
 
     fn as_mut_slice(&mut self) -> &mut [Float64NumericUndo] {
         match self {
-            Self::One(group) => std::slice::from_mut(group.as_mut()),
+            Self::One(group) => std::slice::from_mut(group),
             Self::Many(groups) => groups.as_mut_slice(),
         }
     }
@@ -124,7 +128,7 @@ impl TypedEntityUndo {
         }
 
         let groups = match entity.groups.as_slice() {
-            [group] => NumericGroupsUndo::One(Box::new(snapshot(group)?)),
+            [group] => NumericGroupsUndo::One(snapshot(group)?),
             groups => {
                 NumericGroupsUndo::Many(groups.iter().map(snapshot).collect::<Result<Vec<_>>>()?)
             }
@@ -161,12 +165,16 @@ struct ResidentInspection {
     previous_charge: StateCharge,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "resident undo is short-lived and must not allocate on the hot path"
+)]
 enum ResidentMatch {
     Existing {
         resident: usize,
         key_bytes: usize,
         charge: StateCharge,
-        undo: Box<TypedEntityUndo>,
+        undo: TypedEntityUndo,
     },
     New,
 }
@@ -203,7 +211,7 @@ fn inspect_resident(
         resident,
         key_bytes,
         charge,
-        undo: Box::new(TypedEntityUndo::new(entity)?),
+        undo: TypedEntityUndo::new(entity)?,
     }))
 }
 
@@ -296,10 +304,10 @@ impl InPlaceUpdate {
                 rows.counts[local],
             )));
             residents[local] = resident;
-            undo[local].previous = Some(Box::new(
+            undo[local].previous = Some(
                 TypedEntityUndo::new(&state.states[resident])
                     .expect("a new numeric entity matches its plan"),
-            ));
+            );
             if let Some(name) = direct_names.get(local) {
                 let name = (*name).to_owned();
                 state
