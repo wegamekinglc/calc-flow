@@ -7,11 +7,15 @@
 mod core;
 mod layout7;
 mod pages;
-mod v4;
+pub(in crate::state) mod v4;
 
 pub(crate) use layout7::{decode_layout7, encode_layout7};
 
-pub(crate) use self::core::{EntityId, EntityKey, RingKind, StateTable, ValueKind};
+pub(crate) use self::core::{
+    EntityId, EntityKey, RingKind, StateTable, TableFreeze, ValueKind,
+};
+#[cfg(test)]
+pub(crate) use self::core::KeyGroupId;
 
 use self::core::{KeyedValue, RingValue};
 use std::sync::Arc;

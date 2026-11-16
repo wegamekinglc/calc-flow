@@ -164,11 +164,11 @@ impl V4TableCapture {
         }
     }
 
-    pub(in crate::state) async fn persist(
+    pub(in crate::state) async fn persist_objects(
         self,
         store: &mut V4Store,
         manifest: &V4Manifest,
-    ) -> Result<V4PersistedTable> {
+    ) -> Result<(V4PersistedTable, V4Manifest)> {
         let epoch = self.freeze.epoch;
         let mut objects = Vec::new();
         let mut identities = BTreeMap::new();
@@ -252,12 +252,27 @@ impl V4TableCapture {
                 .count(),
         );
         let manifest = Self::manifest_with_roots(manifest, &roots)?;
+        Ok((
+            V4PersistedTable {
+                lineage,
+                handles: live,
+                roots,
+                manifest_path: std::path::PathBuf::new(),
+            },
+            manifest,
+        ))
+    }
+
+    pub(in crate::state) async fn persist(
+        self,
+        store: &mut V4Store,
+        manifest: &V4Manifest,
+    ) -> Result<V4PersistedTable> {
+        let (persisted, manifest) = self.persist_objects(store, manifest).await?;
         let manifest_path = store.publish_manifest(&manifest)?;
         Ok(V4PersistedTable {
-            lineage,
-            handles: live,
-            roots,
             manifest_path,
+            ..persisted
         })
     }
 
@@ -392,6 +407,7 @@ fn snapshot_from_lineage(table: &StateTable, lineage: TableLineage) -> Result<Ta
             numeric.push(
                 ring.value
                     .numeric
+                    .clone()
                     .ok_or_else(|| mismatch("numeric group is absent".into()))?,
             );
         }
@@ -530,8 +546,10 @@ fn page_payload(page: &PageRef) -> ArrowPayload {
             metadata.insert("head".into(), page.value.ring.head.to_string());
             metadata.insert("len".into(), page.value.ring.len.to_string());
             metadata.insert("capacity".into(), page.value.ring.capacity().to_string());
-            if let Some(numeric) = page.value.numeric {
-                metadata.extend(numeric_metadata(&numeric.layout7()));
+            if let Some(numeric) = &page.value.numeric {
+                for value in numeric {
+                    metadata.extend(numeric_metadata(&value.layout7()));
+                }
             }
             (
                 vec![Field::new(
@@ -749,7 +767,7 @@ fn decode_ring(record: &RecordBatch, entry: &PageEntry) -> Result<PageRef> {
         let position = ring.position(offset);
         ring.slots[position] = value;
     }
-    let numeric = decode_numeric_metadata(metadata)?;
+    let numeric = decode_numeric_metadata(metadata)?.map(|value| vec![value]);
     Ok(PageRef::Ring {
         column: column_index,
         row,

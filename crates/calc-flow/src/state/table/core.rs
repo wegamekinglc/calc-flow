@@ -574,6 +574,7 @@ pub(super) struct PartitionFreeze {
     pub(super) dirty_slots: Vec<u32>,
 }
 
+#[derive(Debug)]
 pub(crate) struct TableFreeze {
     pub(super) epoch: u64,
     pub(super) previous: Arc<TableLineage>,
@@ -582,6 +583,10 @@ pub(crate) struct TableFreeze {
 }
 
 impl TableFreeze {
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
     pub(crate) fn partition_count(&self) -> usize {
         self.partitions.len()
     }
