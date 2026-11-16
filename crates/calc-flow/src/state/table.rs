@@ -632,6 +632,29 @@ impl StateTable {
         )
     }
 
+    pub(crate) fn numeric_sum(&self, column: usize, entity: EntityId) -> Result<f64> {
+        Ok(self.rings[column].numeric.as_ref().expect("numeric group")[self.row(entity)?].sum())
+    }
+
+    pub(crate) fn numeric_variance(
+        &self,
+        column: usize,
+        entity: EntityId,
+        ddof: u8,
+    ) -> Result<f64> {
+        Ok(
+            self.rings[column].numeric.as_ref().expect("numeric group")[self.row(entity)?]
+                .variance(ddof),
+        )
+    }
+
+    pub(crate) fn numeric_stddev(&self, column: usize, entity: EntityId, ddof: u8) -> Result<f64> {
+        Ok(
+            self.rings[column].numeric.as_ref().expect("numeric group")[self.row(entity)?]
+                .stddev(ddof),
+        )
+    }
+
     pub(crate) fn logical_rows(&self) -> usize {
         self.rings.iter().map(|column| column.logical_samples).sum()
     }

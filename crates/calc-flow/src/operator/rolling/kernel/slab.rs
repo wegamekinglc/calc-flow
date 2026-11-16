@@ -2,14 +2,14 @@
 
 use std::{sync::Arc, time::Instant};
 
-use datafusion::arrow::array::{ArrayRef, Float64Builder};
+use datafusion::arrow::array::{ArrayRef, Float64Builder, UInt64Builder};
 use datafusion::arrow::record_batch::RecordBatch;
 
 use super::{
     OutputStorage, Result, RollingKernelExecution, RollingKernelMetrics, RollingKernelPlan,
     RollingKernelState, RollingMetricsRecorder, RollingStage, RollingWork, StateCharge, Statistic,
     StreamKernelUpdate, TypedFrame, TypedGroupInput, TypedGroupPlan, TypedOutputKind,
-    internal_error, nanos, operator_error, valid_float64,
+    TypedOutputPlan, internal_error, nanos, operator_error, valid_float64,
 };
 use crate::state::{EntityId, EntityKey, StateTable, ValueKind};
 
@@ -67,6 +67,63 @@ fn charge(table: &StateTable, node_id: &str) -> Result<StateCharge> {
     })
 }
 
+enum SlabBuilder {
+    Float(Float64Builder),
+    Count(UInt64Builder),
+}
+
+impl SlabBuilder {
+    fn new(output: &TypedOutputPlan, rows: usize) -> Result<Self> {
+        match output.storage {
+            OutputStorage::Float64 => Ok(Self::Float(Float64Builder::with_capacity(rows))),
+            OutputStorage::Count => Ok(Self::Count(UInt64Builder::with_capacity(rows))),
+            _ => Err(internal_error("rolling slab output storage mismatch")),
+        }
+    }
+
+    fn append(
+        &mut self,
+        table: &StateTable,
+        entity: EntityId,
+        output: &TypedOutputPlan,
+    ) -> Result<()> {
+        let valid = table.numeric_valid_count(0, entity)?;
+        if valid < output.min_periods {
+            match self {
+                Self::Float(builder) => builder.append_null(),
+                Self::Count(builder) => builder.append_null(),
+            }
+            return Ok(());
+        }
+        match (self, output.kind) {
+            (Self::Count(builder), TypedOutputKind::Statistic(Statistic::Count)) => {
+                builder.append_value(valid);
+            }
+            (Self::Float(builder), TypedOutputKind::Statistic(Statistic::Sum)) => {
+                builder.append_value(table.numeric_sum(0, entity)?);
+            }
+            (Self::Float(builder), TypedOutputKind::Statistic(Statistic::Mean)) => {
+                builder.append_option(table.numeric_mean(0, entity)?);
+            }
+            (Self::Float(builder), TypedOutputKind::Statistic(Statistic::Variance)) => {
+                builder.append_value(table.numeric_variance(0, entity, output.ddof)?);
+            }
+            (Self::Float(builder), TypedOutputKind::Statistic(Statistic::Stddev)) => {
+                builder.append_value(table.numeric_stddev(0, entity, output.ddof)?);
+            }
+            _ => return Err(internal_error("rolling slab output kind mismatch")),
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> ArrayRef {
+        match self {
+            Self::Float(mut builder) => Arc::new(builder.finish()),
+            Self::Count(mut builder) => Arc::new(builder.finish()),
+        }
+    }
+}
+
 impl RollingKernelPlan {
     pub(super) fn supports_slab(&self) -> bool {
         matches!(
@@ -78,8 +135,18 @@ impl RollingKernelPlan {
         ) && !self.outputs.is_empty()
             && self.outputs.iter().all(|output| {
                 output.group == 0
-                    && output.storage == OutputStorage::Float64
-                    && matches!(output.kind, TypedOutputKind::Statistic(Statistic::Mean))
+                    && match output.kind {
+                        TypedOutputKind::Statistic(Statistic::Count) => {
+                            output.storage == OutputStorage::Count
+                        }
+                        TypedOutputKind::Statistic(
+                            Statistic::Sum
+                            | Statistic::Mean
+                            | Statistic::Variance
+                            | Statistic::Stddev,
+                        ) => output.storage == OutputStorage::Float64,
+                        _ => false,
+                    }
             })
     }
 
@@ -153,8 +220,8 @@ impl RollingKernelPlan {
             let mut builders = self
                 .outputs
                 .iter()
-                .map(|_| Float64Builder::with_capacity(input.num_rows()))
-                .collect::<Vec<_>>();
+                .map(|output| SlabBuilder::new(output, input.num_rows()))
+                .collect::<Result<Vec<_>>>()?;
             let _stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
             for (row, &entity) in ids.iter().enumerate() {
                 let transitions = table.u64(0, entity)?.checked_add(1).ok_or_else(|| {
@@ -167,11 +234,7 @@ impl RollingKernelPlan {
                     valid_float64(values, row, self.nan_as_value),
                 )?;
                 for (builder, output) in builders.iter_mut().zip(&self.outputs) {
-                    if table.numeric_valid_count(0, entity)? >= output.min_periods {
-                        builder.append_option(table.numeric_mean(0, entity)?);
-                    } else {
-                        builder.append_null();
-                    }
+                    builder.append(table, entity, output)?;
                 }
             }
             if let Some(recorder) = observer {
@@ -180,7 +243,7 @@ impl RollingKernelPlan {
             }
             Ok(builders
                 .into_iter()
-                .map(|mut builder| Arc::new(builder.finish()) as ArrayRef)
+                .map(SlabBuilder::finish)
                 .collect::<Vec<_>>())
         })();
         let columns = match result {
@@ -226,7 +289,7 @@ mod tests {
     use std::sync::Arc;
 
     use datafusion::arrow::{
-        array::{Float64Array, StringArray, TimestampMicrosecondArray},
+        array::{Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
         datatypes::{DataType, Field, Schema, TimeUnit},
         record_batch::RecordBatch,
     };
@@ -252,15 +315,23 @@ mod tests {
             groups: vec![TypedGroupPlan::Numeric {
                 input_index: 2,
                 frame: TypedFrame::Rows(2),
-                dispersion: false,
+                dispersion: true,
             }],
-            outputs: vec![TypedOutputPlan {
+            outputs: [
+                (Statistic::Mean, OutputStorage::Float64),
+                (Statistic::Sum, OutputStorage::Float64),
+                (Statistic::Count, OutputStorage::Count),
+                (Statistic::Variance, OutputStorage::Float64),
+            ]
+            .into_iter()
+            .map(|(statistic, storage)| TypedOutputPlan {
                 group: 0,
-                kind: TypedOutputKind::Statistic(Statistic::Mean),
-                storage: OutputStorage::Float64,
+                kind: TypedOutputKind::Statistic(statistic),
+                storage,
                 min_periods: 1,
                 ddof: 0,
-            }],
+            })
+            .collect(),
             fallback_reason: None,
             estimated_state_bytes_per_entity: 0,
             fingerprint: "slab-test".to_owned(),
@@ -296,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn kernel_slab_commit_and_rollback_preserve_mean_and_history() {
+    fn kernel_slab_commit_and_rollback_preserve_aggregates_and_history() {
         let plan = plan();
         let mut state = RollingKernelState::default();
         let empty = state.canonical_state_for_test();
@@ -308,6 +379,12 @@ mod tests {
         let mean = columns[0].as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(mean.value(0).to_bits(), 1.0_f64.to_bits());
         assert_eq!(mean.value(1).to_bits(), 2.0_f64.to_bits());
+        let sum = columns[1].as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(sum.value(1).to_bits(), 4.0_f64.to_bits());
+        let count = columns[2].as_any().downcast_ref::<UInt64Array>().unwrap();
+        assert_eq!(count.value(1), 2);
+        let variance = columns[3].as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(variance.value(1).to_bits(), 2.0_f64.to_bits());
         update.rollback(&mut state);
         assert_eq!(state.canonical_state_for_test(), empty);
 
