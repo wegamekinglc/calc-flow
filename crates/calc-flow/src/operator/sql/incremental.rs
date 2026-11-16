@@ -2981,7 +2981,17 @@ fn aggregate_argument_supported(
 
 fn extrema_argument_supported(data_type: &DataType, global: bool) -> bool {
     exact_numeric(data_type)
-        || matches!(data_type, DataType::Utf8 | DataType::LargeUtf8)
+        || matches!(
+            data_type,
+            DataType::Utf8
+                | DataType::LargeUtf8
+                | DataType::Date32
+                | DataType::Date64
+                | DataType::Time32(_)
+                | DataType::Time64(_)
+                | DataType::Timestamp(..)
+                | DataType::Duration(_)
+        )
         || (global && matches!(data_type, DataType::Float32 | DataType::Float64))
 }
 
