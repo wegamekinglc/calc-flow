@@ -40,23 +40,33 @@ fn duration(unit: TimeUnit, value: i64) -> ScalarValue {
 fn series(data_type: &DataType) -> Vec<ScalarValue> {
     let timezone: Arc<str> = Arc::from("UTC");
     (0..4)
-        .map(|value| match data_type {
-            DataType::Boolean => ScalarValue::Boolean(Some(value % 2 == 0)),
-            DataType::Date32 => ScalarValue::Date32(Some(value)),
-            DataType::Date64 => ScalarValue::Date64(Some(i64::from(value))),
-            DataType::Time32(TimeUnit::Second) => ScalarValue::Time32Second(Some(value)),
-            DataType::Time32(TimeUnit::Millisecond) => ScalarValue::Time32Millisecond(Some(value)),
-            DataType::Time64(TimeUnit::Microsecond) => {
-                ScalarValue::Time64Microsecond(Some(i64::from(value)))
-            }
-            DataType::Time64(TimeUnit::Nanosecond) => {
-                ScalarValue::Time64Nanosecond(Some(i64::from(value)))
-            }
-            DataType::Timestamp(unit, _) => timestamp(*unit, i64::from(value), &timezone),
-            DataType::Duration(unit) => duration(*unit, i64::from(value)),
-            _ => unreachable!("temporal extrema fixture"),
-        })
+        .map(|value| series_value(data_type, value, &timezone))
         .collect()
+}
+
+fn series_value(data_type: &DataType, value: i32, timezone: &Arc<str>) -> ScalarValue {
+    match data_type {
+        DataType::Boolean => ScalarValue::Boolean(Some(value % 2 == 0)),
+        DataType::Date32 => ScalarValue::Date32(Some(value)),
+        DataType::Date64 => ScalarValue::Date64(Some(i64::from(value))),
+        _ => temporal_value(data_type, i64::from(value), timezone),
+    }
+}
+
+fn temporal_value(data_type: &DataType, value: i64, timezone: &Arc<str>) -> ScalarValue {
+    match data_type {
+        DataType::Time32(TimeUnit::Second) => {
+            ScalarValue::Time32Second(Some(i32::try_from(value).unwrap()))
+        }
+        DataType::Time32(TimeUnit::Millisecond) => {
+            ScalarValue::Time32Millisecond(Some(i32::try_from(value).unwrap()))
+        }
+        DataType::Time64(TimeUnit::Microsecond) => ScalarValue::Time64Microsecond(Some(value)),
+        DataType::Time64(TimeUnit::Nanosecond) => ScalarValue::Time64Nanosecond(Some(value)),
+        DataType::Timestamp(unit, _) => timestamp(*unit, value, timezone),
+        DataType::Duration(unit) => duration(*unit, value),
+        _ => unreachable!("temporal extrema fixture"),
+    }
 }
 
 fn temporal_types() -> Vec<DataType> {
