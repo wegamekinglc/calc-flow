@@ -500,7 +500,7 @@ class PairOracle:
     def exact(self, ddof: int = 0) -> dict[str, Fraction | int | bool | None]:
         valid = [item for item in self.history if item is not None]
         n = len(valid)
-        if any(not _finite_pair(item) for item in valid):
+        if any(not math.isfinite(x) or not math.isfinite(y) for x, y in valid):
             return {"count": n, "nonfinite": True}
         values = self._exact_values(valid)
         if n <= ddof:
