@@ -267,7 +267,7 @@ impl ValueLog {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 enum Undo {
     Entity,
     Keyed {
@@ -444,81 +444,95 @@ impl StateTable {
             .take()
             .ok_or_else(|| internal("rolling state transaction is absent"))?;
         for undo in transaction.undo.into_iter().rev() {
-            match undo {
-                Undo::Entity => {
-                    let key = self
-                        .keys
-                        .pop()
-                        .ok_or_else(|| internal("rolling entity undo underflowed"))?;
-                    self.entities.remove(key.bytes.as_slice());
-                    self.dictionary_bytes -= key.bytes.len();
-                    let len = self.keys.len();
-                    for column in &mut self.keyed {
-                        column.truncate(len);
-                    }
-                    for column in &mut self.rings {
-                        column.truncate(len);
-                    }
-                }
-                Undo::Keyed {
-                    column,
-                    row,
-                    value,
-                    stamp,
-                } => {
-                    let column = &mut self.keyed[column];
-                    column.values[row] = value;
-                    column.stamps[row] = stamp;
-                }
-                Undo::RingMetadata {
-                    column,
-                    row,
-                    head,
-                    len,
-                    capacity,
-                    logical_slots,
-                    logical_samples,
-                    stamp,
-                } => {
-                    let column = &mut self.rings[column];
-                    column.stamps[row] = stamp;
-                    let ring = &mut column.rings[row];
-                    ring.slots.resize(capacity, column.kind.empty());
-                    ring.slot_stamps.resize(capacity, 0);
-                    ring.head = head;
-                    ring.len = len;
-                    column.logical_slots = logical_slots;
-                    column.logical_samples = logical_samples;
-                }
-                Undo::RingSlot {
-                    column,
-                    row,
-                    slot,
-                    value,
-                    stamp,
-                } => {
-                    let ring = &mut self.rings[column].rings[row];
-                    ring.slots[slot] = value;
-                    ring.slot_stamps[slot] = stamp;
-                }
-                Undo::Numeric {
-                    column,
-                    row,
-                    value,
-                    stamp,
-                } => {
-                    let column = &mut self.rings[column];
-                    column.numeric.as_mut().expect("numeric group")[row] = value;
-                    column.stamps[row] = stamp;
-                }
-                Undo::ValueLog {
-                    column,
-                    chunks,
-                    len,
-                } => self.value_logs[column].truncate(chunks, len),
-            }
+            self.apply_undo(undo)?;
         }
         self.next_transaction = transaction.id;
+        Ok(())
+    }
+
+    fn apply_undo(&mut self, undo: Undo) -> Result<()> {
+        match undo {
+            Undo::Entity => self.rollback_entity(),
+            Undo::Keyed {
+                column,
+                row,
+                value,
+                stamp,
+            } => {
+                let column = &mut self.keyed[column];
+                column.values[row] = value;
+                column.stamps[row] = stamp;
+                Ok(())
+            }
+            Undo::RingMetadata {
+                column,
+                row,
+                head,
+                len,
+                capacity,
+                logical_slots,
+                logical_samples,
+                stamp,
+            } => {
+                let column = &mut self.rings[column];
+                column.stamps[row] = stamp;
+                let ring = &mut column.rings[row];
+                ring.slots.resize(capacity, column.kind.empty());
+                ring.slot_stamps.resize(capacity, 0);
+                ring.head = head;
+                ring.len = len;
+                column.logical_slots = logical_slots;
+                column.logical_samples = logical_samples;
+                Ok(())
+            }
+            Undo::RingSlot {
+                column,
+                row,
+                slot,
+                value,
+                stamp,
+            } => {
+                let ring = &mut self.rings[column].rings[row];
+                ring.slots[slot] = value;
+                ring.slot_stamps[slot] = stamp;
+                Ok(())
+            }
+            Undo::Numeric {
+                column,
+                row,
+                value,
+                stamp,
+            } => {
+                let column = &mut self.rings[column];
+                column.numeric.as_mut().expect("numeric group")[row] = value;
+                column.stamps[row] = stamp;
+                Ok(())
+            }
+            Undo::ValueLog {
+                column,
+                chunks,
+                len,
+            } => {
+                self.value_logs[column].truncate(chunks, len);
+                Ok(())
+            }
+        }
+    }
+
+    fn rollback_entity(&mut self) -> Result<()> {
+        let key = self
+            .keys
+            .pop()
+            .ok_or_else(|| internal("rolling entity undo underflowed"))?;
+        self.entities.remove(key.bytes.as_slice());
+        self.dictionary_bytes -= key.bytes.len();
+        let len = self.keys.len();
+        for column in &mut self.keyed {
+            column.truncate(len);
+        }
+        for column in &mut self.rings {
+            column.truncate(len);
+        }
         Ok(())
     }
 
@@ -725,33 +739,68 @@ impl StateTable {
         row: usize,
         value: RingValue,
     ) -> Result<Option<RingValue>> {
-        let transaction = self
+        let id = self
             .transaction
-            .as_mut()
-            .ok_or_else(|| internal("ring update requires a transaction"))?;
-        let id = transaction.id;
+            .as_ref()
+            .ok_or_else(|| internal("ring update requires a transaction"))?
+            .id;
+        self.record_ring_metadata(column_index, row, id);
+        self.prepare_ring_push(column_index, row)?;
+        let slot = {
+            let ring = &self.rings[column_index].rings[row];
+            ring.position(ring.len)
+        };
+        self.record_ring_slot(column_index, row, slot, id);
         let column = &mut self.rings[column_index];
-        if column.stamps[row] != id {
-            let stamp = column.stamps[row];
-            column.stamps[row] = id;
-            let ring = &column.rings[row];
-            transaction.undo.push(Undo::RingMetadata {
-                column: column_index,
-                row,
-                head: ring.head,
-                len: ring.len,
-                capacity: ring.capacity(),
-                logical_slots: column.logical_slots,
-                logical_samples: column.logical_samples,
-                stamp,
-            });
-        }
         let ring = &mut column.rings[row];
-        if ring.len == ring.capacity() {
-            if matches!(column.retention, Retention::Rows(_)) && ring.capacity() == 0 {
-                return Err(internal("rolling Rows ring has zero capacity"));
+        let evicted = (ring.len == ring.capacity()).then_some(ring.slots[slot]);
+        if evicted.is_some() {
+            ring.head = (ring.head + 1) % ring.capacity();
+        } else {
+            ring.len += 1;
+            column.logical_samples += 1;
+        }
+        ring.slots[slot] = value;
+        Ok(evicted)
+    }
+
+    fn record_ring_metadata(&mut self, column_index: usize, row: usize, id: u64) {
+        let column = &mut self.rings[column_index];
+        if column.stamps[row] == id {
+            return;
+        }
+        let stamp = column.stamps[row];
+        column.stamps[row] = id;
+        let ring = &column.rings[row];
+        let undo = Undo::RingMetadata {
+            column: column_index,
+            row,
+            head: ring.head,
+            len: ring.len,
+            capacity: ring.capacity(),
+            logical_slots: column.logical_slots,
+            logical_samples: column.logical_samples,
+            stamp,
+        };
+        self.transaction
+            .as_mut()
+            .expect("transaction checked")
+            .undo
+            .push(undo);
+    }
+
+    fn prepare_ring_push(&mut self, column_index: usize, row: usize) -> Result<()> {
+        let column = &mut self.rings[column_index];
+        let ring = &mut column.rings[row];
+        if ring.len != ring.capacity() {
+            return Ok(());
+        }
+        match column.retention {
+            Retention::Rows(_) if ring.capacity() == 0 => {
+                Err(internal("rolling Rows ring has zero capacity"))
             }
-            if matches!(column.retention, Retention::Duration) {
+            Retention::Rows(_) => Ok(()),
+            Retention::Duration => {
                 let capacity = if ring.capacity() == 0 {
                     1
                 } else {
@@ -762,29 +811,30 @@ impl StateTable {
                 column.logical_slots += capacity - ring.capacity();
                 ring.slots.resize(capacity, column.kind.empty());
                 ring.slot_stamps.resize(capacity, 0);
+                Ok(())
             }
         }
-        let slot = ring.position(ring.len);
-        if ring.slot_stamps[slot] != id {
-            let stamp = ring.slot_stamps[slot];
-            ring.slot_stamps[slot] = id;
-            transaction.undo.push(Undo::RingSlot {
-                column: column_index,
-                row,
-                slot,
-                value: ring.slots[slot],
-                stamp,
-            });
+    }
+
+    fn record_ring_slot(&mut self, column_index: usize, row: usize, slot: usize, id: u64) {
+        let ring = &mut self.rings[column_index].rings[row];
+        if ring.slot_stamps[slot] == id {
+            return;
         }
-        let evicted = (ring.len == ring.capacity()).then_some(ring.slots[slot]);
-        if evicted.is_some() {
-            ring.head = (ring.head + 1) % ring.capacity();
-        } else {
-            ring.len += 1;
-            column.logical_samples += 1;
-        }
-        ring.slots[slot] = value;
-        Ok(evicted)
+        let stamp = ring.slot_stamps[slot];
+        ring.slot_stamps[slot] = id;
+        let undo = Undo::RingSlot {
+            column: column_index,
+            row,
+            slot,
+            value: ring.slots[slot],
+            stamp,
+        };
+        self.transaction
+            .as_mut()
+            .expect("transaction checked")
+            .undo
+            .push(undo);
     }
 
     pub(crate) fn f64_history(&self, column: usize, entity: EntityId) -> Result<Vec<Option<f64>>> {
@@ -936,9 +986,17 @@ impl StateTable {
         }
         validate_inventory(self, &snapshot)?;
         let mut restored = StateTable::new();
-        restored.keys = snapshot.keys;
-        restored.entities = restored
-            .keys
+        restored.restore_dictionary(snapshot.keys)?;
+        restored.keyed = self.restore_keyed_columns(&snapshot.keyed)?;
+        restored.rings = self.restore_ring_columns(&snapshot.rings)?;
+        restored.value_logs = self.restore_value_logs(&snapshot.value_logs);
+        restored.next_transaction = self.next_transaction;
+        *self = restored;
+        Ok(())
+    }
+
+    fn restore_dictionary(&mut self, keys: Vec<EntityKey>) -> Result<()> {
+        self.entities = keys
             .iter()
             .enumerate()
             .map(|(index, key)| {
@@ -947,57 +1005,43 @@ impl StateTable {
                 Ok((key.bytes.clone(), EntityId(id)))
             })
             .collect::<Result<HashMap<_, _>>>()?;
-        restored.dictionary_bytes = restored.keys.iter().map(|key| key.bytes.len()).sum();
-        restored.keyed = self
-            .keyed
+        self.dictionary_bytes = keys.iter().map(|key| key.bytes.len()).sum();
+        self.keys = keys;
+        Ok(())
+    }
+
+    fn restore_keyed_columns(&self, snapshots: &[KeyedSnapshot]) -> Result<Vec<KeyedColumn>> {
+        self.keyed
             .iter()
-            .map(|column| KeyedColumn::new(column.name.clone(), column.kind))
-            .collect();
-        for (target, source) in restored.keyed.iter_mut().zip(&snapshot.keyed) {
-            target.values = decode_keyed(source.kind, &source.values)?;
-            target.stamps = vec![0; target.values.len()];
-        }
-        restored.rings = self
-            .rings
-            .iter()
-            .zip(&snapshot.rings)
+            .zip(snapshots)
             .map(|(target, source)| {
-                let mut column =
-                    RingColumn::new(target.name.clone(), target.kind, target.retention);
-                column.numeric.clone_from(&source.numeric);
-                let values = decode_ring(source.kind, &source.values)?;
-                for entity in 0..source.capacities.len() {
-                    let mut ring = Ring::new(source.kind, source.capacities[entity]);
-                    ring.len = source.offsets[entity + 1] - source.offsets[entity];
-                    for offset in 0..ring.len {
-                        let slot = ring.position(offset);
-                        ring.slots[slot] = values[source.offsets[entity] + offset];
-                    }
-                    column.logical_slots += ring.capacity();
-                    column.logical_samples += ring.len;
-                    column.rings.push(ring);
-                    column.stamps.push(0);
-                }
+                let mut column = KeyedColumn::new(target.name.clone(), target.kind);
+                column.values = decode_keyed(source.kind, &source.values)?;
+                column.stamps = vec![0; column.values.len()];
                 Ok(column)
             })
-            .collect::<Result<Vec<_>>>()?;
-        restored.value_logs = self
-            .value_logs
+            .collect()
+    }
+
+    fn restore_ring_columns(&self, snapshots: &[RingSnapshot]) -> Result<Vec<RingColumn>> {
+        self.rings
             .iter()
-            .zip(&snapshot.value_logs)
-            .map(|(target, source)| {
-                let logical_bytes = source.chunks.iter().map(Array::get_array_memory_size).sum();
-                ValueLog {
-                    name: target.name.clone(),
-                    chunks: source.chunks.clone(),
-                    len: source.len,
-                    logical_bytes,
-                }
+            .zip(snapshots)
+            .map(|(target, source)| restore_ring_column(target, source))
+            .collect()
+    }
+
+    fn restore_value_logs(&self, snapshots: &[ValueLogSnapshot]) -> Vec<ValueLog> {
+        self.value_logs
+            .iter()
+            .zip(snapshots)
+            .map(|(target, source)| ValueLog {
+                name: target.name.clone(),
+                logical_bytes: source.chunks.iter().map(Array::get_array_memory_size).sum(),
+                chunks: source.chunks.clone(),
+                len: source.len,
             })
-            .collect();
-        restored.next_transaction = self.next_transaction;
-        *self = restored;
-        Ok(())
+            .collect()
     }
 
     fn row(&self, entity: EntityId) -> Result<usize> {
@@ -1006,6 +1050,30 @@ impl StateTable {
             .then_some(row)
             .ok_or_else(|| internal("rolling entity ID is out of bounds"))
     }
+}
+
+fn restore_ring_column(target: &RingColumn, source: &RingSnapshot) -> Result<RingColumn> {
+    let mut column = RingColumn::new(target.name.clone(), target.kind, target.retention);
+    column.numeric.clone_from(&source.numeric);
+    let values = decode_ring(source.kind, &source.values)?;
+    for entity in 0..source.capacities.len() {
+        let ring = restore_ring(source, entity, &values);
+        column.logical_slots += ring.capacity();
+        column.logical_samples += ring.len;
+        column.rings.push(ring);
+        column.stamps.push(0);
+    }
+    Ok(column)
+}
+
+fn restore_ring(source: &RingSnapshot, entity: usize, values: &[RingValue]) -> Ring {
+    let mut ring = Ring::new(source.kind, source.capacities[entity]);
+    ring.len = source.offsets[entity + 1] - source.offsets[entity];
+    for offset in 0..ring.len {
+        let slot = ring.position(offset);
+        ring.slots[slot] = values[source.offsets[entity] + offset];
+    }
+    ring
 }
 
 fn internal(message: &str) -> CalcFlowError {
@@ -1056,43 +1124,59 @@ fn keyed_array(kind: ValueKind, values: &[KeyedValue]) -> ArrayRef {
 }
 
 fn decode_keyed(kind: ValueKind, array: &ArrayRef) -> Result<Vec<KeyedValue>> {
-    Ok(match kind {
-        ValueKind::UInt64 => array
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .ok_or_else(|| internal("keyed snapshot type mismatch"))?
-            .values()
-            .iter()
-            .copied()
-            .map(KeyedValue::UInt64)
-            .collect(),
-        ValueKind::Int64 => array
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .ok_or_else(|| internal("keyed snapshot type mismatch"))?
-            .values()
-            .iter()
-            .copied()
-            .map(KeyedValue::Int64)
-            .collect(),
-        ValueKind::Float64 => array
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .ok_or_else(|| internal("keyed snapshot type mismatch"))?
-            .values()
-            .iter()
-            .copied()
-            .map(KeyedValue::Float64)
-            .collect(),
-        ValueKind::Boolean => array
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .ok_or_else(|| internal("keyed snapshot type mismatch"))?
-            .values()
-            .iter()
-            .map(KeyedValue::Boolean)
-            .collect(),
-    })
+    match kind {
+        ValueKind::UInt64 => decode_keyed_u64(array),
+        ValueKind::Int64 => decode_keyed_i64(array),
+        ValueKind::Float64 => decode_keyed_f64(array),
+        ValueKind::Boolean => decode_keyed_bool(array),
+    }
+}
+
+fn decode_keyed_u64(array: &ArrayRef) -> Result<Vec<KeyedValue>> {
+    Ok(array
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| internal("keyed snapshot type mismatch"))?
+        .values()
+        .iter()
+        .copied()
+        .map(KeyedValue::UInt64)
+        .collect())
+}
+
+fn decode_keyed_i64(array: &ArrayRef) -> Result<Vec<KeyedValue>> {
+    Ok(array
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| internal("keyed snapshot type mismatch"))?
+        .values()
+        .iter()
+        .copied()
+        .map(KeyedValue::Int64)
+        .collect())
+}
+
+fn decode_keyed_f64(array: &ArrayRef) -> Result<Vec<KeyedValue>> {
+    Ok(array
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .ok_or_else(|| internal("keyed snapshot type mismatch"))?
+        .values()
+        .iter()
+        .copied()
+        .map(KeyedValue::Float64)
+        .collect())
+}
+
+fn decode_keyed_bool(array: &ArrayRef) -> Result<Vec<KeyedValue>> {
+    Ok(array
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .ok_or_else(|| internal("keyed snapshot type mismatch"))?
+        .values()
+        .iter()
+        .map(KeyedValue::Boolean)
+        .collect())
 }
 
 fn ring_array(kind: RingKind, values: &[RingValue]) -> ArrayRef {
@@ -1124,33 +1208,35 @@ fn ring_array(kind: RingKind, values: &[RingValue]) -> ArrayRef {
                 })
                 .collect::<UInt64Array>(),
         ),
-        RingKind::PairFloat64 => {
-            let left = values
-                .iter()
-                .map(|value| match value {
-                    RingValue::PairFloat64(value) => value.map(|pair| pair.0),
-                    _ => unreachable!(),
-                })
-                .collect::<Float64Array>();
-            let right = values
-                .iter()
-                .map(|value| match value {
-                    RingValue::PairFloat64(value) => value.map(|pair| pair.1),
-                    _ => unreachable!(),
-                })
-                .collect::<Float64Array>();
-            Arc::new(StructArray::from(vec![
-                (
-                    Arc::new(Field::new("left", DataType::Float64, true)),
-                    Arc::new(left) as ArrayRef,
-                ),
-                (
-                    Arc::new(Field::new("right", DataType::Float64, true)),
-                    Arc::new(right) as ArrayRef,
-                ),
-            ]))
-        }
+        RingKind::PairFloat64 => pair_ring_array(values),
     }
+}
+
+fn pair_ring_array(values: &[RingValue]) -> ArrayRef {
+    let left = values
+        .iter()
+        .map(|value| match value {
+            RingValue::PairFloat64(value) => value.map(|pair| pair.0),
+            _ => unreachable!(),
+        })
+        .collect::<Float64Array>();
+    let right = values
+        .iter()
+        .map(|value| match value {
+            RingValue::PairFloat64(value) => value.map(|pair| pair.1),
+            _ => unreachable!(),
+        })
+        .collect::<Float64Array>();
+    Arc::new(StructArray::from(vec![
+        (
+            Arc::new(Field::new("left", DataType::Float64, true)),
+            Arc::new(left) as ArrayRef,
+        ),
+        (
+            Arc::new(Field::new("right", DataType::Float64, true)),
+            Arc::new(right) as ArrayRef,
+        ),
+    ]))
 }
 
 fn decode_ring(kind: RingKind, array: &ArrayRef) -> Result<Vec<RingValue>> {
@@ -1176,94 +1262,146 @@ fn decode_ring(kind: RingKind, array: &ArrayRef) -> Result<Vec<RingValue>> {
             .iter()
             .map(RingValue::UInt64)
             .collect(),
-        RingKind::PairFloat64 => {
-            let pairs = array
-                .as_any()
-                .downcast_ref::<StructArray>()
-                .ok_or_else(|| internal("pair ring snapshot type mismatch"))?;
-            let left = pairs
-                .column(0)
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .ok_or_else(|| internal("pair ring left type mismatch"))?;
-            let right = pairs
-                .column(1)
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .ok_or_else(|| internal("pair ring right type mismatch"))?;
-            (0..pairs.len())
-                .map(|row| {
-                    RingValue::PairFloat64(
-                        (left.is_valid(row) && right.is_valid(row))
-                            .then_some((left.value(row), right.value(row))),
-                    )
-                })
-                .collect()
-        }
+        RingKind::PairFloat64 => decode_pair_ring(array)?,
     })
 }
 
+fn decode_pair_ring(array: &ArrayRef) -> Result<Vec<RingValue>> {
+    let pairs = array
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .ok_or_else(|| internal("pair ring snapshot type mismatch"))?;
+    let left = pairs
+        .column(0)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .ok_or_else(|| internal("pair ring left type mismatch"))?;
+    let right = pairs
+        .column(1)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .ok_or_else(|| internal("pair ring right type mismatch"))?;
+    Ok((0..pairs.len())
+        .map(|row| {
+            RingValue::PairFloat64(
+                (left.is_valid(row) && right.is_valid(row))
+                    .then_some((left.value(row), right.value(row))),
+            )
+        })
+        .collect())
+}
+
 fn validate_inventory(table: &StateTable, snapshot: &TableSnapshot) -> Result<()> {
-    let valid = table.keyed.len() == snapshot.keyed.len()
-        && table.rings.len() == snapshot.rings.len()
-        && table.value_logs.len() == snapshot.value_logs.len()
-        && table
-            .keyed
-            .iter()
-            .zip(&snapshot.keyed)
-            .all(|(left, right)| left.name == right.name && left.kind == right.kind)
-        && table
-            .rings
-            .iter()
-            .zip(&snapshot.rings)
-            .all(|(left, right)| {
-                left.name == right.name
-                    && left.kind == right.kind
-                    && left.retention == right.retention
-                    && left.numeric.is_some() == right.numeric.is_some()
-            })
-        && table
-            .value_logs
-            .iter()
-            .zip(&snapshot.value_logs)
-            .all(|(left, right)| left.name == right.name);
-    if !valid {
+    validate_column_schema(table, snapshot)?;
+    validate_keyed_snapshots(table, snapshot)?;
+    validate_ring_snapshots(table, snapshot)
+}
+
+fn validate_column_schema(table: &StateTable, snapshot: &TableSnapshot) -> Result<()> {
+    if table.keyed.len() != snapshot.keyed.len()
+        || table.rings.len() != snapshot.rings.len()
+        || table.value_logs.len() != snapshot.value_logs.len()
+    {
         return Err(internal("rolling state-table column inventory mismatch"));
     }
+    if !table
+        .keyed
+        .iter()
+        .zip(&snapshot.keyed)
+        .all(|(left, right)| keyed_schema_matches(left, right))
+    {
+        return Err(internal("rolling state-table column inventory mismatch"));
+    }
+    if !table
+        .rings
+        .iter()
+        .zip(&snapshot.rings)
+        .all(|(left, right)| ring_schema_matches(left, right))
+    {
+        return Err(internal("rolling state-table column inventory mismatch"));
+    }
+    if !table
+        .value_logs
+        .iter()
+        .zip(&snapshot.value_logs)
+        .all(|(left, right)| left.name == right.name)
+    {
+        return Err(internal("rolling state-table column inventory mismatch"));
+    }
+    Ok(())
+}
+
+fn keyed_schema_matches(left: &KeyedColumn, right: &KeyedSnapshot) -> bool {
+    left.name == right.name && left.kind == right.kind
+}
+
+fn ring_schema_matches(left: &RingColumn, right: &RingSnapshot) -> bool {
+    left.name == right.name
+        && left.kind == right.kind
+        && left.retention == right.retention
+        && left.numeric.is_some() == right.numeric.is_some()
+}
+
+fn validate_keyed_snapshots(table: &StateTable, snapshot: &TableSnapshot) -> Result<()> {
     for (column, column_snapshot) in table.keyed.iter().zip(&snapshot.keyed) {
         if column_snapshot.values.len() != snapshot.keys.len()
             || column_snapshot.values.data_type() != keyed_array(column.kind, &[]).data_type()
         {
             return Err(internal("rolling keyed snapshot shape mismatch"));
         }
-        let _ = column;
-    }
-    let snapshot_entities = snapshot.keys.len();
-    for (column, snapshot) in table.rings.iter().zip(&snapshot.rings) {
-        let entities = snapshot.capacities.len();
-        if entities != snapshot_entities
-            || snapshot
-                .numeric
-                .as_ref()
-                .is_some_and(|numeric| numeric.len() != entities)
-            || (column.numeric.is_some() && snapshot.numeric.is_none())
-            || snapshot.offsets.len() != entities + 1
-            || snapshot.offsets.first() != Some(&0)
-            || snapshot.offsets.last() != Some(&snapshot.values.len())
-            || snapshot
-                .offsets
-                .windows(2)
-                .any(|offset| offset[0] > offset[1])
-            || snapshot
-                .capacities
-                .iter()
-                .zip(snapshot.offsets.windows(2))
-                .any(|(capacity, offset)| offset[1] - offset[0] > *capacity)
-        {
-            return Err(internal("rolling ring snapshot violates its invariants"));
-        }
     }
     Ok(())
+}
+
+fn validate_ring_snapshots(table: &StateTable, snapshot: &TableSnapshot) -> Result<()> {
+    for (column, column_snapshot) in table.rings.iter().zip(&snapshot.rings) {
+        validate_ring_snapshot(column, column_snapshot, snapshot.keys.len())?;
+    }
+    Ok(())
+}
+
+fn validate_ring_snapshot(
+    column: &RingColumn,
+    snapshot: &RingSnapshot,
+    snapshot_entities: usize,
+) -> Result<()> {
+    let entities = snapshot.capacities.len();
+    if entities != snapshot_entities || !ring_numeric_matches(column, snapshot, entities) {
+        return Err(internal("rolling ring snapshot violates its invariants"));
+    }
+    if !ring_offsets_are_valid(snapshot, entities) {
+        return Err(internal("rolling ring snapshot violates its invariants"));
+    }
+    if !ring_capacities_are_valid(snapshot) {
+        return Err(internal("rolling ring snapshot violates its invariants"));
+    }
+    Ok(())
+}
+
+fn ring_numeric_matches(column: &RingColumn, snapshot: &RingSnapshot, entities: usize) -> bool {
+    let populated = snapshot
+        .numeric
+        .as_ref()
+        .is_none_or(|numeric| numeric.len() == entities);
+    populated && (column.numeric.is_none() || snapshot.numeric.is_some())
+}
+
+fn ring_offsets_are_valid(snapshot: &RingSnapshot, entities: usize) -> bool {
+    snapshot.offsets.len() == entities + 1
+        && snapshot.offsets.first() == Some(&0)
+        && snapshot.offsets.last() == Some(&snapshot.values.len())
+        && snapshot
+            .offsets
+            .windows(2)
+            .all(|offset| offset[0] <= offset[1])
+}
+
+fn ring_capacities_are_valid(snapshot: &RingSnapshot) -> bool {
+    snapshot
+        .capacities
+        .iter()
+        .zip(snapshot.offsets.windows(2))
+        .all(|(capacity, offset)| offset[1] - offset[0] <= *capacity)
 }
 
 #[cfg(test)]
