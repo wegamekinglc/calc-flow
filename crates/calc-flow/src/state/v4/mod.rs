@@ -3,14 +3,12 @@ pub(in crate::state) mod object;
 pub(in crate::state) mod store;
 
 pub(in crate::state) use super::manifest::MAX_MANIFEST_DOCUMENT_BYTES;
-pub(in crate::state) use manifest::{
-    JobKind, ManifestExpectationV4, OperatorV4, PartitionV4, SinkV4, SourceHistoryV4, SourceV4,
-    V4Manifest, manifest_fingerprint, recovery_fingerprint,
-};
+pub(in crate::state) use manifest::{OperatorV4, V4Manifest, manifest_fingerprint};
 pub(in crate::state) use object::{
-    ArrowPayload, DecodedObject, EncodedObject, NewObject, ObjectKind, ObjectPayload, OpaqueObject,
-    V4Handle, decode_object, decode_opaque, encode_object, encode_opaque,
+    ArrowPayload, EncodedObject, NewObject, ObjectKind, ObjectPayload, OpaqueObject, V4Handle,
+    decode_object, decode_opaque, encode_object, encode_opaque,
 };
+pub(in crate::state) use store::V4Store;
 
 use crate::{CalcFlowError, Result};
 

@@ -133,7 +133,8 @@ impl V4Manifest {
             format_error(format!("checkpoint manifest schema mismatch: {error}"))
         })?;
         manifest.validate_fingerprint()?;
-        manifest.validate_structure()
+        manifest.validate_structure()?;
+        Ok(manifest)
     }
 
     pub(in crate::state) fn canonical_bytes(&self) -> Result<Vec<u8>> {

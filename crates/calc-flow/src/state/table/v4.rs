@@ -11,7 +11,6 @@ use datafusion::arrow::{
     record_batch::RecordBatch,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use super::{
     StateTable,
@@ -385,7 +384,7 @@ fn snapshot_from_lineage(table: &StateTable, lineage: TableLineage) -> Result<Ta
                 } if *page_index == row / 1024 => Some(page.value.values[row % 1024]),
                 _ => None,
             });
-            let super::core::KeyedValue::UInt64(counter) = counter else {
+            let Some(super::core::KeyedValue::UInt64(counter)) = counter else {
                 return Err(mismatch("layout-7 counter is absent".into()));
             };
             counters.push(counter);
@@ -396,16 +395,7 @@ fn snapshot_from_lineage(table: &StateTable, lineage: TableLineage) -> Result<Ta
                 _ => None,
             });
             let ring = ring.ok_or_else(|| mismatch("layout-7 ring is absent".into()))?;
-            values.extend(
-                ring.value
-                    .ring
-                    .history()
-                    .into_iter()
-                    .map(|value| match value {
-                        super::core::RingValue::Float64(value) => value,
-                        _ => unreachable!(),
-                    }),
-            );
+            values.extend(ring.value.ring.history());
             offsets.push(values.len());
             capacities.push(ring.value.ring.capacity());
             numeric.push(
@@ -471,15 +461,25 @@ fn page_location(page: &PageRef) -> Result<(String, &'static str, (u64, u64))> {
             "metadata",
             (0, page.value.entities.len() as u64),
         )),
-        PageRef::Keyed { column, page, .. } => Ok((
+        PageRef::Keyed {
+            column: column_index,
+            page,
+            ..
+        } => Ok((
             column.to_string(),
             "keyed",
             (0, page.value.values.len() as u64),
         )),
-        PageRef::Ring { column, page, .. } => {
-            Ok((column.to_string(), "ring", (0, page.value.ring.len as u64)))
-        }
-        PageRef::ValueLog { column, page, .. } => Ok((
+        PageRef::Ring {
+            column: column_index,
+            page,
+            ..
+        } => Ok((column.to_string(), "ring", (0, page.value.ring.len as u64))),
+        PageRef::ValueLog {
+            column: column_index,
+            page,
+            ..
+        } => Ok((
             column.to_string(),
             "value_log",
             (
@@ -526,7 +526,7 @@ fn page_payload(page: &PageRef) -> Result<ArrowPayload> {
         PageRef::Keyed { page, .. } => (
             vec![Field::new(
                 "value",
-                keyed_array(page.value.kind, &[]).data_type(),
+                keyed_array(page.value.kind, &[]).data_type().clone(),
                 false,
             )],
             vec![keyed_array(page.value.kind, &page.value.values)],
@@ -541,7 +541,7 @@ fn page_payload(page: &PageRef) -> Result<ArrowPayload> {
             (
                 vec![Field::new(
                     "value",
-                    ring_array(page.value.kind, &[]).data_type(),
+                    ring_array(page.value.kind, &[]).data_type().clone(),
                     true,
                 )],
                 vec![ring_array(page.value.kind, &page.value.ring.history())],
@@ -629,7 +629,8 @@ fn numeric_metadata(parts: &NumericAccumulatorLayout7) -> HashMap<String, String
 
 fn decode_page(entry: &PageEntry, bytes: &[u8]) -> Result<PageRef> {
     let record = read_record(bytes)?;
-    let metadata = record.schema().metadata();
+    let schema = record.schema();
+    let metadata = schema.metadata();
     match metadata.get("page_kind").map(String::as_str) {
         Some("metadata") => decode_metadata(&record, entry),
         Some("keyed") => decode_keyed(&record, entry),
@@ -659,7 +660,8 @@ fn decode_metadata(record: &RecordBatch, entry: &PageEntry) -> Result<PageRef> {
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let metadata = record.schema().metadata();
+    let schema = record.schema();
+    let metadata = schema.metadata();
     let dictionary_bytes = parse_metadata(metadata, "dictionary_bytes")?;
     let value_log_lengths = parse_metadata::<String>(metadata, "value_log_lengths")?;
     let value_log_lengths = parse_u32_list(&value_log_lengths)?;
@@ -674,7 +676,7 @@ fn decode_metadata(record: &RecordBatch, entry: &PageEntry) -> Result<PageRef> {
 }
 
 fn decode_keyed(record: &RecordBatch, entry: &PageEntry) -> Result<PageRef> {
-    let column = entry
+    let column_index = entry
         .column
         .parse::<usize>()
         .map_err(|_| mismatch("keyed column is invalid".into()))?;
@@ -715,14 +717,14 @@ fn decode_keyed(record: &RecordBatch, entry: &PageEntry) -> Result<PageRef> {
             .collect(),
     };
     Ok(PageRef::Keyed {
-        column,
+        column: column_index,
         page_index,
         page: super::pages::Page::new(page_id(entry), super::core::KeyedPage { kind, values }),
     })
 }
 
 fn decode_ring(record: &RecordBatch, entry: &PageEntry) -> Result<PageRef> {
-    let column = entry
+    let column_index = entry
         .column
         .parse::<usize>()
         .map_err(|_| mismatch("ring column is invalid".into()))?;
@@ -735,7 +737,8 @@ fn decode_ring(record: &RecordBatch, entry: &PageEntry) -> Result<PageRef> {
         _ => return Err(mismatch("ring page type is unsupported".into())),
     };
     let values = decode_ring_values(record, kind)?;
-    let metadata = record.schema().metadata();
+    let schema = record.schema();
+    let metadata = schema.metadata();
     let head = parse_metadata(metadata, "head")?;
     let len = parse_metadata(metadata, "len")?;
     let capacity = parse_metadata(metadata, "capacity")?;
@@ -753,7 +756,7 @@ fn decode_ring(record: &RecordBatch, entry: &PageEntry) -> Result<PageRef> {
     }
     let numeric = decode_numeric_metadata(metadata)?;
     Ok(PageRef::Ring {
-        column,
+        column: column_index,
         row,
         page: super::pages::Page::new(
             page_id(entry),
@@ -813,14 +816,15 @@ fn decode_ring_values(
 }
 
 fn decode_value_log(record: &RecordBatch, entry: &PageEntry) -> Result<PageRef> {
-    let column = entry
+    let column_index = entry
         .column
         .parse::<usize>()
         .map_err(|_| mismatch("value-log column is invalid".into()))?;
     let page_index = parse_metadata::<usize>(record.schema().metadata(), "page_index")?;
-    let metadata = record.schema().metadata();
+    let schema = record.schema();
+    let metadata = schema.metadata();
     Ok(PageRef::ValueLog {
-        column,
+        column: column_index,
         page_index,
         page: super::pages::Page::new(
             page_id(entry),
@@ -928,7 +932,8 @@ fn parse_u32_list(value: &str) -> Result<Vec<u32>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PartitionIndex, StateTable, V4TableCapture, core::KeyGroupId, restore_table_v4};
+    use super::{PartitionIndex, StateTable, V4TableCapture, restore_table_v4};
+    use crate::state::table::core::KeyGroupId;
     use crate::state::v4::{V4Manifest, V4Store, manifest_fingerprint};
 
     fn schema() -> StateTable {

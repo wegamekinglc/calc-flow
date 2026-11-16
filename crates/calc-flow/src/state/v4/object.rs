@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    mem::size_of,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -17,7 +18,7 @@ use super::{Result, format_error, mismatch};
 use crate::{canonical_json, json::validate_portable_identifier};
 
 pub(in crate::state) const V4_MAGIC: &[u8; 6] = b"CFST4\0";
-const HEADER_BYTES: usize = V4_MAGIC.len() + 1 + std::mem::size_of::<u64>();
+const HEADER_BYTES: usize = V4_MAGIC.len() + 1 + size_of::<u64>();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::state) enum ObjectKind {

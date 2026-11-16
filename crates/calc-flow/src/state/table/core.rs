@@ -643,12 +643,12 @@ impl TableFreeze {
     pub(crate) fn complete(self) -> TableLineage {
         let mut lineage = (*self.previous).clone();
         lineage.epoch = self.epoch;
-        for frozen in self.partitions {
+        for mut frozen in self.partitions {
             let partition = lineage
                 .partitions
                 .get_mut(&frozen.id)
                 .expect("prepared group");
-            Self::apply_frozen_changes(partition, frozen.changes);
+            Self::apply_frozen_changes(partition, std::mem::take(&mut frozen.changes));
             Self::apply_frozen_allocator(partition, &frozen);
             Self::ensure_frozen_metadata(partition, frozen.metadata);
         }
@@ -698,10 +698,7 @@ impl TableFreeze {
         }
     }
 
-    fn ensure_frozen_metadata(
-        partition: &mut PartitionLineage,
-        metadata: super::pages::Page<PartitionMetadata>,
-    ) {
+    fn ensure_frozen_metadata(partition: &mut PartitionLineage, metadata: Page<PartitionMetadata>) {
         if !partition
             .pages
             .values()
@@ -1255,7 +1252,7 @@ impl StateTable {
         self.resolve_or_append_default(key)
     }
 
-    fn new_entity_id(&self, key: &EntityKey, group: KeyGroupId) -> Result<EntityId> {
+    fn new_entity_id(&self, group: KeyGroupId) -> Result<EntityId> {
         self.transaction_id()?;
         if !self.partitions.contains_key(&group) {
             return Err(internal("entity key group is not prepared"));
@@ -1307,7 +1304,7 @@ impl StateTable {
             return Ok(*entity);
         }
         let next_entity = self.next_entity;
-        let entity = self.new_entity_id(&key, group)?;
+        let entity = self.new_entity_id(group)?;
         self.append_entity_columns(entity, &key)?;
         self.register_entity(key, entity, next_entity)
     }

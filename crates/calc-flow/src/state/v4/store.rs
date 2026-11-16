@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     path::{Path, PathBuf},
 };
 
@@ -227,7 +227,7 @@ impl V4Store {
             .join(&handle.relative_path)
     }
 
-    fn prepare_directories(&self, objects: &[EncodedObject]) -> Result<()> {
+    fn prepare_directories(&mut self, objects: &[EncodedObject]) -> Result<()> {
         let mut parents = BTreeSet::new();
         for object in objects {
             let committed = self.absolute(&object.handle);
@@ -248,7 +248,7 @@ impl V4Store {
         Ok(())
     }
 
-    async fn write_encoded_files(&self, objects: &[EncodedObject]) -> Result<()> {
+    async fn write_encoded_files(&mut self, objects: &[EncodedObject]) -> Result<()> {
         for chunk in objects.chunks(MAX_WORKERS) {
             let mut handles = chunk
                 .iter()
@@ -282,7 +282,7 @@ impl V4Store {
         Ok(())
     }
 
-    fn install_encoded_files(&self, objects: &[EncodedObject]) -> Result<()> {
+    fn install_encoded_files(&mut self, objects: &[EncodedObject]) -> Result<()> {
         let mut directories = BTreeSet::new();
         for object in objects {
             let committed = self.absolute(&object.handle);
@@ -372,7 +372,8 @@ fn io_error(path: &Path, source: std::io::Error) -> CalcFlowError {
 mod tests {
     use std::path::Path;
 
-    use super::{NewObject, ObjectKind, ObjectPayload, OpaqueObject, V4Store};
+    use super::{NewObject, ObjectPayload, OpaqueObject, V4Store};
+    use crate::state::v4::ObjectKind;
     use sha2::{Digest, Sha256};
 
     fn object(id: &str) -> NewObject {
