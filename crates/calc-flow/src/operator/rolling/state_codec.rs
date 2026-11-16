@@ -774,19 +774,30 @@ pub(super) fn validate_metadata_header(
     metadata: &RollingSnapshotMetadata,
     compiled: &CompiledRollingSpec,
 ) -> Result<()> {
-    let expected_schema_fingerprint =
-        if metadata.state_layout_version == compiled.state_layout_version {
-            &compiled.state_schema_fingerprint
-        } else if metadata.state_layout_version == compiled.legacy_state_layout_version {
-            &compiled.legacy_state_schema_fingerprint
-        } else {
-            return Err(checkpoint_mismatch(format!(
-                "rolling state layout version {} does not match current {} or declared legacy {}",
-                metadata.state_layout_version,
-                compiled.state_layout_version,
-                compiled.legacy_state_layout_version
-            )));
-        };
+    if compiled.kernel_plan.supports_slab()
+        && metadata.state_layout_version != super::ROLLING_STATE_TABLE_LAYOUT_VERSION
+    {
+        return Err(checkpoint_mismatch(format!(
+            "rolling state layout version {} is not 7; start a new lineage",
+            metadata.state_layout_version
+        )));
+    }
+    let expected_schema_fingerprint = if compiled.kernel_plan.supports_slab()
+        && metadata.state_layout_version == super::ROLLING_STATE_TABLE_LAYOUT_VERSION
+    {
+        &compiled.state_schema_fingerprint
+    } else if metadata.state_layout_version == compiled.state_layout_version {
+        &compiled.state_schema_fingerprint
+    } else if metadata.state_layout_version == compiled.legacy_state_layout_version {
+        &compiled.legacy_state_schema_fingerprint
+    } else {
+        return Err(checkpoint_mismatch(format!(
+            "rolling state layout version {} does not match current {} or declared legacy {}",
+            metadata.state_layout_version,
+            compiled.state_layout_version,
+            compiled.legacy_state_layout_version
+        )));
+    };
     if metadata.configuration_hash != compiled.configuration_hash {
         return Err(checkpoint_mismatch(
             "rolling operator configuration hash does not match the compiled operator",
@@ -803,6 +814,7 @@ pub(super) fn validate_metadata_header(
             | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
             | ROLLING_INDICATOR_STATE_LAYOUT_VERSION
             | ROLLING_MACD_STATE_LAYOUT_VERSION
+            | super::ROLLING_STATE_TABLE_LAYOUT_VERSION
     ) && metadata.kernel_fingerprint.as_deref() != Some(compiled.kernel_plan.fingerprint())
     {
         return Err(checkpoint_mismatch(

@@ -483,6 +483,91 @@ async fn rolling_restore_rejects_an_oversized_snapshot_without_replacing_state()
     assert_eq!(target.state.charge.rows, 2);
 }
 
+#[tokio::test]
+async fn layout7_restore_matches_uninterrupted_bits_and_rejects_old_layouts() {
+    let spec = kernel_spec(json!([aggregate_output("mean", "price", "mean", 2)]));
+    let mut source =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
+    let mut restored = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+    let job = crate::StreamJobContext::new(
+        1,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut source_output = crate::EdgeCollector::new(source.output_ports().to_vec());
+    source
+        .process_data(
+            "input",
+            Batch::table(
+                vec![float64_fast_record(&[
+                    (1, "a", 1, Some(1.0)),
+                    (2, "a", 2, Some(3.0)),
+                ])],
+                BatchMetadata::default(),
+            )
+            .unwrap(),
+            &context,
+            &mut source_output,
+        )
+        .await
+        .unwrap();
+    source
+        .on_watermark(EventTime::from_micros(2), &context, &mut source_output)
+        .await
+        .unwrap();
+    source_output.drain("output");
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    assert_eq!(
+        source
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .unwrap()
+            .canonical_state_for_test(),
+        restored
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .unwrap()
+            .canonical_state_for_test()
+    );
+
+    let continuation = float64_fast_record(&[(3, "a", 3, Some(5.0))]);
+    let mut restored_output = crate::EdgeCollector::new(restored.output_ports().to_vec());
+    for (operator, output) in [
+        (&mut source, &mut source_output),
+        (&mut restored, &mut restored_output),
+    ] {
+        operator
+            .process_data(
+                "input",
+                Batch::table(vec![continuation.clone()], BatchMetadata::default()).unwrap(),
+                &context,
+                output,
+            )
+            .await
+            .unwrap();
+        operator
+            .on_watermark(EventTime::from_micros(3), &context, output)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        format!("{:?}", source_output.drain("output")),
+        format!("{:?}", restored_output.drain("output"))
+    );
+
+    let mut old = snapshot;
+    old.inline_metadata
+        .insert("state_layout_version".into(), json!(3));
+    let error = StreamOperator::restore(&mut restored, &old).unwrap_err();
+    assert!(error.to_string().contains("start a new lineage"), "{error}");
+}
+
 fn input_schema() -> Schema {
     Schema::new(vec![
         Field::new(
@@ -903,6 +988,7 @@ fn ewma_layout_two_restores_without_retained_history() {
         configuration_hash: compiled.configuration_hash.clone(),
         state_schema_fingerprint: compiled.legacy_state_schema_fingerprint.clone(),
         kernel_fingerprint: None,
+        typed_last_identity: None,
         epoch: Epoch::new(1).unwrap(),
         pipeline_fingerprint: Some(TEST_FINGERPRINT.into()),
         operator_id: Some("rolling".into()),
@@ -974,6 +1060,7 @@ fn layout_one_history_bootstraps_the_typed_transition() {
         configuration_hash: compiled.configuration_hash.clone(),
         state_schema_fingerprint: compiled.legacy_state_schema_fingerprint.clone(),
         kernel_fingerprint: None,
+        typed_last_identity: None,
         epoch: Epoch::new(1).unwrap(),
         pipeline_fingerprint: Some(TEST_FINGERPRINT.into()),
         operator_id: Some("rolling".into()),
@@ -3721,6 +3808,7 @@ fn typed_exponential_means_resume_from_columnar_checkpoints() {
             configuration_hash: compiled.configuration_hash.clone(),
             state_schema_fingerprint: compiled.state_schema_fingerprint.clone(),
             kernel_fingerprint: Some(compiled.kernel_plan.fingerprint().to_owned()),
+            typed_last_identity: None,
             epoch: Epoch::new(1).unwrap(),
             pipeline_fingerprint: Some(TEST_FINGERPRINT.into()),
             operator_id: Some("rolling".into()),

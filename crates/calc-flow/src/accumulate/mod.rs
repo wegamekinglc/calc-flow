@@ -338,6 +338,27 @@ impl PairFamily {
     }
 }
 
+/// Raw layout-7 fields for bit-identical numeric checkpoint continuation.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NumericAccumulatorLayout7 {
+    pub(crate) valid_count: u64,
+    pub(crate) finite_count: u64,
+    pub(crate) nan_count: u64,
+    pub(crate) pos_inf: u64,
+    pub(crate) neg_inf: u64,
+    pub(crate) sum_value: f64,
+    pub(crate) sum_error: f64,
+    pub(crate) sum_enabled: bool,
+    pub(crate) shift: Option<f64>,
+    pub(crate) offsets_value: f64,
+    pub(crate) offsets_error: f64,
+    pub(crate) squares_value: f64,
+    pub(crate) squares_error: f64,
+    pub(crate) dispersion_enabled: bool,
+    pub(crate) since_rebuild: u32,
+    pub(crate) n_prev: u64,
+}
+
 /// Shared validity, compensated families, and rebuild cadence for a scalar group.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct NumericAccumulator {
@@ -536,6 +557,58 @@ impl NumericAccumulator {
 
     pub(crate) fn stddev(&self, ddof: u8) -> f64 {
         self.variance(ddof).sqrt()
+    }
+
+    pub(crate) fn layout7(self) -> NumericAccumulatorLayout7 {
+        NumericAccumulatorLayout7 {
+            valid_count: self.valid_count,
+            finite_count: self.finite_count,
+            nan_count: self.nan_count,
+            pos_inf: self.pos_inf,
+            neg_inf: self.neg_inf,
+            sum_value: self.sum.sum.value,
+            sum_error: self.sum.sum.error,
+            sum_enabled: self.sum.enabled,
+            shift: self.dispersion.shift,
+            offsets_value: self.dispersion.offsets.value,
+            offsets_error: self.dispersion.offsets.error,
+            squares_value: self.dispersion.squares.value,
+            squares_error: self.dispersion.squares.error,
+            dispersion_enabled: self.dispersion.enabled,
+            since_rebuild: self.since_rebuild,
+            n_prev: self.n_prev,
+        }
+    }
+
+    pub(crate) fn from_layout7(parts: NumericAccumulatorLayout7) -> Self {
+        Self {
+            valid_count: parts.valid_count,
+            finite_count: parts.finite_count,
+            nan_count: parts.nan_count,
+            pos_inf: parts.pos_inf,
+            neg_inf: parts.neg_inf,
+            sum: SumFamily {
+                sum: CompensatedSum {
+                    value: parts.sum_value,
+                    error: parts.sum_error,
+                },
+                enabled: parts.sum_enabled,
+            },
+            dispersion: DispersionFamily {
+                shift: parts.shift,
+                offsets: CompensatedSum {
+                    value: parts.offsets_value,
+                    error: parts.offsets_error,
+                },
+                squares: CompensatedSum {
+                    value: parts.squares_value,
+                    error: parts.squares_error,
+                },
+                enabled: parts.dispersion_enabled,
+            },
+            since_rebuild: parts.since_rebuild,
+            n_prev: parts.n_prev,
+        }
     }
 
     pub(crate) fn raw_sum_parts(&self) -> (f64, f64) {

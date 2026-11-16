@@ -10,7 +10,7 @@ type Segments = BTreeMap<String, StateSegment>;
 
 impl RollingOperator {
     pub(super) fn checkpoint_legacy(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
-        if self.state.deferred_history {
+        if self.state.deferred_history && !self.compiled.kernel_plan.supports_slab() {
             return Err(checkpoint_mismatch(
                 "rolling checkpointing is disabled for the deferred-history stream state",
             ));
@@ -38,6 +38,14 @@ impl RollingOperator {
     }
 
     fn materialize_legacy_capture(&mut self) -> Result<()> {
+        if self.state.deferred_history {
+            if !self.state.buffer.is_empty() || !self.state.ordered.is_empty() {
+                return Err(checkpoint_mismatch(
+                    "rolling layout-7 checkpoint requires finalized state without pending rows",
+                ));
+            }
+            return Ok(());
+        }
         self.materialize_ordered_buffer(None)?;
         self.state
             .owned_mut()?
@@ -46,6 +54,21 @@ impl RollingOperator {
     }
 
     fn recount_legacy_capture(&mut self) -> Result<()> {
+        if self.state.deferred_history {
+            let charge =
+                self.compiled
+                    .kernel_plan
+                    .slab_charge(
+                        self.state.typed_kernel_state.as_deref().ok_or_else(|| {
+                            internal_error("rolling layout-7 typed state is absent")
+                        })?,
+                        &self.name,
+                    )?
+                    .ok_or_else(|| internal_error("rolling layout-7 table is absent"))?;
+            self.check_state_budget(charge, &self.name)?;
+            self.state.owned_mut()?.charge = charge;
+            return Ok(());
+        }
         let buffered = budget::buffered_charge(self.state.buffer.values(), &self.name)?;
         let ordered = budget::ordered_buffer_charge(
             self.state.ordered.records(),
@@ -103,10 +126,19 @@ impl RollingOperator {
         inventory: &StateInventory,
     ) -> RollingSnapshotMetadata {
         RollingSnapshotMetadata {
-            state_layout_version: self.compiled.state_layout_version,
+            state_layout_version: if self.state.deferred_history {
+                super::ROLLING_STATE_TABLE_LAYOUT_VERSION
+            } else {
+                self.compiled.state_layout_version
+            },
             configuration_hash: self.compiled.configuration_hash.clone(),
             state_schema_fingerprint: self.compiled.state_schema_fingerprint.clone(),
             kernel_fingerprint: Some(self.compiled.kernel_plan.fingerprint().to_owned()),
+            typed_last_identity: self
+                .state
+                .typed_kernel_state
+                .as_deref()
+                .and_then(super::RollingKernelPlan::slab_last_identity),
             epoch,
             pipeline_fingerprint: self.state.pipeline_fingerprint.clone(),
             operator_id: self.state.operator_id.clone(),

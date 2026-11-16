@@ -18,7 +18,9 @@ mod table;
 mod transaction;
 
 pub(crate) use preloaded_snapshot::PreloadedSnapshot;
-pub(crate) use table::{EntityId, EntityKey, StateTable, ValueKind};
+pub(crate) use table::{
+    EntityId, EntityKey, StateTable, ValueKind, decode_layout7, encode_layout7,
+};
 
 #[cfg(test)]
 pub(crate) use transaction::ManifestTransactionFaultPoint;

@@ -41,6 +41,30 @@ impl RollingOperator {
         }
     }
     fn legacy_restore_charge(&self, restored: &mut DecodedRollingState) -> Result<StateCharge> {
+        if restored.deferred_history {
+            let charge = self
+                .compiled
+                .kernel_plan
+                .slab_charge(
+                    restored.typed_kernel_state.as_deref().ok_or_else(|| {
+                        crate::operator::checkpoint::checkpoint_mismatch(
+                            "rolling layout-7 restore is missing typed state",
+                        )
+                    })?,
+                    &self.name,
+                )?
+                .ok_or_else(|| {
+                    crate::operator::checkpoint::checkpoint_mismatch(
+                        "rolling layout-7 restore is missing its state table",
+                    )
+                })?;
+            if !self.state_budget.allows(charge.rows, charge.bytes) {
+                return Err(crate::operator::checkpoint::checkpoint_mismatch(
+                    "restored rolling state exceeds the configured state budget",
+                ));
+            }
+            return Ok(charge);
+        }
         let buffered = budget::buffered_charge(restored.buffer.values(), &self.name)?;
         let (histories, cache) = restored.histories.prepare_charge_cache(&self.name)?;
         let charge = buffered.checked_add(histories, &self.name)?;
@@ -72,8 +96,8 @@ fn legacy_state(
         pipeline_fingerprint: metadata.pipeline_fingerprint,
         operator_id: metadata.operator_id,
         last_checkpoint_epoch: Some(metadata.epoch),
-        typed_kernel_state: None,
-        deferred_history: false,
+        typed_kernel_state: restored.typed_kernel_state,
+        deferred_history: restored.deferred_history,
         charge,
     }
 }
