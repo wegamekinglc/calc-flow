@@ -452,7 +452,7 @@ fn test_restore_and_replay_suffix_are_bit_identical() {
     let mut control = seeded_protocol(None);
     control.complete_epoch(1).unwrap();
     let checkpoint = control.durable_image();
-    let mut restored = FakeTable::restore(checkpoint, true);
+    let mut restored = FakeTable::restore(&checkpoint, true);
     assert_eq!(control.table().state_bytes(), restored.state_bytes());
 
     for (group, slot, bytes) in [(0, 0, b"one".as_slice()), (0, 1, b"two".as_slice())] {

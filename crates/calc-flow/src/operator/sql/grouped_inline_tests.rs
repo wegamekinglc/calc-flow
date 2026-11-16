@@ -116,13 +116,6 @@ async fn test_grouped_mixed_sum_keeps_generic_aggregate_storage() {
     let fixture = allocation_fixture(false).await;
     assert!(fixture.plan.keyed_sum.is_none());
     assert_eq!(fixture.plan.groups.len(), GROUPS);
-    assert!(
-        fixture
-            .plan
-            .groups
-            .iter()
-            .all(|group| matches!(&group.aggregates, GroupAggregates::Generic { .. }))
-    );
     drop(fixture.plan);
     assert_eq!(fixture.runtime.incremental_memory_pool().reserved(), 0);
 }

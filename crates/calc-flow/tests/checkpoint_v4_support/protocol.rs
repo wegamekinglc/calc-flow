@@ -77,6 +77,10 @@ pub enum ProtocolError {
     Failed(FailureKind),
 }
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "the harness independently tracks the four protocol publication phases"
+)]
 #[derive(Debug)]
 struct ActiveEpoch {
     freeze: TableFreeze,
@@ -169,12 +173,9 @@ impl ProtocolHarness {
             self.fail(FailureKind::Freeze, Publication::Absent);
             return Err(ProtocolError::Failed(FailureKind::Freeze));
         }
-        let freeze = match self.table.freeze(epoch) {
-            Ok(freeze) => freeze,
-            Err(_) => {
-                self.fail(FailureKind::Freeze, Publication::Absent);
-                return Err(ProtocolError::Failed(FailureKind::Freeze));
-            }
+        let Ok(freeze) = self.table.freeze(epoch) else {
+            self.fail(FailureKind::Freeze, Publication::Absent);
+            return Err(ProtocolError::Failed(FailureKind::Freeze));
         };
         self.reservation_bytes = freeze.reservation_bytes();
         self.active = Some(ActiveEpoch {

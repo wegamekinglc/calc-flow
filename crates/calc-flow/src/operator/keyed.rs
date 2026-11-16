@@ -31,8 +31,12 @@ impl GroupId {
             .map_err(|_| keyed_error("group ID exceeds the u32 frontier"))
     }
 
+    #[allow(
+        clippy::cast_lossless,
+        reason = "u32 group IDs widen losslessly on supported 32/64-bit targets"
+    )]
     pub(crate) fn index(self) -> usize {
-        usize::from(self.0)
+        self.0 as usize
     }
 }
 
@@ -239,16 +243,16 @@ impl KeyStore {
         credit
             .try_grow(scratch)
             .map_err(|error| keyed_error(error.to_string()))?;
-        let hashes = if collide {
-            vec![0; rows]
-        } else {
-            hash_rows(&self.schema, arrays, selection, check)?
-        };
+        let hashes = hash_rows(&self.schema, arrays, selection, check)?;
         let mut variable = VariableWork::new(check);
         let mut groups = Vec::with_capacity(rows);
         for (row, hash) in hashes.into_iter().enumerate() {
             if selection.is_some_and(|selection| selection.is_null(row) || !selection.value(row)) {
                 groups.push(GroupId(0));
+                continue;
+            }
+            if collide && let Some(group) = self.lookup_colliding(arrays, row, &mut variable)? {
+                groups.push(group);
                 continue;
             }
             groups.push(self.lookup_or_birth(arrays, row, hash, limit, &mut variable)?);
@@ -272,6 +276,21 @@ impl KeyStore {
             }
         }
         self.birth(arrays, row, hash, limit, variable)
+    }
+
+    fn lookup_colliding(
+        &self,
+        arrays: &[ArrayRef],
+        row: usize,
+        variable: &mut VariableWork<'_>,
+    ) -> Result<Option<GroupId>> {
+        for index in 0..self.len() {
+            let group = GroupId::new(index)?;
+            if self.equals(group, arrays, row, variable)? {
+                return Ok(Some(group));
+            }
+        }
+        Ok(None)
     }
 
     fn equals(
@@ -459,7 +478,7 @@ fn validate_arrays(schema: &KeySchema, arrays: &[ArrayRef]) -> Result<usize> {
     if arrays.len() != schema.fields.len() {
         return Err(keyed_error("key column count differs from schema"));
     }
-    let rows = arrays.first().map_or(0, |array| array.len());
+    let rows = arrays.first().map_or(0, |array| array.as_ref().len());
     for (array, field) in arrays.iter().zip(&schema.fields) {
         if array.len() != rows || array.data_type() != field.data_type() {
             return Err(keyed_error("key array differs from the compiled schema"));
@@ -620,7 +639,7 @@ fn hash_array(
         DataType::Timestamp(TimeUnit::Nanosecond, _) => primitive!(TimestampNanosecondType),
         DataType::Utf8 => hash_strings::<StringArray>(array, hashes, selection, variable)?,
         DataType::LargeUtf8 => {
-            hash_strings::<LargeStringArray>(array, hashes, selection, variable)?
+            hash_strings::<LargeStringArray>(array, hashes, selection, variable)?;
         }
         _ => return Err(keyed_error("unsupported key hash type")),
     }
@@ -735,12 +754,13 @@ fn canonical_value(
         ScalarValue::Int8(value) => fixed!(value),
         ScalarValue::Int16(value) => fixed!(value),
         ScalarValue::Int32(value) | ScalarValue::Date32(value) => fixed!(value),
-        ScalarValue::Int64(value) | ScalarValue::Date64(value) => fixed!(value),
         ScalarValue::UInt8(value) => fixed!(value),
         ScalarValue::UInt16(value) => fixed!(value),
         ScalarValue::UInt32(value) => fixed!(value),
         ScalarValue::UInt64(value) => fixed!(value),
-        ScalarValue::TimestampSecond(value, _)
+        ScalarValue::Int64(value)
+        | ScalarValue::Date64(value)
+        | ScalarValue::TimestampSecond(value, _)
         | ScalarValue::TimestampMillisecond(value, _)
         | ScalarValue::TimestampMicrosecond(value, _)
         | ScalarValue::TimestampNanosecond(value, _) => fixed!(value),
@@ -840,7 +860,7 @@ impl KeyColumn {
                         .unwrap()
                         .value(row)
                         .to_owned()
-                }))
+                }));
             }
             Self::LargeUtf8(values) => values.push(
                 typed_string::<LargeStringArray>(array)?
@@ -856,13 +876,13 @@ impl KeyColumn {
             Self::Date64(_) => push!(Date64, datafusion::arrow::datatypes::Date64Type),
             Self::TimestampSecond(_) => push!(TimestampSecond, TimestampSecondType),
             Self::TimestampMillisecond(_) => {
-                push!(TimestampMillisecond, TimestampMillisecondType)
+                push!(TimestampMillisecond, TimestampMillisecondType);
             }
             Self::TimestampMicrosecond(_) => {
-                push!(TimestampMicrosecond, TimestampMicrosecondType)
+                push!(TimestampMicrosecond, TimestampMicrosecondType);
             }
             Self::TimestampNanosecond(_) => {
-                push!(TimestampNanosecond, TimestampNanosecondType)
+                push!(TimestampNanosecond, TimestampNanosecondType);
             }
         }
         Ok(())
@@ -957,7 +977,7 @@ impl KeyColumn {
             TimestampMillisecond,
             TimestampMicrosecond,
             TimestampNanosecond
-        )
+        );
     }
 
     fn array(&self, groups: &[GroupId], data_type: &DataType) -> Result<ArrayRef> {

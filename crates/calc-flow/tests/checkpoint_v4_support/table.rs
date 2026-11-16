@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
     sync::Arc,
     thread,
 };
@@ -150,11 +151,13 @@ impl PartitionImage {
     }
 
     fn refresh_lineage_digest(&mut self) {
-        self.lineage_digest = self
-            .partition_digests
-            .iter()
-            .map(|(group, digest)| format!("{group}:{digest};"))
-            .collect();
+        self.lineage_digest =
+            self.partition_digests
+                .iter()
+                .fold(String::new(), |mut lineage, (group, digest)| {
+                    write!(lineage, "{group}:{digest};").expect("formatting a String cannot fail");
+                    lineage
+                });
     }
 
     pub fn state_bytes(&self) -> Vec<u8> {
@@ -285,7 +288,7 @@ impl FakeTable {
         }
     }
 
-    pub fn restore(image: PartitionImage, checkpointing: bool) -> Self {
+    pub fn restore(image: &PartitionImage, checkpointing: bool) -> Self {
         let logical_bytes = image
             .pages
             .values()

@@ -180,9 +180,8 @@ impl Iterator for NumericHistory<'_> {
         if self.offset == self.ring.len {
             return None;
         }
-        let value = match self.ring.slots[self.ring.position(self.offset)] {
-            RingValue::Float64(value) => value,
-            _ => unreachable!(),
+        let RingValue::Float64(value) = self.ring.slots[self.ring.position(self.offset)] else {
+            unreachable!()
         };
         self.offset += 1;
         Some(value)
@@ -264,11 +263,7 @@ impl ValueLog {
     fn truncate(&mut self, chunks: usize, len: u32) {
         self.chunks.truncate(chunks);
         self.len = len;
-        self.logical_bytes = self
-            .chunks
-            .iter()
-            .map(|chunk| chunk.get_array_memory_size())
-            .sum();
+        self.logical_bytes = self.chunks.iter().map(Array::get_array_memory_size).sum();
     }
 }
 
@@ -562,6 +557,10 @@ impl StateTable {
         }
     }
 
+    #[allow(
+        clippy::option_option,
+        reason = "ring eviction distinguishes no eviction from an evicted null sample"
+    )]
     pub(crate) fn push_f64(
         &mut self,
         column: usize,
@@ -737,10 +736,10 @@ impl StateTable {
 
     pub(crate) fn append_strings(
         &mut self,
-        column: &usize,
+        column: usize,
         values: StringArray,
     ) -> Result<Range<u32>> {
-        self.append_values(*column, Arc::new(values))
+        self.append_values(column, Arc::new(values))
     }
 
     pub(crate) fn value_log_len(&self, column: usize) -> u32 {
@@ -749,11 +748,7 @@ impl StateTable {
 
     pub(crate) fn strings(&self, column: usize) -> Result<StringArray> {
         let log = &self.value_logs[column];
-        let arrays = log
-            .chunks
-            .iter()
-            .map(|array| array.as_ref())
-            .collect::<Vec<_>>();
+        let arrays = log.chunks.iter().map(AsRef::as_ref).collect::<Vec<_>>();
         let concatenated = datafusion::arrow::compute::concat(&arrays)
             .map_err(|error| internal(&error.to_string()))?;
         concatenated
@@ -848,8 +843,12 @@ impl StateTable {
             .keys
             .iter()
             .enumerate()
-            .map(|(index, key)| (key.bytes.clone(), EntityId(index as u32)))
-            .collect();
+            .map(|(index, key)| {
+                let id = u32::try_from(index)
+                    .map_err(|_| internal("rolling state-table entity IDs exceed u32"))?;
+                Ok((key.bytes.clone(), EntityId(id)))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
         restored.dictionary_bytes = restored.keys.iter().map(|key| key.bytes.len()).sum();
         restored.keyed = self
             .keyed
@@ -867,7 +866,7 @@ impl StateTable {
             .map(|(target, source)| {
                 let mut column =
                     RingColumn::new(target.name.clone(), target.kind, target.retention);
-                column.numeric = source.numeric.clone();
+                column.numeric.clone_from(&source.numeric);
                 let values = decode_ring(source.kind, &source.values)?;
                 for entity in 0..source.capacities.len() {
                     let mut ring = Ring::new(source.kind, source.capacities[entity]);
@@ -889,11 +888,7 @@ impl StateTable {
             .iter()
             .zip(&snapshot.value_logs)
             .map(|(target, source)| {
-                let logical_bytes = source
-                    .chunks
-                    .iter()
-                    .map(|chunk| chunk.get_array_memory_size())
-                    .sum();
+                let logical_bytes = source.chunks.iter().map(Array::get_array_memory_size).sum();
                 ValueLog {
                     name: target.name.clone(),
                     chunks: source.chunks.clone(),
@@ -1138,7 +1133,7 @@ fn validate_inventory(table: &StateTable, snapshot: &TableSnapshot) -> Result<()
         return Err(internal("rolling state-table column inventory mismatch"));
     }
     for (column, snapshot) in table.keyed.iter().zip(&snapshot.keyed) {
-        if snapshot.values.len() != snapshot.keys.len()
+        if snapshot.values.len() != table.keys.len()
             || snapshot.values.data_type() != keyed_array(column.kind, &[]).data_type()
         {
             return Err(internal("rolling keyed snapshot shape mismatch"));
@@ -1146,13 +1141,13 @@ fn validate_inventory(table: &StateTable, snapshot: &TableSnapshot) -> Result<()
         let _ = column;
     }
     for (column, snapshot) in table.rings.iter().zip(&snapshot.rings) {
+        let entities = snapshot.capacities.len();
         if snapshot
             .numeric
             .as_ref()
-            .is_some_and(|numeric| numeric.len() != snapshot.keys.len())
+            .is_some_and(|numeric| numeric.len() != entities)
             || (column.numeric.is_some() && snapshot.numeric.is_none())
-            || snapshot.offsets.len() != snapshot.keys.len() + 1
-            || snapshot.capacities.len() != snapshot.keys.len()
+            || snapshot.offsets.len() != entities + 1
             || snapshot.offsets.first() != Some(&0)
             || snapshot.offsets.last() != Some(&snapshot.values.len())
             || snapshot
@@ -1221,8 +1216,11 @@ mod tests {
         table.push_f64(history, entity, Some(1.0)).unwrap();
         table.commit().unwrap();
 
-        assert_eq!(table.ring_logical_bytes(history), 20 * 8 + (20 + 7) / 8);
-        assert!(table.logical_bytes() <= 20 * 8 + (20 + 7) / 8 + 128);
+        assert_eq!(
+            table.ring_logical_bytes(history),
+            20 * 8 + 20_usize.div_ceil(8)
+        );
+        assert!(table.logical_bytes() <= 20 * 8 + 20_usize.div_ceil(8) + 128);
     }
 
     #[test]
@@ -1265,19 +1263,19 @@ mod tests {
         let log = table.add_value_log("values");
         table.begin().unwrap();
         let first = table
-            .append_strings(&log, StringArray::from(vec![Some("a"), None]))
+            .append_strings(log, StringArray::from(vec![Some("a"), None]))
             .unwrap();
         table.commit().unwrap();
         table.begin().unwrap();
         let second = table
-            .append_strings(&log, StringArray::from(vec![Some("b")]))
+            .append_strings(log, StringArray::from(vec![Some("b")]))
             .unwrap();
         table.rollback().unwrap();
 
         assert_eq!(first, 0..2);
         assert_eq!(second, 2..3);
         assert_eq!(table.value_log_len(log), 2);
-        let values = table.strings(&log).unwrap();
+        let values = table.strings(log).unwrap();
         assert_eq!(values.len(), 2);
         assert_eq!(values.value(0), "a");
         assert!(values.is_null(1));

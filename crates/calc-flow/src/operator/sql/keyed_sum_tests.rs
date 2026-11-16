@@ -161,14 +161,13 @@ fn expected(unsigned: bool, rows: &[Row]) -> Vec<Vec<ScalarValue>> {
     let mut unsigned_sums = Vec::<Option<u64>>::new();
     for row in rows.iter().filter(|row| row.keep) {
         let key = (row.key, row.label);
-        let group = match keys.iter().position(|candidate| *candidate == key) {
-            Some(group) => group,
-            None => {
-                keys.push(key);
-                signed.push(None);
-                unsigned_sums.push(None);
-                keys.len() - 1
-            }
+        let group = if let Some(group) = keys.iter().position(|candidate| *candidate == key) {
+            group
+        } else {
+            keys.push(key);
+            signed.push(None);
+            unsigned_sums.push(None);
+            keys.len() - 1
         };
         if row.selected
             && let Some(value) = row.value

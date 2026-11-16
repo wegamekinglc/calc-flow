@@ -49,19 +49,19 @@ impl GoldenBundle {
         match case.target {
             GoldenTarget::Manifest => apply_json_operation(
                 &mut mutated.manifest,
-                &case.operation,
+                case.operation,
                 case.path(),
                 case.value.as_ref(),
             ),
             GoldenTarget::Partition0 => apply_json_operation(
                 &mut mutated.partition0,
-                &case.operation,
+                case.operation,
                 case.path(),
                 case.value.as_ref(),
             ),
             GoldenTarget::Recovery => apply_json_operation(
                 &mut mutated.recovery,
-                &case.operation,
+                case.operation,
                 case.path(),
                 case.value.as_ref(),
             ),
@@ -166,7 +166,8 @@ struct Manifest {
     operators: BTreeMap<String, Operator>,
     sinks: BTreeMap<String, Sink>,
     static_inputs: BTreeMap<String, Value>,
-    manifest_fingerprint: String,
+    #[serde(rename = "manifest_fingerprint")]
+    fingerprint: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -257,7 +258,8 @@ struct LogicalRange {
 pub fn validate(bundle: &GoldenBundle) -> Result<RestoredGolden, String> {
     validate_version(&bundle.manifest)?;
     validate_manifest_fingerprint(&bundle.manifest)?;
-    let manifest: Manifest = serde_json::from_value(bundle.manifest.clone()).map_err(json_error)?;
+    let manifest: Manifest =
+        serde_json::from_value(bundle.manifest.clone()).map_err(|error| json_error(&error))?;
     validate_identity(&manifest, &bundle.recovery)?;
     validate_participants(&manifest)?;
     let source = &manifest.sources["input"];
@@ -311,9 +313,9 @@ fn validate_identity(manifest: &Manifest, recovery: &Value) -> Result<(), String
     if manifest.recovery_fingerprint != expected_recovery {
         return Err("recovery fingerprint mismatch".into());
     }
-    if manifest.manifest_fingerprint.len() != 64
+    if manifest.fingerprint.len() != 64
         || !manifest
-            .manifest_fingerprint
+            .fingerprint
             .chars()
             .all(|character| character.is_ascii_hexdigit())
     {
@@ -419,7 +421,8 @@ fn validate_partition(
     {
         return Err("partition index checksum mismatch".into());
     }
-    let index: PartitionIndex = serde_json::from_value(document.clone()).map_err(json_error)?;
+    let index: PartitionIndex =
+        serde_json::from_value(document.clone()).map_err(|error| json_error(&error))?;
     if index.format_version != 4 || index.kind != "partition_index" {
         return Err("partition index identity mismatch".into());
     }
@@ -546,7 +549,7 @@ fn manifest_fingerprint(manifest: &Value) -> Result<String, String> {
 
 fn apply_json_operation(
     document: &mut Value,
-    operation: &GoldenOperation,
+    operation: GoldenOperation,
     path: &str,
     value: Option<&Value>,
 ) {
@@ -608,6 +611,6 @@ fn parse(document: &str) -> Value {
     serde_json::from_str(document).expect("golden fixture is valid JSON")
 }
 
-fn json_error(error: serde_json::Error) -> String {
+fn json_error(error: &serde_json::Error) -> String {
     format!("golden JSON schema mismatch: {error}")
 }

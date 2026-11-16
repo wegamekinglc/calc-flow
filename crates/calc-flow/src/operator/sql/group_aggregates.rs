@@ -1,11 +1,9 @@
-use super::{Result, ScalarValue};
+use super::ScalarValue;
 use std::{borrow::Cow, ops::Deref};
 
-pub(super) enum GroupAggregates {
-    Generic {
-        states: Vec<Vec<ScalarValue>>,
-        results: Vec<ScalarValue>,
-    },
+pub(super) struct GroupAggregates {
+    pub(super) states: Vec<Vec<ScalarValue>>,
+    pub(super) results: Vec<ScalarValue>,
 }
 
 pub(super) enum StateView<'a> {
@@ -30,15 +28,11 @@ impl AsRef<[ScalarValue]> for StateView<'_> {
 
 impl GroupAggregates {
     pub(super) fn len(&self) -> usize {
-        match self {
-            Self::Generic { states, .. } => states.len(),
-        }
+        self.states.len()
     }
 
     pub(super) fn state(&self, index: usize) -> StateView<'_> {
-        match self {
-            Self::Generic { states, .. } => StateView::Borrowed(&states[index]),
-        }
+        StateView::Borrowed(&self.states[index])
     }
 
     #[cfg(test)]
@@ -47,48 +41,27 @@ impl GroupAggregates {
     }
 
     pub(super) fn state_scalar(&self, aggregate: usize, field: usize) -> Cow<'_, ScalarValue> {
-        match self {
-            Self::Generic { states, .. } => Cow::Borrowed(&states[aggregate][field]),
-        }
+        Cow::Borrowed(&self.states[aggregate][field])
     }
 
     pub(super) fn result(&self, index: usize) -> Cow<'_, ScalarValue> {
-        match self {
-            Self::Generic { results, .. } => Cow::Borrowed(&results[index]),
-        }
+        Cow::Borrowed(&self.results[index])
     }
 
     pub(super) fn results(&self) -> impl ExactSizeIterator<Item = Cow<'_, ScalarValue>> {
-        let count = match self {
-            Self::Generic { results, .. } => results.len(),
-        };
-        (0..count).map(|index| self.result(index))
+        (0..self.results.len()).map(|index| self.result(index))
     }
 
-    pub(super) fn generic_states(&self) -> Option<&[Vec<ScalarValue>]> {
-        match self {
-            Self::Generic { states, .. } => Some(states),
-        }
+    pub(super) fn generic_states(&self) -> &[Vec<ScalarValue>] {
+        &self.states
     }
 
-    pub(super) fn replace(
-        &mut self,
-        index: usize,
-        state: Vec<ScalarValue>,
-        result: ScalarValue,
-        _name: &str,
-    ) -> Result<()> {
-        let Self::Generic { states, results } = self;
-        states[index] = state;
-        results[index] = result;
-        Ok(())
+    pub(super) fn replace(&mut self, index: usize, state: Vec<ScalarValue>, result: ScalarValue) {
+        self.states[index] = state;
+        self.results[index] = result;
     }
 
-    pub(super) fn restored(
-        states: Vec<Vec<ScalarValue>>,
-        results: Vec<ScalarValue>,
-        _name: &str,
-    ) -> Result<Self> {
-        Ok(Self::Generic { states, results })
+    pub(super) fn restored(states: Vec<Vec<ScalarValue>>, results: Vec<ScalarValue>) -> Self {
+        Self { states, results }
     }
 }

@@ -1,5 +1,5 @@
 use super::keyed::{GroupId, KeySchema, KeyStore, MORSEL_ROWS};
-use crate::{CalcFlowError, DataFusionConfig, DataFusionRuntime, Result};
+use crate::{CalcFlowError, DataFusionConfig, DataFusionRuntime};
 use datafusion::arrow::{
     array::{Array, ArrayRef},
     datatypes::{DataType, Field, FieldRef, TimeUnit},
@@ -36,9 +36,10 @@ fn route(store: &mut KeyStore, values: &[ScalarValue]) -> Vec<GroupId> {
 fn scalar_oracle(rows: &[Vec<ScalarValue>]) -> Vec<usize> {
     let mut keys: Vec<Vec<ScalarValue>> = Vec::new();
     rows.iter()
-        .map(|row| match keys.iter().position(|key| key == row) {
-            Some(group) => group,
-            None => {
+        .map(|row| {
+            if let Some(group) = keys.iter().position(|key| key == row) {
+                group
+            } else {
                 keys.push(row.clone());
                 keys.len() - 1
             }
@@ -47,6 +48,10 @@ fn scalar_oracle(rows: &[Vec<ScalarValue>]) -> Vec<usize> {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the supported-type matrix is intentionally one exhaustive test table"
+)]
 fn test_keyed_typed_routing_matches_naive_oracle_for_every_supported_type() {
     let runtime = runtime();
     let timezone: Arc<str> = Arc::from("America/New_York");
@@ -101,7 +106,7 @@ fn test_keyed_typed_routing_matches_naive_oracle_for_every_supported_type() {
         vec![
             ScalarValue::Utf8(Some("A\0B".into())),
             ScalarValue::Utf8(None),
-            ScalarValue::Utf8(Some("".into())),
+            ScalarValue::Utf8(Some(String::new())),
             ScalarValue::Utf8(Some("é新😀".into())),
             ScalarValue::Utf8(Some("A\0B".into())),
         ],
@@ -151,14 +156,15 @@ fn test_keyed_typed_routing_matches_naive_oracle_for_every_supported_type() {
                 .collect::<Vec<_>>(),
         );
         let actual = store
-            .route_colliding(&[array.clone()], &mut || Ok(()))
+            .route_colliding(std::slice::from_ref(&array), &mut || Ok(()))
             .unwrap();
+        let data_type = array.data_type().clone();
         assert_eq!(
             actual.iter().map(|id| id.index()).collect::<Vec<_>>(),
             expected
         );
         let replay = store.route(&[array], &mut || Ok(())).unwrap();
-        assert_eq!(actual, replay);
+        assert_eq!(actual, replay, "replay type {data_type:?}");
         let canonical = (0..store.len())
             .map(|group| store.canonical(GroupId::new(group).unwrap()).to_vec())
             .collect::<BTreeSet<_>>();
@@ -184,7 +190,7 @@ fn test_keyed_composite_null_collisions_and_batch_splits_preserve_identity() {
             };
             let string = match row % 7 {
                 0 => ScalarValue::Utf8(None),
-                1 => ScalarValue::Utf8(Some("".into())),
+                1 => ScalarValue::Utf8(Some(String::new())),
                 2 => ScalarValue::Utf8(Some("NUL\0KEY".into())),
                 value => ScalarValue::Utf8(Some(format!("key-{}", value % 3))),
             };
@@ -305,7 +311,7 @@ fn test_keyed_layout_fingerprint_is_deterministic_and_schema_exact() {
 }
 
 #[test]
-fn test_keyed_rejects_wrong_input_type_without_mutation() -> Result<()> {
+fn test_keyed_rejects_wrong_input_type_without_mutation() {
     let runtime = runtime();
     let mut store = store(&runtime, vec![field(DataType::Int64)]);
     let wrong: ArrayRef = Arc::new(datafusion::arrow::array::StringArray::from(vec!["1"]));
@@ -313,5 +319,4 @@ fn test_keyed_rejects_wrong_input_type_without_mutation() -> Result<()> {
     assert!(result.is_err());
     assert_eq!(store.len(), 0);
     assert_eq!(store.reserved_bytes(), 0);
-    Ok(())
 }

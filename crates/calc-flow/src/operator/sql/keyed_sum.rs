@@ -8,7 +8,7 @@ use datafusion::arrow::{array::Array, datatypes::DataType};
 use datafusion::execution::memory_pool::MemoryReservation;
 use std::{
     mem::size_of,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
 #[derive(Clone)]
@@ -197,7 +197,7 @@ impl KeyedSum {
     }
 
     fn lock(&self) -> MutexGuard<'_, KeyedSumState> {
-        self.state.lock().unwrap_or_else(|error| error.into_inner())
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -211,7 +211,7 @@ impl Transaction {
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
         let input = SumInput::new(values)?;
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let groups = state
             .keys
             .route_selected_with_limit(keys, selection, self.limit, check)?;
@@ -249,14 +249,14 @@ impl Transaction {
     ) -> Result<Vec<RecordBatch>> {
         self.state
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .records(None, schema, check)
     }
 
     pub(super) fn output_charge(&self) -> Result<usize> {
         self.state
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .output_charge(None)
     }
 
@@ -281,7 +281,7 @@ impl Transaction {
     ) -> Result<()> {
         let keys = chunk.columns()[..key_count].to_vec();
         let input = SumInput::new(chunk.column(key_count))?;
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let groups = state.keys.route_with_limit(&keys, self.limit, check)?;
         grow(&mut state)?;
         for (row, group) in groups.into_iter().enumerate() {
@@ -312,7 +312,7 @@ impl Transaction {
         if !self.active {
             return;
         }
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if !commit {
             for (group, value) in self.undo.drain(..).rev() {
                 state.sums.set(group, Some(value));
