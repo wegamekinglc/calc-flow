@@ -4,7 +4,7 @@
 //! never wait for object writes; durable publication, sink commit and source
 //! acknowledgement happen only in their specified order.
 
-use super::{Result, V4Manifest, V4Store, mismatch};
+use super::{Result, V4Manifest, V4Store, mismatch, opaque::V4OpaqueAdapter};
 use crate::state::{
     StateTable,
     table::v4::{V4PersistedTable, V4TableCapture},
@@ -28,6 +28,8 @@ struct ActiveEpoch {
     persisted: Option<V4PersistedTable>,
     manifest: Option<V4Manifest>,
     manifest_path: Option<std::path::PathBuf>,
+    opaque: Option<V4OpaqueAdapter>,
+    opaque_persisted: bool,
     terminal: bool,
     barrier_forwarded: bool,
     sink_precommitted: bool,
@@ -43,6 +45,8 @@ impl ActiveEpoch {
             persisted: None,
             manifest: Some(manifest),
             manifest_path: None,
+            opaque: None,
+            opaque_persisted: false,
             terminal,
             barrier_forwarded: false,
             sink_precommitted: false,
@@ -102,6 +106,15 @@ impl V4Coordinator {
         Ok(())
     }
 
+    pub(in crate::state) fn begin_with_opaque(
+        &mut self,
+        adapter: V4OpaqueAdapter,
+        epoch: u64,
+    ) -> Result<()> {
+        self.active_mut(epoch)?.opaque = Some(adapter);
+        Ok(())
+    }
+
     pub(in crate::state) fn forward_barrier(&mut self, epoch: u64) -> Result<()> {
         let active = self.active_mut(epoch)?;
         if active.terminal {
@@ -141,6 +154,27 @@ impl V4Coordinator {
         let active = self.active_mut(epoch)?;
         active.persisted = Some(persisted);
         active.manifest = Some(manifest);
+        let adapter = active.opaque.take();
+        if let Some(adapter) = adapter {
+            let owner = adapter.owner().to_owned();
+            let (operator, _) = adapter.persist(self.store_mut()?, epoch).await?;
+            let active = self.active_mut(epoch)?;
+            active
+                .manifest
+                .as_mut()
+                .expect("manifest is present after persistence")
+                .operators
+                .insert(owner, operator);
+            let fingerprint = crate::state::v4::manifest_fingerprint(
+                active.manifest.as_ref().expect("manifest is present after persistence"),
+            )?;
+            active
+                .manifest
+                .as_mut()
+                .expect("manifest is present after persistence")
+                .manifest_fingerprint = fingerprint;
+            active.opaque_persisted = true;
+        }
         Ok(())
     }
 
@@ -168,6 +202,9 @@ impl V4Coordinator {
             .ok_or_else(|| mismatch("manifest contents are absent".into()))?;
         let path = self.store_mut()?.publish_manifest(&manifest)?;
         let active = self.active_mut(epoch)?;
+        if let Some(persisted) = &mut active.persisted {
+            persisted.manifest_path.clone_from(&path);
+        }
         active.manifest_path = Some(path);
         active.manifest_durable = true;
         Ok(())
@@ -358,5 +395,44 @@ mod tests {
         coordinator.commit_sink(2).unwrap();
         coordinator.acknowledge_source(&mut table, 2).unwrap();
         assert_eq!(coordinator.last_completed(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn opaque_adapter_persists_and_restores_snapshot() {
+        let (_temporary, store) = store();
+        let mut coordinator = V4Coordinator::new(store);
+        let mut table = schema();
+        seed(&mut table);
+        let snapshot = crate::OperatorStateSnapshot {
+            inline_metadata: crate::JsonMap::from([("epoch".into(), serde_json::Value::from(1))]),
+            segments: std::collections::BTreeMap::from([(
+                "base".into(),
+                crate::StateSegment::new(b"state".to_vec()),
+            )]),
+        };
+        coordinator.begin(&mut table, 1, false, manifest_at(1)).unwrap();
+        coordinator
+            .begin_with_opaque(V4OpaqueAdapter::from_snapshot("rolling", &snapshot), 1)
+            .unwrap();
+        coordinator.forward_barrier(1).unwrap();
+        coordinator.persist(1).await.unwrap();
+        coordinator.precommit_sink(1).unwrap();
+        coordinator.publish_manifest(1).unwrap();
+        coordinator.commit_sink(1).unwrap();
+        coordinator.acknowledge_source(&mut table, 1).unwrap();
+        let path = coordinator
+            .previous
+            .as_ref()
+            .unwrap()
+            .manifest_path
+            .clone();
+        let stored = V4Store::read_manifest(&path).unwrap();
+        let restored = V4OpaqueAdapter::restore(
+            coordinator.store.as_mut().unwrap(),
+            &stored,
+            "rolling",
+        )
+        .unwrap();
+        assert_eq!(restored.segments["base"].bytes(), snapshot.segments["base"].bytes());
     }
 }

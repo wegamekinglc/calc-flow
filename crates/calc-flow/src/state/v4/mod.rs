@@ -1,4 +1,5 @@
 pub(in crate::state) mod coordinator;
+pub(in crate::state) mod opaque;
 pub(in crate::state) mod manifest;
 pub(in crate::state) mod object;
 pub(in crate::state) mod store;
