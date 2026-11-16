@@ -2248,7 +2248,7 @@ impl RollingOperator {
                 .as_deref()
                 .ok_or_else(|| internal_error("rolling layout-7 typed state is absent"))?;
             let segment_id = format!("base-{:020}-00000000", epoch.as_u64());
-            let bytes = self.compiled.kernel_plan.encode_slab_state(typed)?;
+            let bytes = RollingKernelPlan::encode_slab_state(typed)?;
             return Ok(Some((segment_id, bytes)));
         }
         let row_count = self

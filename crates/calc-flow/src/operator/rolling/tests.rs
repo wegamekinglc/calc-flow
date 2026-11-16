@@ -2497,14 +2497,10 @@ async fn rolling_with_large_retained_label() -> (
 fn retained_state_ipc(operator: &RollingOperator) -> Vec<u8> {
     // Retry records are intentionally pending again after a rejected emission;
     // this helper captures only the committed kernel/history representation.
-    if let Some(typed) = operator.state.typed_kernel_state.as_deref() {
-        if RollingKernelPlan::slab_history_for_test(typed).is_some() {
-            return operator
-                .compiled
-                .kernel_plan
-                .encode_slab_state(typed)
-                .unwrap();
-        }
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref()
+        && RollingKernelPlan::slab_history_for_test(typed).is_some()
+    {
+        return RollingKernelPlan::encode_slab_state(typed).unwrap();
     }
     let mut histories = operator.state.histories.clone();
     histories
@@ -2522,10 +2518,10 @@ fn retained_state_ipc(operator: &RollingOperator) -> Vec<u8> {
 }
 
 fn retained_buffer_addresses(operator: &RollingOperator) -> Vec<usize> {
-    if let Some(typed) = operator.state.typed_kernel_state.as_deref() {
-        if let Some(addresses) = RollingKernelPlan::slab_slot_addresses_for_test(typed) {
-            return addresses;
-        }
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref()
+        && let Some(addresses) = RollingKernelPlan::slab_slot_addresses_for_test(typed)
+    {
+        return addresses;
     }
     operator
         .state
@@ -2555,10 +2551,10 @@ fn retained_buffer_addresses(operator: &RollingOperator) -> Vec<usize> {
 }
 
 fn retained_prices(operator: &RollingOperator) -> Vec<f64> {
-    if let Some(typed) = operator.state.typed_kernel_state.as_deref() {
-        if let Some(history) = RollingKernelPlan::slab_history_for_test(typed) {
-            return history.into_iter().flatten().collect();
-        }
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref()
+        && let Some(history) = RollingKernelPlan::slab_history_for_test(typed)
+    {
+        return history.into_iter().flatten().collect();
     }
     operator
         .state
@@ -2590,10 +2586,10 @@ fn retained_prices(operator: &RollingOperator) -> Vec<f64> {
 }
 
 fn retained_price_address(operator: &RollingOperator, mut index: usize) -> usize {
-    if let Some(typed) = operator.state.typed_kernel_state.as_deref() {
-        if let Some(address) = RollingKernelPlan::slab_history_address_for_test(typed, index) {
-            return address;
-        }
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref()
+        && let Some(address) = RollingKernelPlan::slab_history_address_for_test(typed, index)
+    {
+        return address;
     }
     let history = operator.state.histories.by_entity.values().next().unwrap();
     for chunk in history.retained_chunks() {
@@ -2618,10 +2614,10 @@ fn retained_price_address(operator: &RollingOperator, mut index: usize) -> usize
 }
 
 fn retained_transition_count(operator: &RollingOperator) -> u64 {
-    if let Some(typed) = operator.state.typed_kernel_state.as_deref() {
-        if let Some(count) = RollingKernelPlan::slab_transition_count_for_test(typed) {
-            return count;
-        }
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref()
+        && let Some(count) = RollingKernelPlan::slab_transition_count_for_test(typed)
+    {
+        return count;
     }
     operator
         .state
@@ -2634,20 +2630,20 @@ fn retained_transition_count(operator: &RollingOperator) -> u64 {
 }
 
 fn retained_row_count(operator: &RollingOperator) -> usize {
-    if let Some(typed) = operator.state.typed_kernel_state.as_deref() {
-        if let Some(history) = RollingKernelPlan::slab_history_for_test(typed) {
-            return history.len();
-        }
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref()
+        && let Some(history) = RollingKernelPlan::slab_history_for_test(typed)
+    {
+        return history.len();
     }
     let history = operator.state.histories.by_entity.values().next().unwrap();
     history.rows.len() + history.columnar.rows
 }
 
 fn retained_column_bytes_for_operator(operator: &RollingOperator, column: usize) -> usize {
-    if let Some(typed) = operator.state.typed_kernel_state.as_deref() {
-        if RollingKernelPlan::slab_history_for_test(typed).is_some() {
-            return 0;
-        }
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref()
+        && RollingKernelPlan::slab_history_for_test(typed).is_some()
+    {
+        return 0;
     }
     retained_column_bytes(
         operator.state.histories.by_entity.values().next().unwrap(),
@@ -3233,15 +3229,10 @@ fn assert_cached_rolling_charge(operator: &RollingOperator) {
         "rolling",
     )
     .unwrap();
-    if let Some(typed) = operator.state.typed_kernel_state.as_deref() {
-        if let Some(slab) = operator
-            .compiled
-            .kernel_plan
-            .slab_charge(typed, "rolling")
-            .unwrap()
-        {
-            expected = expected.checked_add(slab, "rolling").unwrap();
-        }
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref()
+        && let Some(slab) = RollingKernelPlan::slab_charge(typed, "rolling").unwrap()
+    {
+        expected = expected.checked_add(slab, "rolling").unwrap();
     }
     assert_eq!(operator.state.charge, expected);
     for (key, state) in &operator.state.histories.by_entity {

@@ -55,16 +55,14 @@ impl RollingOperator {
 
     fn recount_legacy_capture(&mut self) -> Result<()> {
         if self.state.deferred_history {
-            let charge =
-                self.compiled
-                    .kernel_plan
-                    .slab_charge(
-                        self.state.typed_kernel_state.as_deref().ok_or_else(|| {
-                            internal_error("rolling layout-7 typed state is absent")
-                        })?,
-                        &self.name,
-                    )?
-                    .ok_or_else(|| internal_error("rolling layout-7 table is absent"))?;
+            let charge = super::kernel::RollingKernelPlan::slab_charge(
+                self.state
+                    .typed_kernel_state
+                    .as_deref()
+                    .ok_or_else(|| internal_error("rolling layout-7 typed state is absent"))?,
+                &self.name,
+            )?
+            .ok_or_else(|| internal_error("rolling layout-7 table is absent"))?;
             self.check_state_budget(charge, &self.name)?;
             self.state.owned_mut()?.charge = charge;
             return Ok(());

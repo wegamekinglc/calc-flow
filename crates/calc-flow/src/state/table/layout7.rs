@@ -32,7 +32,11 @@ pub(crate) fn encode_layout7(table: &StateTable) -> Result<Vec<u8>> {
     let mut encoded =
         Vec::with_capacity(HEADER_BYTES + components.iter().map(Vec::len).sum::<usize>());
     encoded.extend_from_slice(MAGIC);
-    encoded.extend_from_slice(&(COMPONENTS as u32).to_le_bytes());
+    encoded.extend_from_slice(
+        &u32::try_from(COMPONENTS)
+            .expect("three components fit u32")
+            .to_le_bytes(),
+    );
     for component in &components {
         encoded.extend_from_slice(&(component.len() as u64).to_le_bytes());
     }
@@ -105,9 +109,12 @@ fn encode_entity(snapshot: &TableSnapshot) -> Result<Vec<u8>> {
         Arc::new(Float64Array::from_iter_values(
             parts.iter().map(|part| part.sum_error),
         )),
-        Arc::new(BooleanArray::from_iter(
-            parts.iter().map(|part| part.sum_enabled),
-        )),
+        Arc::new(
+            parts
+                .iter()
+                .map(|part| part.sum_enabled)
+                .collect::<BooleanArray>(),
+        ),
         Arc::new(Float64Array::from(
             parts.iter().map(|part| part.shift).collect::<Vec<_>>(),
         )),
@@ -123,9 +130,12 @@ fn encode_entity(snapshot: &TableSnapshot) -> Result<Vec<u8>> {
         Arc::new(Float64Array::from_iter_values(
             parts.iter().map(|part| part.squares_error),
         )),
-        Arc::new(BooleanArray::from_iter(
-            parts.iter().map(|part| part.dispersion_enabled),
-        )),
+        Arc::new(
+            parts
+                .iter()
+                .map(|part| part.dispersion_enabled)
+                .collect::<BooleanArray>(),
+        ),
         Arc::new(UInt32Array::from_iter_values(
             parts.iter().map(|part| part.since_rebuild),
         )),
@@ -221,7 +231,8 @@ fn decode_components(bytes: &[u8]) -> Result<Vec<Vec<u8>>> {
     let mut cursor = HEADER_BYTES;
     let mut components = Vec::with_capacity(count);
     for index in 0..count {
-        let len = read_u64(bytes, 12 + index * 8)? as usize;
+        let len = usize::try_from(read_u64(bytes, 12 + index * 8)?)
+            .map_err(|_| layout7_error("rolling layout-7 component length exceeds usize"))?;
         let end = cursor
             .checked_add(len)
             .ok_or_else(|| layout7_error("rolling layout-7 component length overflowed"))?;
@@ -432,7 +443,7 @@ fn validate_numeric(table: &StateTable, snapshot: &TableSnapshot) -> Result<()> 
     Ok(())
 }
 
-fn column<'a, T: 'static>(record: &'a RecordBatch, index: usize) -> Result<&'a T> {
+fn column<T: 'static>(record: &RecordBatch, index: usize) -> Result<&T> {
     record
         .column(index)
         .as_any()

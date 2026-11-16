@@ -183,7 +183,6 @@ impl RollingKernelPlan {
     }
 
     pub(in crate::operator::rolling) fn encode_slab_state(
-        &self,
         state: &RollingKernelState,
     ) -> Result<Vec<u8>> {
         let table = state
@@ -209,7 +208,6 @@ impl RollingKernelPlan {
     }
 
     pub(in crate::operator::rolling) fn slab_charge(
-        &self,
         state: &RollingKernelState,
         node_id: &str,
     ) -> Result<Option<StateCharge>> {
@@ -256,6 +254,10 @@ impl RollingKernelPlan {
         Some(state.slab.as_ref()?.ring_slot_addresses(0))
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "slab preparation keeps transaction, output and rollback ordering in one function"
+    )]
     pub(in crate::operator::rolling) fn prepare_slab_ordered_stream(
         &self,
         state: &mut RollingKernelState,

@@ -42,22 +42,19 @@ impl RollingOperator {
     }
     fn legacy_restore_charge(&self, restored: &mut DecodedRollingState) -> Result<StateCharge> {
         if restored.deferred_history {
-            let charge = self
-                .compiled
-                .kernel_plan
-                .slab_charge(
-                    restored.typed_kernel_state.as_deref().ok_or_else(|| {
-                        crate::operator::checkpoint::checkpoint_mismatch(
-                            "rolling layout-7 restore is missing typed state",
-                        )
-                    })?,
-                    &self.name,
-                )?
-                .ok_or_else(|| {
+            let charge = crate::operator::rolling::kernel::RollingKernelPlan::slab_charge(
+                restored.typed_kernel_state.as_deref().ok_or_else(|| {
                     crate::operator::checkpoint::checkpoint_mismatch(
-                        "rolling layout-7 restore is missing its state table",
+                        "rolling layout-7 restore is missing typed state",
                     )
-                })?;
+                })?,
+                &self.name,
+            )?
+            .ok_or_else(|| {
+                crate::operator::checkpoint::checkpoint_mismatch(
+                    "rolling layout-7 restore is missing its state table",
+                )
+            })?;
             if !self.state_budget.allows(charge.rows, charge.bytes) {
                 return Err(crate::operator::checkpoint::checkpoint_mismatch(
                     "restored rolling state exceeds the configured state budget",

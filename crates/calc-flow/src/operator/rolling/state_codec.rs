@@ -782,11 +782,10 @@ pub(super) fn validate_metadata_header(
             metadata.state_layout_version
         )));
     }
-    let expected_schema_fingerprint = if compiled.kernel_plan.supports_slab()
-        && metadata.state_layout_version == super::ROLLING_STATE_TABLE_LAYOUT_VERSION
+    let expected_schema_fingerprint = if (compiled.kernel_plan.supports_slab()
+        && metadata.state_layout_version == super::ROLLING_STATE_TABLE_LAYOUT_VERSION)
+        || metadata.state_layout_version == compiled.state_layout_version
     {
-        &compiled.state_schema_fingerprint
-    } else if metadata.state_layout_version == compiled.state_layout_version {
         &compiled.state_schema_fingerprint
     } else if metadata.state_layout_version == compiled.legacy_state_layout_version {
         &compiled.legacy_state_schema_fingerprint
