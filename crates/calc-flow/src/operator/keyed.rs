@@ -1,18 +1,17 @@
 use crate::{CalcFlowError, Result};
 use datafusion::arrow::{
-    array::{
-        Array, ArrayRef, BooleanArray, LargeStringArray, PrimitiveArray, StringArray,
-    },
+    array::{Array, ArrayRef, BooleanArray, LargeStringArray, PrimitiveArray, StringArray},
     datatypes::{
-        ArrowPrimitiveType, DataType, FieldRef, TimeUnit, TimestampMicrosecondType,
-        TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
+        ArrowPrimitiveType, ArrowTimestampType, DataType, FieldRef, TimeUnit,
+        TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+        TimestampSecondType,
     },
-    execution::memory_pool::MemoryReservation,
 };
 use datafusion::common::ScalarValue;
+use datafusion::execution::memory_pool::MemoryReservation;
 use hashbrown::HashMap;
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::{mem::size_of, sync::Arc};
 
 pub(crate) const MORSEL_ROWS: usize = 4096;
 const VARIABLE_STEP_BYTES: usize = 64 * 1024;
@@ -33,7 +32,7 @@ impl GroupId {
     }
 
     pub(crate) fn index(self) -> usize {
-        self.0 as usize
+        usize::from(self.0)
     }
 }
 
@@ -45,7 +44,9 @@ pub(crate) struct KeySchema {
 impl KeySchema {
     pub(crate) fn groupable(fields: Vec<FieldRef>) -> Result<Self> {
         if fields.is_empty() || fields.iter().any(|field| !supported(field.data_type())) {
-            return Err(keyed_error("key schema is empty or contains an unsupported type"));
+            return Err(keyed_error(
+                "key schema is empty or contains an unsupported type",
+            ));
         }
         Ok(Self { fields })
     }
@@ -115,7 +116,6 @@ impl KeyStore {
         self.fingerprint
     }
 
-    #[cfg(test)]
     pub(crate) fn canonical(&self, group: GroupId) -> Arc<[u8]> {
         self.canonical[group.index()].clone()
     }
@@ -187,6 +187,7 @@ impl KeyStore {
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<Vec<GroupId>> {
         self.route_with_limit_inner(arrays, selection, limit, false, check)
+    }
 
     #[cfg(test)]
     pub(crate) fn route_colliding(
@@ -232,7 +233,7 @@ impl KeyStore {
             return Err(keyed_error("key selection length differs from the morsel"));
         }
         let scratch = rows
-            .checked_mul(2 * std::mem::size_of::<u64>() + std::mem::size_of::<GroupId>())
+            .checked_mul(2 * size_of::<u64>() + size_of::<GroupId>())
             .ok_or_else(|| keyed_error("key routing scratch charge overflowed"))?;
         let credit = self.reservation.new_empty();
         credit
@@ -245,14 +246,12 @@ impl KeyStore {
         };
         let mut variable = VariableWork::new(check);
         let mut groups = Vec::with_capacity(rows);
-        for row in 0..rows {
-            if selection.is_some_and(|selection| {
-                selection.is_null(row) || !selection.value(row)
-            }) {
+        for (row, hash) in hashes.into_iter().enumerate() {
+            if selection.is_some_and(|selection| selection.is_null(row) || !selection.value(row)) {
                 groups.push(GroupId(0));
                 continue;
             }
-            groups.push(self.lookup_or_birth(arrays, row, hashes[row], limit, &mut variable)?);
+            groups.push(self.lookup_or_birth(arrays, row, hash, limit, &mut variable)?);
         }
         Ok(groups)
     }
@@ -337,8 +336,7 @@ impl KeyStore {
     }
 
     pub(crate) fn rollback(&mut self, cut: KeyCut) {
-        for group in (cut.groups..self.len()).rev() {
-            let hash = self.hashes[group];
+        for &hash in self.hashes[cut.groups..].iter().rev() {
             let remove = if let Some(bucket) = self.buckets.get_mut(&hash) {
                 bucket.pop();
                 bucket.is_empty()
@@ -423,7 +421,10 @@ fn layout_fingerprint(schema: &KeySchema) -> [u8; 32] {
         digest.update(field.name().as_bytes());
         digest.update(format!("{:?}", field.data_type()).as_bytes());
         digest.update([u8::from(field.is_nullable())]);
-        let metadata = field.metadata().iter().collect::<std::collections::BTreeMap<_, _>>();
+        let metadata = field
+            .metadata()
+            .iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
         for (key, value) in metadata {
             digest.update((key.len() as u64).to_le_bytes());
             digest.update(key.as_bytes());
@@ -473,14 +474,16 @@ fn birth_charge(
     row: usize,
     canonical: usize,
 ) -> Result<usize> {
-    let values = schema.fields.iter().zip(arrays).try_fold(
-        256usize,
-        |total, (field, array)| {
+    let values = schema
+        .fields
+        .iter()
+        .zip(arrays)
+        .try_fold(256usize, |total, (field, array)| {
             let width = match field.data_type() {
                 DataType::Utf8 | DataType::LargeUtf8 => {
-                    2 * std::mem::size_of::<String>() + string_value(array, row)?.len()
+                    2 * size_of::<String>() + string_value(array, row)?.len()
                 }
-                DataType::Boolean => 2 * std::mem::size_of::<Option<bool>>(),
+                DataType::Boolean => 2 * size_of::<Option<bool>>(),
                 DataType::Int8 | DataType::UInt8 => 2,
                 DataType::Int16 | DataType::UInt16 => 4,
                 DataType::Int32 | DataType::UInt32 | DataType::Date32 => 8,
@@ -489,11 +492,10 @@ fn birth_charge(
             total
                 .checked_add(width)
                 .ok_or_else(|| keyed_error("key birth charge overflowed"))
-        },
-    )?;
+        })?;
     values
         .checked_add(canonical)
-        .and_then(|total| total.checked_add(4 * std::mem::size_of::<usize>()))
+        .and_then(|total| total.checked_add(4 * size_of::<usize>()))
         .ok_or_else(|| keyed_error("key birth charge overflowed"))
 }
 
@@ -534,6 +536,10 @@ impl StableHash {
             self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
         }
     }
+
+    fn finish(self) -> u64 {
+        self.0
+    }
 }
 
 fn hash_rows(
@@ -552,7 +558,7 @@ fn hash_rows(
         }
         hash_array(array, &mut hashes, selection, &mut variable)?;
     }
-    Ok(hashes.into_iter().map(|hash| hash.0).collect())
+    Ok(hashes.into_iter().map(StableHash::finish).collect())
 }
 
 fn hash_array(
@@ -568,7 +574,9 @@ fn hash_array(
                 .downcast_ref::<PrimitiveArray<$kind>>()
                 .ok_or_else(|| keyed_error("typed key array differs from schema"))?;
             for (row, hash) in hashes.iter_mut().enumerate() {
-                if selection.is_some_and(|selection| selection.is_null(row) || !selection.value(row)) {
+                if selection
+                    .is_some_and(|selection| selection.is_null(row) || !selection.value(row))
+                {
                     continue;
                 }
                 hash.bytes(&[u8::from(values.is_null(row))]);
@@ -585,7 +593,9 @@ fn hash_array(
                 .downcast_ref::<BooleanArray>()
                 .ok_or_else(|| keyed_error("Boolean key array differs"))?;
             for (row, hash) in hashes.iter_mut().enumerate() {
-                if selection.is_some_and(|selection| selection.is_null(row) || !selection.value(row)) {
+                if selection
+                    .is_some_and(|selection| selection.is_null(row) || !selection.value(row))
+                {
                     continue;
                 }
                 hash.bytes(&[u8::from(values.is_null(row))]);
@@ -609,7 +619,9 @@ fn hash_array(
         DataType::Timestamp(TimeUnit::Microsecond, _) => primitive!(TimestampMicrosecondType),
         DataType::Timestamp(TimeUnit::Nanosecond, _) => primitive!(TimestampNanosecondType),
         DataType::Utf8 => hash_strings::<StringArray>(array, hashes, selection, variable)?,
-        DataType::LargeUtf8 => hash_strings::<LargeStringArray>(array, hashes, selection, variable)?,
+        DataType::LargeUtf8 => {
+            hash_strings::<LargeStringArray>(array, hashes, selection, variable)?
+        }
         _ => return Err(keyed_error("unsupported key hash type")),
     }
     Ok(())
@@ -803,7 +815,7 @@ impl KeyColumn {
                 let Self::$variant(values) = self else {
                     return Err(keyed_error("typed key birth column differs"));
                 };
-                values.push(input.is_valid(row).then(|| input.value(row)));
+                values.push(input.is_valid(row).then_some(input.value(row)));
             }};
         }
         match self {
@@ -812,7 +824,7 @@ impl KeyColumn {
                     .as_any()
                     .downcast_ref::<BooleanArray>()
                     .ok_or_else(|| keyed_error("Boolean key birth array differs"))?;
-                values.push(input.is_valid(row).then(|| input.value(row)));
+                values.push(input.is_valid(row).then_some(input.value(row)));
             }
             Self::Int8(_) => push!(Int8, datafusion::arrow::datatypes::Int8Type),
             Self::Int16(_) => push!(Int16, datafusion::arrow::datatypes::Int16Type),
@@ -822,15 +834,23 @@ impl KeyColumn {
             Self::UInt16(_) => push!(UInt16, datafusion::arrow::datatypes::UInt16Type),
             Self::UInt32(_) => push!(UInt32, datafusion::arrow::datatypes::UInt32Type),
             Self::UInt64(_) => push!(UInt64, datafusion::arrow::datatypes::UInt64Type),
-            Self::Utf8(values) => values.push(
-                typed_string::<StringArray>(array)?
-                    .is_valid(row)
-                    .then(|| typed_string::<StringArray>(array).unwrap().value(row).to_owned()),
-            ),
+            Self::Utf8(values) => {
+                values.push(typed_string::<StringArray>(array)?.is_valid(row).then(|| {
+                    typed_string::<StringArray>(array)
+                        .unwrap()
+                        .value(row)
+                        .to_owned()
+                }))
+            }
             Self::LargeUtf8(values) => values.push(
                 typed_string::<LargeStringArray>(array)?
                     .is_valid(row)
-                    .then(|| typed_string::<LargeStringArray>(array).unwrap().value(row).to_owned()),
+                    .then(|| {
+                        typed_string::<LargeStringArray>(array)
+                            .unwrap()
+                            .value(row)
+                            .to_owned()
+                    }),
             ),
             Self::Date32(_) => push!(Date32, datafusion::arrow::datatypes::Date32Type),
             Self::Date64(_) => push!(Date64, datafusion::arrow::datatypes::Date64Type),
@@ -864,7 +884,7 @@ impl KeyColumn {
                 let Self::$variant(values) = self else {
                     return Err(keyed_error("typed key equality column differs"));
                 };
-                let value = input.is_valid(row).then(|| input.value(row));
+                let value = input.is_valid(row).then_some(input.value(row));
                 return Ok(values[group] == value);
             }};
         }
@@ -874,7 +894,7 @@ impl KeyColumn {
                     .as_any()
                     .downcast_ref::<BooleanArray>()
                     .ok_or_else(|| keyed_error("Boolean key equality array differs"))?;
-                Ok(values[group] == input.is_valid(row).then(|| input.value(row)))
+                Ok(values[group] == input.is_valid(row).then_some(input.value(row)))
             }
             Self::Int8(_) => equals!(Int8, datafusion::arrow::datatypes::Int8Type),
             Self::Int16(_) => equals!(Int16, datafusion::arrow::datatypes::Int16Type),
@@ -885,13 +905,13 @@ impl KeyColumn {
             Self::UInt32(_) => equals!(UInt32, datafusion::arrow::datatypes::UInt32Type),
             Self::UInt64(_) => equals!(UInt64, datafusion::arrow::datatypes::UInt64Type),
             Self::Utf8(values) => string_equality(
-                &values[group],
+                values[group].as_deref(),
                 typed_string::<StringArray>(array)?,
                 row,
                 variable,
             ),
             Self::LargeUtf8(values) => string_equality(
-                &values[group],
+                values[group].as_deref(),
                 typed_string::<LargeStringArray>(array)?,
                 row,
                 variable,
@@ -936,8 +956,8 @@ impl KeyColumn {
             TimestampSecond,
             TimestampMillisecond,
             TimestampMicrosecond,
-            TimestampNanosecond,
-        );
+            TimestampNanosecond
+        )
     }
 
     fn array(&self, groups: &[GroupId], data_type: &DataType) -> Result<ArrayRef> {
@@ -951,7 +971,10 @@ impl KeyColumn {
         }
         match self {
             Self::Boolean(values) => Ok(Arc::new(BooleanArray::from(
-                groups.iter().map(|group| values[group.index()]).collect::<Vec<_>>(),
+                groups
+                    .iter()
+                    .map(|group| values[group.index()])
+                    .collect::<Vec<_>>(),
             ))),
             Self::Int8(_) => output!(Int8, datafusion::arrow::datatypes::Int8Type),
             Self::Int16(_) => output!(Int16, datafusion::arrow::datatypes::Int16Type),
@@ -975,39 +998,31 @@ impl KeyColumn {
             ))),
             Self::Date32(_) => output!(Date32, datafusion::arrow::datatypes::Date32Type),
             Self::Date64(_) => output!(Date64, datafusion::arrow::datatypes::Date64Type),
-            Self::TimestampSecond(values) => timestamp_output::<TimestampSecondType>(
-                values,
-                groups,
-                data_type,
-            ),
-            Self::TimestampMillisecond(values) => timestamp_output::<TimestampMillisecondType>(
-                values,
-                groups,
-                data_type,
-            ),
-            Self::TimestampMicrosecond(values) => timestamp_output::<TimestampMicrosecondType>(
-                values,
-                groups,
-                data_type,
-            ),
-            Self::TimestampNanosecond(values) => timestamp_output::<TimestampNanosecondType>(
-                values,
-                groups,
-                data_type,
-            ),
+            Self::TimestampSecond(values) => {
+                timestamp_output::<TimestampSecondType>(values, groups, data_type)
+            }
+            Self::TimestampMillisecond(values) => {
+                timestamp_output::<TimestampMillisecondType>(values, groups, data_type)
+            }
+            Self::TimestampMicrosecond(values) => {
+                timestamp_output::<TimestampMicrosecondType>(values, groups, data_type)
+            }
+            Self::TimestampNanosecond(values) => {
+                timestamp_output::<TimestampNanosecondType>(values, groups, data_type)
+            }
         }
     }
 }
 
 fn string_equality<T: StringKeyArray>(
-    stored: &Option<String>,
+    stored: Option<&str>,
     input: &T,
     row: usize,
     variable: &mut VariableWork<'_>,
 ) -> Result<bool> {
-    let incoming = input.is_valid(row).then(|| input.key_value(row));
-    let (Some(stored), Some(incoming)) = (stored.as_deref(), incoming) else {
-        return Ok(stored.as_deref() == incoming);
+    let incoming = input.is_valid(row).then_some(input.key_value(row));
+    let (Some(stored), Some(incoming)) = (stored, incoming) else {
+        return Ok(stored == incoming);
     };
     if stored.len() != incoming.len() {
         return Ok(false);
@@ -1039,6 +1054,7 @@ fn string_value(array: &ArrayRef, row: usize) -> Result<&str> {
 fn primitive_output<T>(values: &[Option<T::Native>], groups: &[GroupId]) -> ArrayRef
 where
     T: ArrowPrimitiveType,
+    PrimitiveArray<T>: From<Vec<Option<T::Native>>>,
 {
     Arc::new(PrimitiveArray::<T>::from(
         groups
@@ -1054,7 +1070,8 @@ fn timestamp_output<T>(
     data_type: &DataType,
 ) -> Result<ArrayRef>
 where
-    T: ArrowPrimitiveType<Native = i64>,
+    T: ArrowTimestampType,
+    PrimitiveArray<T>: From<Vec<Option<i64>>>,
 {
     let DataType::Timestamp(_, timezone) = data_type else {
         return Err(keyed_error("timestamp output schema differs"));

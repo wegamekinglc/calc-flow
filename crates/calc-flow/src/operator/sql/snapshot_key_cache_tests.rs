@@ -166,3 +166,49 @@ async fn snapshots_reuse_sealed_chunk_key_columns() {
     expected.insert(initial_keys[SEALED_ROWS + TAIL_ROWS - 1].clone(), 11);
     assert_eq!(totals(&fourth_records), expected);
 }
+
+#[tokio::test]
+async fn discarded_growth_does_not_install_tail_key_columns() {
+    let initial_keys = (0..SEALED_ROWS + TAIL_ROWS)
+        .map(|index| format!("k{index:05}"))
+        .collect::<Vec<_>>();
+    let input = keyed_input(&initial_keys, 1);
+    let mut plan = plan_for(&input).await;
+    let job = context_for();
+    let context = StreamOperatorContext::new(&job, NAME, None);
+    let first = plan.update(&input, &context, NAME).await.unwrap();
+    let first_records = first.records.clone();
+    plan.commit(first);
+
+    let discarded = plan
+        .update(
+            &keyed_input(&[format!("k{:05}", SEALED_ROWS + TAIL_ROWS)], 1),
+            &context,
+            NAME,
+        )
+        .await
+        .unwrap();
+    let discarded_records = discarded.records.clone();
+    assert_eq!(discarded_records[1].num_rows(), TAIL_ROWS + 1);
+    assert!(
+        !Arc::ptr_eq(
+            key_column(&first_records[1]),
+            key_column(&discarded_records[1])
+        ),
+        "growing the tail builds candidate columns"
+    );
+    drop(discarded);
+
+    let retried = plan
+        .update(&keyed_input(&[initial_keys[0].clone()], 10), &context, NAME)
+        .await
+        .unwrap();
+    let retried_records = retried.records.clone();
+    assert_shared_key_columns(&first_records, &retried_records, "discarded tail growth");
+    let mut expected = (0..SEALED_ROWS + TAIL_ROWS)
+        .map(|index| (format!("k{index:05}"), 1))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    expected.insert(initial_keys[0].clone(), 11);
+    assert_eq!(totals(&retried_records), expected);
+    plan.commit(retried);
+}

@@ -1,15 +1,15 @@
 use super::{
-    AggregateFunctionExpr, ArrayRef, BooleanArray, GroupKey, Int64Array, RecordBatch, Result,
-    SchemaRef, UInt64Array, grouped_sum, predicate,
+    AggregateFunctionExpr, ArrayRef, BooleanArray, CHUNK_ROWS, GroupKey, Int64Array, RecordBatch,
+    Result, SchemaRef, UInt64Array, grouped_sum, predicate,
 };
-use crate::operator::keyed::{GroupId, KeyCut, KeySchema, KeyStore, MORSEL_ROWS};
 use crate::StateBudget;
-use datafusion::arrow::{
-    array::Array,
-    datatypes::DataType,
-    execution::memory_pool::MemoryReservation,
+use crate::operator::keyed::{GroupId, KeyCut, KeySchema, KeyStore, MORSEL_ROWS};
+use datafusion::arrow::{array::Array, datatypes::DataType};
+use datafusion::execution::memory_pool::MemoryReservation;
+use std::{
+    mem::size_of,
+    sync::{Arc, Mutex, MutexGuard},
 };
-use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Clone)]
 pub(super) struct KeyedSum {
@@ -97,6 +97,11 @@ impl KeyedSum {
 
     pub(super) fn layout_fingerprint(&self) -> [u8; 32] {
         self.lock().keys.layout_fingerprint()
+    }
+
+    pub(super) fn canonical_slot(&self, slot: usize) -> Result<Arc<[u8]>> {
+        let group = GroupId::new(slot)?;
+        Ok(self.lock().keys.canonical(group))
     }
 
     pub(super) fn begin(&self, budget: Option<StateBudget>) -> Result<Transaction> {
@@ -210,12 +215,23 @@ impl Transaction {
         let groups = state
             .keys
             .route_selected_with_limit(keys, selection, self.limit, check)?;
-        self.grow(&mut state)?;
+        grow(&mut state)?;
         for (row, group) in groups.into_iter().enumerate() {
             if selection.is_some_and(|selection| !predicate::selected(selection, row)) {
                 continue;
             }
-            self.touch(&mut state, group)?;
+            touch(
+                &mut state,
+                group,
+                self.generation,
+                self.old_groups,
+                &mut TouchUndo {
+                    affected: &mut self.affected,
+                    leased: &mut self.leased,
+                    undo: &mut self.undo,
+                    reservation: &mut self.undo_reservation,
+                },
+            )?;
             if filter.is_some_and(|filter| !predicate::selected(filter, row)) {
                 continue;
             }
@@ -266,54 +282,28 @@ impl Transaction {
         let keys = chunk.columns()[..key_count].to_vec();
         let input = SumInput::new(chunk.column(key_count))?;
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        let groups = state
-            .keys
-            .route_with_limit(&keys, self.limit, check)?;
-        self.grow(&mut state)?;
+        let groups = state.keys.route_with_limit(&keys, self.limit, check)?;
+        grow(&mut state)?;
         for (row, group) in groups.into_iter().enumerate() {
             if !seen.insert(group) || (group.index() < self.old_groups && !replace) {
-                return Err(super::df_error("keyed SUM", "native state contains duplicate keys"));
+                return Err(super::df_error(
+                    "keyed SUM",
+                    "native state contains duplicate keys",
+                ));
             }
-            self.touch(&mut state, group)?;
+            touch(
+                &mut state,
+                group,
+                self.generation,
+                self.old_groups,
+                &mut TouchUndo {
+                    affected: &mut self.affected,
+                    leased: &mut self.leased,
+                    undo: &mut self.undo,
+                    reservation: &mut self.undo_reservation,
+                },
+            )?;
             state.sums.set(group, input.value(row));
-        }
-        Ok(())
-    }
-
-    fn grow(&self, state: &mut KeyedSumState) -> Result<()> {
-        let groups = state.keys.len();
-        let new = groups.saturating_sub(state.sums.len());
-        if new == 0 {
-            return Ok(());
-        }
-        let width = state.sums.width() + std::mem::size_of::<u64>();
-        let bytes = new
-            .checked_mul(width)
-            .ok_or_else(|| super::df_error("keyed SUM", "typed state charge overflowed"))?;
-        state.keys.charge(bytes)?;
-        state.sums.grow(groups);
-        state.marks.resize(groups, 0);
-        Ok(())
-    }
-
-    fn touch(&mut self, state: &mut KeyedSumState, group: GroupId) -> Result<()> {
-        if state.marks[group.index()] == self.generation {
-            return Ok(());
-        }
-        let existing = usize::from(group.index() < self.old_groups);
-        let charge = std::mem::size_of::<GroupId>()
-            + existing
-                * (std::mem::size_of::<GroupId>()
-                    + std::mem::size_of::<(GroupId, SumValue)>());
-        self.undo_reservation
-            .try_grow(charge)
-            .map_err(|error| super::df_error("keyed SUM", error))?;
-        state.marks[group.index()] = self.generation;
-        self.affected.push(group);
-        if group.index() < self.old_groups {
-            state.keys.acquire(group)?;
-            self.leased.push(group);
-            self.undo.push((group, state.sums.value(group)));
         }
         Ok(())
     }
@@ -325,7 +315,7 @@ impl Transaction {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if !commit {
             for (group, value) in self.undo.drain(..).rev() {
-                state.sums.set(group, value);
+                state.sums.set(group, Some(value));
             }
             state.sums.truncate(self.old_groups);
             state.marks.truncate(self.old_groups);
@@ -337,6 +327,55 @@ impl Transaction {
         state.active = false;
         self.active = false;
     }
+}
+
+struct TouchUndo<'a> {
+    affected: &'a mut Vec<GroupId>,
+    leased: &'a mut Vec<GroupId>,
+    undo: &'a mut Vec<(GroupId, SumValue)>,
+    reservation: &'a mut MemoryReservation,
+}
+
+fn grow(state: &mut KeyedSumState) -> Result<()> {
+    let groups = state.keys.len();
+    let new = groups.saturating_sub(state.sums.len());
+    if new == 0 {
+        return Ok(());
+    }
+    let width = state.sums.width() + size_of::<u64>();
+    let bytes = new
+        .checked_mul(width)
+        .ok_or_else(|| super::df_error("keyed SUM", "typed state charge overflowed"))?;
+    state.keys.charge(bytes)?;
+    state.sums.grow(groups);
+    state.marks.resize(groups, 0);
+    Ok(())
+}
+
+fn touch(
+    state: &mut KeyedSumState,
+    group: GroupId,
+    generation: u64,
+    old_groups: usize,
+    undo: &mut TouchUndo<'_>,
+) -> Result<()> {
+    if state.marks[group.index()] == generation {
+        return Ok(());
+    }
+    let existing = usize::from(group.index() < old_groups);
+    let charge =
+        size_of::<GroupId>() + existing * (size_of::<GroupId>() + size_of::<(GroupId, SumValue)>());
+    undo.reservation
+        .try_grow(charge)
+        .map_err(|error| super::df_error("keyed SUM", error))?;
+    state.marks[group.index()] = generation;
+    undo.affected.push(group);
+    if group.index() < old_groups {
+        state.keys.acquire(group)?;
+        undo.leased.push(group);
+        undo.undo.push((group, state.sums.value(group)));
+    }
+    Ok(())
 }
 
 impl Drop for Transaction {
@@ -357,10 +396,10 @@ impl KeyedSumState {
             check()?;
             return Ok(vec![RecordBatch::new_empty(schema)]);
         }
-        let mut records = Vec::with_capacity(count.div_ceil(MORSEL_ROWS));
-        for start in (0..count).step_by(MORSEL_ROWS) {
+        let mut records = Vec::with_capacity(count.div_ceil(CHUNK_ROWS));
+        for start in (0..count).step_by(CHUNK_ROWS) {
             check()?;
-            let end = count.min(start + MORSEL_ROWS);
+            let end = count.min(start + CHUNK_ROWS);
             let groups = (start..end)
                 .map(|row| {
                     let slot = slots.map_or(row, |slots| slots[row]);
@@ -399,18 +438,22 @@ impl<'a> SumInput<'a> {
                 .downcast_ref::<UInt64Array>()
                 .map(SumInput::UInt64)
                 .ok_or_else(|| super::df_error("keyed SUM", "UInt64 input array differs")),
-            _ => Err(super::df_error("keyed SUM", "integer SUM input type differs")),
+            _ => Err(super::df_error(
+                "keyed SUM",
+                "integer SUM input type differs",
+            )),
         }
     }
 
     fn value(&self, row: usize) -> Option<SumValue> {
         match self {
-            Self::Int64(values) if values.is_valid(row) => Some(SumValue::Int64(Some(values.value(row)))),
+            Self::Int64(values) if values.is_valid(row) => {
+                Some(SumValue::Int64(Some(values.value(row))))
+            }
             Self::UInt64(values) if values.is_valid(row) => {
                 Some(SumValue::UInt64(Some(values.value(row))))
             }
-            Self::Int64(_) => None,
-            Self::UInt64(_) => None,
+            Self::Int64(_) | Self::UInt64(_) => None,
         }
     }
 }
@@ -425,8 +468,8 @@ impl SumColumn {
 
     fn width(&self) -> usize {
         match self {
-            Self::Int64(_) => std::mem::size_of::<Option<i64>>(),
-            Self::UInt64(_) => std::mem::size_of::<Option<u64>>(),
+            Self::Int64(_) => size_of::<Option<i64>>(),
+            Self::UInt64(_) => size_of::<Option<u64>>(),
         }
     }
 
@@ -452,12 +495,21 @@ impl SumColumn {
     }
 
     fn set(&mut self, group: GroupId, value: Option<SumValue>) {
-        match (self, value) {
-            (Self::Int64(values), Some(SumValue::Int64(value))) => values[group.index()] = value,
-            (Self::UInt64(values), Some(SumValue::UInt64(value))) => values[group.index()] = value,
-            (Self::Int64(values), None) => values[group.index()] = None,
-            (Self::UInt64(values), None) => values[group.index()] = None,
-            _ => unreachable!("typed SUM state and input were compiled together"),
+        match self {
+            Self::Int64(values) => {
+                values[group.index()] = match value {
+                    Some(SumValue::Int64(value)) => value,
+                    None => None,
+                    _ => unreachable!("typed SUM state and input were compiled together"),
+                };
+            }
+            Self::UInt64(values) => {
+                values[group.index()] = match value {
+                    Some(SumValue::UInt64(value)) => value,
+                    None => None,
+                    _ => unreachable!("typed SUM state and input were compiled together"),
+                };
+            }
         }
     }
 
@@ -478,10 +530,16 @@ impl SumColumn {
     fn array(&self, groups: &[GroupId]) -> ArrayRef {
         match self {
             Self::Int64(values) => Arc::new(Int64Array::from(
-                groups.iter().map(|group| values[group.index()]).collect::<Vec<_>>(),
+                groups
+                    .iter()
+                    .map(|group| values[group.index()])
+                    .collect::<Vec<_>>(),
             )),
             Self::UInt64(values) => Arc::new(UInt64Array::from(
-                groups.iter().map(|group| values[group.index()]).collect::<Vec<_>>(),
+                groups
+                    .iter()
+                    .map(|group| values[group.index()])
+                    .collect::<Vec<_>>(),
             )),
         }
     }

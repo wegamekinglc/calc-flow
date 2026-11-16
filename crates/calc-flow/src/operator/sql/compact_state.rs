@@ -203,13 +203,11 @@ impl IncrementalSql {
             group_count: self.group_count(),
             ordered_last,
             policy: self.native_policy(),
-            key_layout: self.keyed_sum.as_ref().map(|keyed| {
-                keyed
-                    .layout_fingerprint()
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect()
-            }),
+            key_layout: self
+                .keyed_sum
+                .as_ref()
+                .map(super::keyed_sum::KeyedSum::layout_fingerprint)
+                .map(hex::encode),
             _reservation: reservation,
         })
     }
@@ -428,15 +426,15 @@ impl IncrementalSql {
 
     fn export_keyed(
         &self,
-        slots: Option<Vec<usize>>,
+        slots: Option<&[usize]>,
         name: &str,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<PaidNativeStateRecords> {
         let keyed = self.keyed_sum.as_ref().expect("keyed SUM plan");
         let mut descriptor = self.native_descriptor(name)?;
-        let rows = slots.as_ref().map_or(keyed.len(), Vec::len);
+        let rows = slots.map_or(keyed.len(), <[usize]>::len);
         descriptor.group_count = rows;
-        let record_count = rows.div_ceil(super::MORSEL_ROWS).max(1);
+        let record_count = rows.div_ceil(CHUNK_ROWS).max(1);
         let columns = checked_bytes(0, [(descriptor.wire_schema.fields().len(), 512)], name)?;
         let charge = checked_bytes(
             4096,
@@ -446,12 +444,16 @@ impl IncrementalSql {
             ],
             name,
         )?;
-        let charge = checked_bytes(charge, [(keyed.output_charge(slots.as_deref())?, 1)], name)?;
+        let charge = checked_bytes(charge, [(keyed.output_charge(slots)?, 1)], name)?;
         let reservation = self.scratch.new_empty();
         ensure_reservation(&reservation, charge, name)?;
-        let records = keyed.export(slots.as_deref(), descriptor.wire_schema.clone(), check)?;
+        let records = keyed.export(slots, descriptor.wire_schema.clone(), check)?;
         check()?;
-        Ok(PaidNativeStateRecords::new(records, descriptor, reservation))
+        Ok(PaidNativeStateRecords::new(
+            records,
+            descriptor,
+            reservation,
+        ))
     }
 
     pub(in crate::operator::sql) fn export_dirty_state(
@@ -462,7 +464,7 @@ impl IncrementalSql {
         if self.keyed_sum.is_some() {
             let mut slots = self.dirty.slots().to_vec();
             slots.sort_unstable();
-            return self.export_keyed(Some(slots), name, &mut || check());
+            return self.export_keyed(Some(&slots), name, &mut || check());
         }
         let mut cursor = export::ExportCursor::dirty(self, name)?;
         while !cursor.step(&mut || check())? {}
@@ -478,7 +480,7 @@ impl IncrementalSql {
         if self.keyed_sum.is_some() {
             let mut slots = self.dirty.slots().to_vec();
             slots.sort_unstable();
-            return self.export_keyed(Some(slots), name, &mut check);
+            return self.export_keyed(Some(&slots), name, &mut check);
         }
         let mut cursor = export::ExportCursor::dirty(self, name)?;
         loop {
@@ -524,7 +526,10 @@ impl IncrementalSql {
         check_cancelled()?;
         if !self.groups.is_empty()
             || !self.index.is_empty()
-            || self.keyed_sum.as_ref().is_some_and(|keyed| !keyed.is_empty())
+            || self
+                .keyed_sum
+                .as_ref()
+                .is_some_and(|keyed| !keyed.is_empty())
         {
             return Err(df_error(name, "native state import requires an empty plan"));
         }
@@ -893,7 +898,7 @@ impl IncrementalSql {
         Ok(Group {
             key: Arc::from(key),
             values: Arc::from(values),
-            aggregates: GroupAggregates::restored(states, results, name)?,
+            aggregates: GroupAggregates::restored(states, results),
             reservation,
         })
     }

@@ -28,11 +28,11 @@ use datafusion::{
 };
 use hashbrown::HashMap;
 
+use crate::operator::keyed::MORSEL_ROWS;
 use crate::{
     Batch, CalcFlowError, DataFusionRuntime, Result, StreamOperatorContext,
     expression::ValidatedQuery,
 };
-use crate::operator::keyed::MORSEL_ROWS;
 
 const CHUNK_ROWS: usize = 8192;
 
@@ -549,10 +549,7 @@ impl PartialGroups {
                 })
                 .collect::<Result<Vec<_>>>()?;
             let result = self.rank_result(index, &state, name)?;
-            candidate
-                .group
-                .aggregates
-                .replace(index, state, result, name)?;
+            candidate.group.aggregates.replace(index, state, result);
         } else {
             let arrays = arrays
                 .iter()
@@ -927,7 +924,10 @@ impl IncrementalSql {
         policy.validate(&self.checkpoint_policy(), rows, name)?;
         if !self.groups.is_empty()
             || !self.index.is_empty()
-            || self.keyed_sum.as_ref().is_some_and(|keyed| !keyed.is_empty())
+            || self
+                .keyed_sum
+                .as_ref()
+                .is_some_and(|keyed| !keyed.is_empty())
         {
             return Err(df_error(name, "restored proof requires an empty candidate"));
         }
@@ -1055,7 +1055,7 @@ impl IncrementalSql {
                     })
             })
             .collect();
-        GroupAggregates::Generic {
+        GroupAggregates {
             states,
             results: vec![ScalarValue::Null; self.aggregates.len()],
         }
@@ -1185,7 +1185,9 @@ impl IncrementalSql {
             .try_grow(output_charge)
             .map_err(|error| df_error(name, error))?;
         let mut check = || context.check_cancelled();
+        self.snapshot_keys.begin();
         let records = transaction.records(self.aggregate_schema.clone(), &mut check)?;
+        let records = self.keyed_snapshot_records(records, name)?;
         let records = records
             .iter()
             .map(|record| self.keyed_output_record(record, name))
@@ -1230,7 +1232,14 @@ impl IncrementalSql {
             for offset in (0..record.num_rows()).step_by(MORSEL_ROWS) {
                 context.check_cancelled()?;
                 let chunk = record.slice(offset, MORSEL_ROWS.min(record.num_rows() - offset));
-                self.update_keyed_chunk(&chunk, transaction, workspace.0, workspace.1, context, name)?;
+                self.update_keyed_chunk(
+                    &chunk,
+                    transaction,
+                    workspace.0,
+                    workspace.1,
+                    context,
+                    name,
+                )?;
                 processed += chunk.num_rows();
             }
         }
@@ -1264,7 +1273,7 @@ impl IncrementalSql {
             &input.keys,
             &input.arguments[0][0],
             selection,
-            input.filters[0].as_ref(),
+            input.filters.first().and_then(Option::as_ref),
             &mut || context.check_cancelled(),
         )
     }
@@ -1276,17 +1285,48 @@ impl IncrementalSql {
     ) -> Result<usize> {
         let width = checked_bytes(
             0,
-            [
-                (self.aggregates.len(), 128),
-                (self.projection_nodes, 128),
-            ],
+            [(self.aggregates.len(), 128), (self.projection_nodes, 128)],
             name,
         )?;
         checked_bytes(
             transaction.output_charge()?,
-            [(self.keyed_sum.as_ref().expect("keyed SUM plan").len(), width)],
+            [(
+                self.keyed_sum.as_ref().expect("keyed SUM plan").len(),
+                width,
+            )],
             name,
         )
+    }
+
+    fn keyed_snapshot_records(
+        &self,
+        records: Vec<RecordBatch>,
+        name: &str,
+    ) -> Result<Vec<RecordBatch>> {
+        records
+            .into_iter()
+            .enumerate()
+            .map(|(chunk, record)| {
+                let rows = record.num_rows();
+                if rows == 0 {
+                    return Ok(record);
+                }
+                let keyed = self.keyed_sum.as_ref().expect("keyed SUM plan");
+                let first_key = keyed.canonical_slot(chunk * CHUNK_ROWS)?;
+                if let Some(keys) = self.snapshot_keys.get(chunk, rows, &first_key) {
+                    let columns = keys
+                        .iter()
+                        .cloned()
+                        .chain(record.columns()[self.keys.len()..].iter().cloned())
+                        .collect::<Vec<_>>();
+                    return RecordBatch::try_new(record.schema(), columns)
+                        .map_err(|error| df_error(name, error));
+                }
+                let columns = Arc::<[ArrayRef]>::from(record.columns()[..self.keys.len()].to_vec());
+                self.snapshot_keys.stage(chunk, rows, first_key, columns);
+                Ok(record)
+            })
+            .collect()
     }
 
     fn keyed_output_record(&self, aggregate: &RecordBatch, name: &str) -> Result<RecordBatch> {
@@ -1355,11 +1395,7 @@ impl IncrementalSql {
                 (
                     &self.aggregates,
                     &self.aggregate_filters,
-                    candidate
-                        .group
-                        .aggregates
-                        .generic_states()
-                        .expect("global state is generic"),
+                    candidate.group.aggregates.generic_states(),
                     self.predicate.as_ref(),
                     &self.input_checks,
                 ),
@@ -1371,10 +1407,7 @@ impl IncrementalSql {
         let coalesced = values.coalesced;
         for (index, state) in values.values.into_iter().enumerate() {
             let result = global.result(index, &state, name)?;
-            candidate
-                .group
-                .aggregates
-                .replace(index, state, result, name)?;
+            candidate.group.aggregates.replace(index, state, result);
         }
         Ok(coalesced)
     }
@@ -2073,10 +2106,7 @@ impl IncrementalSql {
                     accumulator.as_mut(),
                     name,
                 )?;
-                candidate
-                    .group
-                    .aggregates
-                    .replace(index, state, result, name)?;
+                candidate.group.aggregates.replace(index, state, result);
             }
         }
         Ok(())
@@ -3953,9 +3983,7 @@ mod tests {
             .unwrap();
         collector.drain("output");
         let incremental = operator.incremental.as_mut().unwrap();
-        let GroupAggregates::Generic { states, .. } = &mut incremental.groups[0].aggregates else {
-            panic!("AVG state is generic")
-        };
+        let GroupAggregates { states, .. } = &mut incremental.groups[0].aggregates;
         states[0][0] = ScalarValue::UInt64(Some(count));
         let before = operator.checkpoint(crate::Epoch::INITIAL).unwrap();
         let failed = std::panic::AssertUnwindSafe(operator.process_data(

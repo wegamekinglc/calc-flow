@@ -202,9 +202,7 @@ async fn test_grouped_integer_sum_pending_history_does_not_retain_scalar_buffers
             let candidate = plan
                 .candidate(Some(previous), &previous.key, None, "history")
                 .unwrap();
-            let GroupAggregates::Generic { states, .. } = &candidate.group.aggregates else {
-                panic!("mixed sums must remain generic")
-            };
+            let GroupAggregates { states, .. } = &candidate.group.aggregates;
             for (expression, state) in plan.aggregates.iter().zip(states) {
                 let bytes = state.capacity() * size_of::<ScalarValue>();
                 if grouped_sum::integer_sum(expression) {

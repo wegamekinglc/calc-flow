@@ -16,12 +16,48 @@ struct Row {
 
 fn fixture(unsigned: bool) -> Vec<Row> {
     let mut rows = vec![
-        Row { key: Some(2), label: Some("b"), value: Some(4), selected: true, keep: true },
-        Row { key: None, label: None, value: None, selected: true, keep: true },
-        Row { key: Some(1), label: Some("a"), value: Some(7), selected: false, keep: true },
-        Row { key: Some(2), label: Some("b"), value: Some(3), selected: true, keep: true },
-        Row { key: Some(9), label: Some("dropped"), value: Some(100), selected: true, keep: false },
-        Row { key: Some(1), label: Some("a"), value: Some(5), selected: true, keep: true },
+        Row {
+            key: Some(2),
+            label: Some("b"),
+            value: Some(4),
+            selected: true,
+            keep: true,
+        },
+        Row {
+            key: None,
+            label: None,
+            value: None,
+            selected: true,
+            keep: true,
+        },
+        Row {
+            key: Some(1),
+            label: Some("a"),
+            value: Some(7),
+            selected: false,
+            keep: true,
+        },
+        Row {
+            key: Some(2),
+            label: Some("b"),
+            value: Some(3),
+            selected: true,
+            keep: true,
+        },
+        Row {
+            key: Some(9),
+            label: Some("dropped"),
+            value: Some(100),
+            selected: true,
+            keep: false,
+        },
+        Row {
+            key: Some(1),
+            label: Some("a"),
+            value: Some(5),
+            selected: true,
+            keep: true,
+        },
     ];
     rows.extend((0..37i64).map(|index| Row {
         key: Some(index % 5),
@@ -42,7 +78,7 @@ fn fixture(unsigned: bool) -> Vec<Row> {
         rows.push(Row {
             key: Some(2),
             label: Some("b"),
-            value: Some(i64::MAX as u64),
+            value: Some(u64::try_from(i64::MAX).unwrap()),
             selected: true,
             keep: true,
         });
@@ -58,7 +94,10 @@ fn record(unsigned: bool, rows: &[Row]) -> RecordBatch {
     } else {
         Arc::new(Int64Array::from(
             rows.iter()
-                .map(|row| row.value.map(|value| i64::from_ne_bytes(value.to_ne_bytes())))
+                .map(|row| {
+                    row.value
+                        .map(|value| i64::from_ne_bytes(value.to_ne_bytes()))
+                })
                 .collect::<Vec<_>>(),
         )) as ArrayRef
     };
@@ -131,7 +170,9 @@ fn expected(unsigned: bool, rows: &[Row]) -> Vec<Vec<ScalarValue>> {
                 keys.len() - 1
             }
         };
-        if row.selected && let Some(value) = row.value {
+        if row.selected
+            && let Some(value) = row.value
+        {
             if unsigned {
                 unsigned_sums[group] = Some(unsigned_sums[group].unwrap_or(0).wrapping_add(value));
             } else {
@@ -183,13 +224,15 @@ async fn test_keyed_integer_sum_matches_naive_oracle_across_batch_splits() {
                 history.extend_from_slice(&rows[start..end]);
                 let batch = Batch::table(vec![chunk], crate::BatchMetadata::default()).unwrap();
                 let transaction = plan.update(&batch, &context, "keyed-sum").await.unwrap();
-                assert_eq!(output_rows(&transaction.records), expected(unsigned, history));
+                assert_eq!(
+                    output_rows(&transaction.records),
+                    expected(unsigned, &history)
+                );
                 plan.commit(transaction);
                 assert!(plan.groups.is_empty());
                 assert!(plan.index.is_empty());
             }
         }
-        drop(plan);
         assert_eq!(runtime.incremental_memory_pool().reserved(), 0);
     }
 }
@@ -207,11 +250,8 @@ async fn test_keyed_integer_sum_discard_restores_values_births_ids_and_charges()
     );
     let context = StreamOperatorContext::new(&job, "keyed-sum", None);
     let rows = fixture(false);
-    let initial = Batch::table(
-        vec![record(false, &rows[..4])],
-        crate::BatchMetadata::default(),
-    )
-    .unwrap();
+    let full = record(false, &rows);
+    let initial = Batch::table(vec![full.slice(0, 4)], crate::BatchMetadata::default()).unwrap();
     let transaction = plan.update(&initial, &context, "keyed-sum").await.unwrap();
     plan.commit(transaction);
     let committed_births = plan.keyed_sum.as_ref().unwrap().canonical_births();
@@ -229,7 +269,7 @@ async fn test_keyed_integer_sum_discard_restores_values_births_ids_and_charges()
         runtime.incremental_memory_pool().reserved(),
     );
     let next = Batch::table(
-        vec![record(false, &rows[4..])],
+        vec![full.slice(4, rows.len() - 4)],
         crate::BatchMetadata::default(),
     )
     .unwrap();
@@ -266,14 +306,17 @@ async fn test_keyed_integer_sum_restore_reexports_identically_and_continues() {
         );
         let context = StreamOperatorContext::new(&job, "keyed-sum", None);
         let rows = fixture(unsigned);
-        let initial = Batch::table(
-            vec![record(unsigned, &rows[..8])],
-            crate::BatchMetadata::default(),
-        )
-        .unwrap();
-        let transaction = original.update(&initial, &context, "keyed-sum").await.unwrap();
+        let full = record(unsigned, &rows);
+        let initial =
+            Batch::table(vec![full.slice(0, 8)], crate::BatchMetadata::default()).unwrap();
+        let transaction = original
+            .update(&initial, &context, "keyed-sum")
+            .await
+            .unwrap();
         original.commit(transaction);
-        let exported = original.export_native_state("keyed-sum", || Ok(())).unwrap();
+        let exported = original
+            .export_native_state("keyed-sum", || Ok(()))
+            .unwrap();
         let canonical = original.keyed_sum.as_ref().unwrap().canonical_bytes();
         let mut restored = plan(&runtime, unsigned)
             .await
@@ -285,11 +328,16 @@ async fn test_keyed_integer_sum_restore_reexports_identically_and_continues() {
                 "keyed-sum",
             )
             .unwrap();
-        let reexported = restored.export_native_state("keyed-sum", || Ok(())).unwrap();
+        let reexported = restored
+            .export_native_state("keyed-sum", || Ok(()))
+            .unwrap();
         assert_eq!(exported.records(), reexported.records());
-        assert_eq!(restored.keyed_sum.as_ref().unwrap().canonical_bytes(), canonical);
+        assert_eq!(
+            restored.keyed_sum.as_ref().unwrap().canonical_bytes(),
+            canonical
+        );
         let next = Batch::table(
-            vec![record(unsigned, &rows[8..])],
+            vec![full.slice(8, rows.len() - 8)],
             crate::BatchMetadata::default(),
         )
         .unwrap();

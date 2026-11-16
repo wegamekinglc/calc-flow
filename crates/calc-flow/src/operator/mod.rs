@@ -13,11 +13,11 @@ mod expression;
 pub use distinct::{DistinctHistory, DistinctOperator, DistinctSpec};
 pub(crate) mod ingress;
 mod join;
+mod key_identity;
 mod keyed;
 #[cfg(test)]
 #[path = "keyed/tests.rs"]
 mod keyed_tests;
-mod key_identity;
 pub(crate) mod late_output;
 mod output_chunk;
 mod retained_columns;

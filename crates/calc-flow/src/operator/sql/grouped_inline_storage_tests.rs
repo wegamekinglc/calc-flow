@@ -22,10 +22,7 @@ async fn test_grouped_inline_new_key_budget_refusal_is_atomic() {
     let groups = fixture.plan.keyed_sum.as_ref().unwrap().len();
     fixture
         .runtime
-        .set_compact_state_limit(
-            Some(u64::try_from(baseline).unwrap()),
-            "inline-budget",
-        )
+        .set_compact_state_limit(Some(u64::try_from(baseline).unwrap()), "inline-budget")
         .unwrap();
     let record = RecordBatch::try_from_iter(vec![
         (
@@ -47,10 +44,7 @@ async fn test_grouped_inline_new_key_budget_refusal_is_atomic() {
         CancellationToken::new(),
     );
     let context = StreamOperatorContext::new(&job, "inline-budget", None);
-    let error = fixture
-        .plan
-        .update(&input, &context, "inline-budget")
-        .await;
+    let error = fixture.plan.update(&input, &context, "inline-budget").await;
     assert!(error.is_err());
     assert_eq!(fixture.runtime.compact_state_bytes(), baseline);
     assert_eq!(fixture.plan.keyed_sum.as_ref().unwrap().len(), groups);

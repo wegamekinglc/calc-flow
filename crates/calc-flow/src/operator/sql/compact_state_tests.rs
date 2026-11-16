@@ -20,9 +20,7 @@ async fn test_compact_native_state_wire_ignores_cached_results_and_rebuilds_nati
         let saved = snapshot(&original);
         let first = original.export_native_state("codec", || Ok(())).unwrap();
         for group in &mut original.groups {
-            let GroupAggregates::Generic { results, .. } = &mut group.aggregates else {
-                panic!("decimal state must remain generic")
-            };
+            let GroupAggregates { results, .. } = &mut group.aggregates;
             results.clear();
         }
         let second = original.export_native_state("codec", || Ok(())).unwrap();

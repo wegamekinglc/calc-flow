@@ -144,8 +144,15 @@ fn test_keyed_typed_routing_matches_naive_oracle_for_every_supported_type() {
     for values in cases {
         let array = ScalarValue::iter_to_array(values.iter().cloned()).unwrap();
         let mut store = store(&runtime, vec![field(array.data_type().clone())]);
-        let expected = scalar_oracle(&values.into_iter().map(|value| vec![value]).collect::<Vec<_>>());
-        let actual = store.route_colliding(&[array.clone()], &mut || Ok(())).unwrap();
+        let expected = scalar_oracle(
+            &values
+                .into_iter()
+                .map(|value| vec![value])
+                .collect::<Vec<_>>(),
+        );
+        let actual = store
+            .route_colliding(&[array.clone()], &mut || Ok(()))
+            .unwrap();
         assert_eq!(
             actual.iter().map(|id| id.index()).collect::<Vec<_>>(),
             expected
@@ -229,10 +236,7 @@ fn test_keyed_composite_null_collisions_and_batch_splits_preserve_identity() {
 fn test_keyed_cancellation_at_morsel_and_long_string_boundaries_is_atomic() {
     let runtime = runtime();
     let mut store = store(&runtime, vec![field(DataType::Utf8)]);
-    route(
-        &mut store,
-        &[ScalarValue::Utf8(Some("committed".into()))],
-    );
+    route(&mut store, &[ScalarValue::Utf8(Some("committed".into()))]);
     let before = (
         store.len(),
         store.next_id(),
@@ -250,7 +254,11 @@ fn test_keyed_cancellation_at_morsel_and_long_string_boundaries_is_atomic() {
     let mut checks = 0;
     let result = store.route(&[array], &mut || {
         checks += 1;
-        if checks == 6 { Err(cancelled()) } else { Ok(()) }
+        if checks == 6 {
+            Err(cancelled())
+        } else {
+            Ok(())
+        }
     });
     assert!(matches!(result, Err(CalcFlowError::Cancelled { .. })));
     assert!(checks >= 3);
@@ -274,7 +282,7 @@ fn test_keyed_layout_fingerprint_is_deterministic_and_schema_exact() {
     let runtime = runtime();
     let utc: Arc<str> = Arc::from("UTC");
     let other: Arc<str> = Arc::from("Europe/Paris");
-    let schema = KeySchema::groupable(vec![field(DataType::TimestampMicrosecond(
+    let schema = KeySchema::groupable(vec![field(DataType::Timestamp(
         TimeUnit::Microsecond,
         Some(utc.clone()),
     ))])
@@ -283,13 +291,10 @@ fn test_keyed_layout_fingerprint_is_deterministic_and_schema_exact() {
         schema.clone(),
         runtime.incremental_reservation("fingerprint-left"),
     );
-    let right = KeyStore::new(
-        schema,
-        runtime.incremental_reservation("fingerprint-right"),
-    );
+    let right = KeyStore::new(schema, runtime.incremental_reservation("fingerprint-right"));
     assert_eq!(left.layout_fingerprint(), right.layout_fingerprint());
     let changed = KeyStore::new(
-        KeySchema::groupable(vec![field(DataType::TimestampMicrosecond(
+        KeySchema::groupable(vec![field(DataType::Timestamp(
             TimeUnit::Microsecond,
             Some(other),
         ))])
