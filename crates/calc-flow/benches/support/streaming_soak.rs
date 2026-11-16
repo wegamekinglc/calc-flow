@@ -4102,6 +4102,7 @@ async fn run_checkpoint_soak_child(
         checkpoint_interval: Duration::from_millis(plan.checkpoint_interval_millis),
         checkpoint_timeout: Duration::from_millis(plan.checkpoint_timeout_millis),
         retained_epochs: plan.retained_epochs,
+        checkpoint_inflight_max_bytes: 1 << 30,
         edge_budget: EdgeBudget {
             max_rows: 8,
             max_bytes: 1 << 20,
@@ -5141,6 +5142,7 @@ async fn checkpoint_soak_cancel_window_preserves_clean_terminal_metrics() {
         checkpoint_interval: Duration::from_secs(2),
         checkpoint_timeout: Duration::from_secs(10),
         retained_epochs: CHECKPOINT_SOAK_RETAINED_EPOCHS,
+        checkpoint_inflight_max_bytes: 1 << 30,
         edge_budget: EdgeBudget {
             max_rows: 8,
             max_bytes: 1 << 20,

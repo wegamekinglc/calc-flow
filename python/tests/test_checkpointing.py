@@ -24,6 +24,19 @@ def test_checkpointing_defaults_to_mode_and_preserves_positional_config() -> Non
         assert native["checkpointing"] is value
 
 
+def test_checkpoint_inflight_max_bytes_defaults_and_validates() -> None:
+    assert cf.StreamRuntimeConfig()._native()["checkpoint_inflight_max_bytes"] == 1 << 30
+    assert cf.StreamRuntimeConfig(checkpoint_inflight_max_bytes=4096)._native()[
+        "checkpoint_inflight_max_bytes"
+    ] == 4096
+    with pytest.raises(ValueError, match="checkpoint_inflight_max_bytes"):
+        cf.StreamRuntimeConfig(checkpoint_inflight_max_bytes=0)._native()
+    with pytest.raises(ValueError, match="checkpoint_inflight_max_bytes"):
+        cf.StreamRuntimeConfig(
+            checkpoint_inflight_max_bytes=1 << 53
+        )._native()
+
+
 @pytest.mark.parametrize("value", [0, 1, "false"])
 def test_checkpointing_requires_a_boolean_or_none(value: object) -> None:
     with pytest.raises(TypeError, match="checkpointing must be a bool or None"):

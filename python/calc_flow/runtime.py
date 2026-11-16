@@ -772,6 +772,7 @@ class StreamRuntimeConfig:
     checkpoint_timeout: timedelta = timedelta(minutes=10)
     edge_budget: EdgeBudget = EdgeBudget()
     retained_epochs: int = 2
+    checkpoint_inflight_max_bytes: int = 1 << 30
     sql_state_budget: StateBudget | None = None
     checkpointing: bool | None = None
     sql_compact_state_budget: StateBudget | None = None
@@ -786,6 +787,13 @@ class StreamRuntimeConfig:
             raise TypeError("edge_budget must be a calc_flow.EdgeBudget")
         if type(self.retained_epochs) is not int or self.retained_epochs <= 0:
             raise ValueError("retained_epochs must be a positive integer")
+        if (
+            type(self.checkpoint_inflight_max_bytes) is not int
+            or not 0 < self.checkpoint_inflight_max_bytes <= 9_007_199_254_740_991
+        ):
+            raise ValueError(
+                "checkpoint_inflight_max_bytes must be a positive JSON-safe integer"
+            )
         budgets = (
             ("sql_state", self.sql_state_budget, "max_rows"),
             ("sql_compact_state", self.sql_compact_state_budget, "max_groups"),
@@ -808,6 +816,7 @@ class StreamRuntimeConfig:
             "edge_max_rows": self.edge_budget.max_rows,
             "edge_max_bytes": self.edge_budget.max_bytes,
             "retained_epochs": self.retained_epochs,
+            "checkpoint_inflight_max_bytes": self.checkpoint_inflight_max_bytes,
         }
         for name, budget, rows_key in budgets:
             if budget is not None:

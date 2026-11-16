@@ -115,6 +115,9 @@ pub struct StreamRuntimeConfig {
     /// Optional retained-input limit for each aggregate SQL node.
     pub sql_state_budget: Option<crate::StateBudget>,
     pub retained_epochs: usize,
+    /// Logical checkpoint-retention limit for one in-flight epoch.
+    /// Defaults to 1 GiB and does not represent process RSS.
+    pub checkpoint_inflight_max_bytes: u64,
     /// Optional per-node compact ownership limit (rows count groups).
     /// Supplying this requires every aggregate SQL node to admit compact execution.
     /// Candidate copies and cached checkpoints share the byte limit.
@@ -128,6 +131,8 @@ pub struct StreamRuntimeConfig {
     pub sql_replacement_state_budget: Option<crate::StateBudget>,
 }
 
+const MAX_JSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
 impl Default for StreamRuntimeConfig {
     fn default() -> Self {
         Self {
@@ -137,6 +142,7 @@ impl Default for StreamRuntimeConfig {
             edge_budget: EdgeBudget::default(),
             sql_state_budget: None,
             retained_epochs: 2,
+            checkpoint_inflight_max_bytes: 1 << 30,
             sql_compact_state_budget: None,
             sql_snapshot_state_budget: None,
             sql_replacement_state_budget: None,
@@ -155,6 +161,14 @@ impl StreamRuntimeConfig {
         exact_micros(self.checkpoint_interval, "checkpoint_interval")?;
         exact_micros(self.checkpoint_timeout, "checkpoint_timeout")?;
         EdgeBudget::new(self.edge_budget.max_rows, self.edge_budget.max_bytes)?;
+        if self.checkpoint_inflight_max_bytes == 0
+            || self.checkpoint_inflight_max_bytes > MAX_JSON_SAFE_INTEGER
+        {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "checkpoint_inflight_max_bytes".into(),
+                message: "must be a positive JSON-safe integer".into(),
+            });
+        }
         Ok(())
     }
 }
@@ -1381,6 +1395,7 @@ impl StreamExecutionPlan {
                 "max_bytes": config.edge_budget.max_bytes,
             },
             "retained_epochs": config.retained_epochs,
+            "checkpoint_inflight_max_bytes": config.checkpoint_inflight_max_bytes,
         });
         let fields = value
             .as_object_mut()
@@ -2430,4 +2445,23 @@ fn validate_snapshot_nodes(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod runtime_config_tests {
+    use super::*;
+
+    #[test]
+    fn checkpoint_inflight_limit_is_json_safe_and_hashed() {
+        let config = StreamRuntimeConfig::default();
+        config.validate().unwrap();
+        assert_eq!(config.checkpoint_inflight_max_bytes, 1 << 30);
+        for value in [0, MAX_JSON_SAFE_INTEGER + 1] {
+            let invalid = StreamRuntimeConfig {
+                checkpoint_inflight_max_bytes: value,
+                ..config
+            };
+            assert!(invalid.validate().is_err());
+        }
+    }
 }
