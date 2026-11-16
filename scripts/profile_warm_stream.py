@@ -112,6 +112,17 @@ NATIVE_CASE_ROWS = {
     "64x64-dual-tick": 64,
     "6400x64-dual-lag1": 6_400,
 }
+NATIVE_CASE_ENTITIES = {
+    "1x1-dual": 1,
+    "99x1-dual": 1,
+    "6400x64-dual": 64,
+    "64x64-dual-tick": 64,
+    "6400x64-dual-lag1": 64,
+}
+NATIVE_CASE_OUTPUTS = {
+    name: "mean5,mean20" + (",lag1" if name.endswith("-lag1") else "")
+    for name in NATIVE_CASE_ROWS
+}
 # Rolling-kernel-v2 spec §10.2: (gate, case, arm, limit in seconds).
 NATIVE_LATENCY_GATES = (
     ("G1", "1x1-dual", "absent", 1e-6),
@@ -1762,6 +1773,15 @@ def _validate_native_case_metadata(case: dict[str, Any], name: str) -> None:
         "window_outputs": 2,
         "history_rows": NATIVE_HISTORY_ROWS,
         "warm_dispatches": NATIVE_WARM_DISPATCHES,
+        "workload": {
+            "rows": NATIVE_CASE_ROWS[name],
+            "entities": NATIVE_CASE_ENTITIES[name],
+            "window": 20,
+            "outputs": NATIVE_CASE_OUTPUTS[name],
+            "min_periods": "full window",
+            "input": "Float64 exact binary fractions",
+            "first_payload_bytes": 0,
+        },
     }
     if any(case.get(key) != value for key, value in expected.items()):
         raise ValueError(f"native evidence case {name!r} does not match its workload")
@@ -2075,7 +2095,9 @@ def _native_g2_gate(arms: list[dict[str, Any]], complete: bool) -> dict[str, Any
         "value_ns_per_window_row": value,
         "limit_ns_per_window_row": NATIVE_G2_LIMIT_NS,
         "met": (
-            value <= NATIVE_G2_LIMIT_NS if complete and value is not None else None
+            0.0 < value <= NATIVE_G2_LIMIT_NS
+            if complete and value is not None
+            else None
         ),
     }
 
