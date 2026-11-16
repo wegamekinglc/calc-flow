@@ -3,6 +3,10 @@
 //! Dense entities index keyed and ring columns. Hot-path mutations append undo
 //! records; durable snapshots remain whole-table owned values in P2.
 
+mod layout7;
+
+pub(crate) use layout7::{decode_layout7, encode_layout7};
+
 use std::{collections::HashMap, mem::size_of, ops::Range, sync::Arc};
 
 use datafusion::arrow::{
