@@ -10,6 +10,11 @@ mod manifest;
 mod preloaded_snapshot;
 mod segment;
 mod source_history;
+#[allow(
+    dead_code,
+    reason = "P2.3 lands the state-table seam before migrating rolling group storage"
+)]
+mod table;
 mod transaction;
 
 pub(crate) use preloaded_snapshot::PreloadedSnapshot;
