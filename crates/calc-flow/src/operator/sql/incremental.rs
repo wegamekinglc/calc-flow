@@ -1186,12 +1186,7 @@ impl IncrementalSql {
             .map_err(|error| df_error(name, error))?;
         let mut check = || context.check_cancelled();
         self.snapshot_keys.begin();
-        let records = transaction.records(self.aggregate_schema.clone(), &mut check)?;
-        let records = self.keyed_snapshot_records(records, name)?;
-        let records = records
-            .iter()
-            .map(|record| self.keyed_output_record(record, name))
-            .collect::<Result<Vec<_>>>()?;
+        let records = self.keyed_snapshot_records(&transaction, &mut check, name)?;
         let records = self
             .apply_output_order(records, &reservation, context, name)
             .await?;
@@ -1300,33 +1295,53 @@ impl IncrementalSql {
 
     fn keyed_snapshot_records(
         &self,
-        records: Vec<RecordBatch>,
+        transaction: &keyed_sum::Transaction,
+        check: &mut dyn FnMut() -> Result<()>,
         name: &str,
     ) -> Result<Vec<RecordBatch>> {
-        records
-            .into_iter()
-            .enumerate()
-            .map(|(chunk, record)| {
-                let rows = record.num_rows();
-                if rows == 0 {
-                    return Ok(record);
-                }
-                let keyed = self.keyed_sum.as_ref().expect("keyed SUM plan");
-                let first_key = keyed.canonical_slot(chunk * CHUNK_ROWS)?;
-                if let Some(keys) = self.snapshot_keys.get(chunk, rows, &first_key) {
-                    let columns = keys
-                        .iter()
-                        .cloned()
-                        .chain(record.columns()[self.keys.len()..].iter().cloned())
-                        .collect::<Vec<_>>();
-                    return RecordBatch::try_new(record.schema(), columns)
-                        .map_err(|error| df_error(name, error));
-                }
-                let columns = Arc::<[ArrayRef]>::from(record.columns()[..self.keys.len()].to_vec());
-                self.snapshot_keys.stage(chunk, rows, first_key, columns);
-                Ok(record)
-            })
-            .collect()
+        let keyed = self.keyed_sum.as_ref().expect("keyed SUM plan");
+        let count = keyed.len();
+        if count == 0 {
+            let aggregate = transaction.record(0, 0, self.aggregate_schema.clone(), check)?;
+            return Ok(vec![self.keyed_output_record(&aggregate, name)?]);
+        }
+        let dirty = transaction.dirty_output_chunks();
+        let schema = self.keyed_snapshot_schema();
+        let mut records = Vec::with_capacity(count.div_ceil(CHUNK_ROWS));
+        for start in (0..count).step_by(CHUNK_ROWS) {
+            check()?;
+            let chunk = start / CHUNK_ROWS;
+            let first_key = keyed.canonical_slot(start)?;
+            if !dirty.contains(&chunk)
+                && let Some(columns) = self.snapshot_keys.get_clean(chunk, &first_key)
+            {
+                records.push(
+                    RecordBatch::try_new(schema.clone(), columns.to_vec())
+                        .map_err(|error| df_error(name, error))?,
+                );
+                continue;
+            }
+            let end = count.min(start + CHUNK_ROWS);
+            let aggregate = transaction.record(start, end, self.aggregate_schema.clone(), check)?;
+            let record = self.keyed_output_record(&aggregate, name)?;
+            let columns = Arc::<[ArrayRef]>::from(record.columns().to_vec());
+            self.snapshot_keys
+                .stage(chunk, record.num_rows(), first_key, columns);
+            records.push(record);
+        }
+        Ok(records)
+    }
+
+    fn keyed_snapshot_schema(&self) -> SchemaRef {
+        if self
+            .post_order
+            .as_ref()
+            .is_some_and(output_order::OutputOrder::project_after_limit)
+        {
+            self.aggregate_schema.clone()
+        } else {
+            self.output_schema.clone()
+        }
     }
 
     fn keyed_output_record(&self, aggregate: &RecordBatch, name: &str) -> Result<RecordBatch> {

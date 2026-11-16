@@ -41,7 +41,7 @@ pub(super) struct Committed {
     pub affected: Vec<GroupId>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum SumValue {
     Int64(Option<i64>),
     UInt64(Option<u64>),
@@ -253,6 +253,38 @@ impl Transaction {
             .records(None, schema, check)
     }
 
+    pub(super) fn record(
+        &self,
+        start: usize,
+        end: usize,
+        schema: SchemaRef,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<RecordBatch> {
+        check()?;
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .record(start, end, None, schema)
+    }
+
+    pub(super) fn dirty_output_chunks(&self) -> std::collections::BTreeSet<usize> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut chunks = std::collections::BTreeSet::new();
+        for (group, previous) in &self.undo {
+            if state.sums.value(*group) != *previous {
+                chunks.insert(group.index() / CHUNK_ROWS);
+            }
+        }
+        for group in self
+            .affected
+            .iter()
+            .filter(|group| group.index() >= self.old_groups)
+        {
+            chunks.insert(group.index() / CHUNK_ROWS);
+        }
+        chunks
+    }
+
     pub(super) fn output_charge(&self) -> Result<usize> {
         self.state
             .lock()
@@ -400,20 +432,27 @@ impl KeyedSumState {
         for start in (0..count).step_by(CHUNK_ROWS) {
             check()?;
             let end = count.min(start + CHUNK_ROWS);
-            let groups = (start..end)
-                .map(|row| {
-                    let slot = slots.map_or(row, |slots| slots[row]);
-                    GroupId::new(slot)
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let mut columns = self.keys.columns(&groups)?;
-            columns.push(self.sums.array(&groups));
-            records.push(
-                RecordBatch::try_new(schema.clone(), columns)
-                    .map_err(|error| super::df_error("keyed SUM", error))?,
-            );
+            records.push(self.record(start, end, slots, schema.clone())?);
         }
         Ok(records)
+    }
+
+    fn record(
+        &self,
+        start: usize,
+        end: usize,
+        slots: Option<&[usize]>,
+        schema: SchemaRef,
+    ) -> Result<RecordBatch> {
+        let groups = (start..end)
+            .map(|row| {
+                let slot = slots.map_or(row, |slots| slots[row]);
+                GroupId::new(slot)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut columns = self.keys.columns(&groups)?;
+        columns.push(self.sums.array(&groups));
+        RecordBatch::try_new(schema, columns).map_err(|error| super::df_error("keyed SUM", error))
     }
 
     fn output_charge(&self, slots: Option<&[usize]>) -> Result<usize> {

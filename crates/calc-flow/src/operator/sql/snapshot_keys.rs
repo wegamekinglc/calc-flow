@@ -1,11 +1,11 @@
-//! Shared key columns for repeated full snapshots.
+//! Shared columns for repeated full snapshots.
 //!
-//! Group slots are append-only and a group's key never changes, so the key
-//! columns of a sealed output chunk are identical in every later snapshot.
-//! Freshly built key columns are staged while a transaction prepares and are
-//! installed only when that transaction commits; a refused or failed output
-//! leaves nothing behind. Installed bytes are reserved from the incremental
-//! memory pool, and a refused reservation simply leaves the chunk uncached.
+//! Group slots are append-only and a group's key never changes, so clean
+//! output chunks are identical in every later snapshot. Freshly built columns
+//! are staged while a transaction prepares and installed only when that
+//! transaction commits; a refused or failed output leaves nothing behind.
+//! Installed bytes are reserved from the incremental memory pool, and a
+//! refused reservation simply leaves the chunk uncached.
 
 use std::sync::Arc;
 
@@ -63,7 +63,19 @@ impl SnapshotKeys {
             .then(|| Arc::clone(&cached.columns))
     }
 
-    /// Stages freshly built key columns for the running transaction.
+    /// Returns a clean chunk without requiring its visible row count. Dirty
+    /// detection and canonical identity are the cache validity proof.
+    pub(super) fn get_clean(
+        &self,
+        chunk: usize,
+        first_key: &Arc<[u8]>,
+    ) -> Option<Arc<[ArrayRef]>> {
+        let inner = self.inner.lock();
+        let cached = inner.chunks.get(chunk)?.as_ref()?;
+        Arc::ptr_eq(&cached.first_key, first_key).then(|| Arc::clone(&cached.columns))
+    }
+
+    /// Stages freshly built output columns for the running transaction.
     pub(super) fn stage(
         &self,
         chunk: usize,
