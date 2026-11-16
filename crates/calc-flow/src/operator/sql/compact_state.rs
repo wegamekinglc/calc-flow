@@ -496,6 +496,37 @@ impl IncrementalSql {
         }
     }
 
+    async fn export_keyed_async(
+        &self,
+        slots: Option<Vec<usize>>,
+        name: &str,
+        mut check: impl FnMut() -> Result<()>,
+    ) -> Result<PaidNativeStateRecords> {
+        let mut descriptor = self.native_descriptor(name)?;
+        let rows = slots.as_ref().map_or(self.group_count(), Vec::len);
+        descriptor.group_count = rows;
+        let charge = self.keyed_export_charge(&descriptor, rows, slots.as_deref(), name)?;
+        let reservation = self.scratch.new_empty();
+        ensure_reservation(&reservation, charge, name)?;
+        let rows = if let Some(keyed) = &self.keyed_sum {
+            keyed.export_rows(slots.as_deref())?
+        } else if let Some(keyed) = &self.keyed_state {
+            keyed.export_rows(slots.as_deref())?
+        } else {
+            return Err(df_error(name, "keyed aggregate plan is missing"));
+        };
+        let mut cursor = export::ScalarExportCursor::new(rows, descriptor, reservation, name);
+        loop {
+            if cursor.step(&mut check)? {
+                break;
+            }
+            check()?;
+            tokio::task::yield_now().await;
+        }
+        check()?;
+        Ok(cursor.finish())
+    }
+
     pub(in crate::operator::sql) fn export_dirty_state(
         &self,
         name: &str,
@@ -520,7 +551,7 @@ impl IncrementalSql {
         if self.keyed_sum.is_some() || self.keyed_state.is_some() {
             let mut slots = self.dirty.slots().to_vec();
             slots.sort_unstable();
-            return self.export_keyed(Some(&slots), name, &mut check);
+            return self.export_keyed_async(Some(slots), name, check).await;
         }
         let mut cursor = export::ExportCursor::dirty(self, name)?;
         loop {
@@ -541,7 +572,7 @@ impl IncrementalSql {
     ) -> Result<PaidNativeStateRecords> {
         check_cancelled()?;
         if self.keyed_sum.is_some() || self.keyed_state.is_some() {
-            return self.export_keyed(None, name, &mut check_cancelled);
+            return self.export_keyed_async(None, name, check_cancelled).await;
         }
         let mut cursor = export::ExportCursor::new(self, name)?;
         loop {

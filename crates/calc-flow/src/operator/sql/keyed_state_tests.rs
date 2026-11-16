@@ -83,7 +83,11 @@ async fn test_keyed_mixed_aggregates_match_prefix_rollback_and_restore() {
         &[Some("a"), Some("c"), None, Some("b")],
         &[Some(8), Some(9), None, Some(11)],
     );
-    let empty = input(&[], &[]);
+    let empty = Batch::table(
+        vec![first.table_payload().unwrap().batches()[0].slice(0, 0)],
+        BatchMetadata::default(),
+    )
+    .unwrap();
     let mut plan = plan_for(&runtime, &first).await;
     assert!(plan.keyed_state.is_some());
     assert!(plan.groups.is_empty());

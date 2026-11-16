@@ -24,6 +24,12 @@ const HASH_EQUALITY: &str = "typed-row-hash-exact-column-equality-v1";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct GroupId(u32);
 
+pub(crate) enum ExportValue {
+    Scalar(ScalarValue),
+    Utf8(Option<Arc<str>>),
+    LargeUtf8(Option<Arc<str>>),
+}
+
 impl GroupId {
     pub(crate) fn new(index: usize) -> Result<Self> {
         u32::try_from(index)
@@ -118,6 +124,26 @@ impl KeyStore {
 
     pub(crate) fn layout_fingerprint(&self) -> [u8; 32] {
         self.fingerprint
+    }
+
+    pub(crate) fn fields_len(&self) -> usize {
+        self.schema.fields.len()
+    }
+
+    pub(crate) fn export_value(&self, group: GroupId, column: usize) -> Result<ExportValue> {
+        let field = &self.schema.fields[column];
+        match &self.columns[column] {
+            KeyColumn::Utf8(values) => Ok(ExportValue::Utf8(values[group.index()].clone())),
+            KeyColumn::LargeUtf8(values) => {
+                Ok(ExportValue::LargeUtf8(values[group.index()].clone()))
+            }
+            column => {
+                let array = column.array(std::slice::from_ref(&group), field.data_type())?;
+                let value = ScalarValue::try_from_array(&array, 0)
+                    .map_err(|error| keyed_error(error.to_string()))?;
+                Ok(ExportValue::Scalar(value))
+            }
+        }
     }
 
     pub(crate) fn canonical(&self, group: GroupId) -> Arc<[u8]> {
@@ -549,7 +575,7 @@ fn birth_charge(
 fn birth_value_width(field: &FieldRef, array: &ArrayRef, row: usize) -> Result<usize> {
     match field.data_type() {
         DataType::Utf8 | DataType::LargeUtf8 => {
-            Ok(2 * size_of::<String>() + string_value(array, row)?.len())
+            Ok(2 * size_of::<Arc<str>>() + string_value(array, row)?.len())
         }
         DataType::Boolean => Ok(2 * size_of::<Option<bool>>()),
         DataType::Int8 | DataType::UInt8 => Ok(2),
@@ -993,8 +1019,8 @@ enum KeyColumn {
     UInt16(Vec<Option<u16>>),
     UInt32(Vec<Option<u32>>),
     UInt64(Vec<Option<u64>>),
-    Utf8(Vec<Option<String>>),
-    LargeUtf8(Vec<Option<String>>),
+    Utf8(Vec<Option<Arc<str>>>),
+    LargeUtf8(Vec<Option<Arc<str>>>),
     Date32(Vec<Option<i32>>),
     Date64(Vec<Option<i64>>),
     TimestampSecond(Vec<Option<i64>>),
@@ -1114,12 +1140,20 @@ impl KeyColumn {
             }
             Self::Utf8(values) => {
                 let input = typed_string::<StringArray>(array)?;
-                values.push(input.is_valid(row).then(|| input.value(row).to_owned()));
+                values.push(
+                    input
+                        .is_valid(row)
+                        .then(|| Arc::<str>::from(input.value(row))),
+                );
                 Ok(())
             }
             Self::LargeUtf8(values) => {
                 let input = typed_string::<LargeStringArray>(array)?;
-                values.push(input.is_valid(row).then(|| input.value(row).to_owned()));
+                values.push(
+                    input
+                        .is_valid(row)
+                        .then(|| Arc::<str>::from(input.value(row))),
+                );
                 Ok(())
             }
             Self::Date32(_)

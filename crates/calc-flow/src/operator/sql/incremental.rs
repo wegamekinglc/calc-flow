@@ -67,7 +67,7 @@ mod variable_extrema;
 pub(in crate::operator::sql) mod global_record;
 
 #[path = "native_expression.rs"]
-mod native_expression;
+pub(in crate::operator::sql) mod native_expression;
 
 #[path = "group_key.rs"]
 mod group_key;
@@ -688,6 +688,7 @@ pub(super) struct Transaction {
     track_updates: bool,
     checkpointing: bool,
     new_groups: Vec<Option<Group>>,
+    finalizer_reservation: Option<MemoryReservation>,
     _reservation: MemoryReservation,
     proof: Option<grouped_float::Proof>,
     coalesced: Option<Arc<global_record::coalescer::State>>,
@@ -890,6 +891,7 @@ impl IncrementalSql {
             Some(keyed_state::KeyedState::new(
                 &keys,
                 &aggregates,
+                aggregate_bytes,
                 reservation.new_empty(),
             )?)
         };
@@ -1302,13 +1304,17 @@ impl IncrementalSql {
             }
             batch.num_rows()
         } else {
-            transaction.init_partial(
-                &self.aggregates,
-                self.ordered_last,
-                self.sequential.is_some(),
-                self.scratch.new_empty(),
-                name,
-            )?;
+            if self.keys.is_empty() {
+                transaction.init_global(&self.aggregates, name)?;
+            } else {
+                transaction.init_partial(
+                    &self.aggregates,
+                    self.ordered_last,
+                    self.sequential.is_some(),
+                    self.scratch.new_empty(),
+                    name,
+                )?;
+            }
             let rows = self.update_keyed_aggregate_records(
                 table.batches(),
                 &mut transaction,
@@ -1317,11 +1323,24 @@ impl IncrementalSql {
                 context,
                 name,
             )?;
-            transaction.finish(&self.aggregates, &mut || context.check_cancelled(), name)?;
+            transaction
+                .finish(
+                    &self.aggregates,
+                    &mut || context.check_cancelled(),
+                    name,
+                    &mut || {
+                        #[cfg(test)]
+                        self.finalized_groups
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    },
+                )
+                .await?;
             rows
         };
         #[cfg(not(test))]
         let _ = rows;
+        let finalizer_reservation = self.reservation.new_empty();
+        ensure_reservation(&finalizer_reservation, self.finalizer_bytes, name)?;
         let output_charge = self.keyed_sum_output_charge(&transaction, name)?;
         reservation
             .try_grow(output_charge)
@@ -1350,6 +1369,7 @@ impl IncrementalSql {
             track_updates: batch.num_rows() != 0,
             checkpointing,
             new_groups: Vec::new(),
+            finalizer_reservation: Some(finalizer_reservation),
             _reservation: reservation,
             proof,
             coalesced,
@@ -1366,6 +1386,7 @@ impl IncrementalSql {
         name: &str,
     ) -> Result<usize> {
         let mut processed = 0;
+        let mut previous_touched = 0;
         context.check_cancelled()?;
         for record in records {
             for offset in (0..record.num_rows()).step_by(MORSEL_ROWS) {
@@ -1379,6 +1400,21 @@ impl IncrementalSql {
                     context,
                     name,
                 )?;
+                #[cfg(test)]
+                {
+                    let touched = transaction.affected_count();
+                    self.historical_key_lookups.fetch_add(
+                        touched - previous_touched,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    previous_touched = touched;
+                    self.partial_groups.fetch_max(
+                        transaction.partial_count(),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    self.encoded_rows
+                        .fetch_add(chunk.num_rows(), std::sync::atomic::Ordering::SeqCst);
+                }
                 if let Some(proof) = proof.as_ref() {
                     let count = self
                         .keyed_state
@@ -1392,6 +1428,8 @@ impl IncrementalSql {
                 processed += chunk.num_rows();
             }
         }
+        #[cfg(not(test))]
+        let _ = previous_touched;
         Ok(processed)
     }
 
@@ -1483,6 +1521,7 @@ impl IncrementalSql {
             track_updates: batch.num_rows() != 0,
             checkpointing,
             new_groups: Vec::new(),
+            finalizer_reservation: None,
             _reservation: reservation,
             proof: None,
             coalesced: None,
@@ -1661,6 +1700,7 @@ impl IncrementalSql {
             rows: input.1,
             groups,
             new_groups,
+            finalizer_reservation: None,
             _reservation: reservation,
             proof,
             container,

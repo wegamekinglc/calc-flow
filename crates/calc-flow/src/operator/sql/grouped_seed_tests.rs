@@ -4,7 +4,7 @@ use crate::{
     StreamJobContext, StreamOperatorContext,
 };
 use datafusion::arrow::{
-    array::{BooleanArray, Float32Array, Float64Array, Int64Array},
+    array::{Float32Array, Float64Array, Int64Array},
     datatypes::{Field, Schema},
     record_batch::RecordBatch,
 };

@@ -3,7 +3,7 @@ use super::{
     Result, SchemaRef, UInt64Array, grouped_sum, predicate,
 };
 use crate::StateBudget;
-use crate::operator::keyed::{GroupId, KeyCut, KeySchema, KeyStore, MORSEL_ROWS};
+use crate::operator::keyed::{ExportValue, GroupId, KeyCut, KeySchema, KeyStore, MORSEL_ROWS};
 use datafusion::arrow::{array::Array, datatypes::DataType};
 use datafusion::execution::memory_pool::MemoryReservation;
 use std::{
@@ -16,7 +16,7 @@ pub(super) struct KeyedSum {
     state: Arc<Mutex<KeyedSumState>>,
 }
 
-struct KeyedSumState {
+pub(super) struct KeyedSumState {
     keys: KeyStore,
     sums: SumColumn,
     marks: Vec<u64>,
@@ -136,6 +136,22 @@ impl KeyedSum {
             undo_reservation,
             active: true,
         })
+    }
+
+    pub(super) fn export_rows(&self, slots: Option<&[usize]>) -> Result<Vec<Vec<ExportValue>>> {
+        let state = self.lock();
+        let count = slots.map_or(state.keys.len(), <[usize]>::len);
+        (0..count)
+            .map(|row| {
+                let slot = slots.map_or(row, |slots| slots[row]);
+                let group = GroupId::new(slot)?;
+                let mut values = (0..state.keys.fields_len())
+                    .map(|column| state.keys.export_value(group, column))
+                    .collect::<Result<Vec<_>>>()?;
+                values.push(ExportValue::Scalar(state.sums.value(group).scalar()));
+                Ok(values)
+            })
+            .collect()
     }
 
     pub(super) fn export(

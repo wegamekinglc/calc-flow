@@ -90,7 +90,7 @@ async fn test_compact_native_state_composite_string_null_keys_rebuild_lookup_and
             .unwrap();
         assert_eq!(snapshot(&restored), snapshot(&original));
         assert!(restored.keyed_state.is_some());
-        assert_eq!(restored.group_count(), 0);
+        assert_eq!(restored.group_count(), 3);
         let update = original.update(&input, &context, "codec").await.unwrap();
         original.commit(update);
         let update = restored.update(&input, &context, "codec").await.unwrap();

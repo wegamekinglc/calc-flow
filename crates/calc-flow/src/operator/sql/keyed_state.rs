@@ -4,7 +4,7 @@ use super::{
     grouped_sum, native_grouped_result, ordered_last, predicate, variable_extrema,
 };
 use crate::StateBudget;
-use crate::operator::keyed::{GroupId, KeyCut, KeySchema, KeyStore, MORSEL_ROWS};
+use crate::operator::keyed::{ExportValue, GroupId, KeyCut, KeySchema, KeyStore, MORSEL_ROWS};
 use datafusion::arrow::{array::Array, datatypes::FieldRef};
 use datafusion::execution::memory_pool::MemoryReservation;
 use sha2::{Digest, Sha256};
@@ -13,13 +13,21 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
-#[derive(Clone)]
 pub(super) struct KeyedState {
     state: Arc<Mutex<State>>,
     reservation: MemoryReservation,
 }
 
-struct State {
+impl Clone for KeyedState {
+    fn clone(&self) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+            reservation: self.reservation.new_empty(),
+        }
+    }
+}
+
+pub(super) struct State {
     keys: Option<KeyStore>,
     groups: usize,
     aggregates: Vec<AggregateState>,
@@ -29,6 +37,7 @@ struct State {
     fingerprint: [u8; 32],
     global_key: Arc<[u8]>,
     reservation: MemoryReservation,
+    group_charge: usize,
 }
 
 struct AggregateState {
@@ -54,6 +63,7 @@ pub(super) struct Transaction {
     leased: Vec<GroupId>,
     ranks: Vec<Option<usize>>,
     partial: Option<PartialGroups>,
+    global_accumulators: Option<Vec<Box<dyn super::Accumulator>>>,
     undo_reservation: MemoryReservation,
     active: bool,
 }
@@ -73,6 +83,7 @@ impl KeyedState {
     pub(super) fn new(
         keys: &[GroupKey],
         aggregates: &[Arc<AggregateFunctionExpr>],
+        aggregate_bytes: usize,
         reservation: MemoryReservation,
     ) -> Result<Self> {
         let grouped = !keys.is_empty();
@@ -102,6 +113,7 @@ impl KeyedState {
                 fingerprint,
                 global_key: Arc::from([]),
                 reservation: state_reservation,
+                group_charge: aggregate_bytes,
             })),
             reservation: transaction_reservation,
         })
@@ -161,6 +173,7 @@ impl KeyedState {
             leased: Vec::new(),
             ranks: Vec::new(),
             partial: None,
+            global_accumulators: None,
             undo_reservation,
             active: true,
         };
@@ -172,6 +185,29 @@ impl KeyedState {
         drop(state);
         initialized?;
         Ok(transaction)
+    }
+
+    pub(super) fn export_rows(&self, slots: Option<&[usize]>) -> Result<Vec<Vec<ExportValue>>> {
+        let state = self.lock();
+        let count = slots.map_or(state.groups, <[usize]>::len);
+        (0..count)
+            .map(|row| {
+                let slot = slots.map_or(row, |slots| slots[row]);
+                let group = GroupId::new(slot)?;
+                let mut values = match &state.keys {
+                    Some(keys) => (0..keys.fields_len())
+                        .map(|column| keys.export_value(group, column))
+                        .collect::<Result<Vec<_>>>()?,
+                    None => Vec::new(),
+                };
+                for aggregate in &state.aggregates {
+                    for column in &aggregate.states {
+                        values.push(column.export_value(group));
+                    }
+                }
+                Ok(values)
+            })
+            .collect()
     }
 
     pub(super) fn export(
@@ -358,6 +394,87 @@ impl Transaction {
         Ok(())
     }
 
+    pub(super) fn init_global(
+        &mut self,
+        aggregates: &[Arc<AggregateFunctionExpr>],
+        name: &str,
+    ) -> Result<()> {
+        self.touch_global()?;
+        let state = self.state.clone();
+        let state = state.lock().unwrap_or_else(PoisonError::into_inner);
+        let group = GroupId::new(0)?;
+        let accumulators = aggregates
+            .iter()
+            .enumerate()
+            .map(|(index, expression)| {
+                let mut accumulator = expression
+                    .create_accumulator()
+                    .map_err(|error| df_error(name, error))?;
+                if state.initialized(index, group) {
+                    merge(&mut *accumulator, &state.state(index, group)?, name)?;
+                }
+                Ok(accumulator)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.global_accumulators = Some(accumulators);
+        Ok(())
+    }
+
+    fn apply_global(
+        &mut self,
+        arguments: &[Vec<ArrayRef>],
+        filters: &[Option<&BooleanArray>],
+        name: &str,
+    ) -> Result<()> {
+        let accumulators = self
+            .global_accumulators
+            .as_mut()
+            .expect("scalar global accumulators");
+        for (index, (arguments, accumulator)) in arguments.iter().zip(accumulators).enumerate() {
+            let filtered;
+            let arguments = if let Some(filter) = filters.get(index).copied().flatten() {
+                filtered = arguments
+                    .iter()
+                    .map(|array| {
+                        datafusion::arrow::compute::filter(array.as_ref(), filter)
+                            .map_err(|error| df_error(name, error))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                &filtered
+            } else {
+                arguments
+            };
+            accumulator
+                .update_batch(arguments)
+                .map_err(|error| df_error(name, error))?;
+        }
+        Ok(())
+    }
+
+    fn finish_global(
+        &mut self,
+        check: &mut (dyn FnMut() -> Result<()> + Send),
+        progress: &mut (dyn FnMut() + Send),
+        name: &str,
+    ) -> Result<()> {
+        let accumulators = self
+            .global_accumulators
+            .take()
+            .expect("scalar global accumulators");
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let group = GroupId::new(0)?;
+        for (index, mut accumulator) in accumulators.into_iter().enumerate() {
+            check()?;
+            let values = accumulator.state().map_err(|error| df_error(name, error))?;
+            let result = accumulator
+                .evaluate()
+                .map_err(|error| df_error(name, error))?;
+            state.set_state(index, group, values, result)?;
+        }
+        progress();
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_chunk(
         &mut self,
@@ -370,6 +487,9 @@ impl Transaction {
         check: &mut dyn FnMut() -> Result<()>,
         name: &str,
     ) -> Result<()> {
+        if self.global_accumulators.is_some() {
+            return self.apply_global(arguments, filters, name);
+        }
         let state = self.state.clone();
         let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
         let groups = match &mut state.keys {
@@ -420,35 +540,48 @@ impl Transaction {
         state.set_state(aggregate, GroupId::new(0)?, values, result)
     }
 
-    pub(super) fn finish(
+    pub(super) async fn finish(
         &mut self,
         aggregates: &[Arc<AggregateFunctionExpr>],
-        check: &mut dyn FnMut() -> Result<()>,
+        check: &mut (dyn FnMut() -> Result<()> + Send),
         name: &str,
+        progress: &mut (dyn FnMut() + Send),
     ) -> Result<()> {
+        if self.global_accumulators.is_some() {
+            return self.finish_global(check, progress, name);
+        }
         let Some(mut partial) = self.partial.take() else {
             return Ok(());
         };
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        self.seed_integer_history(&state, &mut partial, name)?;
+        {
+            let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            self.seed_integer_history(&state, &mut partial, name)?;
+        }
         let states = partial.emit_states(name)?;
         for (rank, slot) in partial.slots.iter().enumerate() {
             if rank % 128 == 0 {
+                if rank != 0 {
+                    tokio::task::yield_now().await;
+                }
                 check()?;
             }
             let group = GroupId::new(*slot)?;
-            for (index, arrays) in states.iter().enumerate() {
-                self.merge_rank(
-                    &mut state,
-                    &partial,
-                    aggregates[index].as_ref(),
-                    group,
-                    index,
-                    arrays,
-                    rank,
-                    name,
-                )?;
+            {
+                let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                for (index, arrays) in states.iter().enumerate() {
+                    self.merge_rank(
+                        &mut state,
+                        &partial,
+                        aggregates[index].as_ref(),
+                        group,
+                        index,
+                        arrays,
+                        rank,
+                        name,
+                    )?;
+                }
             }
+            progress();
         }
         Ok(())
     }
@@ -508,6 +641,16 @@ impl Transaction {
             .output_charge(None)
     }
 
+    pub(super) fn affected_count(&self) -> usize {
+        self.affected.len()
+    }
+
+    pub(super) fn partial_count(&self) -> usize {
+        self.partial
+            .as_ref()
+            .map_or(0, |partial| partial.slots.len())
+    }
+
     pub(super) fn changes_state(&self) -> bool {
         !self.affected.is_empty()
     }
@@ -523,10 +666,10 @@ impl Transaction {
         if state.groups == 0 {
             state.grow(1)?;
             state.groups = 1;
-            self.ranks.resize(1, None);
-            self.touch(state, GroupId::new(0)?)?;
         }
-        Ok(())
+        state.marks.resize(state.groups, 0);
+        self.ranks.resize(state.groups, None);
+        self.touch(state, GroupId::new(0)?)
     }
 
     fn grow(&mut self, state: &mut State) -> Result<()> {
@@ -655,6 +798,9 @@ impl Transaction {
         name: &str,
     ) -> Result<()> {
         if partial.sequential[index] || partial.accumulators[index].integer_sum() {
+            if arrays.iter().all(|array| array.is_empty()) {
+                return Ok(());
+            }
             let values = scalars(arrays, rank, name)?;
             let result = partial.rank_result(index, &values, name)?;
             return state.set_state(index, group, values, result);
@@ -668,11 +814,14 @@ impl Transaction {
         }
         let arrays = arrays
             .iter()
+            .filter(|array| !array.is_empty())
             .map(|array| array.slice(rank, 1))
             .collect::<Vec<_>>();
-        accumulator
-            .merge_batch(&arrays)
-            .map_err(|error| df_error(name, error))?;
+        if !arrays.is_empty() {
+            accumulator
+                .merge_batch(&arrays)
+                .map_err(|error| df_error(name, error))?;
+        }
         let values = accumulator.state().map_err(|error| df_error(name, error))?;
         let result = if state.keys.is_some() && expression.fun().name() == "avg" {
             native_grouped_result(expression, &values, name)?
@@ -816,6 +965,18 @@ impl StateColumn {
         self.values.resize(groups, self.null.clone());
     }
 
+    fn export_value(&self, group: GroupId) -> ExportValue {
+        match &self.values[group.index()] {
+            ScalarValue::Utf8(value) => {
+                ExportValue::Utf8(value.as_ref().map(|value| Arc::<str>::from(value.as_str())))
+            }
+            ScalarValue::LargeUtf8(value) => {
+                ExportValue::LargeUtf8(value.as_ref().map(|value| Arc::<str>::from(value.as_str())))
+            }
+            value => ExportValue::Scalar(value.clone()),
+        }
+    }
+
     fn array(&self, groups: &[GroupId]) -> Result<ArrayRef> {
         ScalarValue::iter_to_array(
             groups
@@ -830,7 +991,7 @@ impl State {
     fn grow(&mut self, groups: usize) -> Result<()> {
         let new = groups.saturating_sub(self.groups);
         let width = self.aggregates.iter().try_fold(
-            size_of::<u64>(),
+            self.group_charge + size_of::<u64>(),
             |width: usize, aggregate| -> Result<usize> {
                 let fields = aggregate.states.len() + 1;
                 width
@@ -995,7 +1156,7 @@ impl State {
 impl GroupUndo {
     fn charge(state: &State, group: GroupId) -> usize {
         state.aggregates.iter().fold(
-            size_of::<Self>() + size_of::<GroupId>(),
+            size_of::<Self>() + size_of::<GroupId>() + state.group_charge,
             |charge, aggregate| {
                 aggregate
                     .states
