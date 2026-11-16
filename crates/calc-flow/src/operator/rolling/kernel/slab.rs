@@ -279,6 +279,10 @@ impl RollingKernelPlan {
             state.slab.as_ref().map_or(0, StateTable::entity_count),
             node_id,
         )?;
+        if let Some(recorder) = observer {
+            recorder.add(RollingWork::ResolvedRows, routing.entity_ids.len());
+            recorder.add(RollingWork::TouchedEntities, routing.keys.len());
+        }
         let entity_encode_ns = nanos(started.elapsed());
         let previous_charge = charge(state.slab.as_ref().expect("slab initialized"), node_id)?;
         state.slab.as_mut().expect("slab initialized").begin()?;

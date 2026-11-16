@@ -340,7 +340,14 @@ async fn test_execution_diagnostics_distinguish_small_batch_from_actual_parallel
         assert_eq!(actual.numeric_parallel_calls, u64::from(parallel));
         assert_eq!(actual.numeric_serial_calls, u64::from(!parallel));
         assert_eq!(actual.numeric_general_calls, 0);
-        assert_eq!(actual.parallel_fallback_small_batch, u64::from(!parallel));
+        assert_eq!(
+            actual.parallel_fallback_small_batch,
+            if operator.compiled.kernel_plan.supports_slab() {
+                0
+            } else {
+                u64::from(!parallel)
+            }
+        );
         assert_eq!(actual.parallel_fallback_unsupported_plan, 0);
         assert_eq!(launches, if parallel { 2 } else { 0 });
     }

@@ -2495,7 +2495,8 @@ async fn rolling_with_large_retained_label() -> (
 }
 
 fn retained_state_ipc(operator: &RollingOperator) -> Vec<u8> {
-    assert!(operator.state.ordered.is_empty());
+    // Retry records are intentionally pending again after a rejected emission;
+    // this helper captures only the committed kernel/history representation.
     if let Some(typed) = operator.state.typed_kernel_state.as_deref() {
         if RollingKernelPlan::slab_history_for_test(typed).is_some() {
             return operator

@@ -749,7 +749,11 @@ impl<'a> PreparedOrderedOutput<'a> {
             }
             current.checked_sub(old)?.checked_add(new, node)?
         };
-        let projected = next.checked_add(removed, node)?;
+        let projected = if self.deferred_charge.is_some() {
+            next.checked_add(removed, node)?
+        } else {
+            next
+        };
         if !budget.allows(projected.rows, projected.bytes) {
             return Err(operator_error(node, "rolling state budget exceeded"));
         }
