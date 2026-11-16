@@ -13,7 +13,7 @@ use datafusion::arrow::{
     datatypes::{DataType, Field},
 };
 
-use crate::{CalcFlowError, Result};
+use crate::{CalcFlowError, Result, accumulate::NumericAccumulator};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct EntityId(u32);
@@ -167,12 +167,35 @@ impl Ring {
     }
 }
 
+#[derive(Clone)]
+struct NumericHistory<'a> {
+    ring: &'a Ring,
+    offset: usize,
+}
+
+impl Iterator for NumericHistory<'_> {
+    type Item = Option<f64>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.offset == self.ring.len {
+            return None;
+        }
+        let value = match self.ring.slots[self.ring.position(self.offset)] {
+            RingValue::Float64(value) => value,
+            _ => unreachable!(),
+        };
+        self.offset += 1;
+        Some(value)
+    }
+}
+
 #[derive(Debug)]
 struct RingColumn {
     name: String,
     kind: RingKind,
     retention: Retention,
     rings: Vec<Ring>,
+    numeric: Option<Vec<NumericAccumulator>>,
     stamps: Vec<u64>,
     logical_slots: usize,
     logical_samples: usize,
@@ -185,6 +208,7 @@ impl RingColumn {
             kind,
             retention,
             rings: Vec::new(),
+            numeric: None,
             stamps: Vec::new(),
             logical_slots: 0,
             logical_samples: 0,
@@ -198,6 +222,9 @@ impl RingColumn {
         };
         self.logical_slots += capacity;
         self.rings.push(Ring::new(self.kind, capacity));
+        if let Some(numeric) = &mut self.numeric {
+            numeric.push(NumericAccumulator::default());
+        }
         self.stamps.push(0);
     }
 
@@ -207,12 +234,21 @@ impl RingColumn {
             self.logical_samples -= ring.len;
         }
         self.rings.truncate(len);
+        if let Some(numeric) = &mut self.numeric {
+            numeric.truncate(len);
+        }
         self.stamps.truncate(len);
     }
 
     fn logical_bytes(&self) -> usize {
         let validity = (self.logical_slots * self.kind.validity_bits()).div_ceil(8);
-        self.logical_slots * self.kind.width() + validity + self.rings.len() * size_of::<Ring>()
+        self.logical_slots * self.kind.width()
+            + validity
+            + self.rings.len() * size_of::<Ring>()
+            + self
+                .numeric
+                .as_ref()
+                .map_or(0, |numeric| numeric.len() * size_of::<NumericAccumulator>())
     }
 }
 
@@ -259,6 +295,11 @@ enum Undo {
         slot: usize,
         value: RingValue,
     },
+    Numeric {
+        column: usize,
+        row: usize,
+        value: NumericAccumulator,
+    },
     ValueLog {
         column: usize,
         chunks: usize,
@@ -287,6 +328,7 @@ struct RingSnapshot {
     values: ArrayRef,
     offsets: Vec<usize>,
     capacities: Vec<usize>,
+    numeric: Option<Vec<NumericAccumulator>>,
 }
 
 #[derive(Clone)]
@@ -353,6 +395,13 @@ impl StateTable {
         self.rings
             .push(RingColumn::new(name.to_owned(), kind, retention));
         self.rings.len() - 1
+    }
+
+    pub(crate) fn add_numeric_rows_column(&mut self, name: &str, window: usize) -> usize {
+        assert!(window > 0, "rolling Rows windows must be non-empty");
+        let column = self.add_ring_column(name, RingKind::Float64, Retention::Rows(window));
+        self.rings[column].numeric = Some(Vec::new());
+        column
     }
 
     pub(crate) fn add_value_log(&mut self, name: &str) -> usize {
@@ -437,6 +486,9 @@ impl StateTable {
                     slot,
                     value,
                 } => self.rings[column].rings[row].slots[slot] = value,
+                Undo::Numeric { column, row, value } => {
+                    self.rings[column].numeric.as_mut().expect("numeric group")[row] = value;
+                }
                 Undo::ValueLog {
                     column,
                     chunks,
@@ -526,6 +578,52 @@ impl StateTable {
                 None => None,
                 _ => unreachable!(),
             })
+    }
+
+    pub(crate) fn push_numeric_rows(
+        &mut self,
+        column: usize,
+        entity: EntityId,
+        value: Option<f64>,
+    ) -> Result<()> {
+        let row = self.row(entity)?;
+        let window = match self.rings[column].retention {
+            Retention::Rows(window) if self.rings[column].numeric.is_some() => window,
+            _ => return Err(internal("numeric Rows group type mismatch")),
+        };
+        let transaction = self
+            .transaction
+            .as_ref()
+            .ok_or_else(|| internal("numeric update requires a transaction"))?;
+        if self.rings[column].stamps[row] != transaction.id {
+            let previous = self.rings[column].numeric.as_ref().expect("numeric group")[row];
+            self.transaction
+                .as_mut()
+                .expect("transaction checked")
+                .undo
+                .push(Undo::Numeric {
+                    column,
+                    row,
+                    value: previous,
+                });
+        }
+        let leaving = self.push_f64(column, entity, value)?.flatten();
+        let column = &mut self.rings[column];
+        let history = NumericHistory {
+            ring: &column.rings[row],
+            offset: 0,
+        };
+        let numeric = &mut column.numeric.as_mut().expect("numeric group")[row];
+        numeric
+            .rows(leaving, value)
+            .and_then(|()| numeric.finish_rows(window, history))
+            .map_err(|error| internal(&format!("rolling numeric arithmetic failed: {error:?}")))
+    }
+
+    pub(crate) fn numeric_mean(&self, column: usize, entity: EntityId) -> Result<Option<f64>> {
+        let numeric =
+            self.rings[column].numeric.as_ref().expect("numeric group")[self.row(entity)?];
+        Ok((numeric.valid_count > 0).then(|| numeric.mean()))
     }
 
     fn push_ring(
@@ -718,6 +816,7 @@ impl StateTable {
                     values: ring_array(column.kind, &values),
                     offsets,
                     capacities,
+                    numeric: column.numeric.clone(),
                 }
             })
             .collect();
@@ -768,6 +867,7 @@ impl StateTable {
             .map(|(target, source)| {
                 let mut column =
                     RingColumn::new(target.name.clone(), target.kind, target.retention);
+                column.numeric = source.numeric.clone();
                 let values = decode_ring(source.kind, &source.values)?;
                 for entity in 0..source.capacities.len() {
                     let mut ring = Ring::new(source.kind, source.capacities[entity]);
@@ -1027,6 +1127,7 @@ fn validate_inventory(table: &StateTable, snapshot: &TableSnapshot) -> Result<()
                 left.name == right.name
                     && left.kind == right.kind
                     && left.retention == right.retention
+                    && left.numeric.is_some() == right.numeric.is_some()
             })
         && table
             .value_logs
@@ -1044,8 +1145,13 @@ fn validate_inventory(table: &StateTable, snapshot: &TableSnapshot) -> Result<()
         }
         let _ = column;
     }
-    for snapshot in &snapshot.rings {
-        if snapshot.offsets.len() != snapshot.keys.len() + 1
+    for (column, snapshot) in table.rings.iter().zip(&snapshot.rings) {
+        if snapshot
+            .numeric
+            .as_ref()
+            .is_some_and(|numeric| numeric.len() != snapshot.keys.len())
+            || (column.numeric.is_some() && snapshot.numeric.is_none())
+            || snapshot.offsets.len() != snapshot.keys.len() + 1
             || snapshot.capacities.len() != snapshot.keys.len()
             || snapshot.offsets.first() != Some(&0)
             || snapshot.offsets.last() != Some(&snapshot.values.len())
@@ -1186,5 +1292,61 @@ mod tests {
         other.add_keyed_column("different", ValueKind::UInt64);
         assert!(other.restore(snapshot).is_err());
         assert_eq!(other.entity_count(), 0);
+    }
+
+    #[test]
+    fn float64_rows_group_preserves_mean_bits_across_rollback_and_restore() {
+        let mut table = StateTable::new();
+        let group = table.add_numeric_rows_column("mean", 2);
+        table.begin().unwrap();
+        let entity = table
+            .resolve_or_append(EntityKey::new(b"entity".to_vec()))
+            .unwrap();
+        table.push_numeric_rows(group, entity, Some(1.0)).unwrap();
+        table.push_numeric_rows(group, entity, Some(3.0)).unwrap();
+        table.commit().unwrap();
+        assert_eq!(
+            table
+                .numeric_mean(group, entity)
+                .unwrap()
+                .unwrap()
+                .to_bits(),
+            2.0_f64.to_bits()
+        );
+        let snapshot = table.snapshot();
+
+        table.begin().unwrap();
+        table.push_numeric_rows(group, entity, Some(5.0)).unwrap();
+        assert_eq!(
+            table
+                .numeric_mean(group, entity)
+                .unwrap()
+                .unwrap()
+                .to_bits(),
+            4.0_f64.to_bits()
+        );
+        table.rollback().unwrap();
+        assert_eq!(
+            table
+                .numeric_mean(group, entity)
+                .unwrap()
+                .unwrap()
+                .to_bits(),
+            2.0_f64.to_bits()
+        );
+        assert_eq!(
+            table.f64_history(group, entity).unwrap(),
+            vec![Some(1.0), Some(3.0)]
+        );
+
+        table.restore(snapshot).unwrap();
+        assert_eq!(
+            table
+                .numeric_mean(group, entity)
+                .unwrap()
+                .unwrap()
+                .to_bits(),
+            2.0_f64.to_bits()
+        );
     }
 }
