@@ -150,4 +150,7 @@ mod float_extrema_tests;
 mod string_extrema_tests;
 
 #[cfg(test)]
+mod temporal_extrema_tests;
+
+#[cfg(test)]
 mod grouped_float_tests;
