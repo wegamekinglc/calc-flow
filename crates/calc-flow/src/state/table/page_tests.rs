@@ -110,6 +110,38 @@ fn dirty_first_touch_and_undo_restore_page_and_allocator_state() {
 }
 
 #[test]
+fn rollback_restores_transaction_stamp_and_first_touch_undo() {
+    let mut table = StateTable::with_checkpointing(true);
+    let counter = table.add_keyed_column("counter", ValueKind::UInt64);
+    let history = table.add_ring_column("history", RingKind::Float64, Retention::Rows(4));
+    let entity = entity(&mut table, b"a");
+    table.begin().unwrap();
+    table.set_u64(counter, entity, 1).unwrap();
+    table.push_f64(history, entity, Some(1.0)).unwrap();
+    table.commit().unwrap();
+
+    for rejected in [2, 3, 4] {
+        table.begin().unwrap();
+        table.set_u64(counter, entity, u64::from(rejected)).unwrap();
+        table
+            .push_f64(history, entity, Some(f64::from(rejected)))
+            .unwrap();
+        table.rollback().unwrap();
+        assert_eq!(table.u64(counter, entity).unwrap(), 1);
+        assert_eq!(table.f64_history(history, entity).unwrap(), vec![Some(1.0)]);
+    }
+    table.begin().unwrap();
+    table.set_u64(counter, entity, 5).unwrap();
+    table.push_f64(history, entity, Some(5.0)).unwrap();
+    table.commit().unwrap();
+    assert_eq!(table.u64(counter, entity).unwrap(), 5);
+    assert_eq!(
+        table.f64_history(history, entity).unwrap(),
+        vec![Some(1.0), Some(5.0)]
+    );
+}
+
+#[test]
 fn freeze_rejects_open_transaction_and_overlap() {
     let mut table = StateTable::with_checkpointing(true);
     table.begin().unwrap();

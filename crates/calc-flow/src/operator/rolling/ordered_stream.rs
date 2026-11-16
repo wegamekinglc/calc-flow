@@ -335,6 +335,12 @@ impl RollingOperator {
     }
 
     fn can_defer_ordered_history(&self, context: &StreamOperatorContext<'_>) -> bool {
+        if !context.job().checkpointing()
+            && self.compiled.kernel_plan.supports_slab()
+            && self.state.histories.by_entity.is_empty()
+        {
+            return true;
+        }
         self.state.typed_kernel_state.is_none()
             && self.state.histories.by_entity.is_empty()
             && !context.job().checkpointing()
@@ -406,16 +412,53 @@ impl RollingOperator {
         Some(update.map(|update| update.expect("in-place update was checked above")))
     }
 
+    fn prepare_slab_update(
+        &mut self,
+        input: &RecordBatch,
+        context: &StreamOperatorContext<'_>,
+    ) -> Option<Result<StreamKernelUpdate>> {
+        if context.job().checkpointing() {
+            return None;
+        }
+        let plan = &self.compiled.kernel_plan;
+        let prior = self
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .expect("state initialized above");
+        if !plan.can_use_slab(prior) {
+            return None;
+        }
+        let state = match self.state.owned_mut() {
+            Ok(state) => state,
+            Err(error) => return Some(Err(error)),
+        };
+        Some(
+            plan.prepare_slab_ordered_stream(
+                state
+                    .typed_kernel_state
+                    .as_deref_mut()
+                    .expect("state initialized above"),
+                input,
+                context.operator_id(),
+                context.rolling_metrics(),
+            ),
+        )
+    }
+
     async fn prepare_ordered_update(
         &mut self,
         input: &RecordBatch,
         context: &StreamOperatorContext<'_>,
         defer_history: bool,
     ) -> Result<StreamKernelUpdate> {
+        let observer = context.rolling_metrics();
+        if let Some(update) = self.prepare_slab_update(input, context) {
+            return update;
+        }
         if let Some(update) = self.prepare_ordered_update_in_place(input, context, defer_history) {
             return update;
         }
-        let observer = context.rolling_metrics();
         let plan = &self.compiled.kernel_plan;
         let prior = self
             .state

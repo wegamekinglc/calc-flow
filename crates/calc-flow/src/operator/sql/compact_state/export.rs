@@ -1,9 +1,12 @@
 use datafusion::arrow::array::builder::{
-    ArrayBuilder, BooleanBuilder, Decimal32Builder, Decimal64Builder, Decimal128Builder,
-    Decimal256Builder, Float32Builder, Float64Builder, Int8Builder, Int16Builder, Int32Builder,
-    Int64Builder, LargeStringBuilder, NullBuilder, StringBuilder, TimestampMicrosecondBuilder,
-    TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder, UInt8Builder,
-    UInt16Builder, UInt32Builder, UInt64Builder, make_builder,
+    ArrayBuilder, BooleanBuilder, Date32Builder, Date64Builder, Decimal32Builder, Decimal64Builder,
+    Decimal128Builder, Decimal256Builder, DurationMicrosecondBuilder, DurationMillisecondBuilder,
+    DurationNanosecondBuilder, DurationSecondBuilder, Float32Builder, Float64Builder, Int8Builder,
+    Int16Builder, Int32Builder, Int64Builder, LargeStringBuilder, NullBuilder, StringBuilder,
+    Time32MillisecondBuilder, Time32SecondBuilder, Time64MicrosecondBuilder,
+    Time64NanosecondBuilder, TimestampMicrosecondBuilder, TimestampMillisecondBuilder,
+    TimestampNanosecondBuilder, TimestampSecondBuilder, UInt8Builder, UInt16Builder, UInt32Builder,
+    UInt64Builder, make_builder,
 };
 
 use super::{
@@ -308,7 +311,12 @@ impl ColumnExport {
             | DataType::Decimal64(..)
             | DataType::Decimal128(..)
             | DataType::Decimal256(..)
-            | DataType::Timestamp(..) => make_builder(data_type, rows),
+            | DataType::Date32
+            | DataType::Date64
+            | DataType::Time32(_)
+            | DataType::Time64(_)
+            | DataType::Timestamp(..)
+            | DataType::Duration(_) => make_builder(data_type, rows),
             _ => {
                 return Err(df_error(
                     name,
@@ -453,6 +461,30 @@ fn append_other_fixed(
         ScalarValue::Boolean(value) => append!(builder, BooleanBuilder, value, name),
         ScalarValue::Float32(value) => append!(builder, Float32Builder, value, name),
         ScalarValue::Float64(value) => append!(builder, Float64Builder, value, name),
+        ScalarValue::Date32(value) => append!(builder, Date32Builder, value, name),
+        ScalarValue::Date64(value) => append!(builder, Date64Builder, value, name),
+        ScalarValue::Time32Second(value) => append!(builder, Time32SecondBuilder, value, name),
+        ScalarValue::Time32Millisecond(value) => {
+            append!(builder, Time32MillisecondBuilder, value, name);
+        }
+        ScalarValue::Time64Microsecond(value) => {
+            append!(builder, Time64MicrosecondBuilder, value, name);
+        }
+        ScalarValue::Time64Nanosecond(value) => {
+            append!(builder, Time64NanosecondBuilder, value, name);
+        }
+        ScalarValue::DurationSecond(value) => {
+            append!(builder, DurationSecondBuilder, value, name);
+        }
+        ScalarValue::DurationMillisecond(value) => {
+            append!(builder, DurationMillisecondBuilder, value, name);
+        }
+        ScalarValue::DurationMicrosecond(value) => {
+            append!(builder, DurationMicrosecondBuilder, value, name);
+        }
+        ScalarValue::DurationNanosecond(value) => {
+            append!(builder, DurationNanosecondBuilder, value, name);
+        }
         ScalarValue::TimestampSecond(value, _) => {
             append!(builder, TimestampSecondBuilder, value, name);
         }

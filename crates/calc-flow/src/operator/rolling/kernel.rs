@@ -49,6 +49,7 @@ mod decay;
 mod in_place;
 mod mean;
 mod numeric_rows;
+mod slab;
 use cumulative::TypedCumulativeState;
 mod sorted;
 pub(super) use sorted::SortedRollingState;
@@ -467,6 +468,7 @@ pub(super) struct EntityRows {
 pub(crate) struct StreamKernelUpdate {
     execution: RollingKernelExecution,
     in_place: Option<in_place::InPlaceUpdate>,
+    slab: Option<slab::SlabUpdate>,
 }
 
 /// Durable recurrences which cannot be reconstructed from a retained row tail.
@@ -490,6 +492,9 @@ impl StreamKernelUpdate {
     }
 
     pub(super) fn recurrence_seeds(&self) -> Vec<Vec<Option<RecurrenceSeed>>> {
+        if let Some(slab) = &self.slab {
+            return slab.recurrence_seeds();
+        }
         if let Some(in_place) = &self.in_place {
             return in_place.recurrence_seeds();
         }
@@ -520,6 +525,9 @@ impl StreamKernelUpdate {
         base: &RollingKernelState,
         node_id: &str,
     ) -> Result<(StateCharge, StateCharge)> {
+        if let Some(slab) = &self.slab {
+            return slab.charge_change(base, node_id);
+        }
         if let Some(in_place) = &self.in_place {
             return in_place.charge_change(base, node_id);
         }
@@ -538,6 +546,10 @@ impl StreamKernelUpdate {
     }
 
     pub(super) fn rollback(&mut self, base: &mut RollingKernelState) {
+        if let Some(slab) = self.slab.take() {
+            slab.rollback(base);
+            return;
+        }
         if let Some(in_place) = &mut self.in_place {
             in_place.rollback(base);
             self.in_place = None;
@@ -546,6 +558,14 @@ impl StreamKernelUpdate {
 
     pub(super) fn commit(self, base: &mut RollingKernelState) {
         let local = self.execution.state;
+        if let Some(slab) = self.slab {
+            slab.commit(base);
+            base.kernel_fingerprint = local.kernel_fingerprint;
+            if local.last_identity.is_some() {
+                base.last_identity = local.last_identity;
+            }
+            return;
+        }
         if self.in_place.is_some() {
             base.kernel_fingerprint = local.kernel_fingerprint;
             if local.last_identity.is_some() {
@@ -620,6 +640,7 @@ pub(super) struct RollingKernelState {
     entities: HashMap<Vec<u8>, usize>,
     direct_entities: HashMap<String, (usize, usize)>,
     states: Vec<Arc<TypedEntityState>>,
+    slab: Option<crate::state::StateTable>,
     last_identity: Option<Vec<u8>>,
 }
 
@@ -702,6 +723,7 @@ impl RollingKernelPlan {
             .map(|execution| StreamKernelUpdate {
                 execution,
                 in_place: None,
+                slab: None,
             })
     }
 
@@ -1181,6 +1203,7 @@ impl RollingKernelPlan {
                 Some(StreamKernelUpdate {
                     execution,
                     in_place: None,
+                    slab: None,
                 })
             })
     }
@@ -1663,6 +1686,10 @@ impl RollingKernelState {
                 &self.kernel_fingerprint,
                 entities,
                 &self.states,
+                &self
+                    .slab
+                    .as_ref()
+                    .map(crate::state::StateTable::canonical_state_for_test),
                 &self.last_identity
             )
         )
@@ -1762,6 +1789,7 @@ impl RollingKernelState {
                 entities,
                 direct_entities: HashMap::new(),
                 states,
+                slab: None,
                 last_identity: None,
             },
             entity_ids,

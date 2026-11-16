@@ -932,6 +932,10 @@ impl StateTable {
         for undo in transaction.undo.into_iter().rev() {
             self.apply_undo(undo)?;
         }
+        self.next_transaction = transaction.id;
+        for partition in self.partitions.values_mut() {
+            partition.stamps.retain(|_, stamp| *stamp != transaction.id);
+        }
         Ok(())
     }
 
@@ -1438,15 +1442,39 @@ impl StateTable {
             .map_err(|error| internal(&format!("rolling numeric arithmetic failed: {error:?}")))
     }
 
-    pub(crate) fn numeric_mean(&self, column: usize, entity: EntityId) -> Result<Option<f64>> {
+    fn numeric_accumulator(&self, column: usize, entity: EntityId) -> Result<NumericAccumulator> {
         let (group, row) = self.location(entity)?;
-        let numeric = self.partitions[&group].rings[column][row]
-            .as_ref()
-            .expect("ring page")
-            .value
-            .numeric
-            .expect("numeric group");
+        self.partitions[&group].rings[column]
+            .get(row)
+            .and_then(Option::as_ref)
+            .and_then(|page| page.value.numeric)
+            .ok_or_else(|| internal("numeric group is absent"))
+    }
+
+    pub(crate) fn numeric_mean(&self, column: usize, entity: EntityId) -> Result<Option<f64>> {
+        let numeric = self.numeric_accumulator(column, entity)?;
         Ok((numeric.valid_count > 0).then(|| numeric.mean()))
+    }
+
+    pub(crate) fn numeric_valid_count(&self, column: usize, entity: EntityId) -> Result<u64> {
+        Ok(self.numeric_accumulator(column, entity)?.valid_count)
+    }
+
+    pub(crate) fn numeric_sum(&self, column: usize, entity: EntityId) -> Result<f64> {
+        Ok(self.numeric_accumulator(column, entity)?.sum())
+    }
+
+    pub(crate) fn numeric_variance(
+        &self,
+        column: usize,
+        entity: EntityId,
+        ddof: u8,
+    ) -> Result<f64> {
+        Ok(self.numeric_accumulator(column, entity)?.variance(ddof))
+    }
+
+    pub(crate) fn numeric_stddev(&self, column: usize, entity: EntityId, ddof: u8) -> Result<f64> {
+        Ok(self.numeric_accumulator(column, entity)?.stddev(ddof))
     }
 
     pub(crate) fn f64_history(&self, column: usize, entity: EntityId) -> Result<Vec<Option<f64>>> {
@@ -1695,6 +1723,14 @@ impl StateTable {
             .ok_or_else(|| internal("value-log type mismatch"))
     }
 
+    pub(crate) fn logical_rows(&self) -> usize {
+        self.partitions
+            .values()
+            .flat_map(|partition| partition.rings.iter().flatten().flatten())
+            .map(|page| page.value.ring.len)
+            .sum()
+    }
+
     pub(crate) fn logical_bytes(&self) -> usize {
         self.partitions
             .values()
@@ -1821,6 +1857,68 @@ impl StateTable {
                 .collect::<Vec<_>>();
         entities.sort_by_key(|(entity, _)| entity.index);
         entities
+    }
+
+    #[cfg(test)]
+    pub(crate) fn canonical_state_for_test(&self) -> String {
+        let ordered = self.ordered_entities();
+        let keys = ordered
+            .iter()
+            .map(|(_, key)| key.clone())
+            .collect::<Vec<_>>();
+        let keyed = self
+            .keyed
+            .iter()
+            .enumerate()
+            .map(|(column, schema)| {
+                (
+                    &schema.name,
+                    schema.kind,
+                    ordered
+                        .iter()
+                        .map(|(entity, _)| self.keyed_value(column, *entity))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let rings = self
+            .rings
+            .iter()
+            .enumerate()
+            .map(|(column, schema)| {
+                let values = ordered
+                    .iter()
+                    .map(|(entity, _)| {
+                        self.partitions[&entity.key_group].rings[column]
+                            .get(entity.row as usize)
+                            .and_then(Option::as_ref)
+                            .map(|page| {
+                                (
+                                    page.value.ring.head,
+                                    page.value.ring.len,
+                                    &page.value.ring.slots,
+                                )
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                let numeric = ordered
+                    .iter()
+                    .map(|(entity, _)| {
+                        self.partitions[&entity.key_group].rings[column]
+                            .get(entity.row as usize)
+                            .and_then(Option::as_ref)
+                            .and_then(|page| page.value.numeric)
+                    })
+                    .collect::<Vec<_>>();
+                (&schema.name, schema.kind, schema.retention, values, numeric)
+            })
+            .collect::<Vec<_>>();
+        let value_logs = self
+            .partitions
+            .iter()
+            .map(|(group, partition)| (group, &partition.value_logs))
+            .collect::<Vec<_>>();
+        format!("{:?}", (keys, keyed, rings, value_logs))
     }
 
     pub(crate) fn snapshot(&mut self) -> TableSnapshot {
@@ -2018,48 +2116,9 @@ impl StateTable {
         }
         let mut entities = HashMap::new();
         for (group, lineage) in &snapshot.lineage.partitions {
-            let mut partition = StatePartition::new(*group);
-            partition.keyed = vec![Vec::new(); self.keyed.len()];
-            partition.rings = vec![Vec::new(); self.rings.len()];
-            partition.value_logs = vec![ValueLog::default(); self.value_logs.len()];
-            let mut metadata_seen = false;
-            for (slot, page) in &lineage.pages {
-                self.validate_snapshot_page(page)?;
-                let next_generation = lineage
-                    .allocator
-                    .next_generations
-                    .get(slot)
-                    .copied()
-                    .unwrap_or(0);
-                if page.id().key_group != *group
-                    || page.id().slot != *slot
-                    || page.id().generation >= next_generation
-                {
-                    return Err(internal("snapshot page identity mismatch"));
-                }
-                if matches!(page, PageRef::Metadata(_)) {
-                    if metadata_seen || *slot != 0 {
-                        return Err(internal("snapshot partition metadata is not unique"));
-                    }
-                    metadata_seen = true;
-                }
-                partition.insert(page.clone());
-            }
-            if !metadata_seen {
-                return Err(internal("snapshot partition metadata is absent"));
-            }
-            partition.allocator = lineage.allocator.clone();
-            let value_log_lengths = partition.metadata.value.value_log_lengths.clone();
-            for (column, log) in partition.value_logs.iter_mut().enumerate() {
-                log.len = value_log_lengths.get(column).copied().unwrap_or(0);
-            }
-            for (row, stored) in partition.metadata.value.entities.iter().enumerate() {
-                let entity = EntityId {
-                    index: stored.index,
-                    key_group: *group,
-                    row: row as u32,
-                };
-                if entities.insert(stored.key.bytes.clone(), entity).is_some() {
+            let (partition, entries) = self.install_partition(*group, lineage)?;
+            for (key, entity) in entries {
+                if entities.insert(key, entity).is_some() {
                     return Err(internal("snapshot contains a duplicate entity key"));
                 }
             }
@@ -2082,24 +2141,98 @@ impl StateTable {
         Ok(())
     }
 
+    fn install_partition(
+        &self,
+        group: KeyGroupId,
+        lineage: &PartitionLineage,
+    ) -> Result<(StatePartition, Vec<(Vec<u8>, EntityId)>)> {
+        let mut partition = StatePartition::new(group);
+        partition.keyed = vec![Vec::new(); self.keyed.len()];
+        partition.rings = vec![Vec::new(); self.rings.len()];
+        partition.value_logs = vec![ValueLog::default(); self.value_logs.len()];
+        let mut metadata_seen = false;
+        for (slot, page) in &lineage.pages {
+            self.validate_snapshot_page(page)?;
+            let next_generation = lineage
+                .allocator
+                .next_generations
+                .get(slot)
+                .copied()
+                .unwrap_or(0);
+            if page.id().key_group != group
+                || page.id().slot != *slot
+                || page.id().generation >= next_generation
+            {
+                return Err(internal("snapshot page identity mismatch"));
+            }
+            if matches!(page, PageRef::Metadata(_)) {
+                if metadata_seen || *slot != 0 {
+                    return Err(internal("snapshot partition metadata is not unique"));
+                }
+                metadata_seen = true;
+            }
+            partition.insert(page.clone());
+        }
+        if !metadata_seen {
+            return Err(internal("snapshot partition metadata is absent"));
+        }
+        partition.allocator = lineage.allocator.clone();
+        let value_log_lengths = partition.metadata.value.value_log_lengths.clone();
+        for (column, log) in partition.value_logs.iter_mut().enumerate() {
+            log.len = value_log_lengths.get(column).copied().unwrap_or(0);
+        }
+        let entries = partition
+            .metadata
+            .value
+            .entities
+            .iter()
+            .enumerate()
+            .map(|(row, stored)| {
+                (
+                    stored.key.bytes.clone(),
+                    EntityId {
+                        index: stored.index,
+                        key_group: group,
+                        row: row as u32,
+                    },
+                )
+            })
+            .collect();
+        Ok((partition, entries))
+    }
+
     fn validate_inventory(&self, snapshot: &TableSnapshot) -> Result<()> {
-        let valid = self.keyed.len() == snapshot.keyed.len()
-            && self.rings.len() == snapshot.rings.len()
-            && self.value_logs.len() * self.partitions.len() == snapshot.value_logs.len()
-            && self
-                .keyed
-                .iter()
-                .zip(&snapshot.keyed)
-                .all(|(left, right)| left.name == right.name && left.kind == right.kind)
-            && self.rings.iter().zip(&snapshot.rings).all(|(left, right)| {
+        self.validate_column_schema(snapshot)?;
+        self.validate_keyed_snapshots(snapshot)?;
+        self.validate_ring_snapshots(snapshot)?;
+        self.validate_value_log_snapshots(snapshot)
+    }
+
+    fn validate_column_schema(&self, snapshot: &TableSnapshot) -> Result<()> {
+        if self.keyed.len() != snapshot.keyed.len()
+            || self.rings.len() != snapshot.rings.len()
+            || self.value_logs.len() * self.partitions.len() != snapshot.value_logs.len()
+        {
+            return Err(internal("rolling state-table column inventory mismatch"));
+        }
+        if !self
+            .keyed
+            .iter()
+            .zip(&snapshot.keyed)
+            .all(|(left, right)| left.name == right.name && left.kind == right.kind)
+            || !self.rings.iter().zip(&snapshot.rings).all(|(left, right)| {
                 left.name == right.name
                     && left.kind == right.kind
                     && left.retention == right.retention
                     && left.numeric == right.numeric.is_some()
-            });
-        if !valid {
+            })
+        {
             return Err(internal("rolling state-table column inventory mismatch"));
         }
+        Ok(())
+    }
+
+    fn validate_keyed_snapshots(&self, snapshot: &TableSnapshot) -> Result<()> {
         for (schema, stored) in self.keyed.iter().zip(&snapshot.keyed) {
             if stored.values.len() != snapshot.keys.len()
                 || stored.values.data_type() != keyed_array(schema.kind, &[]).data_type()
@@ -2107,29 +2240,62 @@ impl StateTable {
                 return Err(internal("rolling keyed snapshot shape mismatch"));
             }
         }
-        for stored in &snapshot.rings {
-            let entities = snapshot.keys.len();
-            if stored.capacities.len() != entities
-                || stored
-                    .numeric
-                    .as_ref()
-                    .is_some_and(|numeric| numeric.len() != entities)
-                || stored.offsets.len() != entities + 1
-                || stored.offsets.first() != Some(&0)
-                || stored.offsets.last() != Some(&stored.values.len())
-                || stored
-                    .offsets
-                    .windows(2)
-                    .any(|offset| offset[0] > offset[1])
-                || stored
-                    .capacities
-                    .iter()
-                    .zip(stored.offsets.windows(2))
-                    .any(|(capacity, offset)| offset[1] - offset[0] > *capacity)
-            {
-                return Err(internal("rolling ring snapshot violates its invariants"));
-            }
+        Ok(())
+    }
+
+    fn validate_ring_snapshots(&self, snapshot: &TableSnapshot) -> Result<()> {
+        for (column, stored) in self.rings.iter().zip(&snapshot.rings) {
+            Self::validate_ring_snapshot(column, stored, snapshot.keys.len())?;
         }
+        Ok(())
+    }
+
+    fn validate_ring_snapshot(
+        column: &RingColumn,
+        snapshot: &RingSnapshot,
+        snapshot_entities: usize,
+    ) -> Result<()> {
+        let entities = snapshot.capacities.len();
+        if entities != snapshot_entities || !Self::ring_numeric_matches(column, snapshot, entities)
+        {
+            return Err(internal("rolling ring snapshot violates its invariants"));
+        }
+        if !Self::ring_offsets_are_valid(snapshot, entities) {
+            return Err(internal("rolling ring snapshot violates its invariants"));
+        }
+        if !Self::ring_capacities_are_valid(snapshot) {
+            return Err(internal("rolling ring snapshot violates its invariants"));
+        }
+        Ok(())
+    }
+
+    fn ring_numeric_matches(column: &RingColumn, snapshot: &RingSnapshot, entities: usize) -> bool {
+        let populated = snapshot
+            .numeric
+            .as_ref()
+            .is_none_or(|numeric| numeric.len() == entities);
+        populated && (column.numeric.is_none() || snapshot.numeric.is_some())
+    }
+
+    fn ring_offsets_are_valid(snapshot: &RingSnapshot, entities: usize) -> bool {
+        snapshot.offsets.len() == entities + 1
+            && snapshot.offsets.first() == Some(&0)
+            && snapshot.offsets.last() == Some(&snapshot.values.len())
+            && snapshot
+                .offsets
+                .windows(2)
+                .all(|offset| offset[0] <= offset[1])
+    }
+
+    fn ring_capacities_are_valid(snapshot: &RingSnapshot) -> bool {
+        snapshot
+            .capacities
+            .iter()
+            .zip(snapshot.offsets.windows(2))
+            .all(|(capacity, offset)| offset[1] - offset[0] <= *capacity)
+    }
+
+    fn validate_value_log_snapshots(&self, snapshot: &TableSnapshot) -> Result<()> {
         for stored in &snapshot.value_logs {
             let len = stored
                 .chunks
@@ -2148,11 +2314,18 @@ impl StateTable {
         Ok(())
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "undo variants share one explicit reverse-order dispatcher"
-    )]
     fn apply_undo(&mut self, undo: Undo) -> Result<()> {
+        match undo {
+            undo @ (Undo::Entity { .. }
+            | Undo::Dirty { .. }
+            | Undo::PageCreate { .. }
+            | Undo::PageReplace { .. }
+            | Undo::PageRemove { .. }) => self.apply_page_undo(undo),
+            undo => self.apply_value_undo(undo),
+        }
+    }
+
+    fn apply_page_undo(&mut self, undo: Undo) -> Result<()> {
         match undo {
             Undo::Entity {
                 group,
@@ -2201,6 +2374,13 @@ impl StateTable {
                 partition.insert(page);
                 partition.allocator.restore(slot, allocator);
             }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    fn apply_value_undo(&mut self, undo: Undo) -> Result<()> {
+        match undo {
             Undo::Keyed {
                 group,
                 slot,
@@ -2288,6 +2468,7 @@ impl StateTable {
                 logical_bytes,
                 total_len,
             } => self.undo_value_log(group, column, slot, chunks, len, logical_bytes, total_len)?,
+            _ => unreachable!(),
         }
         Ok(())
     }

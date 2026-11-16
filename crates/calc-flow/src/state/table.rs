@@ -92,33 +92,35 @@ pub(super) fn ring_array(kind: RingKind, values: &[RingValue]) -> ArrayRef {
                 })
                 .collect::<UInt64Array>(),
         ),
-        RingKind::PairFloat64 => {
-            let left = values
-                .iter()
-                .map(|value| match value {
-                    RingValue::PairFloat64(value) => value.map(|pair| pair.0),
-                    _ => unreachable!(),
-                })
-                .collect::<Float64Array>();
-            let right = values
-                .iter()
-                .map(|value| match value {
-                    RingValue::PairFloat64(value) => value.map(|pair| pair.1),
-                    _ => unreachable!(),
-                })
-                .collect::<Float64Array>();
-            Arc::new(StructArray::from(vec![
-                (
-                    Arc::new(Field::new("left", DataType::Float64, true)),
-                    Arc::new(left) as ArrayRef,
-                ),
-                (
-                    Arc::new(Field::new("right", DataType::Float64, true)),
-                    Arc::new(right) as ArrayRef,
-                ),
-            ]))
-        }
+        RingKind::PairFloat64 => pair_ring_array(values),
     }
+}
+
+fn pair_ring_array(values: &[RingValue]) -> ArrayRef {
+    let left = values
+        .iter()
+        .map(|value| match value {
+            RingValue::PairFloat64(value) => value.map(|pair| pair.0),
+            _ => unreachable!(),
+        })
+        .collect::<Float64Array>();
+    let right = values
+        .iter()
+        .map(|value| match value {
+            RingValue::PairFloat64(value) => value.map(|pair| pair.1),
+            _ => unreachable!(),
+        })
+        .collect::<Float64Array>();
+    Arc::new(StructArray::from(vec![
+        (
+            Arc::new(Field::new("left", DataType::Float64, true)),
+            Arc::new(left) as ArrayRef,
+        ),
+        (
+            Arc::new(Field::new("right", DataType::Float64, true)),
+            Arc::new(right) as ArrayRef,
+        ),
+    ]))
 }
 
 fn internal(message: &str) -> CalcFlowError {
