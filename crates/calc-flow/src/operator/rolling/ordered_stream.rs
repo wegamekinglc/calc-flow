@@ -749,7 +749,8 @@ impl<'a> PreparedOrderedOutput<'a> {
             }
             current.checked_sub(old)?.checked_add(new, node)?
         };
-        if !budget.allows(next.rows, next.bytes) {
+        let projected = next.checked_add(removed, node)?;
+        if !budget.allows(projected.rows, projected.bytes) {
             return Err(operator_error(node, "rolling state budget exceeded"));
         }
         Ok((current, next))

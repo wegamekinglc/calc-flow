@@ -105,7 +105,7 @@ fn encode_entity(snapshot: &TableSnapshot) -> Result<Vec<u8>> {
         Arc::new(Float64Array::from_iter_values(
             parts.iter().map(|part| part.sum_error),
         )),
-        Arc::new(BooleanArray::from_iter_values(
+        Arc::new(BooleanArray::from_iter(
             parts.iter().map(|part| part.sum_enabled),
         )),
         Arc::new(Float64Array::from(
@@ -123,7 +123,7 @@ fn encode_entity(snapshot: &TableSnapshot) -> Result<Vec<u8>> {
         Arc::new(Float64Array::from_iter_values(
             parts.iter().map(|part| part.squares_error),
         )),
-        Arc::new(BooleanArray::from_iter_values(
+        Arc::new(BooleanArray::from_iter(
             parts.iter().map(|part| part.dispersion_enabled),
         )),
         Arc::new(UInt32Array::from_iter_values(
@@ -516,7 +516,9 @@ mod tests {
     #[test]
     fn layout7_rejects_non_layout7_bytes_with_a_new_lineage_error() {
         let table = schema();
-        let error = decode_layout7(&table, b"layout-6").unwrap_err();
+        let Err(error) = decode_layout7(&table, b"layout-6") else {
+            panic!("layout 6 must be rejected")
+        };
         assert!(matches!(error, CalcFlowError::CheckpointMismatch { .. }));
         assert!(error.to_string().contains("start a new lineage"));
     }

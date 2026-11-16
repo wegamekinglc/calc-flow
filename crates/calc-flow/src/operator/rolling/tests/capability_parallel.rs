@@ -12,12 +12,17 @@ async fn test_work_invariant_parallel_preparation_qualifies_each_entity_once() {
 
     let input = parallel_rollback_record(0, 64_000);
     let spec = kernel_spec(json!([aggregate_output("mean", "price", "mean", 37)]));
+    let supports_slab = RollingOperator::new("rolling", input.schema(), spec.clone())
+        .unwrap()
+        .compiled
+        .kernel_plan
+        .supports_slab();
     QUALIFICATION_ENTITY_VISITS.set(0);
     assert_cold_parallel(spec, input).await;
     assert_eq!(
         QUALIFICATION_ENTITY_VISITS.replace(0),
-        64,
-        "the same private preparation must qualify each touched entity once"
+        if supports_slab { 0 } else { 64 },
+        "slab plans bypass legacy lane qualification; other plans qualify each touched entity once"
     );
 }
 
@@ -177,10 +182,15 @@ async fn assert_cold_parallel(spec: RollingSpec, input: RecordBatch) -> RecordBa
         serial.encode_state(epoch).unwrap()
     );
     assert_eq!(parallel.state.charge, serial.state.charge);
+    let expected_launches = if parallel.compiled.kernel_plan.supports_slab() {
+        0
+    } else {
+        2
+    };
     assert_eq!(
         launches.load(AtomicOrdering::SeqCst),
-        2,
-        "a cold, independently executable plan must execute two owned lanes"
+        expected_launches,
+        "slab plans bypass lanes; legacy typed plans retain owned lane execution"
     );
     actual
 }

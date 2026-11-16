@@ -227,6 +227,35 @@ impl RollingKernelPlan {
         state.last_identity.clone()
     }
 
+    #[cfg(test)]
+    pub(in crate::operator::rolling) fn slab_history_for_test(
+        state: &RollingKernelState,
+    ) -> Option<Vec<Option<f64>>> {
+        Some(state.slab.as_ref()?.first_f64_history(0))
+    }
+
+    #[cfg(test)]
+    pub(in crate::operator::rolling) fn slab_history_address_for_test(
+        state: &RollingKernelState,
+        offset: usize,
+    ) -> Option<usize> {
+        Some(state.slab.as_ref()?.first_f64_slot_address(0, offset))
+    }
+
+    #[cfg(test)]
+    pub(in crate::operator::rolling) fn slab_transition_count_for_test(
+        state: &RollingKernelState,
+    ) -> Option<u64> {
+        Some(state.slab.as_ref()?.first_u64(0))
+    }
+
+    #[cfg(test)]
+    pub(in crate::operator::rolling) fn slab_slot_addresses_for_test(
+        state: &RollingKernelState,
+    ) -> Option<Vec<usize>> {
+        Some(state.slab.as_ref()?.ring_slot_addresses(0))
+    }
+
     pub(in crate::operator::rolling) fn prepare_slab_ordered_stream(
         &self,
         state: &mut RollingKernelState,

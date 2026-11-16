@@ -851,6 +851,36 @@ impl StateTable {
             .collect())
     }
 
+    #[cfg(test)]
+    pub(crate) fn first_f64_history(&self, column: usize) -> Vec<Option<f64>> {
+        self.f64_history(column, EntityId(0)).expect("one entity")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn first_f64_slot_address(&self, column: usize, offset: usize) -> usize {
+        let ring = &self.rings[column].rings[0];
+        std::ptr::from_ref(&ring.slots[ring.position(offset)]) as usize
+    }
+
+    #[cfg(test)]
+    pub(crate) fn first_u64(&self, column: usize) -> u64 {
+        self.u64(column, EntityId(0)).expect("one entity")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ring_slot_addresses(&self, column: usize) -> Vec<usize> {
+        self.rings[column]
+            .rings
+            .iter()
+            .flat_map(|ring| {
+                ring.slots
+                    .iter()
+                    .map(std::ptr::from_ref)
+                    .map(|pointer| pointer as usize)
+            })
+            .collect()
+    }
+
     pub(crate) fn ring_logical_bytes(&self, column: usize) -> usize {
         let column = &self.rings[column];
         column.logical_bytes() - column.rings.len() * size_of::<Ring>()

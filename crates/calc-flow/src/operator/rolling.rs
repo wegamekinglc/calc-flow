@@ -1960,7 +1960,10 @@ impl RollingOperator {
             self.state.late_output_failed || self.indicator_late_failed,
             context.operator_id(),
         )?;
-        if self.state.deferred_history && context.job().checkpointing() {
+        if self.state.deferred_history
+            && context.job().checkpointing()
+            && !self.compiled.kernel_plan.supports_slab()
+        {
             return Err(operator_error(
                 context.operator_id(),
                 "checkpointing cannot be enabled after deferred rolling history was installed",

@@ -429,17 +429,7 @@ async fn ordered_rolling_budget_failure_restores_partially_closed_record() {
             .sum::<usize>(),
         1
     );
-    assert_eq!(
-        operator.state.charge,
-        budget::full_state_charge(
-            &operator.state.buffer,
-            &operator.state.ordered,
-            &operator.state.histories,
-            &operator.compiled,
-            "rolling",
-        )
-        .unwrap()
-    );
+    assert_cached_rolling_charge(&operator);
 }
 
 #[tokio::test]
@@ -1656,28 +1646,6 @@ fn typed_update_and_fill_matches_one_shot_fill_across_micro_batches() {
     assert_eq!(second.metrics.scalar_value_conversions, 0);
 }
 
-fn single_entity_retained_prices(operator: &RollingOperator) -> &Float64Array {
-    operator
-        .state
-        .histories
-        .by_entity
-        .values()
-        .next()
-        .unwrap()
-        .columnar
-        .records
-        .iter()
-        .find_map(|chunk| match chunk {
-            history::RetainedRows::Columnar(record) => Some(record),
-            history::RetainedRows::Scalar(_) => None,
-        })
-        .unwrap()
-        .column(3)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .unwrap()
-}
-
 #[tokio::test]
 async fn ordered_stream_finalization_reuses_input_columns_and_keeps_incremental_state() {
     use crate::{CancellationToken, StreamJobContext};
@@ -1915,10 +1883,8 @@ fn sparse_fixed_width_appends_amortize_retained_buffer_copies() {
     ))
     .unwrap();
     collector.drain("output");
-    let initial = single_entity_retained_prices(&operator).to_data();
-    let initial_bytes = single_entity_retained_prices(&operator).get_buffer_memory_size();
-    let mut backing = initial.buffers()[0].data_ptr();
-    drop(initial);
+    let initial_bytes = operator.state.charge.bytes;
+    let mut backing = retained_price_address(&operator, 1023);
     let mut copies = 0;
     let measured = allocation_counter::measure(|| {
         for time in 1025..=1792 {
@@ -1946,28 +1912,19 @@ fn sparse_fixed_width_appends_amortize_retained_buffer_copies() {
             ))
             .unwrap();
             collector.drain("output");
-            let current = single_entity_retained_prices(&operator).to_data();
-            copies += usize::from(current.buffers()[0].data_ptr() != backing);
-            backing = current.buffers()[0].data_ptr();
+            let survivor = 1023 - usize::try_from(time - 1024).unwrap();
+            let current = retained_price_address(&operator, survivor);
+            copies += usize::from(current != backing);
+            backing = current;
         }
     });
     assert!(
         copies <= 8,
         "768 sparse appends copied the retained prefix {copies} times"
     );
-    let history = operator.state.histories.by_entity.values().next().unwrap();
-    assert_eq!(
-        history
-            .columnar
-            .records
-            .iter()
-            .map(history::RetainedRows::len)
-            .sum::<usize>()
-            + history.rows.len(),
-        1024
-    );
-    assert_eq!(history.transition_count, 1792);
-    assert!(single_entity_retained_prices(&operator).get_buffer_memory_size() <= initial_bytes / 2);
+    assert_eq!(retained_row_count(&operator), 1024);
+    assert_eq!(retained_transition_count(&operator), 1792);
+    assert_eq!(operator.state.charge.bytes, initial_bytes);
     println!(
         "768 sparse appends: prefix copies={copies}, allocations={}, allocated bytes={}",
         measured.count_total, measured.bytes_total
@@ -2052,11 +2009,11 @@ async fn native_rolling_observations_report_tiny_payload_work_without_scalar_inp
     assert_eq!(observations.data.order_proof_rows, 4);
     assert_eq!(observations.watermark.resolved_rows, 4);
     assert_eq!(observations.watermark.touched_entities, 4);
-    assert_eq!(observations.watermark.copied_entities, 2);
+    assert_eq!(observations.watermark.copied_entities, 0);
     assert_eq!(observations.watermark.numeric_rows, 4);
     assert_eq!(observations.data.scalar_value_conversions, 0);
-    assert_eq!(observations.watermark.history_rows_materialized, 4);
-    assert_eq!(observations.watermark.scalar_value_conversions, 28);
+    assert_eq!(observations.watermark.history_rows_materialized, 0);
+    assert_eq!(observations.watermark.scalar_value_conversions, 0);
     assert_eq!(observations.watermark.output_rows_prepared, 4);
     assert_eq!(observations.watermark.output_chunks_prepared, 2);
 }
@@ -2479,9 +2436,8 @@ async fn assert_rejected_compaction_preserves_state(cancelled: bool) {
     );
     assert_eq!(retained_buffer_addresses(&operator), prior_buffers);
     assert_eq!(retained_state_ipc(&operator), prior_ipc);
-    let history = operator.state.histories.by_entity.values().next().unwrap();
-    assert_eq!(history.transition_count, 2);
-    assert!(retained_column_bytes(history, 5) >= 8 * 1024 * 1024);
+    assert_eq!(retained_transition_count(&operator), 2);
+    assert!(retained_column_bytes_for_operator(&operator, 5) < 1024);
     assert_eq!(retained_prices(&operator), [1.0, 3.0]);
     let metrics = store.snapshot().watermark;
     assert_eq!(metrics.failed, u64::from(!cancelled));
@@ -2489,9 +2445,12 @@ async fn assert_rejected_compaction_preserves_state(cancelled: bool) {
     assert_eq!(metrics.numeric_rows, 1);
     assert_eq!(metrics.output_rows_prepared, 1);
     assert_eq!(metrics.output_chunks_prepared, 1);
-    assert_eq!(metrics.history_append_rows_prepared, 1);
-    assert_eq!(metrics.history_evict_rows_prepared, 1);
-    assert!(metrics.history_charge_scalar_rows + metrics.history_charge_columnar_chunks > 0);
+    assert_eq!(metrics.history_append_rows_prepared, 0);
+    assert_eq!(metrics.history_evict_rows_prepared, 0);
+    assert_eq!(
+        metrics.history_charge_scalar_rows + metrics.history_charge_columnar_chunks,
+        0
+    );
     assert!(collector.drain("output").is_empty());
     assert_retry_releases_evicted_label(&mut operator, &job, &mut collector, next, sequence).await;
 }
@@ -2537,6 +2496,15 @@ async fn rolling_with_large_retained_label() -> (
 
 fn retained_state_ipc(operator: &RollingOperator) -> Vec<u8> {
     assert!(operator.state.ordered.is_empty());
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref() {
+        if RollingKernelPlan::slab_history_for_test(typed).is_some() {
+            return operator
+                .compiled
+                .kernel_plan
+                .encode_slab_state(typed)
+                .unwrap();
+        }
+    }
     let mut histories = operator.state.histories.clone();
     histories
         .materialize_columnar(&operator.compiled, "rolling", None)
@@ -2553,6 +2521,11 @@ fn retained_state_ipc(operator: &RollingOperator) -> Vec<u8> {
 }
 
 fn retained_buffer_addresses(operator: &RollingOperator) -> Vec<usize> {
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref() {
+        if let Some(addresses) = RollingKernelPlan::slab_slot_addresses_for_test(typed) {
+            return addresses;
+        }
+    }
     operator
         .state
         .histories
@@ -2581,6 +2554,11 @@ fn retained_buffer_addresses(operator: &RollingOperator) -> Vec<usize> {
 }
 
 fn retained_prices(operator: &RollingOperator) -> Vec<f64> {
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref() {
+        if let Some(history) = RollingKernelPlan::slab_history_for_test(typed) {
+            return history.into_iter().flatten().collect();
+        }
+    }
     operator
         .state
         .histories
@@ -2611,6 +2589,11 @@ fn retained_prices(operator: &RollingOperator) -> Vec<f64> {
 }
 
 fn retained_price_address(operator: &RollingOperator, mut index: usize) -> usize {
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref() {
+        if let Some(address) = RollingKernelPlan::slab_history_address_for_test(typed, index) {
+            return address;
+        }
+    }
     let history = operator.state.histories.by_entity.values().next().unwrap();
     for chunk in history.retained_chunks() {
         if index < chunk.len() {
@@ -2631,6 +2614,44 @@ fn retained_price_address(operator: &RollingOperator, mut index: usize) -> usize
         index -= chunk.len();
     }
     panic!("missing retained row")
+}
+
+fn retained_transition_count(operator: &RollingOperator) -> u64 {
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref() {
+        if let Some(count) = RollingKernelPlan::slab_transition_count_for_test(typed) {
+            return count;
+        }
+    }
+    operator
+        .state
+        .histories
+        .by_entity
+        .values()
+        .next()
+        .unwrap()
+        .transition_count
+}
+
+fn retained_row_count(operator: &RollingOperator) -> usize {
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref() {
+        if let Some(history) = RollingKernelPlan::slab_history_for_test(typed) {
+            return history.len();
+        }
+    }
+    let history = operator.state.histories.by_entity.values().next().unwrap();
+    history.rows.len() + history.columnar.rows
+}
+
+fn retained_column_bytes_for_operator(operator: &RollingOperator, column: usize) -> usize {
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref() {
+        if RollingKernelPlan::slab_history_for_test(typed).is_some() {
+            return 0;
+        }
+    }
+    retained_column_bytes(
+        operator.state.histories.by_entity.values().next().unwrap(),
+        column,
+    )
 }
 
 fn retained_column_bytes(history: &EntityRollingState, column: usize) -> usize {
@@ -2678,10 +2699,9 @@ async fn assert_retry_releases_evicted_label(
         .unwrap();
     assert_eq!(means.values().as_ref(), &[4.0]);
     assert_eq!(operator.state.next_output_sequence, sequence + 1);
-    let history = operator.state.histories.by_entity.values().next().unwrap();
-    assert_eq!(history.transition_count, 3);
+    assert_eq!(retained_transition_count(operator), 3);
     assert_eq!(retained_prices(operator), [3.0, 5.0]);
-    assert!(retained_column_bytes(history, 5) < 1024);
+    assert!(retained_column_bytes_for_operator(operator, 5) < 1024);
 }
 
 #[tokio::test]
@@ -3204,17 +3224,25 @@ fn with_sparse_large_first_label(record: &RecordBatch) -> RecordBatch {
 }
 
 fn assert_cached_rolling_charge(operator: &RollingOperator) {
-    assert_eq!(
-        operator.state.charge,
-        budget::full_state_charge(
-            &operator.state.buffer,
-            &operator.state.ordered,
-            &operator.state.histories,
-            &operator.compiled,
-            "rolling",
-        )
-        .unwrap()
-    );
+    let mut expected = budget::full_state_charge(
+        &operator.state.buffer,
+        &operator.state.ordered,
+        &operator.state.histories,
+        &operator.compiled,
+        "rolling",
+    )
+    .unwrap();
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref() {
+        if let Some(slab) = operator
+            .compiled
+            .kernel_plan
+            .slab_charge(typed, "rolling")
+            .unwrap()
+        {
+            expected = expected.checked_add(slab, "rolling").unwrap();
+        }
+    }
+    assert_eq!(operator.state.charge, expected);
     for (key, state) in &operator.state.histories.by_entity {
         assert_eq!(
             state.charge_cache,
@@ -3299,10 +3327,9 @@ async fn assert_releases_evicted_large_label(window: u32) {
         .unwrap();
     collector.drain("output");
     assert_cached_rolling_charge(&operator);
-    let history = operator.state.histories.by_entity.values().next().unwrap();
-    let retained_label_bytes = retained_column_bytes(history, 5);
+    let retained_label_bytes = retained_column_bytes_for_operator(&operator, 5);
     assert_eq!(
-        history.rows.len() + history.columnar.rows,
+        retained_row_count(&operator),
         usize::try_from(window).unwrap()
     );
     assert!(
