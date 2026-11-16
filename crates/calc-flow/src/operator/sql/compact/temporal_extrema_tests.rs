@@ -45,9 +45,7 @@ fn series(data_type: &DataType) -> Vec<ScalarValue> {
             DataType::Date32 => ScalarValue::Date32(Some(value)),
             DataType::Date64 => ScalarValue::Date64(Some(i64::from(value))),
             DataType::Time32(TimeUnit::Second) => ScalarValue::Time32Second(Some(value)),
-            DataType::Time32(TimeUnit::Millisecond) => {
-                ScalarValue::Time32Millisecond(Some(value))
-            }
+            DataType::Time32(TimeUnit::Millisecond) => ScalarValue::Time32Millisecond(Some(value)),
             DataType::Time64(TimeUnit::Microsecond) => {
                 ScalarValue::Time64Microsecond(Some(i64::from(value)))
             }
@@ -140,16 +138,18 @@ fn rows(records: &[RecordBatch]) -> Vec<Vec<ScalarValue>> {
     rows
 }
 
-async fn plan(
-    runtime: &DataFusionRuntime,
-    sql: &str,
-    schema: &Arc<Schema>,
-) -> IncrementalSql {
+async fn plan(runtime: &DataFusionRuntime, sql: &str, schema: &Arc<Schema>) -> IncrementalSql {
     let query = crate::expression::parse_select_query(sql).unwrap();
-    IncrementalSql::plan(runtime, &query, "events", schema.clone(), "temporal-extrema")
-        .await
-        .unwrap()
-        .expect("temporal MIN/MAX must remain compact")
+    IncrementalSql::plan(
+        runtime,
+        &query,
+        "events",
+        schema.clone(),
+        "temporal-extrema",
+    )
+    .await
+    .unwrap()
+    .expect("temporal MIN/MAX must remain compact")
 }
 
 fn job() -> StreamJobContext {

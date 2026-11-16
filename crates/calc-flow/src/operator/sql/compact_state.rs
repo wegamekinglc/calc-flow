@@ -442,6 +442,25 @@ impl IncrementalSql {
         let mut descriptor = self.native_descriptor(name)?;
         let rows = slots.map_or(self.group_count(), <[usize]>::len);
         descriptor.group_count = rows;
+        let charge = self.keyed_export_charge(&descriptor, rows, slots, name)?;
+        let reservation = self.scratch.new_empty();
+        ensure_reservation(&reservation, charge, name)?;
+        let records = self.keyed_export_records(slots, descriptor.wire_schema.clone(), check)?;
+        check()?;
+        Ok(PaidNativeStateRecords::new(
+            records,
+            descriptor,
+            reservation,
+        ))
+    }
+
+    fn keyed_export_charge(
+        &self,
+        descriptor: &NativeStateDescriptor,
+        rows: usize,
+        slots: Option<&[usize]>,
+        name: &str,
+    ) -> Result<usize> {
         let record_count = rows.div_ceil(CHUNK_ROWS).max(1);
         let columns = checked_bytes(0, [(descriptor.wire_schema.fields().len(), 512)], name)?;
         let charge = checked_bytes(
@@ -459,22 +478,22 @@ impl IncrementalSql {
         } else {
             return Err(df_error(name, "keyed aggregate plan is missing"));
         };
-        let charge = checked_bytes(charge, [(output_charge, 1)], name)?;
-        let reservation = self.scratch.new_empty();
-        ensure_reservation(&reservation, charge, name)?;
-        let records = if let Some(keyed) = &self.keyed_sum {
-            keyed.export(slots, descriptor.wire_schema.clone(), check)?
+        checked_bytes(charge, [(output_charge, 1)], name)
+    }
+
+    fn keyed_export_records(
+        &self,
+        slots: Option<&[usize]>,
+        schema: SchemaRef,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Vec<RecordBatch>> {
+        if let Some(keyed) = &self.keyed_sum {
+            keyed.export(slots, schema, check)
         } else if let Some(keyed) = &self.keyed_state {
-            keyed.export(slots, descriptor.wire_schema.clone(), check)?
+            keyed.export(slots, schema, check)
         } else {
-            return Err(df_error(name, "keyed aggregate plan is missing"));
-        };
-        check()?;
-        Ok(PaidNativeStateRecords::new(
-            records,
-            descriptor,
-            reservation,
-        ))
+            Err(df_error("keyed export", "keyed aggregate plan is missing"))
+        }
     }
 
     pub(in crate::operator::sql) fn export_dirty_state(
@@ -545,6 +564,24 @@ impl IncrementalSql {
         name: &str,
     ) -> Result<Self> {
         check_cancelled()?;
+        self.ensure_native_import_empty(name)?;
+        let ValidatedNativeImport {
+            descriptor,
+            groups,
+            _validation,
+        } = self.prepare_native_import(
+            records,
+            historical_rows,
+            seen_input,
+            &mut check_cancelled,
+            name,
+        )?;
+        self.install_native_import(records, descriptor, groups, &mut check_cancelled, name)?;
+        check_cancelled()?;
+        Ok(self)
+    }
+
+    fn ensure_native_import_empty(&self, name: &str) -> Result<()> {
         if !self.groups.is_empty()
             || !self.index.is_empty()
             || self
@@ -558,21 +595,20 @@ impl IncrementalSql {
         {
             return Err(df_error(name, "native state import requires an empty plan"));
         }
-        let ValidatedNativeImport {
-            descriptor,
-            groups,
-            _validation,
-        } = self.prepare_native_import(
-            records,
-            historical_rows,
-            seen_input,
-            &mut check_cancelled,
-            name,
-        )?;
+        Ok(())
+    }
+
+    fn install_native_import(
+        &mut self,
+        records: &[RecordBatch],
+        descriptor: NativeStateDescriptor,
+        groups: usize,
+        check_cancelled: &mut impl FnMut() -> Result<()>,
+        name: &str,
+    ) -> Result<()> {
         self.reserve_groups(groups, groups, name)?;
-        self.load_records(records, &descriptor, false, &mut check_cancelled, name)?;
-        check_cancelled()?;
-        Ok(self)
+        self.load_records(records, &descriptor, false, check_cancelled, name)?;
+        Ok(())
     }
 
     fn prepare_native_import(

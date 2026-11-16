@@ -217,27 +217,44 @@ impl Transaction {
             .route_selected_with_limit(keys, selection, self.limit, check)?;
         grow(&mut state)?;
         for (row, group) in groups.into_iter().enumerate() {
-            if selection.is_some_and(|selection| !predicate::selected(selection, row)) {
-                continue;
-            }
-            touch(
-                &mut state,
-                group,
-                self.generation,
-                self.old_groups,
-                &mut TouchUndo {
-                    affected: &mut self.affected,
-                    leased: &mut self.leased,
-                    undo: &mut self.undo,
-                    reservation: &mut self.undo_reservation,
-                },
-            )?;
-            if filter.is_some_and(|filter| !predicate::selected(filter, row)) {
-                continue;
-            }
-            if let Some(value) = input.value(row) {
-                state.sums.add(group, value);
-            }
+            self.apply_row(&mut state, &input, selection, filter, row, group)?;
+        }
+        Ok(())
+    }
+
+    fn undo_parts(&mut self) -> TouchUndo<'_> {
+        TouchUndo {
+            affected: &mut self.affected,
+            leased: &mut self.leased,
+            undo: &mut self.undo,
+            reservation: &mut self.undo_reservation,
+        }
+    }
+
+    fn apply_row(
+        &mut self,
+        state: &mut KeyedSumState,
+        input: &SumInput,
+        selection: Option<&BooleanArray>,
+        filter: Option<&BooleanArray>,
+        row: usize,
+        group: GroupId,
+    ) -> Result<()> {
+        if selection.is_some_and(|selection| !predicate::selected(selection, row)) {
+            return Ok(());
+        }
+        touch(
+            state,
+            group,
+            self.generation,
+            self.old_groups,
+            &mut self.undo_parts(),
+        )?;
+        if filter.is_some_and(|filter| !predicate::selected(filter, row)) {
+            return Ok(());
+        }
+        if let Some(value) = input.value(row) {
+            state.sums.add(group, value);
         }
         Ok(())
     }
@@ -254,7 +271,11 @@ impl Transaction {
     }
 
     pub(super) fn group_count(&self) -> usize {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner).keys.len()
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys
+            .len()
     }
 
     pub(super) fn first_key(&self, slot: usize) -> Result<Arc<[u8]>> {
@@ -331,26 +352,34 @@ impl Transaction {
         let groups = state.keys.route_with_limit(&keys, self.limit, check)?;
         grow(&mut state)?;
         for (row, group) in groups.into_iter().enumerate() {
-            if !seen.insert(group) || (group.index() < self.old_groups && !replace) {
-                return Err(super::df_error(
-                    "keyed SUM",
-                    "native state contains duplicate keys",
-                ));
-            }
-            touch(
-                &mut state,
-                group,
-                self.generation,
-                self.old_groups,
-                &mut TouchUndo {
-                    affected: &mut self.affected,
-                    leased: &mut self.leased,
-                    undo: &mut self.undo,
-                    reservation: &mut self.undo_reservation,
-                },
-            )?;
-            state.sums.set(group, input.value(row));
+            self.restore_row(&mut state, &input, replace, seen, row, group)?;
         }
+        Ok(())
+    }
+
+    fn restore_row(
+        &mut self,
+        state: &mut KeyedSumState,
+        input: &SumInput,
+        replace: bool,
+        seen: &mut std::collections::BTreeSet<GroupId>,
+        row: usize,
+        group: GroupId,
+    ) -> Result<()> {
+        if !seen.insert(group) || (group.index() < self.old_groups && !replace) {
+            return Err(super::df_error(
+                "keyed SUM",
+                "native state contains duplicate keys",
+            ));
+        }
+        touch(
+            state,
+            group,
+            self.generation,
+            self.old_groups,
+            &mut self.undo_parts(),
+        )?;
+        state.sums.set(group, input.value(row));
         Ok(())
     }
 

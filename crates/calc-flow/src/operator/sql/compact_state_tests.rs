@@ -751,7 +751,10 @@ async fn apply(plan: &mut IncrementalSql, kind: &DataType, values: &[Option<i64>
 type Saved = Vec<(Vec<ScalarValue>, Vec<Vec<ScalarValue>>, Vec<ScalarValue>)>;
 
 fn snapshot(plan: &IncrementalSql) -> Saved {
-    plan.keyed_state.as_ref().expect("typed aggregate state").snapshot()
+    plan.keyed_state
+        .as_ref()
+        .expect("typed aggregate state")
+        .snapshot()
 }
 
 fn result(plan: &IncrementalSql) -> RecordBatch {

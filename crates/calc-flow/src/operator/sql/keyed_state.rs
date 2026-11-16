@@ -1,13 +1,12 @@
 use super::{
-    AggregateFunctionExpr, ArrayRef, BooleanArray, CHUNK_ROWS, GroupKey, PartialGroups, RecordBatch,
-    Result, ScalarValue, SchemaRef, df_error, global_record, grouped_float, grouped_sum, native_grouped_result, ordered_last, predicate, variable_extrema,
+    AggregateFunctionExpr, ArrayRef, BooleanArray, CHUNK_ROWS, GroupKey, PartialGroups,
+    RecordBatch, Result, ScalarValue, SchemaRef, df_error, global_record, grouped_float,
+    grouped_sum, native_grouped_result, ordered_last, predicate, variable_extrema,
 };
 use crate::StateBudget;
 use crate::operator::keyed::{GroupId, KeyCut, KeySchema, KeyStore, MORSEL_ROWS};
 use datafusion::arrow::{
-    array::Array,
-    datatypes::FieldRef,
-    execution::memory_pool::MemoryReservation,
+    array::Array, datatypes::FieldRef, execution::memory_pool::MemoryReservation,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -90,7 +89,9 @@ impl KeyedState {
             .iter()
             .map(|expression| AggregateState::new(expression.as_ref()))
             .collect::<Result<Vec<_>>>()?;
-        let fingerprint = key_store.as_ref().map_or_else(global_fingerprint, KeyStore::layout_fingerprint);
+        let fingerprint = key_store
+            .as_ref()
+            .map_or_else(global_fingerprint, KeyStore::layout_fingerprint);
         Ok(Self {
             state: Arc::new(Mutex::new(State {
                 keys: key_store,
@@ -215,7 +216,9 @@ impl KeyedState {
                 counts[index] = counts[index]
                     .checked_add(count)
                     .filter(|total| *total <= historical_rows)
-                    .ok_or_else(|| df_error(name, "native aggregate count exceeds historical rows"))?;
+                    .ok_or_else(|| {
+                        df_error(name, "native aggregate count exceeds historical rows")
+                    })?;
             }
         }
         Ok(counts)
@@ -297,9 +300,7 @@ impl KeyedState {
     #[cfg(test)]
     pub(super) fn record_for_test(&self, schema: SchemaRef) -> RecordBatch {
         let state = self.lock();
-        state
-            .record(0, state.groups, None, schema, false)
-            .unwrap()
+        state.record(0, state.groups, None, schema, false).unwrap()
     }
 
     #[cfg(test)]
@@ -394,8 +395,11 @@ impl Transaction {
     pub(super) fn global_states(&self) -> Vec<Vec<ScalarValue>> {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         (0..state.aggregates.len())
-            .map(|aggregate| state.state(aggregate, GroupId::new(0).expect("global slot"))
-                .unwrap_or_default())
+            .map(|aggregate| {
+                state
+                    .state(aggregate, GroupId::new(0).expect("global slot"))
+                    .unwrap_or_default()
+            })
             .collect()
     }
 
@@ -448,7 +452,10 @@ impl Transaction {
     }
 
     pub(super) fn group_count(&self) -> usize {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner).groups
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .groups
     }
 
     pub(super) fn first_key(&self, slot: usize) -> Result<Arc<[u8]>> {
@@ -583,7 +590,8 @@ impl Transaction {
         let mut growth = 0;
         for &aggregate in variable {
             for row in 0..arguments[aggregate][0].len() {
-                let selected = selection.is_none_or(|selection| predicate::selected(selection, row));
+                let selected =
+                    selection.is_none_or(|selection| predicate::selected(selection, row));
                 let filtered = filters
                     .get(aggregate)
                     .copied()
@@ -591,9 +599,9 @@ impl Transaction {
                     .is_none_or(|filter| predicate::selected(filter, row));
                 if selected && filtered {
                     let width = variable_extrema::array_bytes(&arguments[aggregate][0], row);
-                    growth = growth.checked_add(width).ok_or_else(|| {
-                        df_error(name, "variable aggregate charge overflowed")
-                    })?;
+                    growth = growth
+                        .checked_add(width)
+                        .ok_or_else(|| df_error(name, "variable aggregate charge overflowed"))?;
                 }
             }
         }
@@ -614,7 +622,12 @@ impl Transaction {
         Ok(())
     }
 
-    fn seed_integer_history(&self, state: &State, partial: &mut PartialGroups, name: &str) -> Result<()> {
+    fn seed_integer_history(
+        &self,
+        state: &State,
+        partial: &mut PartialGroups,
+        name: &str,
+    ) -> Result<()> {
         for index in 0..partial.accumulators.len() {
             if partial.accumulators[index].integer_sum() {
                 let saved = partial.slots.iter().enumerate().map(|(rank, slot)| {
@@ -662,7 +675,9 @@ impl Transaction {
         let result = if state.keys.is_some() && expression.fun().name() == "avg" {
             native_grouped_result(expression, &values, name)?
         } else {
-            accumulator.evaluate().map_err(|error| df_error(name, error))?
+            accumulator
+                .evaluate()
+                .map_err(|error| df_error(name, error))?
         };
         state.set_state(index, group, values, result)
     }
@@ -700,7 +715,11 @@ impl Transaction {
                     .state_fields()
                     .map_err(|error| df_error("keyed aggregate", error))?
                     .len();
-                let values = scalars(&chunk.columns()[column..column + width], row, "keyed aggregate")?;
+                let values = scalars(
+                    &chunk.columns()[column..column + width],
+                    row,
+                    "keyed aggregate",
+                )?;
                 let result = restored_result(
                     index,
                     expression.as_ref(),
@@ -795,20 +814,27 @@ impl StateColumn {
     }
 
     fn array(&self, groups: &[GroupId]) -> Result<ArrayRef> {
-        ScalarValue::iter_to_array(groups.iter().map(|group| self.values[group.index()].clone()))
-            .map_err(|error| df_error("keyed aggregate", error))
+        ScalarValue::iter_to_array(
+            groups
+                .iter()
+                .map(|group| self.values[group.index()].clone()),
+        )
+        .map_err(|error| df_error("keyed aggregate", error))
     }
 }
 
 impl State {
     fn grow(&mut self, groups: usize) -> Result<()> {
         let new = groups.saturating_sub(self.groups);
-        let width = self.aggregates.iter().try_fold(size_of::<u64>(), |width, aggregate| {
-            let fields = aggregate.states.len() + 1;
-            width
-                .checked_add(fields * size_of::<ScalarValue>() + size_of::<bool>())
-                .ok_or_else(|| df_error("keyed aggregate", "typed state width overflowed"))
-        })?;
+        let width = self
+            .aggregates
+            .iter()
+            .try_fold(size_of::<u64>(), |width, aggregate| {
+                let fields = aggregate.states.len() + 1;
+                width
+                    .checked_add(fields * size_of::<ScalarValue>() + size_of::<bool>())
+                    .ok_or_else(|| df_error("keyed aggregate", "typed state width overflowed"))
+            })?;
         let charge = new
             .checked_mul(width)
             .ok_or_else(|| df_error("keyed aggregate", "typed state charge overflowed"))?;
@@ -968,13 +994,16 @@ impl GroupUndo {
         state.aggregates.iter().fold(
             size_of::<Self>() + size_of::<GroupId>(),
             |charge, aggregate| {
-            aggregate
-                .states
-                .iter()
-                .map(|column| column.values[group.index()].size())
-                .chain(std::iter::once(aggregate.result.values[group.index()].size()))
-                .fold(charge, |charge, bytes| charge.saturating_add(bytes))
-        })
+                aggregate
+                    .states
+                    .iter()
+                    .map(|column| column.values[group.index()].size())
+                    .chain(std::iter::once(
+                        aggregate.result.values[group.index()].size(),
+                    ))
+                    .fold(charge, |charge, bytes| charge.saturating_add(bytes))
+            },
+        )
     }
 
     fn new(state: &State, group: GroupId) -> Self {
@@ -1008,18 +1037,21 @@ impl GroupUndo {
     }
 
     fn changed(&self, state: &State) -> bool {
-        self.initialized.iter().enumerate().any(|(index, initialized)| {
-            let aggregate = &state.aggregates[index];
-            if aggregate.initialized[self.group.index()] != *initialized {
-                return true;
-            }
-            if aggregate.result.values[self.group.index()] != self.results[index] {
-                return true;
-            }
-            aggregate.states.iter().enumerate().any(|(field, column)| {
-                column.values[self.group.index()] != self.states[index][field]
+        self.initialized
+            .iter()
+            .enumerate()
+            .any(|(index, initialized)| {
+                let aggregate = &state.aggregates[index];
+                if aggregate.initialized[self.group.index()] != *initialized {
+                    return true;
+                }
+                if aggregate.result.values[self.group.index()] != self.results[index] {
+                    return true;
+                }
+                aggregate.states.iter().enumerate().any(|(field, column)| {
+                    column.values[self.group.index()] != self.states[index][field]
+                })
             })
-        })
     }
 
     fn restore(self, state: &mut State) {
@@ -1040,7 +1072,11 @@ fn scalars(arrays: &[ArrayRef], row: usize, name: &str) -> Result<Vec<ScalarValu
         .collect()
 }
 
-fn merge(accumulator: &mut dyn super::Accumulator, values: &[ScalarValue], name: &str) -> Result<()> {
+fn merge(
+    accumulator: &mut dyn super::Accumulator,
+    values: &[ScalarValue],
+    name: &str,
+) -> Result<()> {
     let arrays = values
         .iter()
         .map(ScalarValue::to_array)
@@ -1076,7 +1112,9 @@ fn restored_result(
         .create_accumulator()
         .map_err(|error| df_error(name, error))?;
     merge(&mut *accumulator, values, name)?;
-    accumulator.evaluate().map_err(|error| df_error(name, error))
+    accumulator
+        .evaluate()
+        .map_err(|error| df_error(name, error))
 }
 
 fn global_fingerprint() -> [u8; 32] {

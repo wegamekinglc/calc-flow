@@ -126,7 +126,11 @@ async fn snapshots_reuse_clean_chunks_and_rebuild_dirty_chunks() {
         .await
         .unwrap();
     let second_records = second.records.clone();
-    assert_rebuilt_chunk(&first_records[0], &second_records[0], "touched sealed chunk");
+    assert_rebuilt_chunk(
+        &first_records[0],
+        &second_records[0],
+        "touched sealed chunk",
+    );
     assert_shared_chunk(&first_records[1], &second_records[1], "clean tail");
     plan.commit(second);
 
@@ -153,7 +157,11 @@ async fn snapshots_reuse_clean_chunks_and_rebuild_dirty_chunks() {
         .await
         .unwrap();
     let fourth_records = fourth.records.clone();
-    assert_rebuilt_chunk(&grown_records[0], &fourth_records[0], "second sealed update");
+    assert_rebuilt_chunk(
+        &grown_records[0],
+        &fourth_records[0],
+        "second sealed update",
+    );
     assert_shared_chunk(&grown_records[1], &fourth_records[1], "clean grown tail");
     plan.commit(fourth);
 
@@ -168,11 +176,7 @@ async fn snapshots_reuse_clean_chunks_and_rebuild_dirty_chunks() {
     plan.commit(empty);
 
     let unchanged = plan
-        .update(
-            &keyed_input(&[initial_keys[0].clone()], 0),
-            &context,
-            NAME,
-        )
+        .update(&keyed_input(&[initial_keys[0].clone()], 0), &context, NAME)
         .await
         .unwrap();
     let unchanged_records = unchanged.records.clone();
@@ -213,21 +217,29 @@ async fn discarded_growth_does_not_install_tail_columns() {
         .unwrap();
     let discarded_records = discarded.records.clone();
     assert_eq!(discarded_records[1].num_rows(), TAIL_ROWS + 1);
-    assert_shared_chunk(&first_records[0], &discarded_records[0], "clean discarded chunk");
-    assert_rebuilt_chunk(&first_records[1], &discarded_records[1], "discarded tail growth");
+    assert_shared_chunk(
+        &first_records[0],
+        &discarded_records[0],
+        "clean discarded chunk",
+    );
+    assert_rebuilt_chunk(
+        &first_records[1],
+        &discarded_records[1],
+        "discarded tail growth",
+    );
     drop(discarded);
 
     let retried = plan
-        .update(
-            &keyed_input(&[initial_keys[0].clone()], 10),
-            &context,
-            NAME,
-        )
+        .update(&keyed_input(&[initial_keys[0].clone()], 10), &context, NAME)
         .await
         .unwrap();
     let retried_records = retried.records.clone();
     assert_rebuilt_chunk(&first_records[0], &retried_records[0], "retry update");
-    assert_shared_chunk(&first_records[1], &retried_records[1], "committed tail after rollback");
+    assert_shared_chunk(
+        &first_records[1],
+        &retried_records[1],
+        "committed tail after rollback",
+    );
     let mut expected = (0..SEALED_ROWS + TAIL_ROWS)
         .map(|index| (format!("k{index:05}"), 1))
         .collect::<std::collections::BTreeMap<_, _>>();

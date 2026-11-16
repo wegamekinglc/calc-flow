@@ -110,13 +110,14 @@ async fn case(dtype: &DataType) {
     let mut prefix = vec![first];
     for record in records {
         prefix.push(record.clone());
-        let transaction = plan.update(
-            &Batch::table(vec![record], BatchMetadata::default()).unwrap(),
-            &context,
-            "seed",
-        )
-        .await
-        .unwrap();
+        let transaction = plan
+            .update(
+                &Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                &context,
+                "seed",
+            )
+            .await
+            .unwrap();
         let expected = runtime
             .sql(
                 QUERY,

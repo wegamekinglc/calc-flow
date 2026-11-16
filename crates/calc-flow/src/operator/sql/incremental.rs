@@ -1380,7 +1380,11 @@ impl IncrementalSql {
                     name,
                 )?;
                 if let Some(proof) = proof.as_ref() {
-                    let count = self.keyed_state.as_ref().expect("keyed aggregate plan").len();
+                    let count = self
+                        .keyed_state
+                        .as_ref()
+                        .expect("keyed aggregate plan")
+                        .len();
                     let (_, width) =
                         grouped_float::group_layout(&self.keys).expect("certified grouped key");
                     proof.grow(count, width, &self.aggregates, name)?;

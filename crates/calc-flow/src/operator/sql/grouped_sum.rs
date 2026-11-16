@@ -1,7 +1,6 @@
 use super::{AggregateFunctionExpr, ArrayRef, GroupsAccumulator, Result, ScalarValue, df_error};
 use std::mem::size_of;
 
-
 use datafusion::{
     arrow::{
         array::{Array, BooleanArray, new_empty_array},

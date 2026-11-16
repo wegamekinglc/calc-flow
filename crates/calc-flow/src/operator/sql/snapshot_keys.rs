@@ -65,11 +65,7 @@ impl SnapshotKeys {
 
     /// Returns a clean chunk without requiring its visible row count. Dirty
     /// detection and canonical identity are the cache validity proof.
-    pub(super) fn get_clean(
-        &self,
-        chunk: usize,
-        first_key: &Arc<[u8]>,
-    ) -> Option<Arc<[ArrayRef]>> {
+    pub(super) fn get_clean(&self, chunk: usize, first_key: &Arc<[u8]>) -> Option<Arc<[ArrayRef]>> {
         let inner = self.inner.lock();
         let cached = inner.chunks.get(chunk)?.as_ref()?;
         Arc::ptr_eq(&cached.first_key, first_key).then(|| Arc::clone(&cached.columns))

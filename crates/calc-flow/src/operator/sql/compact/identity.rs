@@ -124,31 +124,47 @@ fn input_json(input: &NativeAggregateInput) -> Result<Value> {
             "kind":"column", "index":index, "field":fields_json(std::slice::from_ref(field))?
         })),
         NativeAggregateInput::Literal(value) => literal_json(value),
-        NativeAggregateInput::Cast { input, field, safe } => Ok(json!({
-            "kind":"cast", "input":input_json(input)?,
-            "field":fields_json(std::slice::from_ref(field))?, "safe":safe,
-            "format_policy":"datafusion_default"
-        })),
-        NativeAggregateInput::TryCast { input, dtype } => Ok(json!({
-            "kind":"try_cast", "input":input_json(input)?,
-            "field":fields_json(&[Arc::new(Field::new("try_cast", dtype.clone(), true))])?,
-            "format_policy":"datafusion_default"
-        })),
+        NativeAggregateInput::Cast { input, field, safe } => cast_json(input, field, *safe),
+        NativeAggregateInput::TryCast { input, dtype } => try_cast_json(input, dtype),
         NativeAggregateInput::Binary {
             left,
             op,
             right,
             fail_on_overflow,
         } => binary_json(left, *op, right, *fail_on_overflow),
-        NativeAggregateInput::Unary { input, op } => Ok(json!({
-            "kind":"unary", "input":input_json(input)?, "operator":op
-        })),
+        NativeAggregateInput::Unary { input, op } => unary_json(input, op),
         NativeAggregateInput::Case {
             operand,
             branches,
             fallback,
         } => case_json(operand.as_deref(), branches, fallback.as_deref()),
     }
+}
+
+fn cast_json(input: &NativeAggregateInput, field: &Arc<Field>, safe: bool) -> Result<Value> {
+    Ok(json!({
+        "kind":"cast", "input":input_json(input)?,
+        "field":fields_json(std::slice::from_ref(field))?, "safe":safe,
+        "format_policy":"datafusion_default"
+    }))
+}
+
+fn try_cast_json(
+    input: &NativeAggregateInput,
+    dtype: &datafusion::arrow::datatypes::DataType,
+) -> Result<Value> {
+    Ok(json!({
+        "kind":"try_cast", "input":input_json(input)?,
+        "field":fields_json(&[Arc::new(Field::new("try_cast", dtype.clone(), true))])?,
+        "format_policy":"datafusion_default"
+    }))
+}
+
+fn unary_json(
+    input: &NativeAggregateInput,
+    op: &datafusion::logical_expr::Operator,
+) -> Result<Value> {
+    Ok(json!({"kind":"unary", "input":input_json(input)?, "operator":op}))
 }
 
 fn literal_json(value: &ScalarValue) -> Result<Value> {
@@ -252,15 +268,21 @@ fn native_output_json(
         value["key_layout"] = json!(key_layout);
     }
     if let Some(ordered) = &descriptor.ordered_last {
-        value["ordered_last"] = json!({
-            "version":1, "model":"df55_single_linear_fifo_groups_v1",
-            "datafusion":"55.0.0", "arrow_ordering":"59.2.0",
-            "tie":"first_maximal_tuple", "group_slots":"first_seen",
-            "ignore_nulls":ordered.ignore_nulls,
-            "order":order_json(&ordered.keys, 0, None)?,
-        });
+        value["ordered_last"] = ordered_last_json(ordered)?;
     }
     Ok(value)
+}
+
+fn ordered_last_json(
+    ordered: &super::super::incremental::compact_state::OrderedLastDescriptor,
+) -> Result<Value> {
+    Ok(json!({
+        "version":1, "model":"df55_single_linear_fifo_groups_v1",
+        "datafusion":"55.0.0", "arrow_ordering":"59.2.0",
+        "tie":"first_maximal_tuple", "group_slots":"first_seen",
+        "ignore_nulls":ordered.ignore_nulls,
+        "order":order_json(&ordered.keys, 0, None)?,
+    }))
 }
 
 fn order_json(

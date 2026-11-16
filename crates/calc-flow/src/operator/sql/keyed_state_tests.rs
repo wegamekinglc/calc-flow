@@ -57,10 +57,7 @@ fn context() -> StreamJobContext {
     )
 }
 
-async fn oracle(
-    runtime: &DataFusionRuntime,
-    history: &[RecordBatch],
-) -> Vec<Vec<ScalarValue>> {
+async fn oracle(runtime: &DataFusionRuntime, history: &[RecordBatch]) -> Vec<Vec<ScalarValue>> {
     let expected = runtime
         .sql(
             SQL,
@@ -119,12 +116,17 @@ async fn test_keyed_mixed_aggregates_match_prefix_rollback_and_restore() {
             "keyed-state",
         )
         .unwrap();
-    let reexported = restored.export_native_state("keyed-state", || Ok(())).unwrap();
+    let reexported = restored
+        .export_native_state("keyed-state", || Ok(()))
+        .unwrap();
     assert_eq!(exported.records(), reexported.records());
 
     history.extend(empty.table_payload().unwrap().batches().to_vec());
     let left = plan.update(&empty, &context, "keyed-state").await.unwrap();
-    let right = restored.update(&empty, &context, "keyed-state").await.unwrap();
+    let right = restored
+        .update(&empty, &context, "keyed-state")
+        .await
+        .unwrap();
     assert_eq!(rows(&left.records), rows(&right.records));
     assert_eq!(rows(&right.records), oracle(&runtime, &history).await);
     plan.commit(left);
