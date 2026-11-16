@@ -2463,21 +2463,6 @@
         }
       ]
     },
-    "RollingNumericalProfile": {
-      "description": "Versioned floating-point behavior for rolling numeric transitions.\n\n`StableV1` remains the default and preserves the released operation order.\n`StableV2Preview` is an explicit opt-in experiment whose serialized name is\n`stable_v2`; it may not replace the default without a separate migration.",
-      "oneOf": [
-        {
-          "const": "stable_v1",
-          "description": "Released West/Welford add/remove behavior.",
-          "type": "string"
-        },
-        {
-          "const": "stable_v2",
-          "description": "Deterministically rebased, shifted-sum preview behavior.",
-          "type": "string"
-        }
-      ]
-    },
     "RollingOutputSpec": {
       "description": "One declared rolling output and its output column name.\n\n# Examples\n\n```\nuse calc_flow::{RollingFrameSpec, RollingOutputSpec};\n\nlet output = RollingOutputSpec::Decay {\n    primitive_version: 1,\n    input: \"price\".into(),\n    output: \"weighted_price\".into(),\n    frame: RollingFrameSpec::Rows { size: 5 },\n    min_periods: 1,\n};\nassert!(matches!(output, RollingOutputSpec::Decay { .. }));\n```",
       "oneOf": [
@@ -3705,10 +3690,6 @@
         "late_policy": {
           "$ref": "#/$defs/LatePolicySpec",
           "description": "Late-row policy."
-        },
-        "numerical_profile": {
-          "$ref": "#/$defs/RollingNumericalProfile",
-          "description": "Versioned floating-point behavior. `stable_v1` is omitted from the\ncanonical configuration so existing project and checkpoint hashes stay\ncompatible; `stable_v2` is an explicit preview opt-in."
         },
         "outputs": {
           "description": "Rolling outputs in semantic declaration order.",
