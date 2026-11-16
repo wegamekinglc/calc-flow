@@ -45,6 +45,9 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   先前 kernel identity 的 checkpoint 拒绝恢复。`python/tests/test_rolling_numeric_contract.py` 已加入
   exact `Fraction` oracle、误差界与特殊值分类检查，以及 batch/session 逐位一致性断言。
   本项不包括 P2.3 的 slab、undo log 或 layout 7。
+  P2.2 的 10 轮 release 证据保存在 `benchmarks/rolling-kernel-v2/p2-2-08b17812.*` 和
+  `p2-2-be094d3f.*`：初版大批量 dual-mean 为 0.83x，按输出关闭无用 dispersion 后仍为 0.89–0.90x。
+  本步骤规格没有性能 Gate；该回退未隐藏，留作 P2.8/P2.9 的固定成本、run/full-tick 优化输入，最终 G1–G3 仍须验收。
 - P2–P7 规格已全部并入：rolling 数值与内核、checkpoint v4、keyed state 与 join、并行执行与 window pane。
   实现按单一 PR 内的提交序列推进，不再建立分阶段 PR。
 
