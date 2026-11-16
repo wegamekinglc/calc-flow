@@ -261,10 +261,11 @@ async fn shared_rows_removed_profile_checkpoint_rejection_preserves_existing_cac
     );
     let installed_credit = pool.reserved();
     assert_eq!(installed_credit, 0);
-    assert!(matches!(
-        StreamOperator::restore(&mut target, &snapshot),
-        Err(CalcFlowError::CheckpointMismatch { .. })
-    ));
+    let error = StreamOperator::restore(&mut target, &snapshot).unwrap_err();
+    assert!(
+        matches!(error, CalcFlowError::CheckpointMismatch { .. }),
+        "{error:?}"
+    );
     assert_eq!(
         (target.state.charge.rows, target.state.charge.bytes),
         installed_charge
@@ -390,7 +391,18 @@ async fn p3_check_serial_rollback(cancelled: bool) {
     } else {
         assert!(error.to_string().contains("expected P3 serial refusal"));
     }
-    assert_eq!(p3_serial_resident(&operator), before);
+    let after = p3_serial_resident(&operator);
+    let pending = budget::ordered_buffer_record_charge(&next, &operator.compiled, "rolling")
+        .unwrap()
+        .unwrap();
+    let expected_rows = before["charge"][0].as_u64().unwrap() + pending.rows;
+    let expected_bytes = before["charge"][1].as_u64().unwrap() + pending.bytes;
+    assert_eq!(after["charge"], json!([expected_rows, expected_bytes]));
+    assert_eq!(after["owners"], before["owners"]);
+    assert_eq!(after["watermark"], before["watermark"]);
+    assert_eq!(after["sequence"], before["sequence"]);
+    assert_eq!(after["typed"], before["typed"]);
+    assert_eq!(after["snapshot"], before["snapshot"]);
     assert_eq!(pool.reserved(), resident_credit);
     assert!(collector.drain("output").is_empty());
     p3_admit_owned_record(&mut operator, &next);

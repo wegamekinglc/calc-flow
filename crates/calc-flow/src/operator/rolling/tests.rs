@@ -2308,7 +2308,12 @@ async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
     let committed = |operator: &RollingOperator| {
         (
             operator.encode_state(epoch).unwrap(),
-            format!("{:?}", operator.state.typed_kernel_state),
+            operator
+                .state
+                .typed_kernel_state
+                .as_deref()
+                .unwrap()
+                .canonical_state_for_test(),
             (
                 operator.state.last_input_watermark,
                 operator.state.next_output_sequence,
@@ -2322,6 +2327,7 @@ async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
         )
     };
     let before = committed(&operator);
+    let previous_charge = operator.state.charge;
     let (segment_id, bytes) = before.0.as_ref().unwrap();
     assert_eq!(snapshot.segments[segment_id].bytes(), bytes);
 
@@ -2371,9 +2377,23 @@ async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
             2
         }
     );
-    assert_eq!(committed(&operator), before);
+    let after = committed(&operator);
+    assert_eq!(after.0, before.0, "layout-7 bytes changed on rollback");
+    assert_eq!(
+        after.1, before.1,
+        "canonical kernel state changed on rollback"
+    );
+    assert_eq!(
+        after.2, before.2,
+        "scalar operator state changed on rollback"
+    );
+    assert_eq!(after.3, before.3, "retained addresses changed on rollback");
+    assert_eq!(
+        operator.state.charge,
+        previous_charge.checked_add(charge, "rolling").unwrap()
+    );
     assert!(operator.state.buffer.is_empty());
-    assert!(operator.state.ordered.is_empty());
+    assert_eq!(operator.state.ordered.records().count(), 1);
     assert!(collector.drain("output").is_empty());
 }
 

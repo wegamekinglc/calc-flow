@@ -747,7 +747,15 @@ pub(super) fn parse_snapshot_metadata(
     serde_json::from_value::<RollingSnapshotMetadata>(Value::Object(
         snapshot.inline_metadata.clone().into_iter().collect(),
     ))
-    .map_err(|error| format_error(&error))
+    .map_err(|error| {
+        if error.to_string().contains("numerical_profile") {
+            checkpoint_mismatch(
+                "rolling numerical profile is no longer supported; start a new lineage",
+            )
+        } else {
+            format_error(&error)
+        }
+    })
 }
 
 pub(super) fn validate_snapshot_metadata(

@@ -2333,11 +2333,13 @@ impl RollingOperator {
         };
         let mut bytes = Vec::new();
         let mut writer = FileWriter::try_new(&mut bytes, record.schema().as_ref())
-            .map_err(|error| format_error(&error))?;
+            .map_err(|error| operator_error(&self.name, &error.to_string()))?;
         writer
             .write(&record)
-            .map_err(|error| format_error(&error))?;
-        writer.finish().map_err(|error| format_error(&error))?;
+            .map_err(|error| operator_error(&self.name, &error.to_string()))?;
+        writer
+            .finish()
+            .map_err(|error| operator_error(&self.name, &error.to_string()))?;
         drop(writer);
         Ok(Some((
             format!("pending-{:020}-00000001", epoch.as_u64()),
@@ -2346,13 +2348,13 @@ impl RollingOperator {
     }
 
     fn decode_layout7_pending(&self, bytes: &[u8]) -> Result<Vec<RecordBatch>> {
-        let mut reader =
-            FileReader::try_new(Cursor::new(bytes), None).map_err(|error| format_error(&error))?;
+        let mut reader = FileReader::try_new(Cursor::new(bytes), None)
+            .map_err(|error| operator_error(&self.name, &error.to_string()))?;
         let mut records = Vec::new();
         while let Some(record) = reader
             .next()
             .transpose()
-            .map_err(|error| format_error(&error))?
+            .map_err(|error| operator_error(&self.name, &error.to_string()))?
         {
             if record.schema().as_ref()
                 != self.input_ports[0]
@@ -2385,7 +2387,11 @@ impl RollingOperator {
         let byte_len = u64::try_from(segment.bytes().len())
             .map_err(|_| internal_error("rolling segment length does not fit u64"))?;
         Ok(SegmentDescriptor {
-            kind: SegmentKind::Base,
+            kind: if segment_id.starts_with("pending-") {
+                SegmentKind::Delta
+            } else {
+                SegmentKind::Base
+            },
             state_layout_version: if self.state.deferred_history {
                 ROLLING_STATE_TABLE_LAYOUT_VERSION
             } else {
@@ -2429,6 +2435,7 @@ impl RollingOperator {
                             .ordered_stream_bounds(record, &self.name, None)
                     })
                     .transpose()?
+                    .flatten()
                     .map(|(_, end)| end);
                 ordered.restore_pending(records, last_identity);
             }
