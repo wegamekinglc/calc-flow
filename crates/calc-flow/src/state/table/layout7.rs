@@ -273,6 +273,20 @@ fn write_component(
     Ok(bytes)
 }
 
+fn decode_component(bytes: &[u8], cursor: &mut usize, index: usize) -> Result<Vec<u8>> {
+    let len = usize::try_from(read_u64(bytes, 12 + index * 8)?)
+        .map_err(|_| layout7_error("rolling layout-7 component length exceeds usize"))?;
+    let end = cursor
+        .checked_add(len)
+        .ok_or_else(|| layout7_error("rolling layout-7 component length overflowed"))?;
+    if end > bytes.len() {
+        return Err(layout7_error("rolling layout-7 component is truncated"));
+    }
+    let component = bytes[*cursor..end].to_vec();
+    *cursor = end;
+    Ok(component)
+}
+
 fn decode_components(bytes: &[u8], windows: usize) -> Result<Vec<Vec<u8>>> {
     if bytes.len() < MIN_HEADER_BYTES || &bytes[..8] != MAGIC {
         return Err(layout7_error(
@@ -292,16 +306,7 @@ fn decode_components(bytes: &[u8], windows: usize) -> Result<Vec<Vec<u8>>> {
     let mut cursor = header_bytes;
     let mut components = Vec::with_capacity(count);
     for index in 0..count {
-        let len = usize::try_from(read_u64(bytes, 12 + index * 8)?)
-            .map_err(|_| layout7_error("rolling layout-7 component length exceeds usize"))?;
-        let end = cursor
-            .checked_add(len)
-            .ok_or_else(|| layout7_error("rolling layout-7 component length overflowed"))?;
-        if end > bytes.len() {
-            return Err(layout7_error("rolling layout-7 component is truncated"));
-        }
-        components.push(bytes[cursor..end].to_vec());
-        cursor = end;
+        components.push(decode_component(bytes, &mut cursor, index)?);
     }
     if cursor != bytes.len() {
         return Err(layout7_error("rolling layout-7 segment has trailing bytes"));
@@ -330,6 +335,32 @@ fn read_component(bytes: &[u8]) -> Result<RecordBatch> {
     Ok(record)
 }
 
+struct SnapshotFields {
+    keys: Vec<EntityKey>,
+    numeric: Vec<Vec<NumericAccumulator>>,
+    offsets: Vec<usize>,
+    capacities: Vec<usize>,
+    logical_bytes: usize,
+}
+
+fn decode_snapshot_fields(
+    entity: &RecordBatch,
+    offsets: &RecordBatch,
+    values: &RecordBatch,
+    shared: &[RecordBatch],
+) -> Result<SnapshotFields> {
+    if entity.num_columns() != 19 || offsets.num_columns() != 1 || values.num_columns() != 1 {
+        return Err(layout7_error("rolling layout-7 column inventory mismatch"));
+    }
+    Ok(SnapshotFields {
+        keys: decode_keys(entity)?,
+        numeric: decode_numeric_families(entity, 3, shared)?,
+        offsets: decode_usize_column(offsets, 0, "offset exceeds usize")?,
+        capacities: decode_usize_column(entity, 2, "capacity exceeds usize")?,
+        logical_bytes: decode_logical_bytes(entity)?,
+    })
+}
+
 fn decode_snapshot(
     table: &StateTable,
     schema: &Layout7Schema,
@@ -338,52 +369,7 @@ fn decode_snapshot(
     values: &RecordBatch,
     shared: &[RecordBatch],
 ) -> Result<TableSnapshot> {
-    if entity.num_columns() != 19 || offsets.num_columns() != 1 || values.num_columns() != 1 {
-        return Err(layout7_error("rolling layout-7 column inventory mismatch"));
-    }
-    let keys = column::<BinaryArray>(entity, 0)?
-        .iter()
-        .map(|key| key.map(|key| EntityKey::new(key.to_vec())))
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| layout7_error("rolling layout-7 entity key is null"))?;
-    let mut numeric = decode_numeric(entity, 3)?
-        .into_iter()
-        .map(|value| vec![value])
-        .collect::<Vec<_>>();
-    for record in shared {
-        let family = decode_numeric(record, 0)?;
-        if family.len() != numeric.len() {
-            return Err(layout7_error(
-                "rolling layout-7 shared family census mismatch",
-            ));
-        }
-        for (accumulators, value) in numeric.iter_mut().zip(family) {
-            accumulators.push(value);
-        }
-    }
-    let offsets = column::<UInt64Array>(offsets, 0)?
-        .values()
-        .iter()
-        .map(|&value| {
-            usize::try_from(value)
-                .map_err(|_| layout7_error("rolling layout-7 offset exceeds usize"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let capacities = column::<UInt64Array>(entity, 2)?
-        .values()
-        .iter()
-        .map(|&value| {
-            usize::try_from(value)
-                .map_err(|_| layout7_error("rolling layout-7 capacity exceeds usize"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let logical_bytes = entity
-        .schema()
-        .metadata()
-        .get("logical_bytes")
-        .ok_or_else(|| layout7_error("rolling layout-7 logical size is absent"))?
-        .parse::<usize>()
-        .map_err(|_| layout7_error("rolling layout-7 logical size is invalid"))?;
+    let fields = decode_snapshot_fields(entity, offsets, values, shared)?;
     let keyed = vec![KeyedSnapshot {
         name: schema.counter_name.clone(),
         kind: ValueKind::UInt64,
@@ -394,63 +380,138 @@ fn decode_snapshot(
         kind: RingKind::Float64,
         retention: schema.retention,
         values: values.column(0).clone(),
-        offsets,
-        capacities,
-        numeric: Some(numeric),
+        offsets: fields.offsets,
+        capacities: fields.capacities,
+        numeric: Some(fields.numeric),
     }];
-    let (snapshot, actual_bytes) = table.layout7_from_snapshot(keys, keyed, rings)?;
-    if actual_bytes != logical_bytes {
+    let (snapshot, actual_bytes) = table.layout7_from_snapshot(fields.keys, keyed, rings)?;
+    if actual_bytes != fields.logical_bytes {
         return Err(layout7_error(&format!(
-            "rolling layout-7 logical size differs from restored pages: encoded {logical_bytes}, restored {actual_bytes}"
+            "rolling layout-7 logical size differs from restored pages: encoded {}, restored {actual_bytes}",
+            fields.logical_bytes
         )));
     }
     Ok(snapshot)
 }
 
+struct NumericColumns<'a> {
+    valid: &'a UInt64Array,
+    finite: &'a UInt64Array,
+    nan: &'a UInt64Array,
+    positive: &'a UInt64Array,
+    negative: &'a UInt64Array,
+    sum_value: &'a Float64Array,
+    sum_error: &'a Float64Array,
+    sum_enabled: &'a BooleanArray,
+    shift: &'a Float64Array,
+    offsets_value: &'a Float64Array,
+    offsets_error: &'a Float64Array,
+    squares_value: &'a Float64Array,
+    squares_error: &'a Float64Array,
+    dispersion_enabled: &'a BooleanArray,
+    since_rebuild: &'a UInt32Array,
+    n_prev: &'a UInt64Array,
+}
+
+fn numeric_columns(record: &RecordBatch, offset: usize) -> Result<NumericColumns<'_>> {
+    Ok(NumericColumns {
+        valid: column::<UInt64Array>(record, offset)?,
+        finite: column::<UInt64Array>(record, offset + 1)?,
+        nan: column::<UInt64Array>(record, offset + 2)?,
+        positive: column::<UInt64Array>(record, offset + 3)?,
+        negative: column::<UInt64Array>(record, offset + 4)?,
+        sum_value: column::<Float64Array>(record, offset + 5)?,
+        sum_error: column::<Float64Array>(record, offset + 6)?,
+        sum_enabled: column::<BooleanArray>(record, offset + 7)?,
+        shift: column::<Float64Array>(record, offset + 8)?,
+        offsets_value: column::<Float64Array>(record, offset + 9)?,
+        offsets_error: column::<Float64Array>(record, offset + 10)?,
+        squares_value: column::<Float64Array>(record, offset + 11)?,
+        squares_error: column::<Float64Array>(record, offset + 12)?,
+        dispersion_enabled: column::<BooleanArray>(record, offset + 13)?,
+        since_rebuild: column::<UInt32Array>(record, offset + 14)?,
+        n_prev: column::<UInt64Array>(record, offset + 15)?,
+    })
+}
+
+fn decode_numeric_row(columns: &NumericColumns<'_>, row: usize) -> NumericAccumulator {
+    NumericAccumulator::from_layout7(NumericAccumulatorLayout7 {
+        valid_count: columns.valid.value(row),
+        finite_count: columns.finite.value(row),
+        nan_count: columns.nan.value(row),
+        pos_inf: columns.positive.value(row),
+        neg_inf: columns.negative.value(row),
+        sum_value: columns.sum_value.value(row),
+        sum_error: columns.sum_error.value(row),
+        sum_enabled: columns.sum_enabled.value(row),
+        shift: columns
+            .shift
+            .is_valid(row)
+            .then(|| columns.shift.value(row)),
+        offsets_value: columns.offsets_value.value(row),
+        offsets_error: columns.offsets_error.value(row),
+        squares_value: columns.squares_value.value(row),
+        squares_error: columns.squares_error.value(row),
+        dispersion_enabled: columns.dispersion_enabled.value(row),
+        since_rebuild: columns.since_rebuild.value(row),
+        n_prev: columns.n_prev.value(row),
+    })
+}
+
 fn decode_numeric(record: &RecordBatch, offset: usize) -> Result<Vec<NumericAccumulator>> {
-    macro_rules! at {
-        ($ty:ty, $index:expr) => {
-            column::<$ty>(record, offset + $index)?
-        };
-    }
-    let valid = at!(UInt64Array, 0);
-    let finite = at!(UInt64Array, 1);
-    let nan = at!(UInt64Array, 2);
-    let positive = at!(UInt64Array, 3);
-    let negative = at!(UInt64Array, 4);
-    let sum_value = at!(Float64Array, 5);
-    let sum_error = at!(Float64Array, 6);
-    let sum_enabled = at!(BooleanArray, 7);
-    let shift = at!(Float64Array, 8);
-    let offsets_value = at!(Float64Array, 9);
-    let offsets_error = at!(Float64Array, 10);
-    let squares_value = at!(Float64Array, 11);
-    let squares_error = at!(Float64Array, 12);
-    let dispersion_enabled = at!(BooleanArray, 13);
-    let since_rebuild = at!(UInt32Array, 14);
-    let n_prev = at!(UInt64Array, 15);
+    let columns = numeric_columns(record, offset)?;
     Ok((0..record.num_rows())
-        .map(|row| {
-            NumericAccumulator::from_layout7(NumericAccumulatorLayout7 {
-                valid_count: valid.value(row),
-                finite_count: finite.value(row),
-                nan_count: nan.value(row),
-                pos_inf: positive.value(row),
-                neg_inf: negative.value(row),
-                sum_value: sum_value.value(row),
-                sum_error: sum_error.value(row),
-                sum_enabled: sum_enabled.value(row),
-                shift: shift.is_valid(row).then(|| shift.value(row)),
-                offsets_value: offsets_value.value(row),
-                offsets_error: offsets_error.value(row),
-                squares_value: squares_value.value(row),
-                squares_error: squares_error.value(row),
-                dispersion_enabled: dispersion_enabled.value(row),
-                since_rebuild: since_rebuild.value(row),
-                n_prev: n_prev.value(row),
-            })
-        })
+        .map(|row| decode_numeric_row(&columns, row))
         .collect())
+}
+
+fn decode_numeric_families(
+    entity: &RecordBatch,
+    offset: usize,
+    shared: &[RecordBatch],
+) -> Result<Vec<Vec<NumericAccumulator>>> {
+    let mut families = decode_numeric(entity, offset)?
+        .into_iter()
+        .map(|value| vec![value])
+        .collect::<Vec<_>>();
+    for record in shared {
+        let family = decode_numeric(record, 0)?;
+        if family.len() != families.len() {
+            return Err(layout7_error(
+                "rolling layout-7 shared family census mismatch",
+            ));
+        }
+        for (accumulators, value) in families.iter_mut().zip(family) {
+            accumulators.push(value);
+        }
+    }
+    Ok(families)
+}
+
+fn decode_keys(entity: &RecordBatch) -> Result<Vec<EntityKey>> {
+    column::<BinaryArray>(entity, 0)?
+        .iter()
+        .map(|key| key.map(|key| EntityKey::new(key.to_vec())))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| layout7_error("rolling layout-7 entity key is null"))
+}
+
+fn decode_usize_column(record: &RecordBatch, index: usize, message: &str) -> Result<Vec<usize>> {
+    column::<UInt64Array>(record, index)?
+        .values()
+        .iter()
+        .map(|&value| usize::try_from(value).map_err(|_| layout7_error(message)))
+        .collect::<Result<Vec<_>>>()
+}
+
+fn decode_logical_bytes(entity: &RecordBatch) -> Result<usize> {
+    entity
+        .schema()
+        .metadata()
+        .get("logical_bytes")
+        .ok_or_else(|| layout7_error("rolling layout-7 logical size is absent"))?
+        .parse::<usize>()
+        .map_err(|_| layout7_error("rolling layout-7 logical size is invalid"))
 }
 
 fn numeric_parts(snapshot: &TableSnapshot, group: usize) -> Vec<NumericAccumulatorLayout7> {
@@ -461,6 +522,79 @@ fn numeric_parts(snapshot: &TableSnapshot, group: usize) -> Vec<NumericAccumulat
         .iter()
         .map(|values| values[group].layout7())
         .collect()
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct HistoryCounts {
+    valid: u64,
+    finite: u64,
+    nan: u64,
+    positive: u64,
+    negative: u64,
+}
+
+fn history_counts(
+    snapshot: &TableSnapshot,
+    entity: usize,
+    history: &Float64Array,
+) -> HistoryCounts {
+    let mut counts = HistoryCounts::default();
+    for row in snapshot.rings[0].offsets[entity]..snapshot.rings[0].offsets[entity + 1] {
+        if history.is_valid(row) {
+            counts.valid += 1;
+            let value = history.value(row);
+            counts.finite += u64::from(value.is_finite());
+            counts.nan += u64::from(value.is_nan());
+            counts.positive += u64::from(value == f64::INFINITY);
+            counts.negative += u64::from(value == f64::NEG_INFINITY);
+        }
+    }
+    counts
+}
+
+fn validate_accumulator(
+    accumulator: &NumericAccumulator,
+    counts: HistoryCounts,
+    window: usize,
+) -> Result<()> {
+    let parts = accumulator.layout7();
+    if (
+        parts.valid_count,
+        parts.finite_count,
+        parts.nan_count,
+        parts.pos_inf,
+        parts.neg_inf,
+    ) != (
+        counts.valid,
+        counts.finite,
+        counts.nan,
+        counts.positive,
+        counts.negative,
+    ) {
+        return Err(layout7_error(
+            "rolling layout-7 counters do not match retained history",
+        ));
+    }
+    validate_dispersion_shift(&parts, counts.finite)?;
+    validate_rebuild_cadence(&parts, window)
+}
+
+fn validate_dispersion_shift(parts: &NumericAccumulatorLayout7, finite: u64) -> Result<()> {
+    if parts.shift.is_some() != (parts.dispersion_enabled && finite > 0) {
+        return Err(layout7_error(
+            "rolling layout-7 dispersion shift invariant failed",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_rebuild_cadence(parts: &NumericAccumulatorLayout7, window: usize) -> Result<()> {
+    if u64::from(parts.since_rebuild) >= (window.max(64) as u64) {
+        return Err(layout7_error(
+            "rolling layout-7 rebuild cadence invariant failed",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_numeric(schema: &Layout7Schema, snapshot: &TableSnapshot) -> Result<()> {
