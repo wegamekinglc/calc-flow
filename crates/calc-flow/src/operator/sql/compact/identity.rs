@@ -135,7 +135,7 @@ fn input_json(input: &NativeAggregateInput) -> Result<Value> {
             right,
             fail_on_overflow,
         } => binary_json(left, *op, right, *fail_on_overflow),
-        NativeAggregateInput::Unary { input, op } => unary_json(input, op),
+        NativeAggregateInput::Unary { input, op } => unary_json(input, *op),
         NativeAggregateInput::Case {
             operand,
             branches,
@@ -163,7 +163,7 @@ fn try_cast_json(
     }))
 }
 
-fn unary_json(input: &NativeAggregateInput, op: &UnaryKind) -> Result<Value> {
+fn unary_json(input: &NativeAggregateInput, op: UnaryKind) -> Result<Value> {
     Ok(json!({"kind":"unary", "input":input_json(input)?, "operator":op}))
 }
 

@@ -798,16 +798,16 @@ fn hash_temporal(
             datafusion::arrow::datatypes::Date64Type
         ),
         DataType::Timestamp(TimeUnit::Second, _) => {
-            hash_primitive!(array, hashes, selection, TimestampSecondType)
+            hash_primitive!(array, hashes, selection, TimestampSecondType);
         }
         DataType::Timestamp(TimeUnit::Millisecond, _) => {
-            hash_primitive!(array, hashes, selection, TimestampMillisecondType)
+            hash_primitive!(array, hashes, selection, TimestampMillisecondType);
         }
         DataType::Timestamp(TimeUnit::Microsecond, _) => {
-            hash_primitive!(array, hashes, selection, TimestampMicrosecondType)
+            hash_primitive!(array, hashes, selection, TimestampMicrosecondType);
         }
         DataType::Timestamp(TimeUnit::Nanosecond, _) => {
-            hash_primitive!(array, hashes, selection, TimestampNanosecondType)
+            hash_primitive!(array, hashes, selection, TimestampNanosecondType);
         }
         _ => return Err(keyed_error("temporal key hash type differs")),
     }
@@ -992,16 +992,14 @@ fn canonical_integer(value: &ScalarValue, output: &mut Vec<u8>) -> Result<()> {
 }
 
 fn canonical_timestamp(value: &ScalarValue, output: &mut Vec<u8>) -> Result<()> {
-    let value = match value {
-        ScalarValue::TimestampSecond(value, _)
-        | ScalarValue::TimestampMillisecond(value, _)
-        | ScalarValue::TimestampMicrosecond(value, _)
-        | ScalarValue::TimestampNanosecond(value, _) => value,
-        _ => {
-            return Err(keyed_error(
-                "canonical timestamp differs from the key schema",
-            ));
-        }
+    let (ScalarValue::TimestampSecond(value, _)
+    | ScalarValue::TimestampMillisecond(value, _)
+    | ScalarValue::TimestampMicrosecond(value, _)
+    | ScalarValue::TimestampNanosecond(value, _)) = value
+    else {
+        return Err(keyed_error(
+            "canonical timestamp differs from the key schema",
+        ));
     };
     if let Some(value) = value {
         output.extend_from_slice(&value.to_le_bytes());
@@ -1252,7 +1250,7 @@ impl KeyColumn {
                 datafusion::arrow::datatypes::Date64Type
             ),
             Self::TimestampSecond(_) => {
-                push_primitive!(self, array, row, TimestampSecond, TimestampSecondType)
+                push_primitive!(self, array, row, TimestampSecond, TimestampSecondType);
             }
             Self::TimestampMillisecond(_) => {
                 push_primitive!(
@@ -1261,7 +1259,7 @@ impl KeyColumn {
                     row,
                     TimestampMillisecond,
                     TimestampMillisecondType
-                )
+                );
             }
             Self::TimestampMicrosecond(_) => {
                 push_primitive!(
@@ -1270,7 +1268,7 @@ impl KeyColumn {
                     row,
                     TimestampMicrosecond,
                     TimestampMicrosecondType
-                )
+                );
             }
             Self::TimestampNanosecond(_) => {
                 push_primitive!(
@@ -1279,7 +1277,7 @@ impl KeyColumn {
                     row,
                     TimestampNanosecond,
                     TimestampNanosecondType
-                )
+                );
             }
             _ => return Err(keyed_error("temporal key birth column differs")),
         }

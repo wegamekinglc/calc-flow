@@ -607,7 +607,7 @@ impl IncrementalSql {
             &mut check_cancelled,
             name,
         )?;
-        self.install_native_import(records, descriptor, groups, &mut check_cancelled, name)?;
+        self.install_native_import(records, &descriptor, groups, &mut check_cancelled, name)?;
         check_cancelled()?;
         Ok(self)
     }
@@ -632,13 +632,13 @@ impl IncrementalSql {
     fn install_native_import(
         &mut self,
         records: &[RecordBatch],
-        descriptor: NativeStateDescriptor,
+        descriptor: &NativeStateDescriptor,
         groups: usize,
         check_cancelled: &mut impl FnMut() -> Result<()>,
         name: &str,
     ) -> Result<()> {
         self.reserve_groups(groups, groups, name)?;
-        self.load_records(records, &descriptor, false, check_cancelled, name)?;
+        self.load_records(records, descriptor, false, check_cancelled, name)?;
         Ok(())
     }
 

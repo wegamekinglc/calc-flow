@@ -13,6 +13,9 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
+#[cfg(test)]
+pub(super) type StateSnapshot = (Vec<ScalarValue>, Vec<Vec<ScalarValue>>, Vec<ScalarValue>);
+
 pub(super) struct KeyedState {
     state: Arc<Mutex<State>>,
     reservation: MemoryReservation,
@@ -131,23 +134,10 @@ impl KeyedState {
         self.lock().fingerprint
     }
 
-    pub(super) fn canonical_slot(&self, slot: usize) -> Result<Arc<[u8]>> {
-        let state = self.lock();
-        match &state.keys {
-            Some(keys) => Ok(keys.canonical(GroupId::new(slot)?)),
-            None if slot == 0 && state.groups == 1 => Ok(state.global_key.clone()),
-            None => Err(df_error("keyed aggregate", "global group slot is invalid")),
-        }
-    }
-
     pub(super) fn global_states(&self) -> Vec<Vec<ScalarValue>> {
         let state = self.lock();
         (0..state.aggregates.len())
-            .map(|aggregate| {
-                state
-                    .state(aggregate, GroupId::new(0).expect("global slot"))
-                    .unwrap_or_default()
-            })
+            .map(|aggregate| state.state(aggregate, GroupId::new(0).expect("global slot")))
             .collect()
     }
 
@@ -306,9 +296,7 @@ impl KeyedState {
     }
 
     #[cfg(test)]
-    pub(super) fn snapshot(
-        &self,
-    ) -> Vec<(Vec<ScalarValue>, Vec<Vec<ScalarValue>>, Vec<ScalarValue>)> {
+    pub(super) fn snapshot(&self) -> Vec<StateSnapshot> {
         let state = self.lock();
         (0..state.groups)
             .map(|slot| {
@@ -422,7 +410,7 @@ impl Transaction {
                     .create_accumulator()
                     .map_err(|error| df_error(name, error))?;
                 if state.initialized(index, group) {
-                    merge(&mut *accumulator, &state.state(index, group)?, name)?;
+                    merge(&mut *accumulator, &state.state(index, group), name)?;
                 }
                 Ok(accumulator)
             })
@@ -436,7 +424,7 @@ impl Transaction {
         arguments: &[Vec<ArrayRef>],
         filters: &[Option<&BooleanArray>],
         name: &str,
-    ) -> Result<usize> {
+    ) -> Result<()> {
         let accumulators = self
             .global_accumulators
             .as_mut()
@@ -459,7 +447,7 @@ impl Transaction {
                 .update_batch(arguments)
                 .map_err(|error| df_error(name, error))?;
         }
-        Ok(0)
+        Ok(())
     }
 
     fn finish_global(
@@ -497,7 +485,7 @@ impl Transaction {
         variable: &[usize],
         check: &mut dyn FnMut() -> Result<()>,
         name: &str,
-    ) -> Result<usize> {
+    ) -> Result<()> {
         if self.global_accumulators.is_some() {
             return self.apply_global(arguments, filters, name);
         }
@@ -507,15 +495,6 @@ impl Transaction {
             Some(store) => store.route_selected_with_limit(keys, selection, self.limit, check)?,
             None => vec![GroupId::new(0)?; rows],
         };
-        let encoded = groups
-            .iter()
-            .enumerate()
-            .filter(|(row, _)| {
-                selection.is_none_or(|selection| predicate::selected(selection, *row))
-            })
-            .map(|(_, group)| *group)
-            .collect::<std::collections::BTreeSet<_>>()
-            .len();
         self.grow(&mut state)?;
         let mut partial = self.partial.take().expect("partial aggregate state");
         let mut indices = Vec::with_capacity(rows);
@@ -526,21 +505,17 @@ impl Transaction {
             }
             indices.push(self.rank(group, &mut state, &mut partial, name)?);
         }
-        self.observe_variable(&mut partial, arguments, filters, selection, variable, name)?;
-        self.seed(&state, &mut partial, name)?;
+        Self::observe_variable(&mut partial, arguments, filters, selection, variable, name)?;
+        Self::seed(&state, &mut partial, name)?;
         partial.update(arguments, filters, &indices, partial.slots.len(), name)?;
         self.partial = Some(partial);
-        Ok(encoded)
+        Ok(())
     }
 
     pub(super) fn global_states(&self) -> Vec<Vec<ScalarValue>> {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         (0..state.aggregates.len())
-            .map(|aggregate| {
-                state
-                    .state(aggregate, GroupId::new(0).expect("global slot"))
-                    .unwrap_or_default()
-            })
+            .map(|aggregate| state.state(aggregate, GroupId::new(0).expect("global slot")))
             .collect()
     }
 
@@ -575,7 +550,7 @@ impl Transaction {
         };
         {
             let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            self.seed_integer_history(&state, &mut partial, name)?;
+            Self::seed_integer_history(&state, &mut partial, name)?;
         }
         let states = partial.emit_states(name)?;
         for (rank, slot) in partial.slots.iter().enumerate() {
@@ -589,7 +564,7 @@ impl Transaction {
             {
                 let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
                 for (index, arrays) in states.iter().enumerate() {
-                    self.merge_rank(
+                    Self::merge_rank(
                         &mut state,
                         &partial,
                         aggregates[index].as_ref(),
@@ -661,10 +636,12 @@ impl Transaction {
             .output_charge(None)
     }
 
+    #[cfg(test)]
     pub(super) fn affected_count(&self) -> usize {
         self.affected.len()
     }
 
+    #[cfg(test)]
     pub(super) fn partial_count(&self) -> usize {
         self.partial
             .as_ref()
@@ -744,7 +721,6 @@ impl Transaction {
     }
 
     fn observe_variable(
-        &self,
         partial: &mut PartialGroups,
         arguments: &[Vec<ArrayRef>],
         filters: &[Option<&BooleanArray>],
@@ -773,7 +749,7 @@ impl Transaction {
         partial.reserve_variable(growth, name)
     }
 
-    fn seed(&self, state: &State, partial: &mut PartialGroups, name: &str) -> Result<()> {
+    fn seed(state: &State, partial: &mut PartialGroups, name: &str) -> Result<()> {
         for index in 0..partial.accumulators.len() {
             if partial.sequential[index] {
                 let saved = (partial.seeded..partial.slots.len()).map(|rank| {
@@ -787,12 +763,7 @@ impl Transaction {
         Ok(())
     }
 
-    fn seed_integer_history(
-        &self,
-        state: &State,
-        partial: &mut PartialGroups,
-        name: &str,
-    ) -> Result<()> {
+    fn seed_integer_history(state: &State, partial: &mut PartialGroups, name: &str) -> Result<()> {
         for index in 0..partial.accumulators.len() {
             if partial.accumulators[index].integer_sum() {
                 let saved = partial.slots.iter().enumerate().map(|(rank, slot)| {
@@ -807,7 +778,6 @@ impl Transaction {
 
     #[allow(clippy::too_many_arguments)]
     fn merge_rank(
-        &self,
         state: &mut State,
         partial: &PartialGroups,
         expression: &AggregateFunctionExpr,
@@ -818,7 +788,7 @@ impl Transaction {
         name: &str,
     ) -> Result<()> {
         if partial.sequential[index] || partial.accumulators[index].integer_sum() {
-            if arrays.iter().all(|array| array.is_empty()) {
+            if arrays.iter().all(Array::is_empty) {
                 return Ok(());
             }
             let values = scalars(arrays, rank, name)?;
@@ -829,7 +799,7 @@ impl Transaction {
             .create_accumulator()
             .map_err(|error| df_error(name, error))?;
         if state.initialized(index, group) {
-            let previous = state.state(index, group)?;
+            let previous = state.state(index, group);
             merge(&mut *accumulator, &previous, name)?;
         }
         let arrays = arrays
@@ -1049,19 +1019,19 @@ impl State {
         self.aggregates[aggregate].initialized[group.index()]
     }
 
-    fn state(&self, aggregate: usize, group: GroupId) -> Result<Vec<ScalarValue>> {
+    fn state(&self, aggregate: usize, group: GroupId) -> Vec<ScalarValue> {
         if !self.initialized(aggregate, group) {
-            return Ok(Vec::new());
+            return Vec::new();
         }
-        Ok(self.aggregates[aggregate]
+        self.aggregates[aggregate]
             .states
             .iter()
             .map(|column| column.values[group.index()].clone())
-            .collect())
+            .collect()
     }
 
     fn seed_state(&self, aggregate: usize, group: GroupId) -> Vec<ScalarValue> {
-        self.state(aggregate, group).unwrap_or_default()
+        self.state(aggregate, group)
     }
 
     fn result(&self, aggregate: usize, group: GroupId) -> ScalarValue {
@@ -1190,7 +1160,7 @@ impl GroupUndo {
                     .chain(std::iter::once(
                         aggregate.result.values[group.index()].size(),
                     ))
-                    .fold(charge, |charge, bytes| charge.saturating_add(bytes))
+                    .fold(charge, usize::saturating_add)
             },
         )
     }
@@ -1266,6 +1236,9 @@ fn merge(
     values: &[ScalarValue],
     name: &str,
 ) -> Result<()> {
+    if values.is_empty() {
+        return Ok(());
+    }
     let arrays = values
         .iter()
         .map(ScalarValue::to_array)

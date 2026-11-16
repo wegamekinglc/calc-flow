@@ -108,11 +108,6 @@ impl KeyedSum {
         self.lock().keys.layout_fingerprint()
     }
 
-    pub(super) fn canonical_slot(&self, slot: usize) -> Result<Arc<[u8]>> {
-        let group = GroupId::new(slot)?;
-        Ok(self.lock().keys.canonical(group))
-    }
-
     pub(super) fn begin(&self, budget: Option<StateBudget>) -> Result<Transaction> {
         let mut state = self.lock();
         if state.active {
@@ -285,6 +280,7 @@ impl Transaction {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn records(
         &self,
         schema: SchemaRef,
