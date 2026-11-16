@@ -211,7 +211,8 @@ impl Transaction {
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
         let input = SumInput::new(values)?;
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = self.state.clone();
+        let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
         let groups = state
             .keys
             .route_selected_with_limit(keys, selection, self.limit, check)?;
@@ -348,7 +349,8 @@ impl Transaction {
     ) -> Result<()> {
         let keys = chunk.columns()[..key_count].to_vec();
         let input = SumInput::new(chunk.column(key_count))?;
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = self.state.clone();
+        let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
         let groups = state.keys.route_with_limit(&keys, self.limit, check)?;
         grow(&mut state)?;
         for (row, group) in groups.into_iter().enumerate() {

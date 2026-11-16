@@ -5,9 +5,8 @@ use super::{
 };
 use crate::StateBudget;
 use crate::operator::keyed::{GroupId, KeyCut, KeySchema, KeyStore, MORSEL_ROWS};
-use datafusion::arrow::{
-    array::Array, datatypes::FieldRef, execution::memory_pool::MemoryReservation,
-};
+use datafusion::arrow::{array::Array, datatypes::FieldRef};
+use datafusion::execution::memory_pool::MemoryReservation;
 use sha2::{Digest, Sha256};
 use std::{
     mem::size_of,
@@ -350,7 +349,8 @@ impl Transaction {
         } else {
             vec![false; aggregates.len()]
         };
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = self.state.clone();
+        let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.keys.is_none() {
             self.rank(GroupId::new(0)?, &mut state, &mut partial, name)?;
         }
@@ -370,7 +370,8 @@ impl Transaction {
         check: &mut dyn FnMut() -> Result<()>,
         name: &str,
     ) -> Result<()> {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = self.state.clone();
+        let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
         let groups = match &mut state.keys {
             Some(store) => store.route_selected_with_limit(keys, selection, self.limit, check)?,
             None => vec![GroupId::new(0)?; rows],
@@ -404,7 +405,8 @@ impl Transaction {
     }
 
     pub(super) fn touch_global(&mut self) -> Result<()> {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = self.state.clone();
+        let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
         self.touch(&mut state, GroupId::new(0)?)
     }
 
@@ -587,7 +589,7 @@ impl Transaction {
         variable: &[usize],
         name: &str,
     ) -> Result<()> {
-        let mut growth = 0;
+        let mut growth = 0usize;
         for &aggregate in variable {
             for row in 0..arguments[aggregate][0].len() {
                 let selected =
@@ -695,7 +697,8 @@ impl Transaction {
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
         let keys = chunk.columns()[..key_count].to_vec();
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = self.state.clone();
+        let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
         let groups = match &mut state.keys {
             Some(store) => store.route_with_limit(&keys, self.limit, check)?,
             None => vec![GroupId::new(0)?; chunk.num_rows()],
@@ -826,15 +829,15 @@ impl StateColumn {
 impl State {
     fn grow(&mut self, groups: usize) -> Result<()> {
         let new = groups.saturating_sub(self.groups);
-        let width = self
-            .aggregates
-            .iter()
-            .try_fold(size_of::<u64>(), |width, aggregate| {
+        let width = self.aggregates.iter().try_fold(
+            size_of::<u64>(),
+            |width: usize, aggregate| -> Result<usize> {
                 let fields = aggregate.states.len() + 1;
                 width
                     .checked_add(fields * size_of::<ScalarValue>() + size_of::<bool>())
                     .ok_or_else(|| df_error("keyed aggregate", "typed state width overflowed"))
-            })?;
+            },
+        )?;
         let charge = new
             .checked_mul(width)
             .ok_or_else(|| df_error("keyed aggregate", "typed state charge overflowed"))?;
@@ -972,7 +975,7 @@ impl State {
             None => 0,
         };
         groups.iter().try_fold(keys, |total, group| {
-            let values = self.aggregates.iter().flat_map(|aggregate| {
+            let mut values = self.aggregates.iter().flat_map(|aggregate| {
                 aggregate
                     .states
                     .iter()

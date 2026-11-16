@@ -12,7 +12,10 @@ use serde_json::{Value, json};
 
 use super::super::{
     SqlOperator, encode_sql_state, incremental,
-    incremental::compact_state::{NativeAggregateInput, NativeStateDescriptor},
+    incremental::compact_state::{
+        NativeAggregateInput, NativeStateDescriptor, OrderedLastDescriptor,
+    },
+    incremental::native_expression::UnaryKind,
     ipc, retention, sql_state_error,
 };
 use super::control::CompactIdentity;
@@ -160,10 +163,7 @@ fn try_cast_json(
     }))
 }
 
-fn unary_json(
-    input: &NativeAggregateInput,
-    op: &datafusion::logical_expr::Operator,
-) -> Result<Value> {
+fn unary_json(input: &NativeAggregateInput, op: &UnaryKind) -> Result<Value> {
     Ok(json!({"kind":"unary", "input":input_json(input)?, "operator":op}))
 }
 
@@ -273,9 +273,7 @@ fn native_output_json(
     Ok(value)
 }
 
-fn ordered_last_json(
-    ordered: &super::super::incremental::compact_state::OrderedLastDescriptor,
-) -> Result<Value> {
+fn ordered_last_json(ordered: &OrderedLastDescriptor) -> Result<Value> {
     Ok(json!({
         "version":1, "model":"df55_single_linear_fifo_groups_v1",
         "datafusion":"55.0.0", "arrow_ordering":"59.2.0",

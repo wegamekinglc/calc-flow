@@ -234,6 +234,23 @@ impl GroupsAccumulator for BooleanExtrema {
         self.update_batch(values, group_indices, None, total_num_groups)
     }
 
+    fn convert_to_state(
+        &self,
+        values: &[ArrayRef],
+        filter: Option<&BooleanArray>,
+    ) -> DataFusionResult<Vec<ArrayRef>> {
+        let [array] = values else {
+            return Err(DataFusionError::Plan(
+                "Boolean extrema expects one input array".into(),
+            ));
+        };
+        let array = match filter {
+            Some(filter) => datafusion::arrow::compute::filter(array.as_ref(), filter)?,
+            None => array.clone(),
+        };
+        Ok(vec![array])
+    }
+
     fn size(&self) -> usize {
         size_of::<Self>() + self.values.capacity() * size_of::<Option<bool>>()
     }
