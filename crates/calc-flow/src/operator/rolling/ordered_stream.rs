@@ -335,10 +335,7 @@ impl RollingOperator {
     }
 
     fn can_defer_ordered_history(&self, context: &StreamOperatorContext<'_>) -> bool {
-        if !context.job().checkpointing()
-            && self.compiled.kernel_plan.supports_slab()
-            && self.state.histories.by_entity.is_empty()
-        {
+        if self.compiled.kernel_plan.supports_slab() && self.state.histories.by_entity.is_empty() {
             return true;
         }
         self.state.typed_kernel_state.is_none()
@@ -417,9 +414,6 @@ impl RollingOperator {
         input: &RecordBatch,
         context: &StreamOperatorContext<'_>,
     ) -> Option<Result<StreamKernelUpdate>> {
-        if context.job().checkpointing() {
-            return None;
-        }
         let plan = &self.compiled.kernel_plan;
         let prior = self
             .state

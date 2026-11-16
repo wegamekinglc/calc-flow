@@ -182,6 +182,51 @@ impl RollingKernelPlan {
         Ok(())
     }
 
+    pub(in crate::operator::rolling) fn encode_slab_state(
+        &self,
+        state: &RollingKernelState,
+    ) -> Result<Vec<u8>> {
+        let table = state
+            .slab
+            .as_ref()
+            .ok_or_else(|| internal_error("rolling layout-7 state is absent"))?;
+        crate::state::encode_layout7(table)
+    }
+
+    pub(in crate::operator::rolling) fn decode_slab_state(
+        &self,
+        bytes: &[u8],
+        last_identity: Option<Vec<u8>>,
+    ) -> Result<RollingKernelState> {
+        let mut state = RollingKernelState::default();
+        self.ensure_slab(&mut state)?;
+        let table = state.slab.as_mut().expect("slab initialized");
+        let snapshot = crate::state::decode_layout7(table, bytes)?;
+        table.restore(snapshot)?;
+        state.kernel_fingerprint = Some(self.fingerprint.clone());
+        state.last_identity = last_identity;
+        Ok(state)
+    }
+
+    pub(in crate::operator::rolling) fn slab_charge(
+        &self,
+        state: &RollingKernelState,
+        node_id: &str,
+    ) -> Result<Option<StateCharge>> {
+        state
+            .slab
+            .as_ref()
+            .map(|table| charge(table, node_id))
+            .transpose()
+    }
+
+    pub(in crate::operator::rolling) fn slab_last_identity(
+        state: &RollingKernelState,
+    ) -> Option<Vec<u8>> {
+        state.slab.as_ref()?;
+        state.last_identity.clone()
+    }
+
     pub(in crate::operator::rolling) fn prepare_slab_ordered_stream(
         &self,
         state: &mut RollingKernelState,

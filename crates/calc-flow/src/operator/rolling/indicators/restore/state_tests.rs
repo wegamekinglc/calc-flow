@@ -84,6 +84,7 @@ pub(super) fn snapshot(operator: &RollingOperator) -> OperatorStateSnapshot {
         configuration_hash: operator.compiled.configuration_hash.clone(),
         state_schema_fingerprint: operator.compiled.state_schema_fingerprint.clone(),
         kernel_fingerprint: Some(operator.compiled.kernel_plan.fingerprint().into()),
+        typed_last_identity: None,
         epoch,
         pipeline_fingerprint: Some(GRAPH.into()),
         operator_id: Some("features".into()),

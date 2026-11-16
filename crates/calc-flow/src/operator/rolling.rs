@@ -108,6 +108,8 @@ pub const ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION: u32 = 4;
 pub const ROLLING_INDICATOR_STATE_LAYOUT_VERSION: u32 = 5;
 /// Columnar indicator state additionally admitting complete MACD recurrences.
 pub const ROLLING_MACD_STATE_LAYOUT_VERSION: u32 = 6;
+/// State-table layout with bit-identical typed accumulator continuation.
+pub(crate) const ROLLING_STATE_TABLE_LAYOUT_VERSION: u32 = 7;
 
 /// One SQL rolling window accepted by the crate-private `DataFusion` physical planner.
 #[derive(Clone, Debug)]
@@ -1390,7 +1392,11 @@ impl RollingOperator {
                 indicator_resources.as_ref(),
             ),
             checkpoint_pending: indicators::pending_for_layout(compiled.state_layout_version, name),
-            state_layout_version: compiled.state_layout_version,
+            state_layout_version: if compiled.kernel_plan.supports_slab() {
+                ROLLING_STATE_TABLE_LAYOUT_VERSION
+            } else {
+                compiled.state_layout_version
+            },
             compiled,
             state,
             state_budget: StateBudget::default(),
@@ -1635,6 +1641,8 @@ struct RollingSnapshotMetadata {
     state_schema_fingerprint: String,
     #[serde(default)]
     kernel_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    typed_last_identity: Option<Vec<u8>>,
     epoch: Epoch,
     #[serde(deserialize_with = "deserialize_required_option")]
     pipeline_fingerprint: Option<String>,
@@ -2222,6 +2230,24 @@ impl RollingOperator {
 
 impl RollingOperator {
     fn encode_state(&self, epoch: Epoch) -> Result<Option<(String, Vec<u8>)>> {
+        if self.state.deferred_history {
+            let _pipeline_fingerprint =
+                self.state.pipeline_fingerprint.clone().ok_or_else(|| {
+                    internal_error("rolling state is missing its pipeline fingerprint")
+                })?;
+            let _operator_id =
+                self.state.operator_id.clone().ok_or_else(|| {
+                    internal_error("rolling state is missing its operator identity")
+                })?;
+            let typed = self
+                .state
+                .typed_kernel_state
+                .as_deref()
+                .ok_or_else(|| internal_error("rolling layout-7 typed state is absent"))?;
+            let segment_id = format!("base-{:020}-00000000", epoch.as_u64());
+            let bytes = self.compiled.kernel_plan.encode_slab_state(typed)?;
+            return Ok(Some((segment_id, bytes)));
+        }
         let row_count = self
             .state
             .histories
@@ -2292,7 +2318,11 @@ impl RollingOperator {
             .map_err(|_| internal_error("rolling segment length does not fit u64"))?;
         Ok(SegmentDescriptor {
             kind: SegmentKind::Base,
-            state_layout_version: self.compiled.state_layout_version,
+            state_layout_version: if self.state.deferred_history {
+                ROLLING_STATE_TABLE_LAYOUT_VERSION
+            } else {
+                self.compiled.state_layout_version
+            },
             schema_fingerprint: self.compiled.state_schema_fingerprint.clone(),
             handle: StateHandle::new(
                 operator_id,
@@ -2311,6 +2341,20 @@ impl RollingOperator {
         snapshot: &crate::OperatorStateSnapshot,
     ) -> Result<DecodedRollingState> {
         let segments = snapshot_segments(snapshot, &metadata.segment_inventory)?;
+        if metadata.state_layout_version == ROLLING_STATE_TABLE_LAYOUT_VERSION {
+            let bytes = segments.into_iter().next().ok_or_else(|| {
+                checkpoint_mismatch("rolling layout-7 snapshot is missing its state-table segment")
+            })?;
+            let typed = self
+                .compiled
+                .kernel_plan
+                .decode_slab_state(&bytes, metadata.typed_last_identity.clone())?;
+            return Ok(DecodedRollingState {
+                typed_kernel_state: Some(Box::new(typed)),
+                deferred_history: true,
+                ..DecodedRollingState::default()
+            });
+        }
         let Some(bytes) = segments.into_iter().next() else {
             return Ok(DecodedRollingState::default());
         };
@@ -2329,6 +2373,8 @@ impl RollingOperator {
 struct DecodedRollingState {
     buffer: BTreeMap<RowIdentity, BufferedRow>,
     histories: RollingHistories,
+    typed_kernel_state: Option<Box<RollingKernelState>>,
+    deferred_history: bool,
 }
 
 /// Serialized state-row ordering key: row kind, entity, identity, and the
