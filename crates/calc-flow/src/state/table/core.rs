@@ -227,6 +227,16 @@ pub(super) struct ValueLogPage {
     pub(super) logical_bytes: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ValueLogAppendPlan {
+    start: u32,
+    end: u32,
+    len: u32,
+    bytes: usize,
+    pack: bool,
+    page_index: usize,
+}
+
 #[derive(Clone, Debug, Default)]
 struct ValueLog {
     pages: Vec<Option<Page<ValueLogPage>>>,
@@ -421,7 +431,7 @@ impl StatePartition {
         }
     }
 
-    fn remove(&mut self, slot: u32) -> Result<PageRef> {
+    fn remove_location(&mut self, slot: u32) -> Result<PageLocation> {
         let location = self
             .locations
             .get(&slot)
@@ -431,30 +441,48 @@ impl StatePartition {
             return Err(internal("partition metadata page cannot be deleted"));
         }
         self.locations.remove(&slot);
-        match location {
+        Ok(location)
+    }
+
+    fn remove(&mut self, slot: u32) -> Result<PageRef> {
+        match self.remove_location(slot)? {
             PageLocation::Metadata => unreachable!(),
-            PageLocation::Keyed { column, page_index } => Ok(PageRef::Keyed {
-                column,
-                page_index,
-                page: self.keyed[column][page_index]
-                    .take()
-                    .ok_or_else(|| internal("keyed page is absent"))?,
-            }),
-            PageLocation::Ring { column, row } => Ok(PageRef::Ring {
-                column,
-                row,
-                page: self.rings[column][row]
-                    .take()
-                    .ok_or_else(|| internal("ring page is absent"))?,
-            }),
-            PageLocation::ValueLog { column, page_index } => Ok(PageRef::ValueLog {
-                column,
-                page_index,
-                page: self.value_logs[column].pages[page_index]
-                    .take()
-                    .ok_or_else(|| internal("value-log page is absent"))?,
-            }),
+            PageLocation::Keyed { column, page_index } => self.take_keyed(column, page_index),
+            PageLocation::Ring { column, row } => self.take_ring(column, row),
+            PageLocation::ValueLog { column, page_index } => {
+                self.take_value_log(column, page_index)
+            }
         }
+    }
+
+    fn take_keyed(&mut self, column: usize, page_index: usize) -> Result<PageRef> {
+        Ok(PageRef::Keyed {
+            column,
+            page_index,
+            page: self.keyed[column][page_index]
+                .take()
+                .ok_or_else(|| internal("keyed page is absent"))?,
+        })
+    }
+
+    fn take_ring(&mut self, column: usize, row: usize) -> Result<PageRef> {
+        Ok(PageRef::Ring {
+            column,
+            row,
+            page: self.rings[column][row]
+                .take()
+                .ok_or_else(|| internal("ring page is absent"))?,
+        })
+    }
+
+    fn take_value_log(&mut self, column: usize, page_index: usize) -> Result<PageRef> {
+        Ok(PageRef::ValueLog {
+            column,
+            page_index,
+            page: self.value_logs[column].pages[page_index]
+                .take()
+                .ok_or_else(|| internal("value-log page is absent"))?,
+        })
     }
 
     fn logical_bytes(&self) -> usize {
@@ -572,9 +600,16 @@ impl TableFreeze {
     }
 
     pub(crate) fn ring_history(&self, column: usize, entity: EntityId) -> Result<Vec<Option<f64>>> {
-        let row = entity.row as usize;
         let page = self
-            .partitions
+            .find_frozen_ring(column, entity)
+            .or_else(|| self.find_previous_ring(column, entity))
+            .ok_or_else(|| internal("frozen ring page is absent"))?;
+        Ok(f64_history(&page))
+    }
+
+    fn find_frozen_ring(&self, column: usize, entity: EntityId) -> Option<Page<RingPage>> {
+        let row = entity.row as usize;
+        self.partitions
             .iter()
             .filter(|partition| partition.id == entity.key_group)
             .flat_map(|partition| &partition.changes)
@@ -586,32 +621,23 @@ impl TableFreeze {
                 }) if *found == column && *found_row == row => Some(page.clone()),
                 _ => None,
             })
-            .or_else(|| {
-                self.previous
-                    .partitions
-                    .get(&entity.key_group)
-                    .and_then(|partition| {
-                        partition.pages.values().find_map(|page| match page {
-                            PageRef::Ring {
-                                column: found,
-                                row: found_row,
-                                page,
-                            } if *found == column && *found_row == row => Some(page.clone()),
-                            _ => None,
-                        })
-                    })
+    }
+
+    fn find_previous_ring(&self, column: usize, entity: EntityId) -> Option<Page<RingPage>> {
+        let row = entity.row as usize;
+        self.previous
+            .partitions
+            .get(&entity.key_group)
+            .and_then(|partition| {
+                partition.pages.values().find_map(|page| match page {
+                    PageRef::Ring {
+                        column: found,
+                        row: found_row,
+                        page,
+                    } if *found == column && *found_row == row => Some(page.clone()),
+                    _ => None,
+                })
             })
-            .ok_or_else(|| internal("frozen ring page is absent"))?;
-        Ok(page
-            .value
-            .ring
-            .history()
-            .into_iter()
-            .map(|value| match value {
-                RingValue::Float64(value) => value,
-                _ => unreachable!(),
-            })
-            .collect())
     }
 
     pub(crate) fn complete(self) -> TableLineage {
@@ -622,46 +648,9 @@ impl TableFreeze {
                 .partitions
                 .get_mut(&frozen.id)
                 .expect("prepared group");
-            for change in frozen.changes {
-                match change {
-                    FrozenChange::Write(page) => {
-                        partition.pages.insert(page.id().slot, page);
-                    }
-                    FrozenChange::Delete(id) => {
-                        partition.pages.remove(&id.slot);
-                    }
-                }
-            }
-            for slot in frozen.dirty_slots {
-                if let Some(generation) = frozen.allocator.next_generations.get(&slot) {
-                    partition
-                        .allocator
-                        .next_generations
-                        .insert(slot, *generation);
-                }
-                if frozen.allocator.free_slots.contains(&slot) {
-                    partition.allocator.free_slots.insert(slot);
-                } else {
-                    partition.allocator.free_slots.remove(&slot);
-                }
-            }
-            partition.allocator.next_slot = frozen.allocator.next_slot;
-            let metadata_slot = frozen.metadata.id.slot;
-            if let Some(generation) = frozen.allocator.next_generations.get(&metadata_slot) {
-                partition
-                    .allocator
-                    .next_generations
-                    .insert(metadata_slot, *generation);
-            }
-            if !partition
-                .pages
-                .values()
-                .any(|page| matches!(page, PageRef::Metadata(_)))
-            {
-                partition
-                    .pages
-                    .insert(frozen.metadata.id.slot, PageRef::Metadata(frozen.metadata));
-            }
+            Self::apply_frozen_changes(partition, frozen.changes);
+            Self::apply_frozen_allocator(partition, &frozen);
+            Self::ensure_frozen_metadata(partition, frozen.metadata);
         }
         lineage.retained_bytes = lineage
             .partitions
@@ -671,6 +660,70 @@ impl TableFreeze {
             .sum();
         lineage
     }
+
+    fn apply_frozen_changes(partition: &mut PartitionLineage, changes: Vec<FrozenChange>) {
+        for change in changes {
+            match change {
+                FrozenChange::Write(page) => {
+                    partition.pages.insert(page.id().slot, page);
+                }
+                FrozenChange::Delete(id) => {
+                    partition.pages.remove(&id.slot);
+                }
+            }
+        }
+    }
+
+    fn apply_frozen_allocator(partition: &mut PartitionLineage, frozen: &PartitionFreeze) {
+        for slot in &frozen.dirty_slots {
+            if let Some(generation) = frozen.allocator.next_generations.get(slot) {
+                partition
+                    .allocator
+                    .next_generations
+                    .insert(*slot, *generation);
+            }
+            if frozen.allocator.free_slots.contains(slot) {
+                partition.allocator.free_slots.insert(*slot);
+            } else {
+                partition.allocator.free_slots.remove(slot);
+            }
+        }
+        partition.allocator.next_slot = frozen.allocator.next_slot;
+        let metadata_slot = frozen.metadata.id.slot;
+        if let Some(generation) = frozen.allocator.next_generations.get(&metadata_slot) {
+            partition
+                .allocator
+                .next_generations
+                .insert(metadata_slot, *generation);
+        }
+    }
+
+    fn ensure_frozen_metadata(
+        partition: &mut PartitionLineage,
+        metadata: super::pages::Page<PartitionMetadata>,
+    ) {
+        if !partition
+            .pages
+            .values()
+            .any(|page| matches!(page, PageRef::Metadata(_)))
+        {
+            partition
+                .pages
+                .insert(metadata.id.slot, PageRef::Metadata(metadata));
+        }
+    }
+}
+
+fn f64_history(page: &Page<RingPage>) -> Vec<Option<f64>> {
+    page.value
+        .ring
+        .history()
+        .into_iter()
+        .map(|value| match value {
+            RingValue::Float64(value) => value,
+            _ => unreachable!(),
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -965,7 +1018,7 @@ impl StateTable {
         self.value_logs.len() - 1
     }
 
-    pub(super) fn layout7_schema(&self) -> Option<Layout7Schema> {
+    fn layout7_columns(&self) -> Option<(&KeyedColumn, &RingColumn)> {
         if !self.value_logs.is_empty() || !self.partitions.contains_key(&KeyGroupId(0)) {
             return None;
         }
@@ -975,11 +1028,19 @@ impl StateTable {
         let [numeric] = self.rings.as_slice() else {
             return None;
         };
-        if counter.kind != ValueKind::UInt64
-            || numeric.kind != RingKind::Float64
-            || !numeric.numeric
-            || !matches!(numeric.retention, Retention::Rows(_))
-        {
+        Some((counter, numeric))
+    }
+
+    fn layout7_shape_matches(counter: &KeyedColumn, numeric: &RingColumn) -> bool {
+        counter.kind == ValueKind::UInt64
+            && numeric.kind == RingKind::Float64
+            && numeric.numeric
+            && matches!(numeric.retention, Retention::Rows(_))
+    }
+
+    pub(super) fn layout7_schema(&self) -> Option<Layout7Schema> {
+        let (counter, numeric) = self.layout7_columns()?;
+        if !Self::layout7_shape_matches(counter, numeric) {
             return None;
         }
         Some(Layout7Schema {
@@ -1194,6 +1255,49 @@ impl StateTable {
         self.resolve_or_append_default(key)
     }
 
+    fn new_entity_id(&self, key: &EntityKey, group: KeyGroupId) -> Result<EntityId> {
+        self.transaction_id()?;
+        if !self.partitions.contains_key(&group) {
+            return Err(internal("entity key group is not prepared"));
+        }
+        let row = self.partitions[&group].metadata.value.entities.len();
+        let row = u32::try_from(row).map_err(|_| internal("partition entity space exhausted"))?;
+        Ok(EntityId {
+            index: self.next_entity,
+            key_group: group,
+            row,
+        })
+    }
+
+    fn append_entity_columns(&mut self, entity: EntityId, key: &EntityKey) -> Result<()> {
+        for column in 0..self.keyed.len() {
+            self.append_keyed_default(entity.key_group, column, entity.row)?;
+        }
+        for column in 0..self.rings.len() {
+            self.append_ring(entity.key_group, column, entity.row)?;
+        }
+        self.append_metadata(entity.key_group, entity, key.clone())
+    }
+
+    fn register_entity(
+        &mut self,
+        key: EntityKey,
+        entity: EntityId,
+        next_entity: u32,
+    ) -> Result<EntityId> {
+        self.entities.insert(key.bytes.clone(), entity);
+        self.next_entity = self
+            .next_entity
+            .checked_add(1)
+            .ok_or_else(|| internal("rolling entity dictionary exhausted u32 IDs"))?;
+        self.push_undo(Undo::Entity {
+            group: entity.key_group,
+            key,
+            next_entity,
+        });
+        Ok(entity)
+    }
+
     pub(crate) fn resolve_or_append_in_group(
         &mut self,
         key: EntityKey,
@@ -1202,36 +1306,10 @@ impl StateTable {
         if let Some(entity) = self.entities.get(key.bytes.as_slice()) {
             return Ok(*entity);
         }
-        self.transaction_id()?;
-        if !self.partitions.contains_key(&group) {
-            return Err(internal("entity key group is not prepared"));
-        }
         let next_entity = self.next_entity;
-        let row = self.partitions[&group].metadata.value.entities.len();
-        let row = u32::try_from(row).map_err(|_| internal("partition entity space exhausted"))?;
-        let entity = EntityId {
-            index: next_entity,
-            key_group: group,
-            row,
-        };
-        for column in 0..self.keyed.len() {
-            self.append_keyed_default(group, column, row)?;
-        }
-        for column in 0..self.rings.len() {
-            self.append_ring(group, column, row)?;
-        }
-        self.append_metadata(group, entity, key.clone())?;
-        self.entities.insert(key.bytes.clone(), entity);
-        self.next_entity = self
-            .next_entity
-            .checked_add(1)
-            .ok_or_else(|| internal("rolling entity dictionary exhausted u32 IDs"))?;
-        self.push_undo(Undo::Entity {
-            group,
-            key,
-            next_entity,
-        });
-        Ok(entity)
+        let entity = self.new_entity_id(&key, group)?;
+        self.append_entity_columns(entity, &key)?;
+        self.register_entity(key, entity, next_entity)
     }
 
     fn append_keyed_default(&mut self, group: KeyGroupId, column: usize, row: u32) -> Result<()> {
@@ -1753,112 +1831,144 @@ impl StateTable {
         self.append_values_in_group(KeyGroupId(0), column, values)
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "value-log append keeps page creation, COW and undo ordering adjacent"
-    )]
     pub(crate) fn append_values_in_group(
         &mut self,
         group: KeyGroupId,
         column: usize,
         values: ArrayRef,
     ) -> Result<Range<u32>> {
-        self.transaction_id()?;
-        let (start, end, len, bytes, pack, page_index) = {
-            let log = &self.partitions[&group].value_logs[column];
-            if log
-                .pages
-                .iter()
-                .flatten()
-                .flat_map(|page| &page.value.chunks)
-                .next()
-                .is_some_and(|first| first.data_type() != values.data_type())
-            {
-                return Err(internal("rolling value-log type changed"));
-            }
-            let start = log.len;
-            let len = u32::try_from(values.len())
-                .map_err(|_| internal("rolling value-log append exceeded u32 handles"))?;
-            let end = start
-                .checked_add(len)
-                .ok_or_else(|| internal("rolling value-log exhausted u32 handles"))?;
-            let bytes = values.get_array_memory_size();
-            let pack = log
-                .pages
-                .last()
-                .and_then(Option::as_ref)
-                .is_some_and(|page| {
-                    page.value
-                        .logical_bytes
-                        .checked_add(bytes)
-                        .is_some_and(|total| total <= VALUE_LOG_PAGE_BYTES)
-                });
-            (start, end, len, bytes, pack, log.pages.len())
-        };
-        if pack {
-            let page_index = page_index - 1;
-            let slot = self.partitions[&group].value_logs[column].pages[page_index]
-                .as_ref()
-                .expect("value-log page")
-                .id
-                .slot;
-            self.replace_page(group, slot, false)?;
-            let page = &self.partitions[&group].value_logs[column].pages[page_index]
-                .as_ref()
-                .expect("value-log page")
-                .value;
-            self.push_undo(Undo::ValueLog {
-                group,
-                column,
-                slot,
-                chunks: page.chunks.len(),
-                len: page.len,
-                logical_bytes: page.logical_bytes,
-                total_len: start,
-            });
-            let partition = self.partitions.get_mut(&group).expect("prepared group");
-            let page = Arc::get_mut(
-                &mut partition.value_logs[column].pages[page_index]
-                    .as_mut()
-                    .expect("value-log page")
-                    .value,
-            )
-            .expect("unfrozen value-log page");
-            page.chunks.push(values);
-            page.len = page
-                .len
-                .checked_add(len)
-                .ok_or_else(|| internal("value-log page length overflow"))?;
-            page.logical_bytes = page
-                .logical_bytes
-                .checked_add(bytes)
-                .ok_or_else(|| internal("value-log byte accounting overflow"))?;
+        let plan = self.value_log_append_plan(group, column, &values)?;
+        if plan.pack {
+            self.append_packed_value_log(group, column, values, plan)?;
         } else {
-            let id = self.create_page_in_group(group, |id| PageRef::ValueLog {
-                column,
-                page_index,
-                page: Page::new(
-                    id,
-                    ValueLogPage {
-                        chunks: vec![values],
-                        start,
-                        len,
-                        logical_bytes: bytes,
-                    },
-                ),
-            })?;
-            self.push_undo(Undo::ValueLog {
-                group,
-                column,
-                slot: id.slot,
-                chunks: 0,
-                len: 0,
-                logical_bytes: 0,
-                total_len: start,
-            });
+            self.append_new_value_log_page(group, column, values, plan)?;
         }
-        self.set_value_log_len(group, column, end)?;
-        Ok(start..end)
+        self.set_value_log_len(group, column, plan.end)?;
+        Ok(plan.start..plan.end)
+    }
+
+    fn value_log_append_plan(
+        &self,
+        group: KeyGroupId,
+        column: usize,
+        values: &ArrayRef,
+    ) -> Result<ValueLogAppendPlan> {
+        self.transaction_id()?;
+        let log = &self.partitions[&group].value_logs[column];
+        if log
+            .pages
+            .iter()
+            .flatten()
+            .flat_map(|page| &page.value.chunks)
+            .next()
+            .is_some_and(|first| first.data_type() != values.data_type())
+        {
+            return Err(internal("rolling value-log type changed"));
+        }
+        let start = log.len;
+        let len = u32::try_from(values.len())
+            .map_err(|_| internal("rolling value-log append exceeded u32 handles"))?;
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| internal("rolling value-log exhausted u32 handles"))?;
+        let bytes = values.get_array_memory_size();
+        let pack = log
+            .pages
+            .last()
+            .and_then(Option::as_ref)
+            .is_some_and(|page| {
+                page.value
+                    .logical_bytes
+                    .checked_add(bytes)
+                    .is_some_and(|total| total <= VALUE_LOG_PAGE_BYTES)
+            });
+        Ok(ValueLogAppendPlan {
+            start,
+            end,
+            len,
+            bytes,
+            pack,
+            page_index: log.pages.len(),
+        })
+    }
+
+    fn append_packed_value_log(
+        &mut self,
+        group: KeyGroupId,
+        column: usize,
+        values: ArrayRef,
+        plan: ValueLogAppendPlan,
+    ) -> Result<()> {
+        let page_index = plan.page_index - 1;
+        let slot = self.partitions[&group].value_logs[column].pages[page_index]
+            .as_ref()
+            .expect("value-log page")
+            .id
+            .slot;
+        self.replace_page(group, slot, false)?;
+        let page = &self.partitions[&group].value_logs[column].pages[page_index]
+            .as_ref()
+            .expect("value-log page")
+            .value;
+        self.push_undo(Undo::ValueLog {
+            group,
+            column,
+            slot,
+            chunks: page.chunks.len(),
+            len: page.len,
+            logical_bytes: page.logical_bytes,
+            total_len: plan.start,
+        });
+        let partition = self.partitions.get_mut(&group).expect("prepared group");
+        let page = Arc::get_mut(
+            &mut partition.value_logs[column].pages[page_index]
+                .as_mut()
+                .expect("value-log page")
+                .value,
+        )
+        .expect("unfrozen value-log page");
+        page.chunks.push(values);
+        page.len = page
+            .len
+            .checked_add(plan.len)
+            .ok_or_else(|| internal("value-log page length overflow"))?;
+        page.logical_bytes = page
+            .logical_bytes
+            .checked_add(plan.bytes)
+            .ok_or_else(|| internal("value-log byte accounting overflow"))?;
+        Ok(())
+    }
+
+    fn append_new_value_log_page(
+        &mut self,
+        group: KeyGroupId,
+        column: usize,
+        values: ArrayRef,
+        plan: ValueLogAppendPlan,
+    ) -> Result<()> {
+        let id = self.create_page_in_group(group, |id| PageRef::ValueLog {
+            column,
+            page_index: plan.page_index,
+            page: Page::new(
+                id,
+                ValueLogPage {
+                    chunks: vec![values],
+                    start: plan.start,
+                    len: plan.len,
+                    logical_bytes: plan.bytes,
+                },
+            ),
+        })?;
+        self.push_undo(Undo::ValueLog {
+            group,
+            column,
+            slot: id.slot,
+            chunks: 0,
+            len: 0,
+            logical_bytes: 0,
+            total_len: plan.start,
+        });
+        Ok(())
     }
 
     fn set_value_log_len(&mut self, group: KeyGroupId, column: usize, len: u32) -> Result<()> {
@@ -1922,7 +2032,7 @@ impl StateTable {
             .sum()
     }
 
-    pub(crate) fn freeze(&mut self, epoch: u64) -> Result<TableFreeze> {
+    fn validate_freeze(&self) -> Result<()> {
         if !self.checkpointing {
             return Err(internal("cannot freeze with checkpointing disabled"));
         }
@@ -1932,37 +2042,56 @@ impl StateTable {
         if self.active.is_some() {
             return Err(internal("an earlier state-table freeze is still active"));
         }
+        Ok(())
+    }
+
+    fn freeze_partition(
+        group: KeyGroupId,
+        partition: &mut StatePartition,
+        frozen: &mut BTreeSet<PageId>,
+        reservation_bytes: &mut usize,
+    ) -> Result<PartitionFreeze> {
+        let dirty = std::mem::take(&mut partition.dirty);
+        let dirty_slots = dirty.bits.iter().copied().collect::<Vec<_>>();
+        let mut changes = Vec::with_capacity(dirty_slots.len());
+        for slot in &dirty_slots {
+            match partition.page(*slot) {
+                Some(page) => {
+                    frozen.insert(page.id());
+                    *reservation_bytes = reservation_bytes
+                        .checked_add(page.logical_bytes() + PAGE_DESCRIPTOR_BYTES)
+                        .ok_or_else(|| internal("checkpoint reservation overflow"))?;
+                    changes.push(FrozenChange::Write(page));
+                }
+                None => changes.push(FrozenChange::Delete(PageId {
+                    key_group: group,
+                    slot: *slot,
+                    generation: partition.allocator.next_generations[slot] - 1,
+                })),
+            }
+        }
+        Ok(PartitionFreeze {
+            id: group,
+            metadata: partition.metadata.clone(),
+            changes,
+            allocator: partition.allocator.clone(),
+            dirty_slots,
+        })
+    }
+
+    pub(crate) fn freeze(&mut self, epoch: u64) -> Result<TableFreeze> {
+        self.validate_freeze()?;
         let previous = self.durable.clone();
         let mut frozen = BTreeSet::new();
         let mut reservation_bytes = previous.retained_bytes;
         let mut partitions = Vec::with_capacity(self.partitions.len());
         for (group, partition) in &mut self.partitions {
-            let dirty = std::mem::take(&mut partition.dirty);
-            let dirty_slots = dirty.bits.iter().copied().collect::<Vec<_>>();
-            let mut changes = Vec::with_capacity(dirty_slots.len());
-            for slot in &dirty_slots {
-                match partition.page(*slot) {
-                    Some(page) => {
-                        frozen.insert(page.id());
-                        reservation_bytes = reservation_bytes
-                            .checked_add(page.logical_bytes() + PAGE_DESCRIPTOR_BYTES)
-                            .ok_or_else(|| internal("checkpoint reservation overflow"))?;
-                        changes.push(FrozenChange::Write(page));
-                    }
-                    None => changes.push(FrozenChange::Delete(PageId {
-                        key_group: *group,
-                        slot: *slot,
-                        generation: partition.allocator.next_generations[slot] - 1,
-                    })),
-                }
-            }
-            partitions.push(PartitionFreeze {
-                id: *group,
-                metadata: partition.metadata.clone(),
-                changes,
-                allocator: partition.allocator.clone(),
-                dirty_slots,
-            });
+            partitions.push(Self::freeze_partition(
+                *group,
+                partition,
+                &mut frozen,
+                &mut reservation_bytes,
+            )?);
         }
         self.active = Some(ActiveFreeze {
             epoch,
@@ -2212,7 +2341,7 @@ impl StateTable {
         ))
     }
 
-    fn install_layout7_pages(&self, snapshot: &TableSnapshot) -> Result<(TableLineage, usize)> {
+    fn prepare_layout7_restore(&self) -> Result<StateTable> {
         let groups = self.partitions.keys().copied().collect::<Vec<_>>();
         let mut restored = StateTable::with_key_groups(self.checkpointing, &groups)?;
         restored.keyed.clone_from(&self.keyed);
@@ -2223,7 +2352,14 @@ impl StateTable {
             partition.rings = vec![Vec::new(); restored.rings.len()];
             partition.value_logs = vec![ValueLog::default(); restored.value_logs.len()];
         }
-        restored.begin()?;
+        Ok(restored)
+    }
+
+    fn install_layout7_entities(
+        &self,
+        restored: &mut StateTable,
+        snapshot: &TableSnapshot,
+    ) -> Result<()> {
         let counters = snapshot.keyed[0]
             .values
             .as_any()
@@ -2237,11 +2373,22 @@ impl StateTable {
             restored.set_u64(0, entity, counters.value(index))?;
             restored.install_layout7_ring(0, entity, &snapshot.rings[0], index)?;
         }
-        restored.commit()?;
+        Ok(())
+    }
+
+    fn clear_restore_tracking(restored: &mut StateTable) {
         for partition in restored.partitions.values_mut() {
             partition.dirty = DirtySet::default();
             partition.stamps.clear();
         }
+    }
+
+    fn install_layout7_pages(&self, snapshot: &TableSnapshot) -> Result<(TableLineage, usize)> {
+        let mut restored = self.prepare_layout7_restore()?;
+        restored.begin()?;
+        self.install_layout7_entities(&mut restored, snapshot)?;
+        restored.commit()?;
+        Self::clear_restore_tracking(&mut restored);
         let logical_bytes = restored.logical_bytes();
         Ok((restored.current_lineage(), logical_bytes))
     }
@@ -2425,7 +2572,7 @@ impl StateTable {
         }
     }
 
-    fn install_lineage(&mut self, snapshot: &TableSnapshot) -> Result<()> {
+    fn validate_lineage_groups(&self, snapshot: &TableSnapshot) -> Result<()> {
         if self.partitions.len() != snapshot.lineage.partitions.len()
             || self
                 .partitions
@@ -2434,25 +2581,20 @@ impl StateTable {
         {
             return Err(internal("snapshot key-group inventory mismatch"));
         }
+        Ok(())
+    }
+
+    fn install_lineage(&mut self, snapshot: &TableSnapshot) -> Result<()> {
+        self.validate_lineage_groups(snapshot)?;
         let mut entities = HashMap::new();
         for (group, lineage) in &snapshot.lineage.partitions {
             let (partition, entries) = self.install_partition(*group, lineage)?;
             for (key, entity) in entries {
-                if entities.insert(key, entity).is_some() {
-                    return Err(internal("snapshot contains a duplicate entity key"));
-                }
+                Self::install_entity(&mut entities, key, entity)?;
             }
             self.partitions.insert(*group, partition);
         }
-        let indices = entities
-            .values()
-            .map(|entity| entity.index)
-            .collect::<BTreeSet<_>>();
-        if entities.len() != snapshot.next_entity as usize
-            || indices.iter().copied().ne(0..snapshot.next_entity)
-        {
-            return Err(internal("snapshot entity dictionary is not dense"));
-        }
+        Self::validate_entity_census(&entities, snapshot.next_entity)?;
         self.entities = entities;
         self.next_entity = snapshot.next_entity;
         if self.checkpointing {
@@ -2461,47 +2603,76 @@ impl StateTable {
         Ok(())
     }
 
-    fn install_partition(
+    fn install_entity(
+        entities: &mut HashMap<Vec<u8>, EntityId>,
+        key: Vec<u8>,
+        entity: EntityId,
+    ) -> Result<()> {
+        if entities.insert(key, entity).is_some() {
+            return Err(internal("snapshot contains a duplicate entity key"));
+        }
+        Ok(())
+    }
+
+    fn validate_entity_census(
+        entities: &HashMap<Vec<u8>, EntityId>,
+        next_entity: u32,
+    ) -> Result<()> {
+        let indices = entities
+            .values()
+            .map(|entity| entity.index)
+            .collect::<BTreeSet<_>>();
+        if entities.len() != next_entity as usize || indices.iter().copied().ne(0..next_entity) {
+            return Err(internal("snapshot entity dictionary is not dense"));
+        }
+        Ok(())
+    }
+
+    fn install_snapshot_page(
         &self,
+        partition: &mut StatePartition,
         group: KeyGroupId,
         lineage: &PartitionLineage,
-    ) -> Result<RestoredPartition> {
-        let mut partition = StatePartition::new(group);
-        partition.keyed = vec![Vec::new(); self.keyed.len()];
-        partition.rings = vec![Vec::new(); self.rings.len()];
-        partition.value_logs = vec![ValueLog::default(); self.value_logs.len()];
-        let mut metadata_seen = false;
-        for (slot, page) in &lineage.pages {
-            self.validate_snapshot_page(page)?;
-            let next_generation = lineage
-                .allocator
-                .next_generations
-                .get(slot)
-                .copied()
-                .unwrap_or(0);
-            if page.id().key_group != group
-                || page.id().slot != *slot
-                || page.id().generation >= next_generation
-            {
-                return Err(internal("snapshot page identity mismatch"));
-            }
-            if matches!(page, PageRef::Metadata(_)) {
-                if metadata_seen || *slot != 0 {
-                    return Err(internal("snapshot partition metadata is not unique"));
-                }
-                metadata_seen = true;
-            }
-            partition.insert(page.clone());
+        slot: u32,
+        page: &PageRef,
+        metadata_seen: &mut bool,
+    ) -> Result<()> {
+        self.validate_snapshot_page(page)?;
+        let next_generation = lineage
+            .allocator
+            .next_generations
+            .get(&slot)
+            .copied()
+            .unwrap_or(0);
+        if page.id().key_group != group
+            || page.id().slot != slot
+            || page.id().generation >= next_generation
+        {
+            return Err(internal("snapshot page identity mismatch"));
         }
-        if !metadata_seen {
-            return Err(internal("snapshot partition metadata is absent"));
+        let metadata = matches!(page, PageRef::Metadata(_));
+        if metadata && (*metadata_seen || slot != 0) {
+            return Err(internal("snapshot partition metadata is not unique"));
         }
-        partition.allocator = lineage.allocator.clone();
+        if metadata {
+            *metadata_seen = true;
+        }
+        partition.insert(page.clone());
+        Ok(())
+    }
+
+    fn restore_value_log_lengths(partition: &mut StatePartition) {
         let value_log_lengths = partition.metadata.value.value_log_lengths.clone();
         for (column, log) in partition.value_logs.iter_mut().enumerate() {
             log.len = value_log_lengths.get(column).copied().unwrap_or(0);
         }
-        let entries = partition
+    }
+
+    fn collect_partition_entities(
+        partition: &StatePartition,
+        group: KeyGroupId,
+    ) -> Result<Vec<(Vec<u8>, EntityId)>> {
+        partition
             .metadata
             .value
             .entities
@@ -2519,7 +2690,35 @@ impl StateTable {
                     },
                 ))
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect()
+    }
+
+    fn install_partition(
+        &self,
+        group: KeyGroupId,
+        lineage: &PartitionLineage,
+    ) -> Result<RestoredPartition> {
+        let mut partition = StatePartition::new(group);
+        partition.keyed = vec![Vec::new(); self.keyed.len()];
+        partition.rings = vec![Vec::new(); self.rings.len()];
+        partition.value_logs = vec![ValueLog::default(); self.value_logs.len()];
+        let mut metadata_seen = false;
+        for (slot, page) in &lineage.pages {
+            self.install_snapshot_page(
+                &mut partition,
+                group,
+                lineage,
+                *slot,
+                page,
+                &mut metadata_seen,
+            )?;
+        }
+        if !metadata_seen {
+            return Err(internal("snapshot partition metadata is absent"));
+        }
+        partition.allocator = lineage.allocator.clone();
+        Self::restore_value_log_lengths(&mut partition);
+        let entries = Self::collect_partition_entities(&partition, group)?;
         Ok((partition, entries))
     }
 
@@ -2531,24 +2730,40 @@ impl StateTable {
     }
 
     fn validate_column_schema(&self, snapshot: &TableSnapshot) -> Result<()> {
+        self.validate_schema_counts(snapshot)?;
+        self.validate_keyed_column_schema(snapshot)?;
+        self.validate_ring_column_schema(snapshot)
+    }
+
+    fn validate_schema_counts(&self, snapshot: &TableSnapshot) -> Result<()> {
         if self.keyed.len() != snapshot.keyed.len()
             || self.rings.len() != snapshot.rings.len()
             || self.value_logs.len() * self.partitions.len() != snapshot.value_logs.len()
         {
             return Err(internal("rolling state-table column inventory mismatch"));
         }
+        Ok(())
+    }
+
+    fn validate_keyed_column_schema(&self, snapshot: &TableSnapshot) -> Result<()> {
         if !self
             .keyed
             .iter()
             .zip(&snapshot.keyed)
             .all(|(left, right)| left.name == right.name && left.kind == right.kind)
-            || !self.rings.iter().zip(&snapshot.rings).all(|(left, right)| {
-                left.name == right.name
-                    && left.kind == right.kind
-                    && left.retention == right.retention
-                    && left.numeric == right.numeric.is_some()
-            })
         {
+            return Err(internal("rolling state-table column inventory mismatch"));
+        }
+        Ok(())
+    }
+
+    fn validate_ring_column_schema(&self, snapshot: &TableSnapshot) -> Result<()> {
+        if !self.rings.iter().zip(&snapshot.rings).all(|(left, right)| {
+            left.name == right.name
+                && left.kind == right.kind
+                && left.retention == right.retention
+                && left.numeric == right.numeric.is_some()
+        }) {
             return Err(internal("rolling state-table column inventory mismatch"));
         }
         Ok(())
@@ -2654,59 +2869,23 @@ impl StateTable {
                 group,
                 key,
                 next_entity,
-            } => self.undo_entity(group, key, next_entity)?,
+            } => self.undo_entity(group, key, next_entity),
             Undo::Dirty {
                 group,
                 slot,
                 was_dirty,
                 first_dirty_len,
-            } => {
-                let dirty = &mut self
-                    .partitions
-                    .get_mut(&group)
-                    .expect("prepared group")
-                    .dirty;
-                if was_dirty {
-                    dirty.mark(slot);
-                } else {
-                    dirty.bits.remove(&slot);
-                }
-                dirty.first_dirty.truncate(first_dirty_len);
-            }
+            } => self.undo_dirty(group, slot, was_dirty, first_dirty_len),
             Undo::Stamp {
                 group,
                 key,
                 previous,
-            } => {
-                let partition = self.partitions.get_mut(&group).expect("prepared group");
-                if key.kind == StampKind::RingSlot {
-                    let PageLocation::Ring { column, row } = partition.locations[&key.slot] else {
-                        return Err(internal("ring stamp undo page kind mismatch"));
-                    };
-                    let index = usize::try_from(key.sub)
-                        .map_err(|_| internal("ring stamp index exceeds usize"))?;
-                    let page = &mut partition.rings[column][row]
-                        .as_mut()
-                        .expect("ring page")
-                        .value;
-                    Arc::get_mut(page)
-                        .expect("unfrozen ring stamp undo")
-                        .slot_stamps[index] = previous.unwrap_or(0);
-                } else if let Some(previous) = previous {
-                    partition.stamps.insert(key, previous);
-                } else {
-                    partition.stamps.remove(&key);
-                }
-            }
+            } => self.undo_stamp(group, key, previous),
             Undo::PageCreate {
                 group,
                 slot,
                 allocator,
-            } => {
-                let partition = self.partitions.get_mut(&group).expect("prepared group");
-                partition.remove(slot)?;
-                partition.allocator.restore(slot, allocator);
-            }
+            } => self.undo_page_create(group, slot, allocator),
             Undo::PageReplace {
                 group,
                 page,
@@ -2716,21 +2895,85 @@ impl StateTable {
                 group,
                 page,
                 allocator,
-            } => {
-                let slot = page.id().slot;
-                let partition = self.partitions.get_mut(&group).expect("prepared group");
-                partition.insert(page);
-                partition.allocator.restore(slot, allocator);
-            }
+            } => self.undo_page_replace(group, page, allocator),
             _ => unreachable!(),
+        }
+    }
+
+    fn undo_dirty(
+        &mut self,
+        group: KeyGroupId,
+        slot: u32,
+        was_dirty: bool,
+        first_dirty_len: usize,
+    ) -> Result<()> {
+        let dirty = &mut self
+            .partitions
+            .get_mut(&group)
+            .expect("prepared group")
+            .dirty;
+        if was_dirty {
+            dirty.mark(slot);
+        } else {
+            dirty.bits.remove(&slot);
+        }
+        dirty.first_dirty.truncate(first_dirty_len);
+        Ok(())
+    }
+
+    fn undo_stamp(
+        &mut self,
+        group: KeyGroupId,
+        key: StampKey,
+        previous: Option<u64>,
+    ) -> Result<()> {
+        let partition = self.partitions.get_mut(&group).expect("prepared group");
+        if key.kind == StampKind::RingSlot {
+            let PageLocation::Ring { column, row } = partition.locations[&key.slot] else {
+                return Err(internal("ring stamp undo page kind mismatch"));
+            };
+            let index =
+                usize::try_from(key.sub).map_err(|_| internal("ring stamp index exceeds usize"))?;
+            let page = &mut partition.rings[column][row]
+                .as_mut()
+                .expect("ring page")
+                .value;
+            Arc::get_mut(page)
+                .expect("unfrozen ring stamp undo")
+                .slot_stamps[index] = previous.unwrap_or(0);
+        } else if let Some(previous) = previous {
+            partition.stamps.insert(key, previous);
+        } else {
+            partition.stamps.remove(&key);
         }
         Ok(())
     }
 
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "value undo consumes one owned transaction record"
-    )]
+    fn undo_page_create(
+        &mut self,
+        group: KeyGroupId,
+        slot: u32,
+        allocator: AllocatorUndo,
+    ) -> Result<()> {
+        let partition = self.partitions.get_mut(&group).expect("prepared group");
+        partition.remove(slot)?;
+        partition.allocator.restore(slot, allocator);
+        Ok(())
+    }
+
+    fn undo_page_replace(
+        &mut self,
+        group: KeyGroupId,
+        page: PageRef,
+        allocator: AllocatorUndo,
+    ) -> Result<()> {
+        let slot = page.id().slot;
+        let partition = self.partitions.get_mut(&group).expect("prepared group");
+        partition.insert(page);
+        partition.allocator.restore(slot, allocator);
+        Ok(())
+    }
+
     fn apply_value_undo(&mut self, undo: Undo) -> Result<()> {
         match undo {
             Undo::Keyed {
@@ -2738,79 +2981,21 @@ impl StateTable {
                 slot,
                 row,
                 value,
-            } => {
-                let partition = self.partitions.get_mut(&group).expect("prepared group");
-                let location = partition.locations[&slot];
-                let PageLocation::Keyed { column, page_index } = location else {
-                    return Err(internal("keyed undo page kind mismatch"));
-                };
-                Arc::get_mut(
-                    &mut partition.keyed[column][page_index]
-                        .as_mut()
-                        .expect("keyed page")
-                        .value,
-                )
-                .expect("unfrozen keyed undo")
-                .values[row] = value;
-            }
+            } => self.undo_keyed(group, slot, row, value),
             Undo::RingMetadata {
                 group,
                 slot,
                 head,
                 len,
                 capacity,
-            } => {
-                let kind = self.ring_kind_for_slot(group, slot)?;
-                let partition = self.partitions.get_mut(&group).expect("prepared group");
-                let PageLocation::Ring { column, row } = partition.locations[&slot] else {
-                    return Err(internal("ring undo page kind mismatch"));
-                };
-                let page = Arc::get_mut(
-                    &mut partition.rings[column][row]
-                        .as_mut()
-                        .expect("ring page")
-                        .value,
-                )
-                .expect("unfrozen ring undo");
-                page.ring.slots.resize(capacity, kind.empty());
-                page.slot_stamps.resize(capacity, 0);
-                page.ring.head = head;
-                page.ring.len = len;
-            }
+            } => self.undo_ring_metadata(group, slot, head, len, capacity),
             Undo::RingSlot {
                 group,
                 slot,
                 index,
                 value,
-            } => {
-                let partition = self.partitions.get_mut(&group).expect("prepared group");
-                let PageLocation::Ring { column, row } = partition.locations[&slot] else {
-                    return Err(internal("ring undo page kind mismatch"));
-                };
-                Arc::get_mut(
-                    &mut partition.rings[column][row]
-                        .as_mut()
-                        .expect("ring page")
-                        .value,
-                )
-                .expect("unfrozen ring undo")
-                .ring
-                .slots[index] = value;
-            }
-            Undo::Numeric { group, slot, value } => {
-                let partition = self.partitions.get_mut(&group).expect("prepared group");
-                let PageLocation::Ring { column, row } = partition.locations[&slot] else {
-                    return Err(internal("numeric undo page kind mismatch"));
-                };
-                Arc::get_mut(
-                    &mut partition.rings[column][row]
-                        .as_mut()
-                        .expect("ring page")
-                        .value,
-                )
-                .expect("unfrozen numeric undo")
-                .numeric = Some(value);
-            }
+            } => self.undo_ring_slot(group, slot, index, value),
+            Undo::Numeric { group, slot, value } => self.undo_numeric(group, slot, value),
             Undo::ValueLog {
                 group,
                 column,
@@ -2819,9 +3004,102 @@ impl StateTable {
                 len,
                 logical_bytes,
                 total_len,
-            } => self.undo_value_log(group, column, slot, chunks, len, logical_bytes, total_len)?,
+            } => self.undo_value_log(group, column, slot, chunks, len, logical_bytes, total_len),
             _ => unreachable!(),
         }
+    }
+
+    fn undo_keyed(
+        &mut self,
+        group: KeyGroupId,
+        slot: u32,
+        row: usize,
+        value: KeyedValue,
+    ) -> Result<()> {
+        let partition = self.partitions.get_mut(&group).expect("prepared group");
+        let location = partition.locations[&slot];
+        let PageLocation::Keyed { column, page_index } = location else {
+            return Err(internal("keyed undo page kind mismatch"));
+        };
+        Arc::get_mut(
+            &mut partition.keyed[column][page_index]
+                .as_mut()
+                .expect("keyed page")
+                .value,
+        )
+        .expect("unfrozen keyed undo")
+        .values[row] = value;
+        Ok(())
+    }
+
+    fn undo_ring_metadata(
+        &mut self,
+        group: KeyGroupId,
+        slot: u32,
+        head: usize,
+        len: usize,
+        capacity: usize,
+    ) -> Result<()> {
+        let kind = self.ring_kind_for_slot(group, slot)?;
+        let partition = self.partitions.get_mut(&group).expect("prepared group");
+        let PageLocation::Ring { column, row } = partition.locations[&slot] else {
+            return Err(internal("ring undo page kind mismatch"));
+        };
+        let page = Arc::get_mut(
+            &mut partition.rings[column][row]
+                .as_mut()
+                .expect("ring page")
+                .value,
+        )
+        .expect("unfrozen ring undo");
+        page.ring.slots.resize(capacity, kind.empty());
+        page.slot_stamps.resize(capacity, 0);
+        page.ring.head = head;
+        page.ring.len = len;
+        Ok(())
+    }
+
+    fn undo_ring_slot(
+        &mut self,
+        group: KeyGroupId,
+        slot: u32,
+        index: usize,
+        value: RingValue,
+    ) -> Result<()> {
+        let partition = self.partitions.get_mut(&group).expect("prepared group");
+        let PageLocation::Ring { column, row } = partition.locations[&slot] else {
+            return Err(internal("ring undo page kind mismatch"));
+        };
+        Arc::get_mut(
+            &mut partition.rings[column][row]
+                .as_mut()
+                .expect("ring page")
+                .value,
+        )
+        .expect("unfrozen ring undo")
+        .ring
+        .slots[index] = value;
+        Ok(())
+    }
+
+    fn undo_numeric(
+        &mut self,
+        group: KeyGroupId,
+        slot: u32,
+        value: NumericAccumulator,
+    ) -> Result<()> {
+        let partition = self.partitions.get_mut(&group).expect("prepared group");
+        let PageLocation::Ring { column, row } = partition.locations[&slot] else {
+            return Err(internal("numeric undo page kind mismatch"));
+        };
+        Arc::get_mut(
+            &mut partition.rings[column][row]
+                .as_mut()
+                .expect("ring page")
+                .value,
+        )
+        .expect("unfrozen numeric undo")
+        .numeric = Some(value);
         Ok(())
     }
 

@@ -530,6 +530,11 @@ fn validate_partition_metadata(index: &PartitionIndex) -> Result<(), String> {
 }
 
 fn validate_ring_partition_metadata(index: &PartitionIndex) -> Result<(), String> {
+    validate_ring_page_inventory(index)?;
+    validate_ring_page_contract(&index.pages[0])
+}
+
+fn validate_ring_page_inventory(index: &PartitionIndex) -> Result<(), String> {
     if index.pages.len() != 1
         || index.pages[0].page_id
             != (GoldenPageId {
@@ -542,7 +547,10 @@ fn validate_ring_partition_metadata(index: &PartitionIndex) -> Result<(), String
     {
         return Err("page inventory or generation metadata mismatch".into());
     }
-    let page = &index.pages[0];
+    Ok(())
+}
+
+fn validate_ring_page_contract(page: &PageEntry) -> Result<(), String> {
     if page.column != "price"
         || page.kind != "ring"
         || page.logical_range.start != 0
