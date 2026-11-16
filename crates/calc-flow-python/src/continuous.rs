@@ -1254,6 +1254,8 @@ pub(crate) fn runtime_config(
         sql_snapshot_state_budget: snapshot_state_budget_config(config)?,
         sql_replacement_state_budget: replacement_state_budget_config(config)?,
         retained_epochs: required_item(config, "retained_epochs")?.extract()?,
+        checkpoint_inflight_max_bytes: required_item(config, "checkpoint_inflight_max_bytes")?
+            .extract()?,
     })
 }
 
@@ -4004,6 +4006,9 @@ binding = Binding()
             config.set_item("edge_max_rows", 10_000_u64).unwrap();
             config.set_item("edge_max_bytes", 64_u64 << 20).unwrap();
             config.set_item("retained_epochs", 2_u64).unwrap();
+            config
+                .set_item("checkpoint_inflight_max_bytes", 1_u64 << 30)
+                .unwrap();
 
             let plan = Py::new(
                 py,

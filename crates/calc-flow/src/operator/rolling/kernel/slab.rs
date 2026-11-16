@@ -11,7 +11,10 @@ use super::{
     StateCharge, Statistic, StreamKernelUpdate, TypedFrame, TypedGroupInput, TypedGroupPlan,
     TypedOutputKind, TypedOutputPlan, internal_error, nanos, operator_error, valid_float64,
 };
-use crate::state::{EntityId, EntityKey, StateTable, ValueKind};
+use crate::{
+    accumulate::NumericAccumulator,
+    state::{EntityId, EntityKey, StateTable, ValueKind},
+};
 
 pub(super) struct SlabUpdate {
     previous_charge: StateCharge,
@@ -89,24 +92,25 @@ impl SlabBuilder {
 
     fn append(
         &mut self,
-        table: &StateTable,
-        entity: EntityId,
+        accumulators: &[NumericAccumulator],
         output: &TypedOutputPlan,
     ) -> Result<()> {
-        let valid = table.numeric_valid_count_at(0, output.group, entity)?;
-        if valid < output.min_periods {
+        let accumulator = accumulators
+            .get(output.group)
+            .ok_or_else(|| internal_error("rolling slab output group is absent"))?;
+        if accumulator.valid_count < output.min_periods {
             self.append_null();
             return Ok(());
         }
         match self {
             Self::Count(builder) => match output.kind {
                 TypedOutputKind::Statistic(Statistic::Count) => {
-                    builder.append_value(valid);
+                    builder.append_value(accumulator.valid_count);
                     Ok(())
                 }
                 _ => Err(internal_error("rolling slab output kind mismatch")),
             },
-            Self::Float(builder) => Self::append_float(builder, table, entity, output),
+            Self::Float(builder) => Self::append_float(builder, accumulator, output),
         }
     }
 
@@ -119,32 +123,25 @@ impl SlabBuilder {
 
     fn append_float(
         builder: &mut Float64Builder,
-        table: &StateTable,
-        entity: EntityId,
+        accumulator: &NumericAccumulator,
         output: &TypedOutputPlan,
     ) -> Result<()> {
         match output.kind {
             TypedOutputKind::Statistic(Statistic::Sum) => {
-                builder.append_value(table.numeric_sum_at(0, output.group, entity)?);
+                builder.append_value(accumulator.sum());
             }
             TypedOutputKind::Statistic(Statistic::Mean) => {
-                builder.append_option(table.numeric_mean_at(0, output.group, entity)?);
+                if accumulator.valid_count > 0 {
+                    builder.append_value(accumulator.mean());
+                } else {
+                    builder.append_null();
+                }
             }
             TypedOutputKind::Statistic(Statistic::Variance) => {
-                builder.append_value(table.numeric_variance_at(
-                    0,
-                    output.group,
-                    entity,
-                    output.ddof,
-                )?);
+                builder.append_value(accumulator.variance(output.ddof));
             }
             TypedOutputKind::Statistic(Statistic::Stddev) => {
-                builder.append_value(table.numeric_stddev_at(
-                    0,
-                    output.group,
-                    entity,
-                    output.ddof,
-                )?);
+                builder.append_value(accumulator.stddev(output.ddof));
             }
             _ => return Err(internal_error("rolling slab output kind mismatch")),
         }
@@ -207,8 +204,9 @@ impl RollingKernelPlan {
         let mut windows = self.groups.iter().map(|group| match group {
             TypedGroupPlan::Numeric {
                 frame: TypedFrame::Rows(window),
+                dispersion,
                 ..
-            } => Ok(*window),
+            } => Ok((*window, *dispersion)),
             _ => Err(internal_error(
                 "rolling slab plan contains a non-numeric Rows group",
             )),
@@ -216,11 +214,15 @@ impl RollingKernelPlan {
         let Some(first) = windows.next() else {
             return Err(internal_error("rolling slab plan has no numeric groups"));
         };
+        let (first_window, first_dispersion) = first?;
         let mut table = StateTable::new();
         table.add_keyed_column("transition_count", ValueKind::UInt64);
-        let column = table.add_numeric_rows_column("numeric", first?);
+        let column = table.add_numeric_rows_column("numeric", first_window);
+        table.set_numeric_dispersion(column, 0, first_dispersion);
         for window in windows {
-            table.add_numeric_window(column, window?);
+            let (window, dispersion) = window?;
+            let group = table.add_numeric_window(column, window);
+            table.set_numeric_dispersion(column, group, dispersion);
         }
         state.slab = Some(table);
         Ok(())
@@ -377,6 +379,14 @@ impl RollingKernelPlan {
             .iter()
             .map(|&local| resolved[local])
             .collect::<Vec<_>>();
+        for (&entity, &rows) in resolved.iter().zip(&routing.rows.counts) {
+            let rows = u64::try_from(rows)
+                .map_err(|_| operator_error(node_id, "rolling entity row count overflowed"))?;
+            let transitions = table.u64(0, entity)?.checked_add(rows).ok_or_else(|| {
+                operator_error(node_id, "rolling entity transition count overflowed")
+            })?;
+            table.set_u64(0, entity, transitions)?;
+        }
         let mut builders = self
             .outputs
             .iter()
@@ -384,13 +394,15 @@ impl RollingKernelPlan {
             .collect::<Result<Vec<_>>>()?;
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
         for (row, &entity) in ids.iter().enumerate() {
-            let transitions = table.u64(0, entity)?.checked_add(1).ok_or_else(|| {
-                operator_error(node_id, "rolling entity transition count overflowed")
-            })?;
-            table.set_u64(0, entity, transitions)?;
-            table.push_numeric_rows(0, entity, valid_float64(values, row, self.nan_as_value))?;
+            let value = valid_float64(values, row, self.nan_as_value);
+            if routing.rows.first_rows[routing.entity_ids[row]] == row {
+                table.push_numeric_rows(0, entity, value)?;
+            } else {
+                table.push_numeric_rows_recurrent(0, entity, value)?;
+            }
+            let accumulators = table.numeric_accumulators(0, entity)?;
             for (builder, output) in builders.iter_mut().zip(&self.outputs) {
-                builder.append(table, entity, output)?;
+                builder.append(accumulators, output)?;
             }
         }
         if let Some(recorder) = observer {
@@ -661,5 +673,45 @@ mod tests {
         let slow = columns[1].as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(fast.value(0).to_bits(), 8.0_f64.to_bits());
         assert_eq!(slow.value(0).to_bits(), 6.0_f64.to_bits());
+    }
+
+    #[test]
+    fn narrow_window_rebuild_uses_only_its_own_history() {
+        let mut plan = plan();
+        plan.groups = vec![
+            TypedGroupPlan::Numeric {
+                input_index: 2,
+                frame: TypedFrame::Rows(2),
+                dispersion: true,
+            },
+            TypedGroupPlan::Numeric {
+                input_index: 2,
+                frame: TypedFrame::Rows(4),
+                dispersion: true,
+            },
+        ];
+        plan.outputs = [0, 1]
+            .into_iter()
+            .map(|group| TypedOutputPlan {
+                group,
+                kind: TypedOutputKind::Statistic(Statistic::Mean),
+                storage: OutputStorage::Float64,
+                min_periods: 1,
+                ddof: 0,
+            })
+            .collect();
+        let times = (1..=64).collect::<Vec<_>>();
+        let values = (1..=64)
+            .map(|value| Some(f64::from(value)))
+            .collect::<Vec<_>>();
+        let mut state = RollingKernelState::default();
+        let update = plan
+            .prepare_slab_ordered_stream(&mut state, &input(&times, &values), "r", None)
+            .unwrap();
+        let columns = update.execution.columns;
+        let narrow = columns[0].as_any().downcast_ref::<Float64Array>().unwrap();
+        let wide = columns[1].as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(narrow.value(63).to_bits(), 63.5_f64.to_bits());
+        assert_eq!(wide.value(63).to_bits(), 62.5_f64.to_bits());
     }
 }

@@ -56,7 +56,7 @@ impl ActiveEpoch {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(in crate::state) struct V4Coordinator {
     store: Option<V4Store>,
     active: Option<ActiveEpoch>,
@@ -64,6 +64,25 @@ pub(in crate::state) struct V4Coordinator {
     last_completed: Option<u64>,
     recovery: Option<V4Recovery>,
     stopped: bool,
+    max_inflight_bytes: usize,
+}
+
+#[allow(
+    dead_code,
+    reason = "P3.4 runner wiring uses stop, recovery and active-epoch inspection"
+)]
+impl Default for V4Coordinator {
+    fn default() -> Self {
+        Self {
+            store: None,
+            active: None,
+            previous: None,
+            last_completed: None,
+            recovery: None,
+            stopped: false,
+            max_inflight_bytes: 1 << 30,
+        }
+    }
 }
 
 #[allow(
@@ -74,6 +93,14 @@ impl V4Coordinator {
     pub(in crate::state) fn new(store: V4Store) -> Self {
         Self {
             store: Some(store),
+            ..Self::default()
+        }
+    }
+
+    pub(in crate::state) fn with_limit(store: V4Store, max_inflight_bytes: usize) -> Self {
+        Self {
+            store: Some(store),
+            max_inflight_bytes,
             ..Self::default()
         }
     }
@@ -102,6 +129,14 @@ impl V4Coordinator {
             ));
         }
         let freeze = table.freeze(epoch)?;
+        let reservation = freeze.reservation_bytes();
+        if reservation > self.max_inflight_bytes {
+            table.abort_freeze(epoch)?;
+            return Err(mismatch(format!(
+                "checkpoint in-flight reservation {reservation} exceeds {} bytes",
+                self.max_inflight_bytes
+            )));
+        }
         self.active = Some(ActiveEpoch::new(freeze, terminal, manifest));
         Ok(())
     }
@@ -166,7 +201,10 @@ impl V4Coordinator {
                 .operators
                 .insert(owner, operator);
             let fingerprint = crate::state::v4::manifest_fingerprint(
-                active.manifest.as_ref().expect("manifest is present after persistence"),
+                active
+                    .manifest
+                    .as_ref()
+                    .expect("manifest is present after persistence"),
             )?;
             active
                 .manifest
@@ -224,23 +262,27 @@ impl V4Coordinator {
         table: &mut StateTable,
         epoch: u64,
     ) -> Result<()> {
-        let active = self.active.take();
-        let Some(active) = active else {
-            return Err(mismatch(
-                "source acknowledgement has no active epoch".into(),
-            ));
+        let previous = {
+            let active = self
+                .active
+                .as_ref()
+                .ok_or_else(|| mismatch("source acknowledgement has no active epoch".into()))?;
+            if active.epoch != epoch || active.manifest_path.is_none() || !active.sink_committed {
+                return Err(mismatch(
+                    "source acknowledgement precedes sink commit".into(),
+                ));
+            }
+            active
+                .persisted
+                .as_ref()
+                .map(|persisted| persisted.lineage.clone())
+                .ok_or_else(|| mismatch("source acknowledgement has no persisted lineage".into()))?
         };
-        if active.manifest_path.is_none() || !active.sink_committed {
-            return Err(mismatch(
-                "source acknowledgement precedes sink commit".into(),
-            ));
-        }
-        let previous = active
-            .persisted
-            .as_ref()
-            .map(|persisted| persisted.lineage.clone())
-            .ok_or_else(|| mismatch("source acknowledgement has no persisted lineage".into()))?;
         table.settle_freeze(epoch, previous)?;
+        let active = self
+            .active
+            .take()
+            .expect("validated active epoch remains present");
         self.last_completed = Some(epoch);
         self.previous = active.persisted;
         self.recovery = None;
@@ -353,6 +395,8 @@ mod tests {
                 .join("lineage/manifests/epoch-1.json")
                 .exists()
         );
+        assert!(coordinator.acknowledge_source(&mut table, 1).is_err());
+        assert_eq!(coordinator.active_epoch(), Some(1));
         coordinator.precommit_sink(1).unwrap();
         coordinator.publish_manifest(1).unwrap();
         assert!(
@@ -398,6 +442,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_inflight_reservation_before_capture_ack() {
+        let (_temporary, store) = store();
+        let mut coordinator = V4Coordinator::with_limit(store, 0);
+        let mut table = schema();
+        seed(&mut table);
+        let error = coordinator
+            .begin(&mut table, 1, false, manifest_at(1))
+            .unwrap_err();
+        assert!(error.to_string().contains("in-flight reservation"));
+        assert_eq!(coordinator.active_epoch(), None);
+        table
+            .freeze(1)
+            .expect("rejected capture releases its state-table freeze");
+        table.abort_freeze(1).unwrap();
+    }
+
+    #[tokio::test]
     async fn opaque_adapter_persists_and_restores_snapshot() {
         let (_temporary, store) = store();
         let mut coordinator = V4Coordinator::new(store);
@@ -410,7 +471,9 @@ mod tests {
                 crate::StateSegment::new(b"state".to_vec()),
             )]),
         };
-        coordinator.begin(&mut table, 1, false, manifest_at(1)).unwrap();
+        coordinator
+            .begin(&mut table, 1, false, manifest_at(1))
+            .unwrap();
         coordinator
             .begin_with_opaque(V4OpaqueAdapter::from_snapshot("rolling", &snapshot), 1)
             .unwrap();
@@ -420,19 +483,14 @@ mod tests {
         coordinator.publish_manifest(1).unwrap();
         coordinator.commit_sink(1).unwrap();
         coordinator.acknowledge_source(&mut table, 1).unwrap();
-        let path = coordinator
-            .previous
-            .as_ref()
-            .unwrap()
-            .manifest_path
-            .clone();
+        let path = coordinator.previous.as_ref().unwrap().manifest_path.clone();
         let stored = V4Store::read_manifest(&path).unwrap();
-        let restored = V4OpaqueAdapter::restore(
-            coordinator.store.as_mut().unwrap(),
-            &stored,
-            "rolling",
-        )
-        .unwrap();
-        assert_eq!(restored.segments["base"].bytes(), snapshot.segments["base"].bytes());
+        let restored =
+            V4OpaqueAdapter::restore(coordinator.store.as_mut().unwrap(), &stored, "rolling")
+                .unwrap();
+        assert_eq!(
+            restored.segments["base"].bytes(),
+            snapshot.segments["base"].bytes()
+        );
     }
 }

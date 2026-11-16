@@ -2,12 +2,7 @@
     dead_code,
     reason = "P3.4 wires opaque v4 objects into the checkpoint coordinator"
 )]
-use std::{
-    collections::HashMap,
-    mem::size_of,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::HashMap, mem::size_of, path::Path, sync::Arc};
 
 use datafusion::arrow::{
     array::ArrayRef,
@@ -130,16 +125,10 @@ pub(in crate::state) fn encode_opaque(
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| format_error("checkpoint-v4 lineage name is absent".into()))?;
-    let relative_path = PathBuf::from(lineage)
-        .join("epochs")
-        .join(epoch.to_string())
-        .join(&object.owner)
-        .join("opaque")
-        .join(&object.object_id)
-        .join(object.generation.to_string())
-        .join(format!("{}.cfst4", object.sha256))
-        .to_string_lossy()
-        .into_owned();
+    let relative_path = format!(
+        "{lineage}/epochs/{epoch}/{}/opaque/{}/{}/{}.cfst4",
+        object.owner, object.object_id, object.generation, object.sha256
+    );
     let handle = V4Handle {
         owner: object.owner.clone(),
         epoch,
@@ -269,16 +258,13 @@ fn object_path(root: &Path, object: &NewObject, epoch: u64, sha256: &str) -> Res
         .and_then(|name| name.to_str())
         .ok_or_else(|| format_error("checkpoint-v4 lineage name is absent".into()))?;
     validate_portable_identifier("checkpoint-v4 lineage", lineage)?;
-    Ok(PathBuf::from(lineage)
-        .join("epochs")
-        .join(epoch.to_string())
-        .join(&object.owner)
-        .join(object.kind.directory())
-        .join(&object.object_id)
-        .join(object.generation.to_string())
-        .join(format!("{sha256}.cfst4"))
-        .to_string_lossy()
-        .into_owned())
+    Ok(format!(
+        "{lineage}/epochs/{epoch}/{}/{}/{}/{}/{sha256}.cfst4",
+        object.owner,
+        object.kind.directory(),
+        object.object_id,
+        object.generation,
+    ))
 }
 
 fn validate_object_id(object_id: &str) -> Result<()> {

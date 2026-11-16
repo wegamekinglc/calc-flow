@@ -4,9 +4,7 @@ use std::collections::BTreeMap;
 
 use sha2::{Digest, Sha256};
 
-use super::{
-    OpaqueObject, OperatorV4, Result, V4Handle, V4Store, mismatch,
-};
+use super::{OpaqueObject, OperatorV4, Result, V4Handle, V4Store, mismatch};
 use crate::{JsonMap, OperatorStateSnapshot, StateSegment};
 
 #[derive(Debug)]
@@ -66,7 +64,10 @@ impl V4OpaqueAdapter {
         epoch: u64,
     ) -> Result<(OperatorV4, Vec<V4Handle>)> {
         let encoded = store.write_opaque(epoch, self.blocks).await?;
-        let handles = encoded.into_iter().map(|object| object.handle).collect::<Vec<_>>();
+        let handles = encoded
+            .into_iter()
+            .map(|object| object.handle)
+            .collect::<Vec<_>>();
         Ok((
             OperatorV4::Opaque {
                 progress: BTreeMap::new(),
@@ -91,7 +92,9 @@ impl V4OpaqueAdapter {
             ..
         }) = manifest.operators.get(owner)
         else {
-            return Err(mismatch("opaque operator is absent from the manifest".into()));
+            return Err(mismatch(
+                "opaque operator is absent from the manifest".into(),
+            ));
         };
         let mut segments = BTreeMap::new();
         for handle in blocks {
@@ -106,7 +109,9 @@ impl V4OpaqueAdapter {
             serde_json::to_vec(inline_metadata).expect("manifest metadata is JSON"),
         ));
         if *state_fingerprint != expected {
-            return Err(mismatch("opaque state fingerprint differs from metadata".into()));
+            return Err(mismatch(
+                "opaque state fingerprint differs from metadata".into(),
+            ));
         }
         Ok(OperatorStateSnapshot {
             inline_metadata: inline_metadata.clone(),

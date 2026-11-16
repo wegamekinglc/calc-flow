@@ -1,7 +1,7 @@
 pub(in crate::state) mod coordinator;
-pub(in crate::state) mod opaque;
 pub(in crate::state) mod manifest;
 pub(in crate::state) mod object;
+pub(in crate::state) mod opaque;
 pub(in crate::state) mod store;
 
 pub(in crate::state) use super::manifest::MAX_MANIFEST_DOCUMENT_BYTES;

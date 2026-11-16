@@ -134,7 +134,11 @@ fn internal(message: &str) -> CalcFlowError {
 
 #[cfg(test)]
 mod tests {
-    use super::{EntityKey, RingKind, StateTable, ValueKind, core::Retention};
+    use super::{
+        EntityKey, RingKind, StateTable, ValueKind,
+        core::{KeyGroupId, Retention},
+        decode_layout7, encode_layout7,
+    };
     use datafusion::arrow::array::{Array, Float64Array, StringArray};
     use std::sync::Arc;
 
@@ -188,6 +192,131 @@ mod tests {
             20 * 8 + 20_usize.div_ceil(8)
         );
         assert!(table.logical_bytes() <= 20 * 8 + 20_usize.div_ceil(8) + 128);
+    }
+
+    #[test]
+    fn numeric_rows_dispersion_is_selected_per_window() {
+        let mut table = StateTable::new();
+        let numeric = table.add_numeric_rows_column("numeric", 2);
+        table.set_numeric_dispersion(numeric, 0, false);
+        table.add_numeric_window(numeric, 4);
+        table.set_numeric_dispersion(numeric, 1, true);
+        table.begin().unwrap();
+        let entity = table
+            .resolve_or_append(EntityKey::new(b"a".to_vec()))
+            .unwrap();
+        let accumulators = table.numeric_accumulators(numeric, entity).unwrap();
+        assert!(!accumulators[0].layout7().dispersion_enabled);
+        assert!(accumulators[1].layout7().dispersion_enabled);
+    }
+
+    #[test]
+    fn recurrent_numeric_updates_preserve_batch_rollback() {
+        let mut table = StateTable::new();
+        let numeric = table.add_numeric_rows_column("numeric", 3);
+        table.begin().unwrap();
+        let entity = table
+            .resolve_or_append(EntityKey::new(b"a".to_vec()))
+            .unwrap();
+        table.push_numeric_rows(numeric, entity, Some(1.0)).unwrap();
+        table.commit().unwrap();
+
+        table.begin().unwrap();
+        table.push_numeric_rows(numeric, entity, Some(3.0)).unwrap();
+        table
+            .push_numeric_rows_recurrent(numeric, entity, Some(5.0))
+            .unwrap();
+        table
+            .push_numeric_rows_recurrent(numeric, entity, Some(7.0))
+            .unwrap();
+        table.rollback().unwrap();
+
+        assert_eq!(table.f64_history(numeric, entity).unwrap(), vec![Some(1.0)]);
+        assert_eq!(table.numeric_mean(numeric, entity).unwrap(), Some(1.0));
+    }
+
+    #[test]
+    fn rollback_restores_numeric_page_after_freeze() {
+        let mut table = StateTable::with_checkpointing(true);
+        let numeric = table.add_numeric_rows_column("numeric", 3);
+        table.begin().unwrap();
+        let entity = table
+            .resolve_or_append(EntityKey::new(b"a".to_vec()))
+            .unwrap();
+        table.push_numeric_rows(numeric, entity, Some(1.0)).unwrap();
+        table.commit().unwrap();
+        let freeze = table.freeze(1).unwrap();
+
+        table.begin().unwrap();
+        table.push_numeric_rows(numeric, entity, Some(3.0)).unwrap();
+        table.rollback().unwrap();
+
+        assert_eq!(table.f64_history(numeric, entity).unwrap(), vec![Some(1.0)]);
+        assert_eq!(table.numeric_mean(numeric, entity).unwrap(), Some(1.0));
+        drop(freeze);
+        table.abort_freeze(1).unwrap();
+    }
+
+    #[test]
+    fn mean_only_layout7_restore_survives_periodic_rebuild() {
+        let mut table = StateTable::new();
+        table.add_keyed_column("counter", ValueKind::UInt64);
+        let numeric = table.add_numeric_rows_column("numeric", 2);
+        table.set_numeric_dispersion(numeric, 0, false);
+        table.begin().unwrap();
+        let entity = table
+            .resolve_or_append(EntityKey::new(b"a".to_vec()))
+            .unwrap();
+        for value in 1..=64 {
+            table
+                .push_numeric_rows(numeric, entity, Some(f64::from(value)))
+                .unwrap();
+        }
+        table.commit().unwrap();
+        let encoded = encode_layout7(&table).unwrap();
+
+        let mut restored = StateTable::new();
+        restored.add_keyed_column("counter", ValueKind::UInt64);
+        let restored_numeric = restored.add_numeric_rows_column("numeric", 2);
+        restored.set_numeric_dispersion(restored_numeric, 0, false);
+        let snapshot = decode_layout7(&restored, &encoded).unwrap();
+        restored.restore(snapshot).unwrap();
+        restored.begin().unwrap();
+        let entity = restored
+            .resolve_or_append(EntityKey::new(b"a".to_vec()))
+            .unwrap();
+        restored.commit().unwrap();
+        assert_eq!(
+            restored.numeric_mean(restored_numeric, entity).unwrap(),
+            Some(63.5)
+        );
+    }
+
+    #[test]
+    fn abort_freeze_restores_dirty_pages_for_retry() {
+        let mut table = StateTable::with_checkpointing(true);
+        let counter = table.add_keyed_column("counter", ValueKind::UInt64);
+        table.begin().unwrap();
+        let entity = table
+            .resolve_or_append(EntityKey::new(b"a".to_vec()))
+            .unwrap();
+        table.set_u64(counter, entity, 1).unwrap();
+        table.commit().unwrap();
+        let freeze = table.freeze(1).unwrap();
+        table.settle_freeze(1, freeze.complete()).unwrap();
+
+        table.begin().unwrap();
+        table.set_u64(counter, entity, 2).unwrap();
+        table.commit().unwrap();
+        assert!(!table.first_dirty_slots(KeyGroupId(0)).is_empty());
+        let freeze = table.freeze(2).unwrap();
+        table.abort_freeze(2).unwrap();
+        drop(freeze);
+        assert!(!table.first_dirty_slots(KeyGroupId(0)).is_empty());
+
+        let retry = table.freeze(2).unwrap();
+        assert!(retry.captured_pages() > 0);
+        table.abort_freeze(2).unwrap();
     }
 
     #[test]

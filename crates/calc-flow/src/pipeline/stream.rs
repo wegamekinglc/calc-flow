@@ -1395,7 +1395,6 @@ impl StreamExecutionPlan {
                 "max_bytes": config.edge_budget.max_bytes,
             },
             "retained_epochs": config.retained_epochs,
-            "checkpoint_inflight_max_bytes": config.checkpoint_inflight_max_bytes,
         });
         let fields = value
             .as_object_mut()
@@ -1405,6 +1404,13 @@ impl StreamExecutionPlan {
         // Preserve the existing hash for the default checkpoint-enabled mode.
         if !config.checkpointing {
             fields.insert("checkpointing".into(), json!(false));
+        }
+        // Preserve the historical hash for the default 1 GiB reservation.
+        if config.checkpoint_inflight_max_bytes != 1 << 30 {
+            fields.insert(
+                "checkpoint_inflight_max_bytes".into(),
+                json!(config.checkpoint_inflight_max_bytes),
+            );
         }
         insert_sql_budget_fields(fields, config);
         let canonical = canonical_json(&value)?;
@@ -2452,7 +2458,7 @@ mod runtime_config_tests {
     use super::*;
 
     #[test]
-    fn checkpoint_inflight_limit_is_json_safe_and_hashed() {
+    fn checkpoint_inflight_limit_is_json_safe() {
         let config = StreamRuntimeConfig::default();
         config.validate().unwrap();
         assert_eq!(config.checkpoint_inflight_max_bytes, 1 << 30);

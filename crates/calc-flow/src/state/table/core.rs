@@ -182,6 +182,15 @@ impl Iterator for NumericHistory<'_> {
         self.offset += 1;
         Some(value)
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.ring.len - self.offset;
+        (remaining, Some(remaining))
+    }
+
+    fn count(self) -> usize {
+        self.ring.len - self.offset
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -191,6 +200,7 @@ struct RingColumn {
     retention: Retention,
     numeric: bool,
     numeric_windows: Vec<usize>,
+    numeric_dispersion: Vec<bool>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -822,6 +832,7 @@ struct ActiveFreeze {
     epoch: u64,
     frozen: BTreeSet<PageId>,
     reservation_bytes: usize,
+    dirty: BTreeMap<KeyGroupId, DirtySet>,
 }
 
 #[derive(Clone)]
@@ -995,6 +1006,7 @@ impl StateTable {
             retention,
             numeric: false,
             numeric_windows: Vec::new(),
+            numeric_dispersion: Vec::new(),
         });
         for partition in self.partitions.values_mut() {
             partition.rings.push(Vec::new());
@@ -1007,6 +1019,7 @@ impl StateTable {
         let column = self.add_ring_column(name, RingKind::Float64, Retention::Rows(window));
         self.rings[column].numeric = true;
         self.rings[column].numeric_windows = vec![window];
+        self.rings[column].numeric_dispersion = vec![true];
         column
     }
 
@@ -1022,7 +1035,16 @@ impl StateTable {
         };
         self.rings[column].retention = Retention::Rows(retained.max(window));
         self.rings[column].numeric_windows.push(window);
+        self.rings[column].numeric_dispersion.push(true);
         self.rings[column].numeric_windows.len() - 1
+    }
+
+    pub(crate) fn set_numeric_dispersion(&mut self, column: usize, group: usize, enabled: bool) {
+        assert!(
+            self.transaction.is_none() && self.next_entity == 0,
+            "numeric families must precede entities"
+        );
+        self.rings[column].numeric_dispersion[group] = enabled;
     }
 
     pub(crate) fn add_value_log(&mut self, name: &str) -> usize {
@@ -1221,14 +1243,17 @@ impl StateTable {
         Ok(id)
     }
 
-    fn replace_page(&mut self, group: KeyGroupId, slot: u32, force: bool) -> Result<PageId> {
+    fn replace_page(&mut self, group: KeyGroupId, slot: u32, force: bool) -> Result<()> {
         self.transaction_id()?;
+        if !self.checkpointing {
+            return Ok(());
+        }
         self.mark_dirty(group, slot)?;
         let current = self.partitions[&group]
             .page(slot)
             .ok_or_else(|| internal("state-table page is absent"))?;
         if !force && !self.is_frozen(current.id()) {
-            return Ok(current.id());
+            return Ok(());
         }
         let (generation, allocator) = self
             .partitions
@@ -1237,7 +1262,6 @@ impl StateTable {
             .allocator
             .replace(slot)?;
         let replacement = current.cow(generation);
-        let id = replacement.id();
         self.push_undo(Undo::PageReplace {
             group,
             page: current,
@@ -1247,7 +1271,7 @@ impl StateTable {
             .get_mut(&group)
             .expect("prepared group")
             .insert(replacement);
-        Ok(id)
+        Ok(())
     }
 
     fn is_frozen(&self, id: PageId) -> bool {
@@ -1380,7 +1404,14 @@ impl StateTable {
             schema
                 .numeric_windows
                 .iter()
-                .map(|_| NumericAccumulator::default())
+                .zip(&schema.numeric_dispersion)
+                .map(|(_, &dispersion)| {
+                    if dispersion {
+                        NumericAccumulator::default()
+                    } else {
+                        NumericAccumulator::mean_only()
+                    }
+                })
                 .collect::<Vec<_>>()
         });
         self.create_page_in_group(group, |id| PageRef::Ring {
@@ -1510,10 +1541,24 @@ impl StateTable {
         entity: EntityId,
         value: Option<f64>,
     ) -> Result<Option<Option<f64>>> {
+        self.push_f64_impl(column, entity, value, true)
+    }
+
+    #[allow(
+        clippy::option_option,
+        reason = "ring eviction distinguishes no eviction from an evicted null sample"
+    )]
+    fn push_f64_impl(
+        &mut self,
+        column: usize,
+        entity: EntityId,
+        value: Option<f64>,
+        first_touch: bool,
+    ) -> Result<Option<Option<f64>>> {
         if self.rings[column].kind != RingKind::Float64 {
             return Err(internal("ring column type mismatch"));
         }
-        self.push_ring(column, entity, RingValue::Float64(value))
+        self.push_ring(column, entity, RingValue::Float64(value), first_touch)
             .map(|evicted| match evicted {
                 Some(RingValue::Float64(value)) => Some(value),
                 None => None,
@@ -1526,6 +1571,7 @@ impl StateTable {
         column: usize,
         entity: EntityId,
         value: RingValue,
+        first_touch: bool,
     ) -> Result<Option<RingValue>> {
         let (group, row) = self.location(entity)?;
         let slot = self.partitions[&group].rings[column][row]
@@ -1534,7 +1580,7 @@ impl StateTable {
             .id
             .slot;
         self.replace_page(group, slot, false)?;
-        if self.note_stamp(group, slot, StampKind::RingMetadata, 0) {
+        if first_touch && self.note_stamp(group, slot, StampKind::RingMetadata, 0) {
             let ring = &self.partitions[&group].rings[column][row]
                 .as_ref()
                 .expect("ring page")
@@ -1646,6 +1692,27 @@ impl StateTable {
         entity: EntityId,
         value: Option<f64>,
     ) -> Result<()> {
+        self.push_numeric_rows_impl(column, entity, value, true)
+    }
+
+    /// Updates an entity whose numeric and ring metadata were already touched
+    /// by this transaction. Ring-slot undo remains first-touch per slot.
+    pub(crate) fn push_numeric_rows_recurrent(
+        &mut self,
+        column: usize,
+        entity: EntityId,
+        value: Option<f64>,
+    ) -> Result<()> {
+        self.push_numeric_rows_impl(column, entity, value, false)
+    }
+
+    fn push_numeric_rows_impl(
+        &mut self,
+        column: usize,
+        entity: EntityId,
+        value: Option<f64>,
+        first_touch: bool,
+    ) -> Result<()> {
         let (group, row) = self.location(entity)?;
         let max_window = match self.rings[column].retention {
             Retention::Rows(window) if self.rings[column].numeric => window,
@@ -1664,31 +1731,35 @@ impl StateTable {
             .expect("ring page")
             .id
             .slot;
-        if self.note_stamp(group, slot, StampKind::Numeric, 0) {
-            let previous = self.partitions[&group].rings[column][row]
-                .as_ref()
-                .expect("ring page")
-                .value
-                .numeric
-                .clone()
-                .expect("numeric group");
-            self.push_undo(Undo::Numeric {
-                group,
-                slot,
-                value: previous,
-            });
+        let previous = if first_touch && self.note_stamp(group, slot, StampKind::Numeric, 0) {
+            Some(
+                self.partitions[&group].rings[column][row]
+                    .as_ref()
+                    .expect("ring page")
+                    .value
+                    .numeric
+                    .clone()
+                    .expect("numeric group"),
+            )
+        } else {
+            None
+        };
+        let evicted = self
+            .push_f64_impl(column, entity, value, first_touch)?
+            .flatten();
+        if let Some(value) = previous {
+            self.push_undo(Undo::Numeric { group, slot, value });
         }
-        let evicted = self.push_f64(column, entity, value)?.flatten();
         let windows = &self.rings[column].numeric_windows;
         let partition = self.partitions.get_mut(&group).expect("prepared group");
         let page = partition.rings[column][row].as_mut().expect("ring page");
         let page = Arc::get_mut(&mut page.value).expect("unfrozen numeric page");
-        let history = NumericHistory {
-            ring: &page.ring,
-            offset: 0,
-        };
         let numeric = page.numeric.as_mut().expect("numeric group");
         for (numeric, &window) in numeric.iter_mut().zip(windows) {
+            let history = NumericHistory {
+                ring: &page.ring,
+                offset: page.ring.len.saturating_sub(window),
+            };
             let leaving = if previous_len < window {
                 None
             } else if window == max_window {
@@ -1703,12 +1774,25 @@ impl StateTable {
             };
             numeric
                 .rows(leaving, value)
-                .and_then(|()| numeric.finish_rows(window, history.clone()))
+                .and_then(|()| numeric.finish_rows(window, history))
                 .map_err(|error| {
                     internal(&format!("rolling numeric arithmetic failed: {error:?}"))
                 })?;
         }
         Ok(())
+    }
+
+    pub(crate) fn numeric_accumulators(
+        &self,
+        column: usize,
+        entity: EntityId,
+    ) -> Result<&[NumericAccumulator]> {
+        let (key_group, row) = self.location(entity)?;
+        self.partitions[&key_group].rings[column]
+            .get(row)
+            .and_then(Option::as_ref)
+            .and_then(|page| page.value.numeric.as_deref())
+            .ok_or_else(|| internal("numeric groups are absent"))
     }
 
     fn numeric_accumulator(
@@ -2185,7 +2269,7 @@ impl StateTable {
         partition: &mut StatePartition,
         frozen: &mut BTreeSet<PageId>,
         reservation_bytes: &mut usize,
-    ) -> Result<PartitionFreeze> {
+    ) -> Result<(PartitionFreeze, DirtySet)> {
         let dirty = std::mem::take(&mut partition.dirty);
         let dirty_slots = dirty.bits.iter().copied().collect::<Vec<_>>();
         let mut changes = Vec::with_capacity(dirty_slots.len());
@@ -2205,13 +2289,16 @@ impl StateTable {
                 })),
             }
         }
-        Ok(PartitionFreeze {
-            id: group,
-            metadata: partition.metadata.clone(),
-            changes,
-            allocator: partition.allocator.clone(),
-            dirty_slots,
-        })
+        Ok((
+            PartitionFreeze {
+                id: group,
+                metadata: partition.metadata.clone(),
+                changes,
+                allocator: partition.allocator.clone(),
+                dirty_slots,
+            },
+            dirty,
+        ))
     }
 
     pub(crate) fn freeze(&mut self, epoch: u64) -> Result<TableFreeze> {
@@ -2220,18 +2307,18 @@ impl StateTable {
         let mut frozen = BTreeSet::new();
         let mut reservation_bytes = previous.retained_bytes;
         let mut partitions = Vec::with_capacity(self.partitions.len());
+        let mut dirty = BTreeMap::new();
         for (group, partition) in &mut self.partitions {
-            partitions.push(Self::freeze_partition(
-                *group,
-                partition,
-                &mut frozen,
-                &mut reservation_bytes,
-            )?);
+            let (freeze, partition_dirty) =
+                Self::freeze_partition(*group, partition, &mut frozen, &mut reservation_bytes)?;
+            partitions.push(freeze);
+            dirty.insert(*group, partition_dirty);
         }
         self.active = Some(ActiveFreeze {
             epoch,
             frozen,
             reservation_bytes,
+            dirty,
         });
         Ok(TableFreeze {
             epoch,
@@ -2255,7 +2342,15 @@ impl StateTable {
         if self.active.as_ref().map(|active| active.epoch) != Some(epoch) {
             return Err(internal("state-table freeze abort epoch mismatch"));
         }
-        self.active = None;
+        let active = self.active.take().expect("active epoch checked");
+        for (group, frozen) in active.dirty {
+            let partition = self.partitions.get_mut(&group).expect("prepared group");
+            let current = std::mem::take(&mut partition.dirty);
+            partition.dirty = frozen;
+            for slot in current.first_dirty {
+                partition.dirty.mark(slot);
+            }
+        }
         Ok(())
     }
 

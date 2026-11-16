@@ -195,12 +195,14 @@ impl DispersionFamily {
 
     /// Refolds oldest-to-newest after choosing the newest finite sample as shift.
     pub(crate) fn rebuild(&mut self, samples: impl Iterator<Item = f64> + Clone) {
+        if !self.enabled {
+            self.reset();
+            return;
+        }
         let newest = samples.clone().last();
         self.reset();
         self.shift = newest;
-        if self.enabled {
-            samples.for_each(|sample| self.add(sample));
-        }
+        samples.for_each(|sample| self.add(sample));
     }
 
     #[allow(

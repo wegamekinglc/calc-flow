@@ -50,6 +50,17 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   本步骤规格没有性能 Gate；该回退未隐藏，留作 P2.8/P2.9 的固定成本、run/full-tick 优化输入，最终 G1–G3 仍须验收。
 - P2–P7 规格已全部并入：rolling 数值与内核、checkpoint v4、keyed state 与 join、并行执行与 window pane。
   实现按单一 PR 内的提交序列推进，不再建立分阶段 PR。
+- P3.1 fake-table 协议/故障 harness 已交付；P3.2 COW pages、dirty lineage、精确 undo 与 layout 7 已通过验证。
+  P3.3 v4 object/manifest/partition persistence 已验证；P3.4 coordinator 与 opaque adapter 已有状态机和
+  epoch roundtrip，但 runner 的实际 source/operator/sink 接线、session checkpoint、故障矩阵和性能门槛尚未完成。
+- P4.1 shared keyed core 与单整数 SUM 已交付；P4.2 typed aggregate state、temporal extrema、8192-group dirty
+  snapshot cache 和 rollback/recovery 已通过 327 个 SQL 测试。旧 compact 删除、P4.3 opt-in changelog 与 P4 测量尚未完成。
+- P2.3 已完成 Float64 Rows slab、共享多窗口 history、layout 7 和 pending restore，rolling 694 项测试通过。
+  后续同一基线的 paired 测量最初发现 large-batch 回退扩大为 0.29x；批量 counter、readout 定位、逐窗口
+  rebuild history、O(1) retained count、checkpoint-off COW elision 和 numeric family 修复后，中间证据
+  `p2-2-slab-family-selection` 为 0.68x，仍未通过最终性能门槛。独立审查发现的 freeze rollback、mean-only
+  rebuild restore 和 abort dirty-loss 问题已各有回归测试并修复。其余 typed groups、P2.4–P2.9、join/ASOF、
+  并行/SIMD 与 window pane 仍需实现和验收。
 
 ## 1. 目标
 
