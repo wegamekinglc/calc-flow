@@ -239,10 +239,10 @@ fn keyed_pages_split_and_duration_ring_growth_changes_generation() {
         .unwrap();
     for value in 0..5 {
         table
-            .push_f64(history, duration, Some(value as f64))
+            .push_f64(history, duration, Some(f64::from(value)))
             .unwrap();
         let current = table.ring_page_id(history, duration).unwrap();
-        if matches!(value, 0 | 1 | 3) {
+        if matches!(value, 0 | 1 | 2 | 4) {
             assert!(current.generation > previous.map_or(0, |page| page.generation));
         } else {
             assert_eq!(current, previous.unwrap());
@@ -252,7 +252,9 @@ fn keyed_pages_split_and_duration_ring_growth_changes_generation() {
     table.commit().unwrap();
     assert_eq!(
         table.f64_history(history, duration).unwrap(),
-        (0..5).map(|value| Some(value as f64)).collect::<Vec<_>>()
+        (0..5)
+            .map(|value| Some(f64::from(value)))
+            .collect::<Vec<_>>()
     );
 
     table.begin().unwrap();

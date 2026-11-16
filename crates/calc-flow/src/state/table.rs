@@ -19,7 +19,7 @@ use datafusion::arrow::{
 
 use crate::CalcFlowError;
 
-pub(super) fn keyed_array(kind: ValueKind, values: &[KeyedValue]) -> ArrayRef {
+pub(in crate::state::table) fn keyed_array(kind: ValueKind, values: &[KeyedValue]) -> ArrayRef {
     match kind {
         ValueKind::UInt64 => Arc::new(
             values
@@ -60,7 +60,7 @@ pub(super) fn keyed_array(kind: ValueKind, values: &[KeyedValue]) -> ArrayRef {
     }
 }
 
-pub(super) fn ring_array(kind: RingKind, values: &[RingValue]) -> ArrayRef {
+pub(in crate::state::table) fn ring_array(kind: RingKind, values: &[RingValue]) -> ArrayRef {
     match kind {
         RingKind::Float64 => Arc::new(
             values

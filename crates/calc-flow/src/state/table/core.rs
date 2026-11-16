@@ -20,6 +20,8 @@ const KEYED_PAGE_ROWS: usize = 1_024;
 const VALUE_LOG_PAGE_BYTES: usize = 64 * 1_024;
 const PAGE_DESCRIPTOR_BYTES: usize = 64;
 
+type RestoredPartition = (StatePartition, Vec<(Vec<u8>, EntityId)>);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct EntityId {
     index: u32,
@@ -1372,7 +1374,9 @@ impl StateTable {
                 .ring;
             (ring.position(ring.len), ring.slots[ring.position(ring.len)])
         };
-        if self.note_stamp(group, slot, StampKind::RingSlot, index as u32) {
+        let stamp_index =
+            u32::try_from(index).map_err(|_| internal("rolling ring slot index exceeds u32"))?;
+        if self.note_stamp(group, slot, StampKind::RingSlot, stamp_index) {
             self.push_undo(Undo::RingSlot {
                 group,
                 slot,
@@ -1893,7 +1897,8 @@ impl StateTable {
                                 EntityId {
                                     index: stored.index,
                                     key_group: group,
-                                    row: row as u32,
+                                    row: u32::try_from(row)
+                                        .expect("partition rows use checked u32 IDs"),
                                 },
                                 stored.key.clone(),
                             )
@@ -2096,6 +2101,10 @@ impl StateTable {
         }
     }
 
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "restore consumes the snapshot into a freshly validated table lineage"
+    )]
     pub(crate) fn restore(&mut self, snapshot: TableSnapshot) -> Result<()> {
         if self.transaction.is_some() || self.active.is_some() {
             return Err(internal(
@@ -2105,9 +2114,9 @@ impl StateTable {
         self.validate_inventory(&snapshot)?;
         let groups = self.partitions.keys().copied().collect::<Vec<_>>();
         let mut restored = StateTable::with_key_groups(self.checkpointing, &groups)?;
-        restored.keyed = self.keyed.clone();
-        restored.rings = self.rings.clone();
-        restored.value_logs = self.value_logs.clone();
+        restored.keyed.clone_from(&self.keyed);
+        restored.rings.clone_from(&self.rings);
+        restored.value_logs.clone_from(&self.value_logs);
         for partition in restored.partitions.values_mut() {
             partition.keyed = vec![Vec::new(); restored.keyed.len()];
             partition.rings = vec![Vec::new(); restored.rings.len()];
@@ -2192,7 +2201,7 @@ impl StateTable {
         &self,
         group: KeyGroupId,
         lineage: &PartitionLineage,
-    ) -> Result<(StatePartition, Vec<(Vec<u8>, EntityId)>)> {
+    ) -> Result<RestoredPartition> {
         let mut partition = StatePartition::new(group);
         partition.keyed = vec![Vec::new(); self.keyed.len()];
         partition.rings = vec![Vec::new(); self.rings.len()];
@@ -2235,16 +2244,18 @@ impl StateTable {
             .iter()
             .enumerate()
             .map(|(row, stored)| {
-                (
+                let row = u32::try_from(row)
+                    .map_err(|_| internal("snapshot partition row index exceeds u32"))?;
+                Ok((
                     stored.key.bytes.clone(),
                     EntityId {
                         index: stored.index,
                         key_group: group,
-                        row: row as u32,
+                        row,
                     },
-                )
+                ))
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         Ok((partition, entries))
     }
 
@@ -2426,6 +2437,10 @@ impl StateTable {
         Ok(())
     }
 
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "value undo consumes one owned transaction record"
+    )]
     fn apply_value_undo(&mut self, undo: Undo) -> Result<()> {
         match undo {
             Undo::Keyed {
@@ -2520,6 +2535,10 @@ impl StateTable {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the value-log undo fields mirror the persisted transaction record"
+    )]
     fn undo_value_log(
         &mut self,
         group: KeyGroupId,
@@ -2554,6 +2573,10 @@ impl StateTable {
         Ok(())
     }
 
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "entity undo consumes the owned key removed from the dictionary"
+    )]
     fn undo_entity(&mut self, group: KeyGroupId, key: EntityKey, next_entity: u32) -> Result<()> {
         self.entities.remove(key.bytes.as_slice());
         self.next_entity = next_entity;
