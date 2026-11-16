@@ -373,9 +373,9 @@ impl ColumnExport {
                 return Ok(true);
             }
             let value = match column {
-                StateColumn::Key(key) => &row[key],
+                StateColumn::Key(key) => &rows[self.row][key],
                 StateColumn::Aggregate(aggregate, state) => {
-                    &row[key_count + aggregate_offsets[aggregate] + state]
+                    &rows[self.row][key_count + aggregate_offsets[aggregate] + state]
                 }
             };
             let copied = self.copy_export_value(value, STRING_STEP_BYTES - bytes, name)?;

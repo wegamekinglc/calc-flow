@@ -1,6 +1,6 @@
 use super::{
     AggregateFunctionExpr, ArrayRef, BooleanArray, CHUNK_ROWS, GroupKey, Int64Array, RecordBatch,
-    Result, SchemaRef, UInt64Array, grouped_sum, predicate,
+    Result, ScalarValue, SchemaRef, UInt64Array, grouped_sum, predicate,
 };
 use crate::StateBudget;
 use crate::operator::keyed::{ExportValue, GroupId, KeyCut, KeySchema, KeyStore, MORSEL_ROWS};
@@ -55,6 +55,15 @@ enum SumColumn {
 enum SumInput<'a> {
     Int64(&'a Int64Array),
     UInt64(&'a UInt64Array),
+}
+
+impl SumValue {
+    fn scalar(self) -> ScalarValue {
+        match self {
+            Self::Int64(value) => ScalarValue::Int64(value),
+            Self::UInt64(value) => ScalarValue::UInt64(value),
+        }
+    }
 }
 
 impl KeyedSum {

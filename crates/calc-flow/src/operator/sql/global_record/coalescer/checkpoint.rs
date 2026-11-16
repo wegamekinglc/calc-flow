@@ -389,7 +389,7 @@ impl IncrementalSql {
                     || actual
                         .iter()
                         .zip(expected)
-                        .any(|(a, b)| !scalar_equal(a, b))
+                        .any(|(a, b)| !scalar_equal(a, &b))
             })
         {
             return Err(df_error(

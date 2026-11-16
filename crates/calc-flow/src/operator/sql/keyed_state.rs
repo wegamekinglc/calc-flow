@@ -140,6 +140,17 @@ impl KeyedState {
         }
     }
 
+    pub(super) fn global_states(&self) -> Vec<Vec<ScalarValue>> {
+        let state = self.lock();
+        (0..state.aggregates.len())
+            .map(|aggregate| {
+                state
+                    .state(aggregate, GroupId::new(0).expect("global slot"))
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
     pub(super) fn begin(&self, budget: Option<StateBudget>) -> Result<Transaction> {
         let mut state = self.lock();
         if state.active {
@@ -425,7 +436,7 @@ impl Transaction {
         arguments: &[Vec<ArrayRef>],
         filters: &[Option<&BooleanArray>],
         name: &str,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let accumulators = self
             .global_accumulators
             .as_mut()
@@ -448,7 +459,7 @@ impl Transaction {
                 .update_batch(arguments)
                 .map_err(|error| df_error(name, error))?;
         }
-        Ok(())
+        Ok(0)
     }
 
     fn finish_global(
@@ -486,7 +497,7 @@ impl Transaction {
         variable: &[usize],
         check: &mut dyn FnMut() -> Result<()>,
         name: &str,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         if self.global_accumulators.is_some() {
             return self.apply_global(arguments, filters, name);
         }
@@ -496,6 +507,15 @@ impl Transaction {
             Some(store) => store.route_selected_with_limit(keys, selection, self.limit, check)?,
             None => vec![GroupId::new(0)?; rows],
         };
+        let encoded = groups
+            .iter()
+            .enumerate()
+            .filter(|(row, _)| {
+                selection.is_none_or(|selection| predicate::selected(selection, *row))
+            })
+            .map(|(_, group)| *group)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
         self.grow(&mut state)?;
         let mut partial = self.partial.take().expect("partial aggregate state");
         let mut indices = Vec::with_capacity(rows);
@@ -510,7 +530,7 @@ impl Transaction {
         self.seed(&state, &mut partial, name)?;
         partial.update(arguments, filters, &indices, partial.slots.len(), name)?;
         self.partial = Some(partial);
-        Ok(())
+        Ok(encoded)
     }
 
     pub(super) fn global_states(&self) -> Vec<Vec<ScalarValue>> {
@@ -978,6 +998,11 @@ impl StateColumn {
     }
 
     fn array(&self, groups: &[GroupId]) -> Result<ArrayRef> {
+        if groups.is_empty() {
+            return Ok(datafusion::arrow::array::new_empty_array(
+                &self.null.data_type(),
+            ));
+        }
         ScalarValue::iter_to_array(
             groups
                 .iter()

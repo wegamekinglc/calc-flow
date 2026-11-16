@@ -1311,7 +1311,7 @@ impl IncrementalSql {
                     &self.aggregates,
                     self.ordered_last,
                     self.sequential.is_some(),
-                    self.scratch.new_empty(),
+                    self.reservation.new_empty(),
                     name,
                 )?;
             }
@@ -1413,7 +1413,7 @@ impl IncrementalSql {
                         std::sync::atomic::Ordering::SeqCst,
                     );
                     self.encoded_rows
-                        .fetch_add(chunk.num_rows(), std::sync::atomic::Ordering::SeqCst);
+                        .fetch_add(encoded, std::sync::atomic::Ordering::SeqCst);
                 }
                 if let Some(proof) = proof.as_ref() {
                     let count = self
@@ -1463,7 +1463,7 @@ impl IncrementalSql {
         } else {
             filters
         };
-        transaction.apply_chunk(
+        let encoded = transaction.apply_chunk(
             &input.keys,
             chunk.num_rows(),
             &input.arguments,
@@ -1472,7 +1472,7 @@ impl IncrementalSql {
             &self.variable_extrema,
             &mut || context.check_cancelled(),
             name,
-        )
+        )?;
     }
 
     async fn update_keyed_sum(

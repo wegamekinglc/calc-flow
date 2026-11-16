@@ -15,9 +15,8 @@ use super::super::{
     incremental::compact_state::{
         NativeAggregateInput, NativeStateDescriptor, OrderedLastDescriptor,
     },
-    ipc,
     incremental::native_expression::UnaryKind,
-    retention, sql_state_error,
+    ipc, retention, sql_state_error,
 };
 use super::control::CompactIdentity;
 use crate::{Batch, BatchMetadata, DataFusionRuntime, Result};
