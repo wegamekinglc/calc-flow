@@ -976,7 +976,7 @@ async fn test_sql_incremental_rejected_new_groups_release_candidates_and_retry_o
             assert!(
                 matches!(operator.process_data("events", incoming.clone(), &context, &mut RejectOutput).await, Err(CalcFlowError::Operator { node_id, .. }) if node_id == "reject")
             );
-            let current = operator.incremental.as_ref().unwrap().capacity_charge();
+            let current = operator.incremental.as_ref().unwrap().group_count();
             if let Some(previous) = capacity_charge {
                 assert_eq!(current, previous);
             }

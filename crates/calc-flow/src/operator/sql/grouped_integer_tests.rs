@@ -175,7 +175,7 @@ async fn test_grouped_integer_sum_uses_column_merge_with_exact_prefix_results() 
 }
 
 #[tokio::test]
-async fn test_grouped_integer_sum_pending_history_does_not_retain_scalar_buffers() {
+async fn test_grouped_integer_pending_history_uses_typed_columns() {
     for native_key in [false, true] {
         let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
         let group = if native_key { "key" } else { "key, stock" };
@@ -196,30 +196,8 @@ async fn test_grouped_integer_sum_pending_history_does_not_retain_scalar_buffers
         plan.commit(transaction);
         assert!(plan.sequential.is_some());
 
-        let mut integer_history_bytes = 0;
-        let mut floating_history_bytes = 0;
-        for previous in &plan.groups {
-            let candidate = plan
-                .candidate(Some(previous), &previous.key, None, "history")
-                .unwrap();
-            let GroupAggregates { states, .. } = &candidate.group.aggregates;
-            for (expression, state) in plan.aggregates.iter().zip(states) {
-                let bytes = state.capacity() * size_of::<ScalarValue>();
-                if grouped_sum::integer_sum(expression) {
-                    integer_history_bytes += bytes;
-                } else {
-                    floating_history_bytes += bytes;
-                }
-            }
-        }
-        assert!(
-            floating_history_bytes > 0,
-            "sequential float state still needs owned candidate history"
-        );
-        assert_eq!(
-            integer_history_bytes, 0,
-            "pending integer SUM candidates must not allocate copied historical scalar buffers"
-        );
+        assert!(plan.keyed_state.is_some());
+        assert!(plan.groups.is_empty());
 
         let next = with_floating_column(&record(false, native_key, 1));
         let next_batch = Batch::table(vec![next.clone()], crate::BatchMetadata::default()).unwrap();

@@ -112,10 +112,42 @@ async fn test_grouped_inline_single_sum_updates_typed_state_without_candidates()
 }
 
 #[tokio::test]
-async fn test_grouped_mixed_sum_keeps_generic_aggregate_storage() {
-    let fixture = allocation_fixture(false).await;
+async fn test_grouped_mixed_sum_uses_typed_aggregate_state() {
+    let mut fixture = allocation_fixture(false).await;
     assert!(fixture.plan.keyed_sum.is_none());
-    assert_eq!(fixture.plan.groups.len(), GROUPS);
+    assert!(fixture.plan.keyed_state.is_some());
+    assert!(fixture.plan.groups.is_empty());
+    let job = StreamJobContext::new(
+        973,
+        "inline-allocation",
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "inline-allocation", None);
+    let transaction = fixture
+        .plan
+        .update(&allocation_input(), &context, "inline-allocation")
+        .await
+        .unwrap();
+    for record in &transaction.records {
+        let totals = record
+            .column_by_name("total")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let counts = record
+            .column_by_name("valid")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert!(totals.iter().all(|value| value == Some(2)));
+        assert!(counts.iter().all(|value| value == Some(2)));
+    }
+    fixture.plan.commit(transaction);
+    assert!(fixture.plan.groups.is_empty());
     drop(fixture.plan);
     assert_eq!(fixture.runtime.incremental_memory_pool().reserved(), 0);
 }

@@ -253,6 +253,20 @@ impl Transaction {
             .records(None, schema, check)
     }
 
+    pub(super) fn group_count(&self) -> usize {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner).keys.len()
+    }
+
+    pub(super) fn first_key(&self, slot: usize) -> Result<Arc<[u8]>> {
+        let group = GroupId::new(slot)?;
+        Ok(self
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys
+            .canonical(group))
+    }
+
     pub(super) fn record(
         &self,
         start: usize,

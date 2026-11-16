@@ -207,6 +207,11 @@ impl IncrementalSql {
                 .keyed_sum
                 .as_ref()
                 .map(super::keyed_sum::KeyedSum::layout_fingerprint)
+                .or_else(|| {
+                    self.keyed_state
+                        .as_ref()
+                        .map(super::keyed_state::KeyedState::layout_fingerprint)
+                })
                 .map(hex::encode),
             _reservation: reservation,
         })
@@ -405,7 +410,7 @@ impl IncrementalSql {
         mut check_cancelled: impl FnMut() -> Result<()>,
     ) -> Result<PaidNativeStateRecords> {
         check_cancelled()?;
-        if self.keyed_sum.is_some() {
+        if self.keyed_sum.is_some() || self.keyed_state.is_some() {
             return self.export_keyed(None, name, &mut check_cancelled);
         }
         let mut cursor = export::ExportCursor::new(self, name)?;
@@ -419,9 +424,13 @@ impl IncrementalSql {
     }
 
     pub(in crate::operator::sql) fn group_count(&self) -> usize {
-        self.keyed_sum
-            .as_ref()
-            .map_or(self.groups.len(), super::keyed_sum::KeyedSum::len)
+        if let Some(keyed) = &self.keyed_sum {
+            keyed.len()
+        } else if let Some(keyed) = &self.keyed_state {
+            keyed.len()
+        } else {
+            self.groups.len()
+        }
     }
 
     fn export_keyed(
@@ -430,9 +439,8 @@ impl IncrementalSql {
         name: &str,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<PaidNativeStateRecords> {
-        let keyed = self.keyed_sum.as_ref().expect("keyed SUM plan");
         let mut descriptor = self.native_descriptor(name)?;
-        let rows = slots.map_or(keyed.len(), <[usize]>::len);
+        let rows = slots.map_or(self.group_count(), <[usize]>::len);
         descriptor.group_count = rows;
         let record_count = rows.div_ceil(CHUNK_ROWS).max(1);
         let columns = checked_bytes(0, [(descriptor.wire_schema.fields().len(), 512)], name)?;
@@ -444,10 +452,23 @@ impl IncrementalSql {
             ],
             name,
         )?;
-        let charge = checked_bytes(charge, [(keyed.output_charge(slots)?, 1)], name)?;
+        let output_charge = if let Some(keyed) = &self.keyed_sum {
+            keyed.output_charge(slots)?
+        } else if let Some(keyed) = &self.keyed_state {
+            keyed.output_charge(slots)?
+        } else {
+            return Err(df_error(name, "keyed aggregate plan is missing"));
+        };
+        let charge = checked_bytes(charge, [(output_charge, 1)], name)?;
         let reservation = self.scratch.new_empty();
         ensure_reservation(&reservation, charge, name)?;
-        let records = keyed.export(slots, descriptor.wire_schema.clone(), check)?;
+        let records = if let Some(keyed) = &self.keyed_sum {
+            keyed.export(slots, descriptor.wire_schema.clone(), check)?
+        } else if let Some(keyed) = &self.keyed_state {
+            keyed.export(slots, descriptor.wire_schema.clone(), check)?
+        } else {
+            return Err(df_error(name, "keyed aggregate plan is missing"));
+        };
         check()?;
         Ok(PaidNativeStateRecords::new(
             records,
@@ -461,7 +482,7 @@ impl IncrementalSql {
         name: &str,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<PaidNativeStateRecords> {
-        if self.keyed_sum.is_some() {
+        if self.keyed_sum.is_some() || self.keyed_state.is_some() {
             let mut slots = self.dirty.slots().to_vec();
             slots.sort_unstable();
             return self.export_keyed(Some(&slots), name, &mut || check());
@@ -477,7 +498,7 @@ impl IncrementalSql {
         name: &str,
         mut check: impl FnMut() -> Result<()>,
     ) -> Result<PaidNativeStateRecords> {
-        if self.keyed_sum.is_some() {
+        if self.keyed_sum.is_some() || self.keyed_state.is_some() {
             let mut slots = self.dirty.slots().to_vec();
             slots.sort_unstable();
             return self.export_keyed(Some(&slots), name, &mut check);
@@ -500,7 +521,7 @@ impl IncrementalSql {
         mut check_cancelled: impl FnMut() -> Result<()>,
     ) -> Result<PaidNativeStateRecords> {
         check_cancelled()?;
-        if self.keyed_sum.is_some() {
+        if self.keyed_sum.is_some() || self.keyed_state.is_some() {
             return self.export_keyed(None, name, &mut check_cancelled);
         }
         let mut cursor = export::ExportCursor::new(self, name)?;
@@ -528,6 +549,10 @@ impl IncrementalSql {
             || !self.index.is_empty()
             || self
                 .keyed_sum
+                .as_ref()
+                .is_some_and(|keyed| !keyed.is_empty())
+            || self
+                .keyed_state
                 .as_ref()
                 .is_some_and(|keyed| !keyed.is_empty())
         {
@@ -665,6 +690,9 @@ impl IncrementalSql {
         check: &dyn Fn() -> Result<()>,
         name: &str,
     ) -> Result<Vec<u64>> {
+        if let Some(keyed) = &self.keyed_state {
+            return keyed.history_counts(&descriptor.aggregate_names, rows, check, name);
+        }
         let mut counts = vec![0; self.aggregates.len()];
         for (row, group) in self.groups.iter().enumerate() {
             if row % STATE_CHUNK_ROWS == 0 {
@@ -689,6 +717,18 @@ impl IncrementalSql {
                 self.keys.len(),
                 replace,
                 self.compact_budget,
+                check_cancelled,
+            );
+        }
+        if let Some(keyed) = &self.keyed_state {
+            return keyed.restore_records(
+                records,
+                self.keys.len(),
+                replace,
+                self.compact_budget,
+                &self.aggregates,
+                self.global_records.as_ref(),
+                self.sequential.is_some(),
                 check_cancelled,
             );
         }

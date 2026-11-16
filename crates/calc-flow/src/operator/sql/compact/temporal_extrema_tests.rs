@@ -41,6 +41,7 @@ fn series(data_type: &DataType) -> Vec<ScalarValue> {
     let timezone: Arc<str> = Arc::from("UTC");
     (0..4)
         .map(|value| match data_type {
+            DataType::Boolean => ScalarValue::Boolean(Some(value % 2 == 0)),
             DataType::Date32 => ScalarValue::Date32(Some(value)),
             DataType::Date64 => ScalarValue::Date64(Some(i64::from(value))),
             DataType::Time32(TimeUnit::Second) => ScalarValue::Time32Second(Some(value)),
@@ -62,6 +63,7 @@ fn series(data_type: &DataType) -> Vec<ScalarValue> {
 
 fn temporal_types() -> Vec<DataType> {
     vec![
+        DataType::Boolean,
         DataType::Date32,
         DataType::Date64,
         DataType::Time32(TimeUnit::Second),
@@ -215,6 +217,7 @@ async fn test_temporal_extrema_match_datafusion_global_and_grouped() {
 #[tokio::test]
 async fn test_temporal_extrema_restore_and_discarded_update_are_atomic() {
     for data_type in [
+        DataType::Boolean,
         DataType::Date32,
         DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC"))),
         DataType::Duration(TimeUnit::Nanosecond),

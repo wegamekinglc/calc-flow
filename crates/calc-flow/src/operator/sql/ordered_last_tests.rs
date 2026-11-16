@@ -220,7 +220,7 @@ async fn test_ordered_last_state_capacity_and_charge_stabilize_at_eight_keys() {
             8
         );
         let current = (
-            native.capacity_charge(),
+            native.group_count(),
             op.stream_state
                 .runtime()
                 .unwrap()

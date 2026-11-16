@@ -106,7 +106,7 @@ async fn test_grouped_float_proof_growth_refusal_refunds_and_preserves_state() {
         plan.commit(transaction);
         let before = plan.export_native_state("proof", || Ok(())).unwrap();
         let policy = plan.checkpoint_policy();
-        let needed = headroom(plan.groups.len(), 10_003, 8, &plan.aggregates, "proof").unwrap();
+        let needed = headroom(plan.group_count(), 10_003, 8, &plan.aggregates, "proof").unwrap();
         let pool = runtime.incremental_memory_pool();
         let basis = pool.reserved();
         let pressure = MemoryConsumer::new("proof-pressure").register(&pool);
@@ -146,14 +146,14 @@ async fn test_grouped_float_proof_growth_refusal_refunds_and_preserves_state() {
         .unwrap()
         .unwrap();
         let candidate_policy = candidate.checkpoint_policy();
-        let needed = headroom(plan.groups.len(), 3, 8, &plan.aggregates, "proof").unwrap();
+        let needed = headroom(plan.group_count(), 3, 8, &plan.aggregates, "proof").unwrap();
         let basis = pool.reserved();
         let pressure = MemoryConsumer::new("cold-proof-pressure").register(&pool);
         pressure.try_grow((1 << 30) - basis - (needed - 1)).unwrap();
         let held = pool.reserved();
         assert!(
             candidate
-                .restore_grouped_proof(&policy, plan.groups.len(), 3, "proof")
+                .restore_grouped_proof(&policy, plan.group_count(), 3, "proof")
                 .is_err()
         );
         assert_eq!(candidate.checkpoint_policy(), candidate_policy);
