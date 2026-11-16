@@ -25,16 +25,19 @@ fn lane_plan(dual: bool) -> RollingKernelPlan {
             TypedGroupPlan::Numeric {
                 input_index: 3,
                 frame: TypedFrame::Rows(5),
+                dispersion: true,
             },
             TypedGroupPlan::Numeric {
                 input_index: 3,
                 frame: TypedFrame::Rows(20),
+                dispersion: true,
             },
         ]
     } else {
         vec![TypedGroupPlan::Numeric {
             input_index: 3,
             frame: TypedFrame::Rows(20),
+            dispersion: true,
         }]
     };
     let mean = |group| TypedFloatReadout {
@@ -304,12 +307,14 @@ fn entity_parallel_qualification_checks_frame_profile_columns_and_actual_queues(
                 plan.groups[0] = TypedGroupPlan::Numeric {
                     input_index: 3,
                     frame: TypedFrame::Rows(21),
+                    dispersion: true,
                 }
             }
             "duration" => {
                 plan.groups[0] = TypedGroupPlan::Numeric {
                     input_index: 3,
                     frame: TypedFrame::Duration(20),
+                    dispersion: true,
                 }
             }
             "wrong_state" => {
@@ -1952,6 +1957,7 @@ fn entity_parallel_mean_only_difference_keeps_exact_fallback_and_float_bits() {
                     TypedGroupPlan::Signed {
                         input_index: 3,
                         frame: TypedFrame::Rows(20),
+                        dispersion: true,
                     }
                 } else {
                     plan.groups[0]
@@ -2057,6 +2063,7 @@ fn readout_shape_plan(group_count: usize, difference: bool) -> RollingKernelPlan
         plan.groups[1] = TypedGroupPlan::Numeric {
             input_index: 4,
             frame: TypedFrame::Rows(20),
+            dispersion: true,
         };
     }
     let readout = |group| TypedFloatReadout {
@@ -2250,6 +2257,7 @@ fn entity_parallel_readout_compatibility_non_numeric_state_preserves_first_error
                 TypedGroupPlan::Signed {
                     input_index: 3,
                     frame: TypedFrame::Rows(5),
+                    dispersion: true,
                 }
             } else {
                 TypedGroupPlan::Extrema {
@@ -2369,6 +2377,7 @@ fn private_readout_input(
                 TypedGroupPlan::Signed {
                     input_index: 3,
                     frame: TypedFrame::Rows(20),
+                    dispersion: true,
                 },
                 1_000,
             );

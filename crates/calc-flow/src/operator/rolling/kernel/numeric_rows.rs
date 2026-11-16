@@ -35,10 +35,12 @@ impl SharedRowsShape {
             TypedGroupPlan::Numeric {
                 input_index: left,
                 frame: TypedFrame::Rows(first),
+                dispersion: _,
             },
             TypedGroupPlan::Numeric {
                 input_index: right,
                 frame: TypedFrame::Rows(second),
+                dispersion: _,
             },
         ] = groups
         else {
@@ -393,6 +395,7 @@ mod tests {
             .map(|window| TypedGroupPlan::Numeric {
                 input_index: 1,
                 frame: TypedFrame::Rows(window),
+                dispersion: true,
             })
             .collect()
     }

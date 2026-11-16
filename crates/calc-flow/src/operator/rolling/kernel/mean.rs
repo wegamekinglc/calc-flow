@@ -49,6 +49,7 @@ impl MeanKernel {
                 group,
                 TypedGroupPlan::Numeric {
                     frame: TypedFrame::Rows(_),
+                    dispersion: _,
                     ..
                 }
             )
@@ -363,6 +364,7 @@ mod tests {
         TypedGroupPlan::Numeric {
             input_index,
             frame: TypedFrame::Rows(window),
+            dispersion: true,
         }
     }
 
@@ -416,6 +418,7 @@ mod tests {
         let duration = TypedGroupPlan::Numeric {
             input_index: 1,
             frame: TypedFrame::Duration(10),
+            dispersion: true,
         };
         let rejected = [
             plan(vec![rows(1, 20)], vec![mean_output(0, 1), count]),
@@ -435,6 +438,7 @@ mod tests {
                 vec![TypedGroupPlan::Signed {
                     input_index: 1,
                     frame: TypedFrame::Rows(3),
+                    dispersion: true,
                 }],
                 vec![mean_output(0, 1)],
             ),

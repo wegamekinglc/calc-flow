@@ -131,14 +131,17 @@ enum TypedGroupPlan {
     Numeric {
         input_index: usize,
         frame: TypedFrame,
+        dispersion: bool,
     },
     Signed {
         input_index: usize,
         frame: TypedFrame,
+        dispersion: bool,
     },
     Unsigned {
         input_index: usize,
         frame: TypedFrame,
+        dispersion: bool,
     },
     Extrema {
         input_index: usize,
@@ -173,6 +176,14 @@ impl TypedGroupPlan {
             | Self::Pair { frame, .. } => Some(frame),
             Self::Scan { window, .. } => Some(TypedFrame::Rows(window)),
             Self::Ewma { .. } | Self::Cumulative { .. } => None,
+        }
+    }
+    fn dispersion_mut(&mut self) -> Option<&mut bool> {
+        match self {
+            Self::Numeric { dispersion, .. }
+            | Self::Signed { dispersion, .. }
+            | Self::Unsigned { dispersion, .. } => Some(dispersion),
+            _ => None,
         }
     }
 }
@@ -881,7 +892,8 @@ impl RollingKernelPlan {
             decay_pool,
         };
         plan.shared_rows = plan.shared_rows_shape().filter(|_| {
-            matches!(plan.groups.first(), Some(TypedGroupPlan::Numeric { input_index, .. })
+            matches!(plan.groups.first(), Some(TypedGroupPlan::Numeric { input_index, dispersion: _, ..
+            })
                 if input_schema.field(*input_index).data_type() == &DataType::Float64)
         });
         plan
@@ -962,7 +974,7 @@ impl RollingKernelPlan {
             && self
                 .groups
                 .iter()
-                .all(|group| matches!(group, TypedGroupPlan::Numeric { .. }))
+                .all(|group| matches!(group, TypedGroupPlan::Numeric { dispersion: _, .. }))
     }
 
     pub(super) fn typed_group_count(&self) -> usize {
@@ -1553,12 +1565,16 @@ fn typed_group_input(
             storage,
             ..
         } => extrema_group_input(input.column(input_index), storage, node_id),
-        TypedGroupPlan::Signed { input_index, .. } => {
-            cast_signed(input.column(input_index), node_id).map(TypedGroupInput::Signed)
-        }
-        TypedGroupPlan::Unsigned { input_index, .. } => {
-            cast_unsigned(input.column(input_index), node_id).map(TypedGroupInput::Unsigned)
-        }
+        TypedGroupPlan::Signed {
+            input_index,
+            dispersion: _,
+            ..
+        } => cast_signed(input.column(input_index), node_id).map(TypedGroupInput::Signed),
+        TypedGroupPlan::Unsigned {
+            input_index,
+            dispersion: _,
+            ..
+        } => cast_unsigned(input.column(input_index), node_id).map(TypedGroupInput::Unsigned),
         TypedGroupPlan::Pair {
             left_index,
             right_index,
@@ -1567,7 +1583,11 @@ fn typed_group_input(
             cast_float64(input.column(left_index), node_id)?,
             cast_float64(input.column(right_index), node_id)?,
         )),
-        TypedGroupPlan::Numeric { input_index, .. }
+        TypedGroupPlan::Numeric {
+            input_index,
+            dispersion: _,
+            ..
+        }
         | TypedGroupPlan::Ewma { input_index, .. }
         | TypedGroupPlan::Scan { input_index, .. } => Ok(TypedGroupInput::Single(cast_float64(
             input.column(input_index),
@@ -1954,10 +1974,35 @@ fn compile_typed_plan(
         }
     }
     let typed_outputs = compile_typed_outputs(outputs, &groups)?;
+    mark_dispersion_groups(&mut groups, &typed_outputs);
     if groups.is_empty() || typed_outputs.is_empty() {
         return Err("requires at least one typed rolling output".into());
     }
     Ok((groups, typed_outputs))
+}
+
+fn mark_dispersion_groups(groups: &mut [TypedGroupPlan], outputs: &[TypedOutputPlan]) {
+    for output in outputs {
+        match output.kind {
+            TypedOutputKind::Statistic(Statistic::Variance | Statistic::Stddev) => {
+                if let Some(dispersion) = groups[output.group].dispersion_mut() {
+                    *dispersion = true;
+                }
+            }
+            TypedOutputKind::Difference { left, right } => {
+                for readout in [left, right] {
+                    if matches!(
+                        readout.kind,
+                        TypedFloatReadoutKind::Variance | TypedFloatReadoutKind::Stddev
+                    ) && let Some(dispersion) = groups[readout.group].dispersion_mut()
+                    {
+                        *dispersion = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn compile_typed_groups(
@@ -2024,10 +2069,22 @@ fn compile_numeric_group(
                 DataType::Float32 | DataType::Float64
             ) =>
         {
-            Ok(TypedGroupPlan::Numeric { input_index, frame })
+            Ok(TypedGroupPlan::Numeric {
+                input_index,
+                frame,
+                dispersion: false,
+            })
         }
-        SumClass::Signed => Ok(TypedGroupPlan::Signed { input_index, frame }),
-        SumClass::Unsigned => Ok(TypedGroupPlan::Unsigned { input_index, frame }),
+        SumClass::Signed => Ok(TypedGroupPlan::Signed {
+            input_index,
+            frame,
+            dispersion: false,
+        }),
+        SumClass::Unsigned => Ok(TypedGroupPlan::Unsigned {
+            input_index,
+            frame,
+            dispersion: false,
+        }),
         _ => Err("requires primitive numeric window groups".into()),
     }
 }
@@ -2342,9 +2399,9 @@ fn output_storage(
         return Ok(OutputStorage::Float64);
     }
     match groups.get(aggregate.group) {
-        Some(TypedGroupPlan::Signed { .. }) => Ok(OutputStorage::Int64),
-        Some(TypedGroupPlan::Unsigned { .. }) => Ok(OutputStorage::UInt64),
-        Some(TypedGroupPlan::Numeric { .. }) => Ok(OutputStorage::Float64),
+        Some(TypedGroupPlan::Signed { dispersion: _, .. }) => Ok(OutputStorage::Int64),
+        Some(TypedGroupPlan::Unsigned { dispersion: _, .. }) => Ok(OutputStorage::UInt64),
+        Some(TypedGroupPlan::Numeric { dispersion: _, .. }) => Ok(OutputStorage::Float64),
         _ => Err("typed rolling sum does not reference a numeric group".into()),
     }
 }
@@ -2710,16 +2767,28 @@ impl TypedWindowState {
             TypedGroupPlan::Cumulative { statistic, .. } => {
                 Self::Cumulative(TypedCumulativeState::new(statistic))
             }
-            TypedGroupPlan::Numeric { frame, .. } => {
-                Self::Numeric(Float64NumericState::new(frame, entity_rows))
-            }
-            TypedGroupPlan::Signed { frame, .. } => {
-                Self::Exact(ExactNumericState::new(frame, SumClass::Signed, entity_rows))
-            }
-            TypedGroupPlan::Unsigned { frame, .. } => Self::Exact(ExactNumericState::new(
+            TypedGroupPlan::Numeric {
+                frame, dispersion, ..
+            } => Self::Numeric(Float64NumericState::with_dispersion(
+                frame,
+                entity_rows,
+                dispersion,
+            )),
+            TypedGroupPlan::Signed {
+                frame, dispersion, ..
+            } => Self::Exact(ExactNumericState::with_dispersion(
+                frame,
+                SumClass::Signed,
+                entity_rows,
+                dispersion,
+            )),
+            TypedGroupPlan::Unsigned {
+                frame, dispersion, ..
+            } => Self::Exact(ExactNumericState::with_dispersion(
                 frame,
                 SumClass::Unsigned,
                 entity_rows,
+                dispersion,
             )),
             TypedGroupPlan::Extrema {
                 frame, descending, ..
@@ -3000,10 +3069,20 @@ enum ExactValue {
 }
 
 impl ExactNumericState {
+    #[cfg(test)]
     fn new(frame: TypedFrame, sum_class: SumClass, entity_rows: usize) -> Self {
+        Self::with_dispersion(frame, sum_class, entity_rows, true)
+    }
+
+    fn with_dispersion(
+        frame: TypedFrame,
+        sum_class: SumClass,
+        entity_rows: usize,
+        dispersion: bool,
+    ) -> Self {
         Self {
             samples: SlidingSampleQueue::new(frame, entity_rows),
-            accumulator: WindowAccumulator::new(sum_class),
+            accumulator: WindowAccumulator::with_dispersion(sum_class, dispersion),
         }
     }
 
@@ -3074,10 +3153,15 @@ impl ExactNumericState {
 }
 
 impl Float64NumericState {
+    #[cfg(test)]
     fn new(frame: TypedFrame, entity_rows: usize) -> Self {
+        Self::with_dispersion(frame, entity_rows, true)
+    }
+
+    fn with_dispersion(frame: TypedFrame, entity_rows: usize, dispersion: bool) -> Self {
         Self {
             samples: SlidingSampleQueue::new(frame, entity_rows),
-            accumulator: WindowAccumulator::new(SumClass::Float),
+            accumulator: WindowAccumulator::with_dispersion(SumClass::Float, dispersion),
         }
     }
 
@@ -4244,6 +4328,7 @@ mod tests {
             vec![TypedGroupPlan::Numeric {
                 input_index: 3,
                 frame: TypedFrame::Rows(2),
+                dispersion: true,
             }],
             vec![TypedOutputPlan {
                 group: 0,
@@ -4918,6 +5003,7 @@ mod tests {
                 TypedGroupPlan::Numeric {
                     input_index: 3,
                     frame: TypedFrame::Rows(64),
+                    dispersion: true,
                 },
                 TypedGroupPlan::Ewma {
                     input_index: 3,
