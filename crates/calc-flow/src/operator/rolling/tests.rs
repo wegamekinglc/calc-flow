@@ -3132,6 +3132,35 @@ fn typed_rank_quantile_match_general_with_ties_and_invalid_rows() {
 }
 
 #[test]
+fn typed_duration_scans_match_general_with_expiration() {
+    let spec = kernel_spec(json!([
+        {
+            "kind": "argmax",
+            "primitive_version": 1,
+            "input": "price",
+            "output": "price_argmax",
+            "frame": {"kind": "duration", "micros": 5},
+            "min_periods": 1
+        },
+        {
+            "kind": "unique_count",
+            "primitive_version": 1,
+            "input": "price",
+            "output": "price_unique",
+            "frame": {"kind": "duration", "micros": 5},
+            "min_periods": 1
+        }
+    ]));
+    let input = float64_fast_record(&[
+        (1, "a", 1, Some(3.0)),
+        (2, "a", 2, Some(1.0)),
+        (3, "a", 3, Some(2.0)),
+        (10, "a", 4, Some(4.0)),
+    ]);
+    assert_typed_matches_general(&spec, &input.schema(), &input);
+}
+
+#[test]
 fn rolling_scans_bound_comparisons_independently_of_window_width() {
     let spec = kernel_spec(json!([
         {

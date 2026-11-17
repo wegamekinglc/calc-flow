@@ -165,6 +165,11 @@ enum TypedGroupPlan {
         kind: ScanKind,
         window: usize,
     },
+    DurationScan {
+        input_index: usize,
+        kind: ScanKind,
+        duration: u64,
+    },
     Lag {
         input_index: usize,
         periods: usize,
@@ -181,6 +186,7 @@ impl TypedGroupPlan {
             | Self::Extrema { frame, .. }
             | Self::Pair { frame, .. } => Some(frame),
             Self::Scan { window, .. } => Some(TypedFrame::Rows(window)),
+            Self::DurationScan { duration, .. } => Some(TypedFrame::Duration(duration)),
             Self::Lag { periods, .. } => {
                 Some(TypedFrame::Rows(if periods == 0 { 1 } else { periods }))
             }
@@ -1625,10 +1631,10 @@ fn typed_group_input(
             ..
         }
         | TypedGroupPlan::Ewma { input_index, .. }
-        | TypedGroupPlan::Scan { input_index, .. } => Ok(TypedGroupInput::Single(cast_float64(
-            input.column(input_index),
-            node_id,
-        )?)),
+        | TypedGroupPlan::Scan { input_index, .. }
+        | TypedGroupPlan::DurationScan { input_index, .. } => Ok(TypedGroupInput::Single(
+            cast_float64(input.column(input_index), node_id)?,
+        )),
         TypedGroupPlan::Lag {
             input_index,
             storage,
@@ -2047,9 +2053,20 @@ fn compile_scan_group(
     if output.input_type != DataType::Float64 {
         return Err("typed scan requires Float64 input".into());
     }
-    let CompiledFrame::Rows(rows) = scan.frame else {
-        return Err("typed scan requires a row frame".into());
-    };
+    match scan.frame {
+        CompiledFrame::Rows(rows) => compile_rows_scan_group(output, scan, rows, groups),
+        CompiledFrame::Duration(duration) => {
+            compile_duration_scan_group(output, scan, duration, groups)
+        }
+    }
+}
+
+fn compile_rows_scan_group(
+    output: &CompiledRollingOutput,
+    scan: super::CompiledScan,
+    rows: u64,
+    groups: &mut Vec<TypedGroupPlan>,
+) -> std::result::Result<(), String> {
     let window = usize::try_from(rows)
         .map_err(|_| "scan row window does not fit the platform usize")?
         .max(1);
@@ -2074,6 +2091,33 @@ fn compile_scan_group(
             input_index: output.input_index,
             kind: scan.kind,
             window,
+        });
+    }
+    Ok(())
+}
+
+fn compile_duration_scan_group(
+    output: &CompiledRollingOutput,
+    scan: super::CompiledScan,
+    duration: u64,
+    groups: &mut Vec<TypedGroupPlan>,
+) -> std::result::Result<(), String> {
+    if !matches!(
+        scan.kind,
+        ScanKind::Argmax | ScanKind::Argmin | ScanKind::UniqueCount
+    ) {
+        return Err("typed Duration scan requires argmax, argmin, or unique_count".into());
+    }
+    if !groups.iter().any(|group| {
+        matches!(group,
+            TypedGroupPlan::DurationScan { input_index, kind, duration: existing }
+            if *input_index == output.input_index && *kind == scan.kind && *existing == duration
+        )
+    }) {
+        groups.push(TypedGroupPlan::DurationScan {
+            input_index: output.input_index,
+            kind: scan.kind,
+            duration,
         });
     }
     Ok(())
@@ -2357,15 +2401,10 @@ fn compile_scan_output(
     if !matches!(scan.kind, ScanKind::Rank | ScanKind::Quantile) {
         require_generated_transition(primitive, GeneratedTransition::Scan)?;
     }
-    let CompiledFrame::Rows(rows) = scan.frame else {
-        return Err("typed scan requires a row frame".into());
-    };
-    let window = usize::try_from(rows)
-        .map_err(|_| "scan row window does not fit the platform usize")?
-        .max(1);
+    let frame = TypedFrame::try_from(scan.frame)?;
     let group = groups
         .iter()
-        .position(|group| scan_group_matches(group, output.input_index, scan.kind, window))
+        .position(|group| scan_group_matches(group, output.input_index, scan.kind, frame))
         .ok_or_else(|| "typed scan group is missing".to_owned())?;
     Ok(TypedOutputPlan {
         group,
@@ -2395,12 +2434,27 @@ fn scan_group_matches(
     group: &TypedGroupPlan,
     input_index: usize,
     kind: ScanKind,
-    window: usize,
+    frame: TypedFrame,
 ) -> bool {
-    matches!(group,
-        TypedGroupPlan::Scan { input_index: existing_input, kind: existing_kind, window: existing_window }
-        if *existing_input == input_index && *existing_kind == kind && *existing_window == window
-    )
+    match (group, frame) {
+        (
+            TypedGroupPlan::Scan {
+                input_index: existing_input,
+                kind: existing_kind,
+                window,
+            },
+            TypedFrame::Rows(rows),
+        ) => *existing_input == input_index && *existing_kind == kind && *window == rows.max(1),
+        (
+            TypedGroupPlan::DurationScan {
+                input_index: existing_input,
+                kind: existing_kind,
+                duration,
+            },
+            TypedFrame::Duration(expected),
+        ) => *existing_input == input_index && *existing_kind == kind && *duration == expected,
+        _ => false,
+    }
 }
 
 fn compile_aggregate_output(
@@ -2897,6 +2951,7 @@ enum TypedWindowState {
     Pair(Float64PairState),
     Ewma(TypedEwmaState),
     Scan(TypedScanState),
+    DurationScan(TypedDurationScanState),
     Rank(TypedRankState),
     Lag(TypedLagState),
     Utf8Lag(TypedUtf8LagState),
@@ -2955,6 +3010,143 @@ impl LagValue {
             Self::Unsigned(_) => Self::Unsigned(None),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DurationScanSample {
+    ordinal: u64,
+    event_time: i64,
+    value: Option<f64>,
+}
+
+#[derive(Clone, Debug)]
+struct TypedDurationScanState {
+    kind: ScanKind,
+    duration: u64,
+    recent: VecDeque<DurationScanSample>,
+    candidates: VecDeque<(u64, f64)>,
+    counts: HashMap<u64, usize>,
+    valid_count: u64,
+    next_ordinal: u64,
+    latest: Option<u64>,
+}
+
+impl TypedDurationScanState {
+    fn new(kind: ScanKind, duration: u64) -> Self {
+        Self {
+            kind,
+            duration,
+            recent: VecDeque::new(),
+            candidates: VecDeque::new(),
+            counts: HashMap::new(),
+            valid_count: 0,
+            next_ordinal: 0,
+            latest: None,
+        }
+    }
+
+    fn update(&mut self, event_time: i64, sample: Option<f64>, node_id: &str) -> Result<()> {
+        let ordinal = self.next_ordinal;
+        self.next_ordinal = self
+            .next_ordinal
+            .checked_add(1)
+            .ok_or_else(|| operator_error(node_id, "rolling Duration scan ordinal overflowed"))?;
+        match self.kind {
+            ScanKind::Argmax | ScanKind::Argmin => self.add_extrema(ordinal, sample),
+            ScanKind::UniqueCount => self.add_unique(sample),
+            _ => return Err(internal_error("typed Duration scan kind is unsupported")),
+        }
+        self.recent.push_back(DurationScanSample {
+            ordinal,
+            event_time,
+            value: sample,
+        });
+        self.expire(event_time);
+        self.latest = match self.kind {
+            ScanKind::Argmax | ScanKind::Argmin => self
+                .candidates
+                .front()
+                .map(|(position, _)| self.next_ordinal - 1 - position),
+            ScanKind::UniqueCount => u64::try_from(self.counts.len()).ok(),
+            _ => None,
+        };
+        Ok(())
+    }
+
+    fn add_extrema(&mut self, ordinal: u64, sample: Option<f64>) {
+        if let Some(sample) = sample {
+            self.valid_count += 1;
+            while self.candidates.back().is_some_and(|(_, previous)| {
+                if self.kind == ScanKind::Argmax {
+                    *previous < sample
+                } else {
+                    *previous > sample
+                }
+            }) {
+                self.candidates.pop_back();
+            }
+            self.candidates.push_back((ordinal, sample));
+        }
+    }
+
+    fn add_unique(&mut self, sample: Option<f64>) {
+        if let Some(key) = sample.map(unique_scan_key) {
+            self.valid_count += 1;
+            *self.counts.entry(key).or_default() += 1;
+        }
+    }
+
+    fn expire(&mut self, event_time: i64) {
+        let bound = i128::from(event_time) - i128::from(self.duration);
+        while self
+            .recent
+            .front()
+            .is_some_and(|sample| i128::from(sample.event_time) <= bound)
+        {
+            let leaving = self.recent.pop_front().expect("recent sample exists");
+            let Some(value) = leaving.value else {
+                continue;
+            };
+            self.valid_count -= 1;
+            if self.kind == ScanKind::UniqueCount {
+                let key = unique_scan_key(value);
+                let count = self.counts.get_mut(&key).expect("recent key is counted");
+                *count -= 1;
+                if *count == 0 {
+                    self.counts.remove(&key);
+                }
+            } else if self
+                .candidates
+                .front()
+                .is_some_and(|(position, _)| *position == leaving.ordinal)
+            {
+                self.candidates.pop_front();
+            }
+        }
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        size_of::<Self>()
+            .saturating_add(
+                self.recent
+                    .capacity()
+                    .saturating_mul(size_of::<DurationScanSample>()),
+            )
+            .saturating_add(
+                self.candidates
+                    .capacity()
+                    .saturating_mul(size_of::<(u64, f64)>()),
+            )
+            .saturating_add(
+                self.counts
+                    .capacity()
+                    .saturating_mul(size_of::<(u64, usize)>()),
+            )
+    }
+}
+
+fn unique_scan_key(value: f64) -> u64 {
+    if value == 0.0 { 0 } else { value.to_bits() }
 }
 
 #[derive(Clone, Debug)]
@@ -3147,6 +3339,9 @@ impl TypedWindowState {
                 kind: ScanKind::Decay,
                 ..
             } => Self::Decay(None),
+            TypedGroupPlan::DurationScan { kind, duration, .. } => {
+                Self::DurationScan(TypedDurationScanState::new(kind, duration))
+            }
             TypedGroupPlan::Scan {
                 kind: ScanKind::Rank | ScanKind::Quantile,
                 window,
@@ -3201,6 +3396,9 @@ impl TypedWindowState {
             }
             (Self::Scan(state), TypedGroupInput::Single(input)) => {
                 state.update(valid_float64(input, row_index, false), node_id)
+            }
+            (Self::DurationScan(state), TypedGroupInput::Single(input)) => {
+                state.update(event_time, valid_float64(input, row_index, false), node_id)
             }
             (Self::Rank(state), TypedGroupInput::Single(input)) => {
                 state.update(valid_float64(input, row_index, false));
@@ -3262,6 +3460,7 @@ impl TypedWindowState {
             Self::Scan(state) => {
                 size_of::<TypedScanState>().saturating_add(state.scan.estimated_bytes())
             }
+            Self::DurationScan(state) => state.estimated_bytes(),
             Self::Rank(state) => size_of::<TypedRankState>().saturating_add(
                 state
                     .recent
@@ -3301,6 +3500,7 @@ impl TypedWindowState {
             Self::Pair(state) => state.samples.len(),
             Self::Lag(state) => state.history.len(),
             Self::Rank(state) => state.recent.len(),
+            Self::DurationScan(state) => state.recent.len(),
             Self::Utf8Lag(state) => state.history.len(),
             Self::Cumulative(_) | Self::Ewma(_) | Self::Scan(_) | Self::Decay(_) => 0,
         }
@@ -4067,6 +4267,13 @@ impl DerivedBuilder {
             TypedWindowState::Pair(state) => self.append_pair(state, output),
             TypedWindowState::Ewma(state) => self.append_ewma(state, output),
             TypedWindowState::Scan(state) => self.append_scan(state, output),
+            TypedWindowState::DurationScan(state) => match (self, output.kind) {
+                (Self::Count(builder), TypedOutputKind::Scan(_)) => {
+                    builder.append_option(state.latest);
+                    Ok(())
+                }
+                _ => Err(typed_output_mismatch()),
+            },
             TypedWindowState::Rank(state) => self.append_rank(state, output),
             TypedWindowState::Lag(state) => self.append_lag(state, output, node_id),
             TypedWindowState::Utf8Lag(state) => match (self, output.kind) {
@@ -4411,6 +4618,7 @@ fn typed_valid_count(state: &TypedWindowState) -> u64 {
         }
         TypedWindowState::Lag(state) => u64::try_from(state.history.len()).unwrap_or(u64::MAX),
         TypedWindowState::Rank(state) => u64::try_from(state.valid_count).unwrap_or(u64::MAX),
+        TypedWindowState::DurationScan(state) => state.valid_count,
         TypedWindowState::Utf8Lag(state) => u64::try_from(state.history.len()).unwrap_or(u64::MAX),
         TypedWindowState::Decay(state) => state.as_ref().map_or(0, |state| state.valid_count()),
     }
