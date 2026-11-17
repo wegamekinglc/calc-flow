@@ -13,7 +13,7 @@ fn job() -> StreamJobContext {
 }
 
 fn operator(policy: LatePolicySpec, lateness: u64) -> RollingOperator {
-    let mut spec = general_spec();
+    let mut spec = valid_spec();
     spec.late_policy = policy;
     spec.allowed_lateness_micros = lateness;
     RollingOperator::new("roll", Arc::new(input_schema()), spec).unwrap()
@@ -27,6 +27,24 @@ fn side_operator(lateness: u64) -> RollingOperator {
         },
         lateness,
     )
+}
+
+fn general_side_operator(lateness: u64) -> RollingOperator {
+    let mut spec = general_spec();
+    spec.late_policy = LatePolicySpec::SideOutput {
+        metrics_version: 1,
+        schema_version: 1,
+    };
+    spec.allowed_lateness_micros = lateness;
+    RollingOperator::new("roll", Arc::new(general_schema()), spec).unwrap()
+}
+
+fn general_batch(records: &[&[InputRow<'_>]]) -> Batch {
+    Batch::table(
+        records.iter().map(|rows| general_record(rows)).collect(),
+        BatchMetadata::new("upstream", 42, JsonMap::new()).unwrap(),
+    )
+    .unwrap()
 }
 
 type InputRow<'a> = (i64, &'a str, u64, Option<f64>);
@@ -81,13 +99,13 @@ async fn test_native_late_rolling_emit_failure_preserves_state_and_forbids_live_
         let job = job();
         let context = StreamOperatorContext::new(&job, "roll", Some(EventTime::from_micros(10)))
             .with_output_budget(crate::EdgeBudget::new(10, 200).unwrap());
-        let mut side = side_operator(0);
+        let mut side = general_side_operator(0);
         let mut good = EdgeCollector::new(side.output_ports().to_vec());
-        let seed = batch(&[&[(26, "a", 1, Some(26.0))]]);
+        let seed = general_batch(&[&[(26, "a", 1, Some(26.0))]]);
         side.process_late_data(&seed, context.input_watermark(), &context, &mut good)
             .await
             .unwrap();
-        let input = batch(&[&[
+        let input = general_batch(&[&[
             (5, "a", 2, Some(5.0)),
             (6, "a", 3, Some(6.0)),
             (20, "a", 4, Some(20.0)),

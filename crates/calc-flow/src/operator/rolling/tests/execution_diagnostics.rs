@@ -4,7 +4,7 @@ use super::*;
 
 #[tokio::test]
 async fn test_execution_diagnostics_observe_incremental_history_and_serial_calls() {
-    let input = float64_fast_record(&[(1, "a", 1, Some(1.0)), (2, "a", 2, Some(3.0))]);
+    let input = general_record(&[(1, "a", 1, Some(1.0)), (2, "a", 2, Some(3.0))]);
     let spec = kernel_spec(json!([duration_output("mean", "price", "mean", 100)]));
     let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
     let expected = reference_output(&operator, &input);
@@ -109,12 +109,12 @@ pub(super) async fn observe(
 
 #[tokio::test]
 async fn test_execution_diagnostics_distinguish_general_replacement_history() {
-    let input = float64_fast_record(&[
+    let input = general_record(&[
         (1, "a", 1, Some(1.0)),
         (2, "a", 2, Some(3.0)),
         (3, "a", 3, Some(5.0)),
     ]);
-    let spec = kernel_spec(json!([lag_time()]));
+    let spec = kernel_spec(json!([lag_label(1)]));
     let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
     let expected = reference_output(&operator, &input);
     let job = crate::StreamJobContext::new(
@@ -194,13 +194,13 @@ fn assert_general_charge(operator: &RollingOperator) {
 
 #[tokio::test]
 async fn test_execution_diagnostics_preserve_general_prepared_prefix_on_later_entity_error() {
-    let input = float64_fast_record(&[
+    let input = general_record(&[
         (1, "a", 1, Some(1.0)),
         (2, "b", 2, Some(3.0)),
         (3, "a", 3, Some(5.0)),
         (4, "b", 4, Some(7.0)),
     ]);
-    let spec = kernel_spec(json!([lag_time()]));
+    let spec = kernel_spec(json!([lag_label(1)]));
     let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
     let job = crate::StreamJobContext::new(
         7,

@@ -19,7 +19,7 @@ use datafusion::arrow::{
         StringArray, StringBuilder, TimestampMicrosecondArray, UInt64Array, UInt64Builder,
     },
     compute::cast,
-    datatypes::{DataType, Int64Type, Schema, TimestampMicrosecondType, UInt64Type},
+    datatypes::{DataType, Int64Type, Schema, TimeUnit, TimestampMicrosecondType, UInt64Type},
     record_batch::RecordBatch,
     row::{RowConverter, SortField},
 };
@@ -285,11 +285,21 @@ enum OutputStorage {
     Float32,
     Float64,
     Utf8,
+    TimestampMicrosecond,
+    TimestampMicrosecondUtc,
 }
 
 impl OutputStorage {
     const fn is_signed(self) -> bool {
-        matches!(self, Self::Int8 | Self::Int16 | Self::Int32 | Self::Int64)
+        matches!(
+            self,
+            Self::Int8
+                | Self::Int16
+                | Self::Int32
+                | Self::Int64
+                | Self::TimestampMicrosecond
+                | Self::TimestampMicrosecondUtc
+        )
     }
 
     const fn is_unsigned(self) -> bool {
@@ -303,7 +313,7 @@ impl OutputStorage {
         matches!(self, Self::Float32 | Self::Float64)
     }
 
-    const fn data_type(self) -> DataType {
+    fn data_type(self) -> DataType {
         match self {
             Self::Count | Self::UInt64 => DataType::UInt64,
             Self::Int8 => DataType::Int8,
@@ -316,6 +326,10 @@ impl OutputStorage {
             Self::Float32 => DataType::Float32,
             Self::Float64 => DataType::Float64,
             Self::Utf8 => DataType::Utf8,
+            Self::TimestampMicrosecond => DataType::Timestamp(TimeUnit::Microsecond, None),
+            Self::TimestampMicrosecondUtc => {
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+            }
         }
     }
 }
@@ -1648,6 +1662,16 @@ fn lag_group_input(
     storage: OutputStorage,
     node_id: &str,
 ) -> Result<TypedGroupInput> {
+    if matches!(
+        storage,
+        OutputStorage::TimestampMicrosecond | OutputStorage::TimestampMicrosecondUtc
+    ) {
+        return input
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .map(|values| TypedGroupInput::Signed(values.iter().collect()))
+            .ok_or_else(|| internal_error("typed timestamp lag input type mismatch"));
+    }
     if storage == OutputStorage::Utf8 {
         return input
             .as_any()
@@ -2011,6 +2035,22 @@ fn append_typed_outputs<const HAS_DECAY: bool>(
     Ok(())
 }
 
+fn lag_storage(data_type: &DataType, delta: bool) -> std::result::Result<OutputStorage, String> {
+    match data_type {
+        DataType::Utf8 if !delta => Ok(OutputStorage::Utf8),
+        DataType::Utf8 => Err("typed delta requires a numeric input".into()),
+        DataType::Timestamp(TimeUnit::Microsecond, timezone)
+            if timezone.as_deref() == Some("UTC") && !delta =>
+        {
+            Ok(OutputStorage::TimestampMicrosecondUtc)
+        }
+        DataType::Timestamp(TimeUnit::Microsecond, None) if !delta => {
+            Ok(OutputStorage::TimestampMicrosecond)
+        }
+        _ => extrema_storage(data_type),
+    }
+}
+
 fn compile_lag_group(
     output: &CompiledRollingOutput,
     periods: u64,
@@ -2020,14 +2060,7 @@ fn compile_lag_group(
     if output.input_type != output.output_type {
         return Err("typed lag/delta requires matching input and output types".into());
     }
-    let storage = if output.input_type == DataType::Utf8 {
-        if delta {
-            return Err("typed delta requires a numeric input".into());
-        }
-        OutputStorage::Utf8
-    } else {
-        extrema_storage(&output.input_type)?
-    };
+    let storage = lag_storage(&output.input_type, delta)?;
     let periods =
         usize::try_from(periods).map_err(|_| "lag/delta periods do not fit the platform usize")?;
     if !groups.iter().any(|group| {

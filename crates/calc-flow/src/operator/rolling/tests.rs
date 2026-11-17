@@ -269,7 +269,7 @@ async fn ordered_rolling_admitted_timezone_column_can_be_checkpointed() {
 #[tokio::test]
 async fn rolling_history_budget_failure_restores_rows_for_retry() {
     let mut operator =
-        RollingOperator::new("rolling", Arc::new(kernel_schema()), general_spec()).unwrap();
+        RollingOperator::new("rolling", Arc::new(general_schema()), general_spec()).unwrap();
     operator
         .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
         .unwrap();
@@ -282,7 +282,7 @@ async fn rolling_history_budget_failure_restores_rows_for_retry() {
     );
     let context = StreamOperatorContext::new(&job, "rolling", None);
     let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
-    let record = float64_fast_record(&[(1, "a", 1, Some(1.0))]);
+    let record = general_record(&[(1, "a", 1, Some(1.0))]);
     operator
         .process_data(
             "input",
@@ -606,9 +606,26 @@ fn valid_spec() -> RollingSpec {
     serde_json::from_value(valid_spec_json()).unwrap()
 }
 
+fn general_schema() -> Schema {
+    with_field(
+        &kernel_schema(),
+        5,
+        &Field::new("label", DataType::LargeUtf8, true),
+    )
+}
+
+fn general_record(rows: &[(i64, &str, u64, Option<f64>)]) -> RecordBatch {
+    let input = float64_fast_record(rows);
+    let mut columns = input.columns().to_vec();
+    columns[5] = Arc::new(datafusion::arrow::array::LargeStringArray::new_null(
+        rows.len(),
+    ));
+    RecordBatch::try_new(Arc::new(general_schema()), columns).unwrap()
+}
+
 fn general_spec() -> RollingSpec {
     let mut document = valid_spec_json();
-    document["outputs"] = json!([lag_time()]);
+    document["outputs"] = json!([lag_label(1)]);
     serde_json::from_value(document).unwrap()
 }
 
@@ -1397,6 +1414,17 @@ fn typed_utf8_lag_matches_general_with_nulls() {
         None,
     ]));
     let input = RecordBatch::try_new(input.schema(), columns).unwrap();
+    assert_typed_matches_general(&spec, &input.schema(), &input);
+}
+
+#[test]
+fn typed_timestamp_lag_matches_general() {
+    let spec = kernel_spec(json!([lag_time()]));
+    let input = float64_fast_record(&[
+        (1, "a", 1, Some(1.0)),
+        (2, "a", 2, Some(2.0)),
+        (3, "a", 3, Some(3.0)),
+    ]);
     assert_typed_matches_general(&spec, &input.schema(), &input);
 }
 
