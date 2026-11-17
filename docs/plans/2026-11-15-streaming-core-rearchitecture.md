@@ -56,6 +56,8 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   argmax/argmin/unique_count 使用 ordinal、event-time expiry 和 typed candidates/counts；TimestampMicrosecond lag
   使用 signed `i64` 历史并恢复 UTC/naive 类型。rolling 703 项、symbolic optimizer 11 项和 clippy 通过。
   其余 temporal/nested lag、剩余 typed groups 与 general `ScalarValue` 路径删除仍未完成。
+- P2.4 继续补齐 Date32/Date64/Time64Microsecond/DurationMicrosecond lag，复用 signed history 和输出类型恢复；
+  rolling 707 项和 clippy 通过。其他 temporal/nested 类型仍需单独验收。
 - P2.5 部分交付：MACD 三组件通过 typed group/readout 复用原生 `MacdKernel`/`MacdParameters`，不再创建
   indicator resource pool；RSI/ATR 已加入 typed plan 并通过 parity，但仍保留原 resource/lifecycle 路径。
   rolling 705 项和 clippy 通过。layout 5/6 删除与 RSI/ATR slab persistence 尚未完成。

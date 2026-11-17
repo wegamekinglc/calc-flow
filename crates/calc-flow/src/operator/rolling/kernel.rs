@@ -15,8 +15,9 @@ use std::{
 
 use datafusion::arrow::{
     array::{
-        Array, ArrayRef, AsArray, Float64Array, Float64Builder, Int64Array, Int64Builder,
-        StringArray, StringBuilder, TimestampMicrosecondArray, UInt64Array, UInt64Builder,
+        Array, ArrayRef, AsArray, Date32Array, Date64Array, DurationMicrosecondArray, Float64Array,
+        Float64Builder, Int64Array, Int64Builder, StringArray, StringBuilder,
+        Time64MicrosecondArray, TimestampMicrosecondArray, UInt64Array, UInt64Builder,
     },
     compute::cast,
     datatypes::{DataType, Int64Type, Schema, TimeUnit, TimestampMicrosecondType, UInt64Type},
@@ -310,6 +311,10 @@ enum OutputStorage {
     Utf8,
     TimestampMicrosecond,
     TimestampMicrosecondUtc,
+    Date32,
+    Date64,
+    Time64Microsecond,
+    DurationMicrosecond,
 }
 
 impl OutputStorage {
@@ -322,6 +327,10 @@ impl OutputStorage {
                 | Self::Int64
                 | Self::TimestampMicrosecond
                 | Self::TimestampMicrosecondUtc
+                | Self::Date32
+                | Self::Date64
+                | Self::Time64Microsecond
+                | Self::DurationMicrosecond
         )
     }
 
@@ -353,6 +362,10 @@ impl OutputStorage {
             Self::TimestampMicrosecondUtc => {
                 DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
             }
+            Self::Date32 => DataType::Date32,
+            Self::Date64 => DataType::Date64,
+            Self::Time64Microsecond => DataType::Time64(TimeUnit::Microsecond),
+            Self::DurationMicrosecond => DataType::Duration(TimeUnit::Microsecond),
         }
     }
 }
@@ -1709,6 +1722,41 @@ fn lag_group_input(
     storage: OutputStorage,
     node_id: &str,
 ) -> Result<TypedGroupInput> {
+    match storage {
+        OutputStorage::Date32 => {
+            return input
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .map(|values| {
+                    TypedGroupInput::Signed(
+                        values.iter().map(|value| value.map(i64::from)).collect(),
+                    )
+                })
+                .ok_or_else(|| internal_error("typed Date32 lag input type mismatch"));
+        }
+        OutputStorage::Date64 => {
+            return input
+                .as_any()
+                .downcast_ref::<Date64Array>()
+                .map(|values| TypedGroupInput::Signed(values.iter().collect()))
+                .ok_or_else(|| internal_error("typed Date64 lag input type mismatch"));
+        }
+        OutputStorage::Time64Microsecond => {
+            return input
+                .as_any()
+                .downcast_ref::<Time64MicrosecondArray>()
+                .map(|values| TypedGroupInput::Signed(values.iter().collect()))
+                .ok_or_else(|| internal_error("typed Time64 lag input type mismatch"));
+        }
+        OutputStorage::DurationMicrosecond => {
+            return input
+                .as_any()
+                .downcast_ref::<DurationMicrosecondArray>()
+                .map(|values| TypedGroupInput::Signed(values.iter().collect()))
+                .ok_or_else(|| internal_error("typed Duration lag input type mismatch"));
+        }
+        _ => {}
+    }
     if matches!(
         storage,
         OutputStorage::TimestampMicrosecond | OutputStorage::TimestampMicrosecondUtc
@@ -2093,6 +2141,12 @@ fn lag_storage(data_type: &DataType, delta: bool) -> std::result::Result<OutputS
         }
         DataType::Timestamp(TimeUnit::Microsecond, None) if !delta => {
             Ok(OutputStorage::TimestampMicrosecond)
+        }
+        DataType::Date32 if !delta => Ok(OutputStorage::Date32),
+        DataType::Date64 if !delta => Ok(OutputStorage::Date64),
+        DataType::Time64(TimeUnit::Microsecond) if !delta => Ok(OutputStorage::Time64Microsecond),
+        DataType::Duration(TimeUnit::Microsecond) if !delta => {
+            Ok(OutputStorage::DurationMicrosecond)
         }
         _ => extrema_storage(data_type),
     }

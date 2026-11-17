@@ -1429,6 +1429,62 @@ fn typed_timestamp_lag_matches_general() {
 }
 
 #[test]
+fn typed_date32_lag_matches_general() {
+    let spec = kernel_spec(json!([lag_label(1)]));
+    let schema = with_field(
+        &kernel_schema(),
+        5,
+        &Field::new("label", DataType::Date32, true),
+    );
+    let base = float64_fast_record(&[
+        (1, "a", 1, Some(1.0)),
+        (2, "a", 2, Some(2.0)),
+        (3, "a", 3, Some(3.0)),
+    ]);
+    let mut columns = base.columns().to_vec();
+    columns[5] = Arc::new(datafusion::arrow::array::Date32Array::from(vec![1, 2, 3]));
+    let input = RecordBatch::try_new(Arc::new(schema), columns).unwrap();
+    assert_typed_matches_general(&spec, &input.schema(), &input);
+}
+
+#[test]
+fn typed_temporal_lag_matches_general() {
+    let base = float64_fast_record(&[
+        (1, "a", 1, Some(1.0)),
+        (2, "a", 2, Some(2.0)),
+        (3, "a", 3, Some(3.0)),
+    ]);
+    let cases: Vec<(DataType, ArrayRef)> = vec![
+        (
+            DataType::Date64,
+            Arc::new(datafusion::arrow::array::Date64Array::from(vec![
+                100, 200, 300,
+            ])),
+        ),
+        (
+            DataType::Time64(datafusion::arrow::datatypes::TimeUnit::Microsecond),
+            Arc::new(datafusion::arrow::array::Time64MicrosecondArray::from(
+                vec![100, 200, 300],
+            )),
+        ),
+        (
+            DataType::Duration(datafusion::arrow::datatypes::TimeUnit::Microsecond),
+            Arc::new(datafusion::arrow::array::DurationMicrosecondArray::from(
+                vec![100, 200, 300],
+            )),
+        ),
+    ];
+    for (data_type, values) in cases {
+        let schema = with_field(&kernel_schema(), 5, &Field::new("label", data_type, true));
+        let mut columns = base.columns().to_vec();
+        columns[5] = values;
+        let input = RecordBatch::try_new(Arc::new(schema), columns).unwrap();
+        let spec = kernel_spec(json!([lag_label(1)]));
+        assert_typed_matches_general(&spec, &input.schema(), &input);
+    }
+}
+
+#[test]
 fn delta_subtracts_the_referenced_value_with_checked_integer_math() {
     let spec = kernel_spec(json!([delta_volume(1)]));
     let rows = vec![
