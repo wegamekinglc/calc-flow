@@ -131,11 +131,21 @@ async fn test_native_late_rolling_emit_failure_preserves_state_and_forbids_live_
         let mut before_output = EdgeCollector::new(before_restored.output_ports().to_vec());
         let mut after_output = EdgeCollector::new(after_restored.output_ports().to_vec());
         before_restored
-            .process_late_data(&input, context.input_watermark(), &context, &mut before_output)
+            .process_late_data(
+                &input,
+                context.input_watermark(),
+                &context,
+                &mut before_output,
+            )
             .await
             .unwrap();
         after_restored
-            .process_late_data(&input, context.input_watermark(), &context, &mut after_output)
+            .process_late_data(
+                &input,
+                context.input_watermark(),
+                &context,
+                &mut after_output,
+            )
             .await
             .unwrap();
         assert_eq!(

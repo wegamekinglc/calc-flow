@@ -3531,10 +3531,10 @@ mod native_lookup;
 mod output_gather;
 mod output_projection;
 #[cfg(test)]
+mod row_ipc;
+#[cfg(test)]
 #[path = "join/run_tests.rs"]
 mod run_tests;
-#[cfg(test)]
-mod row_ipc;
 mod sql_key_scratch;
 mod state_projection;
 mod typed_key;

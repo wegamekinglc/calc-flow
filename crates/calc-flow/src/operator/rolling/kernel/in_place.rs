@@ -510,9 +510,7 @@ impl RollingKernelPlan {
         let mut builders = self
             .outputs
             .iter()
-            .map(|output| {
-                DerivedBuilder::new_with_inputs(*output, input.num_rows(), &typed_inputs)
-            })
+            .map(|output| DerivedBuilder::new_with_inputs(*output, input.num_rows(), &typed_inputs))
             .collect::<Result<Vec<_>>>()?;
         let kernel_start = Instant::now();
         let numeric_result = {

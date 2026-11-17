@@ -31,7 +31,8 @@ use super::budget::StateCharge;
 use super::{
     CompiledAggregate, CompiledDifference, CompiledEvaluation, CompiledEwma, CompiledFloatReadout,
     CompiledFrame, CompiledKeyColumn, CompiledPairAggregate, CompiledRollingOutput,
-    CompiledWindowGroup, PairAccumulator, ScanKind, Statistic, SumClass, SumState, WindowAccumulator,
+    CompiledWindowGroup, PairAccumulator, ScanKind, Statistic, SumClass, SumState,
+    WindowAccumulator,
     generated_kernel_manifest::{
         GeneratedComplexity, GeneratedTransition, generated_kernel_capability,
     },
@@ -3224,7 +3225,9 @@ impl TypedScanValue {
             }
             (Self::Signed(left), Self::Signed(right)) => Ok(left.cmp(&right)),
             (Self::Unsigned(left), Self::Unsigned(right)) => Ok(left.cmp(&right)),
-            _ => Err(internal_error("typed rolling scan values have mixed storage")),
+            _ => Err(internal_error(
+                "typed rolling scan values have mixed storage",
+            )),
         }
     }
 
@@ -3387,9 +3390,10 @@ impl TypedScanState {
             }
             let leaving = self.recent.pop_front().expect("recent sample exists");
             if let Some(value) = leaving.value {
-                self.valid_count = self.valid_count.checked_sub(1).ok_or_else(|| {
-                    internal_error("typed rolling scan removal without an add")
-                })?;
+                self.valid_count = self
+                    .valid_count
+                    .checked_sub(1)
+                    .ok_or_else(|| internal_error("typed rolling scan removal without an add"))?;
                 if self.kind == ScanKind::UniqueCount {
                     let key = TypedScanKey::new(value);
                     let count = self.counts.get_mut(&key).expect("recent key is counted");
@@ -3447,8 +3451,8 @@ impl TypedScanState {
                     u64::try_from(rank)
                         .map_err(|_| operator_error(node_id, "typed rolling rank overflowed"))?,
                 );
-                self.latest_float = (self.valid_count > 1)
-                    .then_some(rank as f64 / (self.valid_count - 1) as f64);
+                self.latest_float =
+                    (self.valid_count > 1).then_some(rank as f64 / (self.valid_count - 1) as f64);
             }
             ScanKind::Decay => {
                 let count = self
@@ -3805,11 +3809,7 @@ impl TypedWindowState {
                 descending,
                 storage: OutputStorage::Value,
                 ..
-            } => Self::ValueExtrema(TypedValueExtremaState::new(
-                frame,
-                descending,
-                entity_rows,
-            )),
+            } => Self::ValueExtrema(TypedValueExtremaState::new(frame, descending, entity_rows)),
             TypedGroupPlan::Extrema {
                 frame, descending, ..
             } => Self::Extrema(TypedExtremaState::new(frame, descending, entity_rows)),
@@ -3847,13 +3847,11 @@ impl TypedWindowState {
                 TypedFrame::Rows(window),
                 entity_rows,
             )),
-            TypedGroupPlan::DurationScan { kind, duration, .. } => {
-                Self::Scan(TypedScanState::new(
-                    kind,
-                    TypedFrame::Duration(duration),
-                    entity_rows,
-                ))
-            }
+            TypedGroupPlan::DurationScan { kind, duration, .. } => Self::Scan(TypedScanState::new(
+                kind,
+                TypedFrame::Duration(duration),
+                entity_rows,
+            )),
             TypedGroupPlan::Rsi { .. } => Self::Rsi(TypedRsiState::new()),
             TypedGroupPlan::Atr { .. } => Self::Atr(TypedAtrState::new()),
             TypedGroupPlan::Macd { options, .. } => Self::Macd(TypedMacdState::new(options)),
@@ -4624,7 +4622,9 @@ impl TypedValueExtremaState {
         {
             let replace = match &latest {
                 None => true,
-                Some(current) => arrow_value_ordering(candidate, current, self.descending, node_id)?,
+                Some(current) => {
+                    arrow_value_ordering(candidate, current, self.descending, node_id)?
+                }
             };
             if replace {
                 latest = Some(candidate.clone());
@@ -4661,7 +4661,12 @@ fn arrow_value_ordering(
     } else {
         datafusion::arrow::compute::kernels::cmp::lt(candidate, current)
     }
-    .map_err(|error| operator_error(node_id, &format!("rolling value comparison failed: {error}")))?;
+    .map_err(|error| {
+        operator_error(
+            node_id,
+            &format!("rolling value comparison failed: {error}"),
+        )
+    })?;
     Ok(ordering.value(0))
 }
 
@@ -4714,9 +4719,10 @@ impl TypedValueScanState {
             }
             let removed = self.values.pop_front().expect("an expiring sample exists");
             if removed.value.is_valid(0) {
-                self.valid_count = self.valid_count.checked_sub(1).ok_or_else(|| {
-                    internal_error("typed rolling scan removal without an add")
-                })?;
+                self.valid_count = self
+                    .valid_count
+                    .checked_sub(1)
+                    .ok_or_else(|| internal_error("typed rolling scan removal without an add"))?;
             }
             if matches!(self.frame, TypedFrame::Rows(_)) {
                 return Ok(());
@@ -5511,9 +5517,7 @@ fn typed_valid_count(state: &TypedWindowState) -> u64 {
         TypedWindowState::Lag(state) => u64::try_from(state.history.len()).unwrap_or(u64::MAX),
         TypedWindowState::ValueScan(state) => state.valid_count,
         TypedWindowState::Utf8Lag(state) => u64::try_from(state.history.len()).unwrap_or(u64::MAX),
-        TypedWindowState::ValueLag(state) => {
-            u64::try_from(state.history.len()).unwrap_or(u64::MAX)
-        }
+        TypedWindowState::ValueLag(state) => u64::try_from(state.history.len()).unwrap_or(u64::MAX),
         TypedWindowState::Rsi(state) => state.kernel.positions,
         TypedWindowState::Atr(state) => state.kernel.positions,
         TypedWindowState::Macd(state) => state.kernel.positions,
@@ -7100,16 +7104,10 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            assert_eq!(
-                extrema_storage(all_types.field(index).data_type()),
-                storage
-            );
+            assert_eq!(extrema_storage(all_types.field(index).data_type()), storage);
             require_numeric_type(&all_types, index).unwrap();
         }
-        assert_eq!(
-            extrema_storage(&DataType::Utf8),
-            OutputStorage::Value
-        );
+        assert_eq!(extrema_storage(&DataType::Utf8), OutputStorage::Value);
         assert!(require_numeric_type(&all_types, 10).is_err());
         assert!(
             compile_typed_plan(&all_types, &[], &[], &[])

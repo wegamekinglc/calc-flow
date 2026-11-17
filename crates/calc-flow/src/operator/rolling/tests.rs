@@ -1753,19 +1753,12 @@ fn delta_unsigned_underflow_is_a_data_error() {
 #[test]
 fn typed_integer_delta_matches_general_and_preserves_checked_errors() {
     let spec = kernel_spec(json!([delta_volume(1)]));
-    let (schema, input) =
-        primitive_volume_record(Arc::new(Int64Array::from(vec![
-            7, 10, 4,
-        ])));
+    let (schema, input) = primitive_volume_record(Arc::new(Int64Array::from(vec![7, 10, 4])));
     assert_typed_matches_general(&spec, &schema, &input);
     let (schema, input) = primitive_volume_record(Arc::new(UInt64Array::from(vec![10, 13, 14])));
     assert_typed_matches_general(&spec, &schema, &input);
 
-    let (schema, input) =
-        primitive_volume_record(Arc::new(Int64Array::from(vec![
-            -1,
-            i64::MAX,
-        ])));
+    let (schema, input) = primitive_volume_record(Arc::new(Int64Array::from(vec![-1, i64::MAX])));
     let compiled = compile_spec(&spec, &schema).unwrap();
     assert!(
         compiled

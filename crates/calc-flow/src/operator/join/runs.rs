@@ -9,7 +9,8 @@
 )]
 
 use super::{
-    JoinSide, JoinStateLimits, JoinTimeBounds, MatchedPair, PayloadRef, matches::Selection,
+    JoinSide, JoinStateLimits, JoinTimeBounds, MatchedPair, PayloadRef,
+    matches::Selection,
     native_dictionary::{TimedEntry, WindowBounds, WindowCursor, ordered_window_bounds},
     operator_error, output_gather,
 };
@@ -232,11 +233,13 @@ impl RunCharge {
             Self::Fixed { row } => row
                 .checked_mul(rows)
                 .ok_or_else(|| run_error("fixed run charge overflowed"))?,
-            Self::Variable { rows: charges } => charges.iter().try_fold(0usize, |total, charge| {
-                total
-                    .checked_add(*charge)
-                    .ok_or_else(|| run_error("variable run charge overflowed"))
-            })?,
+            Self::Variable { rows: charges } => {
+                charges.iter().try_fold(0usize, |total, charge| {
+                    total
+                        .checked_add(*charge)
+                        .ok_or_else(|| run_error("variable run charge overflowed"))
+                })?
+            }
         };
         let identity = rows
             .checked_mul(ROW_COLUMN_BYTES)
@@ -277,11 +280,10 @@ impl Run {
         if selected.is_empty() {
             return Ok(None);
         }
-        let source_rows = UInt64Array::from_iter_values(
-            selected
-                .iter()
-                .map(|&row| u64::try_from(incoming.physical[row]).expect("validated usize fits u64")),
-        );
+        let source_rows =
+            UInt64Array::from_iter_values(selected.iter().map(|&row| {
+                u64::try_from(incoming.physical[row]).expect("validated usize fits u64")
+            }));
         let columns = incoming
             .payload
             .columns()
@@ -298,7 +300,10 @@ impl Run {
             &RecordBatchOptions::new().with_row_count(Some(selected.len())),
         )
         .map_err(|error| operator_error("Join runs", &format!("retained batch failed: {error}")))?;
-        let groups = selected.iter().map(|&row| incoming.groups[row]).collect::<Vec<_>>();
+        let groups = selected
+            .iter()
+            .map(|&row| incoming.groups[row])
+            .collect::<Vec<_>>();
         let times = selected
             .iter()
             .map(|&row| incoming.times[row].as_micros())
@@ -413,25 +418,33 @@ impl SideUpdate {
                     .buckets
                     .get(&group)
                     .map_or(entries.clone(), |bucket| merge(bucket.active(), &entries));
-                (group, Bucket {
-                    entries: merged,
-                    head: 0,
-                })
+                (
+                    group,
+                    Bucket {
+                        entries: merged,
+                        head: 0,
+                    },
+                )
             })
             .collect::<Vec<_>>();
-        let expiration = merge(&side.expiration[side.expiration_head..], &run.entries().collect::<Vec<_>>());
+        let expiration = merge(
+            &side.expiration[side.expiration_head..],
+            &run.entries().collect::<Vec<_>>(),
+        );
         let new_owner_bytes = buckets.iter().try_fold(run.bytes, |total, (_, bucket)| {
             total.checked_add(bucket.charge())
         });
         let new_owner_bytes = new_owner_bytes
-            .and_then(|bytes| {
-                bytes.checked_add(expiration.capacity() * size_of::<LocatorEntry>())
-            })
+            .and_then(|bytes| bytes.checked_add(expiration.capacity() * size_of::<LocatorEntry>()))
             .ok_or_else(|| run_error("state update charge overflowed"))?;
-        let replaced_bytes = buckets.iter().try_fold(side.expiration_charge(), |total, (group, _)| {
-            total.checked_add(side.buckets.get(group).map_or(0, Bucket::charge))
-        });
-        let replaced_bytes = replaced_bytes.ok_or_else(|| run_error("replaced state charge overflowed"))?;
+        let replaced_bytes =
+            buckets
+                .iter()
+                .try_fold(side.expiration_charge(), |total, (group, _)| {
+                    total.checked_add(side.buckets.get(group).map_or(0, Bucket::charge))
+                });
+        let replaced_bytes =
+            replaced_bytes.ok_or_else(|| run_error("replaced state charge overflowed"))?;
         let rows = side
             .rows
             .checked_add(run.len())
@@ -549,9 +562,9 @@ impl EvictionPlan {
                     .checked_sub(live.released_bytes)
                     .ok_or_else(|| run_error("released run charge exceeds its owner"))?
             } else {
-                live.run.charge.rows_charge(
-                    live.run.order[live.head..new_head].iter().copied(),
-                )?
+                live.run
+                    .charge
+                    .rows_charge(live.run.order[live.head..new_head].iter().copied())?
             };
             bytes = bytes
                 .checked_add(charge)
@@ -729,7 +742,10 @@ impl RunState {
         )
     }
 
-    #[allow(clippy::too_many_arguments, reason = "one admitted morsel needs its output context")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one admitted morsel needs its output context"
+    )]
     pub(super) fn apply_checked(
         &mut self,
         incoming_side: JoinSide,
@@ -742,14 +758,7 @@ impl RunState {
     ) -> Result<RunOutput> {
         check()?;
         let prepared = self.prepare(incoming_side, incoming, check)?;
-        let records = prepared.materialize(
-            self,
-            schema,
-            projection,
-            left_width,
-            budget,
-            check,
-        )?;
+        let records = prepared.materialize(self, schema, projection, left_width, budget, check)?;
         check()?;
         let count = records.len();
         let sequences = self.output_sequences(count)?;
@@ -816,9 +825,12 @@ impl RunState {
                 incoming_side == JoinSide::Left,
                 incoming.times[row],
             );
-            let found = opposite.buckets.get(&group).map_or(WindowBounds::EMPTY, |bucket| {
-                ordered_window_bounds(bucket.active(), range, cursors[group.index()])
-            });
+            let found = opposite
+                .buckets
+                .get(&group)
+                .map_or(WindowBounds::EMPTY, |bucket| {
+                    ordered_window_bounds(bucket.active(), range, cursors[group.index()])
+                });
             if opposite.buckets.contains_key(&group) {
                 cursors[group.index()] = Some(WindowCursor::new(range, found));
             }
@@ -826,7 +838,8 @@ impl RunState {
                 .checked_add(found.matches())
                 .ok_or_else(|| run_error("match count overflowed"))?;
             bounds.push(found);
-            if u64::try_from(count).unwrap_or(u64::MAX) > self.limits.max_matches_per_input_batch() {
+            if u64::try_from(count).unwrap_or(u64::MAX) > self.limits.max_matches_per_input_batch()
+            {
                 break;
             }
         }
@@ -872,11 +885,7 @@ impl RunState {
         self.next_output
             .checked_add(count)
             .ok_or_else(|| run_error("output sequence overflowed"))?;
-        Ok((0..count)
-            .map(|offset| {
-                self.next_output + offset
-            })
-            .collect())
+        Ok((0..count).map(|offset| self.next_output + offset).collect())
     }
 }
 
@@ -931,10 +940,9 @@ impl Prepared {
             }
             .min(MORSEL_ROWS);
             if per_chunk == 0 {
-                return Err(OutputChunkErrors::STREAM_JOIN.over_budget_row(
-                    row_bytes,
-                    budget.max_bytes,
-                ));
+                return Err(
+                    OutputChunkErrors::STREAM_JOIN.over_budget_row(row_bytes, budget.max_bytes)
+                );
             }
             return Ok((0..self.probe.len())
                 .step_by(per_chunk)
@@ -942,9 +950,9 @@ impl Prepared {
                 .collect());
         }
         let terminal = schema.fields().iter().try_fold(0usize, |total, field| {
-            total.checked_add(
-                crate::operator::row_cost::terminal_offset_width(field.data_type()),
-            )
+            total.checked_add(crate::operator::row_cost::terminal_offset_width(
+                field.data_type(),
+            ))
         });
         let terminal = terminal.ok_or_else(|| run_error("output terminal charge overflowed"))?;
         let mut ranges = Vec::new();
@@ -998,9 +1006,11 @@ impl Prepared {
         } else {
             (retained, incoming)
         };
-        schema.fields().iter().enumerate().try_fold(
-            0usize,
-            |total, (ordinal, _field)| {
+        schema
+            .fields()
+            .iter()
+            .enumerate()
+            .try_fold(0usize, |total, (ordinal, _field)| {
                 let logical = projection.map_or(ordinal, |columns| columns[ordinal]);
                 let (payload, column) = if logical < left_width {
                     (left, logical)
@@ -1015,11 +1025,13 @@ impl Prepared {
                 total
                     .checked_add(bytes)
                     .ok_or_else(|| run_error("output row charge overflowed"))
-            },
-        )
+            })
     }
 
-    #[allow(clippy::too_many_arguments, reason = "one output range needs its full source context")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one output range needs its full source context"
+    )]
     fn materialize_range(
         &self,
         state: &RunState,
@@ -1039,10 +1051,7 @@ impl Prepared {
             return Ok(());
         }
         if range.len() == 1 {
-            return Err(OutputChunkErrors::STREAM_JOIN.over_budget_row(
-                bytes,
-                budget.max_bytes,
-            ));
+            return Err(OutputChunkErrors::STREAM_JOIN.over_budget_row(bytes, budget.max_bytes));
         }
         let middle = range.start + range.len() / 2;
         self.materialize_range(
@@ -1175,7 +1184,11 @@ impl RunStateSnapshot {
             digest.update(side.bytes.to_le_bytes());
             digest.update(side.next_row_id.to_le_bytes());
             for (group, bucket) in &side.buckets {
-                digest.update(u64::try_from(group.index()).expect("group index fits u64").to_le_bytes());
+                digest.update(
+                    u64::try_from(group.index())
+                        .expect("group index fits u64")
+                        .to_le_bytes(),
+                );
                 for entry in bucket.active() {
                     digest.update(entry.time.as_micros().to_le_bytes());
                     digest.update(entry.row_id.to_le_bytes());
@@ -1234,7 +1247,9 @@ fn validate_snapshot(snapshot: &RunStateSnapshot) -> Result<()> {
                     .iter()
                     .any(|row_id| *row_id >= side.next_row_id)
             {
-                return Err(run_error("restored run identity, prefix, or frontier is invalid"));
+                return Err(run_error(
+                    "restored run identity, prefix, or frontier is invalid",
+                ));
             }
             live_rows += live.run.len() - live.head;
             bytes = bytes
@@ -1281,7 +1296,9 @@ fn validate_snapshot(snapshot: &RunStateSnapshot) -> Result<()> {
                 .windows(2)
                 .any(|pair| pair[0].identity() >= pair[1].identity())
         {
-            return Err(run_error("restored expiration locators are not strictly ordered"));
+            return Err(run_error(
+                "restored expiration locators are not strictly ordered",
+            ));
         }
         let expiration = side.expiration[side.expiration_head..]
             .iter()
@@ -1341,9 +1358,7 @@ fn fixed_output_row_bytes(schema: &SchemaRef) -> Option<usize> {
         {
             return None;
         }
-        total.checked_add(crate::operator::row_cost::fixed_width(
-            field.data_type(),
-        )?)
+        total.checked_add(crate::operator::row_cost::fixed_width(field.data_type())?)
     })
 }
 

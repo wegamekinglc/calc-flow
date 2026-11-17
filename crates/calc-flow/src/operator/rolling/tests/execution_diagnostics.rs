@@ -183,9 +183,14 @@ fn assert_general_charge(operator: &RollingOperator) {
         )
         .unwrap()
     );
-    assert!(operator.state.histories.by_entity.values().all(|state| {
-        state.charge_cache.is_some()
-    }));
+    assert!(
+        operator
+            .state
+            .histories
+            .by_entity
+            .values()
+            .all(|state| { state.charge_cache.is_some() })
+    );
     assert_eq!(
         operator.state.charge.rows,
         2 * u64::try_from(operator.state.histories.by_entity.len()).unwrap()

@@ -3,9 +3,7 @@ use super::{
     runs::{Incoming, RunState},
 };
 use crate::operator::keyed::{GroupId, KeySchema, KeyStore};
-use crate::{
-    Batch, BatchMetadata, DataFusionConfig, DataFusionRuntime, EdgeBudget, EventTime,
-};
+use crate::{Batch, BatchMetadata, DataFusionConfig, DataFusionRuntime, EdgeBudget, EventTime};
 use datafusion::arrow::{
     array::{Array, ArrayRef, DictionaryArray, Int32Array, Int64Array, ListArray, StringArray},
     datatypes::{DataType, Field, Int32Type, Int64Type, Schema},
@@ -15,10 +13,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 fn record(keys: &[i64], values: &[i64]) -> RecordBatch {
     RecordBatch::try_from_iter(vec![
-        (
-            "key",
-            Arc::new(Int64Array::from(keys.to_vec())) as ArrayRef,
-        ),
+        ("key", Arc::new(Int64Array::from(keys.to_vec())) as ArrayRef),
         (
             "value",
             Arc::new(Int64Array::from(values.to_vec())) as ArrayRef,
@@ -191,10 +186,7 @@ fn test_shared_key_routing_preserves_sparse_ids_and_skips_retention_work() {
         &left_record,
         &[0],
         vec![0, 2],
-        vec![
-            EventTime::from_micros(10),
-            EventTime::from_micros(10),
-        ],
+        vec![EventTime::from_micros(10), EventTime::from_micros(10)],
         vec![0, 2],
         datafusion::arrow::array::BooleanArray::from(vec![true, false]),
         3,
@@ -540,9 +532,13 @@ fn test_multi_owner_take_interleave_preserves_dictionary_and_nested_payloads() {
         .as_any()
         .downcast_ref::<DictionaryArray<Int32Type>>()
         .unwrap();
-    assert_eq!(labels.values().len(), 2, "unused dictionary values are detached");
-    let labels = datafusion::arrow::compute::cast(output.records[0].column(0), &DataType::Utf8)
-        .unwrap();
+    assert_eq!(
+        labels.values().len(),
+        2,
+        "unused dictionary values are detached"
+    );
+    let labels =
+        datafusion::arrow::compute::cast(output.records[0].column(0), &DataType::Utf8).unwrap();
     let labels = labels.as_any().downcast_ref::<StringArray>().unwrap();
     assert_eq!((labels.value(0), labels.value(1)), ("left-a", "left-b"));
     let items = output.records[0]
@@ -552,7 +548,8 @@ fn test_multi_owner_take_interleave_preserves_dictionary_and_nested_payloads() {
         .unwrap();
     for (row, expected) in [7, 8].into_iter().enumerate() {
         assert_eq!(
-            items.value(row)
+            items
+                .value(row)
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .unwrap()
@@ -614,7 +611,10 @@ fn test_prefix_eviction_and_snapshot_continue_bitwise() {
 
     let snapshot = state.snapshot();
     let mut restored = RunState::restore(snapshot).unwrap();
-    assert_eq!(restored.snapshot().fingerprint(), state.snapshot().fingerprint());
+    assert_eq!(
+        restored.snapshot().fingerprint(),
+        state.snapshot().fingerprint()
+    );
     let right_record = record(&[1], &[100]);
     let make_right = || {
         incoming(
@@ -650,7 +650,10 @@ fn test_prefix_eviction_and_snapshot_continue_bitwise() {
     assert_eq!(actual.sequences, expected.sequences);
     assert_eq!(actual.records, expected.records);
     assert_eq!(values(&actual.records[0], 0), [20, 30]);
-    assert_eq!(restored.snapshot().fingerprint(), state.snapshot().fingerprint());
+    assert_eq!(
+        restored.snapshot().fingerprint(),
+        state.snapshot().fingerprint()
+    );
 
     let ended = restored.evict_end(JoinSide::Left).unwrap();
     assert_eq!(ended.expired_rows, 3);
