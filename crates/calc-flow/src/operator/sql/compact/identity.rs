@@ -257,13 +257,8 @@ fn native_output_json(
     key_inputs: &[Value],
     input_checks: &[Value],
 ) -> Result<Value> {
-    let mut value = json!({"policy":descriptor.policy, "keys":keys,
-        "key_inputs":key_inputs, "input_checks":input_checks, "aggregates":aggregates,
-        "projection":descriptor.projection.iter().map(input_json).collect::<Result<Vec<_>>>()?,
-        "post_filter":descriptor.post_filter.as_ref().map(input_json).transpose()?,
-        "post_order":descriptor.post_order.as_ref().map(|order| order_json(&order.keys, order.skip, order.fetch)).transpose()?,
-        "wire_schema_sha256":retention::schema_digest(&descriptor.wire_schema)?,
-        "output_schema_sha256":retention::schema_digest(&descriptor.output_schema)?});
+    let mut value =
+        native_output_base_json(descriptor, aggregates, keys, key_inputs, input_checks)?;
     if let Some(key_layout) = &descriptor.key_layout {
         value["key_layout"] = json!(key_layout);
     }
@@ -271,6 +266,22 @@ fn native_output_json(
         value["ordered_last"] = ordered_last_json(ordered)?;
     }
     Ok(value)
+}
+
+fn native_output_base_json(
+    descriptor: &NativeStateDescriptor,
+    aggregates: &[Value],
+    keys: &Value,
+    key_inputs: &[Value],
+    input_checks: &[Value],
+) -> Result<Value> {
+    Ok(json!({"policy":descriptor.policy, "keys":keys,
+        "key_inputs":key_inputs, "input_checks":input_checks, "aggregates":aggregates,
+        "projection":descriptor.projection.iter().map(input_json).collect::<Result<Vec<_>>>()?,
+        "post_filter":descriptor.post_filter.as_ref().map(input_json).transpose()?,
+        "post_order":descriptor.post_order.as_ref().map(|order| order_json(&order.keys, order.skip, order.fetch)).transpose()?,
+        "wire_schema_sha256":retention::schema_digest(&descriptor.wire_schema)?,
+        "output_schema_sha256":retention::schema_digest(&descriptor.output_schema)?}))
 }
 
 fn ordered_last_json(ordered: &OrderedLastDescriptor) -> Result<Value> {

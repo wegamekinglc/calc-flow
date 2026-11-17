@@ -4,7 +4,7 @@
 //! never wait for object writes; durable publication, sink commit and source
 //! acknowledgement happen only in their specified order.
 
-use super::{Result, V4Manifest, V4Store, mismatch, opaque::V4OpaqueAdapter};
+use super::{OperatorV4, Result, V4Manifest, V4Store, mismatch, opaque::V4OpaqueAdapter};
 use crate::state::{
     StateTable,
     table::v4::{V4PersistedTable, V4TableCapture},
@@ -162,57 +162,72 @@ impl V4Coordinator {
     }
 
     pub(in crate::state) async fn persist(&mut self, epoch: u64) -> Result<()> {
+        let Some((freeze, manifest)) = self.take_capture(epoch)? else {
+            return Ok(());
+        };
+        self.persist_table(epoch, freeze, &manifest).await?;
+        self.persist_opaque(epoch).await
+    }
+
+    fn take_capture(
+        &mut self,
+        epoch: u64,
+    ) -> Result<Option<(crate::state::table::TableFreeze, V4Manifest)>> {
         let active = self.active_mut(epoch)?;
         if active.persisted.is_some() {
-            return Ok(());
+            return Ok(None);
         }
-        let (freeze, manifest) = {
-            let active = self.active_mut(epoch)?;
-            if active.persisted.is_some() {
-                return Ok(());
-            }
-            (
-                active
-                    .freeze
-                    .take()
-                    .ok_or_else(|| mismatch("checkpoint capture is absent".into()))?,
-                active
-                    .manifest
-                    .take()
-                    .ok_or_else(|| mismatch("checkpoint manifest is absent".into()))?,
-            )
-        };
+        let freeze = active
+            .freeze
+            .take()
+            .ok_or_else(|| mismatch("checkpoint capture is absent".into()))?;
+        let manifest = active
+            .manifest
+            .take()
+            .ok_or_else(|| mismatch("checkpoint manifest is absent".into()))?;
+        Ok(Some((freeze, manifest)))
+    }
+
+    async fn persist_table(
+        &mut self,
+        epoch: u64,
+        freeze: crate::state::table::TableFreeze,
+        manifest: &V4Manifest,
+    ) -> Result<()> {
         let previous = self.previous.as_ref();
         let (persisted, manifest) = V4TableCapture::new(freeze, previous)
-            .persist_objects(self.store_mut()?, &manifest)
+            .persist_objects(self.store_mut()?, manifest)
             .await?;
         let active = self.active_mut(epoch)?;
         active.persisted = Some(persisted);
         active.manifest = Some(manifest);
-        let adapter = active.opaque.take();
-        if let Some(adapter) = adapter {
-            let owner = adapter.owner().to_owned();
-            let (operator, _) = adapter.persist(self.store_mut()?, epoch).await?;
-            let active = self.active_mut(epoch)?;
-            active
-                .manifest
-                .as_mut()
-                .expect("manifest is present after persistence")
-                .operators
-                .insert(owner, operator);
-            let fingerprint = crate::state::v4::manifest_fingerprint(
-                active
-                    .manifest
-                    .as_ref()
-                    .expect("manifest is present after persistence"),
-            )?;
-            active
-                .manifest
-                .as_mut()
-                .expect("manifest is present after persistence")
-                .manifest_fingerprint = fingerprint;
-            active.opaque_persisted = true;
-        }
+        Ok(())
+    }
+
+    async fn persist_opaque(&mut self, epoch: u64) -> Result<()> {
+        let adapter = self.active_mut(epoch)?.opaque.take();
+        let Some(adapter) = adapter else {
+            return Ok(());
+        };
+        let owner = adapter.owner().to_owned();
+        let (operator, _) = adapter.persist(self.store_mut()?, epoch).await?;
+        let active = self.active_mut(epoch)?;
+        Self::record_opaque_manifest(active, owner, operator)
+    }
+
+    fn record_opaque_manifest(
+        active: &mut ActiveEpoch,
+        owner: String,
+        operator: OperatorV4,
+    ) -> Result<()> {
+        let manifest = active
+            .manifest
+            .as_mut()
+            .expect("manifest is present after persistence");
+        manifest.operators.insert(owner, operator);
+        let fingerprint = crate::state::v4::manifest_fingerprint(manifest)?;
+        manifest.manifest_fingerprint = fingerprint;
+        active.opaque_persisted = true;
         Ok(())
     }
 
@@ -222,9 +237,17 @@ impl V4Coordinator {
     }
 
     pub(in crate::state) fn publish_manifest(&mut self, epoch: u64) -> Result<()> {
+        let Some(manifest) = self.manifest_for_publication(epoch)? else {
+            return Ok(());
+        };
+        let path = self.store_mut()?.publish_manifest(&manifest)?;
+        self.record_manifest_publication(epoch, path)
+    }
+
+    fn manifest_for_publication(&mut self, epoch: u64) -> Result<Option<V4Manifest>> {
         let active = self.active_mut(epoch)?;
         if active.manifest_durable {
-            return Ok(());
+            return Ok(None);
         }
         if active.persisted.is_none() {
             return Err(mismatch("manifest publication precedes persistence".into()));
@@ -234,11 +257,14 @@ impl V4Coordinator {
                 "manifest publication precedes sink pre-commit".into(),
             ));
         }
-        let manifest = active
+        active
             .manifest
             .clone()
-            .ok_or_else(|| mismatch("manifest contents are absent".into()))?;
-        let path = self.store_mut()?.publish_manifest(&manifest)?;
+            .map(Some)
+            .ok_or_else(|| mismatch("manifest contents are absent".into()))
+    }
+
+    fn record_manifest_publication(&mut self, epoch: u64, path: std::path::PathBuf) -> Result<()> {
         let active = self.active_mut(epoch)?;
         if let Some(persisted) = &mut active.persisted {
             persisted.manifest_path.clone_from(&path);
@@ -262,22 +288,7 @@ impl V4Coordinator {
         table: &mut StateTable,
         epoch: u64,
     ) -> Result<()> {
-        let previous = {
-            let active = self
-                .active
-                .as_ref()
-                .ok_or_else(|| mismatch("source acknowledgement has no active epoch".into()))?;
-            if active.epoch != epoch || active.manifest_path.is_none() || !active.sink_committed {
-                return Err(mismatch(
-                    "source acknowledgement precedes sink commit".into(),
-                ));
-            }
-            active
-                .persisted
-                .as_ref()
-                .map(|persisted| persisted.lineage.clone())
-                .ok_or_else(|| mismatch("source acknowledgement has no persisted lineage".into()))?
-        };
+        let previous = self.persisted_for_acknowledgement(epoch)?.lineage.clone();
         table.settle_freeze(epoch, previous)?;
         let active = self
             .active
@@ -287,6 +298,22 @@ impl V4Coordinator {
         self.previous = active.persisted;
         self.recovery = None;
         Ok(())
+    }
+
+    fn persisted_for_acknowledgement(&self, epoch: u64) -> Result<&V4PersistedTable> {
+        let active = self
+            .active
+            .as_ref()
+            .ok_or_else(|| mismatch("source acknowledgement has no active epoch".into()))?;
+        if active.epoch != epoch || active.manifest_path.is_none() || !active.sink_committed {
+            return Err(mismatch(
+                "source acknowledgement precedes sink commit".into(),
+            ));
+        }
+        active
+            .persisted
+            .as_ref()
+            .ok_or_else(|| mismatch("source acknowledgement has no persisted lineage".into()))
     }
 
     pub(in crate::state) fn stop(&mut self) {

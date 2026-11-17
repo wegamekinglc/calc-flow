@@ -8,6 +8,7 @@ use super::{
     IncrementalSql, MemoryReservation, RecordBatch, Result, ScalarValue, Schema, SchemaRef,
     checked_bytes, df_error, ensure_reservation, native_grouped_result,
 };
+use crate::operator::keyed::ExportValue;
 use datafusion::arrow::{
     array::{Array, Int64Array, LargeStringArray, StringArray, UInt64Array},
     datatypes::FieldRef,
@@ -126,40 +127,28 @@ impl IncrementalSql {
     ) -> Result<NativeStateDescriptor> {
         let reservation = self.descriptor_reservation(name)?;
         let (key_fields, key_inputs) = self.native_keys_descriptor(name)?;
+        let aggregates = self.native_aggregate_descriptor(name)?;
+        let output = self.native_output_descriptor(name)?;
+        let (state_fields, ordered_last) = self.native_state_layout(name)?;
+        let expression_identity_bytes = Self::native_expression_identity_bytes(
+            name,
+            &key_inputs,
+            &aggregates,
+            &output,
+            ordered_last.as_ref(),
+        )?;
         let NativeAggregateDescriptor {
             aggregate_names,
             aggregate_inputs,
             count_all_rows,
             aggregate_filters,
             input_checks,
-        } = self.native_aggregate_descriptor(name)?;
+        } = aggregates;
         let NativeOutputDescriptor {
             projection,
             post_filter,
             post_order,
-        } = self.native_output_descriptor(name)?;
-        let (state_fields, ordered_last) = self.native_state_layout(name)?;
-        let expression_identity_bytes = aggregate_inputs
-            .iter()
-            .flatten()
-            .chain(&key_inputs)
-            .chain(aggregate_filters.iter().flatten())
-            .chain(&input_checks)
-            .chain(&projection)
-            .chain(&post_filter)
-            .chain(
-                post_order
-                    .iter()
-                    .flat_map(|order| order.keys.iter().map(|key| &key.0)),
-            )
-            .chain(
-                ordered_last
-                    .iter()
-                    .flat_map(|ordered| ordered.keys.iter().map(|key| &key.0)),
-            )
-            .try_fold(0, |bytes, input| {
-                checked_bytes(bytes, [(input.identity_bytes(name)?, 1)], name)
-            })?;
+        } = output;
         let result_fields = self
             .aggregates
             .iter()
@@ -215,6 +204,38 @@ impl IncrementalSql {
                 .map(hex::encode),
             _reservation: reservation,
         })
+    }
+
+    fn native_expression_identity_bytes(
+        name: &str,
+        key_inputs: &[NativeAggregateInput],
+        aggregates: &NativeAggregateDescriptor,
+        output: &NativeOutputDescriptor,
+        ordered_last: Option<&OrderedLastDescriptor>,
+    ) -> Result<usize> {
+        aggregates
+            .aggregate_inputs
+            .iter()
+            .flatten()
+            .chain(key_inputs)
+            .chain(aggregates.aggregate_filters.iter().flatten())
+            .chain(&aggregates.input_checks)
+            .chain(&output.projection)
+            .chain(&output.post_filter)
+            .chain(
+                output
+                    .post_order
+                    .iter()
+                    .flat_map(|order| order.keys.iter().map(|key| &key.0)),
+            )
+            .chain(
+                ordered_last
+                    .into_iter()
+                    .flat_map(|ordered| ordered.keys.iter().map(|key| &key.0)),
+            )
+            .try_fold(0, |bytes, input| {
+                checked_bytes(bytes, [(input.identity_bytes(name)?, 1)], name)
+            })
     }
 
     fn native_aggregate_descriptor(&self, name: &str) -> Result<NativeAggregateDescriptor> {
@@ -439,12 +460,7 @@ impl IncrementalSql {
         name: &str,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<PaidNativeStateRecords> {
-        let mut descriptor = self.native_descriptor(name)?;
-        let rows = slots.map_or(self.group_count(), <[usize]>::len);
-        descriptor.group_count = rows;
-        let charge = self.keyed_export_charge(&descriptor, rows, slots, name)?;
-        let reservation = self.scratch.new_empty();
-        ensure_reservation(&reservation, charge, name)?;
+        let (descriptor, reservation) = self.prepare_keyed_export(slots, name)?;
         let records = self.keyed_export_records(slots, descriptor.wire_schema.clone(), check)?;
         check()?;
         Ok(PaidNativeStateRecords::new(
@@ -452,6 +468,20 @@ impl IncrementalSql {
             descriptor,
             reservation,
         ))
+    }
+
+    fn prepare_keyed_export(
+        &self,
+        slots: Option<&[usize]>,
+        name: &str,
+    ) -> Result<(NativeStateDescriptor, MemoryReservation)> {
+        let mut descriptor = self.native_descriptor(name)?;
+        let rows = slots.map_or(self.group_count(), <[usize]>::len);
+        descriptor.group_count = rows;
+        let charge = self.keyed_export_charge(&descriptor, rows, slots, name)?;
+        let reservation = self.scratch.new_empty();
+        ensure_reservation(&reservation, charge, name)?;
+        Ok((descriptor, reservation))
     }
 
     fn keyed_export_charge(
@@ -496,25 +526,28 @@ impl IncrementalSql {
         }
     }
 
+    fn keyed_export_rows(
+        &self,
+        slots: Option<&[usize]>,
+        name: &str,
+    ) -> Result<Vec<Vec<ExportValue>>> {
+        if let Some(keyed) = &self.keyed_sum {
+            keyed.export_rows(slots)
+        } else if let Some(keyed) = &self.keyed_state {
+            keyed.export_rows(slots)
+        } else {
+            Err(df_error(name, "keyed aggregate plan is missing"))
+        }
+    }
+
     async fn export_keyed_async(
         &self,
         slots: Option<Vec<usize>>,
         name: &str,
         mut check: impl FnMut() -> Result<()>,
     ) -> Result<PaidNativeStateRecords> {
-        let mut descriptor = self.native_descriptor(name)?;
-        let rows = slots.as_ref().map_or(self.group_count(), Vec::len);
-        descriptor.group_count = rows;
-        let charge = self.keyed_export_charge(&descriptor, rows, slots.as_deref(), name)?;
-        let reservation = self.scratch.new_empty();
-        ensure_reservation(&reservation, charge, name)?;
-        let rows = if let Some(keyed) = &self.keyed_sum {
-            keyed.export_rows(slots.as_deref())?
-        } else if let Some(keyed) = &self.keyed_state {
-            keyed.export_rows(slots.as_deref())?
-        } else {
-            return Err(df_error(name, "keyed aggregate plan is missing"));
-        };
+        let (descriptor, reservation) = self.prepare_keyed_export(slots.as_deref(), name)?;
+        let rows = self.keyed_export_rows(slots.as_deref(), name)?;
         let mut cursor = export::ScalarExportCursor::new(rows, descriptor, reservation, name);
         loop {
             if cursor.step(&mut check)? {
@@ -533,14 +566,22 @@ impl IncrementalSql {
         check: &dyn Fn() -> Result<()>,
     ) -> Result<PaidNativeStateRecords> {
         if self.keyed_sum.is_some() || self.keyed_state.is_some() {
-            let mut slots = self.dirty.slots().to_vec();
-            slots.sort_unstable();
-            return self.export_keyed(Some(&slots), name, &mut || check());
+            return self.export_dirty_keyed(name, check);
         }
         let mut cursor = export::ExportCursor::dirty(self, name)?;
         while !cursor.step(&mut || check())? {}
         check()?;
         Ok(cursor.finish())
+    }
+
+    fn export_dirty_keyed(
+        &self,
+        name: &str,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<PaidNativeStateRecords> {
+        let mut slots = self.dirty.slots().to_vec();
+        slots.sort_unstable();
+        self.export_keyed(Some(&slots), name, &mut || check())
     }
 
     pub(in crate::operator::sql) async fn export_dirty_state_async(

@@ -174,6 +174,27 @@ impl BooleanExtrema {
         }
     }
 
+    fn update_row(
+        &mut self,
+        values: &BooleanArray,
+        row: usize,
+        group: usize,
+        opt_filter: Option<&BooleanArray>,
+    ) {
+        if opt_filter.is_some_and(|filter| filter.is_null(row) || !filter.value(row))
+            || values.is_null(row)
+        {
+            return;
+        }
+        let incoming = values.value(row);
+        let current = &mut self.values[group];
+        *current = Some(match *current {
+            None => incoming,
+            Some(current) if self.maximum => current.max(incoming),
+            Some(current) => current.min(incoming),
+        });
+    }
+
     fn take(&mut self, emit_to: EmitTo) -> Vec<Option<bool>> {
         match emit_to {
             EmitTo::All => std::mem::take(&mut self.values),
@@ -201,18 +222,7 @@ impl GroupsAccumulator for BooleanExtrema {
             .ok_or_else(|| DataFusionError::Plan("Boolean extrema input differs".into()))?;
         self.values.resize(total_num_groups, None);
         for (row, group) in group_indices.iter().enumerate() {
-            if opt_filter.is_some_and(|filter| filter.is_null(row) || !filter.value(row))
-                || values.is_null(row)
-            {
-                continue;
-            }
-            let incoming = values.value(row);
-            let current = &mut self.values[*group];
-            *current = Some(match *current {
-                None => incoming,
-                Some(current) if self.maximum => current.max(incoming),
-                Some(current) => current.min(incoming),
-            });
+            self.update_row(values, row, *group, opt_filter);
         }
         Ok(())
     }

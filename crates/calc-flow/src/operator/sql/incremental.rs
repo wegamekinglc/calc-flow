@@ -532,15 +532,27 @@ impl PartialGroups {
         }
         self.merge_integer_history(committed, context, name).await?;
         let states = self.emit_states(name)?;
-        for (rank, slot) in self.slots.iter().enumerate() {
+        self.merge_candidate_ranks(candidates, &states, context, name)
+            .await
+    }
+
+    async fn merge_candidate_ranks(
+        &mut self,
+        candidates: &mut CandidateMap,
+        states: &[Vec<ArrayRef>],
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<()> {
+        for rank in 0..self.slots.len() {
             if rank % 128 == 0 {
                 context.check_cancelled()?;
                 tokio::task::yield_now().await;
             }
+            let slot = self.slots[rank];
             let candidate = candidates
-                .get_mut(slot)
+                .get_mut(&slot)
                 .expect("candidate for partial group");
-            self.merge_rank(candidate, &states, rank, name)?;
+            self.merge_rank(candidate, states, rank, name)?;
         }
         Ok(())
     }
@@ -702,6 +714,14 @@ struct GroupContainer {
     groups: Vec<Group>,
     index: KeyIndex,
     reservation: MemoryReservation,
+}
+
+type PreparedKeyedRecords = (Vec<RecordBatch>, usize);
+
+struct PreparedKeyedOutput {
+    records: Vec<RecordBatch>,
+    checkpointing: bool,
+    dirty: Option<dirty::DirtyGroups>,
 }
 
 pub(super) struct Transaction {
@@ -896,32 +916,24 @@ impl IncrementalSql {
         let Some(aggregate_bytes) = aggregate_bytes(&aggregates, name)? else {
             return Ok(None);
         };
-        let Some(NativeStrategy {
+        let Some(NativePlan {
             global_records,
             sequential,
-        }) = native_strategy(
+            converter,
+            finalizer_bytes,
+            keyed_sum,
+            keyed_state,
+        }) = native_plan(
             runtime,
-            &runtime.incremental_reservation(name),
             raw,
             &aggregates,
             &keys,
-            (predicate.is_some(), input_nodes),
+            (predicate.is_some(), input_nodes, aggregate_bytes),
+            &reservation,
             name,
         )?
         else {
             return Ok(None);
-        };
-        let (converter, finalizer_bytes) = grouped_layout(&keys, &aggregates, name)?;
-        let keyed_sum = keyed_sum::KeyedSum::plan(&keys, &aggregates, reservation.new_empty())?;
-        let keyed_state = if keyed_sum.is_some() {
-            None
-        } else {
-            Some(keyed_state::KeyedState::new(
-                &keys,
-                &aggregates,
-                aggregate_bytes,
-                reservation.new_empty(),
-            )?)
         };
         Ok(Some(Self::from_parts(PlanParts {
             keyed_sum,
@@ -1078,6 +1090,11 @@ impl IncrementalSql {
         name: &str,
     ) -> Result<()> {
         policy.validate(&self.checkpoint_policy(), rows, name)?;
+        self.ensure_grouped_proof_empty(name)?;
+        self.restore_sequential_proof(policy, groups, name)
+    }
+
+    fn ensure_grouped_proof_empty(&self, name: &str) -> Result<()> {
         if !self.groups.is_empty()
             || !self.index.is_empty()
             || self
@@ -1091,20 +1108,30 @@ impl IncrementalSql {
         {
             return Err(df_error(name, "restored proof requires an empty candidate"));
         }
-        if let grouped_float::Policy::SequentialGroupedFloatV1(policy) = policy {
-            let layout = grouped_float::group_layout(&self.keys).expect("certified grouped key");
-            let rows =
-                usize::try_from(policy.max_record_rows).map_err(|error| df_error(name, error))?;
-            self.sequential = Some(grouped_float::Proof::new(
-                self.scratch.new_empty(),
-                policy.config,
-                groups,
-                rows,
-                layout,
-                &self.aggregates,
-                name,
-            )?);
-        }
+        Ok(())
+    }
+
+    fn restore_sequential_proof(
+        &mut self,
+        policy: &grouped_float::Policy,
+        groups: usize,
+        name: &str,
+    ) -> Result<()> {
+        let grouped_float::Policy::SequentialGroupedFloatV1(policy) = policy else {
+            return Ok(());
+        };
+        let layout = grouped_float::group_layout(&self.keys).expect("certified grouped key");
+        let rows =
+            usize::try_from(policy.max_record_rows).map_err(|error| df_error(name, error))?;
+        self.sequential = Some(grouped_float::Proof::new(
+            self.scratch.new_empty(),
+            policy.config,
+            groups,
+            rows,
+            layout,
+            &self.aggregates,
+            name,
+        )?);
         Ok(())
     }
 
@@ -1276,7 +1303,7 @@ impl IncrementalSql {
     pub(super) async fn update_with_input_owner(
         &mut self,
         batch: &Batch,
-        input_owner: Option<Arc<MemoryReservation>>,
+        mut input_owner: Option<Arc<MemoryReservation>>,
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<Transaction> {
@@ -1294,28 +1321,16 @@ impl IncrementalSql {
         let (reservation, workspace, mut candidates) =
             self.input_candidates(batch.num_rows(), name)?;
         candidates.proof = proof;
-        let mut coalesced = None;
-        let rows_processed = if self.global_records.is_some() {
-            coalesced = self
-                .update_global_records(
-                    table.batches(),
-                    input_owner,
-                    candidates.groups.get_mut(&0).expect("global candidate"),
-                    context,
-                    name,
-                )
-                .await?;
-            batch.num_rows()
-        } else {
-            self.update_records(
+        let (rows_processed, coalesced) = self
+            .update_candidate_records(
                 table.batches(),
+                (batch.num_rows(), &mut input_owner),
                 &mut candidates,
                 (&reservation, workspace),
                 context,
                 name,
             )
-            .await?
-        };
+            .await?;
         self.finish_transaction(
             candidates,
             reservation,
@@ -1325,6 +1340,34 @@ impl IncrementalSql {
             (batch.num_rows() != 0, rows_processed),
         )
         .await
+    }
+
+    async fn update_candidate_records(
+        &self,
+        records: &[RecordBatch],
+        input: (usize, &mut Option<Arc<MemoryReservation>>),
+        candidates: &mut InputCandidates,
+        workspace: (&MemoryReservation, usize),
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<(usize, Option<Arc<global_record::coalescer::State>>)> {
+        if self.global_records.is_some() {
+            let coalesced = self
+                .update_global_records(
+                    records,
+                    input.1.take(),
+                    candidates.groups.get_mut(&0).expect("global candidate"),
+                    context,
+                    name,
+                )
+                .await?;
+            Ok((input.0, coalesced))
+        } else {
+            let rows = self
+                .update_records(records, candidates, workspace, context, name)
+                .await?;
+            Ok((rows, None))
+        }
     }
 
     async fn update_global_keyed(
@@ -1370,17 +1413,7 @@ impl IncrementalSql {
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<usize> {
-        if self.keys.is_empty() {
-            transaction.init_global(&self.aggregates, name)?;
-        } else {
-            transaction.init_partial(
-                &self.aggregates,
-                self.ordered_last,
-                self.sequential.is_some(),
-                self.reservation.new_empty(),
-                name,
-            )?;
-        }
+        self.init_keyed_grouping(transaction, name)?;
         let rows = self.update_keyed_aggregate_records(
             records,
             transaction,
@@ -1389,6 +1422,36 @@ impl IncrementalSql {
             context,
             name,
         )?;
+        self.finish_grouped_keyed(transaction, rows, context, name)
+            .await?;
+        Ok(rows)
+    }
+
+    fn init_keyed_grouping(
+        &self,
+        transaction: &mut keyed_state::Transaction,
+        name: &str,
+    ) -> Result<()> {
+        if self.keys.is_empty() {
+            transaction.init_global(&self.aggregates, name)
+        } else {
+            transaction.init_partial(
+                &self.aggregates,
+                self.ordered_last,
+                self.sequential.is_some(),
+                self.reservation.new_empty(),
+                name,
+            )
+        }
+    }
+
+    async fn finish_grouped_keyed(
+        &self,
+        transaction: &mut keyed_state::Transaction,
+        rows: usize,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<()> {
         if rows != 0 || !self.ordered_last {
             transaction
                 .finish(
@@ -1403,13 +1466,13 @@ impl IncrementalSql {
                 )
                 .await?;
         }
-        Ok(rows)
+        Ok(())
     }
 
     async fn update_keyed_aggregates(
         &self,
         batch: &Batch,
-        input_owner: Option<Arc<MemoryReservation>>,
+        mut input_owner: Option<Arc<MemoryReservation>>,
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<Transaction> {
@@ -1418,49 +1481,32 @@ impl IncrementalSql {
         let (reservation, workspace) = self.input_workspace(batch.num_rows(), name)?;
         let mut proof = self.prepare_grouped_proof(table.batches(), name)?;
         let mut transaction = keyed.begin(self.compact_budget)?;
-        let (rows, coalesced) = if self.global_records.is_some() {
-            self.update_global_keyed(
+        let (rows, coalesced) = self
+            .update_keyed_transaction(
                 &mut transaction,
                 table.batches(),
-                input_owner,
+                (&mut input_owner, (&reservation, workspace)),
+                &mut proof,
                 context,
                 name,
             )
-            .await?
-        } else {
-            (
-                self.update_grouped_keyed(
-                    &mut transaction,
-                    table.batches(),
-                    &mut proof,
-                    (&reservation, workspace),
-                    context,
-                    name,
-                )
-                .await?,
-                None,
-            )
-        };
+            .await?;
         #[cfg(not(test))]
         let _ = rows;
         let finalizer_reservation = self.reservation.new_empty();
         ensure_reservation(&finalizer_reservation, self.finalizer_bytes, name)?;
-        let output_charge = self.keyed_sum_output_charge(&transaction, name)?;
-        reservation
-            .try_grow(output_charge)
-            .map_err(|error| df_error(name, error))?;
-        let mut check = || context.check_cancelled();
-        self.snapshot_keys.begin();
-        let records = self.keyed_snapshot_records(&transaction, &mut check, name)?;
-        let records = self
-            .apply_output_order(records, &reservation, context, name)
+        let PreparedKeyedOutput {
+            records,
+            checkpointing,
+            dirty,
+        } = self
+            .prepare_keyed_output(
+                self.prepare_keyed_records(&transaction, &reservation, context, name),
+                &reservation,
+                context,
+                name,
+            )
             .await?;
-        let checkpointing = context.job().checkpointing();
-        let dirty = if checkpointing {
-            self.dirty.prepare(keyed.len(), name)?
-        } else {
-            None
-        };
         Ok(Transaction {
             keyed_sum: None,
             keyed_state: Some(transaction),
@@ -1478,6 +1524,29 @@ impl IncrementalSql {
             proof,
             coalesced,
         })
+    }
+
+    async fn update_keyed_transaction(
+        &self,
+        transaction: &mut keyed_state::Transaction,
+        records: &[RecordBatch],
+        input: (
+            &mut Option<Arc<MemoryReservation>>,
+            (&MemoryReservation, usize),
+        ),
+        proof: &mut Option<grouped_float::Proof>,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<(usize, Option<Arc<global_record::coalescer::State>>)> {
+        if self.global_records.is_some() {
+            self.update_global_keyed(transaction, records, input.0.take(), context, name)
+                .await
+        } else {
+            let rows = self
+                .update_grouped_keyed(transaction, records, proof, input.1, context, name)
+                .await?;
+            Ok((rows, None))
+        }
     }
 
     fn update_keyed_aggregate_records(
@@ -1562,6 +1631,18 @@ impl IncrementalSql {
             return Ok(());
         }
         let input = self.chunk_input(chunk, name)?;
+        self.apply_keyed_aggregate_chunk(chunk, &input, selection, transaction, context, name)
+    }
+
+    fn apply_keyed_aggregate_chunk(
+        &self,
+        chunk: &RecordBatch,
+        input: &ChunkInput,
+        selection: Option<&BooleanArray>,
+        transaction: &mut keyed_state::Transaction,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<()> {
         let filters = input.filters.iter().map(Option::as_ref).collect::<Vec<_>>();
         let combined = predicate::combine(selection, &filters, self.aggregates.len(), name)?;
         let filters = if selection.is_some() {
@@ -1578,8 +1659,7 @@ impl IncrementalSql {
             &self.variable_extrema,
             &mut || context.check_cancelled(),
             name,
-        )?;
-        Ok(())
+        )
     }
 
     async fn update_keyed_sum(
@@ -1600,22 +1680,18 @@ impl IncrementalSql {
         )?;
         #[cfg(not(test))]
         let _ = rows;
-        let output_charge = self.keyed_sum_output_charge(&transaction, name)?;
-        reservation
-            .try_grow(output_charge)
-            .map_err(|error| df_error(name, error))?;
-        let mut check = || context.check_cancelled();
-        self.snapshot_keys.begin();
-        let records = self.keyed_snapshot_records(&transaction, &mut check, name)?;
-        let records = self
-            .apply_output_order(records, &reservation, context, name)
+        let PreparedKeyedOutput {
+            records,
+            checkpointing,
+            dirty,
+        } = self
+            .prepare_keyed_output(
+                self.prepare_keyed_records(&transaction, &reservation, context, name),
+                &reservation,
+                context,
+                name,
+            )
             .await?;
-        let checkpointing = context.job().checkpointing();
-        let dirty = if checkpointing {
-            self.dirty.prepare(keyed.len(), name)?
-        } else {
-            None
-        };
         Ok(Transaction {
             keyed_sum: Some(transaction),
             keyed_state: None,
@@ -1695,6 +1771,48 @@ impl IncrementalSql {
         )
     }
 
+    fn prepare_keyed_records<T: SnapshotTransaction>(
+        &self,
+        transaction: &T,
+        reservation: &MemoryReservation,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<PreparedKeyedRecords> {
+        let output_charge = self.keyed_sum_output_charge(transaction, name)?;
+        reservation
+            .try_grow(output_charge)
+            .map_err(|error| df_error(name, error))?;
+        let mut check = || context.check_cancelled();
+        self.snapshot_keys.begin();
+        let records = self.keyed_snapshot_records(transaction, &mut check, name)?;
+        let groups = transaction.group_count();
+        Ok((records, groups))
+    }
+
+    async fn prepare_keyed_output(
+        &self,
+        prepared: Result<PreparedKeyedRecords>,
+        reservation: &MemoryReservation,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<PreparedKeyedOutput> {
+        let (records, groups) = prepared?;
+        let records = self
+            .apply_output_order(records, reservation, context, name)
+            .await?;
+        let checkpointing = context.job().checkpointing();
+        let dirty = if checkpointing {
+            self.dirty.prepare(groups, name)?
+        } else {
+            None
+        };
+        Ok(PreparedKeyedOutput {
+            records,
+            checkpointing,
+            dirty,
+        })
+    }
+
     fn keyed_sum_output_charge<T: SnapshotTransaction>(
         &self,
         transaction: &T,
@@ -1728,26 +1846,42 @@ impl IncrementalSql {
         let mut records = Vec::with_capacity(count.div_ceil(CHUNK_ROWS));
         for start in (0..count).step_by(CHUNK_ROWS) {
             check()?;
-            let chunk = start / CHUNK_ROWS;
-            let first_key = transaction.first_key(start)?;
-            if !dirty.contains(&chunk)
-                && let Some(columns) = self.snapshot_keys.get_clean(chunk, &first_key)
-            {
-                records.push(
-                    RecordBatch::try_new(schema.clone(), columns.to_vec())
-                        .map_err(|error| df_error(name, error))?,
-                );
-                continue;
-            }
-            let end = count.min(start + CHUNK_ROWS);
-            let aggregate = transaction.record(start, end, self.aggregate_schema.clone(), check)?;
-            let record = self.keyed_output_record(&aggregate, name)?;
-            let columns = Arc::<[ArrayRef]>::from(record.columns().to_vec());
-            self.snapshot_keys
-                .stage(chunk, record.num_rows(), first_key, columns);
-            records.push(record);
+            records.push(self.keyed_snapshot_chunk(
+                transaction,
+                start,
+                &dirty,
+                &schema,
+                check,
+                name,
+            )?);
         }
         Ok(records)
+    }
+
+    fn keyed_snapshot_chunk<T: SnapshotTransaction>(
+        &self,
+        transaction: &T,
+        start: usize,
+        dirty: &std::collections::BTreeSet<usize>,
+        schema: &SchemaRef,
+        check: &mut dyn FnMut() -> Result<()>,
+        name: &str,
+    ) -> Result<RecordBatch> {
+        let chunk = start / CHUNK_ROWS;
+        let first_key = transaction.first_key(start)?;
+        if !dirty.contains(&chunk)
+            && let Some(columns) = self.snapshot_keys.get_clean(chunk, &first_key)
+        {
+            return RecordBatch::try_new(schema.clone(), columns.to_vec())
+                .map_err(|error| df_error(name, error));
+        }
+        let end = transaction.group_count().min(start + CHUNK_ROWS);
+        let aggregate = transaction.record(start, end, self.aggregate_schema.clone(), check)?;
+        let record = self.keyed_output_record(&aggregate, name)?;
+        let columns = Arc::<[ArrayRef]>::from(record.columns().to_vec());
+        self.snapshot_keys
+            .stage(chunk, record.num_rows(), first_key, columns);
+        Ok(record)
     }
 
     fn keyed_snapshot_schema(&self) -> SchemaRef {
@@ -2908,57 +3042,78 @@ impl IncrementalSql {
         Ok((groups, new_groups))
     }
 
-    pub fn commit(&mut self, mut transaction: Transaction) {
-        if let Some(keyed) = transaction.keyed_sum.take() {
-            let committed = keyed.commit();
-            if let Some(dirty) = transaction.dirty {
-                self.dirty = dirty;
-            }
-            if transaction.checkpointing && transaction.track_updates {
-                for group in committed.affected {
-                    self.dirty.mark(group.index());
-                }
-            }
-            self.snapshot_keys.install_staged();
+    pub fn commit(&mut self, transaction: Transaction) {
+        if transaction.keyed_sum.is_some() {
+            self.commit_keyed_sum(transaction);
             return;
         }
-        if let Some(keyed) = transaction.keyed_state.take() {
-            let committed = keyed.commit();
-            if let Some(coalesced) = transaction.coalesced {
-                self.global_records
-                    .as_mut()
-                    .expect("global coalescer model")
-                    .coalesced = Some(coalesced);
-            }
-            if let Some(dirty) = transaction.dirty {
-                self.dirty = dirty;
-            }
-            if let Some(proof) = transaction.proof {
-                self.sequential = Some(proof);
-            }
-            if transaction.checkpointing && transaction.track_updates {
-                for group in committed.affected {
-                    self.dirty.mark(group.index());
-                }
-            }
-            self.snapshot_keys.install_staged();
+        if transaction.keyed_state.is_some() {
+            self.commit_keyed_state(transaction);
             return;
         }
-        if let Some(coalesced) = transaction.coalesced {
+        self.commit_standard(transaction);
+    }
+
+    fn commit_keyed_sum(&mut self, mut transaction: Transaction) {
+        let committed = transaction
+            .keyed_sum
+            .take()
+            .expect("keyed SUM transaction")
+            .commit();
+        self.install_dirty(transaction.dirty);
+        if transaction.checkpointing && transaction.track_updates {
+            for group in committed.affected {
+                self.dirty.mark(group.index());
+            }
+        }
+        self.snapshot_keys.install_staged();
+    }
+
+    fn commit_keyed_state(&mut self, mut transaction: Transaction) {
+        let committed = transaction
+            .keyed_state
+            .take()
+            .expect("keyed aggregate transaction")
+            .commit();
+        self.install_coalesced(transaction.coalesced);
+        self.install_dirty(transaction.dirty);
+        self.install_proof(transaction.proof);
+        if transaction.checkpointing && transaction.track_updates {
+            for group in committed.affected {
+                self.dirty.mark(group.index());
+            }
+        }
+        self.snapshot_keys.install_staged();
+    }
+
+    fn install_coalesced(&mut self, coalesced: Option<Arc<global_record::coalescer::State>>) {
+        if let Some(coalesced) = coalesced {
             self.global_records
                 .as_mut()
                 .expect("global coalescer model")
                 .coalesced = Some(coalesced);
         }
-        if let Some(dirty) = transaction.dirty {
+    }
+
+    fn install_dirty(&mut self, dirty: Option<dirty::DirtyGroups>) {
+        if let Some(dirty) = dirty {
             self.dirty = dirty;
         }
+    }
+
+    fn install_proof(&mut self, proof: Option<grouped_float::Proof>) {
+        if let Some(proof) = proof {
+            self.sequential = Some(proof);
+        }
+    }
+
+    fn commit_standard(&mut self, transaction: Transaction) {
+        self.install_coalesced(transaction.coalesced);
+        self.install_dirty(transaction.dirty);
         if let Some(container) = transaction.container {
             self.install_container(container);
         }
-        if let Some(proof) = transaction.proof {
-            self.sequential = Some(proof);
-        }
+        self.install_proof(transaction.proof);
         for (slot, group) in transaction.groups {
             if transaction.checkpointing && transaction.track_updates {
                 self.dirty.mark(slot);
@@ -3605,6 +3760,61 @@ fn plan_work(
         input_checks,
         input_nodes,
     })
+}
+
+struct NativePlan {
+    global_records: Option<global_record::Proof>,
+    sequential: Option<grouped_float::Proof>,
+    converter: Option<RowConverter>,
+    finalizer_bytes: usize,
+    keyed_sum: Option<keyed_sum::KeyedSum>,
+    keyed_state: Option<keyed_state::KeyedState>,
+}
+
+fn native_plan(
+    runtime: &DataFusionRuntime,
+    raw: &LogicalPlan,
+    aggregates: &[Arc<AggregateFunctionExpr>],
+    keys: &[GroupKey],
+    input: (bool, usize, usize),
+    reservation: &MemoryReservation,
+    name: &str,
+) -> Result<Option<NativePlan>> {
+    let Some(NativeStrategy {
+        global_records,
+        sequential,
+    }) = native_strategy(
+        runtime,
+        &runtime.incremental_reservation(name),
+        raw,
+        aggregates,
+        keys,
+        (input.0, input.1),
+        name,
+    )?
+    else {
+        return Ok(None);
+    };
+    let (converter, finalizer_bytes) = grouped_layout(keys, aggregates, name)?;
+    let keyed_sum = keyed_sum::KeyedSum::plan(keys, aggregates, reservation.new_empty())?;
+    let keyed_state = if keyed_sum.is_some() {
+        None
+    } else {
+        Some(keyed_state::KeyedState::new(
+            keys,
+            aggregates,
+            input.2,
+            reservation.new_empty(),
+        )?)
+    };
+    Ok(Some(NativePlan {
+        global_records,
+        sequential,
+        converter,
+        finalizer_bytes,
+        keyed_sum,
+        keyed_state,
+    }))
 }
 
 struct NativeStrategy {

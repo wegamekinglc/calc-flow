@@ -26,7 +26,7 @@ use crate::{
     json::parse_json_value,
     state::v4::{
         ArrowPayload, NewObject, ObjectKind, ObjectPayload, OperatorV4, V4Handle, V4Manifest,
-        V4Store, format_error, manifest_fingerprint, mismatch,
+        V4Store, format_error, manifest::PartitionV4, manifest_fingerprint, mismatch,
     },
 };
 
@@ -85,9 +85,23 @@ impl PartitionIndex {
     }
 
     pub(in crate::state) fn validate(&self, epoch: u64) -> Result<()> {
+        self.validate_identity()?;
+        self.validate_page_order()?;
+        self.validate_free_slots()?;
+        for page in &self.pages {
+            self.validate_page(page, epoch)?;
+        }
+        Ok(())
+    }
+
+    fn validate_identity(&self) -> Result<()> {
         if self.format_version != 4 || self.kind != "partition_index" {
             return Err(mismatch("partition index identity mismatch".into()));
         }
+        Ok(())
+    }
+
+    fn validate_page_order(&self) -> Result<()> {
         if self
             .pages
             .windows(2)
@@ -97,6 +111,10 @@ impl PartitionIndex {
                 "page entries are not strictly ordered and unique".into(),
             ));
         }
+        Ok(())
+    }
+
+    fn validate_free_slots(&self) -> Result<()> {
         let free = self.free_slots.iter().copied().collect::<BTreeSet<_>>();
         if free.len() != self.free_slots.len()
             || self.free_slots.windows(2).any(|pair| pair[0] >= pair[1])
@@ -112,32 +130,34 @@ impl PartitionIndex {
                 "partition free-slot metadata is inconsistent".into(),
             ));
         }
-        for page in &self.pages {
-            if page.page_id.key_group != self.key_group {
-                return Err(mismatch("page key group differs from its partition".into()));
-            }
-            if page.byte_len != page.handle.byte_len || page.sha256 != page.handle.sha256 {
-                return Err(mismatch("page digest differs from handle".into()));
-            }
-            if page.handle.epoch > epoch {
-                return Err(mismatch("page handle epoch or length mismatch".into()));
-            }
-            let object_id = format!(
-                "{}/{}/{}",
-                page.page_id.key_group, page.page_id.slot, page.page_id.generation
-            );
-            if page.handle.object_id != object_id {
-                return Err(mismatch("page identity differs from handle".into()));
-            }
-            page.handle.validate(epoch)?;
-            let next = self
-                .next_generations
-                .get(&page.page_id.slot)
-                .copied()
-                .unwrap_or(0);
-            if page.page_id.generation >= next {
-                return Err(mismatch("page generation metadata regressed".into()));
-            }
+        Ok(())
+    }
+
+    fn validate_page(&self, page: &PageEntry, epoch: u64) -> Result<()> {
+        if page.page_id.key_group != self.key_group {
+            return Err(mismatch("page key group differs from its partition".into()));
+        }
+        if page.byte_len != page.handle.byte_len || page.sha256 != page.handle.sha256 {
+            return Err(mismatch("page digest differs from handle".into()));
+        }
+        if page.handle.epoch > epoch {
+            return Err(mismatch("page handle epoch or length mismatch".into()));
+        }
+        let object_id = format!(
+            "{}/{}/{}",
+            page.page_id.key_group, page.page_id.slot, page.page_id.generation
+        );
+        if page.handle.object_id != object_id {
+            return Err(mismatch("page identity differs from handle".into()));
+        }
+        page.handle.validate(epoch)?;
+        let next = self
+            .next_generations
+            .get(&page.page_id.slot)
+            .copied()
+            .unwrap_or(0);
+        if page.page_id.generation >= next {
+            return Err(mismatch("page generation metadata regressed".into()));
         }
         Ok(())
     }
@@ -170,82 +190,11 @@ impl V4TableCapture {
         manifest: &V4Manifest,
     ) -> Result<(V4PersistedTable, V4Manifest)> {
         let epoch = self.freeze.epoch;
-        let mut objects = Vec::new();
-        let mut identities = BTreeMap::new();
-        for partition in &self.freeze.partitions {
-            for change in &partition.changes {
-                if let FrozenChange::Write(page) = change {
-                    let object = page_object(page);
-                    identities.insert((object.owner.clone(), object.object_id.clone()), page.id());
-                    objects.push(object);
-                }
-            }
-        }
-        let lineage = self.freeze.complete();
-        for partition in lineage.partitions.values() {
-            for page in partition.pages.values() {
-                if !self.previous.contains_key(&page.id()) {
-                    let object = page_object(page);
-                    let identity = (object.owner.clone(), object.object_id.clone());
-                    if let std::collections::btree_map::Entry::Vacant(entry) =
-                        identities.entry(identity)
-                    {
-                        entry.insert(page.id());
-                        objects.push(object);
-                    }
-                }
-            }
-        }
-        let encoded = store.write_objects(epoch, objects).await?;
-        let mut handles = self.previous.clone();
-        for object in encoded {
-            let id = identities
-                .get(&(object.handle.owner.clone(), object.handle.object_id.clone()))
-                .copied()
-                .ok_or_else(|| mismatch("persisted page identity is unknown".into()))?;
-            handles.insert(id, object.handle);
-        }
-        let mut roots = BTreeMap::new();
-        let mut live = BTreeMap::new();
-        let mut root_objects = Vec::new();
-        for (group, partition) in &lineage.partitions {
-            let mut entries = Vec::new();
-            for page in partition.pages.values() {
-                let handle = handles.get(&page.id()).cloned().ok_or_else(|| {
-                    mismatch("partition index references a page without a handle".into())
-                })?;
-                live.insert(page.id(), handle.clone());
-                entries.push(page_entry(page, handle));
-            }
-            let index = PartitionIndex {
-                format_version: 4,
-                kind: "partition_index".into(),
-                key_group: group.0,
-                pages: entries,
-                next_generations: partition.allocator.next_generations.clone(),
-                free_slots: partition.allocator.free_slots.iter().copied().collect(),
-            };
-            index.validate(epoch)?;
-            root_objects.push(NewObject {
-                kind: ObjectKind::PartitionIndex,
-                owner: "rolling".into(),
-                object_id: group.0.to_string(),
-                generation: epoch,
-                payload: ObjectPayload::Json(serde_json::to_value(index).map_err(|error| {
-                    format_error(format!("partition index serialization failed: {error}"))
-                })?),
-            });
-        }
-        let encoded_roots = store.write_objects(epoch, root_objects).await?;
-        for root in encoded_roots {
-            let group = super::core::KeyGroupId(
-                root.handle
-                    .object_id
-                    .parse::<u32>()
-                    .map_err(|_| format_error("partition root key group is invalid".into()))?,
-            );
-            roots.insert(group, root.handle);
-        }
+        let (lineage, objects, identities) = collect_page_objects(self.freeze, &self.previous);
+        let handles =
+            persist_page_handles(store, epoch, objects, &identities, &self.previous).await?;
+        let (root_objects, live) = build_root_objects(&lineage, &handles, epoch)?;
+        let roots = persist_roots(store, epoch, root_objects).await?;
         store.record_carried(
             live.keys()
                 .filter(|id| self.previous.contains_key(*id))
@@ -296,6 +245,160 @@ impl V4TableCapture {
     }
 }
 
+type ObjectIdentity = (String, String);
+type PageHandles = BTreeMap<super::core::PageId, V4Handle>;
+type PageIdentities = BTreeMap<ObjectIdentity, super::core::PageId>;
+type PageCandidate = (ObjectIdentity, super::core::PageId, NewObject);
+
+fn page_candidate(page: &PageRef) -> PageCandidate {
+    let object = page_object(page);
+    let identity = (object.owner.clone(), object.object_id.clone());
+    (identity, page.id(), object)
+}
+
+fn changed_page_objects(freeze: &TableFreeze) -> (Vec<NewObject>, PageIdentities) {
+    let mut objects = Vec::new();
+    let mut identities = BTreeMap::new();
+    for partition in &freeze.partitions {
+        for change in &partition.changes {
+            if let FrozenChange::Write(page) = change {
+                let (identity, id, object) = page_candidate(page);
+                identities.insert(identity, id);
+                objects.push(object);
+            }
+        }
+    }
+    (objects, identities)
+}
+
+fn lineage_page_candidates<'a>(
+    lineage: &'a TableLineage,
+    previous: &'a PageHandles,
+) -> impl Iterator<Item = PageCandidate> + 'a {
+    lineage
+        .partitions
+        .values()
+        .flat_map(|partition| partition.pages.values())
+        .filter(move |page| !previous.contains_key(&page.id()))
+        .map(page_candidate)
+}
+
+fn collect_page_objects(
+    freeze: TableFreeze,
+    previous: &PageHandles,
+) -> (TableLineage, Vec<NewObject>, PageIdentities) {
+    let (mut objects, mut identities) = changed_page_objects(&freeze);
+    let lineage = freeze.complete();
+    for (identity, id, object) in lineage_page_candidates(&lineage, previous) {
+        if let std::collections::btree_map::Entry::Vacant(entry) = identities.entry(identity) {
+            entry.insert(id);
+            objects.push(object);
+        }
+    }
+    (lineage, objects, identities)
+}
+
+async fn persist_page_handles(
+    store: &mut V4Store,
+    epoch: u64,
+    objects: Vec<NewObject>,
+    identities: &PageIdentities,
+    previous: &PageHandles,
+) -> Result<PageHandles> {
+    let encoded = store.write_objects(epoch, objects).await?;
+    let mut handles = previous.clone();
+    for object in encoded {
+        let identity = (object.handle.owner.clone(), object.handle.object_id.clone());
+        let id = identities
+            .get(&identity)
+            .copied()
+            .ok_or_else(|| mismatch("persisted page identity is unknown".into()))?;
+        handles.insert(id, object.handle);
+    }
+    Ok(handles)
+}
+
+fn build_root_objects(
+    lineage: &TableLineage,
+    handles: &PageHandles,
+    epoch: u64,
+) -> Result<(Vec<NewObject>, PageHandles)> {
+    let mut live = BTreeMap::new();
+    let mut root_objects = Vec::new();
+    for (group, partition) in &lineage.partitions {
+        let index = partition_index(*group, partition, handles, epoch)?;
+        live.extend(
+            index
+                .pages
+                .iter()
+                .map(|entry| (page_id(entry), entry.handle.clone())),
+        );
+        root_objects.push(partition_root_object(*group, index, epoch)?);
+    }
+    Ok((root_objects, live))
+}
+
+fn partition_index(
+    group: super::core::KeyGroupId,
+    partition: &super::core::PartitionLineage,
+    handles: &PageHandles,
+    epoch: u64,
+) -> Result<PartitionIndex> {
+    let mut entries = Vec::new();
+    for page in partition.pages.values() {
+        let handle = handles
+            .get(&page.id())
+            .cloned()
+            .ok_or_else(|| mismatch("partition index references a page without a handle".into()))?;
+        entries.push(page_entry(page, handle));
+    }
+    let index = PartitionIndex {
+        format_version: 4,
+        kind: "partition_index".into(),
+        key_group: group.0,
+        pages: entries,
+        next_generations: partition.allocator.next_generations.clone(),
+        free_slots: partition.allocator.free_slots.iter().copied().collect(),
+    };
+    index.validate(epoch)?;
+    Ok(index)
+}
+
+fn partition_root_object(
+    group: super::core::KeyGroupId,
+    index: PartitionIndex,
+    epoch: u64,
+) -> Result<NewObject> {
+    Ok(NewObject {
+        kind: ObjectKind::PartitionIndex,
+        owner: "rolling".into(),
+        object_id: group.0.to_string(),
+        generation: epoch,
+        payload: ObjectPayload::Json(serde_json::to_value(index).map_err(|error| {
+            format_error(format!("partition index serialization failed: {error}"))
+        })?),
+    })
+}
+
+async fn persist_roots(
+    store: &mut V4Store,
+    epoch: u64,
+    objects: Vec<NewObject>,
+) -> Result<BTreeMap<super::core::KeyGroupId, V4Handle>> {
+    let encoded = store.write_objects(epoch, objects).await?;
+    let mut roots = BTreeMap::new();
+    for root in encoded {
+        let group = super::core::KeyGroupId(
+            root.handle
+                .object_id
+                .parse::<u32>()
+                .map_err(|_| format_error("partition root key group is invalid".into()))?,
+        );
+        roots.insert(group, root.handle);
+    }
+    Ok(roots)
+}
+
 #[allow(
     clippy::unused_async,
     reason = "the coordinator awaits recovery as one operation"
@@ -305,6 +408,22 @@ pub(in crate::state) async fn restore_table_v4(
     table: &StateTable,
     manifest: &V4Manifest,
 ) -> Result<TableSnapshot> {
+    let (partitions, retained_bytes) = restore_partitions(store, manifest)?;
+    let lineage = TableLineage {
+        epoch: manifest.epoch,
+        partitions,
+        retained_bytes,
+    };
+    snapshot_from_lineage(table, lineage)
+}
+
+fn restore_partitions(
+    store: &mut V4Store,
+    manifest: &V4Manifest,
+) -> Result<(
+    BTreeMap<super::core::KeyGroupId, super::core::PartitionLineage>,
+    usize,
+)> {
     let mut partitions = BTreeMap::new();
     let mut retained_bytes = 0;
     for operator in manifest.operators.values() {
@@ -315,47 +434,108 @@ pub(in crate::state) async fn restore_table_v4(
             continue;
         };
         for partition in roots {
-            let root = store.read_object(&partition.root)?;
-            let ObjectPayload::Bytes(bytes) = root else {
-                return Err(mismatch("partition root is not binary JSON".into()));
-            };
-            let index = PartitionIndex::from_bytes(&bytes, manifest.epoch)?;
-            if index.key_group != partition.key_group {
-                return Err(mismatch("partition index key group mismatch".into()));
-            }
-            let mut pages = BTreeMap::new();
-            for entry in index.pages {
-                let object = store.read_object(&entry.handle)?;
-                let ObjectPayload::Bytes(bytes) = object else {
-                    return Err(mismatch("page object is not Arrow IPC".into()));
-                };
-                let page = decode_page(&entry, &bytes)?;
-                retained_bytes += page.logical_bytes();
-                pages.insert(entry.page_id.slot, page);
-            }
-            let allocator = super::pages::SlotAllocator {
-                next_generations: index.next_generations.clone(),
-                free_slots: index.free_slots.iter().copied().collect(),
-                next_slot: index.next_generations.keys().max().map_or(Ok(0), |slot| {
-                    slot.checked_add(1)
-                        .ok_or_else(|| mismatch("partition next slot overflowed".into()))
-                })?,
-            };
-            partitions.insert(
-                super::core::KeyGroupId(index.key_group),
-                super::core::PartitionLineage { pages, allocator },
-            );
+            let (group, restored, bytes) = restore_partition(store, partition, manifest.epoch)?;
+            retained_bytes += bytes;
+            partitions.insert(group, restored);
         }
     }
-    let lineage = TableLineage {
-        epoch: manifest.epoch,
-        partitions,
+    Ok((partitions, retained_bytes))
+}
+
+fn restore_partition(
+    store: &mut V4Store,
+    partition: &PartitionV4,
+    epoch: u64,
+) -> Result<(
+    super::core::KeyGroupId,
+    super::core::PartitionLineage,
+    usize,
+)> {
+    let index = read_partition_index(store, partition, epoch)?;
+    let (pages, retained_bytes) = restore_pages(store, index.pages)?;
+    let allocator = slot_allocator(&index.next_generations, &index.free_slots)?;
+    Ok((
+        super::core::KeyGroupId(index.key_group),
+        super::core::PartitionLineage { pages, allocator },
         retained_bytes,
+    ))
+}
+
+fn read_partition_index(
+    store: &mut V4Store,
+    partition: &PartitionV4,
+    epoch: u64,
+) -> Result<PartitionIndex> {
+    let root = store.read_object(&partition.root)?;
+    let ObjectPayload::Bytes(bytes) = root else {
+        return Err(mismatch("partition root is not binary JSON".into()));
     };
-    snapshot_from_lineage(table, lineage)
+    let index = PartitionIndex::from_bytes(&bytes, epoch)?;
+    if index.key_group != partition.key_group {
+        return Err(mismatch("partition index key group mismatch".into()));
+    }
+    Ok(index)
+}
+
+fn restore_pages(
+    store: &mut V4Store,
+    entries: Vec<PageEntry>,
+) -> Result<(BTreeMap<u32, PageRef>, usize)> {
+    let mut pages = BTreeMap::new();
+    let mut retained_bytes = 0;
+    for entry in entries {
+        let object = store.read_object(&entry.handle)?;
+        let ObjectPayload::Bytes(bytes) = object else {
+            return Err(mismatch("page object is not Arrow IPC".into()));
+        };
+        let page = decode_page(&entry, &bytes)?;
+        retained_bytes += page.logical_bytes();
+        pages.insert(entry.page_id.slot, page);
+    }
+    Ok((pages, retained_bytes))
+}
+
+fn slot_allocator(
+    next_generations: &BTreeMap<u32, u64>,
+    free_slots: &[u32],
+) -> Result<super::pages::SlotAllocator> {
+    Ok(super::pages::SlotAllocator {
+        next_generations: next_generations.clone(),
+        free_slots: free_slots.iter().copied().collect(),
+        next_slot: next_partition_slot(next_generations)?,
+    })
+}
+
+fn next_partition_slot(next_generations: &BTreeMap<u32, u64>) -> Result<u32> {
+    let Some(slot) = next_generations.keys().max() else {
+        return Ok(0);
+    };
+    slot.checked_add(1)
+        .ok_or_else(|| mismatch("partition next slot overflowed".into()))
+}
+
+type OrderedEntity = (u32, super::core::KeyGroupId, usize, super::EntityKey);
+
+struct Layout7Row {
+    counter: u64,
+    values: Vec<super::core::RingValue>,
+    capacity: usize,
+    numeric: Vec<NumericAccumulator>,
 }
 
 fn snapshot_from_lineage(table: &StateTable, lineage: TableLineage) -> Result<TableSnapshot> {
+    let ordered = ordered_entities(&lineage);
+    let keys = ordered
+        .iter()
+        .map(|(_, _, _, key)| key.clone())
+        .collect::<Vec<_>>();
+    let next_entity =
+        u32::try_from(keys.len()).map_err(|_| mismatch("entity IDs exceed u32".into()))?;
+    let (keyed, rings) = layout7_snapshots(table, &lineage, &ordered)?;
+    table.v4_from_lineage(keys, keyed, rings, lineage, next_entity)
+}
+
+fn ordered_entities(lineage: &TableLineage) -> Vec<OrderedEntity> {
     let mut ordered = Vec::new();
     for (group, partition) in &lineage.partitions {
         for page in partition.pages.values() {
@@ -367,66 +547,91 @@ fn snapshot_from_lineage(table: &StateTable, lineage: TableLineage) -> Result<Ta
         }
     }
     ordered.sort_by_key(|(index, _, _, _)| *index);
-    let keys = ordered
-        .iter()
-        .map(|(_, _, _, key)| key.clone())
-        .collect::<Vec<_>>();
-    let next_entity =
-        u32::try_from(keys.len()).map_err(|_| mismatch("entity IDs exceed u32".into()))?;
-    let mut keyed = Vec::new();
-    let mut rings = Vec::new();
-    if table.layout7_schema().is_some() {
-        let schema = table.layout7_schema().expect("shape checked");
-        let mut counters = Vec::new();
-        let mut values = Vec::new();
-        let mut offsets = vec![0];
-        let mut capacities = Vec::new();
-        let mut numeric = Vec::new();
-        for (_, group, row, _) in &ordered {
-            let partition = &lineage.partitions[group];
-            let counter = partition.pages.values().find_map(|page| match page {
-                PageRef::Keyed {
-                    page_index, page, ..
-                } if *page_index == row / 1024 => Some(page.value.values[row % 1024]),
-                _ => None,
-            });
-            let Some(super::core::KeyedValue::UInt64(counter)) = counter else {
-                return Err(mismatch("layout-7 counter is absent".into()));
-            };
-            counters.push(counter);
-            let ring = partition.pages.values().find_map(|page| match page {
-                PageRef::Ring {
-                    row: found, page, ..
-                } if *found == *row => Some(page),
-                _ => None,
-            });
-            let ring = ring.ok_or_else(|| mismatch("layout-7 ring is absent".into()))?;
-            values.extend(ring.value.ring.history());
-            offsets.push(values.len());
-            capacities.push(ring.value.ring.capacity());
-            numeric.push(
-                ring.value
-                    .numeric
-                    .clone()
-                    .ok_or_else(|| mismatch("numeric group is absent".into()))?,
-            );
-        }
-        keyed.push(KeyedSnapshot {
-            name: schema.counter_name,
-            kind: super::ValueKind::UInt64,
-            values: Arc::new(UInt64Array::from(counters)),
-        });
-        rings.push(RingSnapshot {
-            name: schema.numeric_name,
-            kind: super::RingKind::Float64,
-            retention: schema.retention,
-            values: ring_array(super::RingKind::Float64, &values),
-            offsets,
-            capacities,
-            numeric: Some(numeric),
-        });
+    ordered
+}
+
+fn layout7_snapshots(
+    table: &StateTable,
+    lineage: &TableLineage,
+    ordered: &[OrderedEntity],
+) -> Result<(Vec<KeyedSnapshot>, Vec<RingSnapshot>)> {
+    let Some(schema) = table.layout7_schema() else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let mut counters = Vec::new();
+    let mut values = Vec::new();
+    let mut offsets = vec![0];
+    let mut capacities = Vec::new();
+    let mut numeric = Vec::new();
+    for (_, group, row, _) in ordered {
+        let row = layout7_row(&lineage.partitions[group], *row)?;
+        counters.push(row.counter);
+        values.extend(row.values);
+        offsets.push(values.len());
+        capacities.push(row.capacity);
+        numeric.push(row.numeric);
     }
-    table.v4_from_lineage(keys, keyed, rings, lineage, next_entity)
+    let keyed = vec![KeyedSnapshot {
+        name: schema.counter_name,
+        kind: super::ValueKind::UInt64,
+        values: Arc::new(UInt64Array::from(counters)),
+    }];
+    let rings = vec![RingSnapshot {
+        name: schema.numeric_name,
+        kind: super::RingKind::Float64,
+        retention: schema.retention,
+        values: ring_array(super::RingKind::Float64, &values),
+        offsets,
+        capacities,
+        numeric: Some(numeric),
+    }];
+    Ok((keyed, rings))
+}
+
+fn layout7_row(partition: &super::core::PartitionLineage, row: usize) -> Result<Layout7Row> {
+    let counter = layout7_counter(partition, row)?;
+    let ring = layout7_ring(partition, row)?;
+    let values = ring.ring.history();
+    let capacity = ring.ring.capacity();
+    let numeric = ring
+        .numeric
+        .clone()
+        .ok_or_else(|| mismatch("numeric group is absent".into()))?;
+    Ok(Layout7Row {
+        counter,
+        values,
+        capacity,
+        numeric,
+    })
+}
+
+fn layout7_counter(partition: &super::core::PartitionLineage, row: usize) -> Result<u64> {
+    let counter = partition.pages.values().find_map(|page| match page {
+        PageRef::Keyed {
+            page_index, page, ..
+        } if *page_index == row / 1024 => Some(page.value.values[row % 1024]),
+        _ => None,
+    });
+    let Some(super::core::KeyedValue::UInt64(counter)) = counter else {
+        return Err(mismatch("layout-7 counter is absent".into()));
+    };
+    Ok(counter)
+}
+
+fn layout7_ring(
+    partition: &super::core::PartitionLineage,
+    row: usize,
+) -> Result<&super::core::RingPage> {
+    partition
+        .pages
+        .values()
+        .find_map(|page| match page {
+            PageRef::Ring {
+                row: found, page, ..
+            } if *found == row => Some(page.value.as_ref()),
+            _ => None,
+        })
+        .ok_or_else(|| mismatch("layout-7 ring is absent".into()))
 }
 
 fn page_object(page: &PageRef) -> NewObject {
@@ -694,46 +899,73 @@ fn decode_keyed(record: &RecordBatch, entry: &PageEntry) -> Result<PageRef> {
         .parse::<usize>()
         .map_err(|_| mismatch("keyed column is invalid".into()))?;
     let page_index = parse_metadata::<usize>(record.schema().metadata(), "page_index")?;
-    let kind = match record.column(0).data_type() {
-        DataType::UInt64 => super::ValueKind::UInt64,
-        DataType::Int64 => super::ValueKind::Int64,
-        DataType::Float64 => super::ValueKind::Float64,
-        DataType::Boolean => super::ValueKind::Boolean,
-        _ => return Err(mismatch("keyed page type is unsupported".into())),
-    };
+    let kind = keyed_kind(record.column(0).data_type())?;
     if (0..record.num_rows()).any(|row| !record.column(0).is_valid(row)) {
         return Err(mismatch("keyed page contains a null value".into()));
     }
-    let values = match kind {
-        super::ValueKind::UInt64 => column::<UInt64Array>(record, 0)?
-            .values()
-            .iter()
-            .copied()
-            .map(super::core::KeyedValue::UInt64)
-            .collect(),
-        super::ValueKind::Int64 => column::<Int64Array>(record, 0)?
-            .values()
-            .iter()
-            .copied()
-            .map(super::core::KeyedValue::Int64)
-            .collect(),
-        super::ValueKind::Float64 => column::<Float64Array>(record, 0)?
-            .values()
-            .iter()
-            .copied()
-            .map(super::core::KeyedValue::Float64)
-            .collect(),
-        super::ValueKind::Boolean => column::<BooleanArray>(record, 0)?
-            .values()
-            .iter()
-            .map(super::core::KeyedValue::Boolean)
-            .collect(),
-    };
+    let values = decode_keyed_values(record, kind)?;
     Ok(PageRef::Keyed {
         column: column_index,
         page_index,
         page: super::pages::Page::new(page_id(entry), super::core::KeyedPage { kind, values }),
     })
+}
+
+fn keyed_kind(data_type: &DataType) -> Result<super::ValueKind> {
+    match data_type {
+        DataType::UInt64 => Ok(super::ValueKind::UInt64),
+        DataType::Int64 => Ok(super::ValueKind::Int64),
+        DataType::Float64 => Ok(super::ValueKind::Float64),
+        DataType::Boolean => Ok(super::ValueKind::Boolean),
+        _ => Err(mismatch("keyed page type is unsupported".into())),
+    }
+}
+
+fn decode_keyed_values(
+    record: &RecordBatch,
+    kind: super::ValueKind,
+) -> Result<Vec<super::core::KeyedValue>> {
+    match kind {
+        super::ValueKind::UInt64 => decode_u64_keyed_values(record),
+        super::ValueKind::Int64 => decode_i64_keyed_values(record),
+        super::ValueKind::Float64 => decode_f64_keyed_values(record),
+        super::ValueKind::Boolean => decode_bool_keyed_values(record),
+    }
+}
+
+fn decode_u64_keyed_values(record: &RecordBatch) -> Result<Vec<super::core::KeyedValue>> {
+    Ok(column::<UInt64Array>(record, 0)?
+        .values()
+        .iter()
+        .copied()
+        .map(super::core::KeyedValue::UInt64)
+        .collect())
+}
+
+fn decode_i64_keyed_values(record: &RecordBatch) -> Result<Vec<super::core::KeyedValue>> {
+    Ok(column::<Int64Array>(record, 0)?
+        .values()
+        .iter()
+        .copied()
+        .map(super::core::KeyedValue::Int64)
+        .collect())
+}
+
+fn decode_f64_keyed_values(record: &RecordBatch) -> Result<Vec<super::core::KeyedValue>> {
+    Ok(column::<Float64Array>(record, 0)?
+        .values()
+        .iter()
+        .copied()
+        .map(super::core::KeyedValue::Float64)
+        .collect())
+}
+
+fn decode_bool_keyed_values(record: &RecordBatch) -> Result<Vec<super::core::KeyedValue>> {
+    Ok(column::<BooleanArray>(record, 0)?
+        .values()
+        .iter()
+        .map(super::core::KeyedValue::Boolean)
+        .collect())
 }
 
 fn decode_ring(record: &RecordBatch, entry: &PageEntry) -> Result<PageRef> {
@@ -742,32 +974,9 @@ fn decode_ring(record: &RecordBatch, entry: &PageEntry) -> Result<PageRef> {
         .parse::<usize>()
         .map_err(|_| mismatch("ring column is invalid".into()))?;
     let row = parse_metadata::<usize>(record.schema().metadata(), "row")?;
-    let kind = match record.column(0).data_type() {
-        DataType::Float64 => super::RingKind::Float64,
-        DataType::Int64 => super::RingKind::Int64,
-        DataType::UInt64 => super::RingKind::UInt64,
-        DataType::Struct(_) => super::RingKind::PairFloat64,
-        _ => return Err(mismatch("ring page type is unsupported".into())),
-    };
-    let values = decode_ring_values(record, kind)?;
-    let schema = record.schema();
-    let metadata = schema.metadata();
-    let head = parse_metadata(metadata, "head")?;
-    let len = parse_metadata(metadata, "len")?;
-    let capacity = parse_metadata(metadata, "capacity")?;
-    if len > capacity || values.len() != len {
-        return Err(mismatch("ring length exceeds its capacity".into()));
-    }
-    let mut ring = super::core::Ring {
-        head,
-        len,
-        slots: vec![kind.empty(); capacity],
-    };
-    for (offset, value) in values.into_iter().enumerate() {
-        let position = ring.position(offset);
-        ring.slots[position] = value;
-    }
-    let numeric = decode_numeric_metadata(metadata)?.map(|value| vec![value]);
+    let kind = ring_kind(record.column(0).data_type())?;
+    let (ring, numeric) = decode_ring_state(record, kind)?;
+    let capacity = ring.capacity();
     Ok(PageRef::Ring {
         column: column_index,
         row,
@@ -783,49 +992,133 @@ fn decode_ring(record: &RecordBatch, entry: &PageEntry) -> Result<PageRef> {
     })
 }
 
+fn ring_kind(data_type: &DataType) -> Result<super::RingKind> {
+    match data_type {
+        DataType::Float64 => Ok(super::RingKind::Float64),
+        DataType::Int64 => Ok(super::RingKind::Int64),
+        DataType::UInt64 => Ok(super::RingKind::UInt64),
+        DataType::Struct(_) => Ok(super::RingKind::PairFloat64),
+        _ => Err(mismatch("ring page type is unsupported".into())),
+    }
+}
+
+fn decode_ring_state(
+    record: &RecordBatch,
+    kind: super::RingKind,
+) -> Result<(super::core::Ring, Option<Vec<NumericAccumulator>>)> {
+    let values = decode_ring_values(record, kind)?;
+    let schema = record.schema();
+    let metadata = schema.metadata();
+    let ring = decode_ring_metadata(metadata, kind, values.len())?;
+    let ring = populate_ring(ring, values);
+    let numeric = decode_numeric_metadata(metadata)?.map(|value| vec![value]);
+    Ok((ring, numeric))
+}
+
+fn decode_ring_metadata(
+    metadata: &HashMap<String, String>,
+    kind: super::RingKind,
+    value_count: usize,
+) -> Result<super::core::Ring> {
+    let (head, len, capacity) = decode_ring_shape(metadata)?;
+    if len > capacity || value_count != len {
+        return Err(mismatch("ring length exceeds its capacity".into()));
+    }
+    Ok(super::core::Ring {
+        head,
+        len,
+        slots: vec![kind.empty(); capacity],
+    })
+}
+
+fn decode_ring_shape(metadata: &HashMap<String, String>) -> Result<(usize, usize, usize)> {
+    Ok((
+        parse_metadata(metadata, "head")?,
+        parse_metadata(metadata, "len")?,
+        parse_metadata(metadata, "capacity")?,
+    ))
+}
+
+fn populate_ring(
+    mut ring: super::core::Ring,
+    values: Vec<super::core::RingValue>,
+) -> super::core::Ring {
+    for (offset, value) in values.into_iter().enumerate() {
+        let position = ring.position(offset);
+        ring.slots[position] = value;
+    }
+    ring
+}
+
 fn decode_ring_values(
     record: &RecordBatch,
     kind: super::RingKind,
 ) -> Result<Vec<super::core::RingValue>> {
     match kind {
-        super::RingKind::Float64 => Ok(column::<Float64Array>(record, 0)?
-            .iter()
-            .map(super::core::RingValue::Float64)
-            .collect()),
-        super::RingKind::Int64 => Ok(column::<Int64Array>(record, 0)?
-            .iter()
-            .map(super::core::RingValue::Int64)
-            .collect()),
-        super::RingKind::UInt64 => Ok(column::<UInt64Array>(record, 0)?
-            .iter()
-            .map(super::core::RingValue::UInt64)
-            .collect()),
-        super::RingKind::PairFloat64 => {
-            let pairs = record
-                .column(0)
-                .as_any()
-                .downcast_ref::<datafusion::arrow::array::StructArray>()
-                .ok_or_else(|| mismatch("pair ring page type mismatch".into()))?;
-            let left = pairs
-                .column(0)
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .ok_or_else(|| mismatch("pair ring left type mismatch".into()))?;
-            let right = pairs
-                .column(1)
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .ok_or_else(|| mismatch("pair ring right type mismatch".into()))?;
-            Ok((0..pairs.len())
-                .map(|row| {
-                    super::core::RingValue::PairFloat64(
-                        (left.is_valid(row) && right.is_valid(row))
-                            .then_some((left.value(row), right.value(row))),
-                    )
-                })
-                .collect())
-        }
+        super::RingKind::Float64 => decode_f64_ring_values(record),
+        super::RingKind::Int64 => decode_i64_ring_values(record),
+        super::RingKind::UInt64 => decode_u64_ring_values(record),
+        super::RingKind::PairFloat64 => decode_pair_ring_values(record),
     }
+}
+
+fn decode_f64_ring_values(record: &RecordBatch) -> Result<Vec<super::core::RingValue>> {
+    Ok(column::<Float64Array>(record, 0)?
+        .iter()
+        .map(super::core::RingValue::Float64)
+        .collect())
+}
+
+fn decode_i64_ring_values(record: &RecordBatch) -> Result<Vec<super::core::RingValue>> {
+    Ok(column::<Int64Array>(record, 0)?
+        .iter()
+        .map(super::core::RingValue::Int64)
+        .collect())
+}
+
+fn decode_u64_ring_values(record: &RecordBatch) -> Result<Vec<super::core::RingValue>> {
+    Ok(column::<UInt64Array>(record, 0)?
+        .iter()
+        .map(super::core::RingValue::UInt64)
+        .collect())
+}
+
+fn decode_pair_ring_values(record: &RecordBatch) -> Result<Vec<super::core::RingValue>> {
+    let pairs = pair_ring_array(record)?;
+    let left = pair_ring_left(pairs)?;
+    let right = pair_ring_right(pairs)?;
+    Ok((0..pairs.len())
+        .map(|row| {
+            super::core::RingValue::PairFloat64(
+                (left.is_valid(row) && right.is_valid(row))
+                    .then_some((left.value(row), right.value(row))),
+            )
+        })
+        .collect())
+}
+
+fn pair_ring_array(record: &RecordBatch) -> Result<&datafusion::arrow::array::StructArray> {
+    record
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::StructArray>()
+        .ok_or_else(|| mismatch("pair ring page type mismatch".into()))
+}
+
+fn pair_ring_left(pairs: &datafusion::arrow::array::StructArray) -> Result<&Float64Array> {
+    pairs
+        .column(0)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .ok_or_else(|| mismatch("pair ring left type mismatch".into()))
+}
+
+fn pair_ring_right(pairs: &datafusion::arrow::array::StructArray) -> Result<&Float64Array> {
+    pairs
+        .column(1)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .ok_or_else(|| mismatch("pair ring right type mismatch".into()))
 }
 
 fn decode_value_log(record: &RecordBatch, entry: &PageEntry) -> Result<PageRef> {
@@ -857,32 +1150,89 @@ fn decode_numeric_metadata(
     if !metadata.contains_key("valid_count") {
         return Ok(None);
     }
+    let shift = decode_numeric_shift(metadata)?;
+    let layout = decode_numeric_layout7(metadata, shift)?;
+    Ok(Some(NumericAccumulator::from_layout7(layout)))
+}
+
+fn decode_numeric_shift(metadata: &HashMap<String, String>) -> Result<Option<f64>> {
     let shift = parse_metadata::<String>(metadata, "shift")?;
-    let shift = if shift.is_empty() {
-        None
-    } else {
-        Some(f64::from_bits(parse_metadata::<u64>(metadata, "shift")?))
-    };
-    Ok(Some(NumericAccumulator::from_layout7(
-        NumericAccumulatorLayout7 {
-            valid_count: parse_metadata(metadata, "valid_count")?,
-            finite_count: parse_metadata(metadata, "finite_count")?,
-            nan_count: parse_metadata(metadata, "nan_count")?,
-            pos_inf: parse_metadata(metadata, "pos_inf")?,
-            neg_inf: parse_metadata(metadata, "neg_inf")?,
-            sum_value: f64::from_bits(parse_metadata(metadata, "sum_value")?),
-            sum_error: f64::from_bits(parse_metadata(metadata, "sum_error")?),
-            sum_enabled: parse_metadata(metadata, "sum_enabled")?,
-            shift,
-            offsets_value: f64::from_bits(parse_metadata(metadata, "offsets_value")?),
-            offsets_error: f64::from_bits(parse_metadata(metadata, "offsets_error")?),
-            squares_value: f64::from_bits(parse_metadata(metadata, "squares_value")?),
-            squares_error: f64::from_bits(parse_metadata(metadata, "squares_error")?),
-            dispersion_enabled: parse_metadata(metadata, "dispersion_enabled")?,
-            since_rebuild: parse_metadata(metadata, "since_rebuild")?,
-            n_prev: parse_metadata(metadata, "n_prev")?,
-        },
-    )))
+    if shift.is_empty() {
+        return Ok(None);
+    }
+    parse_f64_metadata(metadata, "shift").map(Some)
+}
+
+fn decode_numeric_layout7(
+    metadata: &HashMap<String, String>,
+    shift: Option<f64>,
+) -> Result<NumericAccumulatorLayout7> {
+    let (valid_count, finite_count, nan_count, pos_inf, neg_inf) = decode_numeric_counts(metadata)?;
+    let (sum_value, sum_error, sum_enabled) = decode_numeric_sum(metadata)?;
+    let (offsets_value, offsets_error) =
+        decode_f64_pair(metadata, "offsets_value", "offsets_error")?;
+    let (squares_value, squares_error) =
+        decode_f64_pair(metadata, "squares_value", "squares_error")?;
+    let (dispersion_enabled, since_rebuild, n_prev) = decode_numeric_progress(metadata)?;
+    Ok(NumericAccumulatorLayout7 {
+        valid_count,
+        finite_count,
+        nan_count,
+        pos_inf,
+        neg_inf,
+        sum_value,
+        sum_error,
+        sum_enabled,
+        shift,
+        offsets_value,
+        offsets_error,
+        squares_value,
+        squares_error,
+        dispersion_enabled,
+        since_rebuild,
+        n_prev,
+    })
+}
+
+fn decode_numeric_counts(metadata: &HashMap<String, String>) -> Result<(u64, u64, u64, u64, u64)> {
+    Ok((
+        parse_metadata(metadata, "valid_count")?,
+        parse_metadata(metadata, "finite_count")?,
+        parse_metadata(metadata, "nan_count")?,
+        parse_metadata(metadata, "pos_inf")?,
+        parse_metadata(metadata, "neg_inf")?,
+    ))
+}
+
+fn decode_numeric_sum(metadata: &HashMap<String, String>) -> Result<(f64, f64, bool)> {
+    Ok((
+        parse_f64_metadata(metadata, "sum_value")?,
+        parse_f64_metadata(metadata, "sum_error")?,
+        parse_metadata(metadata, "sum_enabled")?,
+    ))
+}
+
+fn decode_numeric_progress(metadata: &HashMap<String, String>) -> Result<(bool, u32, u64)> {
+    Ok((
+        parse_metadata(metadata, "dispersion_enabled")?,
+        parse_metadata(metadata, "since_rebuild")?,
+        parse_metadata(metadata, "n_prev")?,
+    ))
+}
+
+fn decode_f64_pair(
+    metadata: &HashMap<String, String>,
+    value_key: &str,
+    error_key: &str,
+) -> Result<(f64, f64)> {
+    Ok((
+        parse_f64_metadata(metadata, value_key)?,
+        parse_f64_metadata(metadata, error_key)?,
+    ))
+}
+
+fn parse_f64_metadata(metadata: &HashMap<String, String>, key: &str) -> Result<f64> {
+    Ok(f64::from_bits(parse_metadata(metadata, key)?))
 }
 
 fn read_record(bytes: &[u8]) -> Result<RecordBatch> {

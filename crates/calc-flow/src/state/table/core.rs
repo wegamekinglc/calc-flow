@@ -193,6 +193,13 @@ impl Iterator for NumericHistory<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct NumericRingUpdate {
+    previous_head: usize,
+    previous_len: usize,
+    evicted: Option<f64>,
+}
+
 #[derive(Clone, Debug)]
 struct RingColumn {
     name: String,
@@ -1069,15 +1076,15 @@ impl StateTable {
         let [numeric] = self.rings.as_slice() else {
             return None;
         };
-        if counter.kind != ValueKind::UInt64
-            || numeric.kind != RingKind::Float64
-            || !numeric.numeric
-            || numeric.numeric_windows.is_empty()
-            || !matches!(numeric.retention, Retention::Rows(_))
-        {
-            return None;
-        }
-        Some((counter, numeric))
+        Self::layout7_column_kinds_match(counter, numeric).then_some((counter, numeric))
+    }
+
+    fn layout7_column_kinds_match(counter: &KeyedColumn, numeric: &RingColumn) -> bool {
+        counter.kind == ValueKind::UInt64
+            && numeric.kind == RingKind::Float64
+            && numeric.numeric
+            && !numeric.numeric_windows.is_empty()
+            && matches!(numeric.retention, Retention::Rows(_))
     }
 
     pub(super) fn layout7_schema(&self) -> Option<Layout7Schema> {
@@ -1252,9 +1259,17 @@ impl StateTable {
         let current = self.partitions[&group]
             .page(slot)
             .ok_or_else(|| internal("state-table page is absent"))?;
-        if !force && !self.is_frozen(current.id()) {
+        if !self.page_replacement_required(current.id(), force) {
             return Ok(());
         }
+        self.copy_on_write_page(group, slot, current)
+    }
+
+    fn page_replacement_required(&self, id: PageId, force: bool) -> bool {
+        force || self.is_frozen(id)
+    }
+
+    fn copy_on_write_page(&mut self, group: KeyGroupId, slot: u32, current: PageRef) -> Result<()> {
         let (generation, allocator) = self
             .partitions
             .get_mut(&group)
@@ -1580,20 +1595,7 @@ impl StateTable {
             .id
             .slot;
         self.replace_page(group, slot, false)?;
-        if first_touch && self.note_stamp(group, slot, StampKind::RingMetadata, 0) {
-            let ring = &self.partitions[&group].rings[column][row]
-                .as_ref()
-                .expect("ring page")
-                .value
-                .ring;
-            self.push_undo(Undo::RingMetadata {
-                group,
-                slot,
-                head: ring.head,
-                len: ring.len,
-                capacity: ring.capacity(),
-            });
-        }
+        self.note_ring_metadata_undo(group, column, row, slot, first_touch);
         self.grow_ring_if_needed(group, column, row, slot)?;
         let (index, previous) = {
             let ring = &self.partitions[&group].rings[column][row]
@@ -1603,16 +1605,7 @@ impl StateTable {
                 .ring;
             (ring.position(ring.len), ring.slots[ring.position(ring.len)])
         };
-        let stamp_index =
-            u32::try_from(index).map_err(|_| internal("rolling ring slot index exceeds u32"))?;
-        if self.note_stamp(group, slot, StampKind::RingSlot, stamp_index) {
-            self.push_undo(Undo::RingSlot {
-                group,
-                slot,
-                index,
-                value: previous,
-            });
-        }
+        self.note_ring_slot_undo(group, slot, index, previous)?;
         let partition = self.partitions.get_mut(&group).expect("prepared group");
         let ring = &mut Arc::get_mut(
             &mut partition.rings[column][row]
@@ -1630,6 +1623,50 @@ impl StateTable {
         }
         ring.slots[index] = value;
         Ok(evicted)
+    }
+
+    fn note_ring_metadata_undo(
+        &mut self,
+        group: KeyGroupId,
+        column: usize,
+        row: usize,
+        slot: u32,
+        first_touch: bool,
+    ) {
+        if first_touch && self.note_stamp(group, slot, StampKind::RingMetadata, 0) {
+            let ring = &self.partitions[&group].rings[column][row]
+                .as_ref()
+                .expect("ring page")
+                .value
+                .ring;
+            self.push_undo(Undo::RingMetadata {
+                group,
+                slot,
+                head: ring.head,
+                len: ring.len,
+                capacity: ring.capacity(),
+            });
+        }
+    }
+
+    fn note_ring_slot_undo(
+        &mut self,
+        group: KeyGroupId,
+        slot: u32,
+        index: usize,
+        previous: RingValue,
+    ) -> Result<()> {
+        let stamp_index =
+            u32::try_from(index).map_err(|_| internal("rolling ring slot index exceeds u32"))?;
+        if self.note_stamp(group, slot, StampKind::RingSlot, stamp_index) {
+            self.push_undo(Undo::RingSlot {
+                group,
+                slot,
+                index,
+                value: previous,
+            });
+        }
+        Ok(())
     }
 
     fn grow_ring_if_needed(
@@ -1735,11 +1772,7 @@ impl StateTable {
         row: usize,
         value: Option<f64>,
     ) -> Result<&'a [NumericAccumulator]> {
-        let max_window = match schema.retention {
-            Retention::Rows(window) if schema.numeric => window,
-            _ => return Err(internal("numeric Rows group type mismatch")),
-        };
-        let transaction_id = transaction.id;
+        let max_window = Self::numeric_max_window(schema)?;
         let slot = partition.rings[column][row]
             .as_ref()
             .expect("ring page")
@@ -1752,6 +1785,26 @@ impl StateTable {
                 .value,
         )
         .expect("checkpoint-off ring page is writable");
+        let update = Self::push_numeric_recurrent_ring(transaction, page, group, slot, value)?;
+        Self::update_numeric_windows(page, &schema.numeric_windows, max_window, update, value)?;
+        Ok(page.numeric.as_deref().expect("numeric group"))
+    }
+
+    fn numeric_max_window(schema: &RingColumn) -> Result<usize> {
+        match schema.retention {
+            Retention::Rows(window) if schema.numeric => Ok(window),
+            _ => Err(internal("numeric Rows group type mismatch")),
+        }
+    }
+
+    fn push_numeric_recurrent_ring(
+        transaction: &mut Transaction,
+        page: &mut RingPage,
+        group: KeyGroupId,
+        slot: u32,
+        value: Option<f64>,
+    ) -> Result<NumericRingUpdate> {
+        let transaction_id = transaction.id;
         let previous_head = page.ring.head;
         let previous_len = page.ring.len;
         let index = page.ring.position(previous_len);
@@ -1789,24 +1842,27 @@ impl StateTable {
             None => None,
             _ => unreachable!(),
         };
+        Ok(NumericRingUpdate {
+            previous_head,
+            previous_len,
+            evicted,
+        })
+    }
+
+    fn update_numeric_windows(
+        page: &mut RingPage,
+        windows: &[usize],
+        max_window: usize,
+        update: NumericRingUpdate,
+        value: Option<f64>,
+    ) -> Result<()> {
         let numeric = page.numeric.as_mut().expect("numeric group");
-        for (numeric, &window) in numeric.iter_mut().zip(&schema.numeric_windows) {
+        for (numeric, &window) in numeric.iter_mut().zip(windows) {
             let history = NumericHistory {
                 ring: &page.ring,
                 offset: page.ring.len.saturating_sub(window),
             };
-            let leaving = if previous_len < window {
-                None
-            } else if window == max_window {
-                evicted
-            } else {
-                let offset = previous_len - window;
-                let slot = (previous_head + offset) % page.ring.capacity();
-                match page.ring.slots[slot] {
-                    RingValue::Float64(value) => value,
-                    _ => unreachable!(),
-                }
-            };
+            let leaving = Self::numeric_leaving(&page.ring, update, window, max_window);
             numeric
                 .rows(leaving, value)
                 .and_then(|()| numeric.finish_rows(window, history))
@@ -1814,7 +1870,27 @@ impl StateTable {
                     internal(&format!("rolling numeric arithmetic failed: {error:?}"))
                 })?;
         }
-        Ok(page.numeric.as_deref().expect("numeric group"))
+        Ok(())
+    }
+
+    fn numeric_leaving(
+        ring: &Ring,
+        update: NumericRingUpdate,
+        window: usize,
+        max_window: usize,
+    ) -> Option<f64> {
+        if update.previous_len < window {
+            None
+        } else if window == max_window {
+            update.evicted
+        } else {
+            let offset = update.previous_len - window;
+            let slot = (update.previous_head + offset) % ring.capacity();
+            match ring.slots[slot] {
+                RingValue::Float64(value) => value,
+                _ => unreachable!(),
+            }
+        }
     }
 
     pub(crate) fn write_numeric_full_tick(
@@ -1826,40 +1902,93 @@ impl StateTable {
         nan_as_value: bool,
         mut emit: impl FnMut(usize, &[NumericAccumulator]) -> Result<()>,
     ) -> Result<bool> {
-        if self.checkpointing
-            || order.is_empty()
-            || ids.len() < order.len()
-            || !ids.len().is_multiple_of(order.len())
-            || values.len() < ids.len()
-            || order
-                .iter()
-                .enumerate()
-                .any(|(index, entity)| order[..index].contains(entity))
-            || !ids.chunks(order.len()).all(|chunk| chunk == order)
-        {
+        if !self.full_tick_input_is_valid(order, ids, values) {
             return Ok(false);
         }
-        let Some(partition) = self.partitions.get(&KeyGroupId(0)) else {
+        if !self.full_tick_entities_are_valid(order) {
             return Ok(false);
+        }
+        self.write_numeric_first_tick(column, order, values, nan_as_value, &mut emit)?;
+        self.write_numeric_recurrent_ticks(column, order.len(), ids, values, nan_as_value, emit)?;
+        Ok(true)
+    }
+
+    fn full_tick_input_is_valid(
+        &self,
+        order: &[EntityId],
+        ids: &[EntityId],
+        values: &Float64Array,
+    ) -> bool {
+        self.full_tick_shape_is_valid(order, ids, values)
+            && Self::full_tick_order_is_valid(order, ids)
+    }
+
+    fn full_tick_shape_is_valid(
+        &self,
+        order: &[EntityId],
+        ids: &[EntityId],
+        values: &Float64Array,
+    ) -> bool {
+        !self.checkpointing
+            && !order.is_empty()
+            && ids.len() >= order.len()
+            && ids.len().is_multiple_of(order.len())
+            && values.len() >= ids.len()
+    }
+
+    fn full_tick_order_is_valid(order: &[EntityId], ids: &[EntityId]) -> bool {
+        !order
+            .iter()
+            .enumerate()
+            .any(|(index, entity)| order[..index].contains(entity))
+            && ids.chunks(order.len()).all(|chunk| chunk == order)
+    }
+
+    fn full_tick_entities_are_valid(&self, order: &[EntityId]) -> bool {
+        let Some(partition) = self.partitions.get(&KeyGroupId(0)) else {
+            return false;
         };
-        if order.iter().any(|entity| {
-            entity.key_group != KeyGroupId(0)
-                || partition
+        order.iter().all(|entity| {
+            entity.key_group == KeyGroupId(0)
+                && partition
                     .metadata
                     .value
                     .entities
                     .get(entity.row as usize)
-                    .is_none_or(|stored| stored.index != entity.index)
-        }) {
-            return Ok(false);
-        }
+                    .is_some_and(|stored| stored.index == entity.index)
+        })
+    }
 
+    fn numeric_input_value(values: &Float64Array, row: usize, nan_as_value: bool) -> Option<f64> {
+        let raw = values.value(row);
+        (values.is_valid(row) && (nan_as_value || !raw.is_nan())).then_some(raw)
+    }
+
+    fn write_numeric_first_tick(
+        &mut self,
+        column: usize,
+        order: &[EntityId],
+        values: &Float64Array,
+        nan_as_value: bool,
+        emit: &mut impl FnMut(usize, &[NumericAccumulator]) -> Result<()>,
+    ) -> Result<()> {
         for (row, entity) in order.iter().enumerate() {
-            let raw = values.value(row);
-            let value = (values.is_valid(row) && (nan_as_value || !raw.is_nan())).then_some(raw);
+            let value = Self::numeric_input_value(values, row, nan_as_value);
             self.push_numeric_rows(column, *entity, value)?;
             emit(row, self.numeric_accumulators(column, *entity)?)?;
         }
+        Ok(())
+    }
+
+    fn write_numeric_recurrent_ticks(
+        &mut self,
+        column: usize,
+        order_len: usize,
+        ids: &[EntityId],
+        values: &Float64Array,
+        nan_as_value: bool,
+        mut emit: impl FnMut(usize, &[NumericAccumulator]) -> Result<()>,
+    ) -> Result<()> {
         let schema = &self.rings[column];
         let transaction = self
             .transaction
@@ -1869,10 +1998,9 @@ impl StateTable {
             .partitions
             .get_mut(&KeyGroupId(0))
             .expect("full-tick group was validated");
-        for (offset, entity) in ids[order.len()..].iter().enumerate() {
-            let row = order.len() + offset;
-            let raw = values.value(row);
-            let value = (values.is_valid(row) && (nan_as_value || !raw.is_nan())).then_some(raw);
+        for (offset, entity) in ids[order_len..].iter().enumerate() {
+            let row = order_len + offset;
+            let value = Self::numeric_input_value(values, row, nan_as_value);
             let accumulators = Self::push_numeric_recurrent_page(
                 transaction,
                 partition,
@@ -1884,7 +2012,7 @@ impl StateTable {
             )?;
             emit(row, accumulators)?;
         }
-        Ok(true)
+        Ok(())
     }
 
     fn push_numeric_rows_impl(
@@ -1895,10 +2023,7 @@ impl StateTable {
         first_touch: bool,
     ) -> Result<()> {
         let (group, row) = self.location(entity)?;
-        let max_window = match self.rings[column].retention {
-            Retention::Rows(window) if self.rings[column].numeric => window,
-            _ => return Err(internal("numeric Rows group type mismatch")),
-        };
+        let max_window = Self::numeric_max_window(&self.rings[column])?;
         let (previous_head, previous_len) = {
             let ring = &self.partitions[&group].rings[column][row]
                 .as_ref()
@@ -1912,7 +2037,34 @@ impl StateTable {
             .expect("ring page")
             .id
             .slot;
-        let previous = if first_touch && self.note_stamp(group, slot, StampKind::Numeric, 0) {
+        let previous = self.numeric_undo_value(group, column, row, slot, first_touch);
+        let evicted = self
+            .push_f64_impl(column, entity, value, first_touch)?
+            .flatten();
+        if let Some(value) = previous {
+            self.push_undo(Undo::Numeric { group, slot, value });
+        }
+        let update = NumericRingUpdate {
+            previous_head,
+            previous_len,
+            evicted,
+        };
+        let windows = &self.rings[column].numeric_windows;
+        let partition = self.partitions.get_mut(&group).expect("prepared group");
+        let page = partition.rings[column][row].as_mut().expect("ring page");
+        let page = Arc::get_mut(&mut page.value).expect("unfrozen numeric page");
+        Self::update_numeric_windows(page, windows, max_window, update, value)
+    }
+
+    fn numeric_undo_value(
+        &mut self,
+        group: KeyGroupId,
+        column: usize,
+        row: usize,
+        slot: u32,
+        first_touch: bool,
+    ) -> Option<Vec<NumericAccumulator>> {
+        if first_touch && self.note_stamp(group, slot, StampKind::Numeric, 0) {
             Some(
                 self.partitions[&group].rings[column][row]
                     .as_ref()
@@ -1924,43 +2076,7 @@ impl StateTable {
             )
         } else {
             None
-        };
-        let evicted = self
-            .push_f64_impl(column, entity, value, first_touch)?
-            .flatten();
-        if let Some(value) = previous {
-            self.push_undo(Undo::Numeric { group, slot, value });
         }
-        let windows = &self.rings[column].numeric_windows;
-        let partition = self.partitions.get_mut(&group).expect("prepared group");
-        let page = partition.rings[column][row].as_mut().expect("ring page");
-        let page = Arc::get_mut(&mut page.value).expect("unfrozen numeric page");
-        let numeric = page.numeric.as_mut().expect("numeric group");
-        for (numeric, &window) in numeric.iter_mut().zip(windows) {
-            let history = NumericHistory {
-                ring: &page.ring,
-                offset: page.ring.len.saturating_sub(window),
-            };
-            let leaving = if previous_len < window {
-                None
-            } else if window == max_window {
-                evicted
-            } else {
-                let offset = previous_len - window;
-                let slot = (previous_head + offset) % page.ring.capacity();
-                match page.ring.slots[slot] {
-                    RingValue::Float64(value) => value,
-                    _ => unreachable!(),
-                }
-            };
-            numeric
-                .rows(leaving, value)
-                .and_then(|()| numeric.finish_rows(window, history))
-                .map_err(|error| {
-                    internal(&format!("rolling numeric arithmetic failed: {error:?}"))
-                })?;
-        }
-        Ok(())
     }
 
     pub(crate) fn numeric_accumulators(
@@ -3057,20 +3173,35 @@ impl StateTable {
             .get(&slot)
             .copied()
             .unwrap_or(0);
+        Self::validate_snapshot_page_identity(page, group, slot, next_generation)?;
+        Self::note_snapshot_metadata(page, slot, metadata_seen)?;
+        partition.insert(page.clone());
+        Ok(())
+    }
+
+    fn validate_snapshot_page_identity(
+        page: &PageRef,
+        group: KeyGroupId,
+        slot: u32,
+        next_generation: u64,
+    ) -> Result<()> {
         if page.id().key_group != group
             || page.id().slot != slot
             || page.id().generation >= next_generation
         {
             return Err(internal("snapshot page identity mismatch"));
         }
-        let metadata = matches!(page, PageRef::Metadata(_));
-        if metadata && (*metadata_seen || slot != 0) {
+        Ok(())
+    }
+
+    fn note_snapshot_metadata(page: &PageRef, slot: u32, metadata_seen: &mut bool) -> Result<()> {
+        if !matches!(page, PageRef::Metadata(_)) {
+            return Ok(());
+        }
+        if *metadata_seen || slot != 0 {
             return Err(internal("snapshot partition metadata is not unique"));
         }
-        if metadata {
-            *metadata_seen = true;
-        }
-        partition.insert(page.clone());
+        *metadata_seen = true;
         Ok(())
     }
 

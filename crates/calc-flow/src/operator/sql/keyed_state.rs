@@ -78,6 +78,14 @@ struct GroupUndo {
     initialized: Vec<bool>,
 }
 
+struct RestoreSpec<'a> {
+    key_count: usize,
+    replace: bool,
+    aggregates: &'a [Arc<AggregateFunctionExpr>],
+    global: Option<&'a global_record::Proof>,
+    sequential: bool,
+}
+
 pub(super) struct Committed {
     pub affected: Vec<GroupId>,
 }
@@ -238,23 +246,15 @@ impl KeyedState {
                 check()?;
             }
             for (index, function) in functions.iter().enumerate() {
-                let Some(column) = state.aggregates[index].states.first() else {
-                    continue;
-                };
-                let count = match (function.as_str(), &column.values[row]) {
-                    ("count", ScalarValue::Int64(value)) => u64::try_from(
-                        value.ok_or_else(|| df_error(name, "native COUNT state is null"))?,
-                    )
-                    .map_err(|_| df_error(name, "native COUNT state is negative"))?,
-                    ("avg", ScalarValue::UInt64(value)) => value.unwrap_or(0),
-                    _ => continue,
-                };
-                counts[index] = counts[index]
-                    .checked_add(count)
-                    .filter(|total| *total <= historical_rows)
-                    .ok_or_else(|| {
-                        df_error(name, "native aggregate count exceeds historical rows")
-                    })?;
+                add_history_count(
+                    &state,
+                    row,
+                    index,
+                    function,
+                    historical_rows,
+                    &mut counts,
+                    name,
+                )?;
             }
         }
         Ok(counts)
@@ -276,20 +276,17 @@ impl KeyedState {
             check()?;
             return Ok(());
         }
+        let spec = RestoreSpec {
+            key_count,
+            replace,
+            aggregates,
+            global,
+            sequential,
+        };
         let mut transaction = self.begin(budget)?;
         let mut seen = std::collections::BTreeSet::new();
         for record in records {
-            for start in (0..record.num_rows()).step_by(MORSEL_ROWS) {
-                check()?;
-                let rows = MORSEL_ROWS.min(record.num_rows() - start);
-                let chunk = record.slice(start, rows);
-                transaction.restore_chunk(
-                    &chunk, key_count, replace, aggregates, global, sequential, &mut seen, check,
-                )?;
-            }
-            if record.num_rows() == 0 {
-                check()?;
-            }
+            transaction.restore_record(record, &spec, &mut seen, check)?;
         }
         transaction.commit();
         Ok(())
@@ -474,6 +471,39 @@ impl Transaction {
         Ok(())
     }
 
+    fn route_groups(
+        &self,
+        state: &mut State,
+        keys: &[ArrayRef],
+        rows: usize,
+        selection: Option<&BooleanArray>,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Vec<GroupId>> {
+        match &mut state.keys {
+            Some(store) => store.route_selected_with_limit(keys, selection, self.limit, check),
+            None => Ok(vec![GroupId::new(0)?; rows]),
+        }
+    }
+
+    fn rank_groups(
+        &mut self,
+        state: &mut State,
+        partial: &mut PartialGroups,
+        groups: Vec<GroupId>,
+        selection: Option<&BooleanArray>,
+        name: &str,
+    ) -> Result<Vec<usize>> {
+        let mut indices = Vec::with_capacity(groups.len());
+        for (row, group) in groups.into_iter().enumerate() {
+            if selection.is_some_and(|selection| !predicate::selected(selection, row)) {
+                indices.push(0);
+                continue;
+            }
+            indices.push(self.rank(group, state, partial, name)?);
+        }
+        Ok(indices)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_chunk(
         &mut self,
@@ -491,20 +521,10 @@ impl Transaction {
         }
         let state = self.state.clone();
         let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-        let groups = match &mut state.keys {
-            Some(store) => store.route_selected_with_limit(keys, selection, self.limit, check)?,
-            None => vec![GroupId::new(0)?; rows],
-        };
+        let groups = self.route_groups(&mut state, keys, rows, selection, check)?;
         self.grow(&mut state)?;
         let mut partial = self.partial.take().expect("partial aggregate state");
-        let mut indices = Vec::with_capacity(rows);
-        for (row, group) in groups.into_iter().enumerate() {
-            if selection.is_some_and(|selection| !predicate::selected(selection, row)) {
-                indices.push(0);
-                continue;
-            }
-            indices.push(self.rank(group, &mut state, &mut partial, name)?);
-        }
+        let indices = self.rank_groups(&mut state, &mut partial, groups, selection, name)?;
         Self::observe_variable(&mut partial, arguments, filters, selection, variable, name)?;
         Self::seed(&state, &mut partial, name)?;
         partial.update(arguments, filters, &indices, partial.slots.len(), name)?;
@@ -545,38 +565,69 @@ impl Transaction {
         if self.global_accumulators.is_some() {
             return self.finish_global(check, progress, name);
         }
-        let Some(mut partial) = self.partial.take() else {
+        let Some(partial) = self.partial.take() else {
             return Ok(());
         };
+        self.finish_partial(aggregates, partial, check, name, progress)
+            .await
+    }
+
+    async fn finish_partial(
+        &mut self,
+        aggregates: &[Arc<AggregateFunctionExpr>],
+        mut partial: PartialGroups,
+        check: &mut (dyn FnMut() -> Result<()> + Send),
+        name: &str,
+        progress: &mut (dyn FnMut() + Send),
+    ) -> Result<()> {
         {
             let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             Self::seed_integer_history(&state, &mut partial, name)?;
         }
         let states = partial.emit_states(name)?;
         for (rank, slot) in partial.slots.iter().enumerate() {
-            if rank % 128 == 0 {
-                if rank != 0 {
-                    tokio::task::yield_now().await;
-                }
-                check()?;
-            }
-            let group = GroupId::new(*slot)?;
-            {
-                let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-                for (index, arrays) in states.iter().enumerate() {
-                    Self::merge_rank(
-                        &mut state,
-                        &partial,
-                        aggregates[index].as_ref(),
-                        group,
-                        index,
-                        arrays,
-                        rank,
-                        name,
-                    )?;
-                }
-            }
+            Self::finish_checkpoint(rank, check).await?;
+            self.merge_emitted_rank(&partial, aggregates, &states, *slot, rank, name)?;
             progress();
+        }
+        Ok(())
+    }
+
+    async fn finish_checkpoint(
+        rank: usize,
+        check: &mut (dyn FnMut() -> Result<()> + Send),
+    ) -> Result<()> {
+        if !rank.is_multiple_of(128) {
+            return Ok(());
+        }
+        if rank != 0 {
+            tokio::task::yield_now().await;
+        }
+        check()
+    }
+
+    fn merge_emitted_rank(
+        &self,
+        partial: &PartialGroups,
+        aggregates: &[Arc<AggregateFunctionExpr>],
+        states: &[Vec<ArrayRef>],
+        slot: usize,
+        rank: usize,
+        name: &str,
+    ) -> Result<()> {
+        let group = GroupId::new(slot)?;
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        for (index, arrays) in states.iter().enumerate() {
+            Self::merge_rank(
+                &mut state,
+                partial,
+                aggregates[index].as_ref(),
+                group,
+                index,
+                arrays,
+                rank,
+                name,
+            )?;
         }
         Ok(())
     }
@@ -788,13 +839,53 @@ impl Transaction {
         name: &str,
     ) -> Result<()> {
         if partial.sequential[index] || partial.accumulators[index].integer_sum() {
-            if arrays.iter().all(Array::is_empty) {
-                return Ok(());
-            }
-            let values = scalars(arrays, rank, name)?;
-            let result = partial.rank_result(index, &values, name)?;
-            return state.set_state(index, group, values, result);
+            return Self::merge_sequential_rank(state, partial, index, group, arrays, rank, name);
         }
+        Self::merge_accumulator_rank(state, expression, index, group, arrays, rank, name)
+    }
+
+    fn merge_sequential_rank(
+        state: &mut State,
+        partial: &PartialGroups,
+        index: usize,
+        group: GroupId,
+        arrays: &[ArrayRef],
+        rank: usize,
+        name: &str,
+    ) -> Result<()> {
+        if arrays.iter().all(Array::is_empty) {
+            return Ok(());
+        }
+        let values = scalars(arrays, rank, name)?;
+        let result = partial.rank_result(index, &values, name)?;
+        state.set_state(index, group, values, result)
+    }
+
+    fn merge_accumulator_rank(
+        state: &mut State,
+        expression: &AggregateFunctionExpr,
+        index: usize,
+        group: GroupId,
+        arrays: &[ArrayRef],
+        rank: usize,
+        name: &str,
+    ) -> Result<()> {
+        let mut accumulator =
+            Self::rank_accumulator(state, expression, index, group, arrays, rank, name)?;
+        let values = accumulator.state().map_err(|error| df_error(name, error))?;
+        let result = Self::merged_rank_result(state, expression, &mut *accumulator, &values, name)?;
+        state.set_state(index, group, values, result)
+    }
+
+    fn rank_accumulator(
+        state: &State,
+        expression: &AggregateFunctionExpr,
+        index: usize,
+        group: GroupId,
+        arrays: &[ArrayRef],
+        rank: usize,
+        name: &str,
+    ) -> Result<Box<dyn super::Accumulator>> {
         let mut accumulator = expression
             .create_accumulator()
             .map_err(|error| df_error(name, error))?;
@@ -812,68 +903,91 @@ impl Transaction {
                 .merge_batch(&arrays)
                 .map_err(|error| df_error(name, error))?;
         }
-        let values = accumulator.state().map_err(|error| df_error(name, error))?;
-        let result = if state.keys.is_some() && expression.fun().name() == "avg" {
-            native_grouped_result(expression, &values, name)?
+        Ok(accumulator)
+    }
+
+    fn merged_rank_result(
+        state: &State,
+        expression: &AggregateFunctionExpr,
+        accumulator: &mut dyn super::Accumulator,
+        values: &[ScalarValue],
+        name: &str,
+    ) -> Result<ScalarValue> {
+        if state.keys.is_some() && expression.fun().name() == "avg" {
+            native_grouped_result(expression, values, name)
         } else {
             accumulator
                 .evaluate()
-                .map_err(|error| df_error(name, error))?
-        };
-        state.set_state(index, group, values, result)
+                .map_err(|error| df_error(name, error))
+        }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn restore_chunk(
+    fn restore_record(
         &mut self,
-        chunk: &RecordBatch,
-        key_count: usize,
-        replace: bool,
-        aggregates: &[Arc<AggregateFunctionExpr>],
-        global: Option<&global_record::Proof>,
-        sequential: bool,
+        record: &RecordBatch,
+        spec: &RestoreSpec<'_>,
         seen: &mut std::collections::BTreeSet<GroupId>,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
-        let keys = chunk.columns()[..key_count].to_vec();
+        for start in (0..record.num_rows()).step_by(MORSEL_ROWS) {
+            check()?;
+            let rows = MORSEL_ROWS.min(record.num_rows() - start);
+            let chunk = record.slice(start, rows);
+            self.restore_chunk(&chunk, spec, seen, check)?;
+        }
+        if record.num_rows() == 0 {
+            check()?;
+        }
+        Ok(())
+    }
+
+    fn restore_chunk(
+        &mut self,
+        chunk: &RecordBatch,
+        spec: &RestoreSpec<'_>,
+        seen: &mut std::collections::BTreeSet<GroupId>,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        let keys = chunk.columns()[..spec.key_count].to_vec();
         let state = self.state.clone();
         let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-        let groups = match &mut state.keys {
-            Some(store) => store.route_with_limit(&keys, self.limit, check)?,
-            None => vec![GroupId::new(0)?; chunk.num_rows()],
-        };
+        let groups = self.route_groups(&mut state, &keys, chunk.num_rows(), None, check)?;
         self.grow(&mut state)?;
         for (row, group) in groups.into_iter().enumerate() {
-            if !seen.insert(group) || (group.index() < self.old_groups && !replace) {
-                return Err(df_error(
-                    "keyed aggregate",
-                    "native state contains duplicate keys",
-                ));
-            }
-            self.touch(&mut state, group)?;
-            let mut column = key_count;
-            for (index, expression) in aggregates.iter().enumerate() {
-                let width = expression
-                    .state_fields()
-                    .map_err(|error| df_error("keyed aggregate", error))?
-                    .len();
-                let values = scalars(
-                    &chunk.columns()[column..column + width],
-                    row,
-                    "keyed aggregate",
-                )?;
-                let result = restored_result(
-                    index,
-                    expression.as_ref(),
-                    &values,
-                    state.keys.is_some(),
-                    global,
-                    sequential,
-                    "keyed aggregate",
-                )?;
-                state.set_state(index, group, values, result)?;
-                column += width;
-            }
+            self.restore_group(&mut state, chunk, row, group, spec, seen)?;
+        }
+        Ok(())
+    }
+
+    fn restore_group(
+        &mut self,
+        state: &mut State,
+        chunk: &RecordBatch,
+        row: usize,
+        group: GroupId,
+        spec: &RestoreSpec<'_>,
+        seen: &mut std::collections::BTreeSet<GroupId>,
+    ) -> Result<()> {
+        self.validate_restore_group(seen, group, spec.replace)?;
+        self.touch(state, group)?;
+        let mut column = spec.key_count;
+        for index in 0..spec.aggregates.len() {
+            column += spec.restore_aggregate(state, chunk, row, group, index, column)?;
+        }
+        Ok(())
+    }
+
+    fn validate_restore_group(
+        &self,
+        seen: &mut std::collections::BTreeSet<GroupId>,
+        group: GroupId,
+        replace: bool,
+    ) -> Result<()> {
+        if !seen.insert(group) || (group.index() < self.old_groups && !replace) {
+            return Err(df_error(
+                "keyed aggregate",
+                "native state contains duplicate keys",
+            ));
         }
         Ok(())
     }
@@ -906,6 +1020,40 @@ impl Transaction {
 impl Drop for Transaction {
     fn drop(&mut self) {
         self.settle(false);
+    }
+}
+
+impl RestoreSpec<'_> {
+    fn restore_aggregate(
+        &self,
+        state: &mut State,
+        chunk: &RecordBatch,
+        row: usize,
+        group: GroupId,
+        index: usize,
+        column: usize,
+    ) -> Result<usize> {
+        let expression = &self.aggregates[index];
+        let width = expression
+            .state_fields()
+            .map_err(|error| df_error("keyed aggregate", error))?
+            .len();
+        let values = scalars(
+            &chunk.columns()[column..column + width],
+            row,
+            "keyed aggregate",
+        )?;
+        let result = restored_result(
+            index,
+            expression.as_ref(),
+            &values,
+            state.keys.is_some(),
+            self.global,
+            self.sequential,
+            "keyed aggregate",
+        )?;
+        state.set_state(index, group, values, result)?;
+        Ok(width)
     }
 }
 
@@ -1081,23 +1229,40 @@ impl State {
             Some(keys) => keys.columns(&groups)?,
             None => Vec::new(),
         };
+        self.append_aggregate_columns(&mut columns, &groups, state)?;
+        RecordBatch::try_new(schema, columns).map_err(|error| df_error("keyed aggregate", error))
+    }
+
+    fn append_aggregate_columns(
+        &self,
+        columns: &mut Vec<ArrayRef>,
+        groups: &[GroupId],
+        state: bool,
+    ) -> Result<()> {
         if state {
-            for aggregate in &self.aggregates {
-                for column in &aggregate.states {
-                    columns.push(column.array(&groups)?);
-                }
-            }
+            self.append_state_columns(columns, groups)
         } else {
-            for (index, _) in self.aggregates.iter().enumerate() {
-                columns.push(
-                    ScalarValue::iter_to_array(
-                        groups.iter().map(|group| self.result(index, *group)),
-                    )
-                    .map_err(|error| df_error("keyed aggregate", error))?,
-                );
+            self.append_result_columns(columns, groups)
+        }
+    }
+
+    fn append_state_columns(&self, columns: &mut Vec<ArrayRef>, groups: &[GroupId]) -> Result<()> {
+        for aggregate in &self.aggregates {
+            for column in &aggregate.states {
+                columns.push(column.array(groups)?);
             }
         }
-        RecordBatch::try_new(schema, columns).map_err(|error| df_error("keyed aggregate", error))
+        Ok(())
+    }
+
+    fn append_result_columns(&self, columns: &mut Vec<ArrayRef>, groups: &[GroupId]) -> Result<()> {
+        for (index, _) in self.aggregates.iter().enumerate() {
+            columns.push(
+                ScalarValue::iter_to_array(groups.iter().map(|group| self.result(index, *group)))
+                    .map_err(|error| df_error("keyed aggregate", error))?,
+            );
+        }
+        Ok(())
     }
 
     fn records(
@@ -1224,6 +1389,47 @@ impl GroupUndo {
     }
 }
 
+fn add_history_count(
+    state: &State,
+    row: usize,
+    index: usize,
+    function: &str,
+    historical_rows: u64,
+    counts: &mut [u64],
+    name: &str,
+) -> Result<()> {
+    let Some(count) = history_count(state, row, index, function, name)? else {
+        return Ok(());
+    };
+    counts[index] = counts[index]
+        .checked_add(count)
+        .filter(|total| *total <= historical_rows)
+        .ok_or_else(|| df_error(name, "native aggregate count exceeds historical rows"))?;
+    Ok(())
+}
+
+fn history_count(
+    state: &State,
+    row: usize,
+    index: usize,
+    function: &str,
+    name: &str,
+) -> Result<Option<u64>> {
+    let Some(column) = state.aggregates[index].states.first() else {
+        return Ok(None);
+    };
+    match (function, &column.values[row]) {
+        ("count", ScalarValue::Int64(value)) => {
+            let value = value.ok_or_else(|| df_error(name, "native COUNT state is null"))?;
+            u64::try_from(value)
+                .map(Some)
+                .map_err(|_| df_error(name, "native COUNT state is negative"))
+        }
+        ("avg", ScalarValue::UInt64(value)) => Ok(Some(value.unwrap_or(0))),
+        _ => Ok(None),
+    }
+}
+
 fn scalars(arrays: &[ArrayRef], row: usize, name: &str) -> Result<Vec<ScalarValue>> {
     arrays
         .iter()
@@ -1270,6 +1476,14 @@ fn restored_result(
     if grouped && expression.fun().name() == "avg" {
         return native_grouped_result(expression, values, name);
     }
+    evaluate_restored_result(expression, values, name)
+}
+
+fn evaluate_restored_result(
+    expression: &AggregateFunctionExpr,
+    values: &[ScalarValue],
+    name: &str,
+) -> Result<ScalarValue> {
     let mut accumulator = expression
         .create_accumulator()
         .map_err(|error| df_error(name, error))?;

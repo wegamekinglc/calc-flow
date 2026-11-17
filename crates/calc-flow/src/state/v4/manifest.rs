@@ -158,6 +158,12 @@ impl V4Manifest {
     pub(in crate::state) fn validate(&self, expected: &ManifestExpectationV4) -> Result<()> {
         self.validate_fingerprint()?;
         self.validate_structure()?;
+        self.validate_identity(expected)?;
+        validate_expected_participants(self, expected)?;
+        self.validate_table_partitions(expected)
+    }
+
+    fn validate_identity(&self, expected: &ManifestExpectationV4) -> Result<()> {
         if self.pipeline_name != expected.pipeline_name
             || self.pipeline_fingerprint != expected.pipeline_fingerprint
         {
@@ -169,12 +175,10 @@ impl V4Manifest {
         if self.job_kind != expected.job_kind || self.epoch != expected.epoch {
             return Err(mismatch("checkpoint manifest identity mismatch".into()));
         }
-        validate_ids("source", &self.sources, &expected.source_ids)?;
-        validate_ids("operator", &self.operators, &expected.operator_ids)?;
-        validate_ids("sink", &self.sinks, &expected.sink_ids)?;
-        if self.static_inputs != expected.static_inputs {
-            return Err(mismatch("static-input participants differ".into()));
-        }
+        Ok(())
+    }
+
+    fn validate_table_partitions(&self, expected: &ManifestExpectationV4) -> Result<()> {
         for (operator, groups) in &expected.table_partitions {
             let Some(actual_operator) = self.operators.get(operator) else {
                 return Err(mismatch("operator participants differ".into()));
@@ -212,39 +216,12 @@ impl V4Manifest {
     }
 
     pub(in crate::state) fn validate_structure(&self) -> Result<()> {
-        if self.format_version != 4 {
-            return Err(CalcFlowError::UnsupportedVersion {
-                expected: 4,
-                found: self.format_version,
-            });
-        }
-        if self.epoch == 0 || self.recovery_status != "final" {
-            return Err(format_error(
-                "checkpoint manifest epoch or recovery status is invalid".into(),
-            ));
-        }
+        validate_format_version(self.format_version)?;
+        validate_epoch_status(self)?;
         validate_participant_rules(self)?;
-        for source in self.sources.values() {
-            if let Some(history) = &source.history {
-                if history.format_version != 1 {
-                    return Err(format_error(
-                        "checkpoint-v4 source-history version is unsupported".into(),
-                    ));
-                }
-                for handle in &history.segments {
-                    handle.validate(self.epoch)?;
-                }
-            }
-        }
-        for operator in self.operators.values() {
-            validate_operator(operator, self.epoch)?;
-        }
-        for sink in self.sinks.values() {
-            for block in &sink.blocks {
-                block.validate(self.epoch)?;
-            }
-        }
-        Ok(())
+        validate_source_histories(self)?;
+        validate_operators(self)?;
+        validate_sinks(self)
     }
 }
 
@@ -277,45 +254,87 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
+fn validate_format_version(format_version: u32) -> Result<()> {
+    if format_version != 4 {
+        return Err(CalcFlowError::UnsupportedVersion {
+            expected: 4,
+            found: format_version,
+        });
+    }
+    Ok(())
+}
+
+fn validate_epoch_status(manifest: &V4Manifest) -> Result<()> {
+    if manifest.epoch == 0 || manifest.recovery_status != "final" {
+        return Err(format_error(
+            "checkpoint manifest epoch or recovery status is invalid".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_source_histories(manifest: &V4Manifest) -> Result<()> {
+    for source in manifest.sources.values() {
+        if let Some(history) = &source.history {
+            if history.format_version != 1 {
+                return Err(format_error(
+                    "checkpoint-v4 source-history version is unsupported".into(),
+                ));
+            }
+            for handle in &history.segments {
+                handle.validate(manifest.epoch)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_operators(manifest: &V4Manifest) -> Result<()> {
+    for operator in manifest.operators.values() {
+        validate_operator(operator, manifest.epoch)?;
+    }
+    Ok(())
+}
+
+fn validate_sinks(manifest: &V4Manifest) -> Result<()> {
+    for sink in manifest.sinks.values() {
+        for block in &sink.blocks {
+            block.validate(manifest.epoch)?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_document_version(value: &Value) -> Result<()> {
     let found = value
         .get("format_version")
         .and_then(Value::as_u64)
         .and_then(|version| u32::try_from(version).ok())
         .ok_or_else(|| format_error("manifest format_version must be a u32".into()))?;
-    if found == 3 {
-        return Err(CalcFlowError::UnsupportedVersion {
-            expected: 4,
-            found: 3,
-        });
-    }
-    if found != 4 {
-        return Err(CalcFlowError::UnsupportedVersion { expected: 4, found });
-    }
-    Ok(())
+    validate_format_version(found)
 }
 
 fn validate_participant_rules(manifest: &V4Manifest) -> Result<()> {
     match manifest.job_kind {
-        JobKind::Runner
-            if manifest.sources.is_empty()
-                || manifest.operators.is_empty()
-                || manifest.sinks.is_empty() =>
-        {
-            return Err(format_error(
-                "runner manifest participants must be non-empty".into(),
-            ));
-        }
-        JobKind::Session
-            if manifest.sources.len() != 1
-                || manifest.operators.is_empty()
-                || !manifest.sinks.is_empty() =>
-        {
-            return Err(format_error(
-                "session manifest must have one source and no sinks".into(),
-            ));
-        }
-        _ => {}
+        JobKind::Runner => validate_runner_participants(manifest),
+        JobKind::Session => validate_session_participants(manifest),
+    }
+}
+
+fn validate_runner_participants(manifest: &V4Manifest) -> Result<()> {
+    if manifest.sources.is_empty() || manifest.operators.is_empty() || manifest.sinks.is_empty() {
+        return Err(format_error(
+            "runner manifest participants must be non-empty".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_session_participants(manifest: &V4Manifest) -> Result<()> {
+    if manifest.sources.len() != 1 || manifest.operators.is_empty() || !manifest.sinks.is_empty() {
+        return Err(format_error(
+            "session manifest must have one source and no sinks".into(),
+        ));
     }
     Ok(())
 }
@@ -342,6 +361,19 @@ fn validate_operator(operator: &OperatorV4, epoch: u64) -> Result<()> {
                 block.validate(epoch)?;
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_expected_participants(
+    manifest: &V4Manifest,
+    expected: &ManifestExpectationV4,
+) -> Result<()> {
+    validate_ids("source", &manifest.sources, &expected.source_ids)?;
+    validate_ids("operator", &manifest.operators, &expected.operator_ids)?;
+    validate_ids("sink", &manifest.sinks, &expected.sink_ids)?;
+    if manifest.static_inputs != expected.static_inputs {
+        return Err(mismatch("static-input participants differ".into()));
     }
     Ok(())
 }

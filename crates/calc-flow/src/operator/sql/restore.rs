@@ -54,23 +54,39 @@ impl SqlOperator {
         snapshot: &OperatorStateSnapshot,
         check_cancelled: &dyn Fn() -> Result<()>,
     ) -> Result<PreparedSqlRestore> {
-        if let Some(operator) = &mut self.replacement {
-            return Ok(PreparedSqlRestore {
-                replacement: Some(operator.prepare_restore(snapshot, check_cancelled)?),
-                retained: None,
-                compact: None,
-                retained_capture: None,
-            });
+        if self.replacement.is_some() {
+            return self.prepare_replacement_restore(snapshot, check_cancelled);
         }
         check_cancelled()?;
         if snapshot.inline_metadata.is_empty() && snapshot.segments.is_empty() {
-            return Ok(PreparedSqlRestore {
-                replacement: None,
-                retained: None,
-                compact: None,
-                retained_capture: None,
-            });
+            return Ok(empty_prepared_restore());
         }
+        self.prepare_current_restore(snapshot, check_cancelled)
+    }
+
+    fn prepare_replacement_restore(
+        &mut self,
+        snapshot: &OperatorStateSnapshot,
+        check_cancelled: &dyn Fn() -> Result<()>,
+    ) -> Result<PreparedSqlRestore> {
+        let replacement = self
+            .replacement
+            .as_mut()
+            .expect("replacement restore")
+            .prepare_restore(snapshot, check_cancelled)?;
+        Ok(PreparedSqlRestore {
+            replacement: Some(replacement),
+            retained: None,
+            compact: None,
+            retained_capture: None,
+        })
+    }
+
+    fn prepare_current_restore(
+        &mut self,
+        snapshot: &OperatorStateSnapshot,
+        check_cancelled: &dyn Fn() -> Result<()>,
+    ) -> Result<PreparedSqlRestore> {
         let layout = current_layout(snapshot)?;
         self.stream_state.runtime()?;
         let prepared = self.prepare_layout_restore(snapshot, layout, check_cancelled)?;
@@ -158,6 +174,15 @@ impl SqlOperator {
 #[cfg(test)]
 #[path = "restore_tests.rs"]
 mod tests;
+
+fn empty_prepared_restore() -> PreparedSqlRestore {
+    PreparedSqlRestore {
+        replacement: None,
+        retained: None,
+        compact: None,
+        retained_capture: None,
+    }
+}
 
 fn recovery_value_bytes(value: &Value) -> Option<usize> {
     let payload = match value {

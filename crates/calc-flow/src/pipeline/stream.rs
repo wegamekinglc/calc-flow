@@ -1401,17 +1401,7 @@ impl StreamExecutionPlan {
             .ok_or_else(|| CalcFlowError::Internal {
                 message: "runtime configuration hash value is not an object".into(),
             })?;
-        // Preserve the existing hash for the default checkpoint-enabled mode.
-        if !config.checkpointing {
-            fields.insert("checkpointing".into(), json!(false));
-        }
-        // Preserve the historical hash for the default 1 GiB reservation.
-        if config.checkpoint_inflight_max_bytes != 1 << 30 {
-            fields.insert(
-                "checkpoint_inflight_max_bytes".into(),
-                json!(config.checkpoint_inflight_max_bytes),
-            );
-        }
+        insert_checkpoint_runtime_fields(fields, config);
         insert_sql_budget_fields(fields, config);
         let canonical = canonical_json(&value)?;
         Ok(hex::encode(Sha256::digest(canonical.as_bytes())))
@@ -2400,6 +2390,23 @@ mod volatile_query_tests {
             );
         assert!(plan.is_ok(), "{:?}", plan.err());
         let _ = default_function_registry();
+    }
+}
+
+fn insert_checkpoint_runtime_fields(
+    fields: &mut serde_json::Map<String, serde_json::Value>,
+    config: &StreamRuntimeConfig,
+) {
+    // Preserve the existing hash for the default checkpoint-enabled mode.
+    if !config.checkpointing {
+        fields.insert("checkpointing".into(), json!(false));
+    }
+    // Preserve the historical hash for the default 1 GiB reservation.
+    if config.checkpoint_inflight_max_bytes != 1 << 30 {
+        fields.insert(
+            "checkpoint_inflight_max_bytes".into(),
+            json!(config.checkpoint_inflight_max_bytes),
+        );
     }
 }
 

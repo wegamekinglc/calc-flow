@@ -49,7 +49,14 @@ impl RollingOperator {
     }
 
     fn slab_restore_charge(&self, restored: &DecodedRollingState) -> Result<StateCharge> {
-        let charge = crate::operator::rolling::kernel::RollingKernelPlan::slab_charge(
+        let charge = self.slab_typed_charge(restored)?;
+        let pending = self.pending_restore_charge(restored)?;
+        let charge = charge.checked_add(pending, &self.name)?;
+        self.check_restore_budget(charge)
+    }
+
+    fn slab_typed_charge(&self, restored: &DecodedRollingState) -> Result<StateCharge> {
+        crate::operator::rolling::kernel::RollingKernelPlan::slab_charge(
             restored.typed_kernel_state.as_deref().ok_or_else(|| {
                 crate::operator::checkpoint::checkpoint_mismatch(
                     "rolling layout-7 restore is missing typed state",
@@ -61,16 +68,16 @@ impl RollingOperator {
             crate::operator::checkpoint::checkpoint_mismatch(
                 "rolling layout-7 restore is missing its state table",
             )
-        })?;
-        let pending =
-            budget::ordered_buffer_charge(restored.ordered.records(), &self.compiled, &self.name)?
-                .ok_or_else(|| {
-                    crate::operator::checkpoint::checkpoint_mismatch(
-                        "rolling layout-7 pending state has unsupported charge",
-                    )
-                })?;
-        let charge = charge.checked_add(pending, &self.name)?;
-        self.check_restore_budget(charge)
+        })
+    }
+
+    fn pending_restore_charge(&self, restored: &DecodedRollingState) -> Result<StateCharge> {
+        budget::ordered_buffer_charge(restored.ordered.records(), &self.compiled, &self.name)?
+            .ok_or_else(|| {
+                crate::operator::checkpoint::checkpoint_mismatch(
+                    "rolling layout-7 pending state has unsupported charge",
+                )
+            })
     }
 
     fn history_restore_charge(&self, restored: &mut DecodedRollingState) -> Result<StateCharge> {

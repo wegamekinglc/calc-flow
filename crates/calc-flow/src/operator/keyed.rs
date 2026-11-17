@@ -969,23 +969,51 @@ fn canonical_string(
     Ok(())
 }
 
+macro_rules! canonical_fixed {
+    ($value:expr, $output:expr) => {
+        if let Some(value) = $value {
+            $output.extend_from_slice(&value.to_le_bytes());
+        }
+    };
+}
+
 fn canonical_integer(value: &ScalarValue, output: &mut Vec<u8>) -> Result<()> {
-    macro_rules! fixed {
-        ($value:expr) => {
-            if let Some(value) = $value {
-                output.extend_from_slice(&value.to_le_bytes());
-            }
-        };
-    }
     match value {
-        ScalarValue::Int8(value) => fixed!(value),
-        ScalarValue::Int16(value) => fixed!(value),
-        ScalarValue::Int32(value) | ScalarValue::Date32(value) => fixed!(value),
-        ScalarValue::UInt8(value) => fixed!(value),
-        ScalarValue::UInt16(value) => fixed!(value),
-        ScalarValue::UInt32(value) => fixed!(value),
-        ScalarValue::UInt64(value) => fixed!(value),
-        ScalarValue::Int64(value) | ScalarValue::Date64(value) => fixed!(value),
+        ScalarValue::Int8(_)
+        | ScalarValue::Int16(_)
+        | ScalarValue::Int32(_)
+        | ScalarValue::Date32(_)
+        | ScalarValue::Int64(_)
+        | ScalarValue::Date64(_) => canonical_signed_integer(value, output),
+        ScalarValue::UInt8(_)
+        | ScalarValue::UInt16(_)
+        | ScalarValue::UInt32(_)
+        | ScalarValue::UInt64(_) => canonical_unsigned_integer(value, output),
+        _ => Err(keyed_error("canonical scalar differs from the key schema")),
+    }
+}
+
+fn canonical_signed_integer(value: &ScalarValue, output: &mut Vec<u8>) -> Result<()> {
+    match value {
+        ScalarValue::Int8(value) => canonical_fixed!(value, output),
+        ScalarValue::Int16(value) => canonical_fixed!(value, output),
+        ScalarValue::Int32(value) | ScalarValue::Date32(value) => {
+            canonical_fixed!(value, output);
+        }
+        ScalarValue::Int64(value) | ScalarValue::Date64(value) => {
+            canonical_fixed!(value, output);
+        }
+        _ => return Err(keyed_error("canonical scalar differs from the key schema")),
+    }
+    Ok(())
+}
+
+fn canonical_unsigned_integer(value: &ScalarValue, output: &mut Vec<u8>) -> Result<()> {
+    match value {
+        ScalarValue::UInt8(value) => canonical_fixed!(value, output),
+        ScalarValue::UInt16(value) => canonical_fixed!(value, output),
+        ScalarValue::UInt32(value) => canonical_fixed!(value, output),
+        ScalarValue::UInt64(value) => canonical_fixed!(value, output),
         _ => return Err(keyed_error("canonical scalar differs from the key schema")),
     }
     Ok(())
@@ -1130,12 +1158,6 @@ impl KeyColumn {
                 values.push(input.is_valid(row).then_some(input.value(row)));
                 Ok(())
             }
-            Self::Int8(_) | Self::Int16(_) | Self::Int32(_) | Self::Int64(_) => {
-                self.push_signed(array, row)
-            }
-            Self::UInt8(_) | Self::UInt16(_) | Self::UInt32(_) | Self::UInt64(_) => {
-                self.push_unsigned(array, row)
-            }
             Self::Utf8(values) => {
                 let input = typed_string::<StringArray>(array)?;
                 values.push(
@@ -1154,12 +1176,25 @@ impl KeyColumn {
                 );
                 Ok(())
             }
+            _ => self.push_primitive(array, row),
+        }
+    }
+
+    fn push_primitive(&mut self, array: &ArrayRef, row: usize) -> Result<()> {
+        match self {
+            Self::Int8(_) | Self::Int16(_) | Self::Int32(_) | Self::Int64(_) => {
+                self.push_signed(array, row)
+            }
+            Self::UInt8(_) | Self::UInt16(_) | Self::UInt32(_) | Self::UInt64(_) => {
+                self.push_unsigned(array, row)
+            }
             Self::Date32(_)
             | Self::Date64(_)
             | Self::TimestampSecond(_)
             | Self::TimestampMillisecond(_)
             | Self::TimestampMicrosecond(_)
             | Self::TimestampNanosecond(_) => self.push_temporal(array, row),
+            _ => Err(keyed_error("primitive key birth column differs")),
         }
     }
 
@@ -1299,12 +1334,6 @@ impl KeyColumn {
                     .ok_or_else(|| keyed_error("Boolean key equality array differs"))?;
                 Ok(values[group] == input.is_valid(row).then_some(input.value(row)))
             }
-            Self::Int8(_) | Self::Int16(_) | Self::Int32(_) | Self::Int64(_) => {
-                self.equals_signed(group, array, row)
-            }
-            Self::UInt8(_) | Self::UInt16(_) | Self::UInt32(_) | Self::UInt64(_) => {
-                self.equals_unsigned(group, array, row)
-            }
             Self::Utf8(values) => string_equality(
                 values[group].as_deref(),
                 typed_string::<StringArray>(array)?,
@@ -1317,12 +1346,25 @@ impl KeyColumn {
                 row,
                 variable,
             ),
+            _ => self.equals_primitive(group, array, row),
+        }
+    }
+
+    fn equals_primitive(&self, group: usize, array: &ArrayRef, row: usize) -> Result<bool> {
+        match self {
+            Self::Int8(_) | Self::Int16(_) | Self::Int32(_) | Self::Int64(_) => {
+                self.equals_signed(group, array, row)
+            }
+            Self::UInt8(_) | Self::UInt16(_) | Self::UInt32(_) | Self::UInt64(_) => {
+                self.equals_unsigned(group, array, row)
+            }
             Self::Date32(_)
             | Self::Date64(_)
             | Self::TimestampSecond(_)
             | Self::TimestampMillisecond(_)
             | Self::TimestampMicrosecond(_)
             | Self::TimestampNanosecond(_) => self.equals_temporal(group, array, row),
+            _ => Err(keyed_error("primitive key equality column differs")),
         }
     }
 

@@ -360,15 +360,11 @@ impl RollingKernelPlan {
         Ok((routing, nanos(started.elapsed())))
     }
 
-    fn fill_slab_rows(
-        &self,
+    fn prepare_slab_entities(
         table: &mut StateTable,
-        values: &Float64Array,
         routing: &EntityRouting,
-        input_rows: usize,
         node_id: &str,
-        observer: Option<&RollingMetricsRecorder>,
-    ) -> Result<Vec<ArrayRef>> {
+    ) -> Result<(Vec<EntityId>, Vec<EntityId>)> {
         let resolved = routing
             .keys
             .iter()
@@ -387,39 +383,86 @@ impl RollingKernelPlan {
             })?;
             table.set_u64(0, entity, transitions)?;
         }
+        Ok((resolved, ids))
+    }
+
+    fn append_slab_outputs(
+        builders: &mut [SlabBuilder],
+        outputs: &[TypedOutputPlan],
+        accumulators: &[NumericAccumulator],
+    ) -> Result<()> {
+        for (builder, output) in builders.iter_mut().zip(outputs) {
+            builder.append(accumulators, output)?;
+        }
+        Ok(())
+    }
+
+    fn append_slab_row(
+        table: &mut StateTable,
+        entity: EntityId,
+        first: bool,
+        value: Option<f64>,
+        builders: &mut [SlabBuilder],
+        outputs: &[TypedOutputPlan],
+    ) -> Result<()> {
+        if first {
+            table.push_numeric_rows(0, entity, value)?;
+        } else {
+            table.push_numeric_rows_recurrent(0, entity, value)?;
+        }
+        let accumulators = table.numeric_accumulators(0, entity)?;
+        Self::append_slab_outputs(builders, outputs, accumulators)
+    }
+
+    fn write_full_tick(
+        &self,
+        table: &mut StateTable,
+        ids: &[EntityId],
+        values: &Float64Array,
+        order_len: usize,
+        builders: &mut [SlabBuilder],
+    ) -> Result<bool> {
+        if order_len == 0 {
+            return Ok(false);
+        }
+        table.write_numeric_full_tick(
+            0,
+            &ids[..order_len],
+            ids,
+            values,
+            self.nan_as_value,
+            |_, accumulators| Self::append_slab_outputs(builders, &self.outputs, accumulators),
+        )
+    }
+
+    fn fill_slab_rows(
+        &self,
+        table: &mut StateTable,
+        values: &Float64Array,
+        routing: &EntityRouting,
+        input_rows: usize,
+        node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
+    ) -> Result<Vec<ArrayRef>> {
+        let (_, ids) = Self::prepare_slab_entities(table, routing, node_id)?;
         let mut builders = self
             .outputs
             .iter()
             .map(|output| SlabBuilder::new(output, input_rows))
             .collect::<Result<Vec<_>>>()?;
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
-        let order_len = routing.keys.len();
-        let full_tick = order_len > 0
-            && table.write_numeric_full_tick(
-                0,
-                &ids[..order_len],
-                &ids,
-                values,
-                self.nan_as_value,
-                |_, accumulators| {
-                    for (builder, output) in builders.iter_mut().zip(&self.outputs) {
-                        builder.append(accumulators, output)?;
-                    }
-                    Ok(())
-                },
-            )?;
+        let full_tick =
+            self.write_full_tick(table, &ids, values, routing.keys.len(), &mut builders)?;
         if !full_tick {
             for (row, &entity) in ids.iter().enumerate() {
-                let value = valid_float64(values, row, self.nan_as_value);
-                if routing.rows.first_rows[routing.entity_ids[row]] == row {
-                    table.push_numeric_rows(0, entity, value)?;
-                } else {
-                    table.push_numeric_rows_recurrent(0, entity, value)?;
-                }
-                let accumulators = table.numeric_accumulators(0, entity)?;
-                for (builder, output) in builders.iter_mut().zip(&self.outputs) {
-                    builder.append(accumulators, output)?;
-                }
+                Self::append_slab_row(
+                    table,
+                    entity,
+                    routing.rows.first_rows[routing.entity_ids[row]] == row,
+                    valid_float64(values, row, self.nan_as_value),
+                    &mut builders,
+                    &self.outputs,
+                )?;
             }
         }
         if let Some(recorder) = observer {
@@ -430,6 +473,23 @@ impl RollingKernelPlan {
             .into_iter()
             .map(SlabBuilder::finish)
             .collect::<Vec<_>>())
+    }
+
+    fn finish_slab_columns(
+        state: &mut RollingKernelState,
+        created: bool,
+        result: Result<Vec<ArrayRef>>,
+    ) -> Result<Vec<ArrayRef>> {
+        match result {
+            Ok(columns) => Ok(columns),
+            Err(error) => {
+                state.slab.as_mut().expect("slab initialized").rollback()?;
+                if created {
+                    state.slab = None;
+                }
+                Err(error)
+            }
+        }
     }
 
     pub(in crate::operator::rolling) fn prepare_slab_ordered_stream(
@@ -457,16 +517,7 @@ impl RollingKernelPlan {
             node_id,
             observer,
         );
-        let columns = match result {
-            Ok(columns) => columns,
-            Err(error) => {
-                state.slab.as_mut().expect("slab initialized").rollback()?;
-                if created {
-                    state.slab = None;
-                }
-                return Err(error);
-            }
-        };
+        let columns = Self::finish_slab_columns(state, created, result)?;
         let local = RollingKernelState {
             kernel_fingerprint: Some(self.fingerprint.clone()),
             last_identity: batch.last_identity,

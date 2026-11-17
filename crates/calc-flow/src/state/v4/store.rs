@@ -83,6 +83,20 @@ impl V4Store {
         objects: Vec<NewObject>,
         fault: Option<V4Fault>,
     ) -> Result<Vec<EncodedObject>> {
+        let mut encoded = self.encode_objects(epoch, &objects, fault).await?;
+        sort_encoded(&mut encoded);
+        self.stats.content_hashes += encoded.len() as u64;
+        self.apply_fault(fault)?;
+        self.persist_encoded(&encoded).await?;
+        Ok(encoded)
+    }
+
+    async fn encode_objects(
+        &self,
+        epoch: u64,
+        objects: &[NewObject],
+        fault: Option<V4Fault>,
+    ) -> Result<Vec<EncodedObject>> {
         let mut encoded = Vec::new();
         for chunk in objects.chunks(MAX_WORKERS) {
             let root = self.root.clone();
@@ -100,47 +114,42 @@ impl V4Store {
                     })
                 })
                 .collect::<Vec<_>>();
-            let mut settled = Vec::new();
-            for handle in &mut handles {
-                settled.push(handle.await);
-            }
-            for result in settled {
-                let object = result.map_err(|error| {
-                    format_error(format!("checkpoint-v4 encode worker failed: {error}"))
-                })?;
-                encoded.push(object?);
-            }
+            encoded.extend(settle_workers(&mut handles, "encode").await?);
         }
-        encoded.sort_by(|left, right| {
-            (&left.handle.owner, &left.handle.object_id)
-                .cmp(&(&right.handle.owner, &right.handle.object_id))
-        });
-        self.stats.content_hashes += encoded.len() as u64;
-        if let Some(fault) = fault {
-            match fault {
-                V4Fault::Write => return Err(format_error("injected write failure".into())),
-                V4Fault::Checksum => {
-                    return Err(mismatch("injected checksum failure".into()));
-                }
-                V4Fault::DiskFull => {
-                    return Err(io_error(
-                        &self.root,
-                        std::io::Error::from(std::io::ErrorKind::StorageFull),
-                    ));
-                }
-                V4Fault::WorkerPanic => {}
-            }
-        }
-        self.prepare_directories(&encoded)?;
-        self.write_encoded_files(&encoded).await?;
-        self.install_encoded_files(&encoded)?;
         Ok(encoded)
+    }
+
+    fn apply_fault(&self, fault: Option<V4Fault>) -> Result<()> {
+        let Some(fault) = fault else {
+            return Ok(());
+        };
+        match fault {
+            V4Fault::Write => Err(format_error("injected write failure".into())),
+            V4Fault::Checksum => Err(mismatch("injected checksum failure".into())),
+            V4Fault::DiskFull => Err(io_error(
+                &self.root,
+                std::io::Error::from(std::io::ErrorKind::StorageFull),
+            )),
+            V4Fault::WorkerPanic => Ok(()),
+        }
     }
 
     pub(in crate::state) async fn write_opaque(
         &mut self,
         epoch: u64,
         objects: Vec<OpaqueObject>,
+    ) -> Result<Vec<EncodedObject>> {
+        let mut encoded = self.encode_opaque(epoch, &objects).await?;
+        sort_encoded(&mut encoded);
+        self.stats.opaque_blocks += encoded.len() as u64;
+        self.persist_encoded(&encoded).await?;
+        Ok(encoded)
+    }
+
+    async fn encode_opaque(
+        &self,
+        epoch: u64,
+        objects: &[OpaqueObject],
     ) -> Result<Vec<EncodedObject>> {
         let mut encoded = Vec::new();
         for chunk in objects.chunks(MAX_WORKERS) {
@@ -153,25 +162,15 @@ impl V4Store {
                     tokio::task::spawn_blocking(move || encode_opaque(&object, &root, epoch))
                 })
                 .collect::<Vec<_>>();
-            let mut settled = Vec::new();
-            for handle in &mut handles {
-                settled.push(handle.await);
-            }
-            for result in settled {
-                encoded.push(result.map_err(|error| {
-                    format_error(format!("checkpoint-v4 opaque worker failed: {error}"))
-                })??);
-            }
+            encoded.extend(settle_workers(&mut handles, "opaque").await?);
         }
-        encoded.sort_by(|left, right| {
-            (&left.handle.owner, &left.handle.object_id)
-                .cmp(&(&right.handle.owner, &right.handle.object_id))
-        });
-        self.stats.opaque_blocks += encoded.len() as u64;
-        self.prepare_directories(&encoded)?;
-        self.write_encoded_files(&encoded).await?;
-        self.install_encoded_files(&encoded)?;
         Ok(encoded)
+    }
+
+    async fn persist_encoded(&mut self, encoded: &[EncodedObject]) -> Result<()> {
+        self.prepare_directories(encoded)?;
+        self.write_encoded_files(encoded).await?;
+        self.install_encoded_files(encoded)
     }
 
     pub(in crate::state) fn read_opaque(&mut self, handle: &V4Handle) -> Result<Vec<u8>> {
@@ -245,17 +244,13 @@ impl V4Store {
                     tokio::task::spawn_blocking(move || write_and_sync(&path, &bytes))
                 })
                 .collect::<Vec<_>>();
-            let mut settled = Vec::new();
-            for handle in &mut handles {
-                settled.push(handle.await);
-            }
-            for result in settled {
-                result.map_err(|error| {
-                    format_error(format!("checkpoint-v4 write worker failed: {error}"))
-                })??;
-            }
+            settle_workers(&mut handles, "write").await?;
         }
         self.stats.file_syncs += objects.len() as u64;
+        self.sync_staging_directories(objects)
+    }
+
+    fn sync_staging_directories(&mut self, objects: &[EncodedObject]) -> Result<()> {
         let mut directories = BTreeSet::new();
         for object in objects {
             if let Some(parent) = staging_path(&self.absolute(&object.handle)).parent() {
@@ -288,6 +283,31 @@ impl V4Store {
         }
         Ok(())
     }
+}
+
+async fn settle_workers<T>(
+    handles: &mut [tokio::task::JoinHandle<Result<T>>],
+    worker: &str,
+) -> Result<Vec<T>> {
+    let mut settled = Vec::new();
+    for handle in handles {
+        settled.push(handle.await);
+    }
+    settled
+        .into_iter()
+        .map(|result| {
+            result.map_err(|error| {
+                format_error(format!("checkpoint-v4 {worker} worker failed: {error}"))
+            })?
+        })
+        .collect()
+}
+
+fn sort_encoded(encoded: &mut [EncodedObject]) {
+    encoded.sort_by(|left, right| {
+        (&left.handle.owner, &left.handle.object_id)
+            .cmp(&(&right.handle.owner, &right.handle.object_id))
+    });
 }
 
 fn staging_path(committed: &Path) -> PathBuf {
