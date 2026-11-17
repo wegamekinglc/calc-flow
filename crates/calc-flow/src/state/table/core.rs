@@ -1717,16 +1717,29 @@ impl StateTable {
     ) -> Result<()> {
         let (group, row) = self.location(entity)?;
         let schema = &self.rings[column];
-        let max_window = match schema.retention {
-            Retention::Rows(window) if schema.numeric => window,
-            _ => return Err(internal("numeric Rows group type mismatch")),
-        };
         let transaction = self
             .transaction
             .as_mut()
             .ok_or_else(|| internal("state-table mutation requires a transaction"))?;
-        let transaction_id = transaction.id;
         let partition = self.partitions.get_mut(&group).expect("prepared group");
+        Self::push_numeric_recurrent_page(transaction, partition, schema, column, group, row, value)
+            .map(|_| ())
+    }
+
+    fn push_numeric_recurrent_page<'a>(
+        transaction: &mut Transaction,
+        partition: &'a mut StatePartition,
+        schema: &RingColumn,
+        column: usize,
+        group: KeyGroupId,
+        row: usize,
+        value: Option<f64>,
+    ) -> Result<&'a [NumericAccumulator]> {
+        let max_window = match schema.retention {
+            Retention::Rows(window) if schema.numeric => window,
+            _ => return Err(internal("numeric Rows group type mismatch")),
+        };
+        let transaction_id = transaction.id;
         let slot = partition.rings[column][row]
             .as_ref()
             .expect("ring page")
@@ -1801,7 +1814,77 @@ impl StateTable {
                     internal(&format!("rolling numeric arithmetic failed: {error:?}"))
                 })?;
         }
-        Ok(())
+        Ok(page.numeric.as_deref().expect("numeric group"))
+    }
+
+    pub(crate) fn write_numeric_full_tick(
+        &mut self,
+        column: usize,
+        order: &[EntityId],
+        ids: &[EntityId],
+        values: &Float64Array,
+        nan_as_value: bool,
+        mut emit: impl FnMut(usize, &[NumericAccumulator]) -> Result<()>,
+    ) -> Result<bool> {
+        if self.checkpointing
+            || order.is_empty()
+            || ids.len() < order.len()
+            || !ids.len().is_multiple_of(order.len())
+            || values.len() < ids.len()
+            || order
+                .iter()
+                .enumerate()
+                .any(|(index, entity)| order[..index].contains(entity))
+            || !ids.chunks(order.len()).all(|chunk| chunk == order)
+        {
+            return Ok(false);
+        }
+        let Some(partition) = self.partitions.get(&KeyGroupId(0)) else {
+            return Ok(false);
+        };
+        if order.iter().any(|entity| {
+            entity.key_group != KeyGroupId(0)
+                || partition
+                    .metadata
+                    .value
+                    .entities
+                    .get(entity.row as usize)
+                    .is_none_or(|stored| stored.index != entity.index)
+        }) {
+            return Ok(false);
+        }
+
+        for (row, entity) in order.iter().enumerate() {
+            let raw = values.value(row);
+            let value = (values.is_valid(row) && (nan_as_value || !raw.is_nan())).then_some(raw);
+            self.push_numeric_rows(column, *entity, value)?;
+            emit(row, self.numeric_accumulators(column, *entity)?)?;
+        }
+        let schema = &self.rings[column];
+        let transaction = self
+            .transaction
+            .as_mut()
+            .ok_or_else(|| internal("state-table mutation requires a transaction"))?;
+        let partition = self
+            .partitions
+            .get_mut(&KeyGroupId(0))
+            .expect("full-tick group was validated");
+        for (offset, entity) in ids[order.len()..].iter().enumerate() {
+            let row = order.len() + offset;
+            let raw = values.value(row);
+            let value = (values.is_valid(row) && (nan_as_value || !raw.is_nan())).then_some(raw);
+            let accumulators = Self::push_numeric_recurrent_page(
+                transaction,
+                partition,
+                schema,
+                column,
+                KeyGroupId(0),
+                entity.row as usize,
+                value,
+            )?;
+            emit(row, accumulators)?;
+        }
+        Ok(true)
     }
 
     fn push_numeric_rows_impl(

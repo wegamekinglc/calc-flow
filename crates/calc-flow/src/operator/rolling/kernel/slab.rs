@@ -393,16 +393,33 @@ impl RollingKernelPlan {
             .map(|output| SlabBuilder::new(output, input_rows))
             .collect::<Result<Vec<_>>>()?;
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
-        for (row, &entity) in ids.iter().enumerate() {
-            let value = valid_float64(values, row, self.nan_as_value);
-            if routing.rows.first_rows[routing.entity_ids[row]] == row {
-                table.push_numeric_rows(0, entity, value)?;
-            } else {
-                table.push_numeric_rows_recurrent(0, entity, value)?;
-            }
-            let accumulators = table.numeric_accumulators(0, entity)?;
-            for (builder, output) in builders.iter_mut().zip(&self.outputs) {
-                builder.append(accumulators, output)?;
+        let order_len = routing.keys.len();
+        let full_tick = order_len > 0
+            && table.write_numeric_full_tick(
+                0,
+                &ids[..order_len],
+                &ids,
+                values,
+                self.nan_as_value,
+                |_, accumulators| {
+                    for (builder, output) in builders.iter_mut().zip(&self.outputs) {
+                        builder.append(accumulators, output)?;
+                    }
+                    Ok(())
+                },
+            )?;
+        if !full_tick {
+            for (row, &entity) in ids.iter().enumerate() {
+                let value = valid_float64(values, row, self.nan_as_value);
+                if routing.rows.first_rows[routing.entity_ids[row]] == row {
+                    table.push_numeric_rows(0, entity, value)?;
+                } else {
+                    table.push_numeric_rows_recurrent(0, entity, value)?;
+                }
+                let accumulators = table.numeric_accumulators(0, entity)?;
+                for (builder, output) in builders.iter_mut().zip(&self.outputs) {
+                    builder.append(accumulators, output)?;
+                }
             }
         }
         if let Some(recorder) = observer {

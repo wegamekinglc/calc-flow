@@ -67,6 +67,9 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   `p2-2-slab-direct-recurrent` 提升到 1.09x/1.11x（faster），消除了相对基线的回退；绝对 G1–G3 仍未达标。
   独立审查发现的 freeze rollback、mean-only rebuild restore 和 abort dirty-loss 问题已各有回归测试并修复。
   其余 typed groups、P2.4–P2.9、join/ASOF、并行/SIMD 与 window pane 仍需实现和验收。
+- P2.9 已交付首个 full-tick tier：严格验证 entity 顺序后，首 tick 完整 first-touch，后续 tick 复用同一
+  transaction/partition，非 full-tick 自动回退。rolling 701 和 clippy 通过；`p2-2-slab-full-tick` 的 paired
+  large-batch 为 1.15x，G2 19.291 ns/window-row、G3 371.773 µs，绝对门槛仍未通过。
 
 ## 1. 目标
 
