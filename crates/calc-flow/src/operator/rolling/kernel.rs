@@ -39,7 +39,7 @@ use super::{
 use crate::accumulate::ArithmeticError;
 use crate::array::{
     MacdOptions,
-    indicators::{MacdKernel, MacdParameters},
+    indicators::{AtrKernel, MacdKernel, MacdParameters, RsiKernel},
 };
 use crate::{
     Result,
@@ -183,6 +183,14 @@ enum TypedGroupPlan {
         input_index: usize,
         options: MacdOptions,
     },
+    Rsi {
+        input_index: usize,
+        period: u64,
+    },
+    Atr {
+        inputs: [usize; 3],
+        period: u64,
+    },
 }
 
 impl TypedGroupPlan {
@@ -198,7 +206,11 @@ impl TypedGroupPlan {
             Self::Lag { periods, .. } => {
                 Some(TypedFrame::Rows(if periods == 0 { 1 } else { periods }))
             }
-            Self::Ewma { .. } | Self::Cumulative { .. } | Self::Macd { .. } => None,
+            Self::Ewma { .. }
+            | Self::Cumulative { .. }
+            | Self::Macd { .. }
+            | Self::Rsi { .. }
+            | Self::Atr { .. } => None,
         }
     }
     fn dispersion_mut(&mut self) -> Option<&mut bool> {
@@ -258,6 +270,8 @@ enum TypedOutputKind {
     Lag,
     Delta,
     Macd(usize),
+    Rsi,
+    Atr,
     Difference {
         left: TypedFloatReadout,
         right: TypedFloatReadout,
@@ -350,6 +364,8 @@ enum TypedGroupInput {
     Signed(Int64Array),
     Unsigned(UInt64Array),
     Pair(Float64Array, Float64Array),
+    Rsi(Float64Array, String, u64),
+    Atr([Float64Array; 3], [String; 3], u64),
 }
 
 /// Stage-level facts from one typed kernel invocation.
@@ -1663,6 +1679,23 @@ fn typed_group_input(
             input.column(input_index),
             node_id,
         )?)),
+        TypedGroupPlan::Rsi {
+            input_index,
+            period,
+        } => Ok(TypedGroupInput::Rsi(
+            cast_float64(input.column(input_index), node_id)?,
+            input.schema().field(input_index).name().to_owned(),
+            period,
+        )),
+        TypedGroupPlan::Atr { inputs, period } => Ok(TypedGroupInput::Atr(
+            [
+                cast_float64(input.column(inputs[0]), node_id)?,
+                cast_float64(input.column(inputs[1]), node_id)?,
+                cast_float64(input.column(inputs[2]), node_id)?,
+            ],
+            inputs.map(|index| input.schema().field(index).name().to_owned()),
+            period,
+        )),
         TypedGroupPlan::Lag {
             input_index,
             storage,
@@ -2170,16 +2203,21 @@ fn compile_duration_scan_group(
     Ok(())
 }
 
-fn compile_macd_group(
-    group: &super::indicators::Group,
-) -> std::result::Result<TypedGroupPlan, String> {
-    let super::indicators::Group::Macd(group) = group else {
-        return Err("typed indicators currently require MACD migration".into());
-    };
-    Ok(TypedGroupPlan::Macd {
-        input_index: group.input(),
-        options: group.options(),
-    })
+fn compile_indicator_group(group: &super::indicators::Group) -> TypedGroupPlan {
+    match group {
+        super::indicators::Group::Macd(group) => TypedGroupPlan::Macd {
+            input_index: group.input(),
+            options: group.options(),
+        },
+        super::indicators::Group::Rsi { input, period, .. } => TypedGroupPlan::Rsi {
+            input_index: *input,
+            period: *period,
+        },
+        super::indicators::Group::Atr { inputs, period, .. } => TypedGroupPlan::Atr {
+            inputs: *inputs,
+            period: *period,
+        },
+    }
 }
 
 fn compile_typed_plan(
@@ -2190,7 +2228,7 @@ fn compile_typed_plan(
 ) -> std::result::Result<(Vec<TypedGroupPlan>, Vec<TypedOutputPlan>), String> {
     let mut groups = compile_typed_groups(input_schema, window_groups)?;
     for group in indicator_groups {
-        groups.push(compile_macd_group(group)?);
+        groups.push(compile_indicator_group(group));
     }
     for output in outputs {
         match &output.evaluation {
@@ -2417,27 +2455,41 @@ fn compile_typed_output(
         CompiledEvaluation::Delta { periods } => compile_lag_output(output, *periods, groups, true),
         CompiledEvaluation::Scan(scan) => compile_scan_output(output, *scan, groups),
         CompiledEvaluation::Indicator(readout) => {
-            compile_macd_output(*readout, groups, indicator_groups)
+            compile_indicator_output(*readout, groups, indicator_groups)
         }
     }
 }
 
-fn compile_macd_output(
+fn compile_indicator_output(
     readout: usize,
     groups: &[TypedGroupPlan],
     indicator_groups: &[super::indicators::Group],
 ) -> std::result::Result<TypedOutputPlan, String> {
-    if readout >= indicator_groups.len() * 3 {
-        return Err("MACD readout is outside the typed plan".into());
-    }
     let base = groups.len() - indicator_groups.len();
-    Ok(TypedOutputPlan {
-        group: base + readout / 3,
-        kind: TypedOutputKind::Macd(readout % 3),
-        storage: OutputStorage::Float64,
-        min_periods: 0,
-        ddof: 0,
-    })
+    let mut remaining = readout;
+    for (index, group) in indicator_groups.iter().enumerate() {
+        let width = if matches!(group, super::indicators::Group::Macd(_)) {
+            3
+        } else {
+            1
+        };
+        if remaining < width {
+            let kind = match group {
+                super::indicators::Group::Macd(_) => TypedOutputKind::Macd(remaining),
+                super::indicators::Group::Rsi { .. } => TypedOutputKind::Rsi,
+                super::indicators::Group::Atr { .. } => TypedOutputKind::Atr,
+            };
+            return Ok(TypedOutputPlan {
+                group: base + index,
+                kind,
+                storage: OutputStorage::Float64,
+                min_periods: 0,
+                ddof: 0,
+            });
+        }
+        remaining -= width;
+    }
+    Err("indicator readout is outside the typed plan".into())
 }
 
 fn compile_lag_output(
@@ -3041,6 +3093,8 @@ enum TypedWindowState {
     Lag(TypedLagState),
     Utf8Lag(TypedUtf8LagState),
     Macd(TypedMacdState),
+    Rsi(TypedRsiState),
+    Atr(TypedAtrState),
     Decay(Option<Arc<decay::OwnedDecay>>),
 }
 
@@ -3386,6 +3440,64 @@ impl TypedMacdState {
     }
 }
 
+#[derive(Clone)]
+struct TypedRsiState {
+    kernel: RsiKernel,
+    latest: Option<f64>,
+}
+
+impl std::fmt::Debug for TypedRsiState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TypedRsiState")
+            .field("latest", &self.latest)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TypedRsiState {
+    fn new() -> Self {
+        Self {
+            kernel: RsiKernel::default(),
+            latest: None,
+        }
+    }
+
+    fn update(&mut self, sample: Option<f64>, period: u64, field: &str) -> Result<()> {
+        self.latest = self.kernel.push(sample, period, field)?;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct TypedAtrState {
+    kernel: AtrKernel,
+    latest: Option<f64>,
+}
+
+impl std::fmt::Debug for TypedAtrState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TypedAtrState")
+            .field("latest", &self.latest)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TypedAtrState {
+    fn new() -> Self {
+        Self {
+            kernel: AtrKernel::default(),
+            latest: None,
+        }
+    }
+
+    fn update(&mut self, values: [Option<f64>; 3], period: u64, fields: [&str; 3]) -> Result<()> {
+        self.latest = self.kernel.push(values, period, fields)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod lag_state_tests {
     use super::{LagValue, OutputStorage, TypedLagState};
@@ -3467,6 +3579,8 @@ impl TypedWindowState {
             TypedGroupPlan::Scan { kind, window, .. } => {
                 Self::Scan(TypedScanState::new(kind, window))
             }
+            TypedGroupPlan::Rsi { .. } => Self::Rsi(TypedRsiState::new()),
+            TypedGroupPlan::Atr { .. } => Self::Atr(TypedAtrState::new()),
             TypedGroupPlan::Macd { options, .. } => Self::Macd(TypedMacdState::new(options)),
             TypedGroupPlan::Lag {
                 periods,
@@ -3548,6 +3662,23 @@ impl TypedWindowState {
                 );
                 Ok(())
             }
+            (Self::Rsi(state), TypedGroupInput::Rsi(input, field, period)) => state.update(
+                input.is_valid(row_index).then_some(input.value(row_index)),
+                *period,
+                field,
+            ),
+            (Self::Atr(state), TypedGroupInput::Atr(inputs, fields, period)) => {
+                let [high, low, close] = inputs;
+                state.update(
+                    [
+                        high.is_valid(row_index).then_some(high.value(row_index)),
+                        low.is_valid(row_index).then_some(low.value(row_index)),
+                        close.is_valid(row_index).then_some(close.value(row_index)),
+                    ],
+                    *period,
+                    fields.each_ref().map(String::as_str),
+                )
+            }
             (Self::Macd(state), TypedGroupInput::Single(input)) => {
                 state.update(input.is_valid(row_index).then_some(input.value(row_index)))
             }
@@ -3609,6 +3740,8 @@ impl TypedWindowState {
                         .map(|value| value.as_ref().map_or(0, String::capacity))
                         .sum::<usize>(),
                 ),
+            Self::Rsi(_) => size_of::<TypedRsiState>(),
+            Self::Atr(_) => size_of::<TypedAtrState>(),
             Self::Macd(_) => size_of::<TypedMacdState>(),
             Self::Decay(state) => state.as_ref().map_or(0, |state| state.bytes()),
         }
@@ -3628,7 +3761,9 @@ impl TypedWindowState {
             | Self::Ewma(_)
             | Self::Scan(_)
             | Self::Decay(_)
-            | Self::Macd(_) => 0,
+            | Self::Macd(_)
+            | Self::Rsi(_)
+            | Self::Atr(_) => 0,
         }
     }
 }
@@ -3673,6 +3808,8 @@ fn update_extrema_input(
             .then(|| ExtremaValue::Unsigned(input.value(row))),
         TypedGroupInput::Pair(..)
         | TypedGroupInput::Utf8(_)
+        | TypedGroupInput::Rsi(..)
+        | TypedGroupInput::Atr(..)
         | TypedGroupInput::DecayReference(_) => {
             return Err(internal_error(
                 "typed rolling group state does not match its input plan",
@@ -4413,6 +4550,20 @@ impl DerivedBuilder {
                 }
                 _ => Err(typed_output_mismatch()),
             },
+            TypedWindowState::Rsi(state) => match (self, output.kind) {
+                (Self::Float(builder, _), TypedOutputKind::Rsi) => {
+                    builder.append_option(state.latest);
+                    Ok(())
+                }
+                _ => Err(typed_output_mismatch()),
+            },
+            TypedWindowState::Atr(state) => match (self, output.kind) {
+                (Self::Float(builder, _), TypedOutputKind::Atr) => {
+                    builder.append_option(state.latest);
+                    Ok(())
+                }
+                _ => Err(typed_output_mismatch()),
+            },
             TypedWindowState::Macd(state) => match (self, output.kind) {
                 (Self::Float(builder, _), TypedOutputKind::Macd(component)) => {
                     let value = state
@@ -4757,6 +4908,8 @@ fn typed_valid_count(state: &TypedWindowState) -> u64 {
         TypedWindowState::Rank(state) => u64::try_from(state.valid_count).unwrap_or(u64::MAX),
         TypedWindowState::DurationScan(state) => state.valid_count,
         TypedWindowState::Utf8Lag(state) => u64::try_from(state.history.len()).unwrap_or(u64::MAX),
+        TypedWindowState::Rsi(state) => state.kernel.positions,
+        TypedWindowState::Atr(state) => state.kernel.positions,
         TypedWindowState::Macd(state) => state.kernel.positions,
         TypedWindowState::Decay(state) => state.as_ref().map_or(0, |state| state.valid_count()),
     }
@@ -4912,7 +5065,9 @@ fn append_pair(
         TypedOutputKind::Scan(_)
         | TypedOutputKind::Lag
         | TypedOutputKind::Delta
-        | TypedOutputKind::Macd(_) => {
+        | TypedOutputKind::Macd(_)
+        | TypedOutputKind::Rsi
+        | TypedOutputKind::Atr => {
             return Err(internal_error(
                 "typed pair state received a non-pair output",
             ));

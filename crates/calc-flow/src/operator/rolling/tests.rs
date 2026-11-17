@@ -3160,6 +3160,39 @@ fn typed_rank_quantile_match_general_with_ties_and_invalid_rows() {
 }
 
 #[test]
+fn typed_rsi_atr_match_general() {
+    let mut spec = kernel_spec(json!([
+        {"kind":"rsi", "primitive_version":1, "input":"price", "output":"rsi", "period":2},
+        {
+            "kind":"atr", "primitive_version":1,
+            "high":"high", "low":"low", "close":"close", "output":"atr", "period":2
+        }
+    ]));
+    spec.state_layout_version = 5;
+    let mut fields = kernel_schema().fields().to_vec();
+    fields[3] = Arc::new(Field::new("high", DataType::Float64, true));
+    fields[4] = Arc::new(Field::new("low", DataType::Float64, true));
+    fields[5] = Arc::new(Field::new("close", DataType::Float64, true));
+    fields.push(Arc::new(Field::new("price", DataType::Float64, true)));
+    let schema = Schema::new(fields);
+    let base = float64_fast_record(&[
+        (1, "a", 1, Some(2.0)),
+        (2, "a", 2, Some(3.0)),
+        (3, "a", 3, Some(4.0)),
+        (4, "a", 4, Some(5.0)),
+    ]);
+    let mut columns = base.columns().to_vec();
+    columns[3] = Arc::new(Float64Array::from(vec![3.0, 4.0, 5.0, 6.0]));
+    columns[4] = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0]));
+    columns[5] = Arc::new(Float64Array::from(vec![2.0, 3.0, 4.0, 5.0]));
+    columns.push(base.column(3).clone());
+    let input = RecordBatch::try_new(Arc::new(schema), columns).unwrap();
+    assert_typed_matches_general(&spec, &input.schema(), &input);
+    let operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    assert!(operator.indicator_resources.is_some());
+}
+
+#[test]
 fn typed_macd_matches_general_for_all_components() {
     let mut spec = kernel_spec(json!([
         {

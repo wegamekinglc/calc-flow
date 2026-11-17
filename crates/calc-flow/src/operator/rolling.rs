@@ -1553,9 +1553,7 @@ impl BatchOperator for RollingOperator {
         self.input_ports[0].validate(input, &format!("{}.input", self.name))?;
         context.run.check_cancelled()?;
         let table = input.table_payload()?;
-        if !self.compiled.indicator_groups.is_empty()
-            && !self.compiled.kernel_plan.supports_typed_transition()
-        {
+        if self.indicator_resources.is_some() {
             return Ok(BTreeMap::from([(
                 "output".into(),
                 self.process_indicator_finite(input.clone(), context)

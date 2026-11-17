@@ -37,7 +37,13 @@ pub(super) fn initial_state(
     compiled: &super::CompiledRollingSpec,
     node: &str,
 ) -> Result<(StateOwner, Option<Resources>)> {
-    if compiled.indicator_groups.is_empty() || compiled.kernel_plan.supports_typed_transition() {
+    let typed_macd = !compiled.indicator_groups.is_empty()
+        && compiled
+            .indicator_groups
+            .iter()
+            .all(|group| matches!(group, Group::Macd(_)))
+        && compiled.kernel_plan.supports_typed_transition();
+    if compiled.indicator_groups.is_empty() || typed_macd {
         return Ok((
             StateOwner::new(super::RollingStreamState::default(), false),
             None,
