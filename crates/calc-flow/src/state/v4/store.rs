@@ -339,10 +339,21 @@ fn sync_file(path: &Path) -> Result<()> {
     file.sync_all().map_err(|source| io_error(path, source))
 }
 
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<()> {
     std::fs::File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|source| io_error(path, source))
+}
+
+#[cfg(not(unix))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "non-Unix directory sync keeps the Unix fallible signature"
+)]
+fn sync_directory(_path: &Path) -> Result<()> {
+    // Directory fsync is unavailable on non-Unix platforms; file contents are synced.
+    Ok(())
 }
 
 fn install_file(staging: &Path, committed: &Path, bytes: &[u8]) -> Result<()> {
