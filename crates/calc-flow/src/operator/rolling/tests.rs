@@ -50,7 +50,7 @@ async fn test_side_output_direct_execution_completes_both_ports() {
     );
 }
 
-use datafusion::arrow::array::Array;
+use datafusion::arrow::array::{Array, Int64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use serde_json::{Value, json};
 
@@ -292,13 +292,57 @@ async fn rolling_history_budget_failure_restores_rows_for_retry() {
         )
         .await
         .unwrap();
+    let before = operator.checkpoint(Epoch::INITIAL).unwrap();
     let error = operator
         .on_watermark(EventTime::from_micros(1), &context, &mut output)
         .await
         .unwrap_err();
     assert!(error.to_string().contains("state budget"), "{error}");
+    let after = operator.checkpoint(Epoch::new(2).unwrap()).unwrap();
+    let mut before_restored =
+        RollingOperator::new("rolling", Arc::new(general_schema()), general_spec()).unwrap();
+    StreamOperator::restore(&mut before_restored, &before).unwrap();
+    let mut after_restored =
+        RollingOperator::new("rolling", Arc::new(general_schema()), general_spec()).unwrap();
+    StreamOperator::restore(&mut after_restored, &after).unwrap();
+    let mut before_output = crate::EdgeCollector::new(before_restored.output_ports().to_vec());
+    let mut after_output = crate::EdgeCollector::new(after_restored.output_ports().to_vec());
+    before_restored
+        .on_watermark(EventTime::from_micros(1), &context, &mut before_output)
+        .await
+        .unwrap();
+    after_restored
+        .on_watermark(EventTime::from_micros(1), &context, &mut after_output)
+        .await
+        .unwrap();
+    let before_records = before_output
+        .drain("output")
+        .into_iter()
+        .flat_map(|message| {
+            message
+                .as_data()
+                .unwrap()
+                .table_payload()
+                .unwrap()
+                .batches()
+                .to_vec()
+        })
+        .collect::<Vec<_>>();
+    let after_records = after_output
+        .drain("output")
+        .into_iter()
+        .flat_map(|message| {
+            message
+                .as_data()
+                .unwrap()
+                .table_payload()
+                .unwrap()
+                .batches()
+                .to_vec()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(before_records, after_records);
     assert_eq!(operator.state.charge.rows, 1);
-    assert_eq!(operator.state.buffer.len(), 1);
     assert!(output.drain("output").is_empty());
 
     operator
@@ -926,7 +970,7 @@ fn compensated_rebuild_handles_large_offset_variance_with_shifted_sums() {
 fn signed_column(outputs: &ComputedOutputs, index: usize) -> Vec<Option<i64>> {
     outputs.columns[index]
         .as_any()
-        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .downcast_ref::<Int64Array>()
         .unwrap()
         .iter()
         .collect()
@@ -1485,6 +1529,133 @@ fn typed_temporal_lag_matches_general() {
 }
 
 #[test]
+fn typed_nested_lag_matches_general() {
+    use datafusion::arrow::array::{Int32Builder, ListBuilder};
+
+    let mut values = ListBuilder::new(Int32Builder::new());
+    values.values().append_value(1);
+    values.values().append_value(2);
+    values.append(true);
+    values.append(false);
+    values.values().append_null();
+    values.append(true);
+    let (schema, input) = primitive_volume_record(Arc::new(values.finish()));
+    let spec = kernel_spec(json!([{
+        "kind": "lag",
+        "primitive_version": 1,
+        "input": "volume",
+        "output": "volume_lag",
+        "periods": 1
+    }]));
+    assert_typed_matches_general(&spec, &schema, &input);
+}
+
+#[test]
+fn typed_nested_count_matches_general() {
+    use datafusion::arrow::array::{Int32Builder, ListBuilder};
+
+    let mut values = ListBuilder::new(Int32Builder::new());
+    values.values().append_value(1);
+    values.append(true);
+    values.append(false);
+    values.values().append_null();
+    values.append(true);
+    values.values().append_value(4);
+    values.append(true);
+    let (schema, input) = primitive_volume_record(Arc::new(values.finish()));
+    let spec = kernel_spec(json!([
+        aggregate_output("count", "volume", "volume_count", 2),
+        {
+            "kind": "count",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_duration_count",
+            "frame": {"kind": "duration", "micros": 2},
+            "min_periods": 2
+        }
+    ]));
+    assert_typed_matches_general(&spec, &schema, &input);
+}
+
+#[test]
+fn typed_non_numeric_extrema_match_general() {
+    let cases: Vec<ArrayRef> = vec![
+        Arc::new(datafusion::arrow::array::StringArray::from(vec![
+            Some("b"),
+            None,
+            Some("a"),
+            Some("c"),
+        ])),
+        Arc::new(datafusion::arrow::array::LargeStringArray::from(vec![
+            Some("b"),
+            None,
+            Some("a"),
+            Some("c"),
+        ])),
+        Arc::new(datafusion::arrow::array::BooleanArray::from(vec![
+            Some(true),
+            None,
+            Some(false),
+            Some(true),
+        ])),
+        Arc::new(datafusion::arrow::array::Date32Array::from(vec![
+            Some(20),
+            None,
+            Some(10),
+            Some(30),
+        ])),
+    ];
+    let spec = kernel_spec(json!([
+        aggregate_output("min", "volume", "volume_min", 2),
+        aggregate_output("max", "volume", "volume_max", 2)
+    ]));
+    for values in cases {
+        let (schema, input) = primitive_volume_record(values);
+        assert_typed_matches_general(&spec, &schema, &input);
+    }
+}
+
+#[test]
+fn typed_non_numeric_unique_count_matches_general() {
+    let spec = kernel_spec(json!([
+        {
+            "kind": "unique_count",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_unique",
+            "frame": {"kind": "rows", "size": 3},
+            "min_periods": 1
+        },
+        {
+            "kind": "unique_count",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_duration_unique",
+            "frame": {"kind": "duration", "micros": 2},
+            "min_periods": 1
+        }
+    ]));
+    let cases: Vec<ArrayRef> = vec![
+        Arc::new(datafusion::arrow::array::LargeStringArray::from(vec![
+            Some("a"),
+            Some("a"),
+            None,
+            Some("b"),
+        ])),
+        Arc::new(datafusion::arrow::array::BooleanArray::from(vec![
+            Some(true),
+            Some(true),
+            None,
+            Some(false),
+        ])),
+    ];
+    for values in cases {
+        let (schema, input) = primitive_volume_record(values);
+        assert_typed_matches_general(&spec, &schema, &input);
+    }
+}
+
+#[test]
 fn delta_subtracts_the_referenced_value_with_checked_integer_math() {
     let spec = kernel_spec(json!([delta_volume(1)]));
     let rows = vec![
@@ -1583,7 +1754,7 @@ fn delta_unsigned_underflow_is_a_data_error() {
 fn typed_integer_delta_matches_general_and_preserves_checked_errors() {
     let spec = kernel_spec(json!([delta_volume(1)]));
     let (schema, input) =
-        primitive_volume_record(Arc::new(datafusion::arrow::array::Int64Array::from(vec![
+        primitive_volume_record(Arc::new(Int64Array::from(vec![
             7, 10, 4,
         ])));
     assert_typed_matches_general(&spec, &schema, &input);
@@ -1591,7 +1762,7 @@ fn typed_integer_delta_matches_general_and_preserves_checked_errors() {
     assert_typed_matches_general(&spec, &schema, &input);
 
     let (schema, input) =
-        primitive_volume_record(Arc::new(datafusion::arrow::array::Int64Array::from(vec![
+        primitive_volume_record(Arc::new(Int64Array::from(vec![
             -1,
             i64::MAX,
         ])));
@@ -3213,6 +3384,157 @@ fn typed_rank_quantile_match_general_with_ties_and_invalid_rows() {
         (6, "a", 6, Some(2.0)),
     ]);
     assert_typed_matches_general(&spec, &input.schema(), &input);
+}
+
+#[test]
+fn typed_numeric_scans_preserve_exact_integer_ordering() {
+    let spec = kernel_spec(json!([
+        {
+            "kind": "argmax",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_argmax",
+            "frame": {"kind": "rows", "size": 3},
+            "min_periods": 1
+        },
+        {
+            "kind": "argmin",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_argmin",
+            "frame": {"kind": "rows", "size": 3},
+            "min_periods": 1
+        },
+        {
+            "kind": "rank",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_rank",
+            "frame": {"kind": "rows", "size": 3},
+            "min_periods": 1
+        },
+        {
+            "kind": "quantile",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_quantile",
+            "frame": {"kind": "rows", "size": 3},
+            "min_periods": 1
+        },
+        {
+            "kind": "unique_count",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_unique",
+            "frame": {"kind": "rows", "size": 3},
+            "min_periods": 1
+        },
+        {
+            "kind": "decay",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_decay",
+            "frame": {"kind": "rows", "size": 3},
+            "min_periods": 1
+        }
+    ]));
+    let cases: Vec<ArrayRef> = vec![
+        Arc::new(Int64Array::from(vec![
+            Some(i64::MAX),
+            Some(i64::MAX - 1),
+            None,
+            Some(i64::MIN),
+        ])),
+        Arc::new(UInt64Array::from(vec![
+            Some(u64::MAX),
+            Some(u64::MAX - 1),
+            None,
+            Some(0),
+        ])),
+        Arc::new(datafusion::arrow::array::Float32Array::from(vec![
+            Some(3.0),
+            Some(1.0),
+            None,
+            Some(2.0),
+        ])),
+    ];
+    for values in cases {
+        let (schema, input) = primitive_volume_record(values);
+        assert_typed_matches_general(&spec, &schema, &input);
+    }
+}
+
+#[test]
+fn typed_duration_scans_support_every_numeric_readout() {
+    let spec = kernel_spec(json!([
+        {
+            "kind": "argmax",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_argmax",
+            "frame": {"kind": "duration", "micros": 2},
+            "min_periods": 1
+        },
+        {
+            "kind": "argmin",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_argmin",
+            "frame": {"kind": "duration", "micros": 2},
+            "min_periods": 1
+        },
+        {
+            "kind": "rank",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_rank",
+            "frame": {"kind": "duration", "micros": 2},
+            "min_periods": 1
+        },
+        {
+            "kind": "quantile",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_quantile",
+            "frame": {"kind": "duration", "micros": 2},
+            "min_periods": 1
+        },
+        {
+            "kind": "unique_count",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_unique",
+            "frame": {"kind": "duration", "micros": 2},
+            "min_periods": 1
+        },
+        {
+            "kind": "decay",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_decay",
+            "frame": {"kind": "duration", "micros": 2},
+            "min_periods": 1
+        }
+    ]));
+    let (schema, input) = primitive_volume_record(Arc::new(Int64Array::from(vec![
+        Some(i64::MAX),
+        Some(i64::MAX - 1),
+        None,
+        Some(i64::MIN),
+    ])));
+    assert_typed_matches_general(&spec, &schema, &input);
+}
+
+#[test]
+fn rolling_manifest_has_no_general_typed_transitions() {
+    for capability in generated_kernel_manifest::GENERATED_KERNEL_CAPABILITIES {
+        assert_eq!(
+            capability.complexity,
+            generated_kernel_manifest::GeneratedComplexity::AmortizedConstant,
+            "{}",
+            capability.primitive
+        );
+    }
 }
 
 #[test]
@@ -5112,7 +5434,7 @@ async fn emission_chunks_by_edge_budget_and_oversize_rows_fail() {
                 Arc::new(datafusion::arrow::array::StringArray::from(vec!["a"; len])) as ArrayRef,
                 Arc::new(UInt64Array::from((1..=len as u64).collect::<Vec<_>>())),
                 Arc::new(Float64Array::from(prices)),
-                Arc::new(datafusion::arrow::array::Int64Array::from(
+                Arc::new(Int64Array::from(
                     (1..=len as u64)
                         .map(|v| Some(i64::try_from(v).unwrap() * 10))
                         .collect::<Vec<_>>(),

@@ -167,7 +167,7 @@
       "stream": true,
       "datafusion": false,
       "typed_transition": "scan",
-      "complexity": "general"
+      "complexity": "amortized_constant"
     },
     {
       "primitive": "quantile",
@@ -175,7 +175,7 @@
       "stream": true,
       "datafusion": false,
       "typed_transition": "scan",
-      "complexity": "general"
+      "complexity": "amortized_constant"
     },
     {
       "primitive": "unique_count",

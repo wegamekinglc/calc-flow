@@ -506,11 +506,14 @@ impl RollingKernelPlan {
             event_times: &event_times,
             entity_ids: &entity_ids,
         };
+        let typed_inputs = self.typed_inputs(input, node_id)?;
         let mut builders = self
             .outputs
             .iter()
-            .map(|output| DerivedBuilder::new(*output, input.num_rows()))
-            .collect::<Vec<_>>();
+            .map(|output| {
+                DerivedBuilder::new_with_inputs(*output, input.num_rows(), &typed_inputs)
+            })
+            .collect::<Result<Vec<_>>>()?;
         let kernel_start = Instant::now();
         let numeric_result = {
             let _stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));

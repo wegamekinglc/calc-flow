@@ -541,6 +541,7 @@ impl DecayInputPreparation<'_> {
             input_index,
             window,
             kind: ScanKind::Decay,
+            ..
         } = self.plan.groups[ordinal]
         else {
             return Err(internal_error("typed decay cache has no matching plan"));

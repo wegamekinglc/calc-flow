@@ -15,7 +15,6 @@ pub(super) enum GeneratedTransition {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum GeneratedComplexity {
     AmortizedConstant,
-    General,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -195,7 +194,7 @@ pub(super) const GENERATED_KERNEL_CAPABILITIES: &[GeneratedKernelCapability] = &
         stream: true,
         datafusion: false,
         typed_transition: Some(GeneratedTransition::Scan),
-        complexity: GeneratedComplexity::General,
+        complexity: GeneratedComplexity::AmortizedConstant,
     },
     GeneratedKernelCapability {
         primitive: "quantile",
@@ -203,7 +202,7 @@ pub(super) const GENERATED_KERNEL_CAPABILITIES: &[GeneratedKernelCapability] = &
         stream: true,
         datafusion: false,
         typed_transition: Some(GeneratedTransition::Scan),
-        complexity: GeneratedComplexity::General,
+        complexity: GeneratedComplexity::AmortizedConstant,
     },
     GeneratedKernelCapability {
         primitive: "unique_count",

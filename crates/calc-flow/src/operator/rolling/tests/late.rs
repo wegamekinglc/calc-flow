@@ -114,6 +114,7 @@ async fn test_native_late_rolling_emit_failure_preserves_state_and_forbids_live_
             fail_at,
             sent: Vec::new(),
         };
+        let before = side.checkpoint(Epoch::INITIAL).unwrap();
         let error = side
             .process_late_data(&input, context.input_watermark(), &context, &mut failing)
             .await
@@ -122,7 +123,29 @@ async fn test_native_late_rolling_emit_failure_preserves_state_and_forbids_live_
             matches!(error, CalcFlowError::Operator { ref node_id, ref message } if node_id == "sink" && message == "original sink failure")
         );
         assert_eq!(failing.sent.len(), fail_at);
-        assert_eq!(side.state.buffer.len(), 1);
+        let after = side.checkpoint(Epoch::new(2).unwrap()).unwrap();
+        let mut before_restored = general_side_operator(0);
+        StreamOperator::restore(&mut before_restored, &before).unwrap();
+        let mut after_restored = general_side_operator(0);
+        StreamOperator::restore(&mut after_restored, &after).unwrap();
+        let mut before_output = EdgeCollector::new(before_restored.output_ports().to_vec());
+        let mut after_output = EdgeCollector::new(after_restored.output_ports().to_vec());
+        before_restored
+            .process_late_data(&input, context.input_watermark(), &context, &mut before_output)
+            .await
+            .unwrap();
+        after_restored
+            .process_late_data(&input, context.input_watermark(), &context, &mut after_output)
+            .await
+            .unwrap();
+        assert_eq!(
+            drain_records(&mut before_output, "late"),
+            drain_records(&mut after_output, "late")
+        );
+        assert_eq!(
+            drain_records(&mut before_output, "output"),
+            drain_records(&mut after_output, "output")
+        );
         assert_eq!(side.state.metrics, LateMetricDelta::default());
         assert_eq!(side.state.next_late_output_sequence, 0);
         let retry = side

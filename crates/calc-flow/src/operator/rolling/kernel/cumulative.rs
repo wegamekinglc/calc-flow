@@ -38,6 +38,7 @@ impl TypedCumulativeState {
                 .is_valid(row)
                 .then(|| NumericValue::Unsigned(values.value(row))),
             TypedGroupInput::Pair(..)
+            | TypedGroupInput::Values(_)
             | TypedGroupInput::Utf8(_)
             | TypedGroupInput::Rsi(..)
             | TypedGroupInput::Atr(..)
@@ -89,7 +90,7 @@ pub(super) fn compile_group(
         super::require_numeric_type(input_schema, input_index)?;
         OutputStorage::Float64
     } else {
-        extrema_storage(input_schema.field(input_index).data_type())?
+        extrema_storage(input_schema.field(input_index).data_type())
     };
     Ok(TypedGroupPlan::Cumulative {
         input_index,
@@ -109,7 +110,7 @@ pub(super) fn compile_output(
     Ok(TypedOutputPlan {
         group: aggregate.group,
         kind: TypedOutputKind::Statistic(aggregate.statistic),
-        storage: extrema_storage(&output.output_type)?,
+        storage: extrema_storage(&output.output_type),
         min_periods: aggregate.min_periods,
         ddof: aggregate.ddof,
     })

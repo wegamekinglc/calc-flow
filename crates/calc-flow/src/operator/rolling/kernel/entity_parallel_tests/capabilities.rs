@@ -109,6 +109,7 @@ fn test_capability_parallel_keeps_unprepared_decay_and_non_f64_output_serial() {
         input_index: 3,
         kind: ScanKind::Decay,
         window: 37,
+        storage: OutputStorage::Float64,
     });
     assert!(
         !plan.supports_entity_parallel(&batch),

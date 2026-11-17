@@ -26,8 +26,8 @@ ROLLING_KERNEL_CAPABILITIES = MappingProxyType(
         "difference": ("fused_difference", "amortized_constant", False),
         "argmax": ("scan", "amortized_constant", False),
         "argmin": ("scan", "amortized_constant", False),
-        "rank": ("scan", "general", False),
-        "quantile": ("scan", "general", False),
+        "rank": ("scan", "amortized_constant", False),
+        "quantile": ("scan", "amortized_constant", False),
         "unique_count": ("scan", "amortized_constant", False),
         "decay": ("scan", "amortized_constant", False),
     }

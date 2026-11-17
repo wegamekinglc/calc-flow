@@ -163,8 +163,8 @@ async fn test_execution_diagnostics_distinguish_general_replacement_history() {
     );
     assert_general_charge(&operator);
     let work = store.snapshot().watermark;
-    assert_eq!(work.numeric_general_calls, 2);
-    assert_eq!(work.numeric_serial_calls, 0);
+    assert_eq!(work.numeric_general_calls, 0);
+    assert_eq!(work.numeric_serial_calls, 2);
     assert_eq!(work.numeric_parallel_calls, 0);
     assert_eq!(work.history_charge_scalar_rows, 3);
     assert_eq!(work.history_append_rows_prepared, 2);
@@ -184,7 +184,7 @@ fn assert_general_charge(operator: &RollingOperator) {
         .unwrap()
     );
     assert!(operator.state.histories.by_entity.values().all(|state| {
-        state.charge_cache.is_none() && state.rows.len() == 1 && state.columnar.rows == 0
+        state.charge_cache.is_some()
     }));
     assert_eq!(
         operator.state.charge.rows,

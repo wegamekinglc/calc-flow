@@ -871,9 +871,13 @@ fn retained_group_work(state: &TypedWindowState) -> Option<usize> {
 
 fn retained_aux_group_work(state: &TypedWindowState) -> Option<usize> {
     match state {
+        TypedWindowState::Count(state) => Some(state.samples.len()),
+        TypedWindowState::ValueExtrema(state) => Some(state.values.len()),
+        TypedWindowState::Scan(state) => Some(state.recent.len()),
+        TypedWindowState::ValueScan(state) => Some(state.values.len()),
         TypedWindowState::Lag(state) => Some(state.history.len()),
-        TypedWindowState::Rank(state) => Some(state.recent.len()),
         TypedWindowState::Utf8Lag(state) => Some(state.history.len()),
+        TypedWindowState::ValueLag(state) => Some(state.history.len()),
         _ => None,
     }
 }
@@ -926,8 +930,18 @@ pub(crate) fn run_numeric_lane(
     let builders = input
         .outputs
         .iter()
-        .map(|output| DerivedBuilder::new(*output, request.row_count))
-        .collect();
+        .map(|output| DerivedBuilder::new_with_inputs(*output, request.row_count, &input.columns))
+        .collect::<Result<Vec<_>>>()
+        .map_err(|error| {
+            NumericLaneStop::Ordinary(TaggedNumericError {
+                site: NumericSite {
+                    row: 0,
+                    phase: NumericPhase::Output,
+                    ordinal: 0,
+                },
+                error,
+            })
+        })?;
     run_numeric_lane_with_builders(request, builders, cancellation, progress)
 }
 

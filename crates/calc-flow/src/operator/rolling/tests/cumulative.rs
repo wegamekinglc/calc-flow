@@ -181,7 +181,7 @@ fn test_cumulative_typed_integer_overflow_matches_general() {
 }
 
 #[test]
-fn test_cumulative_preserves_unordered_and_unsupported_stage_fallback() {
+fn test_cumulative_preserves_unordered_and_typed_lag_execution() {
     let spec = mixed_cumulative_spec();
     let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
     let input = float64_fast_record(&[(2, "a", 2, Some(2.0)), (1, "a", 1, Some(1.0))]);
@@ -200,7 +200,7 @@ fn test_cumulative_preserves_unordered_and_unsupported_stage_fallback() {
             .unwrap()
             .kernel_plan
             .selection(),
-        KernelSelection::General
+        KernelSelection::OrderedPrimitive
     );
 }
 

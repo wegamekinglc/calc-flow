@@ -122,11 +122,7 @@ def _validate_kernel_complexity(
     primitive = value["primitive"]
     if value["complexity"] not in COMPLEXITIES:
         raise ValueError(f"kernel {primitive!r} has unknown complexity")
-    if (
-        transition is not None
-        and value["complexity"] != "amortized_constant"
-        and not (primitive in {"rank", "quantile"} and value["complexity"] == "general")
-    ):
+    if transition is not None and value["complexity"] != "amortized_constant":
         raise ValueError(
             f"kernel {primitive!r} typed transition must advertise amortized_constant"
         )
@@ -194,7 +190,6 @@ pub(super) enum GeneratedTransition {{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum GeneratedComplexity {{
     AmortizedConstant,
-    General,
 }}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

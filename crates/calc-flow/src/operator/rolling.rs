@@ -4392,14 +4392,7 @@ impl IncrementalScanState {
         ScalarValue::UInt64(self.advance_float(index, sample))
     }
 
-    fn valid_count(&self) -> usize {
-        match self {
-            Self::Extrema { valid_count, .. } | Self::UniqueFloat64 { valid_count, .. } => {
-                *valid_count
-            }
-        }
-    }
-
+    #[cfg(test)]
     fn estimated_bytes(&self) -> usize {
         match self {
             Self::Extrema {
