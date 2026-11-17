@@ -165,6 +165,10 @@ enum TypedGroupPlan {
         kind: ScanKind,
         window: usize,
     },
+    Lag {
+        input_index: usize,
+        periods: usize,
+    },
 }
 
 impl TypedGroupPlan {
@@ -176,6 +180,9 @@ impl TypedGroupPlan {
             | Self::Extrema { frame, .. }
             | Self::Pair { frame, .. } => Some(frame),
             Self::Scan { window, .. } => Some(TypedFrame::Rows(window)),
+            Self::Lag { periods, .. } => {
+                Some(TypedFrame::Rows(if periods == 0 { 1 } else { periods }))
+            }
             Self::Ewma { .. } | Self::Cumulative { .. } => None,
         }
     }
@@ -233,6 +240,8 @@ enum TypedOutputKind {
     Correlation,
     Ewma,
     Scan(ScanKind),
+    Lag,
+    Delta,
     Difference {
         left: TypedFloatReadout,
         right: TypedFloatReadout,
@@ -1612,7 +1621,8 @@ fn typed_group_input(
             ..
         }
         | TypedGroupPlan::Ewma { input_index, .. }
-        | TypedGroupPlan::Scan { input_index, .. } => Ok(TypedGroupInput::Single(cast_float64(
+        | TypedGroupPlan::Scan { input_index, .. }
+        | TypedGroupPlan::Lag { input_index, .. } => Ok(TypedGroupInput::Single(cast_float64(
             input.column(input_index),
             node_id,
         )?)),
@@ -1963,6 +1973,65 @@ fn append_typed_outputs<const HAS_DECAY: bool>(
     Ok(())
 }
 
+fn compile_lag_group(
+    output: &CompiledRollingOutput,
+    periods: u64,
+    groups: &mut Vec<TypedGroupPlan>,
+) -> std::result::Result<(), String> {
+    if output.input_type != DataType::Float64 || output.output_type != DataType::Float64 {
+        return Err("typed lag/delta currently requires Float64 input and output".into());
+    }
+    let periods =
+        usize::try_from(periods).map_err(|_| "lag/delta periods do not fit the platform usize")?;
+    if !groups.iter().any(|group| {
+        matches!(group,
+            TypedGroupPlan::Lag { input_index, periods: existing }
+            if *input_index == output.input_index && *existing == periods
+        )
+    }) {
+        groups.push(TypedGroupPlan::Lag {
+            input_index: output.input_index,
+            periods,
+        });
+    }
+    Ok(())
+}
+
+fn compile_scan_group(
+    output: &CompiledRollingOutput,
+    scan: super::CompiledScan,
+    groups: &mut Vec<TypedGroupPlan>,
+) -> std::result::Result<(), String> {
+    if output.input_type != DataType::Float64 {
+        return Err("typed scan requires Float64 input".into());
+    }
+    let CompiledFrame::Rows(rows) = scan.frame else {
+        return Err("typed scan requires a row frame".into());
+    };
+    let window = usize::try_from(rows)
+        .map_err(|_| "scan row window does not fit the platform usize")?
+        .max(1);
+    if !matches!(
+        scan.kind,
+        ScanKind::Argmax | ScanKind::Argmin | ScanKind::UniqueCount | ScanKind::Decay
+    ) {
+        return Err("typed scan requires argmax, argmin, unique_count, or decay".into());
+    }
+    if !groups.iter().any(|group| {
+        matches!(group,
+            TypedGroupPlan::Scan { input_index, kind, window: existing }
+            if *input_index == output.input_index && *kind == scan.kind && *existing == window
+        )
+    }) {
+        groups.push(TypedGroupPlan::Scan {
+            input_index: output.input_index,
+            kind: scan.kind,
+            window,
+        });
+    }
+    Ok(())
+}
+
 fn compile_typed_plan(
     input_schema: &Schema,
     outputs: &[CompiledRollingOutput],
@@ -1970,35 +2039,12 @@ fn compile_typed_plan(
 ) -> std::result::Result<(Vec<TypedGroupPlan>, Vec<TypedOutputPlan>), String> {
     let mut groups = compile_typed_groups(input_schema, window_groups)?;
     for output in outputs {
-        let CompiledEvaluation::Scan(scan) = output.evaluation else {
-            continue;
-        };
-        if output.input_type != DataType::Float64 {
-            return Err("typed scan requires Float64 input".into());
-        }
-        let CompiledFrame::Rows(rows) = scan.frame else {
-            return Err("typed scan requires a row frame".into());
-        };
-        let window = usize::try_from(rows)
-            .map_err(|_| "scan row window does not fit the platform usize")?
-            .max(1);
-        if !matches!(
-            scan.kind,
-            ScanKind::Argmax | ScanKind::Argmin | ScanKind::UniqueCount | ScanKind::Decay
-        ) {
-            return Err("typed scan requires argmax, argmin, or unique_count".into());
-        }
-        if !groups.iter().any(|group| {
-            matches!(group,
-                TypedGroupPlan::Scan { input_index, kind, window: existing }
-                if *input_index == output.input_index && *kind == scan.kind && *existing == window
-            )
-        }) {
-            groups.push(TypedGroupPlan::Scan {
-                input_index: output.input_index,
-                kind: scan.kind,
-                window,
-            });
+        match &output.evaluation {
+            CompiledEvaluation::Lag { periods } | CompiledEvaluation::Delta { periods } => {
+                compile_lag_group(output, *periods, &mut groups)?;
+            }
+            CompiledEvaluation::Scan(scan) => compile_scan_group(output, *scan, &mut groups)?,
+            _ => {}
         }
     }
     let typed_outputs = compile_typed_outputs(outputs, &groups)?;
@@ -2208,9 +2254,41 @@ fn compile_typed_output(
         CompiledEvaluation::Pair(pair) => compile_pair_output(pair),
         CompiledEvaluation::Ewma(ewma) => compile_ewma_output(ewma, groups),
         CompiledEvaluation::Difference(difference) => compile_difference_output(difference),
+        CompiledEvaluation::Lag { periods } => compile_lag_output(output, *periods, groups, false),
+        CompiledEvaluation::Delta { periods } => compile_lag_output(output, *periods, groups, true),
         CompiledEvaluation::Scan(scan) => compile_scan_output(output, *scan, groups),
-        _ => Err("requires aggregate, pair, EWMA, or fused difference outputs".into()),
+        CompiledEvaluation::Indicator(_) => Err("requires a supported typed rolling output".into()),
     }
+}
+
+fn compile_lag_output(
+    output: &CompiledRollingOutput,
+    periods: u64,
+    groups: &[TypedGroupPlan],
+    delta: bool,
+) -> std::result::Result<TypedOutputPlan, String> {
+    let periods =
+        usize::try_from(periods).map_err(|_| "lag/delta periods do not fit the platform usize")?;
+    let group = groups
+        .iter()
+        .position(|group| {
+            matches!(group,
+                TypedGroupPlan::Lag { input_index, periods: existing }
+                if *input_index == output.input_index && *existing == periods
+            )
+        })
+        .ok_or_else(|| "typed lag/delta group is missing".to_owned())?;
+    Ok(TypedOutputPlan {
+        group,
+        kind: if delta {
+            TypedOutputKind::Delta
+        } else {
+            TypedOutputKind::Lag
+        },
+        storage: OutputStorage::Float64,
+        min_periods: 0,
+        ddof: 0,
+    })
 }
 
 fn compile_scan_output(
@@ -2759,6 +2837,7 @@ enum TypedWindowState {
     Pair(Float64PairState),
     Ewma(TypedEwmaState),
     Scan(TypedScanState),
+    Lag(TypedLagState),
     Decay(Option<Arc<decay::OwnedDecay>>),
 }
 
@@ -2786,6 +2865,67 @@ impl TypedScanState {
             .checked_add(1)
             .ok_or_else(|| operator_error(node_id, "typed rolling scan index overflowed"))?;
         Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TypedLagState {
+    periods: usize,
+    history: VecDeque<Option<f64>>,
+    current: Option<f64>,
+    reference: Option<f64>,
+}
+
+impl TypedLagState {
+    fn new(periods: usize) -> Self {
+        Self {
+            periods,
+            history: VecDeque::with_capacity(periods),
+            current: None,
+            reference: None,
+        }
+    }
+
+    fn update(&mut self, sample: Option<f64>) {
+        self.current = sample;
+        self.reference = if self.periods == 0 {
+            sample
+        } else if self.history.len() >= self.periods {
+            self.history[self.history.len() - self.periods]
+        } else {
+            None
+        };
+        if self.periods > 0 {
+            self.history.push_back(sample);
+            if self.history.len() > self.periods {
+                self.history.pop_front();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod lag_state_tests {
+    use super::TypedLagState;
+
+    #[test]
+    fn lag_preserves_null_nan_and_zero_period_references() {
+        let mut state = TypedLagState::new(1);
+        state.update(Some(1.0));
+        assert_eq!(state.reference, None);
+        state.update(Some(f64::NAN));
+        assert_eq!(state.reference, Some(1.0));
+        state.update(None);
+        assert!(state.reference.is_some_and(f64::is_nan));
+        state.update(Some(3.0));
+        assert_eq!(state.reference, None);
+        assert_eq!(state.current, Some(3.0));
+
+        let mut zero = TypedLagState::new(0);
+        zero.update(Some(4.0));
+        assert_eq!(zero.reference, Some(4.0));
+        zero.update(Some(5.0));
+        assert_eq!(zero.reference, Some(5.0));
     }
 }
 
@@ -2834,6 +2974,7 @@ impl TypedWindowState {
             TypedGroupPlan::Scan { kind, window, .. } => {
                 Self::Scan(TypedScanState::new(kind, window))
             }
+            TypedGroupPlan::Lag { periods, .. } => Self::Lag(TypedLagState::new(periods)),
         }
     }
 
@@ -2873,6 +3014,10 @@ impl TypedWindowState {
             (Self::Scan(state), TypedGroupInput::Single(input)) => {
                 state.update(valid_float64(input, row_index, false), node_id)
             }
+            (Self::Lag(state), TypedGroupInput::Single(input)) => {
+                state.update(input.is_valid(row_index).then(|| input.value(row_index)));
+                Ok(())
+            }
             (Self::Decay(state), input) => {
                 if let Some(state) = state {
                     let values = match input {
@@ -2903,6 +3048,12 @@ impl TypedWindowState {
             Self::Scan(state) => {
                 size_of::<TypedScanState>().saturating_add(state.scan.estimated_bytes())
             }
+            Self::Lag(state) => size_of::<TypedLagState>().saturating_add(
+                state
+                    .history
+                    .capacity()
+                    .saturating_mul(size_of::<Option<f64>>()),
+            ),
             Self::Decay(state) => state.as_ref().map_or(0, |state| state.bytes()),
         }
     }
@@ -2913,6 +3064,7 @@ impl TypedWindowState {
             Self::Exact(state) => state.samples.len(),
             Self::Extrema(state) => state.values.len(),
             Self::Pair(state) => state.samples.len(),
+            Self::Lag(state) => state.history.len(),
             Self::Cumulative(_) | Self::Ewma(_) | Self::Scan(_) | Self::Decay(_) => 0,
         }
     }
@@ -3673,6 +3825,7 @@ impl DerivedBuilder {
             TypedWindowState::Pair(state) => self.append_pair(state, output),
             TypedWindowState::Ewma(state) => self.append_ewma(state, output),
             TypedWindowState::Scan(state) => self.append_scan(state, output),
+            TypedWindowState::Lag(state) => self.append_lag(state, output),
             TypedWindowState::Decay(Some(state)) => match (self, output.kind) {
                 (Self::Float(builder, _), TypedOutputKind::Scan(ScanKind::Decay)) => {
                     builder.append_option(state.latest);
@@ -3760,6 +3913,24 @@ impl DerivedBuilder {
         match (self, output.kind) {
             (Self::Float(builder, _), TypedOutputKind::Ewma) => {
                 builder.append_value(state.value);
+                Ok(())
+            }
+            _ => Err(typed_output_mismatch()),
+        }
+    }
+
+    fn append_lag(&mut self, state: &TypedLagState, output: &TypedOutputPlan) -> Result<()> {
+        match (self, output.kind) {
+            (Self::Float(builder, _), TypedOutputKind::Lag) => {
+                builder.append_option(state.reference);
+                Ok(())
+            }
+            (Self::Float(builder, _), TypedOutputKind::Delta) => {
+                if let (Some(current), Some(reference)) = (state.current, state.reference) {
+                    builder.append_value(current - reference);
+                } else {
+                    builder.append_null();
+                }
                 Ok(())
             }
             _ => Err(typed_output_mismatch()),
@@ -3925,6 +4096,7 @@ fn typed_valid_count(state: &TypedWindowState) -> u64 {
         TypedWindowState::Scan(state) => {
             u64::try_from(state.scan.valid_count()).unwrap_or(u64::MAX)
         }
+        TypedWindowState::Lag(state) => u64::try_from(state.history.len()).unwrap_or(u64::MAX),
         TypedWindowState::Decay(state) => state.as_ref().map_or(0, |state| state.valid_count()),
     }
 }
@@ -4076,8 +4248,10 @@ fn append_pair(
         TypedOutputKind::Ewma => {
             return Err(internal_error("typed pair state received an EWMA output"));
         }
-        TypedOutputKind::Scan(_) => {
-            return Err(internal_error("typed pair state received a scan output"));
+        TypedOutputKind::Scan(_) | TypedOutputKind::Lag | TypedOutputKind::Delta => {
+            return Err(internal_error(
+                "typed pair state received a non-pair output",
+            ));
         }
         TypedOutputKind::Difference { .. } => {
             return Err(internal_error(

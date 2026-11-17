@@ -114,7 +114,7 @@ async fn test_execution_diagnostics_distinguish_general_replacement_history() {
         (2, "a", 2, Some(3.0)),
         (3, "a", 3, Some(5.0)),
     ]);
-    let spec = kernel_spec(json!([lag_price(1)]));
+    let spec = kernel_spec(json!([delta_volume(1)]));
     let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
     let expected = reference_output(&operator, &input);
     let job = crate::StreamJobContext::new(
@@ -200,7 +200,7 @@ async fn test_execution_diagnostics_preserve_general_prepared_prefix_on_later_en
         (3, "a", 3, Some(5.0)),
         (4, "b", 4, Some(7.0)),
     ]);
-    let spec = kernel_spec(json!([lag_price(1)]));
+    let spec = kernel_spec(json!([delta_volume(1)]));
     let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
     let job = crate::StreamJobContext::new(
         7,

@@ -1193,6 +1193,129 @@ fn lag_preserves_null_and_nan_at_the_referenced_position() {
     assert_eq!(values.value(3).to_bits(), 3.0_f64.to_bits());
 }
 
+#[tokio::test]
+async fn lag_and_delta_use_the_typed_plan_without_changing_results() {
+    let spec = kernel_spec(json!([lag_price(1), delta_price(1)]));
+    let mut operator = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+    let job = crate::StreamJobContext::new(
+        7,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+    let input = float64_fast_record(&[
+        (1, "a", 1, Some(1.0)),
+        (2, "a", 2, Some(3.0)),
+        (3, "a", 3, Some(8.0)),
+    ]);
+    operator
+        .process_data(
+            "input",
+            Batch::table(vec![input], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    operator
+        .on_watermark(EventTime::from_micros(3), &context, &mut collector)
+        .await
+        .unwrap();
+    assert!(operator.state.typed_kernel_state.is_some());
+
+    let emitted = collector.drain("output");
+    let record = &emitted[0]
+        .as_data()
+        .unwrap()
+        .table_payload()
+        .unwrap()
+        .batches()[0];
+    let lag = record
+        .column(record.schema().index_of("price_lag").unwrap())
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    let delta = record
+        .column(record.schema().index_of("price_delta").unwrap())
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert_eq!(
+        lag.iter().collect::<Vec<_>>(),
+        vec![None, Some(1.0), Some(3.0)]
+    );
+    assert_eq!(
+        delta.iter().collect::<Vec<_>>(),
+        vec![None, Some(2.0), Some(5.0)]
+    );
+}
+
+#[tokio::test]
+async fn typed_lag_restore_preserves_period_history() {
+    let spec = kernel_spec(json!([lag_price(2)]));
+    let mut operator =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
+    let job = crate::StreamJobContext::new(
+        7,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+    let first = float64_fast_record(&[(1, "a", 1, Some(1.0)), (2, "a", 2, Some(2.0))]);
+    operator
+        .process_data(
+            "input",
+            Batch::table(vec![first], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    operator
+        .on_watermark(EventTime::from_micros(2), &context, &mut collector)
+        .await
+        .unwrap();
+    let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+
+    let mut restored = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    let mut collector = crate::EdgeCollector::new(restored.output_ports().to_vec());
+    let second = float64_fast_record(&[(3, "a", 3, Some(3.0)), (4, "a", 4, Some(4.0))]);
+    restored
+        .process_data(
+            "input",
+            Batch::table(vec![second], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    restored
+        .on_watermark(EventTime::from_micros(4), &context, &mut collector)
+        .await
+        .unwrap();
+    assert!(restored.state.typed_kernel_state.is_some());
+    let emitted = collector.drain("output");
+    let record = &emitted[0]
+        .as_data()
+        .unwrap()
+        .table_payload()
+        .unwrap()
+        .batches()[0];
+    let lag = record
+        .column(record.schema().index_of("price_lag").unwrap())
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert_eq!(lag.iter().collect::<Vec<_>>(), vec![Some(1.0), Some(2.0)]);
+}
+
 #[test]
 fn lag_works_for_non_numeric_columns() {
     let spec = kernel_spec(json!([{
