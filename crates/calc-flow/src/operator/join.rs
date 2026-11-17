@@ -3514,6 +3514,7 @@ mod data_work;
 mod expiration;
 mod matches;
 mod retained;
+mod runs;
 use expiration::ExpirationIndex;
 use retained::{Rows, StateRows};
 #[cfg(feature = "benchmark-internals")]
@@ -3529,6 +3530,9 @@ mod native_dictionary;
 mod native_lookup;
 mod output_gather;
 mod output_projection;
+#[cfg(test)]
+#[path = "join/run_tests.rs"]
+mod run_tests;
 #[cfg(test)]
 mod row_ipc;
 mod sql_key_scratch;

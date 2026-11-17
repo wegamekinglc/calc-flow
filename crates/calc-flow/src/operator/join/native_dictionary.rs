@@ -22,6 +22,16 @@ struct RunEntry {
     dense: usize,
 }
 
+pub(super) trait TimedEntry {
+    fn event_time(&self) -> EventTime;
+}
+
+impl TimedEntry for RunEntry {
+    fn event_time(&self) -> EventTime {
+        self.time
+    }
+}
+
 impl RunEntry {
     fn identity(self) -> (EventTime, u64) {
         (self.time, self.row_id)
@@ -631,24 +641,7 @@ impl NativeIndex {
             .as_ref()
             .expect("live key ID")
             .active();
-        let Some(cursor) =
-            cursor.filter(|cursor| range.0 >= cursor.range.0 && range.1 >= cursor.range.1)
-        else {
-            let lower = run.partition_point(|entry| boundary(entry.time, range.0, false));
-            #[cfg(test)]
-            note_window_run_search();
-            let upper = run.partition_point(|entry| boundary(entry.time, range.1, true));
-            #[cfg(test)]
-            note_window_run_search();
-            return WindowBounds { lower, upper };
-        };
-        let lower = advance_partition_point(run, cursor.bounds.lower, |entry| {
-            boundary(entry.time, range.0, false)
-        });
-        let upper = advance_partition_point(run, lower.max(cursor.bounds.upper), |entry| {
-            boundary(entry.time, range.1, true)
-        });
-        WindowBounds { lower, upper }
+        ordered_window_bounds(run, range, cursor)
     }
 
     pub(super) fn dense_bounds(&self, id: u32, bounds: WindowBounds) -> Option<(usize, usize)> {
@@ -740,6 +733,32 @@ impl NativeIndex {
     }
 }
 
+/// Exact inclusive window bounds shared by row-indexed and run-locator probes.
+pub(super) fn ordered_window_bounds<E: TimedEntry>(
+    run: &[E],
+    range: (EventTime, EventTime),
+    cursor: Option<WindowCursor>,
+) -> WindowBounds {
+    let Some(cursor) =
+        cursor.filter(|cursor| range.0 >= cursor.range.0 && range.1 >= cursor.range.1)
+    else {
+        let lower = run.partition_point(|entry| boundary(entry.event_time(), range.0, false));
+        #[cfg(test)]
+        note_window_run_search();
+        let upper = run.partition_point(|entry| boundary(entry.event_time(), range.1, true));
+        #[cfg(test)]
+        note_window_run_search();
+        return WindowBounds { lower, upper };
+    };
+    let lower = advance_partition_point(run, cursor.bounds.lower, |entry| {
+        boundary(entry.event_time(), range.0, false)
+    });
+    let upper = advance_partition_point(run, lower.max(cursor.bounds.upper), |entry| {
+        boundary(entry.event_time(), range.1, true)
+    });
+    WindowBounds { lower, upper }
+}
+
 // Test-only per-thread count of full-run window binary searches, so probe
 // work stays observable as O(distinct keys + out-of-order fallbacks) instead
 // of per row, without racing parallel tests.
@@ -776,6 +795,10 @@ impl WindowBounds {
     pub(super) fn matches(self) -> usize {
         debug_assert!(self.upper >= self.lower);
         self.upper - self.lower
+    }
+
+    pub(super) fn range(self) -> std::ops::Range<usize> {
+        self.lower..self.upper
     }
 }
 
@@ -814,10 +837,10 @@ fn insertion_position(run: &[RunEntry], entry: RunEntry) -> usize {
 
 /// Partition point of `pred` over `run`, given `pred` holds on `run[..from]`.
 /// Gallops forward exponentially, then bisects the small remainder.
-fn advance_partition_point(
-    run: &[RunEntry],
+fn advance_partition_point<E: TimedEntry>(
+    run: &[E],
     from: usize,
-    pred: impl Fn(&RunEntry) -> bool,
+    pred: impl Fn(&E) -> bool,
 ) -> usize {
     debug_assert!(from <= run.len());
     let mut low = from;
