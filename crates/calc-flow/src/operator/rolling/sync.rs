@@ -1,9 +1,9 @@
 //! Synchronous execution for admitted ordered rolling graphs.
 
 use super::{
-    Batch, Epoch, EventTime, JsonMap, LateMetricDelta, LatePolicySpec, OperatorMetadata, Port,
-    Result, RollingOperator, StreamOperator, accumulate_late_metrics, async_trait, budget,
-    operator_error, read_buffered_rows,
+    BTreeMap, Batch, BufferedRow, Epoch, EventTime, JsonMap, LateMetricDelta, LatePolicySpec,
+    OperatorMetadata, Port, Result, RollingOperator, RowIdentity, StateCharge, StreamOperator,
+    accumulate_late_metrics, async_trait, budget, operator_error, read_buffered_rows,
 };
 use crate::{
     OperatorStateSnapshot, UdfReference,
@@ -85,7 +85,7 @@ impl SyncRollingOperator {
         Ok(())
     }
 
-    fn data(&mut self, batch: &Batch, context: &mut SyncContext<'_>) -> Result<()> {
+    fn validate_data(&self, batch: &Batch, context: &SyncContext<'_>) -> Result<()> {
         context.check_cancelled()?;
         self.inner.input_ports[0].validate(batch, &format!("{}.input", self.inner.name))?;
         self.observe(context)?;
@@ -95,6 +95,79 @@ impl SyncRollingOperator {
                 "received data after end-of-input",
             ));
         }
+        Ok(())
+    }
+
+    fn read_accepted(
+        &mut self,
+        batch: &Batch,
+        context: &SyncContext<'_>,
+    ) -> Result<(BTreeMap<RowIdentity, BufferedRow>, LateMetricDelta)> {
+        let observer = context.rolling_metrics();
+        let watermark = context.input_watermark();
+        self.inner.materialize_ordered_buffer(observer)?;
+        let rows = read_buffered_rows(
+            batch.table_payload()?,
+            &self.inner.compiled,
+            &self.inner.name,
+        )?;
+        self.inner
+            .classify_envelope(rows, watermark, context.operator_id(), observer)
+    }
+
+    fn charge_accepted(
+        &self,
+        accepted: &BTreeMap<RowIdentity, BufferedRow>,
+        context: &SyncContext<'_>,
+    ) -> Result<StateCharge> {
+        let next_charge = self.inner.state.charge.checked_add(
+            budget::buffered_charge(accepted.values(), context.operator_id())?,
+            context.operator_id(),
+        )?;
+        self.inner
+            .check_state_budget(next_charge, context.operator_id())?;
+        Ok(next_charge)
+    }
+
+    fn classify_accepted(
+        &mut self,
+        batch: &Batch,
+        context: &SyncContext<'_>,
+    ) -> Result<(
+        BTreeMap<RowIdentity, BufferedRow>,
+        LateMetricDelta,
+        StateCharge,
+    )> {
+        let (accepted, metrics) = self.read_accepted(batch, context)?;
+        let next_charge = self.charge_accepted(&accepted, context)?;
+        Ok((accepted, metrics, next_charge))
+    }
+
+    fn commit_accepted(
+        &mut self,
+        accepted: BTreeMap<RowIdentity, BufferedRow>,
+        metrics: LateMetricDelta,
+        next_metrics: LateMetricDelta,
+        next_charge: StateCharge,
+        context: &SyncContext<'_>,
+    ) -> Result<()> {
+        for (identity, row) in accepted {
+            self.inner.state.owned_mut()?.buffer.insert(identity, row);
+        }
+        context.late_metrics().record(metrics)?;
+        self.inner.state.owned_mut()?.metrics = next_metrics;
+        self.inner.state.owned_mut()?.charge = next_charge;
+        self.install_identity(context)
+    }
+
+    fn accept_data(&mut self, batch: &Batch, context: &mut SyncContext<'_>) -> Result<()> {
+        let (accepted, metrics, next_charge) = self.classify_accepted(batch, context)?;
+        let next_metrics = accumulate_late_metrics(self.inner.state.metrics, metrics)?;
+        self.commit_accepted(accepted, metrics, next_metrics, next_charge, context)
+    }
+
+    fn data(&mut self, batch: &Batch, context: &mut SyncContext<'_>) -> Result<()> {
+        self.validate_data(batch, context)?;
         let observer = context.rolling_metrics();
         let watermark = context.input_watermark();
         if self
@@ -103,35 +176,32 @@ impl SyncRollingOperator {
         {
             return self.install_identity(context);
         }
-        self.inner.materialize_ordered_buffer(observer)?;
-        let rows = read_buffered_rows(
-            batch.table_payload()?,
-            &self.inner.compiled,
-            &self.inner.name,
-        )?;
-        let (accepted, metrics) =
+        self.accept_data(batch, context)
+    }
+
+    fn emit_watermark_rows(
+        &mut self,
+        watermark: EventTime,
+        context: &mut SyncContext<'_>,
+        output: &mut Emitter,
+    ) -> Result<()> {
+        if self.inner.state.ordered.is_empty() {
+            let closing = self
+                .inner
+                .closing_keys(watermark.as_micros(), context.operator_id())?;
+            let rows = self.inner.take_buffered(&closing)?;
+            self.inner.emit_slab_rows_sync(&rows, context, output)
+        } else {
+            let last_identity = self.inner.state.ordered.last_identity();
+            let records = self.inner.state.owned_mut()?.ordered.take_closed(
+                watermark,
+                &self.inner.compiled,
+                self.inner.spec.allowed_lateness_micros,
+                context.operator_id(),
+            )?;
             self.inner
-                .classify_envelope(rows, watermark, context.operator_id(), observer)?;
-        let next_metrics = accumulate_late_metrics(self.inner.state.metrics, metrics)?;
-        let next_charge = self.inner.state.charge.checked_add(
-            budget::buffered_charge(accepted.values(), context.operator_id())?,
-            context.operator_id(),
-        )?;
-        self.inner
-            .check_state_budget(next_charge, context.operator_id())?;
-        for (identity, row) in accepted {
-            self.inner.state.owned_mut()?.buffer.insert(identity, row);
+                .emit_ordered_sync(records, last_identity, context, output)
         }
-        context.late_metrics().record(LateMetricDelta {
-            late_rows: metrics.late_rows,
-            affected_batches: metrics.affected_batches,
-            max_lateness_micros: metrics.max_lateness_micros,
-            null_event_time_rows: metrics.null_event_time_rows,
-            null_event_time_batches: metrics.null_event_time_batches,
-        })?;
-        self.inner.state.owned_mut()?.metrics = next_metrics;
-        self.inner.state.owned_mut()?.charge = next_charge;
-        self.install_identity(context)
     }
 
     fn watermark(
@@ -153,26 +223,22 @@ impl SyncRollingOperator {
                 "input watermark did not advance strictly",
             ));
         }
-        if self.inner.state.ordered.is_empty() {
-            let closing = self
-                .inner
-                .closing_keys(watermark.as_micros(), context.operator_id())?;
-            let rows = self.inner.take_buffered(&closing)?;
-            self.inner.emit_slab_rows_sync(&rows, context, output)?;
-        } else {
-            let last_identity = self.inner.state.ordered.last_identity();
-            let records = self.inner.state.owned_mut()?.ordered.take_closed(
-                watermark,
-                &self.inner.compiled,
-                self.inner.spec.allowed_lateness_micros,
-                context.operator_id(),
-            )?;
-            self.inner
-                .emit_ordered_sync(records, last_identity, context, output)?;
-        }
+        self.emit_watermark_rows(watermark, context, output)?;
         self.install_identity(context)?;
         self.inner.state.owned_mut()?.last_input_watermark = Some(watermark);
         Ok(())
+    }
+
+    fn emit_end_rows(&mut self, context: &mut SyncContext<'_>, output: &mut Emitter) -> Result<()> {
+        if self.inner.state.ordered.is_empty() {
+            let rows = self.inner.take_all_buffered()?;
+            self.inner.emit_slab_rows_sync(&rows, context, output)
+        } else {
+            let last_identity = self.inner.state.ordered.last_identity();
+            let records = self.inner.state.owned_mut()?.ordered.take_all();
+            self.inner
+                .emit_ordered_sync(records, last_identity, context, output)
+        }
     }
 
     fn end(&mut self, context: &mut SyncContext<'_>, output: &mut Emitter) -> Result<()> {
@@ -181,15 +247,7 @@ impl SyncRollingOperator {
         if self.inner.state.ended {
             return Ok(());
         }
-        if self.inner.state.ordered.is_empty() {
-            let rows = self.inner.take_all_buffered()?;
-            self.inner.emit_slab_rows_sync(&rows, context, output)?;
-        } else {
-            let last_identity = self.inner.state.ordered.last_identity();
-            let records = self.inner.state.owned_mut()?.ordered.take_all();
-            self.inner
-                .emit_ordered_sync(records, last_identity, context, output)?;
-        }
+        self.emit_end_rows(context, output)?;
         self.install_identity(context)?;
         self.inner.state.owned_mut()?.ended = true;
         Ok(())
