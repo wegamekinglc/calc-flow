@@ -58,9 +58,10 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
 - P2.3 已完成 Float64 Rows slab、共享多窗口 history、layout 7 和 pending restore，rolling 694 项测试通过。
   后续同一基线的 paired 测量最初发现 large-batch 回退扩大为 0.29x；批量 counter、readout 定位、逐窗口
   rebuild history、O(1) retained count、checkpoint-off COW elision 和 numeric family 修复后，中间证据
-  `p2-2-slab-family-selection` 为 0.68x，仍未通过最终性能门槛。独立审查发现的 freeze rollback、mean-only
-  rebuild restore 和 abort dirty-loss 问题已各有回归测试并修复。其余 typed groups、P2.4–P2.9、join/ASOF、
-  并行/SIMD 与 window pane 仍需实现和验收。
+  `p2-2-slab-family-selection` 为 0.68x，随后 first-touch undo 和 checkpoint-off direct recurrent 将
+  `p2-2-slab-direct-recurrent` 提升到 1.09x/1.11x（faster），消除了相对基线的回退；绝对 G1–G3 仍未达标。
+  独立审查发现的 freeze rollback、mean-only rebuild restore 和 abort dirty-loss 问题已各有回归测试并修复。
+  其余 typed groups、P2.4–P2.9、join/ASOF、并行/SIMD 与 window pane 仍需实现和验收。
 
 ## 1. 目标
 

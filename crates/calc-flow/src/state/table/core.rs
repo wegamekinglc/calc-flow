@@ -1703,7 +1703,105 @@ impl StateTable {
         entity: EntityId,
         value: Option<f64>,
     ) -> Result<()> {
+        if !self.checkpointing {
+            return self.push_numeric_rows_recurrent_off(column, entity, value);
+        }
         self.push_numeric_rows_impl(column, entity, value, false)
+    }
+
+    fn push_numeric_rows_recurrent_off(
+        &mut self,
+        column: usize,
+        entity: EntityId,
+        value: Option<f64>,
+    ) -> Result<()> {
+        let (group, row) = self.location(entity)?;
+        let schema = &self.rings[column];
+        let max_window = match schema.retention {
+            Retention::Rows(window) if schema.numeric => window,
+            _ => return Err(internal("numeric Rows group type mismatch")),
+        };
+        let transaction = self
+            .transaction
+            .as_mut()
+            .ok_or_else(|| internal("state-table mutation requires a transaction"))?;
+        let transaction_id = transaction.id;
+        let partition = self.partitions.get_mut(&group).expect("prepared group");
+        let slot = partition.rings[column][row]
+            .as_ref()
+            .expect("ring page")
+            .id
+            .slot;
+        let page = Arc::get_mut(
+            &mut partition.rings[column][row]
+                .as_mut()
+                .expect("ring page")
+                .value,
+        )
+        .expect("checkpoint-off ring page is writable");
+        let previous_head = page.ring.head;
+        let previous_len = page.ring.len;
+        let index = page.ring.position(previous_len);
+        let previous = page.ring.slots[index];
+        let stamp_index =
+            u32::try_from(index).map_err(|_| internal("rolling ring slot index exceeds u32"))?;
+        if page.slot_stamps[index] != transaction_id {
+            let previous_stamp = page.slot_stamps[index];
+            transaction.undo.push(Undo::Stamp {
+                group,
+                key: StampKey {
+                    slot,
+                    kind: StampKind::RingSlot,
+                    sub: stamp_index,
+                },
+                previous: Some(previous_stamp),
+            });
+            transaction.undo.push(Undo::RingSlot {
+                group,
+                slot,
+                index,
+                value: previous,
+            });
+            page.slot_stamps[index] = transaction_id;
+        }
+        let evicted = (previous_len == page.ring.capacity()).then_some(previous);
+        if evicted.is_some() {
+            page.ring.head = (previous_head + 1) % page.ring.capacity();
+        } else {
+            page.ring.len += 1;
+        }
+        page.ring.slots[index] = RingValue::Float64(value);
+        let evicted = match evicted {
+            Some(RingValue::Float64(value)) => value,
+            None => None,
+            _ => unreachable!(),
+        };
+        let numeric = page.numeric.as_mut().expect("numeric group");
+        for (numeric, &window) in numeric.iter_mut().zip(&schema.numeric_windows) {
+            let history = NumericHistory {
+                ring: &page.ring,
+                offset: page.ring.len.saturating_sub(window),
+            };
+            let leaving = if previous_len < window {
+                None
+            } else if window == max_window {
+                evicted
+            } else {
+                let offset = previous_len - window;
+                let slot = (previous_head + offset) % page.ring.capacity();
+                match page.ring.slots[slot] {
+                    RingValue::Float64(value) => value,
+                    _ => unreachable!(),
+                }
+            };
+            numeric
+                .rows(leaving, value)
+                .and_then(|()| numeric.finish_rows(window, history))
+                .map_err(|error| {
+                    internal(&format!("rolling numeric arithmetic failed: {error:?}"))
+                })?;
+        }
+        Ok(())
     }
 
     fn push_numeric_rows_impl(

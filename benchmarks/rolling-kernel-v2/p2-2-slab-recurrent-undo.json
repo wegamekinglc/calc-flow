@@ -1,0 +1,493 @@
+{
+  "contract": "paired-native-evidence-v1",
+  "status": "completed",
+  "cases": [
+    "1x1-dual",
+    "6400x64-dual"
+  ],
+  "requested_rounds": 10,
+  "completed_rounds": 10,
+  "timed_samples_per_round": 30,
+  "sample_pairs_per_case": 300,
+  "budget_seconds": 590.0,
+  "elapsed_seconds": 5.542137347001699,
+  "numeric_contract_change": true,
+  "binaries": [
+    {
+      "side": "baseline",
+      "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa",
+      "sha256": "1b27105bf3607eee87cc997376fc628bc0622d6a9b4cbac8db291ca27d0bb77d"
+    },
+    {
+      "side": "candidate",
+      "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo",
+      "sha256": "200e710c7ee2ae69ffec73cec5544c7f2d43b64c7d81367525dc667370d1aa1c"
+    }
+  ],
+  "round_evidence": [
+    {
+      "round": 1,
+      "order": "AB",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo-work/round-1-baseline.json",
+          "sha256": "051d9cd1dd7ffce205a794feddca47fbb03d6fd5dc484316d06d0f6ffe56aef9",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo-work/round-1-candidate.json",
+          "sha256": "0a7e67d0a218da713a135f89eec778dde2556f39ee525e3f19cf00004e11dcbb",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo"
+        }
+      }
+    },
+    {
+      "round": 2,
+      "order": "BA",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo-work/round-2-baseline.json",
+          "sha256": "be5e963dbb4e5a8f76f1141c69dfe6f11b05c86b52fef4576cbf7cd7348139d7",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo-work/round-2-candidate.json",
+          "sha256": "8eef04199cd7ec32375999a8ac3ec698b8e6e54966bc908543bfe236c4e0da40",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo"
+        }
+      }
+    },
+    {
+      "round": 3,
+      "order": "AB",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo-work/round-3-baseline.json",
+          "sha256": "7176f7c60dd3c9da719b97430a2a553f4b48d8bde182d2c4bb09b12228c44bd7",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo-work/round-3-candidate.json",
+          "sha256": "5a04c1ab625e015bff3ac588fac80a49a516bb5814b9fc907c5e5cb916fa6814",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo"
+        }
+      }
+    },
+    {
+      "round": 4,
+      "order": "BA",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo-work/round-4-baseline.json",
+          "sha256": "d5903aa77e0f211e4412e30fb810f9f9937405c1f577eead9fcfdc845b9e9d3b",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo-work/round-4-candidate.json",
+          "sha256": "93e67fbf924026770e06f78e1c4e15953356605ef2ef8b874d3d2ade8b54a00c",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo"
+        }
+      }
+    },
+    {
+      "round": 5,
+      "order": "AB",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo-work/round-5-baseline.json",
+          "sha256": "5ff94c62977ccbd5ce7e790f8a9ffb61d02cb68b4cc956de150702068d2261e2",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo-work/round-5-candidate.json",
+          "sha256": "8f23076f4968793dfb9bc38beb2276d72d1a2ac0e88b138a71a5efe9347bb957",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo"
+        }
+      }
+    },
+    {
+      "round": 6,
+      "order": "BA",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo-work/round-6-baseline.json",
+          "sha256": "dfbbb17e93a074bfe252b0d1559932511708ef2564a3d21c18af0b5da88b3b84",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo-work/round-6-candidate.json",
+          "sha256": "0808581b3ceb72facb12f1d98458b609da72a9b42141079dfdcf051f60d1f2c6",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo"
+        }
+      }
+    },
+    {
+      "round": 7,
+      "order": "AB",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo-work/round-7-baseline.json",
+          "sha256": "1c064211d5e60902b8cdbfb78dee7ea35d74a7d993f75cb560aa46ab1cc4ca38",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo-work/round-7-candidate.json",
+          "sha256": "c5348f410dda86f40a80d489f35f91628c912104f992319df7b26470fd9847c9",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo"
+        }
+      }
+    },
+    {
+      "round": 8,
+      "order": "BA",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo-work/round-8-baseline.json",
+          "sha256": "f5db9863c8cc6e06ff5cbcda98a34f6be25d93d22954ba2280c3123ed54e3f1a",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo-work/round-8-candidate.json",
+          "sha256": "85f7ac11f3bc2df6d34248ef7562eed85fcf9feb4827f78688c166a9937dbdbb",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo"
+        }
+      }
+    },
+    {
+      "round": 9,
+      "order": "AB",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo-work/round-9-baseline.json",
+          "sha256": "48ea4f7d905e3b24f3a290bacba4883dcbff246b3b3dcdd257b524ad67761ea5",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo-work/round-9-candidate.json",
+          "sha256": "bcd5b7ee833e71daf15bd60a0cb992a8f47c006ca378249a10925aef4465f3e0",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo"
+        }
+      }
+    },
+    {
+      "round": 10,
+      "order": "BA",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo-work/round-10-baseline.json",
+          "sha256": "15711c4d9f2b27ecd21f320605940ac71b90f47847d6706c8caeed4b0f5d1d94",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo-work/round-10-candidate.json",
+          "sha256": "dd20485198c56133fdcb24bedac05986a0978a64ff25421fa8d7dd68c01cf6fb",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-recurrent-undo"
+        }
+      }
+    }
+  ],
+  "arms": [
+    {
+      "case": "1x1-dual",
+      "kind": "dispatch",
+      "arm": "absent",
+      "rows": 1,
+      "rounds": 10,
+      "baseline": {
+        "p50_seconds": 2.1438e-05,
+        "p95_seconds": 2.959260000000007e-05,
+        "cv": 0.7479863701677943,
+        "rows_per_second": 46646.14236402649
+      },
+      "candidate": {
+        "p50_seconds": 1.79495e-05,
+        "p95_seconds": 2.5246200000000033e-05,
+        "cv": 0.4991555932295974,
+        "rows_per_second": 55711.85826903256
+      },
+      "round_medians_seconds": {
+        "baseline": [
+          2.17685e-05,
+          2.22625e-05,
+          2.0963999999999998e-05,
+          2.217e-05,
+          2.124e-05,
+          2.2347500000000002e-05,
+          2.2805e-05,
+          1.997e-05,
+          1.3737e-05,
+          2.174e-05
+        ],
+        "candidate": [
+          8.5455e-06,
+          1.8248e-05,
+          1.82955e-05,
+          1.8579e-05,
+          1.95295e-05,
+          1.91135e-05,
+          1.78995e-05,
+          1.8217e-05,
+          8.085e-06,
+          1.84805e-05
+        ]
+      },
+      "paired_round_speedups": [
+        2.5473641097653736,
+        1.219996711968435,
+        1.1458555382471098,
+        1.1932827385758114,
+        1.08758544765611,
+        1.1691997802600258,
+        1.274057934579178,
+        1.0962287972772686,
+        1.6990723562152135,
+        1.1763750980763505
+      ],
+      "paired_round_speedup_median": 1.184828918326081,
+      "paired_round_speedup_ci95": [
+        1.1327142887686472,
+        1.4595345340918242
+      ],
+      "bootstrap_resamples": 20000,
+      "verdict": {
+        "paired_speedup": "faster",
+        "confirmed_regression": false
+      }
+    },
+    {
+      "case": "1x1-dual",
+      "kind": "dispatch",
+      "arm": "present",
+      "rows": 1,
+      "rounds": 10,
+      "baseline": {
+        "p50_seconds": 2.51045e-05,
+        "p95_seconds": 3.1548000000000004e-05,
+        "cv": 0.3166417001489605,
+        "rows_per_second": 39833.49598677528
+      },
+      "candidate": {
+        "p50_seconds": 2.0561e-05,
+        "p95_seconds": 2.8448150000000017e-05,
+        "cv": 0.3073346877621861,
+        "rows_per_second": 48635.7667428627
+      },
+      "round_medians_seconds": {
+        "baseline": [
+          2.57895e-05,
+          2.5709500000000002e-05,
+          2.4726e-05,
+          2.58305e-05,
+          2.4777e-05,
+          2.57135e-05,
+          2.6379e-05,
+          2.33635e-05,
+          1.6763000000000002e-05,
+          2.55175e-05
+        ],
+        "candidate": [
+          1.0219e-05,
+          2.1104e-05,
+          2.1377e-05,
+          2.1073e-05,
+          2.22935e-05,
+          2.17745e-05,
+          2.0685499999999997e-05,
+          2.1093e-05,
+          9.997e-06,
+          2.14875e-05
+        ]
+      },
+      "paired_round_speedups": [
+        2.523681377825619,
+        1.2182287717968159,
+        1.1566637039809142,
+        1.2257628244673278,
+        1.1114001839101084,
+        1.1808996762267792,
+        1.2752411109231105,
+        1.1076423458019249,
+        1.676803040912274,
+        1.1875509016870274
+      ],
+      "paired_round_speedup_median": 1.2028898367419216,
+      "paired_round_speedup_ci95": [
+        1.146149930068444,
+        1.451282932689801
+      ],
+      "bootstrap_resamples": 20000,
+      "verdict": {
+        "paired_speedup": "faster",
+        "confirmed_regression": false
+      },
+      "numeric_update_ns_per_window_row": {
+        "baseline": 432.75,
+        "candidate": 520.0
+      }
+    },
+    {
+      "case": "6400x64-dual",
+      "kind": "dispatch",
+      "arm": "absent",
+      "rows": 6400,
+      "rounds": 10,
+      "baseline": {
+        "p50_seconds": 0.0011767155,
+        "p95_seconds": 0.00142111285,
+        "cv": 0.26337560913804325,
+        "rows_per_second": 5438867.763703291
+      },
+      "candidate": {
+        "p50_seconds": 0.00140219,
+        "p95_seconds": 0.0017285868500000001,
+        "cv": 0.25582754224922327,
+        "rows_per_second": 4564288.719788332
+      },
+      "round_medians_seconds": {
+        "baseline": [
+          0.0012633384999999999,
+          0.0010399555,
+          0.0011097665,
+          0.0009993225000000001,
+          0.0013030440000000002,
+          0.0012991225,
+          0.0011590235,
+          0.001176042,
+          0.000738645,
+          0.0011737735
+        ],
+        "candidate": [
+          0.00145218,
+          0.0014155895,
+          0.001407157,
+          0.0009316675,
+          0.001458913,
+          0.001639546,
+          0.001342566,
+          0.0013167895,
+          0.0013992585,
+          0.0014375385
+        ]
+      },
+      "paired_round_speedups": [
+        0.8699599911856656,
+        0.7346448246472582,
+        0.7886586216037017,
+        1.0726171085714593,
+        0.8931608670290827,
+        0.7923672162903633,
+        0.8632897749533358,
+        0.89311313615426,
+        0.5278831609741874,
+        0.8165162185221474
+      ],
+      "paired_round_speedup_median": 0.8399029967377416,
+      "paired_round_speedup_ci95": [
+        0.7635060204688108,
+        0.89311313615426
+      ],
+      "bootstrap_resamples": 20000,
+      "verdict": {
+        "paired_speedup": "slower",
+        "confirmed_regression": true
+      }
+    },
+    {
+      "case": "6400x64-dual",
+      "kind": "dispatch",
+      "arm": "present",
+      "rows": 6400,
+      "rounds": 10,
+      "baseline": {
+        "p50_seconds": 0.001185482,
+        "p95_seconds": 0.00138647185,
+        "cv": 0.18491909512045096,
+        "rows_per_second": 5398647.976097486
+      },
+      "candidate": {
+        "p50_seconds": 0.0014071885,
+        "p95_seconds": 0.0017437398,
+        "cv": 0.403392000360098,
+        "rows_per_second": 4548075.826372942
+      },
+      "round_medians_seconds": {
+        "baseline": [
+          0.0012932809999999999,
+          0.001024003,
+          0.0011504675,
+          0.0010082885,
+          0.0012844815,
+          0.0012912885,
+          0.00117839,
+          0.001228613,
+          0.0007481585,
+          0.001206819
+        ],
+        "candidate": [
+          0.0014500189999999999,
+          0.001431009,
+          0.001496496,
+          0.000908423,
+          0.0014991955,
+          0.0016476135,
+          0.001355327,
+          0.001320239,
+          0.001391036,
+          0.001457664
+        ]
+      },
+      "paired_round_speedups": [
+        0.8919062439871477,
+        0.715581103962309,
+        0.7687741898408015,
+        1.109932817641121,
+        0.8567805199522011,
+        0.7837326533194829,
+        0.8694506934488874,
+        0.9305989294362611,
+        0.5378426582777154,
+        0.82791301699157
+      ],
+      "paired_round_speedup_median": 0.8423467684718855,
+      "paired_round_speedup_ci95": [
+        0.7496568786408959,
+        0.9000248114425742
+      ],
+      "bootstrap_resamples": 20000,
+      "verdict": {
+        "paired_speedup": "slower",
+        "confirmed_regression": true
+      },
+      "numeric_update_ns_per_window_row": {
+        "baseline": 50.312968749999996,
+        "candidate": 83.3098828125
+      }
+    }
+  ],
+  "gate_values": {
+    "G1": {
+      "case": "1x1-dual",
+      "arm": "absent",
+      "value_seconds": 1.79495e-05,
+      "limit_seconds": 1e-06,
+      "met": false
+    },
+    "G2": {
+      "case": "6400x64-dual",
+      "arm": "present",
+      "value_ns_per_window_row": 83.3098828125,
+      "limit_ns_per_window_row": 4.0,
+      "met": false
+    },
+    "G3": {
+      "case": "6400x64-dual",
+      "arm": "absent",
+      "value_seconds": 0.00140219,
+      "limit_seconds": 0.0001,
+      "met": false
+    }
+  },
+  "timed_boundary": "current-thread dispatch_data plus dispatch_watermark_handler on a RollingOperator; no projection; output drain outside the timer",
+  "comparison_note": "P2.1 uses the async dispatch boundary; later cross-boundary speedups are informational, while G1-G3 remain absolute",
+  "harness_sha256": "4496479e206390cabdcaf988cc92acb4c180309beb6e9986d17785fc4a4352ea"
+}
