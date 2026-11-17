@@ -34,7 +34,8 @@ pub(in crate::operator::sql) fn prepare(
         _identity,
         _descriptor,
     } = prepare_binding(operator, snapshot, check)?;
-    let native = restore_groups(native, snapshot, &decoded.value, check, &operator.name)?;
+    let mut native = restore_groups(native, snapshot, &decoded.value, check, &operator.name)?;
+    native.set_output_mode(operator.aggregate_output)?;
     check()?;
     let state = restored_compact_state(operator, snapshot, columns, &decoded.value)?;
     check()?;

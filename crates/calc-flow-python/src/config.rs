@@ -782,11 +782,13 @@ impl PyRuntime {
         serde_json::to_string(&plan).map_err(|error| PyRuntimeError::new_err(error.to_string()))
     }
 
+    #[pyo3(signature = (query, schemas, aggregate_output=None))]
     fn _infer_sql_schema<'py>(
         &self,
         py: Python<'py>,
         query: &str,
         schemas: &Bound<'py, PyMapping>,
+        aggregate_output: Option<&str>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let runtime = self.snapshot()?;
         let schemas = schemas
@@ -795,9 +797,23 @@ impl PyRuntime {
             .into_iter()
             .map(|(alias, schema)| (alias, schema.into_inner()))
             .collect::<BTreeMap<_, _>>();
-        let operator =
+        let mut operator =
             calc_flow::SqlOperator::new("schema", query, schemas.keys().cloned().collect(), vec![])
                 .map_err(crate::error::to_py_err)?;
+        if let Some(mode) = aggregate_output {
+            let mode = match mode {
+                "snapshot" => calc_flow::SqlAggregateOutputMode::Snapshot,
+                "changelog" => calc_flow::SqlAggregateOutputMode::Changelog,
+                other => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "unsupported aggregate output mode {other:?}"
+                    )));
+                }
+            };
+            operator
+                .set_aggregate_output_mode(mode)
+                .map_err(crate::error::to_py_err)?;
+        }
         let schema = py
             .detach(|| runtime.tokio.block_on(operator.infer_schema(&schemas)))
             .map_err(crate::error::to_py_err)?;

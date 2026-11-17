@@ -56,7 +56,7 @@ from calc_flow.symbolic.query_analysis import (
     UpdateKind,
     UpdateSemantics,
 )
-from calc_flow.symbolic.sql import snapshot_sql, sql
+from calc_flow.symbolic.sql import changelog_sql, snapshot_sql, sql
 from calc_flow.symbolic.types import CompileMode, Field
 from calc_flow.symbolic.windows import (
     CrossSectionGroup,
@@ -131,6 +131,7 @@ __all__ = [
     "parameter",
     "row",
     "rows",
+    "changelog_sql",
     "sql",
     "snapshot_sql",
     "table",

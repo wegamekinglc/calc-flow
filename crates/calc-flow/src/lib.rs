@@ -120,11 +120,11 @@ pub use operator::{
     RollingOperator, RollingOutputSpec, RollingSpec, RollingValuePolicy, RowsFrame,
     STREAM_JOIN_MAX_SAFE_JSON_INTEGER, STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1,
     SnapshotSqlOperator, SortDirection, SortHistory, SortKey, SortSpec, SortTies, SortWindow,
-    SqlOperator, StateBudget, StateSegment, StreamAsofJoinOperator, StreamAsofJoinSideStatus,
-    StreamAsofJoinSpec, StreamAsofJoinStatus, StreamCollector, StreamJoinOperator,
-    StreamJoinSideStatus, StreamJoinSpec, StreamJoinStatus, StreamJoinType, StreamOperator,
-    StreamOperatorContext, StreamOperatorFactory, StreamOperatorLifecycle, UnionOperator,
-    WindowAggregateOperator, WindowGeometry, WindowSpec,
+    SqlAggregateOutputMode, SqlOperator, StateBudget, StateSegment, StreamAsofJoinOperator,
+    StreamAsofJoinSideStatus, StreamAsofJoinSpec, StreamAsofJoinStatus, StreamCollector,
+    StreamJoinOperator, StreamJoinSideStatus, StreamJoinSpec, StreamJoinStatus, StreamJoinType,
+    StreamOperator, StreamOperatorContext, StreamOperatorFactory, StreamOperatorLifecycle,
+    UnionOperator, WindowAggregateOperator, WindowGeometry, WindowSpec,
 };
 pub use pipeline::{
     BatchExecutionPlan, DeliveryGuarantee, Edge, EdgeBudget, ExecutionOptions, NodeTiming,

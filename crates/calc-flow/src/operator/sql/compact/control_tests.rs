@@ -13,6 +13,7 @@ fn control() -> CompactControl {
         coalescer: incremental::global_record::coalescer::Inventory::None,
         identity: CompactIdentity {
             query_sha256: "q".repeat(64),
+            aggregate_output: SqlAggregateOutputMode::Snapshot,
             input_alias: "events".into(),
             runtime_config: DataFusionConfig::default(),
             logical_schema_sha256: "l".repeat(64),

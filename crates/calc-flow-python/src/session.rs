@@ -238,7 +238,7 @@ impl PyStreamSession {
         let released = guard.complete(session, completion);
         drop(released);
         result
-            .map(|epoch| epoch.as_u64())
+            .map(calc_flow::Epoch::as_u64)
             .map_err(|error| session_py_err(error, failed))
     }
 

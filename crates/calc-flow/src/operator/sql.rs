@@ -30,6 +30,8 @@ use super::{
 use super::expression::required_input;
 
 #[cfg(test)]
+mod changelog_tests;
+#[cfg(test)]
 mod checkpoint_test_hooks;
 mod compact;
 mod compact_budget;
@@ -49,6 +51,37 @@ mod retention;
 
 #[cfg(test)]
 mod row_local_compiled_tests;
+
+/// Selects the visible relation emitted by a compact streaming SQL aggregate.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SqlAggregateOutputMode {
+    /// Emit the complete cumulative visible relation after every input batch.
+    #[default]
+    Snapshot,
+    /// Emit only retract/upsert changes from the last committed visible relation.
+    Changelog,
+}
+
+impl SqlAggregateOutputMode {
+    #[allow(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde skip_serializing_if requires a reference"
+    )]
+    pub(crate) const fn is_snapshot(&self) -> bool {
+        matches!(self, Self::Snapshot)
+    }
+}
 
 /// A multi-input `DataFusion` SQL operator.
 ///
@@ -74,6 +107,7 @@ pub struct SqlOperator {
     retained_capture: Option<std::sync::Arc<current_retained::RetainedCapture>>,
     state_budget: Option<StateBudget>,
     compact_state_budget: Option<StateBudget>,
+    aggregate_output: SqlAggregateOutputMode,
     incremental: Option<Box<incremental::IncrementalSql>>,
     incremental_checked: bool,
     #[cfg(test)]
@@ -363,6 +397,7 @@ impl Clone for SqlOperator {
             retained_capture: None,
             state_budget: self.state_budget,
             compact_state_budget: self.compact_state_budget,
+            aggregate_output: self.aggregate_output,
             incremental: None,
             incremental_checked: false,
             #[cfg(test)]
@@ -395,6 +430,11 @@ impl SqlOperator {
     }
 
     pub(crate) fn enable_replacement(&mut self) -> Result<()> {
+        if self.aggregate_output == SqlAggregateOutputMode::Changelog {
+            return Err(Self::changelog_required_error(
+                "latest_relation replacement SQL is not a compact append aggregate",
+            ));
+        }
         self.replacement = Some(Box::new(super::SnapshotSqlOperator::for_single_alias(
             self.clone(),
         )?));
@@ -460,6 +500,7 @@ impl SqlOperator {
             retained_capture: None,
             state_budget: None,
             compact_state_budget: None,
+            aggregate_output: SqlAggregateOutputMode::Snapshot,
             incremental: None,
             incremental_checked: false,
             #[cfg(test)]
@@ -525,7 +566,8 @@ impl SqlOperator {
                     .into(),
             });
         }
-        let schema = DataFusionRuntime::new(DataFusionConfig::default())?
+        let runtime = DataFusionRuntime::new(DataFusionConfig::default())?;
+        let schema = runtime
             .infer_query_schema(&self.query, schemas, &self.name)
             .await?;
         let mut names = BTreeSet::new();
@@ -539,6 +581,39 @@ impl SqlOperator {
                     ),
                 });
             }
+        }
+        if self.aggregate_output == SqlAggregateOutputMode::Changelog {
+            let input_schema = schemas[&self.aliases[0]].clone();
+            let Some(mut native) = incremental::IncrementalSql::plan(
+                &runtime,
+                &self.validated,
+                &self.aliases[0],
+                input_schema,
+                &self.name,
+            )
+            .await?
+            else {
+                return Err(Self::changelog_required_error(
+                    "changelog requires compact aggregate execution",
+                ));
+            };
+            native.set_output_mode(SqlAggregateOutputMode::Changelog)?;
+            if schema.fields().iter().any(|field| field.name() == "_cf_op") {
+                return Err(Self::changelog_required_error(
+                    "changelog output reserves the _cf_op field name",
+                ));
+            }
+            let mut fields = schema.fields().to_vec();
+            fields.push(std::sync::Arc::new(
+                datafusion::arrow::datatypes::Field::new(
+                    "_cf_op",
+                    datafusion::arrow::datatypes::DataType::Utf8,
+                    false,
+                ),
+            ));
+            return Ok(std::sync::Arc::new(
+                datafusion::arrow::datatypes::Schema::new(fields),
+            ));
         }
         Ok(schema)
     }
@@ -570,6 +645,46 @@ impl SqlOperator {
 
     pub(crate) const fn has_stream_aggregate(&self) -> bool {
         self.stream_aggregate
+    }
+
+    /// Selects snapshot or changelog output for a compact stream aggregate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for non-aggregate, multi-alias or replacement SQL, or
+    /// when changing modes after stream state has been admitted.
+    pub fn set_aggregate_output_mode(&mut self, mode: SqlAggregateOutputMode) -> Result<()> {
+        if mode == SqlAggregateOutputMode::Changelog
+            && (!self.stream_aggregate || self.aliases.len() != 1 || self.replacement.is_some())
+        {
+            return Err(Self::changelog_required_error(
+                "changelog requires one compact single-alias stream aggregate",
+            ));
+        }
+        if self.aggregate_output != mode
+            && (self.incremental.is_some() || self.retained.is_some() || self.compact.is_some())
+        {
+            return Err(Self::changelog_required_error(
+                "aggregate output mode cannot change after state admission",
+            ));
+        }
+        if let Some(incremental) = self.incremental.as_mut() {
+            incremental.set_output_mode(mode)?;
+        }
+        self.aggregate_output = mode;
+        Ok(())
+    }
+
+    /// The declared aggregate output mode.
+    pub const fn aggregate_output_mode(&self) -> SqlAggregateOutputMode {
+        self.aggregate_output
+    }
+
+    fn changelog_required_error(message: &str) -> CalcFlowError {
+        CalcFlowError::InvalidArgument {
+            field: "sql.aggregate_output".into(),
+            message: message.into(),
+        }
     }
 
     /// Sets an optional row and logical-byte limit for retained stream SQL
@@ -1039,10 +1154,19 @@ impl SqlOperator {
         }
         let mut initialized = self.plan_incremental(alias, batch, plans).await?;
         self.configure_incremental_budget(&mut initialized)?;
-        if !self
+        let proved = self
             .prove_incremental_plan(initialized.as_deref(), alias, batch, context)
-            .await?
+            .await?;
+        if !(proved
+            || (self.aggregate_output == SqlAggregateOutputMode::Changelog
+                && batch.num_rows() == 0
+                && initialized.is_some()))
         {
+            if self.aggregate_output == SqlAggregateOutputMode::Changelog {
+                return Err(Self::changelog_required_error(
+                    "changelog input does not satisfy compact aggregate admission",
+                ));
+            }
             self.incremental_checked = batch.num_rows() != 0;
             return Ok(None);
         }
@@ -1180,8 +1304,8 @@ impl SqlOperator {
             || batch.table_payload().map(|table| table.schema().clone()),
             |state| Ok(state.records[0].schema()),
         )?;
-        if let Some((raw, analyzed)) = plans {
-            return incremental::IncrementalSql::from_plan(
+        let mut plan = if let Some((raw, analyzed)) = plans {
+            incremental::IncrementalSql::from_plan(
                 self.stream_state.runtime()?,
                 &self.validated,
                 schema,
@@ -1189,17 +1313,27 @@ impl SqlOperator {
                 &analyzed,
                 &self.name,
             )
-            .map(|plan| plan.map(Box::new));
+            .map(|plan| plan.map(Box::new))?
+        } else {
+            incremental::IncrementalSql::plan(
+                self.stream_state.runtime()?,
+                &self.validated,
+                alias,
+                schema,
+                &self.name,
+            )
+            .await
+            .map(|plan| plan.map(Box::new))?
+        };
+        if self.aggregate_output == SqlAggregateOutputMode::Changelog {
+            let Some(native) = plan.as_mut() else {
+                return Err(Self::changelog_required_error(
+                    "changelog requires compact aggregate execution",
+                ));
+            };
+            native.set_output_mode(SqlAggregateOutputMode::Changelog)?;
         }
-        incremental::IncrementalSql::plan(
-            self.stream_state.runtime()?,
-            &self.validated,
-            alias,
-            schema,
-            &self.name,
-        )
-        .await
-        .map(|plan| plan.map(Box::new))
+        Ok(plan)
     }
 
     async fn rebuild_incremental(
@@ -1382,6 +1516,9 @@ impl OperatorMetadata for SqlOperator {
                 Value::Array(self.udfs.iter().map(udf_configuration).collect()),
             ),
         ]);
+        if self.aggregate_output == SqlAggregateOutputMode::Changelog {
+            config.insert("aggregate_output".into(), "changelog".into());
+        }
         if self.is_replacement() {
             config.insert("replacement_policy".into(), "single_alias_v1".into());
         }

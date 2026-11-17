@@ -108,6 +108,38 @@ impl KeyedSum {
         self.lock().keys.layout_fingerprint()
     }
 
+    pub(super) fn group_count(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys
+            .len()
+    }
+
+    pub(super) fn first_key(&self, slot: usize) -> Result<Arc<[u8]>> {
+        let group = GroupId::new(slot)?;
+        Ok(self
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys
+            .canonical(group))
+    }
+
+    pub(super) fn record(
+        &self,
+        start: usize,
+        end: usize,
+        schema: SchemaRef,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<RecordBatch> {
+        check()?;
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .record(start, end, None, schema)
+    }
+
     pub(super) fn begin(&self, budget: Option<StateBudget>) -> Result<Transaction> {
         let mut state = self.lock();
         if state.active {

@@ -71,7 +71,7 @@ pub use rolling::{
     RollingFrameSpec, RollingOperator, RollingOutputSpec, RollingSpec, RollingValuePolicy,
 };
 pub use snapshot_sql::SnapshotSqlOperator;
-pub use sql::SqlOperator;
+pub use sql::{SqlAggregateOutputMode, SqlOperator};
 pub use state_budget::StateBudget;
 pub use stream::{
     EdgeCollector, IngressProgress, IngressProgressSnapshot, IngressState, OperatorStateSnapshot,

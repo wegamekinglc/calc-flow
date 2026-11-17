@@ -149,6 +149,36 @@ impl KeyedState {
             .collect()
     }
 
+    pub(super) fn group_count(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .groups
+    }
+
+    pub(super) fn first_key(&self, slot: usize) -> Result<Arc<[u8]>> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        match &state.keys {
+            Some(keys) => Ok(keys.canonical(GroupId::new(slot)?)),
+            None if slot == 0 && state.groups == 1 => Ok(state.global_key.clone()),
+            None => Err(df_error("keyed aggregate", "global group slot is invalid")),
+        }
+    }
+
+    pub(super) fn record(
+        &self,
+        start: usize,
+        end: usize,
+        schema: SchemaRef,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<RecordBatch> {
+        check()?;
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .record(start, end, None, schema, false)
+    }
+
     pub(super) fn begin(&self, budget: Option<StateBudget>) -> Result<Transaction> {
         let mut state = self.lock();
         if state.active {

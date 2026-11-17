@@ -72,6 +72,7 @@ fn identity_value(
 ) -> Result<CompactIdentity> {
     Ok(CompactIdentity {
         query_sha256: operator.query_digest(),
+        aggregate_output: operator.aggregate_output,
         input_alias: operator.aliases[0].clone(),
         runtime_config: runtime.compact_runtime_config(),
         logical_schema_sha256: retention::schema_digest(logical)?,

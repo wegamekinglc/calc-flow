@@ -716,6 +716,12 @@ class TableExpr(Expr[object]):
 
         return sql(query, input=self)
 
+    def changelog_sql(self, query: str, /) -> TableExpr:
+        """Declare a compact stream aggregate with retract/upsert output."""
+        from calc_flow.symbolic.sql import changelog_sql
+
+        return changelog_sql(query, input=self)
+
     def stream_asof_join(
         self,
         right: TableExpr,

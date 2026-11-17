@@ -401,6 +401,7 @@ fn fixture_identity(
     native_descriptor: Value,
 ) -> CompactIdentity {
     CompactIdentity {
+        aggregate_output: crate::SqlAggregateOutputMode::Snapshot,
         query_sha256: operator.query_digest(),
         input_alias: "events".into(),
         runtime_config: config,
