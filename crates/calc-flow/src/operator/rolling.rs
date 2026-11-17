@@ -61,6 +61,7 @@ mod late;
 mod ordered_stream;
 mod state_codec;
 mod state_v3;
+pub(crate) mod sync;
 
 use compile::{
     compile_aggregate, compile_spec, compile_spec_full, configuration, format_error,

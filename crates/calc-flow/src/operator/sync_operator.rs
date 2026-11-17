@@ -45,6 +45,8 @@ pub(crate) struct SyncContext<'a> {
     late_metrics: Arc<dyn LateMetricSink>,
     rolling_metrics: Option<RollingMetricsRecorder>,
     control: StreamJobControl,
+    pipeline_fingerprint: Arc<str>,
+    checkpointing: bool,
     _job_scope: PhantomData<&'a StreamJobContext>,
 }
 
@@ -63,6 +65,8 @@ impl SyncContext<'static> {
             late_metrics,
             rolling_metrics: None,
             control: job.native_control(),
+            pipeline_fingerprint: Arc::from(job.fingerprint()),
+            checkpointing: job.checkpointing(),
             _job_scope: PhantomData,
         }
     }
@@ -112,6 +116,14 @@ impl SyncContext<'_> {
 
     pub(crate) fn check_cancelled(&self) -> Result<()> {
         self.control.check_cancelled()
+    }
+
+    pub(crate) fn fingerprint(&self) -> &str {
+        &self.pipeline_fingerprint
+    }
+
+    pub(crate) const fn checkpointing(&self) -> bool {
+        self.checkpointing
     }
 }
 

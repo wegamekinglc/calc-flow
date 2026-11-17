@@ -197,6 +197,13 @@ pub(crate) enum CompiledStreamOperator {
     SyncExpression(
         Box<crate::operator::sync_operator::SyncNode<crate::operator::SyncExpressionOperator>>,
     ),
+    SyncRolling(
+        Box<
+            crate::operator::sync_operator::SyncNode<
+                crate::operator::rolling::sync::SyncRollingOperator,
+            >,
+        >,
+    ),
     Sql(crate::SqlOperator),
     SnapshotSql(crate::SnapshotSqlOperator),
     BoundedOrder(crate::BoundedOrderOperator),
@@ -457,6 +464,7 @@ impl CompiledStreamOperator {
             Self::External(_)
             | Self::Expression(_)
             | Self::SyncExpression(_)
+            | Self::SyncRolling(_)
             | Self::Sql(_)
             | Self::SnapshotSql(_)
             | Self::BoundedOrder(_)
@@ -481,7 +489,7 @@ impl CompiledStreamOperator {
         match self {
             Self::External(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::Expression(operator) => operator.on_ingress_progress(ingress, context).await,
-            Self::SyncExpression(_) => Ok(()),
+            Self::SyncExpression(_) | Self::SyncRolling(_) => Ok(()),
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::SnapshotSql(operator) => operator.on_ingress_progress(ingress, context).await,
@@ -577,6 +585,9 @@ impl CompiledStreamOperator {
             Self::SyncExpression(node) => {
                 crate::operator::sync_operator::SyncStreamOperator::reset(node.operator_mut())
             }
+            Self::SyncRolling(node) => {
+                crate::operator::sync_operator::SyncStreamOperator::reset(node.operator_mut())
+            }
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.reset(),
             Self::SnapshotSql(operator) => operator.reset(),
@@ -598,7 +609,7 @@ impl CompiledStreamOperator {
         match self {
             Self::External(operator) => operator.prepare_checkpoint_async(context).await,
             Self::Expression(operator) => operator.prepare_checkpoint_async(context).await,
-            Self::SyncExpression(_) => context.check_cancelled(),
+            Self::SyncExpression(_) | Self::SyncRolling(_) => context.check_cancelled(),
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.prepare_checkpoint_async(context).await,
             Self::SnapshotSql(operator) => operator.prepare_checkpoint_async(context).await,
@@ -625,6 +636,12 @@ impl CompiledStreamOperator {
             Self::External(operator) => operator.checkpoint(epoch),
             Self::Expression(operator) => operator.checkpoint(epoch),
             Self::SyncExpression(node) => {
+                crate::operator::sync_operator::SyncStreamOperator::checkpoint(
+                    node.operator_mut(),
+                    epoch,
+                )
+            }
+            Self::SyncRolling(node) => {
                 crate::operator::sync_operator::SyncStreamOperator::checkpoint(
                     node.operator_mut(),
                     epoch,
@@ -658,6 +675,10 @@ impl CompiledStreamOperator {
                     snapshot,
                 )
             }
+            Self::SyncRolling(node) => crate::operator::sync_operator::SyncStreamOperator::restore(
+                node.operator_mut(),
+                snapshot,
+            ),
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.restore(snapshot),
             Self::SnapshotSql(operator) => operator.restore(snapshot),
@@ -722,7 +743,7 @@ impl CompiledStreamOperator {
             Self::Expression(operator) => {
                 operator.process_data(ingress, batch, context, output).await
             }
-            Self::SyncExpression(_) => Err(sync_adapter_error()),
+            Self::SyncExpression(_) | Self::SyncRolling(_) => Err(sync_adapter_error()),
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.process_data(ingress, batch, context, output).await,
             Self::SnapshotSql(operator) => {
@@ -758,7 +779,7 @@ impl CompiledStreamOperator {
         match self {
             Self::External(operator) => operator.on_watermark(watermark, context, output).await,
             Self::Expression(operator) => operator.on_watermark(watermark, context, output).await,
-            Self::SyncExpression(_) => Err(sync_adapter_error()),
+            Self::SyncExpression(_) | Self::SyncRolling(_) => Err(sync_adapter_error()),
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.on_watermark(watermark, context, output).await,
             Self::SnapshotSql(operator) => operator.on_watermark(watermark, context, output).await,
@@ -782,7 +803,7 @@ impl CompiledStreamOperator {
         match self {
             Self::External(operator) => operator.on_end(context, output).await,
             Self::Expression(operator) => operator.on_end(context, output).await,
-            Self::SyncExpression(_) => Err(sync_adapter_error()),
+            Self::SyncExpression(_) | Self::SyncRolling(_) => Err(sync_adapter_error()),
             Self::CheckpointLoan => Err(checkpoint_loan_error()),
             Self::Sql(operator) => operator.on_end(context, output).await,
             Self::SnapshotSql(operator) => operator.on_end(context, output).await,
@@ -812,6 +833,7 @@ impl CompiledStreamOperator {
             | Self::Union(_)
             | Self::Window(_)
             | Self::Rolling(_)
+            | Self::SyncRolling(_)
             | Self::CrossSection(_) => false,
         }
     }

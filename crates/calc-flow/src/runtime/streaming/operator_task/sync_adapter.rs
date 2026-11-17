@@ -15,47 +15,71 @@ use crate::{
 };
 
 pub(super) fn is_sync(operator: &CompiledStreamOperator) -> bool {
-    matches!(operator, CompiledStreamOperator::SyncExpression(_))
+    matches!(
+        operator,
+        CompiledStreamOperator::SyncExpression(_) | CompiledStreamOperator::SyncRolling(_)
+    )
 }
 
 pub(super) async fn prepare(inputs: &mut OperatorTaskInputs) -> Result<()> {
-    let CompiledStreamOperator::Expression(_) = &inputs.operator else {
+    if !matches!(
+        &inputs.operator,
+        CompiledStreamOperator::Expression(_) | CompiledStreamOperator::Rolling(_)
+    ) {
         return Ok(());
-    };
+    }
     let owned = std::mem::replace(&mut inputs.operator, CompiledStreamOperator::CheckpointLoan);
-    let CompiledStreamOperator::Expression(operator) = owned else {
-        unreachable!("Expression variant checked above")
-    };
-    let prepared = operator
-        .prepare_sync(&PrepareContext::new(inputs.context.job()))
-        .await?;
-    match prepared {
-        PreparedExpression::Async(operator) => {
-            inputs.operator = CompiledStreamOperator::Expression(operator);
+    match owned {
+        CompiledStreamOperator::Expression(operator) => {
+            let prepared = operator
+                .prepare_sync(&PrepareContext::new(inputs.context.job()))
+                .await?;
+            match prepared {
+                PreparedExpression::Async(operator) => {
+                    inputs.operator = CompiledStreamOperator::Expression(operator);
+                }
+                PreparedExpression::Sync(operator) => {
+                    inputs.operator = CompiledStreamOperator::SyncExpression(Box::new(
+                        make_sync_node(inputs, operator),
+                    ));
+                }
+            }
         }
-        PreparedExpression::Sync(operator) => {
-            let node_id: Arc<str> = Arc::from(inputs.node_id.as_str());
-            let output_budget = inputs.progress.output_budget(&inputs.outputs);
-            let late_metrics: Arc<dyn crate::operator::LateMetricSink> =
-                Arc::new(inputs.progress.clone());
-            let context = SyncContext::new(
-                inputs.context.job(),
-                Arc::clone(&node_id),
-                output_budget,
-                late_metrics,
-            );
-            let emitter = Emitter::new(
-                node_id,
-                &inputs.output_ports,
-                std::mem::take(&mut inputs.outputs),
-                &inputs.late_output_ports,
-            );
-            inputs.operator = CompiledStreamOperator::SyncExpression(Box::new(SyncNode::new(
-                operator, context, emitter,
-            )));
+        CompiledStreamOperator::Rolling(operator) => {
+            if operator.supports_sync() {
+                inputs.operator = CompiledStreamOperator::SyncRolling(Box::new(make_sync_node(
+                    inputs,
+                    operator.into_sync(),
+                )));
+            } else {
+                inputs.operator = CompiledStreamOperator::Rolling(operator);
+            }
         }
+        _ => unreachable!("sync preparation only accepts Expression or Rolling"),
     }
     Ok(())
+}
+
+fn make_sync_node<O: SyncStreamOperator>(
+    inputs: &mut OperatorTaskInputs,
+    operator: O,
+) -> SyncNode<O> {
+    let node_id: Arc<str> = Arc::from(inputs.node_id.as_str());
+    let output_budget = inputs.progress.output_budget(&inputs.outputs);
+    let late_metrics: Arc<dyn crate::operator::LateMetricSink> = Arc::new(inputs.progress.clone());
+    let context = SyncContext::new(
+        inputs.context.job(),
+        Arc::clone(&node_id),
+        output_budget,
+        late_metrics,
+    );
+    let emitter = Emitter::new(
+        node_id,
+        &inputs.output_ports,
+        std::mem::take(&mut inputs.outputs),
+        &inputs.late_output_ports,
+    );
+    SyncNode::new(operator, context, emitter)
 }
 
 pub(super) async fn data(
@@ -83,11 +107,10 @@ fn data_callback(
     rolling: Option<RollingMetricsRecorder>,
 ) -> Result<()> {
     let result = {
-        let node = node_mut(&mut inputs.operator);
+        let mut node = node_mut(&mut inputs.operator);
         node.context_mut().update(input_watermark, ingress_progress);
         node.context_mut().set_rolling_metrics(rolling);
-        let (operator, context, emitter) = node.parts_mut();
-        operator.on_data(0, batch, context, emitter)
+        node.on_data(0, batch)
     };
     if result.is_err() {
         node_mut(&mut inputs.operator).emitter_mut().clear();
@@ -185,11 +208,10 @@ async fn watermark_callback(
         .as_ref()
         .map(|callback| callback.recorder().clone());
     let result = {
-        let node = node_mut(&mut inputs.operator);
+        let mut node = node_mut(&mut inputs.operator);
         node.context_mut().update(input_watermark, ingress_progress);
         node.context_mut().set_rolling_metrics(rolling.clone());
-        let (operator, context, emitter) = node.parts_mut();
-        operator.on_watermark(watermark, context, emitter)
+        node.on_watermark(watermark)
     };
     let result = match result {
         Ok(()) => flush(inputs, rolling.as_ref()).await,
@@ -212,11 +234,10 @@ pub(super) async fn end(
     rolling: Option<RollingMetricsRecorder>,
 ) -> Result<()> {
     let result = {
-        let node = node_mut(&mut inputs.operator);
+        let mut node = node_mut(&mut inputs.operator);
         node.context_mut().update(input_watermark, ingress_progress);
         node.context_mut().set_rolling_metrics(rolling.clone());
-        let (operator, context, emitter) = node.parts_mut();
-        operator.on_end(context, emitter)
+        node.on_end()
     };
     match result {
         Ok(()) => flush(inputs, rolling.as_ref()).await,
@@ -242,7 +263,7 @@ async fn flush(
         let Some(emission) = node_mut(operator).emitter_mut().pop() else {
             return Ok(());
         };
-        let node = node_mut(operator);
+        let mut node = node_mut(operator);
         let output = node
             .emitter_mut()
             .output_mut(emission.port)
@@ -415,11 +436,10 @@ fn watermark_session(
         .as_ref()
         .map(|callback| callback.recorder().clone());
     let result = {
-        let node = node_mut(&mut inputs.operator);
+        let mut node = node_mut(&mut inputs.operator);
         node.context_mut().update(input_watermark, ingress_progress);
         node.context_mut().set_rolling_metrics(rolling);
-        let (operator, context, emitter) = node.parts_mut();
-        operator.on_watermark(watermark, context, emitter)
+        node.on_watermark(watermark)
     }
     .and_then(|()| flush_session(inputs));
     if let Some(callback) = callback {
@@ -443,11 +463,10 @@ pub(super) fn end_session(
         .as_ref()
         .map(|callback| callback.recorder().clone());
     let result = {
-        let node = node_mut(&mut inputs.operator);
+        let mut node = node_mut(&mut inputs.operator);
         node.context_mut().update(input_watermark, ingress_progress);
         node.context_mut().set_rolling_metrics(rolling);
-        let (operator, context, emitter) = node.parts_mut();
-        operator.on_end(context, emitter)
+        node.on_end()
     }
     .and_then(|()| flush_session(inputs));
     if let Some(callback) = callback {
@@ -470,7 +489,8 @@ fn flush_session(inputs: &mut OperatorTaskInputs) -> Result<()> {
         let Some(emission) = node_mut(operator).emitter_mut().pop() else {
             return Ok(());
         };
-        let output = node_mut(operator)
+        let mut node = node_mut(operator);
+        let output = node
             .emitter_mut()
             .output_mut(emission.port)
             .expect("validated session emission port");
@@ -504,12 +524,82 @@ fn forward_control_session(inputs: &mut OperatorTaskInputs, message: &StreamMess
 pub(super) fn recycle(operator: &mut CompiledStreamOperator, batch: crate::Batch) {
     if let CompiledStreamOperator::SyncExpression(node) = operator {
         node.recycle(batch);
+    } else if let CompiledStreamOperator::SyncRolling(node) = operator {
+        node.recycle(batch);
     }
 }
 
-fn node_mut(operator: &mut CompiledStreamOperator) -> &mut SyncNode<SyncExpressionOperator> {
-    let CompiledStreamOperator::SyncExpression(node) = operator else {
-        unreachable!("sync adapter called for an async operator")
-    };
-    node
+enum SyncOperatorNodeRef<'a> {
+    Expression(&'a mut SyncNode<SyncExpressionOperator>),
+    Rolling(&'a mut SyncNode<crate::operator::rolling::sync::SyncRollingOperator>),
+}
+
+impl SyncOperatorNodeRef<'_> {
+    fn context_mut(&mut self) -> &mut SyncContext<'static> {
+        match self {
+            Self::Expression(node) => node.context_mut(),
+            Self::Rolling(node) => node.context_mut(),
+        }
+    }
+
+    fn emitter(&self) -> &Emitter {
+        match self {
+            Self::Expression(node) => node.emitter(),
+            Self::Rolling(node) => node.emitter(),
+        }
+    }
+
+    fn emitter_mut(&mut self) -> &mut Emitter {
+        match self {
+            Self::Expression(node) => node.emitter_mut(),
+            Self::Rolling(node) => node.emitter_mut(),
+        }
+    }
+
+    fn on_data(&mut self, ingress: usize, batch: crate::Batch) -> Result<()> {
+        match self {
+            Self::Expression(node) => {
+                let (operator, context, emitter) = node.parts_mut();
+                operator.on_data(ingress, batch, context, emitter)
+            }
+            Self::Rolling(node) => {
+                let (operator, context, emitter) = node.parts_mut();
+                operator.on_data(ingress, batch, context, emitter)
+            }
+        }
+    }
+
+    fn on_watermark(&mut self, watermark: EventTime) -> Result<()> {
+        match self {
+            Self::Expression(node) => {
+                let (operator, context, emitter) = node.parts_mut();
+                operator.on_watermark(watermark, context, emitter)
+            }
+            Self::Rolling(node) => {
+                let (operator, context, emitter) = node.parts_mut();
+                operator.on_watermark(watermark, context, emitter)
+            }
+        }
+    }
+
+    fn on_end(&mut self) -> Result<()> {
+        match self {
+            Self::Expression(node) => {
+                let (operator, context, emitter) = node.parts_mut();
+                operator.on_end(context, emitter)
+            }
+            Self::Rolling(node) => {
+                let (operator, context, emitter) = node.parts_mut();
+                operator.on_end(context, emitter)
+            }
+        }
+    }
+}
+
+fn node_mut(operator: &mut CompiledStreamOperator) -> SyncOperatorNodeRef<'_> {
+    match operator {
+        CompiledStreamOperator::SyncExpression(node) => SyncOperatorNodeRef::Expression(node),
+        CompiledStreamOperator::SyncRolling(node) => SyncOperatorNodeRef::Rolling(node),
+        _ => unreachable!("sync adapter called for an async operator"),
+    }
 }

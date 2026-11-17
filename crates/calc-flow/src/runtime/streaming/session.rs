@@ -886,6 +886,7 @@ fn node_rejection(operator: &CompiledStreamOperator) -> Option<String> {
     let kind = match operator {
         CompiledStreamOperator::Expression(_)
         | CompiledStreamOperator::SyncExpression(_)
+        | CompiledStreamOperator::SyncRolling(_)
         | CompiledStreamOperator::Union(_) => return None,
         CompiledStreamOperator::Rolling(rolling) => {
             return rolling_rejection(rolling.state_layout_version());

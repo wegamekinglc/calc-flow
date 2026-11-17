@@ -15,6 +15,7 @@ use super::kernel::{EntityRows, RecurrenceSeed, StreamKernelUpdate};
 use crate::operator::rolling_metrics::{
     RollingMetricsRecorder, RollingStage, RollingWork, RollingWorkBatch,
 };
+use crate::operator::sync_operator::{Emitter, SyncContext};
 use crate::runtime::streaming::entity_work::{ReservePair, SerialReason};
 
 use super::{
@@ -586,6 +587,282 @@ impl RollingOperator {
             )
     }
 
+    fn prepare_slab_update_sync(
+        &mut self,
+        input: &RecordBatch,
+        context: &SyncContext<'_>,
+    ) -> Option<Result<StreamKernelUpdate>> {
+        let plan = &self.compiled.kernel_plan;
+        let prior = self
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .expect("state initialized above");
+        if !plan.can_use_slab(prior) {
+            return None;
+        }
+        let state = match self.state.owned_mut() {
+            Ok(state) => state,
+            Err(error) => return Some(Err(error)),
+        };
+        Some(
+            plan.prepare_slab_ordered_stream(
+                state
+                    .typed_kernel_state
+                    .as_deref_mut()
+                    .expect("state initialized above"),
+                input,
+                context.operator_id(),
+                context.rolling_metrics(),
+            ),
+        )
+    }
+
+    fn prepare_ordered_update_in_place_sync(
+        &mut self,
+        input: &RecordBatch,
+        context: &SyncContext<'_>,
+        defer_history: bool,
+    ) -> Option<Result<StreamKernelUpdate>> {
+        let observer = context.rolling_metrics();
+        let plan = &self.compiled.kernel_plan;
+        if !defer_history || context.checkpointing() || !plan.supports_inplace_ordered_stream(input)
+        {
+            return None;
+        }
+        let state = match self.state.owned_mut() {
+            Ok(state) => state,
+            Err(error) => return Some(Err(error)),
+        };
+        let update = plan.prepare_ordered_stream_in_place(
+            state
+                .typed_kernel_state
+                .as_deref_mut()
+                .expect("state initialized above"),
+            input,
+            context.operator_id(),
+            observer,
+        );
+        if matches!(&update, Ok(None)) {
+            return None;
+        }
+        let mut work = RollingWorkBatch::new(observer);
+        work.add(RollingWork::ParallelFallbackSmallBatch, 1);
+        work.add(RollingWork::NumericSerialCalls, 1);
+        drop(work);
+        Some(update.map(|update| update.expect("in-place update was checked above")))
+    }
+
+    fn serial_ordered_update_sync(
+        &self,
+        input: &RecordBatch,
+        context: &SyncContext<'_>,
+        reason: RollingWork,
+    ) -> Result<StreamKernelUpdate> {
+        let observer = context.rolling_metrics();
+        let mut work = RollingWorkBatch::new(observer);
+        work.add(reason, 1);
+        work.add(RollingWork::NumericSerialCalls, 1);
+        self.compiled
+            .kernel_plan
+            .prepare_ordered_stream_with_history(
+                self.state
+                    .typed_kernel_state
+                    .as_deref()
+                    .expect("state initialized above"),
+                input,
+                Some(&self.state.histories),
+                context.operator_id(),
+                observer,
+            )
+    }
+
+    fn prepare_ordered_update_sync(
+        &mut self,
+        input: &RecordBatch,
+        context: &SyncContext<'_>,
+        defer_history: bool,
+    ) -> Result<StreamKernelUpdate> {
+        if let Some(update) = self.prepare_slab_update_sync(input, context) {
+            return update;
+        }
+        if let Some(update) =
+            self.prepare_ordered_update_in_place_sync(input, context, defer_history)
+        {
+            return update;
+        }
+        self.serial_ordered_update_sync(input, context, RollingWork::ParallelFallbackNoWorkClient)
+    }
+
+    fn can_defer_ordered_history_sync(&self, context: &SyncContext<'_>) -> bool {
+        if self.compiled.kernel_plan.supports_slab() && self.state.histories.by_entity.is_empty() {
+            return true;
+        }
+        self.state.typed_kernel_state.is_none()
+            && self.state.histories.by_entity.is_empty()
+            && !context.checkpointing()
+            && self.compiled.kernel_plan.supports_deferred_history()
+    }
+
+    fn prepare_ordered_output_sync<'a>(
+        &'a mut self,
+        input: &RecordBatch,
+        context: &SyncContext<'_>,
+    ) -> Result<PreparedOrderedOutput<'a>> {
+        let observer = context.rolling_metrics();
+        let can_defer = self.can_defer_ordered_history_sync(context);
+        self.ensure_ordered_kernel_state(input, context.operator_id(), observer)?;
+        let defer_history = self.state.deferred_history || can_defer;
+        let update = self.prepare_ordered_update_sync(input, context, defer_history)?;
+        let mut prepared =
+            PreparedOrderedOutput::new(update, self.state.owned_mut()?, defer_history);
+        prepared.prepare_history_sync(input, &self.compiled, context)?;
+        let sequence = prepared.state.next_output_sequence;
+        let (batches, next_sequence) = Self::ordered_output_chunks_sync(
+            input,
+            prepared.update_mut(),
+            context,
+            &self.output_ports,
+            sequence,
+        )?;
+        prepared.batches = batches;
+        prepared.next_sequence = next_sequence;
+        Ok(prepared)
+    }
+
+    fn ordered_output_chunks_sync(
+        input: &RecordBatch,
+        update: &mut StreamKernelUpdate,
+        context: &SyncContext<'_>,
+        output_ports: &[super::Port],
+        sequence: u64,
+    ) -> Result<(Vec<Batch>, u64)> {
+        let observer = context.rolling_metrics();
+        let arrow_stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
+        let schema = output_ports[0]
+            .schema()
+            .expect("rolling output has an exact schema");
+        let columns = input
+            .columns()
+            .iter()
+            .cloned()
+            .chain(update.take_columns())
+            .collect();
+        let record = RecordBatch::try_new(Arc::clone(schema), columns)
+            .map_err(|error| operator_error(context.operator_id(), &error.to_string()))?;
+        if let Some(recorder) = observer {
+            recorder.add(RollingWork::OutputRowsPrepared, record.num_rows());
+        }
+        drop(arrow_stage);
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::BudgetPreparation));
+        let batches = chunk_output_record(
+            &record,
+            context.operator_id(),
+            sequence,
+            context.output_budget(),
+        )?;
+        let count = u64::try_from(batches.len())
+            .map_err(|_| operator_error(context.operator_id(), "output chunk count overflowed"))?;
+        if let Some(recorder) = observer {
+            recorder.add(RollingWork::OutputChunksPrepared, batches.len());
+        }
+        let next_sequence = sequence
+            .checked_add(count)
+            .ok_or_else(|| operator_error(context.operator_id(), "output sequence overflowed"))?;
+        Ok((batches, next_sequence))
+    }
+
+    pub(super) fn emit_ordered_sync(
+        &mut self,
+        records: Vec<RecordBatch>,
+        last_identity: Option<Vec<u8>>,
+        context: &SyncContext<'_>,
+        output: &mut Emitter,
+    ) -> Result<()> {
+        let removed = self.ordered_buffer_removal_charge(&records, context.operator_id())?;
+        self.emit_ordered_with_removed_charge_sync(records, last_identity, removed, context, output)
+    }
+
+    fn emit_ordered_with_removed_charge_sync(
+        &mut self,
+        records: Vec<RecordBatch>,
+        last_identity: Option<Vec<u8>>,
+        removed: super::budget::StateCharge,
+        context: &SyncContext<'_>,
+        output: &mut Emitter,
+    ) -> Result<()> {
+        let original_charge = self.state.charge;
+        let observer = context.rolling_metrics();
+        match self.emit_ordered_inner_sync(&records, removed, context, output) {
+            Ok(()) => Ok(()),
+            Err(failure) if failure.restore => self.restore_ordered_failure(
+                records,
+                last_identity,
+                original_charge,
+                failure.error,
+                context.operator_id(),
+                observer,
+            ),
+            Err(failure) => Err(failure.error),
+        }
+    }
+
+    fn emit_ordered_inner_sync(
+        &mut self,
+        records: &[RecordBatch],
+        removed: super::budget::StateCharge,
+        context: &SyncContext<'_>,
+        output: &mut Emitter,
+    ) -> std::result::Result<(), OrderedEmitError> {
+        let observer = context.rolling_metrics();
+        let input = {
+            let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
+            combine_ordered_records(records, context.operator_id())?
+        };
+        let Some(input) = input else {
+            return Ok(());
+        };
+        let state_budget = self.state_budget;
+        let mut prepared = self.prepare_ordered_output_sync(&input, context)?;
+        let (current_charge, next_charge) =
+            prepared.projected_charge(removed, &state_budget, context.operator_id(), observer)?;
+        prepared.state.charge = current_charge;
+        let defer_history = prepared.defer_history || prepared.state.deferred_history;
+        if let Err(error) = Self::deliver_ordered_batches_sync(&mut prepared, output) {
+            return Err(OrderedEmitError {
+                error,
+                restore: defer_history,
+            });
+        }
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
+        prepared.commit(next_charge);
+        Ok(())
+    }
+
+    fn deliver_ordered_batches_sync(
+        prepared: &mut PreparedOrderedOutput<'_>,
+        output: &mut Emitter,
+    ) -> Result<()> {
+        for batch in std::mem::take(&mut prepared.batches) {
+            output.emit(0, batch)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn emit_slab_rows_sync(
+        &mut self,
+        rows: &[BufferedRow],
+        context: &SyncContext<'_>,
+        output: &mut Emitter,
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let record = self.slab_input_record(rows, context.operator_id())?;
+        let removed = super::budget::buffered_charge(rows.iter(), context.operator_id())?;
+        self.emit_ordered_with_removed_charge_sync(vec![record], None, removed, context, output)
+    }
+
     fn ordered_buffer_removal_charge(
         &self,
         records: &[RecordBatch],
@@ -776,6 +1053,36 @@ impl<'a> PreparedOrderedOutput<'a> {
         input: &RecordBatch,
         compiled: &CompiledRollingSpec,
         context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        let observer = context.rolling_metrics();
+        if self.defer_history {
+            let charge = self.update().charge_change(
+                self.state
+                    .typed_kernel_state
+                    .as_deref()
+                    .expect("state initialized above"),
+                context.operator_id(),
+            )?;
+            self.deferred_charge = Some(charge);
+            return Ok(());
+        }
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
+        self.touched = retained_histories(
+            input,
+            self.update(),
+            &self.state.histories,
+            compiled,
+            context.operator_id(),
+            observer,
+        )?;
+        Ok(())
+    }
+
+    fn prepare_history_sync(
+        &mut self,
+        input: &RecordBatch,
+        compiled: &CompiledRollingSpec,
+        context: &SyncContext<'_>,
     ) -> Result<()> {
         let observer = context.rolling_metrics();
         if self.defer_history {
