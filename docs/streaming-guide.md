@@ -1249,9 +1249,12 @@ let plan = PipelineBuilder::new("orders")?
 The window operator has no default state budget below the JSON counter range
 (9,007,199,254,740,991 rows and logical bytes). A window group stops counting
 once its close is emitted, with checkpointing enabled or disabled, so the
-budget bounds open window groups regardless of the checkpoint interval. Rust
-callers can adjust the budget with
-`WindowAggregateOperator::set_state_budget` before graph compilation;
+budget bounds open window groups regardless of the checkpoint interval. This
+logical row count remains open `(window bounds, group)` pairs when hopping uses
+pane state; it does not become a physical pane count. Pane byte accounting
+covers actual pane/key/open-window storage and merge scratch. Input and close
+budget failures install no partial state. Rust callers can adjust the budget
+with `WindowAggregateOperator::set_state_budget` before graph compilation;
 recovery rejects a snapshot that exceeds the selected budget. The budget does
 not include checkpoint segment copies or process RSS.
 
@@ -1274,6 +1277,16 @@ are not materialized. Null-time rows are dropped. Watermark equality with the
 window end closes the window, and end-of-input flushes remaining state.
 Hopping drops only already-closed assignments from a late row. No early,
 update, or retraction output is emitted.
+
+Hopping windows whose complete aggregate list contains only `count`, `min`, and
+`max` preaggregate each valid row into one slide-aligned pane and merge panes in
+ascending pane-start order at close. Other declarations retain per-window
+accumulators. Both paths preserve the same visible output, late, budget, and
+recovery semantics; pane snapshots use physical layout 3 and restore
+bit-identical continuation. See
+[window state and storage](runtime-envelope.md#window-state-and-storage) for
+pane geometry, exact extrema, retirement, atomic rejection, and checkpoint
+details.
 
 ## Sink contract
 

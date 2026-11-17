@@ -314,8 +314,11 @@ No synthetic maximum watermark is used. Compare whole results with
 of the same complete input were accepted. A closed-window prefix remains
 `finality_unproven` without a concrete selected cut. Explicit latest accepts
 append inputs and rejects complete snapshots entering windows before resources
-are acquired. Window state version remains 1; supported checkpoint layouts are
-1 and 2, with no checkpoint format change.
+are acquired. Window semantic state version remains 1. Per-window snapshots use
+physical layouts 1 and 2; hopping windows whose complete aggregate list contains
+only `count`, `min`, and `max` instead write pane snapshot layout 3 with matching
+pane and open-window segments. Project and manifest formats are unchanged. See
+[window state and storage](runtime-envelope.md#window-state-and-storage).
 
 Run [the Python example](../examples/finite_event_window.py) or
 [the standalone Rust core example](../crates/calc-flow/examples/finite_event_window.rs).

@@ -1429,9 +1429,17 @@ progress.
 aggregates. `TableExpr::window(spec)` and the explicit `CF_TUMBLE` / `CF_HOP`
 SQL dialect create a shared window boundary. In batch mode,
 `WindowAggregateOperator` uses fresh temporary state and finalizes the complete
-input. Its stream lifecycle updates incremental state, classifies late row-window assignments against the current input
-watermark, emits closed windows in deterministic order, and snapshots retained
-Arrow IPC deltas. Retained accumulators default to the JSON counter range,
+input. Its stream lifecycle updates incremental state, classifies late
+row-window assignments against the current input watermark, and emits closed
+windows in deterministic order. Per-window execution snapshots retained Arrow
+IPC deltas. Hopping windows whose complete aggregate list contains only `count`,
+`min`, and `max` instead preaggregate into slide-aligned panes and write physical
+layout 3 with canonical pane and open-window segments. Both paths retain
+logical open-window row accounting; pane byte accounting also covers physical
+pane/key storage and merge scratch. Compatible pane restore continues with
+bit-identical output and subsequent checkpoint bytes. See
+[window state and storage](runtime-envelope.md#window-state-and-storage).
+Retained accumulators default to the JSON counter range,
 9,007,199,254,740,991 windows and logical bytes, without a smaller implicit budget.
 A window stops counting once its close
 is emitted, with checkpointing enabled or disabled, so the budget bounds open

@@ -175,13 +175,18 @@ checks this separately from the ordering proof used for rolling and
 cross-section state; nullable time and ungrouped event windows are valid.
 
 The native window owns accumulation, late-assignment and null-time counters,
-watermark closure, output order, and checkpoint state layout `1`. Tumbling and
-hopping close at `watermark >= end` or end-of-input and append final results.
-An aligned checkpoint preserves open windows using the existing manifest and
-state protocol. Python adds no runtime accumulator or window buffer. Active
-window/group counts remain data-dependent; the 1024 hopping-overlap limit is
-an assignment bound, not a total memory bound. See the
-[event-window API](symbolic-api.md#symbolic-event-time-window-aggregation)
+watermark closure, output order, and checkpoint state. Tumbling and hopping
+close at `watermark >= end` or end-of-input and append final results. Hopping
+windows whose complete aggregate list contains only `count`, `min`, and `max`
+use N=1 slide-aligned pane preaggregation and ordered pane merge; other
+declarations retain per-window accumulators. An aligned checkpoint preserves
+open windows using the existing manifest and state protocol: per-window
+snapshots use physical layouts 1 and 2, while pane snapshots use layout 3 and
+continue bit-identically after compatible restore. Python adds no runtime
+accumulator or window buffer. Active window/group counts remain data-dependent;
+the 1024 hopping-overlap limit is an assignment bound, not a total memory bound.
+See [window state and storage](runtime-envelope.md#window-state-and-storage) and
+the [event-window API](symbolic-api.md#symbolic-event-time-window-aggregation)
 for the type matrix, composition limits, and lateness-option ownership.
 
 ## Native rolling state

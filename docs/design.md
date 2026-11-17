@@ -155,15 +155,21 @@ cleanup instead of detaching background work.
 
 ## Stateful windows
 
-`WindowAggregateOperator` supports fixed UTC tumbling and hopping windows.
-Its `WindowSpec` names the event-time column, ordered group columns, geometry,
-and ordered `count`, `sum`, `min`, `max`, or `avg` aggregates. It is stream-only.
+`WindowAggregateOperator` supports fixed UTC tumbling and hopping windows in
+batch and stream execution. Its `WindowSpec` names the event-time column,
+ordered group columns, geometry, and ordered `count`, `sum`, `min`, `max`, or
+`avg` aggregates.
 
-The operator keeps deterministic incremental state keyed by window bounds and
-group values. A watermark closes eligible windows; end-of-input closes the
-remaining non-empty windows. Assignments whose window end is not later than
+The operator has deterministic per-window state and an N=1 pane representation
+for hopping windows whose complete aggregate list contains only `count`, `min`,
+and `max`. The latter preaggregates each valid row into one slide-aligned
+`(group, pane)` and merges the target window's panes in ascending pane order at
+close. Both representations retain the same late-assignment, output, budget,
+and recovery contract. A watermark closes eligible windows; end-of-input closes
+the remaining non-empty windows. Assignments whose window end is not later than
 the current input watermark are late and are not applied. Session windows,
 allowed-lateness updates, retractions, and early triggers remain unavailable.
+See [window state and storage](runtime-envelope.md#window-state-and-storage).
 
 ## Stateful stream join
 

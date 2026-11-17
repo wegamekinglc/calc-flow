@@ -91,6 +91,15 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   静态测试通过：`python/tests/test_distribution.py` 4 项、`scripts/test_release_workflow.py` 4 项、
   `scripts/test_inspect_v3_wheel.py` 2 项、`scripts/test_release_config.py` 42 项；实际 wheel 与跨平台发布仍由
   release workflow 验收。P6 的分区执行器、统一 morsel 池、I/O 与计算分离及性能门槛仍未完成。
+- P7 pane 部分交付（`68b43fe3`）：N=1 hopping 且完整聚合列表仅含 COUNT/MIN/MAX 时启用按 slide 对齐的 pane；
+  负时间戳使用数学向下取整，每个有效行只更新一个 `(group, pane)`，关闭时按 pane start 升序合并恰好 k 个 pane。
+  COUNT 更新与合并均检查 u64 溢出，MIN/MAX 保持既有全序和浮点位模式；全 NULL 操作数的有效组仍产生 count=0
+  和 NULL extrema。保留逐目标窗口的 `end <= watermark` late 判定，pane 在最后可贡献窗口关闭时（含等号）退休。
+  逻辑预算仍按开放 `(window bounds, group)` 计数，字节预算覆盖实际 pane/key 与 merge scratch；输入、预算或
+  rejected close 不安装部分状态，rejected close 同时恢复输出序列。Layout 3 checkpoint 保存 canonical
+  panes/open-windows，兼容恢复后的后续输出与 snapshot bytes 逐位一致。8 项 pane 测试、53 项 window 测试和
+  clippy 通过。SUM/AVG 及含它们的混合列表仍走 legacy per-window 路径；其他聚合扩展、P6 分区 dispatch、
+  性能验收和最终旧路径/旧 codec 删除仍未完成。
 
 ## 1. 目标
 

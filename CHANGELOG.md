@@ -9,6 +9,28 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-18: Add N=1 pane preaggregation for hopping windows whose complete
+  aggregate list contains only `count`, `min`, and `max`. Slide-aligned panes
+  use mathematical floor for negative timestamps; each valid row updates one
+  `(group, pane)`, and close merges exactly the target window's panes in
+  ascending pane-start order. COUNT uses checked `u64` addition during update
+  and merge, while MIN/MAX retain exact total-order values and floating bits.
+  Valid all-null groups still emit count zero and null extrema. Late
+  classification remains per target window, and panes retire only when their
+  last possible target closes, including at watermark equality. State-budget
+  rows still count logical open window/group pairs; bytes cover physical
+  pane/key/open-window storage and merge scratch. Input and close failures are
+  atomic, and rejected close restores the exact pre-call state and output
+  sequence. Pane snapshots use physical layout 3 with canonical pane and
+  open-window segments; compatible restore continues with bit-identical output
+  and subsequent checkpoint bytes. Per-window layouts 1/2 are not valid pane
+  snapshots, so existing per-window state for a newly pane-eligible declaration
+  requires a new lineage. Tumbling and hopping declarations involving `sum` or
+  `avg` retain the legacy per-window path; other aggregate admission,
+  partitioned dispatch, performance acceptance, and final old-path deletion
+  remain open. See
+  [window state and storage](docs/runtime-envelope.md#window-state-and-storage).
+
 - 2026-11-17: Add the separate, explicitly installed `calc-flow-python-v3`
   distribution for x86-64-v3 processors. It shares the calendar version and
   `calc_flow` import package with portable `calc-flow-python`; install exactly

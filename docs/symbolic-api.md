@@ -490,13 +490,18 @@ fail before any source opens, with field paths such as
 `outputs.minute.window_tumbling.aggregates[0].column`; unsupported field
 types append `.dtype` to the field path.
 
-The native window owns accumulators, output sequence, and checkpoint layout
-`1`. Bind sources and sinks through `StreamingRunner` and use
-`ManagedCheckpointRuntime` for the existing aligned checkpoint and recovery
-protocol. Recovering an open window restores that native state. There is no
-Python row executor or separate Python window buffer. Session windows, local
-calendar windows, offsets, early triggers, update/retraction outputs, custom
-aggregates, and extra allowed-lateness semantics are unsupported.
+The native window owns accumulators, output sequence, and versioned checkpoint
+state. Per-window snapshots use physical layouts 1 and 2. Hopping windows whose
+complete aggregate list contains only `count`, `min`, and `max` use pane layout
+3; compatible restore preserves subsequent output and checkpoint bits. Bind
+sources and sinks through `StreamingRunner` and use `ManagedCheckpointRuntime`
+for the existing aligned checkpoint and recovery protocol. Recovering an open
+window restores that native state. There is no Python row executor or separate
+Python window buffer. See
+[window state and storage](runtime-envelope.md#window-state-and-storage).
+Session windows, local calendar windows, offsets, early triggers,
+update/retraction outputs, custom aggregates, and extra allowed-lateness
+semantics are unsupported.
 
 ## Symbolic bounded stream joins
 
