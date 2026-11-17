@@ -63,8 +63,9 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   rolling 705 项和 clippy 通过。layout 5/6 删除与 RSI/ATR slab persistence 尚未完成。
 - P3.1 fake-table 协议/故障 harness 已交付；P3.2 COW pages、dirty lineage、精确 undo 与 layout 7 已通过验证。
   P3.3 v4 object/manifest/partition persistence 已验证；P3.4 coordinator 与 opaque adapter 已有状态机和
-  epoch roundtrip。Rust `StreamSession::new_with_checkpoints`、`restore` 和 `checkpoint` 已交付，
-  使用 managed storage 与 `job_kind=session`；Python checkpoint surface 尚未接线。runner 的实际
+  epoch roundtrip。Rust 与 Python `StreamSession` 的 durable construction、restore 和同步 checkpoint 已交付，
+  使用 managed storage、`job_kind=session`、canonical opaque fingerprint 与 input/watermark progress；Rust session 25 项、
+  Python focused 53 项通过，包含 epoch 1/2 continuation 和 running-loop 拒绝。runner 的实际
   source/operator/sink 接线、完整故障矩阵和性能门槛尚未完成。
 - P4.1 shared keyed core 与单整数 SUM 已交付；P4.2 typed aggregate state、temporal extrema、8192-group dirty
   snapshot cache 和 rollback/recovery 已通过 327 个 SQL 测试。旧 compact 删除、P4.3 opt-in changelog 与 P4 测量尚未完成。

@@ -337,6 +337,12 @@ fn durable_session_checkpoint_restores_operator_and_input_progress() {
         ManagedCheckpointRuntime::new(&root).unwrap(),
     )
     .unwrap();
+    assert!(
+        session
+            .nodes
+            .iter()
+            .all(crate::runtime::streaming::operator_task::caller_driven::CallerDrivenOperator::checkpointing)
+    );
     let input = session.input_ids()[0].to_owned();
     let output = session.output_ids()[0].to_owned();
     session

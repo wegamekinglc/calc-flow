@@ -55,6 +55,11 @@ impl CallerDrivenOperator {
     }
 
     #[cfg(test)]
+    pub(in crate::runtime::streaming) fn checkpointing(&self) -> bool {
+        self.inputs.context.job().checkpointing()
+    }
+
+    #[cfg(test)]
     pub(in crate::runtime::streaming) fn panic_on_next_dispatch(&mut self) {
         self.panic_on_next_dispatch = true;
     }

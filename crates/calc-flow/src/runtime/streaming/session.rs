@@ -266,8 +266,17 @@ impl StreamSession {
         config: &StreamRuntimeConfig,
         watermarks: BTreeMap<String, SessionWatermark>,
     ) -> Result<Self> {
+        Self::new_with_checkpointing(plan, config, watermarks, false)
+    }
+
+    fn new_with_checkpointing(
+        plan: StreamExecutionPlan,
+        config: &StreamRuntimeConfig,
+        watermarks: BTreeMap<String, SessionWatermark>,
+        checkpointing: bool,
+    ) -> Result<Self> {
         let parts = admitted_parts(plan, config)?;
-        let job = session_job(&parts.fingerprint)?;
+        let job = session_job(&parts.fingerprint, checkpointing)?;
         let runtime = session_runtime()?;
         let wired = session_block_on(&runtime, wire(parts, &job, watermarks));
         let (input, nodes, outputs) = match wired {
@@ -490,7 +499,7 @@ fn admitted_parts(
 }
 
 /// A checkpoint-off job context built like the continuous runner's.
-fn session_job(fingerprint: &str) -> Result<StreamJobContext> {
+fn session_job(fingerprint: &str, checkpointing: bool) -> Result<StreamJobContext> {
     Ok(StreamJobContext::new(
         crate::continuous::allocate_job_id()?,
         fingerprint.to_owned(),
@@ -498,7 +507,7 @@ fn session_job(fingerprint: &str) -> Result<StreamJobContext> {
         None,
         CancellationToken::new(),
     )
-    .with_checkpointing(false))
+    .with_checkpointing(checkpointing))
 }
 
 /// The session-owned current-thread runtime: timers only, no I/O driver.

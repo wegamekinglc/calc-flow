@@ -184,8 +184,7 @@ impl StreamSession {
                 "checkpoint storage requires checkpointing=true",
             ));
         }
-        let mut session = Self::new(plan, config, watermarks)?;
-        session.job = session.job.clone().with_checkpointing(true);
+        let mut session = Self::new_with_checkpointing(plan, config, watermarks, true)?;
         let opened = Self::open_storage(&session, checkpoints)?;
         SessionCheckpoints::ensure_fresh(&opened)?;
         session.checkpoints = Some(SessionCheckpoints::new(opened, 0)?);
@@ -208,8 +207,7 @@ impl StreamSession {
                 "checkpoint storage requires checkpointing=true",
             ));
         }
-        let mut session = Self::new(plan, config, watermarks)?;
-        session.job = session.job.clone().with_checkpointing(true);
+        let mut session = Self::new_with_checkpointing(plan, config, watermarks, true)?;
         let opened = Self::open_storage(&session, checkpoints)?;
         let (manifest, _) = SessionCheckpoints::latest_manifest(&opened)?;
         if manifest.recovery_fingerprint != session.job.fingerprint() {
