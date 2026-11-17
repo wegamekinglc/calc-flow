@@ -25,9 +25,9 @@ implementation lives in `crates/calc-flow/src/runtime/streaming/` (the message,
 bounded channel, job and task contexts, whole-job preflight, source, operator,
 and sink tasks, the job-scoped progress driver, checkpoint coordinator,
 supervisor, internal runner/reaper, caller-driven session, metrics, and soak),
-`crates/calc-flow/src/state/` (the v3 manifest, segments, state backends, and
-production manifest transaction), `crates/calc-flow/src/time/` (event time and
-epoch),
+`crates/calc-flow/src/state/` (the v3 runner manifest, internal v4 session
+manifest, segments, state backends, and production manifest transactions),
+`crates/calc-flow/src/time/` (event time and epoch),
 `crates/calc-flow/src/operator/stream.rs` (the operator traits and public
 in-memory collector), `crates/calc-flow/src/operator/window.rs` (window
 declarations and execution), and `crates/calc-flow/src/pipeline/stream.rs`
@@ -867,10 +867,26 @@ per edge. The queue-capacity and backpressure rules of
 runners and streams, not sessions. An oversized input batch is a validation
 error; an oversized internal message fails the session.
 
-**No checkpoint.** The session's job context has checkpointing disabled. Every
-checkpoint field of `StreamRuntimeConfig` is ignored, including
-`checkpointing = true`. Operators receive no checkpoint, restore, or barrier
-wiring, and nothing is durable. Sessions also publish no status or metrics.
+**Checkpoints.** `StreamSession::new` retains the original in-memory behavior:
+its job context has checkpointing disabled, every checkpoint field of
+`StreamRuntimeConfig` is ignored, including `checkpointing = true`, and nothing
+is durable. `StreamSession::new_with_checkpoints` and `StreamSession::restore`
+instead require `checkpointing = true` and `ManagedCheckpointRuntime` storage.
+Fresh construction rejects a lineage that already contains a manifest. Restore
+selects the highest complete v4 session epoch, requires `job_kind="session"`,
+and validates the plan recovery fingerprint. These session manifests do not
+change the runner's v3 manifest protocol.
+
+On success, `StreamSession::checkpoint()` synchronously persists every
+operator's opaque snapshot plus the next input sequence and watermark progress,
+publishes the manifest, and returns its `Epoch`; checkpoint timing fields do not
+schedule automatic session captures. Restore opens no connectors and replays no
+earlier input or output. The caller resumes by pushing later batches from the
+restored sequence and watermark state. An error after epoch capture begins
+fails the live session. If publication already completed, that error does not
+invalidate the complete epoch, which remains available to `restore`. Sessions
+also publish no status or metrics. See the
+[Rust reference](rust-api.md#caller-driven-stream-sessions).
 
 **Failure.** Validation errors leave the session unchanged; the source
 sequence, generated-watermark state, and watermark commit only after a
@@ -1262,8 +1278,9 @@ edge queues and caller-driven operator drivers.
 
 Runtime-owned control-message and transaction internals do not appear in
 project-v3 documents. Python binds the public continuous facade and
-`StreamSession`. The public v3 manifest model and state backend remain the
-runtime's durable recovery truth.
+`StreamSession`. For runners, the public v3 manifest model and state backend
+remain the durable recovery truth; durable Rust sessions use internal v4
+manifests through `ManagedCheckpointRuntime`.
 
 
 See [verification](verification.md#streaming-stress-and-soak-checks) for the

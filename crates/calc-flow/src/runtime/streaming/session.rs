@@ -51,8 +51,9 @@ use crate::{
 /// returns [`CalcFlowError::InvalidArgument`] at field `session` instead of
 /// blocking that runtime.
 ///
-/// Sessions are in-memory and non-durable. The checkpoint fields of
-/// [`StreamRuntimeConfig`] are ignored, including `checkpointing = true`;
+/// Sessions created with [`Self::new`] are in-memory and non-durable. Durable
+/// sessions use [`Self::new_with_checkpoints`] or [`Self::restore`] and provide
+/// synchronous v4 checkpoint capture through [`Self::checkpoint`].
 /// `edge_budget` bounds each envelope and the SQL state budgets are applied as
 /// runners apply them. Inner edges have no queue backpressure: one call
 /// buffers what each operator emits during its turn, so memory per call is

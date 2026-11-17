@@ -9,6 +9,22 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-17: Add durable checkpoints to Rust `StreamSession`.
+  `new_with_checkpoints` starts a fresh managed lineage and rejects one that
+  already contains a manifest; `restore` selects the highest complete v4
+  session epoch and validates `job_kind="session"` and the plan fingerprint;
+  `checkpoint()` synchronously persists opaque operator snapshots plus input
+  sequence and watermark progress and returns its `Epoch`. Restored sessions
+  open no connectors and replay no earlier input or output. A failure after
+  capture begins fails the live session, and a failure after manifest
+  publication does not invalidate that complete restorable epoch. Existing
+  `StreamSession::new` remains in-memory, ignores checkpoint configuration,
+  and is otherwise unchanged. Python session checkpoint construction, restore,
+  and capture are not wired yet. Runner checkpoint wiring, the full fault
+  matrix, and performance-gate verification remain open. See
+  [caller-driven stream sessions](docs/rust-api.md#caller-driven-stream-sessions)
+  and the [re-architecture plan](docs/plans/2026-11-15-streaming-core-rearchitecture.md).
+
 - 2026-11-16: Replace selectable rolling numerical profiles with one
   compensated sliding numeric contract. Remove Rust `RollingNumericalProfile`,
   `RollingSpec.numerical_profile`, the rolling-mean profile accessors, every

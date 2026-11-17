@@ -76,6 +76,42 @@ def _explicit_session() -> cf.StreamSession[pa.Table]:
     return _signals().session(config=CONFIG, watermarks=cf.SourceProvidedWatermarks())
 
 
+def test_durable_session_checkpoint_restore(tmp_path) -> None:
+    storage = cf.ManagedCheckpointRuntime(tmp_path / "managed")
+    config = cf.StreamRuntimeConfig(checkpointing=True)
+    with _signals().session(
+        config=config,
+        watermarks=cf.SourceProvidedWatermarks(),
+        checkpoints=storage,
+    ) as session:
+        session.push(_rows((0, "a", 0, 1.0), (0, "b", 1, 2.0)), watermark=_at(0))
+        assert session.checkpoint() == 1
+
+    with _signals().session(
+        config=config,
+        watermarks=cf.SourceProvidedWatermarks(),
+        checkpoints=cf.ManagedCheckpointRuntime(tmp_path / "managed"),
+        restore=True,
+    ) as restored:
+        emitted = restored.push(_rows((1, "a", 2, 3.0)), watermark=_at(1))
+        assert emitted.to_pylist()[0]["avg"] == 2.0
+        assert restored.checkpoint() == 2
+
+
+def test_checkpoint_rejects_running_loop(tmp_path) -> None:
+    session = _signals().session(
+        config=cf.StreamRuntimeConfig(checkpointing=True),
+        checkpoints=cf.ManagedCheckpointRuntime(tmp_path / "managed"),
+    )
+
+    async def run() -> None:
+        with pytest.raises(RuntimeError, match="cannot run inside an event loop"):
+            session.checkpoint()
+
+    asyncio.run(run())
+    session.close()
+
+
 def test_table_session_matches_stream_under_source_provided_watermarks() -> None:
     pushes = [
         (_rows((0, "a", 0, 1.0), (0, "b", 1, 2.0)), _at(0)),

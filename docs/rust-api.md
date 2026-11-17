@@ -1455,12 +1455,12 @@ capped at `B`. Direct callers must choose
 ## Caller-driven stream sessions
 
 The crate-root `StreamSession` executes one compiled `StreamExecutionPlan`
-synchronously and in memory. Each call validates its input, runs the batch and
-watermark through every operator in topological order using the runner's
-per-operator code, and returns the rows emitted by that call. There are no
-source, sink, or progress tasks. The `StreamSession` rustdoc contains a
-complete doctest that compiles a rolling-to-projection plan; its central calls
-are:
+synchronously on the calling thread, with optional managed durable checkpoints.
+Each call validates its input, runs the batch and watermark through every
+operator in topological order using the runner's per-operator code, and returns
+the rows emitted by that call. There are no source, sink, or progress tasks.
+The `StreamSession` rustdoc contains a complete doctest that compiles a
+rolling-to-projection plan; its central calls are:
 
 ```rust
 let mut session = StreamSession::new(plan, &StreamRuntimeConfig::default(), BTreeMap::new())?;
@@ -1511,10 +1511,32 @@ code, run the session on a blocking thread, for example through
 no partial drain survives a call. Dropping a session cancels its job token and
 releases every operator; it is safe inside a runtime context.
 
-Sessions are non-durable. Every checkpoint field of `StreamRuntimeConfig` is
-ignored, including `checkpointing = true`; `edge_budget` bounds every envelope
-and the SQL state budgets are applied as runners apply them. Internal edges
-have no queue backpressure; see
+`StreamSession::new` retains the original in-memory, non-durable behavior.
+Every checkpoint field of `StreamRuntimeConfig` is ignored on that constructor,
+including `checkpointing = true`. The additional durable methods are:
+
+- `StreamSession::new_with_checkpoints(plan, &config, watermarks, checkpoints)`
+  starts a fresh lineage in `ManagedCheckpointRuntime` storage. It requires
+  `checkpointing = true` and rejects a lineage that already contains a manifest
+  rather than appending to it.
+- `StreamSession::restore(plan, &config, watermarks, checkpoints)` requires
+  `checkpointing = true`, selects the highest complete v4 session epoch, and
+  validates `job_kind="session"` and the plan recovery fingerprint before
+  restoring state.
+- `StreamSession::checkpoint(&mut self) -> Result<Epoch>` requires managed
+  storage and an open, non-failed session. On success it synchronously persists
+  every operator's opaque snapshot plus the next input sequence and watermark
+  progress, publishes the manifest, and returns the completed `Epoch`.
+  Checkpoint timing fields do not schedule automatic session captures.
+
+Restore opens no connectors and replays no earlier input or output. The caller
+resumes by pushing later batches from the restored sequence and watermark
+state. An error after epoch capture begins fails the live session; later calls
+are rejected. If manifest publication already completed, that error does not
+invalidate the complete epoch, which remains available to `restore`.
+
+`edge_budget` bounds every envelope and the SQL state budgets are applied as
+runners apply them. Internal edges have no queue backpressure; see
 [caller-driven sessions](runtime-envelope.md#caller-driven-sessions).
 
 `new` admits one dynamic input with no static inputs, no native array sequence

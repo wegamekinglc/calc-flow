@@ -31,7 +31,7 @@ def _require_blocking(entry: str) -> None:
     except RuntimeError:
         return
     message = f"{entry}() cannot run inside an event loop"
-    if entry not in ("collect_array", "session"):
+    if entry not in ("collect_array", "session", "session.checkpoint"):
         message += f"; use {entry}_async()"
     raise RuntimeError(message)
 

@@ -38,7 +38,11 @@ if TYPE_CHECKING:
     from calc_flow.compute import TableData
     from calc_flow.config import ProjectDocument
     from calc_flow.pipeline import BatchExecutionPlan, Runtime, StreamExecutionPlan
-    from calc_flow.runtime import StreamRuntimeConfig, WatermarkPolicy
+    from calc_flow.runtime import (
+        ManagedCheckpointRuntime,
+        StreamRuntimeConfig,
+        WatermarkPolicy,
+    )
     from calc_flow.session import StreamSession
     from calc_flow.stream import StreamInput, StreamOutput, StreamResults
     from calc_flow.symbolic.analyzer import AnalysisResult
@@ -684,6 +688,8 @@ class Program:
         runtime: Runtime | None = None,
         config: StreamRuntimeConfig | None = None,
         watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+        checkpoints: ManagedCheckpointRuntime | None = None,
+        restore: bool = False,
     ) -> StreamSession[dict[str, pa.Table]]:
         """Compile a streaming program into a synchronous push session.
 
@@ -697,7 +703,15 @@ class Program:
 
         return cast(
             "StreamSession[dict[str, pa.Table]]",
-            _open_session(self, runtime, config, watermarks, table_output=False),
+            _open_session(
+                self,
+                runtime,
+                config,
+                watermarks,
+                table_output=False,
+                checkpoints=checkpoints,
+                restore=restore,
+            ),
         )
 
     def output(self, name: str, value: TableExpr | ArrayExpr, /) -> Program:

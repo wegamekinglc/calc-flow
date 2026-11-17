@@ -482,7 +482,11 @@ The `calc_flow` crate re-exports its supported public types from
 `StreamingRunner`. The runner owns source and sink bindings plus a
 `ManagedCheckpointRuntime`; `start(self)` consumes it and returns the sole
 `StreamingJob` lifecycle owner. `StreamSession::new` instead consumes an
-admitted plan for synchronous, in-memory pushes on the calling thread; see
+admitted plan for synchronous, in-memory pushes on the calling thread. Rust
+callers can also use `StreamSession::new_with_checkpoints` to start a fresh
+managed durable lineage, `StreamSession::restore` to resume the highest complete
+session epoch after validating lineage compatibility, and
+`StreamSession::checkpoint` to capture state synchronously; see
 [caller-driven stream sessions](rust-api.md#caller-driven-stream-sessions). Static array inspection uses `StaticArraySnapshot` and `StaticArrayValues`.
 `Batch::static_array_snapshot()` is an explicit owned host-neutral copy for a
 latched static array: its backend, dtype, shape, optional full null bitmap, and
@@ -538,9 +542,10 @@ finished, closed, or busy session.
 ## Version and compatibility
 
 The Rust crate and Python binding are versioned `2026.11.14` in this checkout.
-Project format version `3` and checkpoint-manifest version `3` are separate
-protocol values from the package version. The Studio application moved to the
-separate [calc-flow-studio](https://github.com/wegamekinglc/calc-flow-studio)
+Project format version `3`, runner checkpoint-manifest version `3`, and durable
+Rust session-manifest version `4` are separate protocol values from the package
+version. The Studio application moved to the separate
+[calc-flow-studio](https://github.com/wegamekinglc/calc-flow-studio)
 repository and is versioned there.
 
 Package versions use calendar versioning (`YYYY.M.D` release dates).

@@ -170,8 +170,11 @@ dashes span the full column width, including cell spaces.
   task/coordinator/supervisor internals, and reaper ownership remain
   crate-private. The crate-root `StreamSession` instead drives an admitted
   plan (one dynamic input; rolling, expression, and union nodes) synchronously
-  on the caller's thread over session edges, with no tasks, checkpoints, or
-  queue backpressure. See `docs/runtime-envelope.md`.
+  on the caller's thread over session edges, with no tasks or queue
+  backpressure. `StreamSession::new` retains the in-memory behavior;
+  `new_with_checkpoints`, `restore`, and `checkpoint` add opt-in managed
+  durable snapshots using v4 manifests with `job_kind=session`. See
+  `docs/runtime-envelope.md`.
 - `Port` declares name, `BatchKind`, required flag, and optional exact Arrow
   schema.
 - `OperatorMetadata` owns shared graph metadata. `BatchOperator` and

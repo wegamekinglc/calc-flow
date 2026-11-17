@@ -58,7 +58,11 @@ if TYPE_CHECKING:
     from calc_flow.asof_join_spec import AsofStateLimits
     from calc_flow.compute import TableData
     from calc_flow.pipeline import Runtime
-    from calc_flow.runtime import StreamRuntimeConfig, WatermarkPolicy
+    from calc_flow.runtime import (
+        ManagedCheckpointRuntime,
+        StreamRuntimeConfig,
+        WatermarkPolicy,
+    )
     from calc_flow.session import StreamSession
     from calc_flow.stream import StreamInput, StreamResults
     from calc_flow.symbolic.asof import _AsofJoinOptions
@@ -757,6 +761,8 @@ class TableExpr(Expr[object]):
         runtime: Runtime | None = None,
         config: StreamRuntimeConfig | None = None,
         watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+        checkpoints: ManagedCheckpointRuntime | None = None,
+        restore: bool = False,
     ) -> StreamSession[pa.Table]:
         """Compile once into a synchronous push session returning ``pa.Table``.
 
@@ -774,7 +780,15 @@ class TableExpr(Expr[object]):
         program = Program("session", engine="streaming", outputs={"result": self})
         return cast(
             "StreamSession[pa.Table]",
-            _open_session(program, runtime, config, watermarks, table_output=True),
+            _open_session(
+                program,
+                runtime,
+                config,
+                watermarks,
+                table_output=True,
+                checkpoints=checkpoints,
+                restore=restore,
+            ),
         )
 
     def collect(

@@ -166,6 +166,7 @@ impl PyStreamSession {
 #[pymethods]
 impl PyStreamSession {
     #[new]
+    #[pyo3(signature = (plan, config, watermarks, *, checkpoints=None, restore=false))]
     #[allow(
         clippy::needless_pass_by_value,
         reason = "PyO3 constructor extraction owns its PyRef boundary value"
@@ -175,12 +176,38 @@ impl PyStreamSession {
         plan: PyRef<'_, PyStreamExecutionPlan>,
         config: &Bound<'_, PyDict>,
         watermarks: &Bound<'_, PyDict>,
+        checkpoints: Option<PyRef<'_, crate::continuous::PyManagedCheckpointRuntime>>,
+        restore: bool,
     ) -> PyResult<Self> {
         let config = crate::continuous::runtime_config(config)?;
         let watermarks = session_watermarks(watermarks)?;
         let (plan, owner) = plan.take()?;
+        let checkpoints = checkpoints.map(|runtime| runtime.take()).transpose()?;
+        if restore && checkpoints.is_none() {
+            return Err(PyValueError::new_err(
+                "restore requires managed checkpoint storage",
+            ));
+        }
         let session = py
-            .detach(move || calc_flow::StreamSession::new(plan, &config, watermarks))
+            .detach(move || {
+                if restore {
+                    calc_flow::StreamSession::restore(
+                        plan,
+                        &config,
+                        watermarks,
+                        checkpoints.expect("restore storage was checked"),
+                    )
+                } else if let Some(checkpoints) = checkpoints {
+                    calc_flow::StreamSession::new_with_checkpoints(
+                        plan,
+                        &config,
+                        watermarks,
+                        checkpoints,
+                    )
+                } else {
+                    calc_flow::StreamSession::new(plan, &config, watermarks)
+                }
+            })
             .map_err(crate::error::to_py_err)?;
         let input_ids = session.input_ids().into_iter().map(str::to_owned).collect();
         let output_ids = session
@@ -194,6 +221,25 @@ impl PyStreamSession {
             output_ids,
             owner: Mutex::new(Some(owner)),
         })
+    }
+
+    fn checkpoint(&self, py: Python<'_>) -> PyResult<u64> {
+        let (guard, mut session) =
+            CallGuard::begin(&self.state).map_err(PyRuntimeError::new_err)?;
+        let (session, result) = py.detach(move || {
+            let result = session.checkpoint();
+            (session, result)
+        });
+        let failed = session.is_failed();
+        let completion = match &result {
+            Err(error) if failed => Completion::Failed(error.to_string()),
+            _ => Completion::Open,
+        };
+        let released = guard.complete(session, completion);
+        drop(released);
+        result
+            .map(|epoch| epoch.as_u64())
+            .map_err(|error| session_py_err(error, failed))
     }
 
     #[pyo3(signature = (input, batch, watermark_micros=None))]

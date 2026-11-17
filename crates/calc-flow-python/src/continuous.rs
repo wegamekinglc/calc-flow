@@ -819,7 +819,7 @@ impl PyContinuousStreamingRunner {
 }
 
 impl PyManagedCheckpointRuntime {
-    fn take(&self) -> PyResult<calc_flow::ManagedCheckpointRuntime> {
+    pub(crate) fn take(&self) -> PyResult<calc_flow::ManagedCheckpointRuntime> {
         self.inner.lock().take().ok_or_else(|| {
             PyRuntimeError::new_err("managed checkpoint runtime has already been consumed")
         })

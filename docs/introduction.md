@@ -115,11 +115,14 @@ without event time need no progress configuration for stateless work. See the
 
 Use `TableExpr.session()` or `Program.session()` when the application holds
 each batch and wants its results returned by the same synchronous call. A
-session compiles once, keeps native state in memory, and runs each `push`,
+Python session compiles once, keeps native state in memory, and runs each `push`,
 `advance`, or `finish` on the calling thread, returning the rows that call
 emits. It accepts one dynamic input feeding rolling, row-local expression, and
 union stages, and has no checkpoint or recovery. Calls on an existing session
 may run inside an event loop. See [stream sessions](python-api.md#stream-sessions).
+The separate Rust `StreamSession::new_with_checkpoints`, `restore`, and
+`checkpoint` methods provide managed durable session checkpoints; see
+[caller-driven stream sessions](rust-api.md#caller-driven-stream-sessions).
 
 Convenience streams run without checkpoints by default; `checkpointing=True`
 adds temporary managed checkpoints. Async iterable inputs provide
@@ -173,8 +176,10 @@ a bounded expression language. Graphs exchange `Batch` values rather than
 raw tables or arrays, and configuration contains data and registration
 references rather than executable objects.
 
-Projects use format `3`; managed checkpoint manifests also use version `3`.
-These protocol versions are separate from this checkout's package version `2026.11.14`.
+Projects use format `3`. Runner-managed checkpoint manifests use version `3`;
+durable Rust session lineages use internal manifest version `4` with
+`job_kind="session"`. These protocol versions are separate from this checkout's
+package version `2026.11.14`.
 
 The DataFusion 55 / Arrow 59 upgrade changes engine-specific checkpoint
 identity. SQL checkpoints created with DataFusion 54 and ASOF checkpoints

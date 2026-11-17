@@ -16,6 +16,7 @@ from calc_flow.pipeline import Runtime
 from calc_flow.runtime import (
     BoundedOutOfOrderness,
     DisabledWatermarks,
+    ManagedCheckpointRuntime,
     SourceProvidedWatermarks,
     StreamRuntimeConfig,
     Watermark,
@@ -50,8 +51,9 @@ class StreamSession(Generic[T]):
     Create sessions with ``TableExpr.session`` or ``Program.session``. Each
     ``push`` runs its batch and optional watermark through every operator and
     returns the rows that call emitted; ``finish`` flushes and ends the
-    session. Sessions are in-memory: checkpoint fields of
-    ``StreamRuntimeConfig`` are ignored and nothing survives the process.
+    session. Sessions created without ``checkpoints`` are in-memory. Supplying
+    managed storage enables durable checkpoint and highest-epoch restore through
+    ``checkpoint()`` and ``restore=True``; ``new`` keeps its original behavior.
 
     ``push``, ``advance``, ``finish`` and ``close`` may run inside a running
     event loop. They execute admitted operators on the calling thread with no
@@ -116,6 +118,11 @@ class StreamSession(Generic[T]):
         """Advance the input watermark without data; returns the rows it closes."""
         micros = self._watermark_micros(watermark)
         return self._result(self._native.advance(self._input.physical, micros))
+
+    def checkpoint(self) -> int:
+        """Durably persist the current session and return its epoch."""
+        _require_blocking("session.checkpoint")
+        return self._native.checkpoint()
 
     def finish(self) -> T:
         """End the input, flush every operator and finish the session."""
@@ -287,6 +294,8 @@ def _open_session(
     watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None,
     *,
     table_output: bool,
+    checkpoints: ManagedCheckpointRuntime | None = None,
+    restore: bool = False,
 ) -> StreamSession[object]:
     from calc_flow.stream import _compile_stream, _StreamRequest
 
@@ -310,6 +319,8 @@ def _open_session(
         plan._inner,
         native_config,
         {physical[name]: policy for name, policy in policies.items()},
+        checkpoints=None if checkpoints is None else checkpoints._inner,
+        restore=restore,
     )
     name, value = next(iter(dynamic.items()))
     session_input = _SessionInput(
