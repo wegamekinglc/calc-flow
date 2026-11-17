@@ -37,6 +37,10 @@ use super::{
     internal_error, operator_error,
 };
 use crate::accumulate::ArithmeticError;
+use crate::array::{
+    MacdOptions,
+    indicators::{MacdKernel, MacdParameters},
+};
 use crate::{
     Result,
     operator::rolling_metrics::{
@@ -175,6 +179,10 @@ enum TypedGroupPlan {
         periods: usize,
         storage: OutputStorage,
     },
+    Macd {
+        input_index: usize,
+        options: MacdOptions,
+    },
 }
 
 impl TypedGroupPlan {
@@ -190,7 +198,7 @@ impl TypedGroupPlan {
             Self::Lag { periods, .. } => {
                 Some(TypedFrame::Rows(if periods == 0 { 1 } else { periods }))
             }
-            Self::Ewma { .. } | Self::Cumulative { .. } => None,
+            Self::Ewma { .. } | Self::Cumulative { .. } | Self::Macd { .. } => None,
         }
     }
     fn dispersion_mut(&mut self) -> Option<&mut bool> {
@@ -249,6 +257,7 @@ enum TypedOutputKind {
     Scan(ScanKind),
     Lag,
     Delta,
+    Macd(usize),
     Difference {
         left: TypedFloatReadout,
         right: TypedFloatReadout,
@@ -829,6 +838,7 @@ impl RollingKernelPlan {
         sequence_columns: &[CompiledKeyColumn],
         outputs: &[CompiledRollingOutput],
         window_groups: &[CompiledWindowGroup],
+        indicator_groups: &[super::indicators::Group],
     ) -> Self {
         let order_columns = std::iter::once(event_time_index)
             .chain(partition_columns.iter().map(|column| column.index))
@@ -851,6 +861,7 @@ impl RollingKernelPlan {
             sequence_columns,
             outputs,
             window_groups,
+            indicator_groups,
         )
     }
 
@@ -867,8 +878,9 @@ impl RollingKernelPlan {
         sequence_columns: Vec<usize>,
         outputs: &[CompiledRollingOutput],
         window_groups: &[CompiledWindowGroup],
+        indicator_groups: &[super::indicators::Group],
     ) -> Self {
-        let compiled = compile_typed_plan(input_schema, outputs, window_groups);
+        let compiled = compile_typed_plan(input_schema, outputs, window_groups, indicator_groups);
         let allow_order_peers = order_columns.first() != Some(&event_time_index);
         let (selection, complexity, groups, typed_outputs, fallback_reason) = match compiled {
             Ok((groups, typed_outputs)) => (
@@ -1646,9 +1658,11 @@ fn typed_group_input(
         }
         | TypedGroupPlan::Ewma { input_index, .. }
         | TypedGroupPlan::Scan { input_index, .. }
-        | TypedGroupPlan::DurationScan { input_index, .. } => Ok(TypedGroupInput::Single(
-            cast_float64(input.column(input_index), node_id)?,
-        )),
+        | TypedGroupPlan::DurationScan { input_index, .. }
+        | TypedGroupPlan::Macd { input_index, .. } => Ok(TypedGroupInput::Single(cast_float64(
+            input.column(input_index),
+            node_id,
+        )?)),
         TypedGroupPlan::Lag {
             input_index,
             storage,
@@ -2156,12 +2170,28 @@ fn compile_duration_scan_group(
     Ok(())
 }
 
+fn compile_macd_group(
+    group: &super::indicators::Group,
+) -> std::result::Result<TypedGroupPlan, String> {
+    let super::indicators::Group::Macd(group) = group else {
+        return Err("typed indicators currently require MACD migration".into());
+    };
+    Ok(TypedGroupPlan::Macd {
+        input_index: group.input(),
+        options: group.options(),
+    })
+}
+
 fn compile_typed_plan(
     input_schema: &Schema,
     outputs: &[CompiledRollingOutput],
     window_groups: &[CompiledWindowGroup],
+    indicator_groups: &[super::indicators::Group],
 ) -> std::result::Result<(Vec<TypedGroupPlan>, Vec<TypedOutputPlan>), String> {
     let mut groups = compile_typed_groups(input_schema, window_groups)?;
+    for group in indicator_groups {
+        groups.push(compile_macd_group(group)?);
+    }
     for output in outputs {
         match &output.evaluation {
             CompiledEvaluation::Lag { periods } => {
@@ -2174,7 +2204,7 @@ fn compile_typed_plan(
             _ => {}
         }
     }
-    let typed_outputs = compile_typed_outputs(outputs, &groups)?;
+    let typed_outputs = compile_typed_outputs(outputs, &groups, indicator_groups)?;
     mark_dispersion_groups(&mut groups, &typed_outputs);
     if groups.is_empty() || typed_outputs.is_empty() {
         return Err("requires at least one typed rolling output".into());
@@ -2359,10 +2389,11 @@ fn require_numeric_type(input_schema: &Schema, index: usize) -> std::result::Res
 fn compile_typed_outputs(
     outputs: &[CompiledRollingOutput],
     groups: &[TypedGroupPlan],
+    indicator_groups: &[super::indicators::Group],
 ) -> std::result::Result<Vec<TypedOutputPlan>, String> {
     let mut typed_outputs = Vec::with_capacity(outputs.len());
     for output in outputs {
-        let plan = compile_typed_output(output, groups)?;
+        let plan = compile_typed_output(output, groups, indicator_groups)?;
         if !typed_output_groups_are_valid(&plan, groups.len()) {
             return Err("aggregate group index is outside the typed plan".into());
         }
@@ -2374,6 +2405,7 @@ fn compile_typed_outputs(
 fn compile_typed_output(
     output: &CompiledRollingOutput,
     groups: &[TypedGroupPlan],
+    indicator_groups: &[super::indicators::Group],
 ) -> std::result::Result<TypedOutputPlan, String> {
     match &output.evaluation {
         CompiledEvaluation::Cumulative(aggregate) => cumulative::compile_output(output, aggregate),
@@ -2384,8 +2416,28 @@ fn compile_typed_output(
         CompiledEvaluation::Lag { periods } => compile_lag_output(output, *periods, groups, false),
         CompiledEvaluation::Delta { periods } => compile_lag_output(output, *periods, groups, true),
         CompiledEvaluation::Scan(scan) => compile_scan_output(output, *scan, groups),
-        CompiledEvaluation::Indicator(_) => Err("requires a supported typed rolling output".into()),
+        CompiledEvaluation::Indicator(readout) => {
+            compile_macd_output(*readout, groups, indicator_groups)
+        }
     }
+}
+
+fn compile_macd_output(
+    readout: usize,
+    groups: &[TypedGroupPlan],
+    indicator_groups: &[super::indicators::Group],
+) -> std::result::Result<TypedOutputPlan, String> {
+    if readout >= indicator_groups.len() * 3 {
+        return Err("MACD readout is outside the typed plan".into());
+    }
+    let base = groups.len() - indicator_groups.len();
+    Ok(TypedOutputPlan {
+        group: base + readout / 3,
+        kind: TypedOutputKind::Macd(readout % 3),
+        storage: OutputStorage::Float64,
+        min_periods: 0,
+        ddof: 0,
+    })
 }
 
 fn compile_lag_output(
@@ -2988,6 +3040,7 @@ enum TypedWindowState {
     Rank(TypedRankState),
     Lag(TypedLagState),
     Utf8Lag(TypedUtf8LagState),
+    Macd(TypedMacdState),
     Decay(Option<Arc<decay::OwnedDecay>>),
 }
 
@@ -3302,6 +3355,37 @@ impl TypedUtf8LagState {
     }
 }
 
+#[derive(Clone)]
+struct TypedMacdState {
+    kernel: MacdKernel,
+    parameters: MacdParameters,
+    latest: [Option<f64>; 3],
+}
+
+impl std::fmt::Debug for TypedMacdState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TypedMacdState")
+            .field("latest", &self.latest)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TypedMacdState {
+    fn new(options: MacdOptions) -> Self {
+        Self {
+            kernel: MacdKernel::default(),
+            parameters: MacdParameters::new(options),
+            latest: [None; 3],
+        }
+    }
+
+    fn update(&mut self, sample: Option<f64>) -> Result<()> {
+        self.latest = self.kernel.push(sample, &self.parameters)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod lag_state_tests {
     use super::{LagValue, OutputStorage, TypedLagState};
@@ -3383,6 +3467,7 @@ impl TypedWindowState {
             TypedGroupPlan::Scan { kind, window, .. } => {
                 Self::Scan(TypedScanState::new(kind, window))
             }
+            TypedGroupPlan::Macd { options, .. } => Self::Macd(TypedMacdState::new(options)),
             TypedGroupPlan::Lag {
                 periods,
                 storage: OutputStorage::Utf8,
@@ -3463,6 +3548,9 @@ impl TypedWindowState {
                 );
                 Ok(())
             }
+            (Self::Macd(state), TypedGroupInput::Single(input)) => {
+                state.update(input.is_valid(row_index).then_some(input.value(row_index)))
+            }
             (Self::Decay(state), input) => {
                 if let Some(state) = state {
                     let values = match input {
@@ -3521,6 +3609,7 @@ impl TypedWindowState {
                         .map(|value| value.as_ref().map_or(0, String::capacity))
                         .sum::<usize>(),
                 ),
+            Self::Macd(_) => size_of::<TypedMacdState>(),
             Self::Decay(state) => state.as_ref().map_or(0, |state| state.bytes()),
         }
     }
@@ -3535,7 +3624,11 @@ impl TypedWindowState {
             Self::Rank(state) => state.recent.len(),
             Self::DurationScan(state) => state.recent.len(),
             Self::Utf8Lag(state) => state.history.len(),
-            Self::Cumulative(_) | Self::Ewma(_) | Self::Scan(_) | Self::Decay(_) => 0,
+            Self::Cumulative(_)
+            | Self::Ewma(_)
+            | Self::Scan(_)
+            | Self::Decay(_)
+            | Self::Macd(_) => 0,
         }
     }
 }
@@ -4320,6 +4413,17 @@ impl DerivedBuilder {
                 }
                 _ => Err(typed_output_mismatch()),
             },
+            TypedWindowState::Macd(state) => match (self, output.kind) {
+                (Self::Float(builder, _), TypedOutputKind::Macd(component)) => {
+                    let value = state
+                        .latest
+                        .get(component)
+                        .ok_or_else(|| internal_error("typed MACD component is out of bounds"))?;
+                    builder.append_option(*value);
+                    Ok(())
+                }
+                _ => Err(typed_output_mismatch()),
+            },
             TypedWindowState::Decay(Some(state)) => match (self, output.kind) {
                 (Self::Float(builder, _), TypedOutputKind::Scan(ScanKind::Decay)) => {
                     builder.append_option(state.latest);
@@ -4653,6 +4757,7 @@ fn typed_valid_count(state: &TypedWindowState) -> u64 {
         TypedWindowState::Rank(state) => u64::try_from(state.valid_count).unwrap_or(u64::MAX),
         TypedWindowState::DurationScan(state) => state.valid_count,
         TypedWindowState::Utf8Lag(state) => u64::try_from(state.history.len()).unwrap_or(u64::MAX),
+        TypedWindowState::Macd(state) => state.kernel.positions,
         TypedWindowState::Decay(state) => state.as_ref().map_or(0, |state| state.valid_count()),
     }
 }
@@ -4804,7 +4909,10 @@ fn append_pair(
         TypedOutputKind::Ewma => {
             return Err(internal_error("typed pair state received an EWMA output"));
         }
-        TypedOutputKind::Scan(_) | TypedOutputKind::Lag | TypedOutputKind::Delta => {
+        TypedOutputKind::Scan(_)
+        | TypedOutputKind::Lag
+        | TypedOutputKind::Delta
+        | TypedOutputKind::Macd(_) => {
             return Err(internal_error(
                 "typed pair state received a non-pair output",
             ));
@@ -6240,7 +6348,7 @@ mod tests {
         assert!(extrema_storage(&DataType::Utf8).is_err());
         assert!(require_numeric_type(&all_types, 10).is_err());
         assert!(
-            compile_typed_plan(&all_types, &[], &[])
+            compile_typed_plan(&all_types, &[], &[], &[])
                 .unwrap_err()
                 .contains("at least one")
         );

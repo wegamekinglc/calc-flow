@@ -229,6 +229,7 @@ impl DataFusionRollingKernel {
             sequence_columns.iter().map(|column| column.index).collect(),
             &outputs,
             &groups,
+            &[],
         )
         .with_nan_as_value();
         plan.supports_typed_transition().then_some(Self { plan })
@@ -1552,7 +1553,9 @@ impl BatchOperator for RollingOperator {
         self.input_ports[0].validate(input, &format!("{}.input", self.name))?;
         context.run.check_cancelled()?;
         let table = input.table_payload()?;
-        if !self.compiled.indicator_groups.is_empty() {
+        if !self.compiled.indicator_groups.is_empty()
+            && !self.compiled.kernel_plan.supports_typed_transition()
+        {
             return Ok(BTreeMap::from([(
                 "output".into(),
                 self.process_indicator_finite(input.clone(), context)

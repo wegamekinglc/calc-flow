@@ -363,6 +363,7 @@ fn compile_spec_against_schema(
         &sequence_columns,
         &outputs,
         &window_groups,
+        &indicator_groups,
     );
     Ok(CompiledRollingSpec {
         state_layout_version,

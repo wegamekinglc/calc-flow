@@ -3160,6 +3160,52 @@ fn typed_rank_quantile_match_general_with_ties_and_invalid_rows() {
 }
 
 #[test]
+fn typed_macd_matches_general_for_all_components() {
+    let mut spec = kernel_spec(json!([
+        {
+            "kind": "macd_component",
+            "primitive_version": 1,
+            "input": "price",
+            "output": "macd_line",
+            "fast_span": 1,
+            "slow_span": 2,
+            "signal_span": 1,
+            "component": "line"
+        },
+        {
+            "kind": "macd_component",
+            "primitive_version": 1,
+            "input": "price",
+            "output": "macd_signal",
+            "fast_span": 1,
+            "slow_span": 2,
+            "signal_span": 1,
+            "component": "signal"
+        },
+        {
+            "kind": "macd_component",
+            "primitive_version": 1,
+            "input": "price",
+            "output": "macd_histogram",
+            "fast_span": 1,
+            "slow_span": 2,
+            "signal_span": 1,
+            "component": "histogram"
+        }
+    ]));
+    spec.state_layout_version = 6;
+    let input = float64_fast_record(&[
+        (1, "a", 1, Some(1.0)),
+        (2, "a", 2, Some(2.0)),
+        (3, "a", 3, Some(3.0)),
+        (4, "a", 4, Some(4.0)),
+    ]);
+    assert_typed_matches_general(&spec, &input.schema(), &input);
+    let operator = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+    assert!(operator.indicator_resources.is_none());
+}
+
+#[test]
 fn typed_duration_scans_match_general_with_expiration() {
     let spec = kernel_spec(json!([
         {

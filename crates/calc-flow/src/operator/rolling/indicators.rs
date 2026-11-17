@@ -37,7 +37,7 @@ pub(super) fn initial_state(
     compiled: &super::CompiledRollingSpec,
     node: &str,
 ) -> Result<(StateOwner, Option<Resources>)> {
-    if compiled.indicator_groups.is_empty() {
+    if compiled.indicator_groups.is_empty() || compiled.kernel_plan.supports_typed_transition() {
         return Ok((
             StateOwner::new(super::RollingStreamState::default(), false),
             None,
