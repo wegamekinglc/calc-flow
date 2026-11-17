@@ -16,7 +16,7 @@ use std::{
 use datafusion::arrow::{
     array::{
         Array, ArrayRef, AsArray, Float64Array, Float64Builder, Int64Array, Int64Builder,
-        StringArray, TimestampMicrosecondArray, UInt64Array, UInt64Builder,
+        StringArray, StringBuilder, TimestampMicrosecondArray, UInt64Array, UInt64Builder,
     },
     compute::cast,
     datatypes::{DataType, Int64Type, Schema, TimestampMicrosecondType, UInt64Type},
@@ -278,6 +278,7 @@ enum OutputStorage {
     UInt64,
     Float32,
     Float64,
+    Utf8,
 }
 
 impl OutputStorage {
@@ -308,6 +309,7 @@ impl OutputStorage {
             Self::UInt32 => DataType::UInt32,
             Self::Float32 => DataType::Float32,
             Self::Float64 => DataType::Float64,
+            Self::Utf8 => DataType::Utf8,
         }
     }
 }
@@ -315,6 +317,7 @@ impl OutputStorage {
 enum TypedGroupInput {
     DecayReference(Box<decay::ReferenceInput>),
     Single(Float64Array),
+    Utf8(StringArray),
     Signed(Int64Array),
     Unsigned(UInt64Array),
     Pair(Float64Array, Float64Array),
@@ -1639,6 +1642,14 @@ fn lag_group_input(
     storage: OutputStorage,
     node_id: &str,
 ) -> Result<TypedGroupInput> {
+    if storage == OutputStorage::Utf8 {
+        return input
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .cloned()
+            .map(TypedGroupInput::Utf8)
+            .ok_or_else(|| internal_error("typed Utf8 lag input did not produce StringArray"));
+    }
     if storage.is_signed() {
         cast_signed(input, node_id).map(TypedGroupInput::Signed)
     } else if storage.is_unsigned() {
@@ -1998,11 +2009,19 @@ fn compile_lag_group(
     output: &CompiledRollingOutput,
     periods: u64,
     groups: &mut Vec<TypedGroupPlan>,
+    delta: bool,
 ) -> std::result::Result<(), String> {
     if output.input_type != output.output_type {
         return Err("typed lag/delta requires matching input and output types".into());
     }
-    let storage = extrema_storage(&output.input_type)?;
+    let storage = if output.input_type == DataType::Utf8 {
+        if delta {
+            return Err("typed delta requires a numeric input".into());
+        }
+        OutputStorage::Utf8
+    } else {
+        extrema_storage(&output.input_type)?
+    };
     let periods =
         usize::try_from(periods).map_err(|_| "lag/delta periods do not fit the platform usize")?;
     if !groups.iter().any(|group| {
@@ -2068,8 +2087,11 @@ fn compile_typed_plan(
     let mut groups = compile_typed_groups(input_schema, window_groups)?;
     for output in outputs {
         match &output.evaluation {
-            CompiledEvaluation::Lag { periods } | CompiledEvaluation::Delta { periods } => {
-                compile_lag_group(output, *periods, &mut groups)?;
+            CompiledEvaluation::Lag { periods } => {
+                compile_lag_group(output, *periods, &mut groups, false)?;
+            }
+            CompiledEvaluation::Delta { periods } => {
+                compile_lag_group(output, *periods, &mut groups, true)?;
             }
             CompiledEvaluation::Scan(scan) => compile_scan_group(output, *scan, &mut groups)?,
             _ => {}
@@ -2877,6 +2899,7 @@ enum TypedWindowState {
     Scan(TypedScanState),
     Rank(TypedRankState),
     Lag(TypedLagState),
+    Utf8Lag(TypedUtf8LagState),
     Decay(Option<Arc<decay::OwnedDecay>>),
 }
 
@@ -3018,6 +3041,42 @@ impl TypedLagState {
     }
 }
 
+#[derive(Clone, Debug)]
+struct TypedUtf8LagState {
+    periods: usize,
+    history: VecDeque<Option<String>>,
+    current: Option<String>,
+    reference: Option<String>,
+}
+
+impl TypedUtf8LagState {
+    fn new(periods: usize) -> Self {
+        Self {
+            periods,
+            history: VecDeque::with_capacity(periods),
+            current: None,
+            reference: None,
+        }
+    }
+
+    fn update(&mut self, sample: Option<String>) {
+        self.current.clone_from(&sample);
+        self.reference = if self.periods == 0 {
+            sample.clone()
+        } else if self.history.len() >= self.periods {
+            self.history[self.history.len() - self.periods].clone()
+        } else {
+            None
+        };
+        if self.periods > 0 {
+            self.history.push_back(sample);
+            if self.history.len() > self.periods {
+                self.history.pop_front();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod lag_state_tests {
     use super::{LagValue, OutputStorage, TypedLagState};
@@ -3097,6 +3156,11 @@ impl TypedWindowState {
                 Self::Scan(TypedScanState::new(kind, window))
             }
             TypedGroupPlan::Lag {
+                periods,
+                storage: OutputStorage::Utf8,
+                ..
+            } => Self::Utf8Lag(TypedUtf8LagState::new(periods)),
+            TypedGroupPlan::Lag {
                 periods, storage, ..
             } => Self::Lag(TypedLagState::new(periods, storage)),
         }
@@ -3160,6 +3224,14 @@ impl TypedWindowState {
                 ));
                 Ok(())
             }
+            (Self::Utf8Lag(state), TypedGroupInput::Utf8(input)) => {
+                state.update(
+                    input
+                        .is_valid(row_index)
+                        .then(|| input.value(row_index).to_owned()),
+                );
+                Ok(())
+            }
             (Self::Decay(state), input) => {
                 if let Some(state) = state {
                     let values = match input {
@@ -3202,6 +3274,21 @@ impl TypedWindowState {
                     .capacity()
                     .saturating_mul(size_of::<LagValue>()),
             ),
+            Self::Utf8Lag(state) => size_of::<TypedUtf8LagState>()
+                .saturating_add(
+                    state
+                        .history
+                        .capacity()
+                        .saturating_mul(size_of::<Option<String>>()),
+                )
+                .saturating_add(
+                    state
+                        .history
+                        .iter()
+                        .chain([&state.current, &state.reference])
+                        .map(|value| value.as_ref().map_or(0, String::capacity))
+                        .sum::<usize>(),
+                ),
             Self::Decay(state) => state.as_ref().map_or(0, |state| state.bytes()),
         }
     }
@@ -3214,6 +3301,7 @@ impl TypedWindowState {
             Self::Pair(state) => state.samples.len(),
             Self::Lag(state) => state.history.len(),
             Self::Rank(state) => state.recent.len(),
+            Self::Utf8Lag(state) => state.history.len(),
             Self::Cumulative(_) | Self::Ewma(_) | Self::Scan(_) | Self::Decay(_) => 0,
         }
     }
@@ -3257,7 +3345,9 @@ fn update_extrema_input(
         TypedGroupInput::Unsigned(input) => input
             .is_valid(row)
             .then(|| ExtremaValue::Unsigned(input.value(row))),
-        TypedGroupInput::Pair(..) | TypedGroupInput::DecayReference(_) => {
+        TypedGroupInput::Pair(..)
+        | TypedGroupInput::Utf8(_)
+        | TypedGroupInput::DecayReference(_) => {
             return Err(internal_error(
                 "typed rolling group state does not match its input plan",
             ));
@@ -3916,12 +4006,15 @@ enum DerivedBuilder {
     Signed(Int64Builder, OutputStorage),
     Unsigned(UInt64Builder, OutputStorage),
     Float(Float64Builder, OutputStorage),
+    Utf8(StringBuilder),
 }
 
 impl DerivedBuilder {
     fn new(output: TypedOutputPlan, capacity: usize) -> Self {
         let storage = output.storage;
-        if storage == OutputStorage::Count {
+        if storage == OutputStorage::Utf8 {
+            Self::Utf8(StringBuilder::with_capacity(capacity, capacity * 8))
+        } else if storage == OutputStorage::Count {
             Self::Count(UInt64Builder::with_capacity(capacity))
         } else if storage.is_signed() {
             Self::Signed(Int64Builder::with_capacity(capacity), storage)
@@ -3976,6 +4069,17 @@ impl DerivedBuilder {
             TypedWindowState::Scan(state) => self.append_scan(state, output),
             TypedWindowState::Rank(state) => self.append_rank(state, output),
             TypedWindowState::Lag(state) => self.append_lag(state, output, node_id),
+            TypedWindowState::Utf8Lag(state) => match (self, output.kind) {
+                (Self::Utf8(builder), TypedOutputKind::Lag) => {
+                    if let Some(value) = state.reference.as_deref() {
+                        builder.append_value(value);
+                    } else {
+                        builder.append_null();
+                    }
+                    Ok(())
+                }
+                _ => Err(typed_output_mismatch()),
+            },
             TypedWindowState::Decay(Some(state)) => match (self, output.kind) {
                 (Self::Float(builder, _), TypedOutputKind::Scan(ScanKind::Decay)) => {
                     builder.append_option(state.latest);
@@ -4045,7 +4149,7 @@ impl DerivedBuilder {
             Self::Float(builder, _) => append_float_extrema(builder, state),
             Self::Signed(builder, _) => append_signed_extrema(builder, state),
             Self::Unsigned(builder, _) => append_unsigned_extrema(builder, state),
-            Self::Count(_) => Err(typed_output_mismatch()),
+            Self::Count(_) | Self::Utf8(_) => Err(typed_output_mismatch()),
         }
     }
 
@@ -4178,6 +4282,7 @@ impl DerivedBuilder {
             Self::Count(builder) | Self::Unsigned(builder, _) => builder.append_null(),
             Self::Signed(builder, _) => builder.append_null(),
             Self::Float(builder, _) => builder.append_null(),
+            Self::Utf8(builder) => builder.append_null(),
         }
     }
 
@@ -4193,6 +4298,7 @@ impl DerivedBuilder {
             Self::Float(mut builder, storage) => {
                 finish_with_storage(Arc::new(builder.finish()), storage)
             }
+            Self::Utf8(mut builder) => Ok(Arc::new(builder.finish())),
         }
     }
 }
@@ -4305,6 +4411,7 @@ fn typed_valid_count(state: &TypedWindowState) -> u64 {
         }
         TypedWindowState::Lag(state) => u64::try_from(state.history.len()).unwrap_or(u64::MAX),
         TypedWindowState::Rank(state) => u64::try_from(state.valid_count).unwrap_or(u64::MAX),
+        TypedWindowState::Utf8Lag(state) => u64::try_from(state.history.len()).unwrap_or(u64::MAX),
         TypedWindowState::Decay(state) => state.as_ref().map_or(0, |state| state.valid_count()),
     }
 }

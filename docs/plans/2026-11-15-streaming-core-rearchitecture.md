@@ -51,8 +51,10 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
 - P2–P7 规格已全部并入：rolling 数值与内核、checkpoint v4、keyed state 与 join、并行执行与 window pane。
   实现按单一 PR 内的提交序列推进，不再建立分阶段 PR。
 - P2.4 部分交付：Float64/Float32/Int64/UInt64 的 lag/delta 已进入 typed plan，保留 null/NaN、periods=0、
-  checked arithmetic、溢出错误与 checkpoint 历史恢复；rolling 699 项和 clippy 通过。非数值 lag、rank/quantile、
-  其余 typed groups 与 general `ScalarValue` 路径删除仍未完成。
+  checked arithmetic、溢出错误与 checkpoint 历史恢复；rank/quantile 也有 typed window state 和 ties/invalid-row
+  parity，kernel registry 已同步；Utf8 lag 使用 typed `Option<String>` 历史和 `StringBuilder`。rolling 701 项、
+  symbolic optimizer 11 项和 clippy 通过。其余 temporal/nested lag、剩余 typed groups 与 general `ScalarValue`
+  路径删除仍未完成。
 - P3.1 fake-table 协议/故障 harness 已交付；P3.2 COW pages、dirty lineage、精确 undo 与 layout 7 已通过验证。
   P3.3 v4 object/manifest/partition persistence 已验证；P3.4 coordinator 与 opaque adapter 已有状态机和
   epoch roundtrip，但 runner 的实际 source/operator/sink 接线、session checkpoint、故障矩阵和性能门槛尚未完成。

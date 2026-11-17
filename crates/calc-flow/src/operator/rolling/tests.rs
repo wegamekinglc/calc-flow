@@ -608,7 +608,7 @@ fn valid_spec() -> RollingSpec {
 
 fn general_spec() -> RollingSpec {
     let mut document = valid_spec_json();
-    document["outputs"] = json!([lag_label(1)]);
+    document["outputs"] = json!([lag_time()]);
     serde_json::from_value(document).unwrap()
 }
 
@@ -816,6 +816,16 @@ fn lag_label(periods: u64) -> Value {
         "input": "label",
         "output": "label_lag",
         "periods": periods
+    })
+}
+
+fn lag_time() -> Value {
+    json!({
+        "kind": "lag",
+        "primitive_version": 1,
+        "input": "ts",
+        "output": "ts_lag",
+        "periods": 1
     })
 }
 
@@ -1370,6 +1380,24 @@ fn lag_works_for_non_numeric_columns() {
         .unwrap();
     assert!(values.is_null(0));
     assert_eq!(values.value(1), "x");
+}
+
+#[test]
+fn typed_utf8_lag_matches_general_with_nulls() {
+    let spec = kernel_spec(json!([lag_label(1)]));
+    let input = float64_fast_record(&[
+        (1, "a", 1, Some(1.0)),
+        (2, "a", 2, Some(2.0)),
+        (3, "a", 3, Some(3.0)),
+    ]);
+    let mut columns = input.columns().to_vec();
+    columns[5] = Arc::new(datafusion::arrow::array::StringArray::from(vec![
+        Some("x"),
+        Some("y"),
+        None,
+    ]));
+    let input = RecordBatch::try_new(input.schema(), columns).unwrap();
+    assert_typed_matches_general(&spec, &input.schema(), &input);
 }
 
 #[test]

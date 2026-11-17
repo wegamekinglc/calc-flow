@@ -866,6 +866,7 @@ fn retained_group_work(state: &TypedWindowState) -> Option<usize> {
         TypedWindowState::Pair(state) => state.samples.len().checked_mul(2),
         TypedWindowState::Lag(state) => Some(state.history.len()),
         TypedWindowState::Rank(state) => Some(state.recent.len()),
+        TypedWindowState::Utf8Lag(state) => Some(state.history.len()),
         TypedWindowState::Ewma(_) | TypedWindowState::Cumulative(_) => Some(1),
         TypedWindowState::Decay(_) | TypedWindowState::Scan(_) => None,
     }
