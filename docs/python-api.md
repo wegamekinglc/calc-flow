@@ -137,6 +137,7 @@ be inferred.
 | `t.filter(predicate)`                          | Keep rows matching a boolean `ColumnExpr` over that table           |
 | `expression.pipe(function, *args, **kwargs)`   | Apply a synchronous declaration function once                       |
 | `t.sql(query)`                                 | Add SQL using this table as the local alias `input`                 |
+| `t.changelog_sql(query)`                       | Declare compact stream changelog SQL using local alias `input`      |
 | `expression.identical(other)`                  | Compare structural identity as a Python boolean                     |
 
 Use `&`, `|`, and `~` instead of `and`, `or`, and `not`; converting an expression
@@ -278,10 +279,33 @@ and standalone array Program outputs are unsupported; the
 
 Batch SQL accepts multiple aliases. Append stream SQL accepts one alias or the
 exact-schema [UNION ALL subset](relational-frontends.md#same-schema-union).
-Queries with ordinary aggregates or `GROUP BY` accumulate state across batches and emit the full
-current result after each batch: `SELECT SUM(value) AS total` emits `1`, then
-`6` for input batches `[1]` and `[2, 3]`. A grouped result includes unchanged
-groups in each snapshot. By default, retained SQL input has no fixed row or
+By default, queries with ordinary aggregates or `GROUP BY` accumulate state
+across batches and emit the full current result after each batch:
+`SELECT SUM(value) AS total` emits `1`, then `6` for input batches `[1]` and
+`[2, 3]`. A grouped result includes unchanged groups in each snapshot.
+
+`cf.changelog_sql(query: str, /, **tables: TableExpr) -> TableExpr` and
+`t.changelog_sql(query, /)` explicitly select changelog output for one
+single-alias stream aggregate. This mode requires compact execution; batch,
+multi-alias, latest-relation, non-aggregate, and unsupported aggregate shapes
+are rejected rather than falling back to retained input. Outer
+`ORDER BY`/`LIMIT` is unsupported. Every `GROUP BY` expression must appear
+exactly once in the final projection as the same typed expression or an alias,
+without a cast; a global aggregate uses the singleton empty key.
+
+The projected SQL fields are followed by non-null Utf8 `_cf_op`, whose values
+are `"retract"` and `"upsert"`; a user output field with that name is rejected.
+Both operations carry the complete projected row. Changes use ascending
+internal group-ID order, with the old-row retract before the new-row upsert.
+Newly visible groups upsert only, groups leaving `HAVING` retract only, and
+unchanged visible rows emit no operations. Comparison includes nulls and exact
+floating-point bit patterns. Restore continues from committed state without
+bootstrap upserts. See
+[changelog aggregate output](streaming-guide.md#changelog-aggregate-output)
+for flush and delivery boundaries. Existing `cf.sql`, `TableExpr.sql`, and
+`snapshot_sql` declarations are unchanged.
+
+By default, retained SQL input has no fixed row or
 byte cap. Set `StreamRuntimeConfig.sql_state_budget` to
 `StateBudget(20_000_000, 8 << 30)` to limit cumulative accepted input, including
 compact execution. Eligible aggregates keep compact state; unsupported shapes
@@ -311,8 +335,8 @@ Ordering uses the parsed per-term direction/null placement: defaults are
 `ASC NULLS LAST` and `DESC NULLS FIRST`. Equal complete tuples keep the first
 encountered winner. Default/`RESPECT NULLS` can select null; `IGNORE NULLS`
 skips null values but preserves null-only groups. Declare a business sequence
-in the SQL ordering tuple if needed; no tie-breaker is implicit. Full snapshots
-still cost O(keys) output work, without delta output or fixed RSS guarantees.
+in the SQL ordering tuple if needed; no tie-breaker is implicit. Default full
+snapshots still cost O(keys) output work and have no fixed RSS guarantee.
 See [ordered LAST_VALUE](streaming-guide.md#compact-ordered-last_value) for
 the exact MVP shape and existing runtime evidence.
 
@@ -325,7 +349,7 @@ rejecting unknown/corrupt state atomically. See
 and [SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries).
 SQL without aggregation remains batch-local,
 as do SQL window functions when used without a grouped or ordinary aggregate.
-`ORDER BY` and `LIMIT` apply to each emitted snapshot.
+In default mode, `ORDER BY` and `LIMIT` apply to each emitted snapshot.
 
 `cf.snapshot_sql(query: str, /, **tables: TableExpr) -> TableExpr` provides
 stream-only SQL over complete replacement relations, including multiple

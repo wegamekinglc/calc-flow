@@ -788,7 +788,7 @@ An append streaming SQL stage supports one alias or the shared
 [exact-schema UNION ALL subset](relational-frontends.md#same-schema-union).
 Union preserves each ingress FIFO and duplicates; compare all output rows at
 all-source EOF without a cross-source ordering promise. Ordinary aggregates
-and `GROUP BY` emit a full cumulative result after each batch.
+and `GROUP BY` emit a full cumulative result after each batch by default.
 For example, `SELECT SUM(value) AS total FROM input` emits `1` after `[1]` and
 `6` after `[2, 3]`; grouped snapshots include every current group, including
 unchanged ones. Eligible aggregate queries use native incremental accumulators
@@ -847,9 +847,9 @@ compact state has been installed. Both SQL budgets default to `None`; when
 configured together, the cumulative input quota and compact-state limits both
 apply. Neither changes the semantic plan fingerprint.
 
-Other SQL remains batch-local. `ORDER BY` and `LIMIT` apply to each snapshot;
-SQL window functions alone remain batch-local. Downstream stages receive each
-snapshot as new rows. Multi-alias append SQL is a batch operation;
+Other SQL remains batch-local. In default mode, `ORDER BY` and `LIMIT` apply to
+each snapshot; SQL window functions alone remain batch-local. Downstream stages
+receive each snapshot as new rows. Multi-alias append SQL is a batch operation;
 [`cf.snapshot_sql`](#complete-replacement-snapshot-sql) replaces complete
 relations in streams. Use native `ts`
 operations for rolling state and the documented window/join declarations for
@@ -882,6 +882,50 @@ without temporary checkpoints, or provide exactly-once application delivery.
 Use explicit sinks and a stable checkpoint root for those guarantees. Arrow
 results omit the `Batch` envelope; use an explicit sink when application
 processing needs its metadata or delivery acknowledgement.
+
+### Changelog aggregate output
+
+`cf.sql` and `TableExpr.sql` retain the default full-snapshot behavior.
+`cf.changelog_sql(query, /, **tables)` and `TableExpr.changelog_sql(query, /)`
+opt a stream aggregate into changelog output. Rust selects it with
+`SqlOperator::set_aggregate_output_mode(SqlAggregateOutputMode::Changelog)`
+before state admission. Project-v3 SQL nodes express the same choice as
+`aggregate_output="changelog"`; omitted or `"snapshot"` retains snapshots.
+
+Changelog is compact-only and limited to one stream input alias. Batch,
+non-aggregate, multi-alias, latest-relation, UDF, and other shapes without
+compact support are rejected rather than rerun over retained history. Outer
+`ORDER BY` and `LIMIT` are unsupported. Every `GROUP BY` expression must occur
+exactly once in the final projection as the same typed expression or an alias,
+without a cast, so the visible row carries its group identity. A global
+aggregate uses the singleton empty group key.
+
+The output schema is the ordinary projected SQL schema followed by a non-null
+Utf8 `_cf_op` field; a user output field named `_cf_op` is rejected. Its only
+values are `"retract"` and `"upsert"`. Both carry the complete projected row,
+and a retract carries the previously visible values rather than just keys.
+Internal group IDs and canonical key bytes are not exposed.
+
+For each accepted data batch, the operator compares the previously emitted
+visible relation with the updated one. A newly visible group emits only an
+upsert. A changed visible group emits a retract with its old row followed by an
+upsert with its new row. A group leaving `HAVING` emits only a retract; entering
+`HAVING` emits only an upsert; remaining hidden or producing an identical
+visible row emits no operation. A completely unchanged relation therefore
+produces an empty changelog, not a snapshot. Comparison includes nulls and
+exact typed values; Float32/Float64 equality uses exact bit patterns, so
+signed-zero and NaN-payload changes are visible.
+
+Changes are ordered by ascending internal group ID, with retract before upsert
+within one group. One accepted data Batch flushes its ordered changes at the
+same boundary where default mode emits a snapshot. Edge-budget chunking can
+split only between operations and never reorders a retract/upsert pair.
+Watermark, idle, and EOF add no synthetic baseline or extra diff.
+
+Restored committed aggregate state is the next diff baseline. Restore emits no
+bootstrap upserts. Changelog does not add consumer deduplication or an
+exactly-once guarantee; durable replay follows the existing per-output delivery
+contract, and ordinary sinks may observe repeated operations.
 
 ### Compact ordered LAST_VALUE
 

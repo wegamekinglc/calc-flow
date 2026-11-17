@@ -926,6 +926,26 @@ fn inputs() -> Result<BTreeMap<String, Batch>, Box<dyn std::error::Error>> {
 }
 ```
 
+`SqlAggregateOutputMode::{Snapshot, Changelog}` selects the visible relation
+emitted by a streaming SQL aggregate. `Snapshot` is the default and emits the
+complete cumulative relation after every input batch. Call
+`SqlOperator::set_aggregate_output_mode(SqlAggregateOutputMode::Changelog)`
+before stream-state admission to emit only changes;
+`aggregate_output_mode()` returns the declared selection.
+
+Changelog requires one compact single-alias stream aggregate. It rejects batch,
+non-aggregate, multi-alias, latest-relation, and shapes without compact support,
+as well as outer `ORDER BY`/`LIMIT`. Every `GROUP BY` expression must appear
+exactly once in the final projection as the same typed expression or an alias,
+without a cast. The ordinary output fields are followed by non-null Utf8
+`_cf_op`, containing `"retract"` or `"upsert"`; both operations carry a complete
+projected row. Changes are ordered by internal group ID, with retract before
+upsert. The diff covers `HAVING` transitions and exact floating-point bits,
+omits unchanged rows, and resumes from restored committed state without
+bootstrap upserts. See
+[changelog aggregate output](streaming-guide.md#changelog-aggregate-output)
+for the complete visibility, flush, and delivery contract.
+
 ## Snapshot SQL
 
 `SnapshotSqlOperator::new(name, query, aliases, udfs)` declares a stream-only
@@ -1709,7 +1729,11 @@ language surfaces.
 
 `ProjectSpec` is the strict v3 data model. Use `validate_project` for a
 `ValidationReport`, `compile_project` for a `BatchExecutionPlan`, and
-`project_json_schema` for the generated schema.
+`project_json_schema` for the generated schema. A SQL operator's optional
+`aggregate_output` accepts `"snapshot"` or `"changelog"`; omission defaults to
+snapshot, and canonical serialization omits that default. Changelog participates
+in node configuration and semantic identity. See
+[SQL aggregate output](projects-guide.md#sql-aggregate-output).
 
 `FileProjectStore` is the public async atomic local project store. Project JSON
 is canonical; YAML is safe import/export only. Continuous recovery storage is

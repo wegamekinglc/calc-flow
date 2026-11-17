@@ -230,7 +230,9 @@ selectors.
   Batch SQL supports multiple aliases; append stream SQL accepts one alias or
   the exact-schema multi-alias subset that appends rows without deduplication.
   Ordinary and grouped SQL aggregates emit a full cumulative snapshot after each
-  batch.
+  batch by default. Rust `SqlOperator::set_aggregate_output_mode` and Python
+  `changelog_sql` can instead select retract/upsert changes for a compact
+  single-alias stream aggregate; project-v3 calls this `aggregate_output`.
   Eligible queries, including admitted grouped ordered LAST_VALUE, use compact
   state; unsupported aggregate shapes retain input and rerun over history.
   Other SQL runs per batch. SQL state has no fixed default cap;

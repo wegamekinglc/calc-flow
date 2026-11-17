@@ -72,7 +72,8 @@ The inferred input has no ordering. Temporal calculations declare ordering on
 [temporal ordering](python-api.md#temporal-ordering).
 
 `TableExpr` provides indexing, overloaded column operators, append-only
-`with_columns`, `select`, `filter`, `sql`, `pipe`, collection, and `stream`.
+`with_columns`, `select`, `filter`, `sql`, `changelog_sql`, `pipe`, collection,
+and `stream`.
 `Program(name, /, *, mode, inputs=None, outputs=())` accepts an output mapping,
 automatically discovers omitted roots, collects by logical name, and exports
 strict native projects with `to_project`. Runtime arguments are optional;
@@ -95,8 +96,10 @@ collection state, streaming ownership, and logical versus physical bindings.
 | Entry point                                                                       | Contract                                                             |
 |-----------------------------------------------------------------------------------|----------------------------------------------------------------------|
 | `sql(query, /, **tables)`                                                         | Lazy `TableExpr`; explicit aliases mapped to table declarations      |
+| `changelog_sql(query, /, **tables)`                                               | Compact single-alias stream aggregate with `_cf_op` changes          |
 | `snapshot_sql(query, /, **tables)`                                                | Stream-only query over complete latest replacement relations         |
 | `TableExpr.sql(query, /)`                                                         | Single-table SQL with the local alias `input`                        |
+| `TableExpr.changelog_sql(query, /)`                                               | Single-table changelog SQL with local alias `input`                  |
 | `Expr.pipe(function, /, *args, **kwargs)`                                         | Call the synchronous builder once and preserve its return type       |
 | `TableExpr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`      | `StreamResults[pyarrow.Table]`                                       |
 | `Program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`        | `StreamResults[StreamOutput]`; logical input mapping required        |
@@ -112,8 +115,12 @@ collection state, streaming ownership, and logical versus physical bindings.
 SQL schema planning reads declarations, not data. Batch SQL accepts multiple
 aliases; append stream SQL accepts one alias or the exact-schema
 [UNION ALL subset](relational-frontends.md#same-schema-union). Ordinary aggregates and `GROUP BY`
-emit full cumulative snapshots after each batch. Eligible aggregate queries
-update compact state; unsupported shapes rerun over retained input. Other append
+emit full cumulative snapshots after each batch by default. `changelog_sql`
+requires one compact single-alias stream aggregate and instead emits full-row
+retract/upsert changes with non-null Utf8 `_cf_op`; see
+[changelog aggregate output](streaming-guide.md#changelog-aggregate-output).
+Eligible aggregate queries update compact state; unsupported shapes rerun over
+retained input unless compact execution is explicitly required. Other append
 SQL executes per batch. `snapshot_sql` supports multiple aliases, waits for all
 relations to initialize, then emits a complete result after each replacement.
 Its outputs currently connect directly to sinks and reject ExactlyOnce. See
@@ -363,6 +370,13 @@ table-to-array-to-table provider described in the
 `project_json_schema()` returns the Rust-generated schema and
 `validate_project_json()` returns canonical validated JSON.
 
+A SQL operator may declare optional `aggregate_output` with values `"snapshot"`
+or `"changelog"`. Omission and explicit `"snapshot"` are equivalent, and
+canonical serialization omits the default. `"changelog"` selects the compact
+single-alias stream aggregate protocol and is not a field on `snapshot_sql`
+nodes. The mode participates in node configuration and semantic identity. See
+[SQL aggregate output](projects-guide.md#sql-aggregate-output).
+
 Rolling and cross-section `LatePolicySpec` supports `side_output` in native
 stream projects, with `metrics_version: 1` and `schema_version: 1`. Its `late`
 diagnostic port has no watermark/idle progress, but participates in aligned
@@ -480,6 +494,9 @@ The `calc_flow` crate re-exports its supported public types from
 | Projects              | `ProjectSpec`, `compile_project`, `validate_project`                                                                                                                                                |
 | Persistence           | `FileProjectStore`, `LocalStateBackend`, `CheckpointManifest`                                                                                                                                       |
 | Errors                | `CalcFlowError`, `Result<T>`                                                                                                                                                                        |
+
+`SqlAggregateOutputMode` is the crate-root SQL aggregate output selector; see
+[SQL operators](rust-api.md#sql-operators).
 
 `compile_project` produces a `BatchExecutionPlan`. `compile_batch` and
 `compile_stream` are the Rust graph-compilation entry points. A

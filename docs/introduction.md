@@ -147,11 +147,13 @@ DataFusion 55 executes table expressions and SQL. SQL nodes accept one
 read-only `SELECT` or CTE. Batch SQL supports multiple aliases; streaming SQL
 accepts one alias for append SQL, or the exact-schema
 [UNION ALL subset](relational-frontends.md#same-schema-union). Ordinary aggregates and `GROUP BY` emit a
-full cumulative snapshot after each native batch. Eligible queries, including the supported
+full cumulative snapshot after each native batch by default. Eligible queries, including the supported
 grouped ordered `LAST_VALUE`, update compact state; other aggregate shapes
 retain input and rerun over its history. Other SQL evaluates each batch
-separately. See
-[SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries).
+separately. `cf.changelog_sql` and `TableExpr.changelog_sql` explicitly select
+compact-only retract/upsert output for a single-alias stream aggregate. See
+[SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries)
+and [changelog aggregate output](streaming-guide.md#changelog-aggregate-output).
 SQL output has a new row lineage and does not inherit temporal ordering.
 Row-local expressions may follow append SQL; compute rolling features before
 a SQL stage.

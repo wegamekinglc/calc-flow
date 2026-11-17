@@ -195,18 +195,28 @@ exact-schema [UNION ALL subset](relational-frontends.md#same-schema-union).
 Other multi-alias append SQL is rejected before any source opens, even if
 aliases share a root. Stream SQL with an
 ordinary aggregate or `GROUP BY` emits the full cumulative result after every
-batch. Eligible queries, including admitted grouped ordered `LAST_VALUE`,
-update compact state; unsupported aggregate shapes rerun over retained input.
-There is no fixed SQL state cap by default. `sql_state_budget` limits cumulative
-accepted input; `sql_compact_state_budget` requires compact execution and limits
-each aggregate node's live groups and owned bytes. See
+batch by default. Eligible queries, including admitted grouped ordered
+`LAST_VALUE`, update compact state; unsupported aggregate shapes rerun over
+retained input. There is no fixed SQL state cap by default. `sql_state_budget`
+limits cumulative accepted input; `sql_compact_state_budget` requires compact
+execution and limits each aggregate node's live groups and owned bytes.
+
+`cf.changelog_sql(query, /, **tables)` and `TableExpr.changelog_sql(query, /)`
+explicitly select retract/upsert output for one compact single-alias stream
+aggregate. The result appends non-null Utf8 `_cf_op` to the projected fields.
+Every `GROUP BY` expression must remain visible exactly once in the projection,
+and outer `ORDER BY`/`LIMIT` is rejected. See
+[changelog aggregate output](streaming-guide.md#changelog-aggregate-output)
+for the diff, ordering and recovery contract.
+
+Other SQL stays batch-local. In default mode, `ORDER BY` and `LIMIT` apply to
+the current snapshot; SQL window functions alone remain batch-local. Default
+aggregate snapshots repeat unchanged groups, so downstream operators receive
+them as new rows. See
 [SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries)
-for admission, ordering, budget and recovery contracts. Other SQL stays
-batch-local. `ORDER BY` and `LIMIT` apply to the current
-snapshot; SQL window functions alone remain batch-local. These aggregate
-snapshots repeat unchanged groups, so downstream operators receive them as new
-rows. Native rolling, event windows, and bounded stream joins have their
-separately declared cross-batch semantics. Use
+for admission, ordering, budget and recovery contracts. Native rolling, event
+windows, and bounded stream joins have their separately declared cross-batch
+semantics. Use
 [SQL composition](../examples/32_sql_expression_pipeline.py),
 [named SQL inputs](../examples/02_sql_join.py), and the
 [rolling-to-SQL stream](../examples/33_streaming_pipeline.py) as executable examples.
@@ -919,8 +929,9 @@ including declaration-only `window_tumbling@1`/`window_hopping@1` nodes and
 `linalg`/`parameter` uses that do not form the exact symbolic matrix compilation
 shape above — fail with `unknown_primitive_version` rooted at the output or
 `static_inputs.<name>`, in both batch and stream modes. Native stateful
-operators retain their declared finality; explicit stream SQL uses the snapshot
-or batch-local semantics described in [SQL composition](#sql-composition). Standalone array outputs fail
+operators retain their declared finality; explicit stream SQL uses the snapshot,
+changelog, or batch-local semantics described in
+[SQL composition](#sql-composition). Standalone array outputs fail
 with `unknown_primitive_version` in batch mode; stream mode rejects them
 earlier, at the analysis phase, with `unbounded_state` rooted at
 `outputs.<name>` — the stream-safety rule for an array output with row-axis

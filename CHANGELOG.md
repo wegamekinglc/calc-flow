@@ -9,6 +9,19 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-17: Add opt-in changelog output for compact single-alias stream SQL
+  aggregates. Rust exposes `SqlAggregateOutputMode::{Snapshot, Changelog}` and
+  `SqlOperator::set_aggregate_output_mode`; Python adds `cf.changelog_sql` and
+  `TableExpr.changelog_sql`. Project-v3 SQL nodes accept optional
+  `aggregate_output: "snapshot" | "changelog"`, with omitted/explicit snapshot
+  preserving the default full cumulative relation. Changelog output appends
+  non-null Utf8 `_cf_op` and carries complete projected rows for
+  retract-before-upsert changes in ascending internal group-ID order. It
+  requires visible `GROUP BY` identity, rejects outer `ORDER BY`/`LIMIT` and
+  noncompact shapes, includes `HAVING` transitions and exact floating-bit
+  changes, suppresses unchanged rows, and restores without bootstrap upserts.
+  See [changelog aggregate output](docs/streaming-guide.md#changelog-aggregate-output).
+
 - 2026-11-17: Expose durable session checkpoints in Python.
   `TableExpr.session` and `Program.session` accept
   `checkpoints: ManagedCheckpointRuntime | None = None` and

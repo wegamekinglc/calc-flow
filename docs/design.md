@@ -335,13 +335,16 @@ in Rust/DataFusion. SQL output has a distinct lineage without inherited temporal
 ordering. Row-local work may follow SQL, and native rolling may precede it.
 Append stream SQL accepts one alias or the exact-schema
 [UNION ALL subset](relational-frontends.md#same-schema-union). Ordinary aggregates and `GROUP BY` emit
-full cumulative snapshots after each batch. Eligible queries update compact
-state; unsupported aggregate shapes retain input and rerun over its history.
-Other append SQL, including window functions without an ordinary aggregate,
-executes per native batch. Stream-only `snapshot_sql` queries the latest
-complete replacement relations across multiple aliases. See the
-[SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries)
-and [snapshot SQL contract](snapshot-sql-native.md) for state, budget, output,
+full cumulative snapshots after each batch by default. A compact single-alias
+stream aggregate can explicitly emit retract/upsert changelog rows instead.
+Eligible queries update compact state; unsupported aggregate shapes retain
+input and rerun over its history. Other append SQL, including window functions
+without an ordinary aggregate, executes per native batch. Stream-only
+`snapshot_sql` queries the latest complete replacement relations across
+multiple aliases. See the
+[SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries),
+[changelog output](streaming-guide.md#changelog-aggregate-output), and
+[snapshot SQL contract](snapshot-sql-native.md) for state, budget, output,
 and recovery restrictions.
 
 Convenience adapters infer supported Arrow schemas, capture input references,

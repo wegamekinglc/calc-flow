@@ -68,7 +68,8 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   Python focused 53 项通过，包含 epoch 1/2 continuation 和 running-loop 拒绝。runner 的实际
   source/operator/sink 接线、完整故障矩阵和性能门槛尚未完成。
 - P4.1 shared keyed core 与单整数 SUM 已交付；P4.2 typed aggregate state、temporal extrema、8192-group dirty
-  snapshot cache 和 rollback/recovery 已通过 327 个 SQL 测试。旧 compact 删除、P4.3 opt-in changelog 与 P4 测量尚未完成。
+  snapshot cache 和 rollback/recovery 已通过 327 个 SQL 测试。P4.3 opt-in changelog 已集成，
+  SQL 336 项与 Python 5 项测试通过。旧 compact 删除和 P4 测量尚未完成。
 - P2.3 已完成 Float64 Rows slab、共享多窗口 history、layout 7 和 pending restore，rolling 694 项测试通过。
   后续同一基线的 paired 测量最初发现 large-batch 回退扩大为 0.29x；批量 counter、readout 定位、逐窗口
   rebuild history、O(1) retained count、checkpoint-off COW elision 和 numeric family 修复后，中间证据

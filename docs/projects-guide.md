@@ -116,6 +116,17 @@ reference. See [Python API](python-api.md#projects-and-persistence) for method
 usage and [architecture](design.md#project-and-registry-design) for storage
 and registry ownership.
 
+## SQL aggregate output
+
+Within a SQL node's `operator` object, optional `aggregate_output` accepts
+`"snapshot"` or `"changelog"`. Omission defaults to `"snapshot"`; an explicit
+snapshot has the same meaning and fingerprint and is omitted from canonical
+serialization. `"changelog"` is valid only for a compact single-alias stream
+aggregate and changes the node output schema and semantic identity. It is not
+a field on `snapshot_sql` nodes. See
+[changelog aggregate output](streaming-guide.md#changelog-aggregate-output)
+for visible-group, operation, and recovery contracts.
+
 ## Late side-output projects
 
 Rolling and cross-section stream nodes select
