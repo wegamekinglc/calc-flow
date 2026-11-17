@@ -31,8 +31,9 @@ Markdown, tests, and verification.
   I/O in servers and asyncio applications. Calls on an existing
   `StreamSession` (`push`, `advance`, `finish`, `close`) are synchronous
   caller-thread engine calls with no I/O or cross-thread waits and may run
-  inside an event loop; session construction compiles and follows the
-  blocking rule.
+  inside an event loop. Session construction, including restore, and
+  `checkpoint()` follow the blocking rule and reject a running event loop;
+  checkpoint has no async alternative.
 * Prefer small, explicit modules over compatibility shims or duplicate
   abstraction layers.
 * Keep table behavior Arrow-backed and array behavior Array API-backed,

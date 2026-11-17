@@ -470,23 +470,26 @@ See [explicit connectors and recovery](streaming-guide.md#explicit-connectors-an
 
 ## Stream sessions
 
-`TableExpr.session(*, runtime=None, config=None, watermarks=None)` returns
-`StreamSession[pyarrow.Table]`. `Program.session(*, runtime=None, config=None,
-watermarks=None)` returns `StreamSession[dict[str, pyarrow.Table]]` and requires
-a stream-mode Program. A session compiles one fresh native stream plan and keeps
-its operator state in memory. Each call runs synchronously on the calling
-thread, passes its batch and watermark through every operator, and returns the
-rows emitted by that call. There is no source, sink, job, progress driver, or
-async bridge. Use `stream` for async sources and `StreamingRunner` for
-connectors, delivery contracts, and recovery; see
+`TableExpr.session(*, runtime=None, config=None, watermarks=None,
+checkpoints: ManagedCheckpointRuntime | None = None, restore: bool = False)`
+returns `StreamSession[pyarrow.Table]`. `Program.session(*, runtime=None,
+config=None, watermarks=None,
+checkpoints: ManagedCheckpointRuntime | None = None, restore: bool = False)`
+returns `StreamSession[dict[str, pyarrow.Table]]` and requires a stream-mode
+Program. A session compiles one fresh native stream plan. Each ordinary call
+runs synchronously on the calling thread, passes its batch and watermark through
+every operator, and returns the rows emitted by that call. There is no source,
+sink, job, progress driver, or async bridge. Use `stream` for async sources and
+`StreamingRunner` for connectors and sink delivery contracts; see
 [choose batch or stream](streaming-guide.md#choose-batch-or-stream). Run
-[example 37](../examples/37_stream_session.py) for a checked table session with
-ordered rows, explicit progress, and finalization.
+[example 37](../examples/37_stream_session.py) for a checked in-memory table
+session with ordered rows, explicit progress, and finalization.
 
 | Member                               | Contract                                                                    |
 |--------------------------------------|-----------------------------------------------------------------------------|
 | `push(inputs, /, *, watermark=None)` | Run one batch, then an optional completeness watermark; return emitted rows |
 | `advance(watermark)`                 | Advance the input watermark without data; return the rows it closes         |
+| `checkpoint() -> int`                | Persist durable state and return its epoch; managed storage required        |
 | `finish()`                           | End the input, flush every operator, and finish the session                 |
 | `close()`                            | Release native state without flushing; repeated calls do nothing            |
 | `with ... as session`                | Context exit calls `close()`; rows that are still open are discarded        |
@@ -506,8 +509,9 @@ with every declared output name, empty tables included; aliases of one physical
 output share one table. Rows keep emission order within each output; outputs
 have no combined order. A call can emit no rows until progress closes them.
 
-Construction compiles, so it rejects a running event loop with `RuntimeError`.
-A session admits one dynamic table input feeding rolling `cf.ts` features
+Construction, including `restore=True`, compiles and rejects a running event
+loop with `RuntimeError`. A session admits one dynamic table input feeding
+rolling `cf.ts` features
 (except RSI, ATR, and MACD), row-local expressions such as `with_columns`,
 `select`, and `filter`, and `union_all`. Static parameters and native array
 inputs raise `ValueError` before compilation. Native admission rejects other
@@ -544,21 +548,40 @@ not check order, so late rows reach the operators and follow their late
 policies. Rows dropped by `late_policy="drop"` are not observable: sessions
 expose no `status()` or late-row metrics.
 
-`config=None` uses `StreamRuntimeConfig()`. Sessions are non-durable: checkpoint
-fields are ignored, including `checkpointing=True`, and no state survives the
-session. `config.edge_budget` bounds each input and internal message. Internal
-edges have no queue backpressure: a call buffers whatever each operator emits
-during its turn and returns only after every queue is empty, so memory per call
-is bounded by the operators' output chunking rather than by queue capacity.
+`config=None` uses `StreamRuntimeConfig()`. With `checkpoints=None`, sessions
+retain in-memory behavior and checkpoint configuration is ignored, including
+`checkpointing=True`; no state survives the session. Passing a public
+`ManagedCheckpointRuntime` enables durable v4 capture and requires effective
+`checkpointing=True`: the default `None` resolves to enabled, while `False`
+rejects storage. The adapter unwraps the public storage wrapper at the native
+boundary. Fresh durable construction rejects a lineage that already contains a
+manifest. `restore=True` requires storage and selects the highest complete
+session epoch after validating `job_kind="session"` and the plan recovery
+fingerprint. Restore opens no connectors and replays no earlier input or output;
+the caller resumes with later batches.
+
+`checkpoint()` requires managed storage and an open, non-failed session. It
+synchronously persists operator state plus the next input sequence and watermark
+progress, publishes the v4 manifest, and returns the integer epoch. Checkpoint
+timing fields do not schedule automatic session captures. A failure after
+capture begins fails the live session; a manifest that already finished
+publication remains available to restore.
+
+`config.edge_budget` bounds each input and internal message. Internal edges have
+no queue backpressure: a call buffers whatever each operator emits during its
+turn and returns only after every queue is empty, so memory per call is bounded
+by the operators' output chunking rather than by queue capacity.
 
 `push`, `advance`, `finish`, and `close` may run inside a running event loop.
 They run the admitted operators on the calling thread with no I/O and no
-cross-thread waits, so a large push blocks the loop for its duration. Native
-calls release the GIL. A session runs one call at a time: a concurrent call
-from another thread, or a re-entrant call from a UDF, raises `RuntimeError`
-naming the busy state. `close()` during an in-flight call returns immediately;
-that call still returns its rows or raises its own error, and later calls raise
-`RuntimeError` naming the closed state.
+cross-thread waits, so a large push blocks the loop for its duration.
+`checkpoint()` performs blocking durable capture, rejects a running event loop
+with `RuntimeError`, and has no async alternative. Native calls release the GIL.
+A session runs one call at a time: a concurrent call from another thread, or a
+re-entrant call from a UDF, raises `RuntimeError` naming the busy state.
+`close()` during an in-flight call returns immediately; that call still returns
+its rows or raises its own error, and later calls raise `RuntimeError` naming
+the closed state.
 
 | Condition                                                         | Exception                                                  | Session afterwards |
 |-------------------------------------------------------------------|------------------------------------------------------------|--------------------|
@@ -569,7 +592,8 @@ that call still returns its rows or raises its own error, and later calls raise
 | Operator failure or panic during a call                           | Native error class, usually `ExecutionError`               | Failed             |
 | Call on a failed, finished, closed, or busy session               | `RuntimeError`                                             | Unchanged          |
 | Unsupported graph at construction                                 | `ConfigError`, or `ValueError` for static and array inputs | Not created        |
-| Construction inside a running event loop                          | `RuntimeError`                                             | Not created        |
+| Construction or restore inside a running event loop               | `RuntimeError`                                             | Not created        |
+| Checkpoint inside a running event loop                            | `RuntimeError`                                             | Unchanged          |
 
 A failed call discards rows that operators emitted earlier in that call. Later
 calls on a failed session raise `RuntimeError` with the original message and
@@ -654,7 +678,7 @@ operational needs:
 |------------------------------------------|----------------------------------------------------------------|
 | Plan state and execution diagnostics     | `Program.compile_batch`, `BatchExecutionPlan`, and `RunResult` |
 | Typed runtime UDF or provider selection  | `Runtime` registrations and explicitly selected builder nodes  |
-| Durable recovery or transactional sinks  | `Program.compile_stream`, explicit bindings, and managed state |
+| Runner recovery or transactional sinks   | `Program.compile_stream`, explicit bindings, and managed state |
 | Native graph construction and inspection | `PipelineBuilder`, ports, and validated `ProjectDocument`      |
 
 These expose the same native graph and runtime. They do not introduce a table

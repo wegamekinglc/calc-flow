@@ -49,18 +49,21 @@ Arrow tables. Compile an explicit batch plan when you need `RunResult` diagnosti
 or owned plan state. Use `TableExpr.stream` or `Program.stream` when sources
 arrive over time and the calculation must retain state between batches.
 Use `Program.compile_stream()` with explicit bindings and a stable
-`ManagedCheckpointRuntime` when state must survive process restarts or the
-application owns transactional delivery.
+`ManagedCheckpointRuntime` when connector-backed state must survive process
+restarts or the application owns transactional delivery.
 
 Use `TableExpr.session()` or `Program.session()` when the application already
 holds each input batch and needs the rows it closes returned by the same
 synchronous call, for example in a request handler or a replay loop. A session
-runs one compiled plan on the calling thread, with no source, sink, job, or
-checkpoint, and keeps state in memory only. It admits one dynamic input feeding
-rolling, row-local expression, and union stages. Use a stream instead for async
-sources, several dynamic inputs, other operators, status observation, bounded
-queue backpressure, or delivery and recovery contracts. See
-[stream sessions](python-api.md#stream-sessions) and
+runs one compiled plan on the calling thread, with no source, sink, or job
+tasks. The default `checkpoints=None` keeps state in memory only. Supplying a
+`ManagedCheckpointRuntime` enables durable v4 checkpoints, and `restore=True`
+resumes the highest complete session epoch; the caller supplies the later input
+batches. A session admits one dynamic input feeding rolling, row-local
+expression, and union stages. Use a stream instead for async sources, several
+dynamic inputs, other operators, status observation, or bounded queue
+backpressure, and an explicit runner for connector and sink delivery contracts.
+See [stream sessions](python-api.md#stream-sessions) and
 [session watermarks](#session-watermarks).
 
 Batch and stream plans are intentionally different types. A batch plan cannot
@@ -1717,6 +1720,15 @@ mode/storage arguments fail before startup. Rust callers use
 `StreamingRunner::without_checkpoints(plan, sources, sinks)`; when supplying a
 custom `StreamRuntimeConfig`, set its `checkpointing` field to `false` as well.
 The existing Rust `StreamingRunner::new` keeps checkpointing enabled.
+
+Stream sessions select durability with `checkpoints`: `None` retains in-memory
+behavior and ignores checkpoint configuration, while a
+`ManagedCheckpointRuntime` enables durable v4 capture. Durable construction
+requires effective `checkpointing=True`; the default `None` resolves to enabled,
+and `False` rejects storage. `restore=True` requires storage and selects the
+highest complete session epoch. `StreamSession.checkpoint()` captures
+synchronously and returns the integer epoch; checkpoint timing fields do not
+schedule automatic session captures.
 
 Disabled jobs provide best-effort delivery and accept ordinary sinks. They
 reject exactly-once requests, transactional or epoch-idempotent sinks, and

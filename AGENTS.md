@@ -143,8 +143,9 @@ Ordinary feature work must not rewrite either team definition.
   network I/O; blocking convenience methods must reject a running event loop.
   Calls on an existing `StreamSession` (`push`, `advance`, `finish`, `close`)
   are synchronous caller-thread engine calls with no I/O or cross-thread waits
-  and may run inside an event loop; session construction compiles and follows
-  the blocking rule.
+  and may run inside an event loop. Session construction, including restore,
+  and `checkpoint()` follow the blocking rule and reject a running event loop;
+  checkpoint has no async alternative.
 - Do not add compatibility shims for the removed Python v1 implementation.
 
 For Markdown tables, align columns with pipes and pad separator rows so their
@@ -265,11 +266,16 @@ selectors.
   plan with one dynamic input and maps watermark policies onto session
   watermarks; synchronous caller-thread `push`, `advance`, and `finish` return
   Arrow tables (programs: every declared output name), and `close` releases
-  state without flushing. State is in memory and checkpoint configuration is
-  ignored. The PyO3 `_StreamSession` binding releases the global interpreter
-  lock (GIL) per call and
-  raises `RuntimeError` for busy, closed, finished, or failed sessions. See
-  `docs/python-api.md`.
+  state without flushing. `checkpoints=None` retains in-memory behavior and
+  ignores checkpoint configuration. Supplying the public
+  `ManagedCheckpointRuntime` wrapper, unwrapped at the native boundary, enables
+  durable v4 capture with effective `checkpointing=True`; `restore=True`
+  requires storage and selects the highest complete session epoch, and
+  `checkpoint() -> int` captures synchronously. Construction, restore, and
+  checkpoint reject a running event loop; ordinary session calls retain their
+  caller-thread contract. The PyO3 `_StreamSession` binding releases the global
+  interpreter lock (GIL) per call and raises `RuntimeError` for busy, closed,
+  finished, or failed sessions. See `docs/python-api.md`.
 - `Program(name, mode="batch")` or `Program(name, mode="stream")` fixes the
   lifecycle at construction; legacy `engine="sql"|"streaming"` is an exclusive
   alias. Exactly one selector is required. Immutable `with_input` and `output`

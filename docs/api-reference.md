@@ -92,21 +92,22 @@ collection state, streaming ownership, and logical versus physical bindings.
 
 ### SQL, pipelines, and streaming results
 
-| Entry point                                                                  | Contract                                                             |
-|------------------------------------------------------------------------------|----------------------------------------------------------------------|
-| `sql(query, /, **tables)`                                                    | Lazy `TableExpr`; explicit aliases mapped to table declarations      |
-| `snapshot_sql(query, /, **tables)`                                           | Stream-only query over complete latest replacement relations         |
-| `TableExpr.sql(query, /)`                                                    | Single-table SQL with the local alias `input`                        |
-| `Expr.pipe(function, /, *args, **kwargs)`                                    | Call the synchronous builder once and preserve its return type       |
-| `TableExpr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)` | `StreamResults[pyarrow.Table]`                                       |
-| `Program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`   | `StreamResults[StreamOutput]`; logical input mapping required        |
-| `TableExpr.session(*, runtime=None, config=None, watermarks=None)`           | `StreamSession[pyarrow.Table]`                                       |
-| `Program.session(*, runtime=None, config=None, watermarks=None)`             | `StreamSession[dict[str, pyarrow.Table]]`; stream mode required      |
-| `Program(name, mode=...)`                                                    | Require `"batch"` or `"stream"`; legacy engine is an exclusive alias |
-| `Program.execute(inputs, /, *, ...)`                                         | SQL: named Arrow tables; streaming: owned named events               |
-| `StreamOutput.name` / `.table`                                               | Immutable named Arrow output event                                   |
-| `StreamResults` async context / iteration / `aclose()` / `.job`              | One native job, one consumer, bounded output and owned cleanup       |
-| `StreamSession.push` / `.advance` / `.finish` / `.close` / context manager   | Synchronous caller-thread calls returning the rows each call emits   |
+| Entry point                                                                       | Contract                                                             |
+|-----------------------------------------------------------------------------------|----------------------------------------------------------------------|
+| `sql(query, /, **tables)`                                                         | Lazy `TableExpr`; explicit aliases mapped to table declarations      |
+| `snapshot_sql(query, /, **tables)`                                                | Stream-only query over complete latest replacement relations         |
+| `TableExpr.sql(query, /)`                                                         | Single-table SQL with the local alias `input`                        |
+| `Expr.pipe(function, /, *args, **kwargs)`                                         | Call the synchronous builder once and preserve its return type       |
+| `TableExpr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`      | `StreamResults[pyarrow.Table]`                                       |
+| `Program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`        | `StreamResults[StreamOutput]`; logical input mapping required        |
+| `TableExpr.session(*, ..., checkpoints=None, restore=False)`                      | `StreamSession[pyarrow.Table]`                                       |
+| `Program.session(*, ..., checkpoints=None, restore=False)`                        | `StreamSession[dict[str, pyarrow.Table]]`; stream mode required      |
+| `Program(name, mode=...)`                                                         | Require `"batch"` or `"stream"`; legacy engine is an exclusive alias |
+| `Program.execute(inputs, /, *, ...)`                                              | SQL: named Arrow tables; streaming: owned named events               |
+| `StreamOutput.name` / `.table`                                                    | Immutable named Arrow output event                                   |
+| `StreamResults` async context / iteration / `aclose()` / `.job`                   | One native job, one consumer, bounded output and owned cleanup       |
+| `StreamSession.push` / `.advance` / `.finish` / `.close` / context manager        | Synchronous caller-thread calls returning the rows each call emits   |
+| `StreamSession.checkpoint() -> int`                                               | Synchronously capture durable state; managed storage required        |
 
 SQL schema planning reads declarations, not data. Batch SQL accepts multiple
 aliases; append stream SQL accepts one alias or the exact-schema
@@ -142,10 +143,14 @@ and the [streaming guide](streaming-guide.md).
 and `finish` run synchronously on the calling thread and return the emitted
 rows: one Arrow table for `TableExpr.session`, or every declared output name
 for `Program.session`. It admits one dynamic input feeding rolling, row-local
-expression, and union stages. Sessions are in-memory, ignore checkpoint
-configuration, and have no queue backpressure. Calls on an existing session may
-run inside an event loop; construction may not. Lifecycle errors raise
-`RuntimeError`. See [stream sessions](python-api.md#stream-sessions).
+expression, and union stages. `checkpoints=None` retains in-memory behavior and
+ignores checkpoint configuration. A `ManagedCheckpointRuntime` enables durable
+v4 capture, `restore=True` selects its highest complete session epoch, and
+`StreamSession.checkpoint() -> int` captures state synchronously. Sessions have
+no queue backpressure. Existing `push`, `advance`, `finish`, and `close` calls
+may run inside an event loop; construction, restore, and checkpoint reject one,
+and checkpoint has no async alternative. Lifecycle errors raise `RuntimeError`.
+See [stream sessions](python-api.md#stream-sessions).
 
 ### Bounded backward ASOF Join
 
@@ -543,7 +548,7 @@ finished, closed, or busy session.
 
 The Rust crate and Python binding are versioned `2026.11.14` in this checkout.
 Project format version `3`, runner checkpoint-manifest version `3`, and durable
-Rust session-manifest version `4` are separate protocol values from the package
+session-manifest version `4` are separate protocol values from the package
 version. The Studio application moved to the separate
 [calc-flow-studio](https://github.com/wegamekinglc/calc-flow-studio)
 repository and is versioned there.

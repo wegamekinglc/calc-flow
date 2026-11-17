@@ -115,13 +115,17 @@ without event time need no progress configuration for stateless work. See the
 
 Use `TableExpr.session()` or `Program.session()` when the application holds
 each batch and wants its results returned by the same synchronous call. A
-Python session compiles once, keeps native state in memory, and runs each `push`,
-`advance`, or `finish` on the calling thread, returning the rows that call
-emits. It accepts one dynamic input feeding rolling, row-local expression, and
-union stages, and has no checkpoint or recovery. Calls on an existing session
-may run inside an event loop. See [stream sessions](python-api.md#stream-sessions).
-The separate Rust `StreamSession::new_with_checkpoints`, `restore`, and
-`checkpoint` methods provide managed durable session checkpoints; see
+Python session compiles once and runs each `push`, `advance`, or `finish` on the
+calling thread, returning the rows that call emits. With the default
+`checkpoints=None`, native state remains in memory with no recovery. Passing a
+`ManagedCheckpointRuntime` through `checkpoints=` enables durable v4 session
+checkpoints; `restore=True` selects the highest complete epoch in that storage.
+A session accepts one dynamic input feeding rolling, row-local expression, and
+union stages. Existing `push`, `advance`, `finish`, and `close` calls may run
+inside an event loop; construction, restore, and `checkpoint()` reject one. See
+[stream sessions](python-api.md#stream-sessions). Rust exposes the same native
+durability through `StreamSession::new_with_checkpoints`, `restore`, and
+`checkpoint`; see
 [caller-driven stream sessions](rust-api.md#caller-driven-stream-sessions).
 
 Convenience streams run without checkpoints by default; `checkpointing=True`
@@ -177,7 +181,7 @@ raw tables or arrays, and configuration contains data and registration
 references rather than executable objects.
 
 Projects use format `3`. Runner-managed checkpoint manifests use version `3`;
-durable Rust session lineages use internal manifest version `4` with
+durable Rust and Python session lineages use internal manifest version `4` with
 `job_kind="session"`. These protocol versions are separate from this checkout's
 package version `2026.11.14`.
 

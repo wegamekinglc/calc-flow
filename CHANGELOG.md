@@ -9,6 +9,20 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-17: Expose durable session checkpoints in Python.
+  `TableExpr.session` and `Program.session` accept
+  `checkpoints: ManagedCheckpointRuntime | None = None` and
+  `restore: bool = False`. Durable construction requires effective
+  `checkpointing=True`; `restore=True` requires storage and selects the highest
+  complete v4 session epoch. `StreamSession.checkpoint() -> int` synchronously
+  persists the current state and returns its epoch. The default
+  `checkpoints=None` retains in-memory behavior. Construction, restore, and
+  checkpoint reject a running event loop, and checkpoint has no async
+  alternative; `push`, `advance`, `finish`, and `close` retain their
+  caller-thread synchronous contract. Runner checkpoint wiring, the full fault
+  matrix, and performance-gate verification remain open. See
+  [stream sessions](docs/python-api.md#stream-sessions).
+
 - 2026-11-17: Add durable checkpoints to Rust `StreamSession`.
   `new_with_checkpoints` starts a fresh managed lineage and rejects one that
   already contains a manifest; `restore` selects the highest complete v4
