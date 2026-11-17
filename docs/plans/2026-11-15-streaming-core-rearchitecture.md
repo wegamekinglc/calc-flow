@@ -84,6 +84,13 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
 - P2.9 已交付首个 full-tick tier：严格验证 entity 顺序后，首 tick 完整 first-touch，后续 tick 复用同一
   transaction/partition，非 full-tick 自动回退。rolling 701 和 clippy 通过；`p2-2-slab-full-tick` 的 paired
   large-batch 为 1.15x，G2 19.291 ns/window-row、G3 371.773 µs，绝对门槛仍未通过。
+- P6 SIMD 打包（`311d248c`）已交付：独立 `calc-flow-python-v3` 与 portable 版本使用相同版本号和
+  `calc_flow` import package，要求在干净环境显式安装且二者互斥；Linux、macOS、Windows 三个 x86-64 target
+  各有六个 Python tag 和两个 abi3 tier，不发布 v3 sdist。只有 v3 job 设置 `target-cpu=x86-64-v3`，portable
+  与 AArch64 保持不变；artifact/hash、v3 vector inspection、clean-install smoke 和独立发布链路已接入。
+  静态测试通过：`python/tests/test_distribution.py` 4 项、`scripts/test_release_workflow.py` 4 项、
+  `scripts/test_inspect_v3_wheel.py` 2 项、`scripts/test_release_config.py` 42 项；实际 wheel 与跨平台发布仍由
+  release workflow 验收。P6 的分区执行器、统一 morsel 池、I/O 与计算分离及性能门槛仍未完成。
 
 ## 1. 目标
 

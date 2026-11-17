@@ -16,11 +16,24 @@ repository.
 
 ## Install
 
-CPython 3.9 or newer:
+CPython 3.9 or newer, using the portable default:
 
 ```bash
 uv add calc-flow-python
 ```
+
+On Linux, macOS, or Windows x86-64 processors with x86-64-v3 support, the
+explicitly installed optimized alternative is:
+
+```bash
+uv add calc-flow-python-v3
+```
+
+Both distributions have the same version and `calc_flow` import package. Install
+exactly one in a clean environment: they are mutually exclusive, and importing
+with both present raises an `ImportError`. See
+[getting started](docs/getting-started.md#install-published-packages) for CPU,
+platform, and switching details.
 
 Optional array providers:
 
@@ -29,10 +42,11 @@ uv add "calc-flow-python[numpy]"
 uv add "calc-flow-python[jax]"
 ```
 
-The core package's default Python dependencies are `pyarrow` and
-`typing-extensions`. NumPy and JAX remain optional; `calc-flow-python[array]`
-installs both. Project-document validation uses the native Rust runtime and does
-not require Pydantic.
+For the v3 distribution, use the corresponding extras on
+`calc-flow-python-v3`. Either distribution's default Python dependencies are
+`pyarrow` and `typing-extensions`. NumPy and JAX remain optional; the selected
+distribution's `array` extra installs both. Project-document validation uses the
+native Rust runtime and does not require Pydantic.
 
 ## Python quickstart
 

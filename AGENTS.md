@@ -323,14 +323,21 @@ selectors.
 
 ## Release invariants
 
-- Workspace crate and Python core versions move together as calendar versions
-  (`YYYY.M.D` release dates, for example `2026.9.22`). The binding's Rust
+- Workspace crate and Python distribution versions move together as calendar
+  versions (`YYYY.M.D` release dates, for example `2026.9.22`). The binding's Rust
   dependency is exact, and release tags are annotated
   `calc-flow-python-v<version>` at the current `main` head.
-- Core wheels contain only `calc_flow`, native module, metadata/SBOM, and
-  license.
-- Source distributions contain essential Rust/Python build sources but never
-  frozen `src/calc_flow`, fixtures, or guidance directories.
+- `calc-flow-python` is the portable default. `calc-flow-python-v3` is a separate,
+  explicitly installed, mutually exclusive distribution with the same version
+  and `calc_flow` import package; install exactly one in a clean environment.
+- Portable and v3 wheels contain only `calc_flow`, exactly one native module,
+  metadata/SBOM, and license, with no runtime native-module selector.
+- V3 wheels cover Linux, macOS, and Windows x86-64 with the same six Python tags
+  and two abi3 tiers as portable wheels. Only v3 jobs set
+  `target-cpu=x86-64-v3`; portable x86-64 and AArch64 builds remain unchanged.
+  No v3 source distribution is published.
+- Portable source distributions contain essential Rust/Python build sources but
+  never frozen `src/calc_flow`, fixtures, or guidance directories.
 - The published crate includes license/source/examples/benches and excludes
   repository-only integration tests.
 - Preserve pinned workflow actions, Maturin/Rust versions, audit policies, and
@@ -398,8 +405,9 @@ snapshot. Do not wait, watch, poll, or sleep/retry unless the user or acceptance
 criteria explicitly require the final CI result. Pending or absent CI can be
 reported in a completed handoff; it is not green or merge-ready. Report failed,
 cancelled, and inconclusive checks accurately. Required test, coverage, and
-cross-platform checks block merge when failed or unresolved. The Python package
-release requires its artifact verification and post-build unit tests to pass.
+cross-platform checks block merge when failed or unresolved. Each Python package
+distribution requires its artifact verification and respective installed-wheel
+unit tests or clean-install smoke to pass before publication.
 The final specialist review remains required; merging also requires explicit
 authority and green required checks.
 
@@ -410,8 +418,10 @@ git diff --exit-code -- schemas/project-v3.schema.json
 git diff --check
 ```
 
-The Python release workflow builds and verifies the core wheels and source
-distribution, tests installed Linux wheels across supported Python versions,
-and publishes only the core package on release tags. Benchmarks, soaks, audits,
-crate packaging, and documentation checks do not run in that workflow.
+The Python release workflow builds and verifies the portable core wheels and
+source distribution plus the separate v3 wheel matrix. It tests installed
+portable Linux wheels across supported Python versions, checks v3 numeric vector
+instructions and a clean v3 installation, and independently publishes the two
+distributions on release tags after their respective gates. Benchmarks, soaks,
+audits, crate packaging, and documentation checks do not run in that workflow.
 Select local release verification under the same scope and exception rules above.

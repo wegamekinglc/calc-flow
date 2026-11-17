@@ -6,10 +6,11 @@ For a guided first calculation, read [batch calculations](batch-guide.md).
 This page describes the Python application API and its contracts; the full
 expression catalog has its own [reference](symbolic-api.md).
 
-The `calc-flow-python` package exposes Python expressions and Arrow
-execution over the internal Rust runtime through PyO3. CPython 3.9 or newer
-is required. This page describes version `2026.11.14` in the current checkout;
-use a source build when the published package has a different version.
+The `calc-flow-python` and explicitly installed `calc-flow-python-v3`
+distributions expose the same Python expressions and Arrow execution over the
+internal Rust runtime through PyO3. CPython 3.9 or newer is required. This page
+describes version `2026.11.14` in the current checkout; use a source build when
+the published package has a different version.
 
 On this page:
 
@@ -50,6 +51,13 @@ The default Python dependencies are `pyarrow` and `typing-extensions`. The
 requirements. Project-document validation uses the native Rust runtime and does
 not require Pydantic. Maturin is required for source builds, not for installing
 a prebuilt wheel.
+
+On x86-64 processors with x86-64-v3 support, use
+`uv add calc-flow-python-v3` instead in a clean environment. The two
+distributions have the same version and `calc_flow` import package and are
+mutually exclusive; do not install both or one over the other. See
+[getting started](getting-started.md#install-published-packages) for supported
+platforms, optional-provider extras, and the coexistence error.
 
 From a source checkout:
 

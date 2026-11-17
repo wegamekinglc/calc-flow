@@ -9,6 +9,21 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-17: Add the separate, explicitly installed `calc-flow-python-v3`
+  distribution for x86-64-v3 processors. It shares the calendar version and
+  `calc_flow` import package with portable `calc-flow-python`; install exactly
+  one in a clean environment because the distributions are mutually exclusive
+  and importing with both present raises an actionable `ImportError`. Publish
+  eighteen v3 abi3 wheels across Linux, macOS, and Windows x86-64 with the same
+  six Python tags and two abi3 build tiers as the portable matrix, and no v3
+  source distribution. Only v3 jobs set `target-cpu=x86-64-v3`; portable x86-64
+  and AArch64 builds are unchanged. The release workflow verifies both artifact
+  matrices and hashes, inspects v3 numeric loops for vector instructions,
+  clean-installs a v3 wheel, and publishes the distributions independently.
+  Runtime partitioning and unified morsel-pool migration remain open. See
+  [installation](docs/getting-started.md#install-published-packages) and the
+  [Python release guide](docs/python-release.md).
+
 - 2026-11-17: Add opt-in changelog output for compact single-alias stream SQL
   aggregates. Rust exposes `SqlAggregateOutputMode::{Snapshot, Changelog}` and
   `SqlOperator::set_aggregate_output_mode`; Python adds `cf.changelog_sql` and
