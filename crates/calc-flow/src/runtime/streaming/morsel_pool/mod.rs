@@ -125,7 +125,7 @@ impl<T> MorselTicket<T> {
 
     /// Waits for the owned result. Worker-local joins fail instead of deadlocking.
     pub(crate) fn join(self) -> Result<T> {
-        if CURRENT_POOL.with(std::cell::Cell::get) == self.pool_id() {
+        if CURRENT_POOL.with(std::cell::Cell::get) != 0 {
             return Err(invalid(
                 "morsel_pool.nested",
                 "a morsel cannot join work owned by its own pool",
@@ -259,7 +259,7 @@ impl MorselClient {
         O: Send + 'static,
         F: FnOnce(T, &MorselLease) -> Result<O> + Send + 'static,
     {
-        self.inner.reject_nested()?;
+        Inner::reject_nested()?;
         self.inner.validate_cost(cost)?;
         let id = self.inner.admit(cost)?;
         let ticket = MorselTicket {
@@ -288,8 +288,9 @@ impl MorselClient {
         O: Send + 'static,
         F: FnOnce(T, &MorselLease) -> Result<O> + Send + 'static,
     {
-        self.inner.reject_nested()?;
+        Inner::reject_nested()?;
         self.inner.validate_cost(cost)?;
+        self.inner.check_open()?;
         if cost.rows <= self.inner.config.inline_rows {
             let lease = MorselLease {
                 cancellation: self.inner.cancellation.clone(),
@@ -408,12 +409,21 @@ impl Inner {
         Ok(())
     }
 
-    fn reject_nested(&self) -> Result<()> {
-        if CURRENT_POOL.with(std::cell::Cell::get) == self.id {
+    fn reject_nested() -> Result<()> {
+        if CURRENT_POOL.with(std::cell::Cell::get) != 0 {
             return Err(invalid(
                 "morsel_pool.nested",
                 "nested morsel submission is not allowed",
             ));
+        }
+        Ok(())
+    }
+
+    fn check_open(&self) -> Result<()> {
+        if lock(&self.state).closed || self.cancellation.is_cancelled() {
+            return Err(CalcFlowError::Cancelled {
+                run_id: self.name.clone(),
+            });
         }
         Ok(())
     }
@@ -428,9 +438,21 @@ impl Inner {
                 });
             }
             let next = MorselUsage {
-                morsels: state.usage.morsels.saturating_add(1),
-                rows: state.usage.rows.saturating_add(cost.rows),
-                bytes: state.usage.bytes.saturating_add(bytes),
+                morsels: state
+                    .usage
+                    .morsels
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("morsel.count", "morsel count overflowed"))?,
+                rows: state
+                    .usage
+                    .rows
+                    .checked_add(cost.rows)
+                    .ok_or_else(|| invalid("morsel.rows", "morsel row charge overflowed"))?,
+                bytes: state
+                    .usage
+                    .bytes
+                    .checked_add(bytes)
+                    .ok_or_else(|| invalid("morsel.bytes", "morsel byte charge overflowed"))?,
             };
             if next.morsels <= self.config.max_morsels
                 && next.rows <= self.config.max_rows

@@ -45,6 +45,74 @@ fn assert_cancelled<T>(result: Result<T>) {
 }
 
 #[test]
+fn closed_pool_rejects_inline_execution() {
+    let mut pool = MorselPool::new(
+        "closed-inline",
+        MorselPoolConfig {
+            inline_rows: 4,
+            ..config(1)
+        },
+    )
+    .unwrap();
+    let client = pool.client();
+    pool.close_and_join().unwrap();
+    assert_cancelled(client.execute(1, cost(1, 8), |value, _| Ok(value)));
+}
+
+#[test]
+fn admission_accounting_uses_checked_arithmetic() {
+    let mut pool = MorselPool::new(
+        "overflow",
+        MorselPoolConfig {
+            workers: 1,
+            max_morsels: 2,
+            max_rows: usize::MAX,
+            max_bytes: usize::MAX,
+            inline_rows: 0,
+        },
+    )
+    .unwrap();
+    let client = pool.client();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let first = client
+        .submit((), cost(usize::MAX, 0), move |(), _| {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(())
+        })
+        .unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let error = submission_error(client.submit((), cost(1, 0), |(), _| Ok(())));
+    assert!(matches!(
+        error,
+        CalcFlowError::InvalidArgument { ref field, .. } if field == "morsel.rows"
+    ));
+    release_tx.send(()).unwrap();
+    first.join().unwrap();
+    pool.close_and_join().unwrap();
+}
+
+#[test]
+fn nested_execution_is_rejected_across_pools() {
+    let mut outer_pool = MorselPool::new("outer", config(1)).unwrap();
+    let mut inner_pool = MorselPool::new("inner", config(1)).unwrap();
+    let outer = outer_pool.client();
+    let inner = inner_pool.client();
+    let Err(error) = outer.execute((), cost(8, 32), move |(), _| {
+        inner.execute(1, cost(1, 8), |value, _| Ok(value))
+    }) else {
+        panic!("cross-pool nested execution unexpectedly succeeded")
+    };
+    assert!(matches!(
+        error,
+        CalcFlowError::InvalidArgument { ref field, .. } if field == "morsel_pool.nested"
+    ));
+    outer_pool.close_and_join().unwrap();
+    inner_pool.close_and_join().unwrap();
+}
+
+#[test]
 fn individual_row_and_byte_bounds_are_rejected_before_queueing() {
     let mut pool = MorselPool::new(
         "bounds",
