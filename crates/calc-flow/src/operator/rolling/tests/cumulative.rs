@@ -193,10 +193,7 @@ fn test_cumulative_preserves_unordered_and_unsupported_stage_fallback() {
             .is_none()
     );
     let mut value = serde_json::to_value(spec).unwrap();
-    value["outputs"]
-        .as_array_mut()
-        .unwrap()
-        .push(delta_volume(1));
+    value["outputs"].as_array_mut().unwrap().push(lag_label(1));
     let spec = serde_json::from_value(value).unwrap();
     assert_eq!(
         compile_spec(&spec, &kernel_schema())

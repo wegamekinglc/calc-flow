@@ -168,6 +168,7 @@ enum TypedGroupPlan {
     Lag {
         input_index: usize,
         periods: usize,
+        storage: OutputStorage,
     },
 }
 
@@ -1621,11 +1622,31 @@ fn typed_group_input(
             ..
         }
         | TypedGroupPlan::Ewma { input_index, .. }
-        | TypedGroupPlan::Scan { input_index, .. }
-        | TypedGroupPlan::Lag { input_index, .. } => Ok(TypedGroupInput::Single(cast_float64(
+        | TypedGroupPlan::Scan { input_index, .. } => Ok(TypedGroupInput::Single(cast_float64(
             input.column(input_index),
             node_id,
         )?)),
+        TypedGroupPlan::Lag {
+            input_index,
+            storage,
+            ..
+        } => lag_group_input(input.column(input_index), storage, node_id),
+    }
+}
+
+fn lag_group_input(
+    input: &ArrayRef,
+    storage: OutputStorage,
+    node_id: &str,
+) -> Result<TypedGroupInput> {
+    if storage.is_signed() {
+        cast_signed(input, node_id).map(TypedGroupInput::Signed)
+    } else if storage.is_unsigned() {
+        cast_unsigned(input, node_id).map(TypedGroupInput::Unsigned)
+    } else if storage.is_float() {
+        cast_float64(input, node_id).map(TypedGroupInput::Single)
+    } else {
+        Err(internal_error("typed lag/delta has non-primitive storage"))
     }
 }
 
@@ -1978,20 +1999,22 @@ fn compile_lag_group(
     periods: u64,
     groups: &mut Vec<TypedGroupPlan>,
 ) -> std::result::Result<(), String> {
-    if output.input_type != DataType::Float64 || output.output_type != DataType::Float64 {
-        return Err("typed lag/delta currently requires Float64 input and output".into());
+    if output.input_type != output.output_type {
+        return Err("typed lag/delta requires matching input and output types".into());
     }
+    let storage = extrema_storage(&output.input_type)?;
     let periods =
         usize::try_from(periods).map_err(|_| "lag/delta periods do not fit the platform usize")?;
     if !groups.iter().any(|group| {
         matches!(group,
-            TypedGroupPlan::Lag { input_index, periods: existing }
+            TypedGroupPlan::Lag { input_index, periods: existing, .. }
             if *input_index == output.input_index && *existing == periods
         )
     }) {
         groups.push(TypedGroupPlan::Lag {
             input_index: output.input_index,
             periods,
+            storage,
         });
     }
     Ok(())
@@ -2273,11 +2296,14 @@ fn compile_lag_output(
         .iter()
         .position(|group| {
             matches!(group,
-                TypedGroupPlan::Lag { input_index, periods: existing }
+                TypedGroupPlan::Lag { input_index, periods: existing, .. }
                 if *input_index == output.input_index && *existing == periods
             )
         })
         .ok_or_else(|| "typed lag/delta group is missing".to_owned())?;
+    let TypedGroupPlan::Lag { storage, .. } = groups[group] else {
+        unreachable!("typed lag/delta group kind was checked")
+    };
     Ok(TypedOutputPlan {
         group,
         kind: if delta {
@@ -2285,7 +2311,7 @@ fn compile_lag_output(
         } else {
             TypedOutputKind::Lag
         },
-        storage: OutputStorage::Float64,
+        storage,
         min_periods: 0,
         ddof: 0,
     })
@@ -2868,32 +2894,59 @@ impl TypedScanState {
     }
 }
 
-#[derive(Clone, Debug)]
-struct TypedLagState {
-    periods: usize,
-    history: VecDeque<Option<f64>>,
-    current: Option<f64>,
-    reference: Option<f64>,
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LagValue {
+    Float(Option<f64>),
+    Signed(Option<i64>),
+    Unsigned(Option<u64>),
 }
 
-impl TypedLagState {
-    fn new(periods: usize) -> Self {
-        Self {
-            periods,
-            history: VecDeque::with_capacity(periods),
-            current: None,
-            reference: None,
+impl LagValue {
+    fn null_for(storage: OutputStorage) -> Self {
+        if storage.is_signed() {
+            Self::Signed(None)
+        } else if storage.is_unsigned() {
+            Self::Unsigned(None)
+        } else {
+            Self::Float(None)
         }
     }
 
-    fn update(&mut self, sample: Option<f64>) {
+    const fn null(self) -> Self {
+        match self {
+            Self::Float(_) => Self::Float(None),
+            Self::Signed(_) => Self::Signed(None),
+            Self::Unsigned(_) => Self::Unsigned(None),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TypedLagState {
+    periods: usize,
+    history: VecDeque<LagValue>,
+    current: LagValue,
+    reference: LagValue,
+}
+
+impl TypedLagState {
+    fn new(periods: usize, storage: OutputStorage) -> Self {
+        Self {
+            periods,
+            history: VecDeque::with_capacity(periods),
+            current: LagValue::null_for(storage),
+            reference: LagValue::null_for(storage),
+        }
+    }
+
+    fn update(&mut self, sample: LagValue) {
         self.current = sample;
         self.reference = if self.periods == 0 {
             sample
         } else if self.history.len() >= self.periods {
             self.history[self.history.len() - self.periods]
         } else {
-            None
+            sample.null()
         };
         if self.periods > 0 {
             self.history.push_back(sample);
@@ -2906,26 +2959,29 @@ impl TypedLagState {
 
 #[cfg(test)]
 mod lag_state_tests {
-    use super::TypedLagState;
+    use super::{LagValue, OutputStorage, TypedLagState};
 
     #[test]
     fn lag_preserves_null_nan_and_zero_period_references() {
-        let mut state = TypedLagState::new(1);
-        state.update(Some(1.0));
-        assert_eq!(state.reference, None);
-        state.update(Some(f64::NAN));
-        assert_eq!(state.reference, Some(1.0));
-        state.update(None);
-        assert!(state.reference.is_some_and(f64::is_nan));
-        state.update(Some(3.0));
-        assert_eq!(state.reference, None);
-        assert_eq!(state.current, Some(3.0));
+        let mut state = TypedLagState::new(1, OutputStorage::Float64);
+        state.update(LagValue::Float(Some(1.0)));
+        assert_eq!(state.reference, LagValue::Float(None));
+        state.update(LagValue::Float(Some(f64::NAN)));
+        assert_eq!(state.reference, LagValue::Float(Some(1.0)));
+        state.update(LagValue::Float(None));
+        assert!(matches!(
+            state.reference,
+            LagValue::Float(Some(value)) if value.is_nan()
+        ));
+        state.update(LagValue::Float(Some(3.0)));
+        assert_eq!(state.reference, LagValue::Float(None));
+        assert_eq!(state.current, LagValue::Float(Some(3.0)));
 
-        let mut zero = TypedLagState::new(0);
-        zero.update(Some(4.0));
-        assert_eq!(zero.reference, Some(4.0));
-        zero.update(Some(5.0));
-        assert_eq!(zero.reference, Some(5.0));
+        let mut zero = TypedLagState::new(0, OutputStorage::Float64);
+        zero.update(LagValue::Float(Some(4.0)));
+        assert_eq!(zero.reference, LagValue::Float(Some(4.0)));
+        zero.update(LagValue::Float(Some(5.0)));
+        assert_eq!(zero.reference, LagValue::Float(Some(5.0)));
     }
 }
 
@@ -2974,7 +3030,9 @@ impl TypedWindowState {
             TypedGroupPlan::Scan { kind, window, .. } => {
                 Self::Scan(TypedScanState::new(kind, window))
             }
-            TypedGroupPlan::Lag { periods, .. } => Self::Lag(TypedLagState::new(periods)),
+            TypedGroupPlan::Lag {
+                periods, storage, ..
+            } => Self::Lag(TypedLagState::new(periods, storage)),
         }
     }
 
@@ -3015,7 +3073,21 @@ impl TypedWindowState {
                 state.update(valid_float64(input, row_index, false), node_id)
             }
             (Self::Lag(state), TypedGroupInput::Single(input)) => {
-                state.update(input.is_valid(row_index).then(|| input.value(row_index)));
+                state.update(LagValue::Float(
+                    input.is_valid(row_index).then_some(input.value(row_index)),
+                ));
+                Ok(())
+            }
+            (Self::Lag(state), TypedGroupInput::Signed(input)) => {
+                state.update(LagValue::Signed(
+                    input.is_valid(row_index).then_some(input.value(row_index)),
+                ));
+                Ok(())
+            }
+            (Self::Lag(state), TypedGroupInput::Unsigned(input)) => {
+                state.update(LagValue::Unsigned(
+                    input.is_valid(row_index).then_some(input.value(row_index)),
+                ));
                 Ok(())
             }
             (Self::Decay(state), input) => {
@@ -3052,7 +3124,7 @@ impl TypedWindowState {
                 state
                     .history
                     .capacity()
-                    .saturating_mul(size_of::<Option<f64>>()),
+                    .saturating_mul(size_of::<LagValue>()),
             ),
             Self::Decay(state) => state.as_ref().map_or(0, |state| state.bytes()),
         }
@@ -3825,7 +3897,7 @@ impl DerivedBuilder {
             TypedWindowState::Pair(state) => self.append_pair(state, output),
             TypedWindowState::Ewma(state) => self.append_ewma(state, output),
             TypedWindowState::Scan(state) => self.append_scan(state, output),
-            TypedWindowState::Lag(state) => self.append_lag(state, output),
+            TypedWindowState::Lag(state) => self.append_lag(state, output, node_id),
             TypedWindowState::Decay(Some(state)) => match (self, output.kind) {
                 (Self::Float(builder, _), TypedOutputKind::Scan(ScanKind::Decay)) => {
                     builder.append_option(state.latest);
@@ -3919,22 +3991,65 @@ impl DerivedBuilder {
         }
     }
 
-    fn append_lag(&mut self, state: &TypedLagState, output: &TypedOutputPlan) -> Result<()> {
-        match (self, output.kind) {
-            (Self::Float(builder, _), TypedOutputKind::Lag) => {
-                builder.append_option(state.reference);
-                Ok(())
+    fn append_lag(
+        &mut self,
+        state: &TypedLagState,
+        output: &TypedOutputPlan,
+        node_id: &str,
+    ) -> Result<()> {
+        match (self, output.kind, state.current, state.reference) {
+            (Self::Float(builder, _), TypedOutputKind::Lag, _, LagValue::Float(reference)) => {
+                builder.append_option(reference);
             }
-            (Self::Float(builder, _), TypedOutputKind::Delta) => {
-                if let (Some(current), Some(reference)) = (state.current, state.reference) {
-                    builder.append_value(current - reference);
-                } else {
-                    builder.append_null();
+            (Self::Signed(builder, _), TypedOutputKind::Lag, _, LagValue::Signed(reference)) => {
+                builder.append_option(reference);
+            }
+            (
+                Self::Unsigned(builder, _),
+                TypedOutputKind::Lag,
+                _,
+                LagValue::Unsigned(reference),
+            ) => {
+                builder.append_option(reference);
+            }
+            (
+                Self::Float(builder, _),
+                TypedOutputKind::Delta,
+                LagValue::Float(current),
+                LagValue::Float(reference),
+            ) => match current.zip(reference) {
+                Some((current, reference)) => builder.append_value(current - reference),
+                None => builder.append_null(),
+            },
+            (
+                Self::Signed(builder, _),
+                TypedOutputKind::Delta,
+                LagValue::Signed(current),
+                LagValue::Signed(reference),
+            ) => match current.zip(reference) {
+                Some((current, reference)) => {
+                    builder.append_value(current.checked_sub(reference).ok_or_else(|| {
+                        operator_error(node_id, "rolling signed delta overflowed")
+                    })?);
                 }
-                Ok(())
-            }
-            _ => Err(typed_output_mismatch()),
+                None => builder.append_null(),
+            },
+            (
+                Self::Unsigned(builder, _),
+                TypedOutputKind::Delta,
+                LagValue::Unsigned(current),
+                LagValue::Unsigned(reference),
+            ) => match current.zip(reference) {
+                Some((current, reference)) => {
+                    builder.append_value(current.checked_sub(reference).ok_or_else(|| {
+                        operator_error(node_id, "rolling unsigned delta underflowed")
+                    })?);
+                }
+                None => builder.append_null(),
+            },
+            _ => return Err(typed_output_mismatch()),
         }
+        Ok(())
     }
 
     fn append_scan(&mut self, state: &TypedScanState, output: &TypedOutputPlan) -> Result<()> {

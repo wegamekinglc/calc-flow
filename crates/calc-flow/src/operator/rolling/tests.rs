@@ -269,7 +269,7 @@ async fn ordered_rolling_admitted_timezone_column_can_be_checkpointed() {
 #[tokio::test]
 async fn rolling_history_budget_failure_restores_rows_for_retry() {
     let mut operator =
-        RollingOperator::new("rolling", Arc::new(kernel_schema()), valid_spec()).unwrap();
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), general_spec()).unwrap();
     operator
         .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
         .unwrap();
@@ -606,6 +606,12 @@ fn valid_spec() -> RollingSpec {
     serde_json::from_value(valid_spec_json()).unwrap()
 }
 
+fn general_spec() -> RollingSpec {
+    let mut document = valid_spec_json();
+    document["outputs"] = json!([lag_label(1)]);
+    serde_json::from_value(document).unwrap()
+}
+
 fn with_field(schema: &Schema, index: usize, replacement: &Field) -> Schema {
     let fields = schema
         .fields()
@@ -799,6 +805,16 @@ fn lag_price(periods: u64) -> Value {
         "primitive_version": 1,
         "input": "price",
         "output": "price_lag",
+        "periods": periods
+    })
+}
+
+fn lag_label(periods: u64) -> Value {
+    json!({
+        "kind": "lag",
+        "primitive_version": 1,
+        "input": "label",
+        "output": "label_lag",
         "periods": periods
     })
 }
@@ -1449,6 +1465,57 @@ fn delta_unsigned_underflow_is_a_data_error() {
         matches!(error, CalcFlowError::Operator { .. }),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn typed_integer_delta_matches_general_and_preserves_checked_errors() {
+    let spec = kernel_spec(json!([delta_volume(1)]));
+    let (schema, input) =
+        primitive_volume_record(Arc::new(datafusion::arrow::array::Int64Array::from(vec![
+            7, 10, 4,
+        ])));
+    assert_typed_matches_general(&spec, &schema, &input);
+    let (schema, input) = primitive_volume_record(Arc::new(UInt64Array::from(vec![10, 13, 14])));
+    assert_typed_matches_general(&spec, &schema, &input);
+
+    let (schema, input) =
+        primitive_volume_record(Arc::new(datafusion::arrow::array::Int64Array::from(vec![
+            -1,
+            i64::MAX,
+        ])));
+    let compiled = compile_spec(&spec, &schema).unwrap();
+    assert!(
+        compiled
+            .kernel_plan
+            .open_and_fill(&input, "rolling")
+            .is_err()
+    );
+    let (schema, input) = primitive_volume_record(Arc::new(UInt64Array::from(vec![10, 3])));
+    let compiled = compile_spec(&spec, &schema).unwrap();
+    assert!(
+        compiled
+            .kernel_plan
+            .open_and_fill(&input, "rolling")
+            .is_err()
+    );
+}
+
+#[test]
+fn typed_float32_lag_delta_matches_general() {
+    let spec = kernel_spec(json!([
+        {
+            "kind": "lag",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_lag",
+            "periods": 1
+        },
+        delta_volume(1)
+    ]));
+    let (schema, input) = primitive_volume_record(Arc::new(
+        datafusion::arrow::array::Float32Array::from(vec![Some(1.0), None, Some(3.5)]),
+    ));
+    assert_typed_matches_general(&spec, &schema, &input);
 }
 
 #[test]

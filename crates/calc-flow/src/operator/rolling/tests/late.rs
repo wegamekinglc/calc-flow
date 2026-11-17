@@ -13,7 +13,7 @@ fn job() -> StreamJobContext {
 }
 
 fn operator(policy: LatePolicySpec, lateness: u64) -> RollingOperator {
-    let mut spec = valid_spec();
+    let mut spec = general_spec();
     spec.late_policy = policy;
     spec.allowed_lateness_micros = lateness;
     RollingOperator::new("roll", Arc::new(input_schema()), spec).unwrap()
