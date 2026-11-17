@@ -9,6 +9,26 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-18: Add a crate-private synchronous columnar Join run core. Each
+  retained input morsel becomes an immutable Arrow run with group-ID,
+  event-time, and physical row-ID columns. Stable run/row locators are merged
+  per key in `(event_time, row_id)` order without rewriting out-of-order Arrow
+  payloads, and probe-only rows create no persistent run. Native probing
+  produces ordered incoming/opposite selection vectors and enforces the match
+  cap before selection allocation. Output columns materialize through Arrow
+  `take` or `interleave`, including direct projections and dictionary/nested
+  payloads. Strict watermark expiry cuts ordered prefixes and retires empty
+  runs. Per-side logical accounting covers live retained rows, payload cells,
+  identity/locator columns, run owners, and index capacities, including
+  replacement overlap. In-memory snapshot restore validates locator coverage,
+  ordering, row-ID frontiers, and accounting, then continues with identical
+  output records and sequences and equal snapshot fingerprints. Production
+  `StreamJoinOperator` admission and durable v4 state-page wiring are not
+  connected yet; existing managed Join layouts 1–3 and recovery contracts remain
+  unchanged. ASOF migration, final old-layout deletion, and performance gates
+  remain open. See
+  [the columnar run core](docs/streaming-guide.md#columnar-run-core).
+
 - 2026-11-18: Add N=1 pane preaggregation for hopping windows whose complete
   aggregate list contains only `count`, `min`, and `max`. Slide-aligned panes
   use mathematical floor for negative timestamps; each valid row updates one

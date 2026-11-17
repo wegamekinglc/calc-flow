@@ -100,6 +100,16 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   panes/open-windows，兼容恢复后的后续输出与 snapshot bytes 逐位一致。8 项 pane 测试、53 项 window 测试和
   clippy 通过。SUM/AVG 及含它们的混合列表仍走 legacy per-window 路径；其他聚合扩展、P6 分区 dispatch、
   性能验收和最终旧路径/旧 codec 删除仍未完成。
+- P5.1 Join run 核心部分交付（`695d301a`）：每个保留 morsel 形成不可变 Arrow run，携带 group ID、event time
+  和物理 row ID 列；`(run ID, row offset)` locator 按 `(event_time, row_id)` 合并到 per-key 有序索引，乱序 run
+  不重写 payload，probe-only 行不建立持久 run。原生探测复用 shared keyed core 和单调 window cursor，生成保持
+  `(incoming admitted position, opposite event_time, opposite row_id)` 顺序的 selection vectors；输出按列通过
+  Arrow `take`/`interleave` 物化，覆盖 projection、dictionary 和 nested payload。watermark 仍使用严格
+  `row_time + extension < opposite_watermark` 前缀淘汰，EOF 清空对应侧。每侧 rows 计 live retained rows，bytes 覆盖
+  retained payload、identity/locator columns、run owners 与 index capacities，并计入 replacement overlap。
+  内存 snapshot/restore 校验 locator 覆盖、顺序、row-ID/frontier 和 accounting，后续输出与序列一致且 snapshot fingerprint
+  相同。Join 569 项和 clippy 通过。该核心尚未接入生产 `StreamJoinOperator` admission 或 v4 state pages；
+  现有 managed Join layouts 1–3 和恢复路径保持不变。生产接线、ASOF 迁移、最终旧 layout 删除和性能门槛仍未完成。
 
 ## 1. 目标
 

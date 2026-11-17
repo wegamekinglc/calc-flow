@@ -1510,6 +1510,59 @@ Rust/Python retain exact integer microseconds.
 
 ### Join output materialization and recovery
 
+#### Columnar run core
+
+The crate-private
+`crates/calc-flow/src/operator/join/runs.rs` compute core represents each
+retained input morsel as an immutable Arrow run with parallel group-ID,
+event-time, and physical row-ID columns. A stable `(run ID, row offset)`
+locator identifies each retained row. Per-key buckets merge those locators in
+`(event_time, row_id)` order, including for out-of-order admission, without
+rewriting the run's Arrow payload. Rows whose retain bit is false remain only in the temporary admitted
+input and create no persistent run state.
+
+Native probing routes incoming keys through the shared keyed core and searches
+only the opposite side's bucket for that group. Inclusive time-window searches
+reuse a forward cursor for monotonic same-key probes and use partition-point
+searches otherwise. The complete match count is checked before selection
+allocation. Parallel incoming/opposite selections preserve `(incoming admitted
+position, opposite event_time, opposite row_id)` order. Materialization
+translates the selections into source locations and gathers output columns
+through Arrow `take` for a single source owner or `interleave` for multiple
+owners, preserving direct-consumer projection and dictionary/nested payload
+behavior.
+
+The run core's `max_state_rows_per_side` charge is the number of live retained
+rows. Its `max_state_bytes_per_side` logical charge covers retained Arrow
+payload cells, group/time/row-ID and locator columns, run owners, per-key bucket
+capacity, and expiration-index capacity. Prospective admission includes the
+overlap between existing state and replacement indexes; shared key-store
+ownership is outside either per-side charge. These are deterministic logical
+limits, not allocator or process-RSS measurements.
+
+Watermark expiry retains the strict predicate
+`row_time + extension < opposite_watermark`, so equality does not evict a row.
+An ordered expiration partition point selects the expired prefix; per-run and
+per-key heads then advance together, empty runs and buckets are released, and
+end-of-input expires the complete side. Eviction emits no matched output or
+retraction.
+
+The core's in-memory snapshot clones immutable run and index owners. Restore
+validates run identity and prefixes, row-ID uniqueness and frontiers, locator
+ordering and coverage, expiration order, and logical accounting before
+installing state. Compatible continuation produces identical subsequent output
+records and sequences, with equal snapshot fingerprints.
+
+This compute core is tested directly but is not yet connected to production
+`StreamJoinOperator` admission or durable ownership. The v4 runner does not yet
+expose Join state pages, and `RunStateSnapshot` is not a durable checkpoint
+encoding. The existing operator's native/DataFusion paths, logical V1 charges,
+physical layouts 1–3, and managed recovery contracts below therefore remain in
+force. ASOF migration, final old-layout deletion, and performance acceptance
+remain open.
+
+#### Existing operator storage and recovery
+
 Join retains payload chunks with columnar row metadata and stable chunk/row
 references. Expiration advances sorted run heads without relocating surviving
 rows. Native matching stores opposite row references plus incoming identity
