@@ -500,3 +500,106 @@ fn nested_ticket_join_is_rejected_without_waiting() {
     pool.close_and_join().unwrap();
     assert_eq!(pool.usage(), MorselUsage::default());
 }
+
+#[test]
+fn settled_ticket_can_join_after_pool_drop() {
+    let mut pool = MorselPool::new("ticket-drop", config(1)).unwrap();
+    let client = pool.client();
+    let (done_tx, done_rx) = mpsc::channel();
+    let ticket = client
+        .submit(7, cost(1, 8), move |value, _| {
+            done_tx.send(()).unwrap();
+            Ok(value)
+        })
+        .unwrap();
+    done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    pool.close_and_join().unwrap();
+    drop(client);
+    drop(pool);
+    assert_eq!(ticket.join().unwrap(), 7);
+}
+
+#[test]
+fn direct_cancellation_wakes_blocked_admission() {
+    let mut pool = MorselPool::new(
+        "cancel-admission",
+        MorselPoolConfig {
+            max_morsels: 1,
+            ..config(1)
+        },
+    )
+    .unwrap();
+    let client = pool.client();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let first = client
+        .submit((), cost(8, 32), move |(), _| {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(())
+        })
+        .unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let second_client = client.clone();
+    let (calling_tx, calling_rx) = mpsc::channel();
+    let (submitted_tx, submitted_rx) = mpsc::channel();
+    let second = thread::spawn(move || {
+        calling_tx.send(()).unwrap();
+        submitted_tx
+            .send(second_client.submit((), cost(1, 8), |(), _| Ok(())))
+            .unwrap();
+    });
+    calling_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    pool.cancellation().cancel();
+    let outcome = submitted_rx.recv_timeout(Duration::from_secs(2));
+    release_tx.send(()).unwrap();
+    first.join().unwrap();
+    second.join().unwrap();
+    pool.close_and_join().unwrap();
+    let result = outcome.expect("cancellation did not wake admission");
+    assert_cancelled(match result {
+        Ok(ticket) => ticket.join(),
+        Err(error) => Err(error),
+    });
+}
+
+#[test]
+fn queued_cancellation_contains_input_destructor_panics() {
+    struct PanicDrop;
+    impl Drop for PanicDrop {
+        fn drop(&mut self) {
+            panic!("morsel input drop panic")
+        }
+    }
+
+    let mut pool = MorselPool::new(
+        "drop-panic",
+        MorselPoolConfig {
+            max_morsels: 2,
+            ..config(1)
+        },
+    )
+    .unwrap();
+    let client = pool.client();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let first = client
+        .submit((), cost(8, 32), move |(), _| {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(())
+        })
+        .unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let second = client
+        .submit(PanicDrop, cost(8, 32), |_, _| Ok(()))
+        .unwrap();
+    second.cancel();
+    let Err(CalcFlowError::TaskPanicked { message, .. }) = second.join() else {
+        panic!("destructor panic was not contained as a task failure")
+    };
+    assert!(message.contains("morsel input drop panic"));
+    release_tx.send(()).unwrap();
+    first.join().unwrap();
+    pool.close_and_join().unwrap();
+}

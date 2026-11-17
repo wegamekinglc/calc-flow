@@ -87,6 +87,23 @@ impl MorselLease {
     }
 }
 
+/// A cancellation handle that also wakes blocked workers and admission.
+#[derive(Clone)]
+pub(crate) struct MorselCancellation {
+    token: CancellationToken,
+    pool: Weak<Inner>,
+}
+
+impl MorselCancellation {
+    pub(crate) fn cancel(&self) {
+        self.token.cancel();
+        if let Some(pool) = self.pool.upgrade() {
+            pool.ready.notify_all();
+            pool.settled.notify_all();
+        }
+    }
+}
+
 struct TicketState<T> {
     result: Mutex<Option<Result<T>>>,
     ready: Condvar,
@@ -125,7 +142,7 @@ impl<T> MorselTicket<T> {
 
     /// Waits for the owned result. Worker-local joins fail instead of deadlocking.
     pub(crate) fn join(self) -> Result<T> {
-        if CURRENT_POOL.with(std::cell::Cell::get) != 0 {
+        if self.pool.upgrade().is_some() && CURRENT_POOL.with(std::cell::Cell::get) != 0 {
             return Err(invalid(
                 "morsel_pool.nested",
                 "a morsel cannot join work owned by its own pool",
@@ -142,10 +159,6 @@ impl<T> MorselTicket<T> {
         result
             .take()
             .expect("morsel ticket result is present after settlement")
-    }
-
-    fn pool_id(&self) -> u64 {
-        self.pool.upgrade().map_or(0, |pool| pool.id)
     }
 
     fn settle(&self, result: Result<T>, pool: &Inner) {
@@ -221,12 +234,25 @@ where
     }
 
     fn cancel(self: Box<Self>, pool: &Inner) {
-        self.ticket.settle(
-            Err(CalcFlowError::Cancelled {
-                run_id: pool.name.clone(),
-            }),
-            pool,
-        );
+        let ticket = self.ticket.clone();
+        match catch_unwind(AssertUnwindSafe(|| drop(self))) {
+            Ok(()) => ticket.settle(
+                Err(CalcFlowError::Cancelled {
+                    run_id: pool.name.clone(),
+                }),
+                pool,
+            ),
+            Err(payload) => {
+                ticket.settle(
+                    Err(CalcFlowError::TaskPanicked {
+                        task_id: ticket.id,
+                        message: panic_message(payload.as_ref()),
+                    }),
+                    pool,
+                );
+                pool.fail();
+            }
+        }
     }
 
     fn id(&self) -> u64 {
@@ -317,6 +343,7 @@ pub(crate) struct MorselPool {
     inner: Arc<Inner>,
     workers: Vec<JoinHandle<()>>,
     closed: bool,
+    join_error: Option<String>,
 }
 
 impl MorselPool {
@@ -336,21 +363,34 @@ impl MorselPool {
             cancellation: CancellationToken::new(),
             next_ticket: AtomicU64::new(1),
         });
-        let mut workers = Vec::with_capacity(config.workers);
+        let mut workers: Vec<JoinHandle<()>> = Vec::with_capacity(config.workers);
         for index in 0..config.workers {
             let worker_inner = Arc::clone(&inner);
-            let handle = thread::Builder::new()
+            let handle = match thread::Builder::new()
                 .name(format!("{name}-morsel-{index}"))
                 .spawn(move || worker_loop(worker_inner))
-                .map_err(|error| CalcFlowError::Internal {
-                    message: format!("morsel worker could not start: {error}"),
-                })?;
+            {
+                Ok(handle) => handle,
+                Err(error) => {
+                    inner.cancellation.cancel();
+                    lock(&inner.state).closed = true;
+                    inner.ready.notify_all();
+                    inner.settled.notify_all();
+                    for worker in workers {
+                        let _ = worker.join();
+                    }
+                    return Err(CalcFlowError::Internal {
+                        message: format!("morsel worker could not start: {error}"),
+                    });
+                }
+            };
             workers.push(handle);
         }
         Ok(Self {
             inner,
             workers,
             closed: false,
+            join_error: None,
         })
     }
 
@@ -360,8 +400,11 @@ impl MorselPool {
         }
     }
 
-    pub(crate) fn cancellation(&self) -> CancellationToken {
-        self.inner.cancellation.clone()
+    pub(crate) fn cancellation(&self) -> MorselCancellation {
+        MorselCancellation {
+            token: self.inner.cancellation.clone(),
+            pool: Arc::downgrade(&self.inner),
+        }
     }
 
     pub(crate) fn usage(&self) -> MorselUsage {
@@ -370,7 +413,15 @@ impl MorselPool {
 
     pub(crate) fn close_and_join(&mut self) -> Result<()> {
         if self.closed {
-            return Ok(());
+            return self.join_error.as_ref().map_or_else(
+                || Ok(()),
+                |message| {
+                    Err(CalcFlowError::TaskPanicked {
+                        task_id: self.inner.id,
+                        message: message.clone(),
+                    })
+                },
+            );
         }
         self.closed = true;
         self.inner.cancellation.cancel();
@@ -380,13 +431,18 @@ impl MorselPool {
         self.inner.cancel_queued();
         self.inner.ready.notify_all();
         self.inner.settled.notify_all();
+        let mut first_error = None;
         for worker in self.workers.drain(..) {
-            worker
-                .join()
-                .map_err(|payload| CalcFlowError::TaskPanicked {
-                    task_id: self.inner.id,
-                    message: panic_message(payload.as_ref()),
-                })?;
+            if let Err(payload) = worker.join() {
+                first_error.get_or_insert_with(|| panic_message(payload.as_ref()));
+            }
+        }
+        if let Some(message) = first_error {
+            self.join_error = Some(message.clone());
+            return Err(CalcFlowError::TaskPanicked {
+                task_id: self.inner.id,
+                message,
+            });
         }
         Ok(())
     }
