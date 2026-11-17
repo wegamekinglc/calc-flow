@@ -128,6 +128,96 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  v3-wheels:
+    name: V3 Wheel ${{ matrix.os }} ${{ matrix.target }} ${{ matrix.python_tag }}
+    needs: prepare-python-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64
+            python_tag: cp313
+            manylinux: "2_28"
+          - os: ubuntu-latest
+            target: x86_64
+            python_tag: cp39
+            manylinux: "2_28"
+          - os: macos-15-intel
+            target: x86_64
+            python_tag: cp313
+            manylinux: "off"
+          - os: macos-15-intel
+            target: x86_64
+            python_tag: cp39
+            manylinux: "off"
+          - os: windows-latest
+            target: x64
+            python_tag: cp313
+            manylinux: "off"
+          - os: windows-latest
+            target: x64
+            python_tag: cp39
+            manylinux: "off"
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Prepare isolated v3 source
+        run: python scripts/prepare_v3_source.py --output v3-source
+      - name: Build modern v3 abi3 wheel
+        if: matrix.python_tag == 'cp313'
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64-v3
+          CARGO_PROFILE_RELEASE_STRIP: none
+        with:
+          command: build
+          maturin-version: v1.14.1
+          rust-toolchain: "1.94.0"
+          working-directory: v3-source
+          target: ${{ matrix.target }}
+          args: --release --locked --out dist --find-interpreter --features pyo3/abi3-py313
+          manylinux: ${{ matrix.manylinux }}
+      - name: Build legacy v3 abi3 wheel
+        if: matrix.python_tag == 'cp39'
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64-v3
+          CARGO_PROFILE_RELEASE_STRIP: none
+        with:
+          command: build
+          maturin-version: v1.14.1
+          rust-toolchain: "1.94.0"
+          working-directory: v3-source
+          target: ${{ matrix.target }}
+          args: --release --locked --out dist --find-interpreter --features legacy-python
+          manylinux: ${{ matrix.manylinux }}
+      - name: Add explicit v3 Python version tags
+        shell: bash
+        run: |
+          python -m pip install wheel==0.46.3
+          shopt -s nullglob
+          wheels=(v3-source/dist/*.whl)
+          test "${#wheels[@]}" -eq 1
+          case "${{ matrix.python_tag }}" in
+            cp39) tags=(cp310 cp311 cp312) ;;
+            cp313) tags=(cp314) ;;
+            *) exit 1 ;;
+          esac
+          for tag in "${tags[@]}"; do
+            python -m wheel tags --python-tag="$tag" "${wheels[0]}"
+          done
+      - name: Upload v3 wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: v3-wheel-${{ matrix.os }}-${{ matrix.target }}-${{ matrix.python_tag }}
+          path: v3-source/dist/*.whl
+          if-no-files-found: error
+          retention-days: 30
+
   sdist:
     name: Python source distribution
     needs: prepare-python-release
@@ -243,6 +333,66 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  verify-v3-artifacts:
+    name: Verify x86-64-v3 Python artifacts
+    needs: [v3-wheels]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Download v3 wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: v3-wheel-*
+          path: dist-v3
+          merge-multiple: true
+      - name: Verify v3 wheel matrix and metadata
+        shell: bash
+        run: |
+          args=(--dist-dir dist-v3 --core-only --distribution calc-flow-python-v3)
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            args+=(--tag "${GITHUB_REF_NAME}")
+          fi
+          python scripts/verify_python_release.py "${args[@]}" > v3-release-manifest.txt
+      - name: Inspect v3 numeric vector instructions
+        shell: bash
+        run: |
+          shopt -s nullglob
+          wheels=(dist-v3/*manylinux*_x86_64.whl)
+          test "${#wheels[@]}" -gt 0
+          for wheel in "${wheels[@]}"; do
+            python scripts/inspect_v3_wheel.py "$wheel"
+          done
+      - name: Upload verified v3 manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: v3-release-manifest
+          path: v3-release-manifest.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  v3-wheel-smoke:
+    name: Clean-install v3 wheel
+    needs: [verify-v3-artifacts]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Download Linux v3 wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: v3-wheel-ubuntu-latest-x86_64-cp313
+          path: dist-v3
+      - name: Install and import only v3 distribution
+        shell: bash
+        run: |
+          python -m venv /tmp/calc-flow-v3-smoke
+          /tmp/calc-flow-v3-smoke/bin/pip install dist-v3/*-cp313-abi3-*.whl
+          /tmp/calc-flow-v3-smoke/bin/python -c "import calc_flow; assert calc_flow.__version__"
+
   publish-python-core:
     name: Publish calc-flow-python to PyPI
     if: github.event_name == 'push' && github.ref_type == 'tag'
@@ -276,3 +426,32 @@ jobs:
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: dist
+
+  publish-python-v3:
+    name: Publish calc-flow-python-v3 to PyPI
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [verify-v3-artifacts, v3-wheel-smoke]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/calc-flow-python-v3/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download v3 wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: v3-wheel-*
+          path: dist-v3
+          merge-multiple: true
+      - name: Download verified v3 manifest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: v3-release-manifest
+      - name: Confirm v3 artifact integrity
+        run: sha256sum --check ../v3-release-manifest.txt
+        working-directory: dist-v3
+      - name: Publish v3 artifacts
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist-v3

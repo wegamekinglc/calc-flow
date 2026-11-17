@@ -1,4 +1,10 @@
+# ruff: noqa: E402 -- distribution exclusivity must run before native import.
 from __future__ import annotations
+
+from calc_flow._distribution import ensure_single_distribution
+
+ensure_single_distribution()
+del ensure_single_distribution
 
 from calc_flow import _native as _native
 from calc_flow import symbolic
