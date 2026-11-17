@@ -1150,34 +1150,49 @@ impl KeyColumn {
 
     fn push(&mut self, array: &ArrayRef, row: usize) -> Result<()> {
         match self {
-            Self::Boolean(values) => {
-                let input = array
-                    .as_any()
-                    .downcast_ref::<BooleanArray>()
-                    .ok_or_else(|| keyed_error("Boolean key birth array differs"))?;
-                values.push(input.is_valid(row).then_some(input.value(row)));
-                Ok(())
-            }
-            Self::Utf8(values) => {
-                let input = typed_string::<StringArray>(array)?;
-                values.push(
-                    input
-                        .is_valid(row)
-                        .then(|| Arc::<str>::from(input.value(row))),
-                );
-                Ok(())
-            }
-            Self::LargeUtf8(values) => {
-                let input = typed_string::<LargeStringArray>(array)?;
-                values.push(
-                    input
-                        .is_valid(row)
-                        .then(|| Arc::<str>::from(input.value(row))),
-                );
-                Ok(())
-            }
+            Self::Boolean(_) => self.push_boolean(array, row),
+            Self::Utf8(_) => self.push_utf8(array, row),
+            Self::LargeUtf8(_) => self.push_large_utf8(array, row),
             _ => self.push_primitive(array, row),
         }
+    }
+
+    fn push_boolean(&mut self, array: &ArrayRef, row: usize) -> Result<()> {
+        let Self::Boolean(values) = self else {
+            unreachable!("boolean key birth dispatch was checked")
+        };
+        let input = array
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| keyed_error("Boolean key birth array differs"))?;
+        values.push(input.is_valid(row).then_some(input.value(row)));
+        Ok(())
+    }
+
+    fn push_utf8(&mut self, array: &ArrayRef, row: usize) -> Result<()> {
+        let Self::Utf8(values) = self else {
+            unreachable!("UTF-8 key birth dispatch was checked")
+        };
+        let input = typed_string::<StringArray>(array)?;
+        values.push(
+            input
+                .is_valid(row)
+                .then(|| Arc::<str>::from(input.value(row))),
+        );
+        Ok(())
+    }
+
+    fn push_large_utf8(&mut self, array: &ArrayRef, row: usize) -> Result<()> {
+        let Self::LargeUtf8(values) = self else {
+            unreachable!("large UTF-8 key birth dispatch was checked")
+        };
+        let input = typed_string::<LargeStringArray>(array)?;
+        values.push(
+            input
+                .is_valid(row)
+                .then(|| Arc::<str>::from(input.value(row))),
+        );
+        Ok(())
     }
 
     fn push_primitive(&mut self, array: &ArrayRef, row: usize) -> Result<()> {
