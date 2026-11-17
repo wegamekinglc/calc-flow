@@ -12,7 +12,7 @@ use crate::state::{
 
 #[allow(dead_code, reason = "P3.4 runner wiring uses these recovery states")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::state) enum V4Recovery {
+pub(crate) enum V4Recovery {
     PreviousManifest,
     RecoveryRequired,
 }
@@ -28,7 +28,7 @@ struct ActiveEpoch {
     persisted: Option<V4PersistedTable>,
     manifest: Option<V4Manifest>,
     manifest_path: Option<std::path::PathBuf>,
-    opaque: Option<V4OpaqueAdapter>,
+    opaque: Vec<V4OpaqueAdapter>,
     opaque_persisted: bool,
     terminal: bool,
     barrier_forwarded: bool,
@@ -45,7 +45,7 @@ impl ActiveEpoch {
             persisted: None,
             manifest: Some(manifest),
             manifest_path: None,
-            opaque: None,
+            opaque: Vec::new(),
             opaque_persisted: false,
             terminal,
             barrier_forwarded: false,
@@ -57,7 +57,7 @@ impl ActiveEpoch {
 }
 
 #[derive(Debug)]
-pub(in crate::state) struct V4Coordinator {
+pub(crate) struct V4Coordinator {
     store: Option<V4Store>,
     active: Option<ActiveEpoch>,
     previous: Option<V4PersistedTable>,
@@ -90,14 +90,22 @@ impl Default for V4Coordinator {
     reason = "P3.4 runner wiring uses stop, recovery and active-epoch inspection"
 )]
 impl V4Coordinator {
-    pub(in crate::state) fn new(store: V4Store) -> Self {
+    pub(crate) fn new(store: V4Store) -> Self {
         Self {
             store: Some(store),
             ..Self::default()
         }
     }
 
-    pub(in crate::state) fn with_limit(store: V4Store, max_inflight_bytes: usize) -> Self {
+    pub(crate) fn with_completed(store: V4Store, last_completed: u64) -> Self {
+        Self {
+            store: Some(store),
+            last_completed: Some(last_completed),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn with_limit(store: V4Store, max_inflight_bytes: usize) -> Self {
         Self {
             store: Some(store),
             max_inflight_bytes,
@@ -105,7 +113,7 @@ impl V4Coordinator {
         }
     }
 
-    pub(in crate::state) fn begin(
+    pub(crate) fn begin(
         &mut self,
         table: &mut StateTable,
         epoch: u64,
@@ -141,16 +149,12 @@ impl V4Coordinator {
         Ok(())
     }
 
-    pub(in crate::state) fn begin_with_opaque(
-        &mut self,
-        adapter: V4OpaqueAdapter,
-        epoch: u64,
-    ) -> Result<()> {
-        self.active_mut(epoch)?.opaque = Some(adapter);
+    pub(crate) fn begin_with_opaque(&mut self, adapter: V4OpaqueAdapter, epoch: u64) -> Result<()> {
+        self.active_mut(epoch)?.opaque.push(adapter);
         Ok(())
     }
 
-    pub(in crate::state) fn forward_barrier(&mut self, epoch: u64) -> Result<()> {
+    pub(crate) fn forward_barrier(&mut self, epoch: u64) -> Result<()> {
         let active = self.active_mut(epoch)?;
         if active.terminal {
             return Err(mismatch(
@@ -161,7 +165,7 @@ impl V4Coordinator {
         Ok(())
     }
 
-    pub(in crate::state) async fn persist(&mut self, epoch: u64) -> Result<()> {
+    pub(crate) async fn persist(&mut self, epoch: u64) -> Result<()> {
         let Some((freeze, manifest)) = self.take_capture(epoch)? else {
             return Ok(());
         };
@@ -205,14 +209,14 @@ impl V4Coordinator {
     }
 
     async fn persist_opaque(&mut self, epoch: u64) -> Result<()> {
-        let adapter = self.active_mut(epoch)?.opaque.take();
-        let Some(adapter) = adapter else {
-            return Ok(());
-        };
-        let owner = adapter.owner().to_owned();
-        let (operator, _) = adapter.persist(self.store_mut()?, epoch).await?;
-        let active = self.active_mut(epoch)?;
-        Self::record_opaque_manifest(active, owner, operator)
+        let adapters = std::mem::take(&mut self.active_mut(epoch)?.opaque);
+        for adapter in adapters {
+            let owner = adapter.owner().to_owned();
+            let (operator, _) = adapter.persist(self.store_mut()?, epoch).await?;
+            let active = self.active_mut(epoch)?;
+            Self::record_opaque_manifest(active, owner, operator)?;
+        }
+        Ok(())
     }
 
     fn record_opaque_manifest(
@@ -231,12 +235,12 @@ impl V4Coordinator {
         Ok(())
     }
 
-    pub(in crate::state) fn precommit_sink(&mut self, epoch: u64) -> Result<()> {
+    pub(crate) fn precommit_sink(&mut self, epoch: u64) -> Result<()> {
         self.active_mut(epoch)?.sink_precommitted = true;
         Ok(())
     }
 
-    pub(in crate::state) fn publish_manifest(&mut self, epoch: u64) -> Result<()> {
+    pub(crate) fn publish_manifest(&mut self, epoch: u64) -> Result<()> {
         let Some(manifest) = self.manifest_for_publication(epoch)? else {
             return Ok(());
         };
@@ -274,7 +278,7 @@ impl V4Coordinator {
         Ok(())
     }
 
-    pub(in crate::state) fn commit_sink(&mut self, epoch: u64) -> Result<()> {
+    pub(crate) fn commit_sink(&mut self, epoch: u64) -> Result<()> {
         let active = self.active_mut(epoch)?;
         if !active.manifest_durable {
             return Err(mismatch("sink commit precedes manifest durability".into()));
@@ -283,11 +287,7 @@ impl V4Coordinator {
         Ok(())
     }
 
-    pub(in crate::state) fn acknowledge_source(
-        &mut self,
-        table: &mut StateTable,
-        epoch: u64,
-    ) -> Result<()> {
+    pub(crate) fn acknowledge_source(&mut self, table: &mut StateTable, epoch: u64) -> Result<()> {
         let previous = self.persisted_for_acknowledgement(epoch)?.lineage.clone();
         table.settle_freeze(epoch, previous)?;
         let active = self
@@ -316,7 +316,7 @@ impl V4Coordinator {
             .ok_or_else(|| mismatch("source acknowledgement has no persisted lineage".into()))
     }
 
-    pub(in crate::state) fn stop(&mut self) {
+    pub(crate) fn stop(&mut self) {
         if let Some(active) = self.active.take() {
             self.recovery = Some(if active.manifest_durable {
                 V4Recovery::RecoveryRequired
@@ -327,15 +327,15 @@ impl V4Coordinator {
         self.stopped = true;
     }
 
-    pub(in crate::state) const fn last_completed(&self) -> Option<u64> {
+    pub(crate) const fn last_completed(&self) -> Option<u64> {
         self.last_completed
     }
 
-    pub(in crate::state) const fn recovery(&self) -> Option<V4Recovery> {
+    pub(crate) const fn recovery(&self) -> Option<V4Recovery> {
         self.recovery
     }
 
-    pub(in crate::state) fn active_epoch(&self) -> Option<u64> {
+    pub(crate) fn active_epoch(&self) -> Option<u64> {
         self.active.as_ref().map(|active| active.epoch)
     }
 
@@ -348,7 +348,7 @@ impl V4Coordinator {
         }
     }
 
-    fn store_mut(&mut self) -> Result<&mut V4Store> {
+    pub(crate) fn store_mut(&mut self) -> Result<&mut V4Store> {
         self.store
             .as_mut()
             .ok_or_else(|| mismatch("checkpoint store is absent".into()))

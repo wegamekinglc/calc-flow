@@ -20,12 +20,12 @@ use crate::runtime::streaming::progress::{
     prepare::{ArrowTimestampUnit, ResolvedEventTimeColumn},
 };
 use crate::{
-    Batch, BatchKind, BatchMetadata, CalcFlowError, Cursor, Edge, EdgeBudget, EventTime,
-    ExpressionOperator, JobState, JsonMap, NativeWatermarkCapability, OperatorMetadata,
-    PipelineBuilder, Port, PortEndpoint, ReplayPositioning, RollingOperator, RollingSpec,
-    SinkBinding, SourceBinding, SourceCapabilities, SourceDeliveryCapability, SourceEvent,
-    SourceSchema, StreamExecutionPlan, StreamRequirements, StreamRuntimeConfig, StreamSink,
-    StreamSource, StreamingRunner, UdfRegistry, WatermarkPolicy,
+    Batch, BatchKind, BatchMetadata, CalcFlowError, Cursor, Edge, EdgeBudget, Epoch, EventTime,
+    ExpressionOperator, JobState, JsonMap, ManagedCheckpointRuntime, NativeWatermarkCapability,
+    OperatorMetadata, PipelineBuilder, Port, PortEndpoint, ReplayPositioning, RollingOperator,
+    RollingSpec, SinkBinding, SourceBinding, SourceCapabilities, SourceDeliveryCapability,
+    SourceEvent, SourceSchema, StreamExecutionPlan, StreamRequirements, StreamRuntimeConfig,
+    StreamSink, StreamSource, StreamingRunner, UdfRegistry, WatermarkPolicy,
 };
 
 type Row = (i64, &'static str, u64, f64);
@@ -322,6 +322,48 @@ fn test_rolling_projection_with_explicit_watermarks_matches_runner() {
     assert_eq!(emitted_per_push, [2, 1, 1]);
     assert_eq!(rows.len(), 5);
     assert_eq!(rows, rendered_rows(&expected[&output]));
+}
+
+#[test]
+fn durable_session_checkpoint_restores_operator_and_input_progress() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("managed");
+    let mut config = session_config();
+    config.checkpointing = true;
+    let mut session = StreamSession::new_with_checkpoints(
+        rolling_projection_plan(),
+        &config,
+        BTreeMap::new(),
+        ManagedCheckpointRuntime::new(&root).unwrap(),
+    )
+    .unwrap();
+    let input = session.input_ids()[0].to_owned();
+    let output = session.output_ids()[0].to_owned();
+    session
+        .push(
+            &input,
+            input_batch(&[(10, "a", 0, 1.0), (10, "b", 1, 2.0)]),
+            Some(micros(10)),
+        )
+        .unwrap();
+    assert_eq!(session.checkpoint().unwrap(), Epoch::new(1).unwrap());
+    drop(session);
+
+    let mut restored = StreamSession::restore(
+        rolling_projection_plan(),
+        &config,
+        BTreeMap::new(),
+        ManagedCheckpointRuntime::new(&root).unwrap(),
+    )
+    .unwrap();
+    let emitted = restored
+        .push(&input, input_batch(&[(11, "a", 2, 3.0)]), Some(micros(11)))
+        .unwrap();
+    assert_eq!(
+        rendered_rows(emitted.batches(&output)),
+        vec!["1970-01-01T00:00:00.000011Z|a|2.0".to_owned()]
+    );
+    assert_eq!(restored.checkpoint().unwrap(), Epoch::new(2).unwrap());
 }
 
 fn ordered(input: &str) -> BTreeMap<String, SessionWatermark> {

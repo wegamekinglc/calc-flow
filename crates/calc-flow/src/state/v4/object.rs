@@ -16,11 +16,11 @@ use sha2::{Digest, Sha256};
 use super::{Result, format_error, mismatch};
 use crate::{canonical_json, json::validate_portable_identifier};
 
-pub(in crate::state) const V4_MAGIC: &[u8; 6] = b"CFST4\0";
+pub(crate) const V4_MAGIC: &[u8; 6] = b"CFST4\0";
 const HEADER_BYTES: usize = V4_MAGIC.len() + 1 + size_of::<u64>();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::state) enum ObjectKind {
+pub(crate) enum ObjectKind {
     Page,
     PartitionIndex,
     SourceHistory,
@@ -47,7 +47,7 @@ impl ObjectKind {
         }
     }
 
-    pub(in crate::state) fn directory(self) -> &'static str {
+    pub(crate) fn directory(self) -> &'static str {
         match self {
             Self::Page => "pages",
             Self::PartitionIndex => "partitions",
@@ -59,17 +59,17 @@ impl ObjectKind {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::state) struct V4Handle {
-    pub(in crate::state) owner: String,
-    pub(in crate::state) epoch: u64,
-    pub(in crate::state) object_id: String,
-    pub(in crate::state) relative_path: String,
-    pub(in crate::state) byte_len: u64,
-    pub(in crate::state) sha256: String,
+pub(crate) struct V4Handle {
+    pub(crate) owner: String,
+    pub(crate) epoch: u64,
+    pub(crate) object_id: String,
+    pub(crate) relative_path: String,
+    pub(crate) byte_len: u64,
+    pub(crate) sha256: String,
 }
 
 impl V4Handle {
-    pub(in crate::state) fn validate(&self, manifest_epoch: u64) -> Result<()> {
+    pub(crate) fn validate(&self, manifest_epoch: u64) -> Result<()> {
         validate_portable_identifier("checkpoint-v4 handle owner", &self.owner)?;
         validate_object_id(&self.object_id)?;
         validate_relative_path(&self.relative_path)?;
@@ -84,38 +84,38 @@ impl V4Handle {
 }
 
 #[derive(Clone, Debug)]
-pub(in crate::state) struct ArrowPayload {
-    pub(in crate::state) fields: Vec<Field>,
-    pub(in crate::state) columns: Vec<ArrayRef>,
-    pub(in crate::state) metadata: HashMap<String, String>,
+pub(crate) struct ArrowPayload {
+    pub(crate) fields: Vec<Field>,
+    pub(crate) columns: Vec<ArrayRef>,
+    pub(crate) metadata: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug)]
-pub(in crate::state) enum ObjectPayload {
+pub(crate) enum ObjectPayload {
     Bytes(Vec<u8>),
     Json(serde_json::Value),
     Arrow(ArrowPayload),
 }
 
 #[derive(Clone, Debug)]
-pub(in crate::state) struct NewObject {
-    pub(in crate::state) kind: ObjectKind,
-    pub(in crate::state) owner: String,
-    pub(in crate::state) object_id: String,
-    pub(in crate::state) generation: u64,
-    pub(in crate::state) payload: ObjectPayload,
+pub(crate) struct NewObject {
+    pub(crate) kind: ObjectKind,
+    pub(crate) owner: String,
+    pub(crate) object_id: String,
+    pub(crate) generation: u64,
+    pub(crate) payload: ObjectPayload,
 }
 
 #[derive(Clone, Debug)]
-pub(in crate::state) struct OpaqueObject {
-    pub(in crate::state) owner: String,
-    pub(in crate::state) object_id: String,
-    pub(in crate::state) generation: u64,
-    pub(in crate::state) bytes: Vec<u8>,
-    pub(in crate::state) sha256: String,
+pub(crate) struct OpaqueObject {
+    pub(crate) owner: String,
+    pub(crate) object_id: String,
+    pub(crate) generation: u64,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) sha256: String,
 }
 
-pub(in crate::state) fn encode_opaque(
+pub(crate) fn encode_opaque(
     object: &OpaqueObject,
     root: &Path,
     epoch: u64,
@@ -144,7 +144,7 @@ pub(in crate::state) fn encode_opaque(
     })
 }
 
-pub(in crate::state) fn decode_opaque(handle: &V4Handle, bytes: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn decode_opaque(handle: &V4Handle, bytes: &[u8]) -> Result<Vec<u8>> {
     handle.validate(u64::MAX)?;
     if bytes.len() as u64 != handle.byte_len || hex::encode(Sha256::digest(bytes)) != handle.sha256
     {
@@ -156,22 +156,18 @@ pub(in crate::state) fn decode_opaque(handle: &V4Handle, bytes: &[u8]) -> Result
 }
 
 #[derive(Clone, Debug)]
-pub(in crate::state) struct EncodedObject {
-    pub(in crate::state) bytes: Vec<u8>,
-    pub(in crate::state) handle: V4Handle,
+pub(crate) struct EncodedObject {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) handle: V4Handle,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(in crate::state) struct DecodedObject {
-    pub(in crate::state) kind: ObjectKind,
-    pub(in crate::state) body: Vec<u8>,
+pub(crate) struct DecodedObject {
+    pub(crate) kind: ObjectKind,
+    pub(crate) body: Vec<u8>,
 }
 
-pub(in crate::state) fn encode_object(
-    object: &NewObject,
-    root: &Path,
-    epoch: u64,
-) -> Result<EncodedObject> {
+pub(crate) fn encode_object(object: &NewObject, root: &Path, epoch: u64) -> Result<EncodedObject> {
     let body = payload_bytes(&object.payload)?;
     let mut bytes = Vec::with_capacity(HEADER_BYTES + body.len());
     bytes.extend_from_slice(V4_MAGIC);
@@ -191,7 +187,7 @@ pub(in crate::state) fn encode_object(
     Ok(EncodedObject { bytes, handle })
 }
 
-pub(in crate::state) fn decode_object(handle: &V4Handle, bytes: &[u8]) -> Result<DecodedObject> {
+pub(crate) fn decode_object(handle: &V4Handle, bytes: &[u8]) -> Result<DecodedObject> {
     handle.validate(u64::MAX)?;
     if bytes.len() as u64 != handle.byte_len {
         return Err(mismatch(

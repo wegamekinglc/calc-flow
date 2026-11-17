@@ -16,28 +16,28 @@ use crate::CalcFlowError;
 const MAX_WORKERS: usize = 4;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(in crate::state) struct V4PersistenceStats {
-    pub(in crate::state) content_hashes: u64,
-    pub(in crate::state) file_syncs: u64,
-    pub(in crate::state) staging_directory_syncs: u64,
-    pub(in crate::state) committed_directory_syncs: u64,
-    pub(in crate::state) directory_creation_syncs: u64,
-    pub(in crate::state) manifest_file_syncs: u64,
-    pub(in crate::state) manifest_root_syncs: u64,
-    pub(in crate::state) read_back_hashes: u64,
-    pub(in crate::state) recovery_hashes: u64,
-    pub(in crate::state) carried_objects: u64,
-    pub(in crate::state) opaque_blocks: u64,
+pub(crate) struct V4PersistenceStats {
+    pub(crate) content_hashes: u64,
+    pub(crate) file_syncs: u64,
+    pub(crate) staging_directory_syncs: u64,
+    pub(crate) committed_directory_syncs: u64,
+    pub(crate) directory_creation_syncs: u64,
+    pub(crate) manifest_file_syncs: u64,
+    pub(crate) manifest_root_syncs: u64,
+    pub(crate) read_back_hashes: u64,
+    pub(crate) recovery_hashes: u64,
+    pub(crate) carried_objects: u64,
+    pub(crate) opaque_blocks: u64,
 }
 
 #[derive(Debug)]
-pub(in crate::state) struct V4Store {
+pub(crate) struct V4Store {
     root: PathBuf,
     stats: V4PersistenceStats,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::state) enum V4Fault {
+pub(crate) enum V4Fault {
     Write,
     Checksum,
     DiskFull,
@@ -45,22 +45,22 @@ pub(in crate::state) enum V4Fault {
 }
 
 impl V4Store {
-    pub(in crate::state) fn new(root: impl Into<PathBuf>) -> Self {
+    pub(crate) fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
             stats: V4PersistenceStats::default(),
         }
     }
 
-    pub(in crate::state) fn stats(&self) -> &V4PersistenceStats {
+    pub(crate) fn stats(&self) -> &V4PersistenceStats {
         &self.stats
     }
 
-    pub(in crate::state) fn record_carried(&mut self, count: usize) {
+    pub(crate) fn record_carried(&mut self, count: usize) {
         self.stats.carried_objects += count as u64;
     }
 
-    pub(in crate::state) async fn write_objects(
+    pub(crate) async fn write_objects(
         &mut self,
         epoch: u64,
         objects: Vec<NewObject>,
@@ -68,7 +68,7 @@ impl V4Store {
         self.write_objects_inner(epoch, objects, None).await
     }
 
-    pub(in crate::state) async fn write_objects_with_fault(
+    pub(crate) async fn write_objects_with_fault(
         &mut self,
         epoch: u64,
         objects: Vec<NewObject>,
@@ -134,7 +134,7 @@ impl V4Store {
         }
     }
 
-    pub(in crate::state) async fn write_opaque(
+    pub(crate) async fn write_opaque(
         &mut self,
         epoch: u64,
         objects: Vec<OpaqueObject>,
@@ -173,14 +173,14 @@ impl V4Store {
         self.install_encoded_files(encoded)
     }
 
-    pub(in crate::state) fn read_opaque(&mut self, handle: &V4Handle) -> Result<Vec<u8>> {
+    pub(crate) fn read_opaque(&mut self, handle: &V4Handle) -> Result<Vec<u8>> {
         let path = self.absolute(handle);
         let bytes = std::fs::read(&path).map_err(|source| io_error(&path, source))?;
         self.stats.recovery_hashes += 1;
         decode_opaque(handle, &bytes)
     }
 
-    pub(in crate::state) fn publish_manifest(&mut self, manifest: &V4Manifest) -> Result<PathBuf> {
+    pub(crate) fn publish_manifest(&mut self, manifest: &V4Manifest) -> Result<PathBuf> {
         manifest.validate_structure()?;
         let bytes = manifest.canonical_bytes()?;
         let directory = self.root.join("manifests");
@@ -196,12 +196,12 @@ impl V4Store {
         Ok(committed)
     }
 
-    pub(in crate::state) fn read_manifest(path: &Path) -> Result<V4Manifest> {
+    pub(crate) fn read_manifest(path: &Path) -> Result<V4Manifest> {
         let bytes = std::fs::read(path).map_err(|source| io_error(path, source))?;
         V4Manifest::from_bytes(&bytes)
     }
 
-    pub(in crate::state) fn read_object(&mut self, handle: &V4Handle) -> Result<ObjectPayload> {
+    pub(crate) fn read_object(&mut self, handle: &V4Handle) -> Result<ObjectPayload> {
         let path = self.absolute(handle);
         let bytes = std::fs::read(&path).map_err(|source| io_error(&path, source))?;
         self.stats.recovery_hashes += 1;

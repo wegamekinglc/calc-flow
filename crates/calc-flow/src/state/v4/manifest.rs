@@ -19,36 +19,36 @@ use crate::{
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(in crate::state) enum JobKind {
+pub(crate) enum JobKind {
     Runner,
     Session,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::state) struct SourceHistoryV4 {
-    pub(in crate::state) format_version: u32,
-    pub(in crate::state) contract: String,
-    pub(in crate::state) inline_metadata: JsonMap,
-    pub(in crate::state) segments: Vec<V4Handle>,
+pub(crate) struct SourceHistoryV4 {
+    pub(crate) format_version: u32,
+    pub(crate) contract: String,
+    pub(crate) inline_metadata: JsonMap,
+    pub(crate) segments: Vec<V4Handle>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::state) struct SourceV4 {
+pub(crate) struct SourceV4 {
     #[serde(deserialize_with = "deserialize_required_option")]
-    pub(in crate::state) cursor: Option<CursorManifestEntry>,
-    pub(in crate::state) identity_hash: String,
-    pub(in crate::state) next_sequence: u64,
-    pub(in crate::state) ended: bool,
-    pub(in crate::state) watermark_policy: super::super::manifest::SourceWatermarkManifestState,
+    pub(crate) cursor: Option<CursorManifestEntry>,
+    pub(crate) identity_hash: String,
+    pub(crate) next_sequence: u64,
+    pub(crate) ended: bool,
+    pub(crate) watermark_policy: super::super::manifest::SourceWatermarkManifestState,
     #[serde(deserialize_with = "deserialize_required_option")]
-    pub(in crate::state) history: Option<SourceHistoryV4>,
+    pub(crate) history: Option<SourceHistoryV4>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub(in crate::state) enum OperatorV4 {
+pub(crate) enum OperatorV4 {
     Table {
         progress: BTreeMap<String, OperatorIngressManifestEntry>,
         #[serde(deserialize_with = "deserialize_required_option")]
@@ -67,7 +67,7 @@ pub(in crate::state) enum OperatorV4 {
 }
 
 impl OperatorV4 {
-    pub(in crate::state) fn partitions(&self) -> Option<&[PartitionV4]> {
+    pub(crate) fn partitions(&self) -> Option<&[PartitionV4]> {
         match self {
             Self::Table { partitions, .. } => Some(partitions),
             Self::Opaque { .. } => None,
@@ -77,55 +77,55 @@ impl OperatorV4 {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::state) struct PartitionV4 {
-    pub(in crate::state) key_group: u32,
-    pub(in crate::state) root: V4Handle,
+pub(crate) struct PartitionV4 {
+    pub(crate) key_group: u32,
+    pub(crate) root: V4Handle,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::state) struct SinkV4 {
-    pub(in crate::state) delivery: SinkDeliveryManifest,
+pub(crate) struct SinkV4 {
+    pub(crate) delivery: SinkDeliveryManifest,
     #[serde(deserialize_with = "deserialize_required_option")]
-    pub(in crate::state) pre_commit: Option<JsonMap>,
-    pub(in crate::state) blocks: Vec<V4Handle>,
+    pub(crate) pre_commit: Option<JsonMap>,
+    pub(crate) blocks: Vec<V4Handle>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::state) struct V4Manifest {
-    pub(in crate::state) format_version: u32,
-    pub(in crate::state) pipeline_name: String,
-    pub(in crate::state) pipeline_fingerprint: String,
-    pub(in crate::state) runtime_config_hash: String,
-    pub(in crate::state) epoch: u64,
-    pub(in crate::state) created_at: DateTime<Utc>,
-    pub(in crate::state) recovery_status: String,
-    pub(in crate::state) job_kind: JobKind,
-    pub(in crate::state) recovery_fingerprint: String,
-    pub(in crate::state) sources: BTreeMap<String, SourceV4>,
-    pub(in crate::state) operators: BTreeMap<String, OperatorV4>,
-    pub(in crate::state) sinks: BTreeMap<String, SinkV4>,
-    pub(in crate::state) static_inputs: BTreeMap<String, StaticInputDigest>,
-    pub(in crate::state) manifest_fingerprint: String,
+pub(crate) struct V4Manifest {
+    pub(crate) format_version: u32,
+    pub(crate) pipeline_name: String,
+    pub(crate) pipeline_fingerprint: String,
+    pub(crate) runtime_config_hash: String,
+    pub(crate) epoch: u64,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) recovery_status: String,
+    pub(crate) job_kind: JobKind,
+    pub(crate) recovery_fingerprint: String,
+    pub(crate) sources: BTreeMap<String, SourceV4>,
+    pub(crate) operators: BTreeMap<String, OperatorV4>,
+    pub(crate) sinks: BTreeMap<String, SinkV4>,
+    pub(crate) static_inputs: BTreeMap<String, StaticInputDigest>,
+    pub(crate) manifest_fingerprint: String,
 }
 
 #[derive(Clone, Debug)]
-pub(in crate::state) struct ManifestExpectationV4 {
-    pub(in crate::state) pipeline_name: String,
-    pub(in crate::state) pipeline_fingerprint: String,
-    pub(in crate::state) recovery_fingerprint: String,
-    pub(in crate::state) job_kind: JobKind,
-    pub(in crate::state) epoch: u64,
-    pub(in crate::state) source_ids: BTreeSet<String>,
-    pub(in crate::state) operator_ids: BTreeSet<String>,
-    pub(in crate::state) sink_ids: BTreeSet<String>,
-    pub(in crate::state) static_inputs: BTreeMap<String, StaticInputDigest>,
-    pub(in crate::state) table_partitions: BTreeMap<String, Vec<u32>>,
+pub(crate) struct ManifestExpectationV4 {
+    pub(crate) pipeline_name: String,
+    pub(crate) pipeline_fingerprint: String,
+    pub(crate) recovery_fingerprint: String,
+    pub(crate) job_kind: JobKind,
+    pub(crate) epoch: u64,
+    pub(crate) source_ids: BTreeSet<String>,
+    pub(crate) operator_ids: BTreeSet<String>,
+    pub(crate) sink_ids: BTreeSet<String>,
+    pub(crate) static_inputs: BTreeMap<String, StaticInputDigest>,
+    pub(crate) table_partitions: BTreeMap<String, Vec<u32>>,
 }
 
 impl V4Manifest {
-    pub(in crate::state) fn from_bytes(document: &[u8]) -> Result<Self> {
+    pub(crate) fn from_bytes(document: &[u8]) -> Result<Self> {
         if document.len() > MAX_MANIFEST_DOCUMENT_BYTES {
             return Err(format_error(
                 "checkpoint manifest exceeds the 10 MiB limit".into(),
@@ -141,7 +141,7 @@ impl V4Manifest {
         Ok(manifest)
     }
 
-    pub(in crate::state) fn canonical_bytes(&self) -> Result<Vec<u8>> {
+    pub(crate) fn canonical_bytes(&self) -> Result<Vec<u8>> {
         self.validate_fingerprint()?;
         let bytes = canonical_json(&serde_json::to_value(self).map_err(|error| {
             format_error(format!("checkpoint manifest serialization failed: {error}"))
@@ -155,7 +155,7 @@ impl V4Manifest {
         Ok(bytes)
     }
 
-    pub(in crate::state) fn validate(&self, expected: &ManifestExpectationV4) -> Result<()> {
+    pub(crate) fn validate(&self, expected: &ManifestExpectationV4) -> Result<()> {
         self.validate_fingerprint()?;
         self.validate_structure()?;
         self.validate_identity(expected)?;
@@ -201,7 +201,7 @@ impl V4Manifest {
         Ok(())
     }
 
-    pub(in crate::state) fn v3_rejection_message() -> &'static str {
+    pub(crate) fn v3_rejection_message() -> &'static str {
         "checkpoint manifest v3 is not restorable; start a new lineage"
     }
 
@@ -215,7 +215,7 @@ impl V4Manifest {
         Ok(())
     }
 
-    pub(in crate::state) fn validate_structure(&self) -> Result<()> {
+    pub(crate) fn validate_structure(&self) -> Result<()> {
         validate_format_version(self.format_version)?;
         validate_epoch_status(self)?;
         validate_participant_rules(self)?;
@@ -225,7 +225,7 @@ impl V4Manifest {
     }
 }
 
-pub(in crate::state) fn manifest_fingerprint(manifest: &V4Manifest) -> Result<String> {
+pub(crate) fn manifest_fingerprint(manifest: &V4Manifest) -> Result<String> {
     let mut value = serde_json::to_value(manifest).map_err(|error| {
         format_error(format!("checkpoint manifest serialization failed: {error}"))
     })?;
@@ -238,7 +238,7 @@ pub(in crate::state) fn manifest_fingerprint(manifest: &V4Manifest) -> Result<St
     )))
 }
 
-pub(in crate::state) fn recovery_fingerprint(identity: &Value) -> Result<String> {
+pub(crate) fn recovery_fingerprint(identity: &Value) -> Result<String> {
     Ok(hex::encode(Sha256::digest(
         canonical_json(identity)?.as_bytes(),
     )))

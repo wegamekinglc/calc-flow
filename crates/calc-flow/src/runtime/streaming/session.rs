@@ -139,6 +139,8 @@ use crate::{
 /// assert!(session.finish()?.is_empty());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
+mod checkpoint;
+
 pub struct StreamSession {
     runtime: Option<tokio::runtime::Runtime>,
     job: StreamJobContext,
@@ -146,6 +148,7 @@ pub struct StreamSession {
     nodes: Vec<CallerDrivenOperator>,
     outputs: Vec<(String, OperatorEdgeReceiver)>,
     lifecycle: Lifecycle,
+    checkpoints: Option<checkpoint::SessionCheckpoints>,
 }
 
 /// How a session input's watermark advances.
@@ -287,6 +290,7 @@ impl StreamSession {
             nodes,
             outputs,
             lifecycle: Lifecycle::Open,
+            checkpoints: None,
         })
     }
 

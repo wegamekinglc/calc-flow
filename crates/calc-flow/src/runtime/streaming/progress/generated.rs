@@ -101,6 +101,10 @@ impl GeneratedWatermarkState {
         Ok(Some(candidate))
     }
 
+    pub(crate) const fn max_out_of_orderness(&self) -> Duration {
+        self.max_out_of_orderness
+    }
+
     pub(crate) const fn max_observed_nanos(&self) -> Option<i128> {
         self.max_observed_nanos
     }

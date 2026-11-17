@@ -8,7 +8,7 @@ use super::{OpaqueObject, OperatorV4, Result, V4Handle, V4Store, mismatch};
 use crate::{JsonMap, OperatorStateSnapshot, StateSegment};
 
 #[derive(Debug)]
-pub(in crate::state) struct V4OpaqueAdapter {
+pub(crate) struct V4OpaqueAdapter {
     owner: String,
     inline_metadata: JsonMap,
     state_fingerprint: String,
@@ -20,14 +20,18 @@ pub(in crate::state) struct V4OpaqueAdapter {
     reason = "P3.4 runner uses opaque adapters for un-migrated operators"
 )]
 impl V4OpaqueAdapter {
-    pub(in crate::state) fn from_snapshot(owner: &str, snapshot: &OperatorStateSnapshot) -> Self {
+    pub(crate) fn from_snapshot(owner: &str, snapshot: &OperatorStateSnapshot) -> Self {
         let epoch = snapshot
             .inline_metadata
             .get("epoch")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         let inline_metadata = snapshot.inline_metadata.clone();
-        let inline_bytes = serde_json::to_vec(&inline_metadata).expect("snapshot metadata is JSON");
+        let metadata_value =
+            serde_json::to_value(&inline_metadata).expect("snapshot metadata is JSON");
+        let inline_bytes = crate::canonical_json(&metadata_value)
+            .expect("snapshot metadata is JSON")
+            .into_bytes();
         let state_fingerprint = hex::encode(Sha256::digest(&inline_bytes));
         let mut blocks = vec![OpaqueObject {
             owner: owner.to_owned(),
@@ -54,11 +58,11 @@ impl V4OpaqueAdapter {
         }
     }
 
-    pub(in crate::state) fn owner(&self) -> &str {
+    pub(crate) fn owner(&self) -> &str {
         &self.owner
     }
 
-    pub(in crate::state) async fn persist(
+    pub(crate) async fn persist(
         self,
         store: &mut V4Store,
         epoch: u64,
@@ -80,7 +84,7 @@ impl V4OpaqueAdapter {
         ))
     }
 
-    pub(in crate::state) fn restore(
+    pub(crate) fn restore(
         store: &mut V4Store,
         manifest: &super::V4Manifest,
         owner: &str,
@@ -105,8 +109,12 @@ impl V4OpaqueAdapter {
             }
             segments.insert(id, StateSegment::new(bytes));
         }
+        let metadata_value =
+            serde_json::to_value(inline_metadata).expect("manifest metadata is JSON");
         let expected = hex::encode(Sha256::digest(
-            serde_json::to_vec(inline_metadata).expect("manifest metadata is JSON"),
+            crate::canonical_json(&metadata_value)
+                .expect("manifest metadata is JSON")
+                .as_bytes(),
         ));
         if *state_fingerprint != expected {
             return Err(mismatch(

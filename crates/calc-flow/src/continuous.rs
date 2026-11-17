@@ -958,6 +958,13 @@ impl ManagedCheckpointRuntime {
             .map_err(safe_error)
     }
 
+    pub(crate) async fn open(
+        self,
+        cancellation: &CancellationToken,
+    ) -> Result<crate::runtime::streaming::checkpoint::OpenedManagedCheckpointRuntime> {
+        self.inner.open(cancellation).await
+    }
+
     #[cfg(test)]
     pub(crate) fn with_fault_for_test(
         mut self,

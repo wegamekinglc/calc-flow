@@ -59,6 +59,20 @@ impl CallerDrivenOperator {
         self.panic_on_next_dispatch = true;
     }
 
+    pub(in crate::runtime::streaming) fn checkpoint(
+        &mut self,
+        epoch: crate::Epoch,
+    ) -> Result<crate::OperatorStateSnapshot> {
+        self.inputs.operator.checkpoint(epoch)
+    }
+
+    pub(in crate::runtime::streaming) fn restore(
+        &mut self,
+        snapshot: &crate::OperatorStateSnapshot,
+    ) -> Result<()> {
+        self.inputs.operator.restore(snapshot)
+    }
+
     pub(in crate::runtime::streaming) fn is_sync(&self) -> bool {
         sync_adapter::is_sync(&self.inputs.operator)
     }
