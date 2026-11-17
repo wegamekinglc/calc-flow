@@ -32,6 +32,11 @@ mod message;
 mod metrics;
 #[allow(
     dead_code,
+    reason = "operator migration to the unified compute pool follows in P6"
+)]
+pub(crate) mod morsel_pool;
+#[allow(
+    dead_code,
     reason = "operator task internals are exercised through the continuous facade"
 )]
 mod operator_task;
