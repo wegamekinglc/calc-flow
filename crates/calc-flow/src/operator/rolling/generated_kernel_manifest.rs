@@ -9,6 +9,7 @@ pub(super) enum GeneratedTransition {
     Cumulative,
     FusedDifference,
     Scan,
+    Lag,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,16 +34,16 @@ pub(super) const GENERATED_KERNEL_CAPABILITIES: &[GeneratedKernelCapability] = &
         batch: true,
         stream: true,
         datafusion: false,
-        typed_transition: None,
-        complexity: GeneratedComplexity::General,
+        typed_transition: Some(GeneratedTransition::Lag),
+        complexity: GeneratedComplexity::AmortizedConstant,
     },
     GeneratedKernelCapability {
         primitive: "delta",
         batch: true,
         stream: true,
         datafusion: false,
-        typed_transition: None,
-        complexity: GeneratedComplexity::General,
+        typed_transition: Some(GeneratedTransition::Lag),
+        complexity: GeneratedComplexity::AmortizedConstant,
     },
     GeneratedKernelCapability {
         primitive: "count",
@@ -187,6 +188,22 @@ pub(super) const GENERATED_KERNEL_CAPABILITIES: &[GeneratedKernelCapability] = &
         datafusion: false,
         typed_transition: Some(GeneratedTransition::Scan),
         complexity: GeneratedComplexity::AmortizedConstant,
+    },
+    GeneratedKernelCapability {
+        primitive: "rank",
+        batch: true,
+        stream: true,
+        datafusion: false,
+        typed_transition: Some(GeneratedTransition::Scan),
+        complexity: GeneratedComplexity::General,
+    },
+    GeneratedKernelCapability {
+        primitive: "quantile",
+        batch: true,
+        stream: true,
+        datafusion: false,
+        typed_transition: Some(GeneratedTransition::Scan),
+        complexity: GeneratedComplexity::General,
     },
     GeneratedKernelCapability {
         primitive: "unique_count",

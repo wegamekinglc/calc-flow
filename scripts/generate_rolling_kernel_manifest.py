@@ -43,6 +43,8 @@ EXPECTED_PRIMITIVES = (
     "difference",
     "argmax",
     "argmin",
+    "rank",
+    "quantile",
     "unique_count",
     "decay",
 )
@@ -54,6 +56,7 @@ TRANSITIONS = {
     "cumulative": "Cumulative",
     "fused_difference": "FusedDifference",
     "scan": "Scan",
+    "lag": "Lag",
 }
 COMPLEXITIES = {
     "amortized_constant": "AmortizedConstant",
@@ -119,7 +122,11 @@ def _validate_kernel_complexity(
     primitive = value["primitive"]
     if value["complexity"] not in COMPLEXITIES:
         raise ValueError(f"kernel {primitive!r} has unknown complexity")
-    if transition is not None and value["complexity"] != "amortized_constant":
+    if (
+        transition is not None
+        and value["complexity"] != "amortized_constant"
+        and not (primitive in {"rank", "quantile"} and value["complexity"] == "general")
+    ):
         raise ValueError(
             f"kernel {primitive!r} typed transition must advertise amortized_constant"
         )
@@ -181,6 +188,7 @@ pub(super) enum GeneratedTransition {{
     Cumulative,
     FusedDifference,
     Scan,
+    Lag,
 }}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

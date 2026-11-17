@@ -3073,6 +3073,37 @@ async fn rolling_scan_retains_history_across_checkpoint() {
 }
 
 #[test]
+fn typed_rank_quantile_match_general_with_ties_and_invalid_rows() {
+    let spec = kernel_spec(json!([
+        {
+            "kind": "rank",
+            "primitive_version": 1,
+            "input": "price",
+            "output": "price_rank",
+            "frame": {"kind": "rows", "size": 3},
+            "min_periods": 1
+        },
+        {
+            "kind": "quantile",
+            "primitive_version": 1,
+            "input": "price",
+            "output": "price_quantile",
+            "frame": {"kind": "rows", "size": 3},
+            "min_periods": 1
+        }
+    ]));
+    let input = float64_fast_record(&[
+        (1, "a", 1, Some(3.0)),
+        (2, "a", 2, Some(1.0)),
+        (3, "a", 3, Some(1.0)),
+        (4, "a", 4, Some(f64::NAN)),
+        (5, "a", 5, None),
+        (6, "a", 6, Some(2.0)),
+    ]);
+    assert_typed_matches_general(&spec, &input.schema(), &input);
+}
+
+#[test]
 fn rolling_scans_bound_comparisons_independently_of_window_width() {
     let spec = kernel_spec(json!([
         {

@@ -6,8 +6,8 @@ from types import MappingProxyType
 
 ROLLING_KERNEL_CAPABILITIES = MappingProxyType(
     {
-        "lag": (None, "general", False),
-        "delta": (None, "general", False),
+        "lag": ("lag", "amortized_constant", False),
+        "delta": ("lag", "amortized_constant", False),
         "count": ("numeric", "amortized_constant", False),
         "sum": ("numeric", "amortized_constant", False),
         "mean": ("numeric", "amortized_constant", True),
@@ -26,6 +26,8 @@ ROLLING_KERNEL_CAPABILITIES = MappingProxyType(
         "difference": ("fused_difference", "amortized_constant", False),
         "argmax": ("scan", "amortized_constant", False),
         "argmin": ("scan", "amortized_constant", False),
+        "rank": ("scan", "general", False),
+        "quantile": ("scan", "general", False),
         "unique_count": ("scan", "amortized_constant", False),
         "decay": ("scan", "amortized_constant", False),
     }

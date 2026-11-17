@@ -185,9 +185,7 @@ def test_rolling_kernel_explain_helpers_fail_closed_on_unknown_shapes() -> None:
     assert _rolling_kernel_fallback({"kind": "unknown"}, field_types) == (
         "primitive_unknown_missing_from_census"
     )
-    assert _rolling_kernel_fallback({"kind": "lag", "input": "x"}, field_types) == (
-        "primitive_lag_has_no_typed_transition"
-    )
+    assert _rolling_kernel_fallback({"kind": "lag", "input": "x"}, field_types) is None
     assert (
         _rolling_kernel_fallback(
             {"kind": "argmax", "input": "x", "frame": {"kind": "duration", "size": 10}},

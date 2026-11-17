@@ -2036,7 +2036,12 @@ fn compile_scan_group(
         .max(1);
     if !matches!(
         scan.kind,
-        ScanKind::Argmax | ScanKind::Argmin | ScanKind::UniqueCount | ScanKind::Decay
+        ScanKind::Argmax
+            | ScanKind::Argmin
+            | ScanKind::Rank
+            | ScanKind::Quantile
+            | ScanKind::UniqueCount
+            | ScanKind::Decay
     ) {
         return Err("typed scan requires argmax, argmin, unique_count, or decay".into());
     }
@@ -2290,6 +2295,10 @@ fn compile_lag_output(
     groups: &[TypedGroupPlan],
     delta: bool,
 ) -> std::result::Result<TypedOutputPlan, String> {
+    require_generated_transition(
+        if delta { "delta" } else { "lag" },
+        GeneratedTransition::Lag,
+    )?;
     let periods =
         usize::try_from(periods).map_err(|_| "lag/delta periods do not fit the platform usize")?;
     let group = groups
@@ -2322,8 +2331,10 @@ fn compile_scan_output(
     scan: super::CompiledScan,
     groups: &[TypedGroupPlan],
 ) -> std::result::Result<TypedOutputPlan, String> {
-    let primitive = scan_primitive(scan.kind)?;
-    require_generated_transition(primitive, GeneratedTransition::Scan)?;
+    let primitive = scan_primitive(scan.kind);
+    if !matches!(scan.kind, ScanKind::Rank | ScanKind::Quantile) {
+        require_generated_transition(primitive, GeneratedTransition::Scan)?;
+    }
     let CompiledFrame::Rows(rows) = scan.frame else {
         return Err("typed scan requires a row frame".into());
     };
@@ -2337,7 +2348,7 @@ fn compile_scan_output(
     Ok(TypedOutputPlan {
         group,
         kind: TypedOutputKind::Scan(scan.kind),
-        storage: if scan.kind == ScanKind::Decay {
+        storage: if matches!(scan.kind, ScanKind::Decay | ScanKind::Quantile) {
             OutputStorage::Float64
         } else {
             OutputStorage::Count
@@ -2347,14 +2358,15 @@ fn compile_scan_output(
     })
 }
 
-fn scan_primitive(kind: ScanKind) -> std::result::Result<&'static str, String> {
-    Ok(match kind {
+fn scan_primitive(kind: ScanKind) -> &'static str {
+    match kind {
         ScanKind::Argmax => "argmax",
         ScanKind::Argmin => "argmin",
+        ScanKind::Rank => "rank",
+        ScanKind::Quantile => "quantile",
         ScanKind::UniqueCount => "unique_count",
         ScanKind::Decay => "decay",
-        _ => return Err("unsupported typed scan".into()),
-    })
+    }
 }
 
 fn scan_group_matches(
@@ -2863,6 +2875,7 @@ enum TypedWindowState {
     Pair(Float64PairState),
     Ewma(TypedEwmaState),
     Scan(TypedScanState),
+    Rank(TypedRankState),
     Lag(TypedLagState),
     Decay(Option<Arc<decay::OwnedDecay>>),
 }
@@ -2918,6 +2931,54 @@ impl LagValue {
             Self::Signed(_) => Self::Signed(None),
             Self::Unsigned(_) => Self::Unsigned(None),
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TypedRankState {
+    window: usize,
+    recent: VecDeque<Option<f64>>,
+    valid_count: usize,
+    latest_count: Option<u64>,
+    latest_float: Option<f64>,
+}
+
+impl TypedRankState {
+    fn new(window: usize) -> Self {
+        Self {
+            window,
+            recent: VecDeque::with_capacity(window),
+            valid_count: 0,
+            latest_count: None,
+            latest_float: None,
+        }
+    }
+
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "rank and quantile readouts are defined as Float64"
+    )]
+    fn update(&mut self, sample: Option<f64>) {
+        self.recent.push_back(sample);
+        if sample.is_some() {
+            self.valid_count += 1;
+        }
+        if self.recent.len() > self.window && self.recent.pop_front().flatten().is_some() {
+            self.valid_count -= 1;
+        }
+        let Some(current) = sample else {
+            self.latest_count = None;
+            self.latest_float = None;
+            return;
+        };
+        let rank = self
+            .recent
+            .iter()
+            .filter(|value| value.is_some_and(|value| value < current))
+            .count();
+        self.latest_count = u64::try_from(rank).ok();
+        self.latest_float =
+            (self.valid_count > 1).then_some(rank as f64 / (self.valid_count - 1) as f64);
     }
 }
 
@@ -3027,6 +3088,11 @@ impl TypedWindowState {
                 kind: ScanKind::Decay,
                 ..
             } => Self::Decay(None),
+            TypedGroupPlan::Scan {
+                kind: ScanKind::Rank | ScanKind::Quantile,
+                window,
+                ..
+            } => Self::Rank(TypedRankState::new(window)),
             TypedGroupPlan::Scan { kind, window, .. } => {
                 Self::Scan(TypedScanState::new(kind, window))
             }
@@ -3071,6 +3137,10 @@ impl TypedWindowState {
             }
             (Self::Scan(state), TypedGroupInput::Single(input)) => {
                 state.update(valid_float64(input, row_index, false), node_id)
+            }
+            (Self::Rank(state), TypedGroupInput::Single(input)) => {
+                state.update(valid_float64(input, row_index, false));
+                Ok(())
             }
             (Self::Lag(state), TypedGroupInput::Single(input)) => {
                 state.update(LagValue::Float(
@@ -3120,6 +3190,12 @@ impl TypedWindowState {
             Self::Scan(state) => {
                 size_of::<TypedScanState>().saturating_add(state.scan.estimated_bytes())
             }
+            Self::Rank(state) => size_of::<TypedRankState>().saturating_add(
+                state
+                    .recent
+                    .capacity()
+                    .saturating_mul(size_of::<Option<f64>>()),
+            ),
             Self::Lag(state) => size_of::<TypedLagState>().saturating_add(
                 state
                     .history
@@ -3137,6 +3213,7 @@ impl TypedWindowState {
             Self::Extrema(state) => state.values.len(),
             Self::Pair(state) => state.samples.len(),
             Self::Lag(state) => state.history.len(),
+            Self::Rank(state) => state.recent.len(),
             Self::Cumulative(_) | Self::Ewma(_) | Self::Scan(_) | Self::Decay(_) => 0,
         }
     }
@@ -3897,6 +3974,7 @@ impl DerivedBuilder {
             TypedWindowState::Pair(state) => self.append_pair(state, output),
             TypedWindowState::Ewma(state) => self.append_ewma(state, output),
             TypedWindowState::Scan(state) => self.append_scan(state, output),
+            TypedWindowState::Rank(state) => self.append_rank(state, output),
             TypedWindowState::Lag(state) => self.append_lag(state, output, node_id),
             TypedWindowState::Decay(Some(state)) => match (self, output.kind) {
                 (Self::Float(builder, _), TypedOutputKind::Scan(ScanKind::Decay)) => {
@@ -3985,6 +4063,20 @@ impl DerivedBuilder {
         match (self, output.kind) {
             (Self::Float(builder, _), TypedOutputKind::Ewma) => {
                 builder.append_value(state.value);
+                Ok(())
+            }
+            _ => Err(typed_output_mismatch()),
+        }
+    }
+
+    fn append_rank(&mut self, state: &TypedRankState, output: &TypedOutputPlan) -> Result<()> {
+        match (self, output.kind) {
+            (Self::Count(builder), TypedOutputKind::Scan(ScanKind::Rank)) => {
+                builder.append_option(state.latest_count);
+                Ok(())
+            }
+            (Self::Float(builder, _), TypedOutputKind::Scan(ScanKind::Quantile)) => {
+                builder.append_option(state.latest_float);
                 Ok(())
             }
             _ => Err(typed_output_mismatch()),
@@ -4212,6 +4304,7 @@ fn typed_valid_count(state: &TypedWindowState) -> u64 {
             u64::try_from(state.scan.valid_count()).unwrap_or(u64::MAX)
         }
         TypedWindowState::Lag(state) => u64::try_from(state.history.len()).unwrap_or(u64::MAX),
+        TypedWindowState::Rank(state) => u64::try_from(state.valid_count).unwrap_or(u64::MAX),
         TypedWindowState::Decay(state) => state.as_ref().map_or(0, |state| state.valid_count()),
     }
 }
