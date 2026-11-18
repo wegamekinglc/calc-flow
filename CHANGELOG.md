@@ -9,6 +9,22 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-18: Make immutable source history native to runner checkpoint v4.
+  `SourceHistoryManifestEntry` now carries canonically ordered public
+  `SourceHistorySegmentHandle` values, and `SourceHistoryContext::archive_file`
+  returns that type after writing bytes directly to v4 storage instead of
+  staging and converting them through v3 operator state. The handle's raw
+  `byte_len` drives storage and prepaid buffer budgets on archive, restore and
+  load; reads verify the persisted checksum. Later manifests carry unchanged
+  handles, retention preserves referenced history across epochs, and restored
+  ended sources contribute their history to out-of-band final cuts without
+  reopening. ASOF ordinary and terminal v4 recovery retain `source_replay`
+  metadata and replay through these native histories. Final manifest publication
+  runs on a blocking worker. Legacy v3 history is rejected rather than
+  converted. Verification passed 6 source-history, 12 frozen-connector, 697
+  non-soak streaming, and 67 soak tests. ASOF production migration remains open.
+  See [manifest publication and recovery](docs/runtime-envelope.md#manifest-publication-and-recovery).
+
 - 2026-11-18: Persist `StreamingRunner` checkpoints as manifest v4 with
   `job_kind=runner`. Source cuts, opaque operator snapshots with ingress and
   output-frontier progress, and sink recovery blocks are published as v4
@@ -22,13 +38,12 @@ measurements. Use the current guides for supported behavior.
   retention and orphan cleanup follow durable settlement. Uncertain manifest
   rename or parent synchronization preserves prepared sinks and requires
   recovery; once a manifest is durable, later settlement or maintenance failures
-  retain it as recovery truth. The named
-  restart matrix covers twelve fault points under I/O, panic, cancellation and
-  restart, including a real parent-directory sync failure, partial sink commit,
-  retention and compaction. Process-restart soak evidence classifies v4
-  artifacts and includes their state bytes. Source-history v4/native cleanup,
-  legacy protocol deletion, ASOF production migration, P6, performance gates
-  and final CI remain open. See the
+  retain it as recovery truth. The named restart matrix covers twelve fault
+  points under I/O, panic, cancellation and restart, including a real
+  parent-directory sync failure, partial sink commit, retention and compaction.
+  Process-restart soak evidence classifies v4 artifacts and includes their state
+  bytes. Legacy protocol deletion, ASOF production migration, P6, performance
+  gates and final CI remain open. See the
   [re-architecture plan](docs/plans/2026-11-15-streaming-core-rearchitecture.md).
 
 - 2026-11-18: Add a crate-private synchronous columnar Join run core. Each

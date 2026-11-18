@@ -75,8 +75,15 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   本 epoch 的 retention/orphan cleanup 在 durable settlement 后执行；rename/parent-sync 结果不确定时保留 prepared sinks
   并要求恢复，manifest durable 后的 settlement/maintenance 失败保留该恢复真相。非 soak streaming suite 已验证；命名 restart matrix 覆盖
   12 个故障点的 I/O、panic、cancel、restart，包含真实 parent-directory sync 失败、partial sink commit、retention 和
-  compaction。进程重启 soak 证据已分类 v4 artifacts 并计入其 state bytes。source-history 的 v4/native 清理、
-  legacy 协议删除、ASOF 生产迁移、P6、性能门槛和最终 CI 仍未完成。
+  compaction。进程重启 soak 证据已分类 v4 artifacts 并计入其 state bytes。legacy 协议删除、ASOF 生产迁移、P6、
+  性能门槛和最终 CI 仍未完成。
+- P3.6 source history native v4（`ca760192`）：`SourceHistoryManifestEntry` 直接携带 canonical public
+  `SourceHistorySegmentHandle`；`archive_file` 将原始字节直接写入 v4 storage，不再经 v3 operator-state staging/conversion。
+  handle 的 raw `byte_len` 用于 archive/restore/load 的 storage 与 prepaid buffer budget，读取校验 checksum。后续 manifest
+  携带原 handle，retention 保留跨 epoch 引用；restored ended source 将 history 带入 out-of-band final cut 且不 reopen。
+  ASOF ordinary/terminal v4 restore 保留 `source_replay` metadata 并经 native history replay；最终 manifest publication
+  移到 blocking worker。legacy v3 history 拒绝而非转换。验证通过：source history 6、frozen connectors 12、
+  非 soak streaming 697、soak 67。ASOF 生产迁移仍未完成。
 - P4.1 shared keyed core 与单整数 SUM 已交付；P4.2 typed aggregate state、temporal extrema、8192-group dirty
   snapshot cache 和 rollback/recovery 已通过 327 个 SQL 测试。P4.3 opt-in changelog 已集成，
   SQL 336 项与 Python 5 项测试通过。旧 compact 删除和 P4 测量尚未完成。

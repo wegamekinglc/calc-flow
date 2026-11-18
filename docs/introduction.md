@@ -182,10 +182,12 @@ a bounded expression language. Graphs exchange `Batch` values rather than
 raw tables or arrays, and configuration contains data and registration
 references rather than executable objects.
 
-Projects use format `3`. Runner-managed checkpoint manifests use version `3`;
-durable Rust and Python session lineages use internal manifest version `4` with
-`job_kind="session"`. These protocol versions are separate from this checkout's
-package version `2026.11.14`.
+Projects use format `3`. Runner-managed and durable session checkpoints use
+internal manifest version `4`, distinguished by `job_kind="runner"` and
+`job_kind="session"`. Runner source history carries native v4 segment handles.
+Legacy v3 checkpoints are rejected rather than converted; start a new lineage.
+These protocol versions are separate from this checkout's package version
+`2026.11.14`.
 
 The DataFusion 55 / Arrow 59 upgrade changes engine-specific checkpoint
 identity. SQL checkpoints created with DataFusion 54 and ASOF checkpoints
