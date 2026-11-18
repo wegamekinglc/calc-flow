@@ -9,6 +9,26 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-18: Replace production ASOF state with shared-key columnar runs.
+  Each admitted batch becomes an immutable Arrow run with group, time, sequence,
+  and payload/identity liveness columns. Stable `(run ID, row offset)` locators
+  merge in per-key `(time, sequence)` order and in global pending-left
+  `(time, key, sequence)` order. Selection carries left/right locators and right
+  validity; output columns materialize through Arrow `take` or `interleave`,
+  including explicit nulls for unmatched rows and direct-consumer projections.
+  Output commits only the accepted pending prefix. Eviction cuts expired or
+  dominated right-payload prefixes, retires identity-only history after right
+  progress or EOF, and releases empty runs. Native layout/accounting 11 with
+  `arrow-columnar-59.2.0` checkpoints persist canonical shared keys, per-run
+  identity/payload columns, and control/index-capacity descriptors. Restore
+  validates their inventory, schemas, charges, progress and counters, then
+  continues with the same output sequence and snapshot bytes. The old ASOF
+  row/object codecs and base/delta checkpoint machinery are removed; earlier
+  native layouts are rejected and require a new lineage. Verification passed
+  133 focused tests and independent review approved the migration. Final P5
+  performance acceptance, P6, and final CI remain open. See
+  [ASOF state and recovery](docs/asof-join-guide.md#recovery-status-and-delivery).
+
 - 2026-11-18: Make immutable source history native to runner checkpoint v4.
   `SourceHistoryManifestEntry` now carries canonically ordered public
   `SourceHistorySegmentHandle` values, and `SourceHistoryContext::archive_file`
@@ -22,7 +42,7 @@ measurements. Use the current guides for supported behavior.
   metadata and replay through these native histories. Final manifest publication
   runs on a blocking worker. Legacy v3 history is rejected rather than
   converted. Verification passed 6 source-history, 12 frozen-connector, 697
-  non-soak streaming, and 67 soak tests. ASOF production migration remains open.
+  non-soak streaming, and 67 soak tests.
   See [manifest publication and recovery](docs/runtime-envelope.md#manifest-publication-and-recovery).
 
 - 2026-11-18: Persist `StreamingRunner` checkpoints as manifest v4 with
@@ -42,8 +62,8 @@ measurements. Use the current guides for supported behavior.
   points under I/O, panic, cancellation and restart, including a real
   parent-directory sync failure, partial sink commit, retention and compaction.
   Process-restart soak evidence classifies v4 artifacts and includes their state
-  bytes. Legacy protocol deletion, ASOF production migration, P6, performance
-  gates and final CI remain open. See the
+  bytes. Legacy protocol deletion, P6, performance gates and final CI remain
+  open. See the
   [re-architecture plan](docs/plans/2026-11-15-streaming-core-rearchitecture.md).
 
 - 2026-11-18: Add a crate-private synchronous columnar Join run core. Each
@@ -62,8 +82,7 @@ measurements. Use the current guides for supported behavior.
   output records and sequences and equal snapshot fingerprints. Production
   `StreamJoinOperator` admission and durable v4 state-page wiring are not
   connected yet; existing managed Join layouts 1–3 and recovery contracts remain
-  unchanged. ASOF migration, final old-layout deletion, and performance gates
-  remain open. See
+  unchanged. Final old-layout deletion and performance gates remain open. See
   [the columnar run core](docs/streaming-guide.md#columnar-run-core).
 
 - 2026-11-18: Add N=1 pane preaggregation for hopping windows whose complete

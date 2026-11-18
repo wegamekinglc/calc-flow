@@ -188,37 +188,36 @@ status surface.
 
 ## Bounded backward ASOF Join
 
-`StreamAsofJoinOperator` owns the separate `stream_asof_join@1` state. Native
-indexes preserve exact typed key and sequence ordering; each final left row
-selects at most one right predecessor in its inclusive tolerance. Large ordered
-left prefixes reuse a per-key right cursor; smaller outputs or constrained
-workspace use binary search. Output materialization gathers retained Arrow
-columns on a blocking worker, copying consecutive left rows as spans and
-interleaving right candidates with nulls for unmatched rows. Python owns
+`StreamAsofJoinOperator` owns the separate `stream_asof_join@1` state. Each
+admitted batch becomes an immutable Arrow run with shared group IDs, event
+times, sequences, and payload/identity liveness. Stable `(run ID, row offset)`
+locators merge into per-key `(time, sequence)` indexes and the canonical
+pending-left order without rewriting out-of-order payloads. Each final left row
+selects at most one right predecessor in its inclusive tolerance. Selection
+produces left/right locators plus right validity; Arrow `take` or `interleave`
+materializes the selected columns, with nulls for unmatched rows. Python owns
 declarations, analysis, and lowering.
 
-Pending left rows keep compact columnar identities and references into retained
-Arrow payload batches. Right history uses ordered per-key indexes and the same
-payload pool. Semantic state version `3` uses native layout/accounting version
-`10`. Accounting covers retained capacities, unique identity buffers, payload
-batches, and checkpoint journal and retained segment storage. A separate
-workspace budget equal to the configured state-byte limit
-covers admission copies, candidate/output arrays, compaction, encoding, and
-restore. It is not a process RSS ceiling.
+Semantic state version `3` uses native layout/accounting version `11` and
+`arrow-columnar-59.2.0` checkpoint encoding. Accounting covers shared keys,
+retained run columns, locator capacities, and selection/output workspace. A
+separate workspace budget equal to the configured state-byte limit covers
+admission, selection, materialization, encoding, and restore. It is not a
+process RSS ceiling.
 
-Admission and output-prefix preparation preflight incremental state and index
-charges. An accepted output chunk synchronously commits its prepared prefix
-without re-encoding the complete state. Right-side eviction runs once after
-the ready chunks in a progress tick have been accepted, using expiration
-indexes to select due keys and rows. Bounded chunks do not imply constant-cost
-handlers. Native checkpoints retain an immutable base plus bounded delta
-frames and shared payload segments. Eligible managed source-history routes can
-instead use a versioned callback replay log with native anchors. Managed
-preparation, capture, and restore use awaited CPU work; direct operator
-checkpoint calls remain synchronous. The runtime owns persisted ingress
-progress and output frontier, which ASOF cross-validates with restored state.
-It closes left rows only after both sides strictly pass their time, retains idle
-watermarks, and forwards a conservative frontier. See the
+Admission and output-prefix preparation preflight state and workspace charges.
+An accepted output chunk synchronously commits only its selected pending prefix.
+Right-side eviction runs once after the ready chunks in a progress tick have
+been accepted, cutting expired or dominated payload prefixes and retiring
+identity-only prefixes when right progress or EOF permits. Empty runs release
+their state. Native checkpoints persist canonical shared keys, per-run
+identity/payload columns, and control/index-capacity descriptors. Compatible
+restore validates the complete inventory and continues the output sequence and
+snapshot bytes. Eligible managed source-history routes can instead use a
+versioned callback replay log with native anchors. The runtime owns persisted
+ingress progress and output frontier, which ASOF cross-validates with restored
+state. It closes left rows only after both sides strictly pass their time,
+retains idle watermarks, and forwards a conservative frontier. See the
 [ASOF contract](asof-join-guide.md) for finality, accounting, composition, and
 source/sink delivery requirements.
 

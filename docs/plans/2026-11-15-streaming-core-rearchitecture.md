@@ -75,15 +75,15 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   本 epoch 的 retention/orphan cleanup 在 durable settlement 后执行；rename/parent-sync 结果不确定时保留 prepared sinks
   并要求恢复，manifest durable 后的 settlement/maintenance 失败保留该恢复真相。非 soak streaming suite 已验证；命名 restart matrix 覆盖
   12 个故障点的 I/O、panic、cancel、restart，包含真实 parent-directory sync 失败、partial sink commit、retention 和
-  compaction。进程重启 soak 证据已分类 v4 artifacts 并计入其 state bytes。legacy 协议删除、ASOF 生产迁移、P6、
-  性能门槛和最终 CI 仍未完成。
+  compaction。进程重启 soak 证据已分类 v4 artifacts 并计入其 state bytes。legacy 协议删除、P6、性能门槛和
+  最终 CI 仍未完成。
 - P3.6 source history native v4（`ca760192`）：`SourceHistoryManifestEntry` 直接携带 canonical public
   `SourceHistorySegmentHandle`；`archive_file` 将原始字节直接写入 v4 storage，不再经 v3 operator-state staging/conversion。
   handle 的 raw `byte_len` 用于 archive/restore/load 的 storage 与 prepaid buffer budget，读取校验 checksum。后续 manifest
   携带原 handle，retention 保留跨 epoch 引用；restored ended source 将 history 带入 out-of-band final cut 且不 reopen。
   ASOF ordinary/terminal v4 restore 保留 `source_replay` metadata 并经 native history replay；最终 manifest publication
   移到 blocking worker。legacy v3 history 拒绝而非转换。验证通过：source history 6、frozen connectors 12、
-  非 soak streaming 697、soak 67。ASOF 生产迁移仍未完成。
+  非 soak streaming 697、soak 67。
 - P4.1 shared keyed core 与单整数 SUM 已交付；P4.2 typed aggregate state、temporal extrema、8192-group dirty
   snapshot cache 和 rollback/recovery 已通过 327 个 SQL 测试。P4.3 opt-in changelog 已集成，
   SQL 336 项与 Python 5 项测试通过。旧 compact 删除和 P4 测量尚未完成。
@@ -93,7 +93,7 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   `p2-2-slab-family-selection` 为 0.68x，随后 first-touch undo 和 checkpoint-off direct recurrent 将
   `p2-2-slab-direct-recurrent` 提升到 1.09x/1.11x（faster），消除了相对基线的回退；绝对 G1–G3 仍未达标。
   独立审查发现的 freeze rollback、mean-only rebuild restore 和 abort dirty-loss 问题已各有回归测试并修复。
-  其余 typed groups、P2.4–P2.9、join/ASOF、并行/SIMD 与 window pane 仍需实现和验收。
+  其余 typed groups、P2.4–P2.9、Join 生产接线、并行/SIMD 与 window pane 的剩余工作仍需实现和验收。
 - P2.7 已为 admitted ordered graphs 接入同步 Rolling：serial prepare/update/emission、sync adapter 双类型分派、
   checkpoint/restore/reset 和空输出处理，StreamSession 24 项、rolling 705 项和 clippy 通过；其他图继续使用
   async runner。`p2-2-slab-sync-rolling` 的 paired large-batch 为 1.12x/1.13x，未超过 full-tick 的 1.15x；
@@ -126,7 +126,18 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   retained payload、identity/locator columns、run owners 与 index capacities，并计入 replacement overlap。
   内存 snapshot/restore 校验 locator 覆盖、顺序、row-ID/frontier 和 accounting，后续输出与序列一致且 snapshot fingerprint
   相同。Join 569 项和 clippy 通过。该核心尚未接入生产 `StreamJoinOperator` admission 或 v4 state pages；
-  现有 managed Join layouts 1–3 和恢复路径保持不变。生产接线、ASOF 迁移、最终旧 layout 删除和性能门槛仍未完成。
+  现有 managed Join layouts 1–3 和恢复路径保持不变。生产接线、最终旧 layout 删除和性能门槛仍未完成。
+- P5.2 ASOF columnar 生产迁移（`888d7f93`，已批准）：生产 `StreamAsofJoinOperator` 以 shared-key columnar runs
+  替换旧 row/object state。每个 admitted batch 形成不可变 Arrow run，携带 group/time/sequence 与 payload/identity
+  liveness；稳定 `(run ID, row offset)` locator 按 per-key `(time, sequence)` 和全局 pending-left
+  `(time, key, sequence)` 顺序合并。selection 携带 left/right locators 与 right validity，输出按列通过 Arrow
+  `take`/`interleave` 物化，保留 unmatched null 和 direct projection。输出接受后仅提交 pending prefix；
+  eviction 淘汰 expired/dominated right-payload prefixes，在 right progress/EOF 后退休 identity-only history，
+  并释放空 run。原生 layout/accounting 11 与 `arrow-columnar-59.2.0` checkpoint 保存 canonical shared keys、
+  per-run identity/payload 和 control/index-capacity descriptors；restore 校验 inventory、schemas、charges、progress
+  和 counters，后续 output sequence 与 snapshot bytes 保持一致。旧 ASOF row/object codecs 和 base/delta
+  checkpoint machinery 已删除，较早 native layouts 拒绝恢复并要求新 lineage。133 项 focused 测试通过，
+  独立审查已批准。最终 P5 性能验收、P6 和最终 CI 仍未完成。
 
 ## 1. 目标
 

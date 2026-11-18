@@ -249,152 +249,58 @@ The equality case remains eligible. Right EOF alone does not discard useful
 history. An expired payload can leave a charged identity-only entry until its
 own side's watermark passes the identity time or that side ends.
 
-Native accounting version `10` charges retained column and index capacities,
-unique key/sequence buffer owners, each Arrow payload batch once, and owned
-checkpoint journal, frame, and retained payload storage. Source-replay records
-and anchors are also charged when that managed path is active. The batch charge
-reserves its canonical IPC bytes even before encoding, plus the decoded record
-body length and per-column metadata.
-Admission reuses immutable Arrow buffers when it accepts a whole input batch
-whose backing allocation contains no bytes beyond the accepted slice. Otherwise
-it compacts the accepted rows before retention, including small slices of much larger
-source buffers. Snapshot batch segments share immutable IPC buffers; a row
-index points into one batch.
-
-During admission, temporary rows also use batch-table indices. The admission
-owns each compact payload once, and left chunk preparation transfers a copy
-of that owner table to its blocking worker together with its workspace lease.
-Dropping the preparation future cannot release the worker's input charge early.
-Identity preflight counts accepted rows while estimating their workspace, so
-the identity vector reserves its complete capacity once, including inputs
-with an accepted watermark. Nonempty admission reserves one additional
-identity-row slot for the overlap with converter startup. These temporary
-indices do not change retained row references or the durable checkpoint contract.
-
-Admission, sorting, Arrow materialization, encoding, and restore also share
-a **separate workspace ceiling equal to `max_state_bytes`**. Output is further
-bounded by runtime edge rows/bytes. A 64 MiB state limit therefore is not a
-64 MiB process RSS limit; sources, edges, checkpoint publication, runtime
+Native accounting version `11` charges shared key storage, immutable run
+payload and identity columns, payload/identity liveness, locator capacities,
+and index owners. Source-replay records and anchors are also charged when that
+managed path is active. Admission, selection, Arrow materialization, encoding,
+and restore share a **separate workspace ceiling equal to `max_state_bytes`**.
+Output is further bounded by runtime edge rows/bytes. A 64 MiB state limit is
+not a 64 MiB process RSS limit; sources, edges, checkpoint publication, runtime
 allocations, and caller-owned tables have their own ownership and budgets.
-Identity workspace includes the canonical batch encoding, retained sequence
-copies, and converter headers. A single non-null Utf8 or LargeUtf8 key with an
-integer sequence is hashed from its Arrow values and encoded once per distinct
-value. The temporary distinct-value copy reserves workspace before Arrow take;
-row dictionary IDs retain the same canonical key bytes and checkpoint order.
-Other key shapes use the existing typed scalar or batch row converter paths;
-generic sequences use the batch row converter. New owned key copies reserve
-additional workspace once per unique key before allocation; shared resident
-keys reuse their buffers. Dropped late rows do not allocate
-identity buffers. Batch hash vectors reserve additional workspace and fall back
-to scalar probing when that scratch cannot fit.
+
+Accepted rows from one admitted batch form an immutable Arrow run. A run owns
+an optional payload RecordBatch plus parallel group-ID, event-time, sequence,
+and payload/identity liveness columns. Admission materializes the accepted rows
+with Arrow `take` before retention, so dropped rows do not remain reachable
+through the run. A stable `(run ID, row offset)` locator
+identifies each retained row. Dropped late rows create no persistent state, and
+a duplicate or budget rejection installs no partial key, run, or output.
+
+Per-key right payload and identity indexes merge locators in `(time, sequence)`
+order. Pending left locators merge in canonical `(time, key, sequence)` order,
+using typed key ranks rather than group birth order. Out-of-order admission
+merges locator columns without rewriting the Arrow payloads. The same run and
+locator identities are used by duplicate validation, selection, checkpoint
+capture, and restore.
+
+For each finalizable left row, selection chooses the greatest right
+`(time, sequence)` within the inclusive tolerance from that key's ordered
+payload locators. A selection contains left and right locators plus right
+validity. Materialization uses Arrow `take` for one run and `interleave` for
+multiple runs, inserting a null source for unmatched right rows. Direct-consumer
+projection limits the materialized columns without changing retained input
+schemas or checkpoint identity.
+
+Selection and output charges are preflighted before emission. A retryable
+workspace or output-limit failure halves the attempted prefix; a single row
+that cannot fit fails without committing it. After downstream acceptance, the
+operator commits exactly that pending prefix, its counters, and the output
+sequence. Previously accepted output is not withdrawn by a later failure.
+
+Once the ready chunks in a progress tick have been accepted, right eviction
+uses the earlier of the left future-time bound and earliest pending left time.
+It cuts payload prefixes satisfying `right_time + tolerance < threshold` and
+can also drop dominated payloads at or before the threshold except the newest
+such row. Identity-only prefixes retire only when their time is strictly below
+the right watermark or the right side has ended. Runs with no live payload or
+identity are released. Cancellation leaves unaccepted output and its pending
+state available for a compatible checkpoint.
 
 When required state or a single output row cannot fit, execution fails with a
 structured resource reason. It never discards a still-useful candidate or
-chooses a worse match to fit a limit. Failed batch admission leaves no partial
-accepted state or corresponding output. Results previously accepted by a sink
-are not withdrawn.
-
-Native Rust/Arrow indexes keep each right key's identities in time and sequence
-order and choose at most one candidate per left row. Large ordered left prefixes
-reuse a per-key right cursor; smaller outputs and constrained workspace use
-binary search. Candidate
-rows are gathered directly from retained Arrow batches in final left-row order;
-consecutive left source rows are copied as spans. Eligible right candidates with
-one established source use compact 64-bit indices with explicit null validity
-and Arrow `take`
-on a blocking worker. Multiple sources retain the `interleave` path; converting
-the compact indices checks cancellation in bounded blocks and uses the existing
-workspace reservation. The async owner uses the original tuple layout when its
-bounded source check cannot establish a single right source, so it does not
-convert a growing prefix on the executor. This is
-the ASOF operator's output assembly; DataFusion remains the SQL and
-table-expression engine. Python only declares and lowers
-the graph. Admission retains each accepted payload batch and charges an upper
-bound for its canonical IPC size before encoding. Native checkpoint preparation
-encodes uncached retained payloads on a blocking worker; later checkpoints share
-those immutable segments. The produced segment is checked against the charged
-size. With checkpointing enabled, accepted admission, output, and eviction
-changes feed a capacity-checked journal. Native captures retain a base plus bounded delta frames and payload
-segments, replacing the base when compaction is required. Managed capture and
-native restore also run through awaited CPU work. Direct calls to `checkpoint()`
-can prepare and capture synchronously.
-Right key dictionaries use private integer handles for lookup; base encoding
-reserves sorting scratch and writes canonical key-byte order. See
-[recovery](#recovery-status-and-delivery) for the native and source-replay
-representations and their compatibility checks.
-Retained payload rows use eight-byte batch/row references to one owning batch
-pool. Finalized and evicted references release their batch when its final row
-is removed, and sparse pool indexes shrink using preflighted replacement storage.
-Pending left rows retain owned compact Arrow time buffers, a per-chunk key dictionary,
-sequence columns, and optional compact positions. All eight signed and unsigned
-integer sequence types use their native 1/2/4/8-byte width. Ordered contiguous
-integer sequences copy the accepted Arrow value range directly. Generic sequences
-share one continuous Arrow binary buffer per admitted batch. Unordered input is sorted
-on a blocking worker; borrowed cursor heads merge overlapping chunks in
-canonical `(time, key, sequence)` order. Cached row counts and extrema avoid
-rescanning all chunks on admission and progress queries. Prefix compaction
-reserves scratch and builds replacement buffers before output acceptance, so
-committing accepted output does not allocate. Its worker also reserves the
-retained input capacities, keeping Arrow and identity buffers funded when a
-cancelled or dropped call is followed by reset. Restore constructs chunks only
-from validated live index offsets. State accounting charges retained column
-capacities, unique identity buffers, payload batches, owning indexes, and
-checkpoint storage. A partly referenced identity buffer remains
-charged at its full retained capacity.
-
-Temporary admission and probe work use the available CPU and input work budget.
-Admission retains stable full-key routing. Large native columnar prefixes can
-split consecutive output rows between workers, including rows of a single hot
-key. Each worker matches rows and builds its local output references. Assembly
-preserves those local references and merges prefix summaries; its work still
-follows the actual span, source and key-owner metadata. Fragmented inputs can
-therefore require more owner work. Legacy layouts retain their existing probe
-paths. The eight persistent storage shards retain their identity and checkpoint
-layout; their count does not cap temporary computation concurrency.
-
-Worker prefix summaries and the owner merge destination have separate prepaid
-workspace while both are alive. Native integer-sequence summaries use retained
-chunk and dictionary metadata to size their reservation. Optional parallel
-workspace refusal releases the attempt before using the serial path; a required
-allocation failure can still reduce the finalization prefix. Narrow primitive
-outputs can use row tasks independently of the selected column count, including
-one copied column. These tasks retain the normal column path when optional row
-scratch cannot fit. Shared left spans remain eligible for zero-copy output
-across consecutive fragments.
-
-Finalization takes ready rows up to the output edge's row budget. Key and
-candidate vectors reserve checked workspace before allocation;
-the operator halves a chunk and releases unused scratch if workspace or output
-bytes exceed a limit. Each accepted chunk installs its prepared state,
-checkpoint journal changes, counters, and output sequence. Right-side
-eviction is deferred until all ready chunks
-in that progress tick have been accepted, then performed once. A cancelled
-tick can therefore retain right payloads that the completed tick would evict;
-its checkpoint still contains the accepted output prefix and every remaining
-pending row.
-
-When a left output range covers one complete Arrow array, materialization can
-share it if its backing buffers fit the visible slice memory charge. Partial
-ranges and arrays backed by larger allocations use the bounded copy path.
-Projected output reserves workspace for the selected columns; the existing
-conservative buffer-growth allowance also applies to shared arrays.
-
-Admission preflights exact incremental identity, batch and index charges before
-synchronously installing new rows. An eviction sweep preflights its row, shared
-batch, and index deltas before changing state in place; it defers index encoding
-until checkpoint preparation. A tick with nothing to evict uses cached minimum
-right-side times, while a sweep that changes state still traverses retained
-right buckets and their expired prefixes. The preview reserves scratch for batch
-reference counts and unique encoding-owner removals, including identity-only
-history. Commit releases each batch and encoding allocation by its aggregated
-reference count. Shared right columns are copied on a
-blocking worker before admission or eviction commits; unchanged buckets keep
-their allocation. The worker's reservation retains its inputs and replacement
-columns through cancellation and reset. Both paths reuse unchanged Arrow batch segments. This does not
-turn state limits into a process RSS bound. The output edge and workspace
-budgets continue to bound each emitted chunk. No
-throughput or latency guarantee follows from the configured resource bounds.
-See the [ASOF benchmark boundary and workloads](benchmark-suite.md#asof-settlement-measurements)
+chooses a worse match to fit a limit. No throughput or latency guarantee follows
+from the configured resource bounds. See the
+[ASOF benchmark boundary and workloads](benchmark-suite.md#asof-settlement-measurements)
 for separate settlement, allocation, and RSS diagnostics.
 
 ## Composition and explanation
@@ -420,29 +326,27 @@ facts; resource occupancy and delivery guarantees come from the running job.
 ## Recovery, status, and delivery
 
 ASOF uses its own `stream_asof_join@1` identity with semantic state version `3`.
-Native snapshots require layout/accounting version `10`; other native layouts
-are rejected even when their semantic version is `3`. Checkpoints include
-pending left rows, right history, live identities,
+Native snapshots require layout/accounting version `11` and
+`row_encoding="arrow-columnar-59.2.0"`; other native layouts are rejected even
+when their semantic version is `3`. Checkpoints contain canonical shared keys,
+per-run identity and optional payload segments, and a control descriptor with
+run inventory, the next run ID, and locator-index capacities. Metadata includes
 logical counters, output sequence, and terminal state. The runtime wrapper owns
 ingress watermarks/idle/EOF and the forwarded output frontier. Restore validates
-these together with configuration, schema, segment integrity, and recomputed
-resource charges before installing state. Native captures retain a canonical
-base plus bounded ordered delta frames and immutable Arrow payload segments,
-preserving typed sequence widths and capacity hints. Restore checks the frame
-chain, retained-payload descriptor, configuration, and engine-specific row
-encoding before installing state. Unknown or incompatible versions fail closed.
-`reset` only clears operator-owned memory; it does not
+the exact segment inventory, checksums, Arrow schemas, key/group coverage,
+payload/identity agreement, run identifiers, progress, counters, and recomputed
+resource charges before installing state. Unknown or incompatible versions fail
+closed. Compatible restore preserves pending rows and the next output sequence;
+subsequent output and a recapture at the same epoch retain their deterministic
+records and bytes. `reset` only clears operator-owned memory; it does not
 delete shared checkpoints, reset sources, or operate sink transactions.
 
-The prefix preparation path validates the next state and journal charge before
-emitting a chunk, then installs state, counters, journal changes, and
-output sequence synchronously after the sink accepts it. At a checkpoint
-barrier, asynchronous preparation encodes the required base or delta and uncached
-payloads before capture shares the immutable segments. Cancellation during
-preparation or a blocked emit leaves that chunk pending and preserves any
-earlier committed prefix. A captured checkpoint resumes the remaining rows and sequence without
-losing or repeating the committed operator prefix. The strict dual-watermark
-boundary is preserved.
+Finalization validates selection and output charges before emitting a chunk,
+then installs the selected prefix, counters, and output sequence after the sink
+accepts it. Cancellation or a blocked emit leaves that chunk pending and
+preserves any earlier committed prefix. A captured checkpoint resumes the
+remaining rows and sequence without losing or repeating the committed operator
+prefix. The strict dual-watermark boundary is preserved.
 
 Eligible managed jobs with immutable source history and replay factories on
 both ASOF input paths can instead use `source_replay` version `3`. That

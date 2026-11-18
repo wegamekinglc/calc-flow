@@ -601,19 +601,18 @@ microsecond; no watermark is emitted for an underflowing predecessor. This
 preserves downstream acceptance of later legal rows at `C`. The public
 `StreamOperator` trait gains no new control-injection or callback requirement.
 
-ASOF admission preflights retained capacities and, when checkpointing is
-enabled, checkpoint journal storage, then installs accepted rows without
-cloning the retained maps. Output prefix
-commits install prepared state and journal changes after output acceptance.
-Right-side eviction uses expiration indexes to select due keys and rows,
-preparing required copies and resource deltas before changing state in place
-once per completed progress tick. Its semantic state version is `3`; native
-layout/accounting version `10` stores an immutable base, bounded delta frames,
-and shared payload segments. Eligible source-history routes instead retain
-versioned callback replay records whose segments use native v4 source-history
-handles. Managed preparation,
-capture, and native restore use awaited CPU work; direct operator checkpoint
-calls can prepare synchronously.
+ASOF admission preflights shared keys, immutable run payload/identity columns,
+locator indexes, and workspace before committing a complete batch. Per-key
+locators preserve `(time, sequence)` order, while pending left locators use
+canonical `(time, key, sequence)` order. Finalization selects a closed prefix,
+materializes left/right locators through Arrow `take` or `interleave`, and
+commits that prefix only after output acceptance. Right eviction cuts expired
+or dominated payload prefixes and separately retires identity-only history when
+right progress or EOF permits. Its semantic state version is `3`;
+layout/accounting version `11` uses `arrow-columnar-59.2.0` and stores canonical
+shared keys, per-run identity/payload columns, and control/index-capacity
+descriptors. Eligible source-history routes instead retain versioned callback
+replay records whose segments use native v4 source-history handles.
 Restore cross-validates native rows/counters/terminal state
 with the wrapper's ingress progress and output frontier before readiness is
 acknowledged. All sources reaching ASOF must have a non-disabled valid watermark

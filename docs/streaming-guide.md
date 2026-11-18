@@ -1558,8 +1558,7 @@ This compute core is tested directly but is not yet connected to production
 expose Join state pages, and `RunStateSnapshot` is not a durable checkpoint
 encoding. The existing operator's native/DataFusion paths, logical V1 charges,
 physical layouts 1–3, and managed recovery contracts below therefore remain in
-force. ASOF migration, final old-layout deletion, and performance acceptance
-remain open.
+force. Final old-layout deletion and performance acceptance remain open.
 
 #### Existing operator storage and recovery
 
@@ -1798,8 +1797,9 @@ schema/identity contract, late error/drop policies, whole-operator state and
 workspace budgets, composition, and recovery guarantees.
 
 ASOF uses the `stream_asof_join@1` operator identity and semantic checkpoint
-state version `3`. Native snapshots require layout/accounting version `10`;
-other native layouts fail closed even when their semantic version is `3`.
+state version `3`. Native snapshots require layout/accounting version `11` and
+`arrow-columnar-59.2.0` encoding; other native layouts fail closed even when
+their semantic version is `3`.
 Eligible managed source-history routes can use the separate versioned replay
 representation described in
 [ASOF recovery](asof-join-guide.md#recovery-status-and-delivery). Its
@@ -1946,9 +1946,9 @@ reservations without an implicit byte limit. Explicit operator state budgets
 and edge budgets remain separate from these execution-memory reservations;
 edge backpressure does not impose a total runtime or process memory limit.
 
-Native ASOF temporary work uses CPU- and input-sized concurrency independently
-of its persistent storage shards. Its finalization prefixes follow the explicit
-edge budget and shrink when workspace or output bytes require it. Warm ordered
+Native ASOF selection and materialization use columnar locators and prepaid
+workspace. Its finalization prefixes follow the explicit edge budget and shrink
+when workspace or output bytes require it. Warm ordered
 Float64 rolling mean and compatible dual-SMA use whole-entity CPU lanes, retaining
 each entity's arithmetic order. Small, unsupported or severely skewed
 inputs keep their serial paths. Window and cumulative SQL aggregates retain
