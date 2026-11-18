@@ -65,8 +65,18 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   P3.3 v4 object/manifest/partition persistence 已验证；P3.4 coordinator 与 opaque adapter 已有状态机和
   epoch roundtrip。Rust 与 Python `StreamSession` 的 durable construction、restore 和同步 checkpoint 已交付，
   使用 managed storage、`job_kind=session`、canonical opaque fingerprint 与 input/watermark progress；Rust session 25 项、
-  Python focused 53 项通过，包含 epoch 1/2 continuation 和 running-loop 拒绝。runner 的实际
-  source/operator/sink 接线、完整故障矩阵和性能门槛尚未完成。
+  Python focused 53 项通过，包含 epoch 1/2 continuation 和 running-loop 拒绝。runner 的 opaque-v4 接线与故障证据见下条；
+  性能门槛尚未完成。
+- P3.4/P3.6 runner checkpoint v4（`17893f8f`、`e7cd2f76`）：runner 将 source cut、opaque operator snapshot 及其
+  ingress/output-frontier progress、sink recovery blocks 发布为 `job_kind=runner` 的 manifest v4。原生恢复选择最高完整
+  epoch，校验精确 participants、capabilities、frontier 和 terminal 一致性，明确拒绝 v3 manifest，在输入准入前恢复
+  operator/source/sink，并从下一 epoch 继续。Join/ASOF 保留付费恢复准入，包括 checkpoint-preload reservation；
+  terminal Join 可使用付费本地 opaque loading。manifest durable 仍是提交点，sink finalization 先于 source acknowledgement，
+  本 epoch 的 retention/orphan cleanup 在 durable settlement 后执行；rename/parent-sync 结果不确定时保留 prepared sinks
+  并要求恢复，manifest durable 后的 settlement/maintenance 失败保留该恢复真相。非 soak streaming suite 已验证；命名 restart matrix 覆盖
+  12 个故障点的 I/O、panic、cancel、restart，包含真实 parent-directory sync 失败、partial sink commit、retention 和
+  compaction。进程重启 soak 证据已分类 v4 artifacts 并计入其 state bytes。source-history 的 v4/native 清理、
+  legacy 协议删除、ASOF 生产迁移、P6、性能门槛和最终 CI 仍未完成。
 - P4.1 shared keyed core 与单整数 SUM 已交付；P4.2 typed aggregate state、temporal extrema、8192-group dirty
   snapshot cache 和 rollback/recovery 已通过 327 个 SQL 测试。P4.3 opt-in changelog 已集成，
   SQL 336 项与 Python 5 项测试通过。旧 compact 删除和 P4 测量尚未完成。

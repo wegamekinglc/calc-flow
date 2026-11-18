@@ -9,6 +9,28 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-18: Persist `StreamingRunner` checkpoints as manifest v4 with
+  `job_kind=runner`. Source cuts, opaque operator snapshots with ingress and
+  output-frontier progress, and sink recovery blocks are published as v4
+  objects. Native restore selects the highest complete runner epoch, validates
+  the exact participants, capabilities, frontiers and terminal agreement,
+  rejects legacy v3 manifests, restores operator/source/sink state before input
+  admission, and continues at the next epoch. Join and ASOF retain paid restore
+  admission, including checkpoint-preload reservations and paid local opaque
+  loading for terminal Join recovery. Manifest durability remains the commit
+  point: sink finalization precedes source acknowledgement, and post-checkpoint
+  retention and orphan cleanup follow durable settlement. Uncertain manifest
+  rename or parent synchronization preserves prepared sinks and requires
+  recovery; once a manifest is durable, later settlement or maintenance failures
+  retain it as recovery truth. The named
+  restart matrix covers twelve fault points under I/O, panic, cancellation and
+  restart, including a real parent-directory sync failure, partial sink commit,
+  retention and compaction. Process-restart soak evidence classifies v4
+  artifacts and includes their state bytes. Source-history v4/native cleanup,
+  legacy protocol deletion, ASOF production migration, P6, performance gates
+  and final CI remain open. See the
+  [re-architecture plan](docs/plans/2026-11-15-streaming-core-rearchitecture.md).
+
 - 2026-11-18: Add a crate-private synchronous columnar Join run core. Each
   retained input morsel becomes an immutable Arrow run with group-ID,
   event-time, and physical row-ID columns. Stable run/row locators are merged
