@@ -131,7 +131,7 @@ async fn checkpoint_a_real_pair(root: &Path) {
     let gate = Arc::new(WorkerGate::default());
     let _release = Release(gate.clone());
     block_after_numeric(&job, &gate);
-    job.core.entity_work.set_worker_limit_for_test(2);
+    job.core.morsels.set_worker_limit_for_test(2);
     f.start.notify_one();
     wait_until(|| gate.entered.load(Ordering::SeqCst) == 2).await;
     let epoch = {
@@ -139,7 +139,7 @@ async fn checkpoint_a_real_pair(root: &Path) {
         tokio::pin!(cut);
         assert!(futures::poll!(&mut cut).is_pending());
         assert_eq!(rows(&f.records), PRELOAD);
-        assert!(job.core.entity_work.active_bytes() > 0);
+        assert!(job.core.morsels.active_bytes() > 0);
         gate.release();
         tokio::time::timeout(Duration::from_secs(10), &mut cut)
             .await
@@ -159,7 +159,7 @@ async fn checkpoint_a_real_pair(root: &Path) {
     assert!(!manifest.operators["rolling"].opaque_metadata().unwrap().1);
     assert_eq!(rows(&f.records), TOTAL);
     assert_eq!(job.core.owned_lane_launches.load(Ordering::SeqCst), 2);
-    assert_eq!(job.core.entity_work.active_bytes(), 0);
+    assert_eq!(job.core.morsels.active_bytes(), 0);
     assert_eq!(job.cancel().await.state, ContinuousJobState::Cancelled);
     assert!(job.core.runtime_status.lock().tasks.snapshot().is_empty());
     drop(job);
@@ -211,7 +211,7 @@ async fn real_checkpoint_drains_lanes_and_restores_owned_lanes_for_both_continua
         .unwrap();
     let weak = Arc::downgrade(&job.core);
     assert_eq!(*restored_cursor.lock(), Some(vec![2]));
-    job.core.entity_work.set_worker_limit_for_test(2);
+    job.core.morsels.set_worker_limit_for_test(2);
     f.start.notify_one();
     wait_until(|| rows(&f.records) == ROWS).await;
     assert_eq!(job.core.owned_lane_launches.load(Ordering::SeqCst), 2);
@@ -229,7 +229,7 @@ async fn real_checkpoint_drains_lanes_and_restores_owned_lanes_for_both_continua
     assert_eq!(job.core.owned_lane_launches.load(Ordering::SeqCst), 4);
     assert_continuation(&f.records, &input);
     assert!(job.core.runtime_status.lock().tasks.snapshot().is_empty());
-    assert_eq!(job.core.entity_work.active_bytes(), 0);
+    assert_eq!(job.core.morsels.active_bytes(), 0);
     drop(job);
     runner.shutdown().await.unwrap();
     assert!(weak.upgrade().is_none());
@@ -244,7 +244,7 @@ async fn claimed_terminal_manifest_driver_abort_resolves_without_a_supervisor_or
         .start_checkpointed(f.spec, checkpoint(directory.path()))
         .await
         .unwrap();
-    job.core.entity_work.set_worker_limit_for_test(2);
+    job.core.morsels.set_worker_limit_for_test(2);
     f.start.notify_one();
     let outcome = tokio::time::timeout(Duration::from_secs(10), job.wait())
         .await
@@ -298,7 +298,7 @@ async fn classified_terminal_recovery_failure_closes_claim_before_report_publica
         .start_checkpointed(f.spec, checkpoint(directory.path()))
         .await
         .unwrap();
-    job.core.entity_work.set_worker_limit_for_test(2);
+    job.core.morsels.set_worker_limit_for_test(2);
     f.start.notify_one();
     assert_eq!(job.wait().await.state, ContinuousJobState::Completed);
     drop(job);
