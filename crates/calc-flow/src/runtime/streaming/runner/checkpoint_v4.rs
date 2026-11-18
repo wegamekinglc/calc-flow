@@ -106,7 +106,30 @@ pub(super) async fn persist_epoch(
     };
     manifest.manifest_fingerprint = manifest_fingerprint(&manifest)?;
     validate_participants(checkpoint, &manifest, view)?;
-    let path = store.publish_manifest(&manifest)?;
+    #[cfg(all(test, unix))]
+    let real_parent_sync_failure = checkpoint.faults.is_armed(
+        super::CheckpointFaultPoint::ManifestParentSync,
+        super::CheckpointFaultMode::Io,
+    );
+    #[cfg(all(test, unix))]
+    if real_parent_sync_failure {
+        store.fail_parent_sync_for_test(checkpoint.faults.parent_sync_os_failure_probe());
+    }
+    let path = match store.publish_manifest(&manifest) {
+        Ok(path) => path,
+        #[cfg(all(test, unix))]
+        Err(_) if real_parent_sync_failure => {
+            let _ = checkpoint.inject_fault(
+                super::CheckpointFaultPoint::ManifestParentSync,
+                cancellation,
+            );
+            return Err(CalcFlowError::RecoveryRequired {
+                pipeline_name: checkpoint.identity.pipeline_name.clone(),
+                message: "v4 manifest parent sync failed after installation".into(),
+            });
+        }
+        Err(error) => return Err(error),
+    };
     #[cfg(test)]
     if !matches!(
         checkpoint.inject_fault(super::CheckpointFaultPoint::ManifestRename, cancellation),

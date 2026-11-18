@@ -34,6 +34,8 @@ pub(crate) struct V4PersistenceStats {
 pub(crate) struct V4Store {
     root: PathBuf,
     stats: V4PersistenceStats,
+    #[cfg(all(test, unix))]
+    real_parent_sync_failure: Option<crate::state::ManifestParentSyncOsFailureProbe>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,7 +51,17 @@ impl V4Store {
         Self {
             root: root.into(),
             stats: V4PersistenceStats::default(),
+            #[cfg(all(test, unix))]
+            real_parent_sync_failure: None,
         }
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn fail_parent_sync_for_test(
+        &mut self,
+        probe: crate::state::ManifestParentSyncOsFailureProbe,
+    ) {
+        self.real_parent_sync_failure = Some(probe);
     }
 
     pub(crate) fn stats(&self) -> &V4PersistenceStats {
@@ -191,6 +203,14 @@ impl V4Store {
         sync_file(&temporary)?;
         self.stats.manifest_file_syncs += 1;
         install_file(&temporary, &committed, &bytes)?;
+        #[cfg(all(test, unix))]
+        if let Some(probe) = &self.real_parent_sync_failure {
+            probe.record();
+            return Err(io_error(
+                &directory,
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            ));
+        }
         sync_directory(&directory)?;
         self.stats.manifest_root_syncs += 1;
         Ok(committed)

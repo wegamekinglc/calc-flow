@@ -53,12 +53,12 @@ type ManifestTransactionFaultHook =
     Arc<dyn Fn(ManifestTransactionFaultPoint) -> Result<()> + Send + Sync>;
 
 #[cfg(all(test, unix))]
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct ManifestParentSyncOsFailureProbe(Arc<AtomicUsize>);
 
 #[cfg(all(test, unix))]
 impl ManifestParentSyncOsFailureProbe {
-    fn record(&self) {
+    pub(crate) fn record(&self) {
         self.0.fetch_add(1, Ordering::SeqCst);
     }
 

@@ -3766,7 +3766,7 @@ pub(super) mod tests {
             finish_benchmark_alignment_harness(&mut self.harness).await?;
             Ok(BenchmarkAlignmentReport {
                 data_before_barrier,
-                state_segments: ack.state.segments.len(),
+                state_segments: ack.snapshot.segments.len(),
                 barriers,
             })
         }

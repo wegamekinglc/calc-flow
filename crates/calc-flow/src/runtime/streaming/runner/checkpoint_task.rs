@@ -1035,16 +1035,22 @@ async fn retain_completed_epoch(
     let _ = cancellation;
     checkpoint.status.sinks_committed(epoch);
     #[cfg(test)]
-    if !matches!(
-        checkpoint.inject_fault(CheckpointFaultPoint::Retention, cancellation),
-        Ok(false)
-    ) {
-        checkpoint
-            .status
-            .fail(CheckpointFailureCategory::Maintenance);
-        return Err(CalcFlowError::Internal {
-            message: "injected retention failure".into(),
-        });
+    match checkpoint.inject_fault(CheckpointFaultPoint::Retention, cancellation) {
+        Ok(false) => {}
+        Err(error) => {
+            checkpoint
+                .status
+                .fail(CheckpointFailureCategory::Maintenance);
+            return Err(error);
+        }
+        Ok(true) => {
+            checkpoint
+                .status
+                .fail(CheckpointFailureCategory::Maintenance);
+            return Err(CalcFlowError::Internal {
+                message: "injected retention failure".into(),
+            });
+        }
     }
     let removed = checkpoint_v4_retention::retain(checkpoint).await?;
     #[cfg(test)]
