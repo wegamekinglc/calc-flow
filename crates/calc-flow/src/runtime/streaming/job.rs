@@ -1,6 +1,7 @@
 mod asof;
 mod distinct;
 mod order;
+mod window_finality;
 
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
