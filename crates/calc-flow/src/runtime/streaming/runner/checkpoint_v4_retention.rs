@@ -25,14 +25,14 @@ fn retain_sync(root: &Path, retained_epochs: usize) -> Result<usize> {
     let mut epochs = manifests;
     epochs.sort_by(|left, right| right.0.cmp(&left.0));
     let mut referenced = BTreeSet::new();
-    for (position, (_, path)) in epochs.iter().enumerate() {
-        if position >= retained_epochs {
-            std::fs::remove_file(path).map_err(|error| io_error(path, error))?;
-            continue;
-        }
+    let retained = retained_epochs.min(epochs.len());
+    for (_, path) in &epochs[..retained] {
         let bytes = std::fs::read(path).map_err(|error| io_error(path, error))?;
         let manifest = V4Manifest::from_bytes(&bytes)?;
         collect_references(&manifest, &mut referenced);
+    }
+    for (_, path) in &epochs[retained..] {
+        std::fs::remove_file(path).map_err(|error| io_error(path, error))?;
     }
     remove_unreferenced(root, &referenced)
 }
@@ -47,6 +47,19 @@ fn manifest_files(root: &Path) -> Result<Vec<(u64, PathBuf)>> {
     let mut manifests = Vec::new();
     for entry in entries {
         let path = entry.map_err(|error| io_error(&directory, error))?.path();
+        let temporary = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.starts_with("epoch-")
+                    && Path::new(name)
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("tmp"))
+            });
+        if temporary {
+            std::fs::remove_file(&path).map_err(|error| io_error(&path, error))?;
+            continue;
+        }
         let Some(epoch) = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -147,5 +160,111 @@ fn io_error(path: &Path, source: std::io::Error) -> CalcFlowError {
     CalcFlowError::Io {
         path: path.to_string_lossy().into_owned(),
         source,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use sha2::{Digest, Sha256};
+
+    use super::retain_root;
+    use crate::state::v4::{
+        JobKind, OperatorV4, SinkV4, SourceV4, V4Handle, V4Manifest, V4Store, manifest_fingerprint,
+    };
+    use crate::{JsonMap, SinkDeliveryManifest, SourceWatermarkManifestState};
+
+    async fn object(store: &mut V4Store, epoch: u64, id: &str) -> V4Handle {
+        let bytes = id.as_bytes().to_vec();
+        store
+            .write_opaque(
+                epoch,
+                vec![crate::state::v4::OpaqueObject {
+                    owner: "operator".into(),
+                    object_id: id.into(),
+                    generation: epoch,
+                    sha256: hex::encode(Sha256::digest(&bytes)),
+                    bytes,
+                }],
+            )
+            .await
+            .unwrap()
+            .remove(0)
+            .handle
+    }
+
+    fn manifest(epoch: u64, blocks: Vec<V4Handle>) -> V4Manifest {
+        let metadata = JsonMap::new();
+        let state_fingerprint = hex::encode(Sha256::digest(b"{}"));
+        let mut manifest = V4Manifest {
+            format_version: 4,
+            pipeline_name: "retention-test".into(),
+            pipeline_fingerprint: "fingerprint".into(),
+            runtime_config_hash: "runtime".into(),
+            epoch,
+            created_at: chrono::Utc::now(),
+            recovery_status: "final".into(),
+            job_kind: JobKind::Runner,
+            recovery_fingerprint: "fingerprint".into(),
+            sources: BTreeMap::from([(
+                "source".into(),
+                SourceV4 {
+                    cursor: None,
+                    identity_hash: "identity".into(),
+                    next_sequence: 0,
+                    ended: false,
+                    watermark_policy: SourceWatermarkManifestState::Disabled { idle: false },
+                    history: None,
+                },
+            )]),
+            operators: BTreeMap::from([(
+                "operator".into(),
+                OperatorV4::Opaque {
+                    progress: BTreeMap::new(),
+                    output_frontier: None,
+                    state_fingerprint,
+                    inline_metadata: metadata,
+                    blocks,
+                },
+            )]),
+            sinks: BTreeMap::from([(
+                "sink".into(),
+                SinkV4 {
+                    delivery: SinkDeliveryManifest::Ordinary,
+                    pre_commit: None,
+                    blocks: Vec::new(),
+                },
+            )]),
+            static_inputs: BTreeMap::new(),
+            manifest_fingerprint: String::new(),
+        };
+        manifest.manifest_fingerprint = manifest_fingerprint(&manifest).unwrap();
+        manifest
+    }
+
+    #[tokio::test]
+    async fn retention_preserves_carried_handles_and_removes_orphans() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest_root = root.path().join("manifests");
+        let mut store = V4Store::new(manifest_root.join("lineage"));
+        let first = object(&mut store, 1, "first").await;
+        let second = object(&mut store, 2, "second").await;
+        store
+            .publish_manifest(&manifest(1, vec![first.clone()]))
+            .unwrap();
+        store
+            .publish_manifest(&manifest(2, vec![first.clone(), second.clone()]))
+            .unwrap();
+        let orphan = object(&mut store, 3, "orphan").await;
+        assert_eq!(retain_root(&manifest_root, 1).await.unwrap(), 1);
+        assert!(
+            !manifest_root
+                .join("lineage/manifests/epoch-1.json")
+                .exists()
+        );
+        assert_eq!(store.read_opaque(&first).unwrap(), b"first");
+        assert_eq!(store.read_opaque(&second).unwrap(), b"second");
+        assert!(store.read_opaque(&orphan).is_err());
     }
 }

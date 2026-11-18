@@ -57,9 +57,10 @@ impl ObjectKind {
     }
 }
 
+/// Immutable opaque segment reference used by native v4 source history.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct V4Handle {
+pub struct V4Handle {
     pub(crate) owner: String,
     pub(crate) epoch: u64,
     pub(crate) object_id: String,
@@ -69,6 +70,16 @@ pub(crate) struct V4Handle {
 }
 
 impl V4Handle {
+    /// Returns the connector-defined stable segment identifier.
+    pub fn segment_id(&self) -> &str {
+        &self.object_id
+    }
+
+    /// Returns the exact raw segment byte length used by history budgets.
+    pub const fn byte_len(&self) -> u64 {
+        self.byte_len
+    }
+
     pub(crate) fn validate(&self, manifest_epoch: u64) -> Result<()> {
         validate_portable_identifier("checkpoint-v4 handle owner", &self.owner)?;
         validate_object_id(&self.object_id)?;

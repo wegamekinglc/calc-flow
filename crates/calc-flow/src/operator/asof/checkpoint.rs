@@ -292,7 +292,15 @@ impl StreamAsofJoinOperator {
             snapshot
                 .inline_metadata
                 .iter()
-                .filter(|(key, _)| !matches!(key.as_str(), "retained_payloads" | "checkpoint_log"))
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "retained_payloads"
+                            | "checkpoint_log"
+                            | "source_replay"
+                            | crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1
+                    )
+                })
                 .map(|(key, value)| (key.as_str(), value)),
         ))
         .map_err(|error: serde_json::Error| mismatch(&error.to_string()))?;

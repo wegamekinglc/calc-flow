@@ -57,3 +57,4 @@ pub use manifest::{
 pub use source_history::{
     SourceHistoryBytes, SourceHistoryContext, SourceHistoryLimits, SourceHistorySpec,
 };
+pub use v4::SourceHistorySegmentHandle;

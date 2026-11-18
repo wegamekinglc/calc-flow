@@ -1226,7 +1226,7 @@ async fn validate_manifest_segments_scoped(
     session: Option<&parking_lot::Mutex<SessionSegments>>,
     native: Option<&crate::array::NativeSequenceInventory>,
 ) -> Result<()> {
-    validate_source_segments(lineage, manifest, session).await?;
+    validate_source_segments(lineage, manifest, session)?;
     validate_operator_segments(lineage, manifest, session, native).await?;
     validate_sink_segments(lineage, manifest, session).await
 }
@@ -1236,18 +1236,16 @@ fn session_verified(
 ) -> bool {
     session.is_some_and(|state| state.lock().verified.contains(handle))
 }
-async fn validate_source_segments(
-    lineage: &dyn StateLineageBackend,
+fn validate_source_segments(
+    _lineage: &dyn StateLineageBackend,
     manifest: &CheckpointManifest,
-    session: Option<&parking_lot::Mutex<SessionSegments>>,
+    _session: Option<&parking_lot::Mutex<SessionSegments>>,
 ) -> Result<()> {
     for source in manifest.sources().values() {
-        if let Some(history) = &source.history {
-            for handle in &history.segments {
-                if !session_verified(session, handle) {
-                    lineage.verify_committed_segment(handle).await?;
-                }
-            }
+        if source.history.is_some() {
+            return Err(CalcFlowError::CheckpointMismatch {
+                message: "legacy source history is not restorable; start a new lineage".into(),
+            });
         }
     }
     Ok(())
@@ -1290,11 +1288,7 @@ fn collect_manifest_handles(manifest: &CheckpointManifest, retained: &mut BTreeS
 }
 
 fn manifest_handles(manifest: &CheckpointManifest) -> impl Iterator<Item = &StateHandle> {
-    manifest
-        .sources()
-        .values()
-        .filter_map(|source| source.history.as_ref())
-        .flat_map(|history| &history.segments)
+    std::iter::empty::<&StateHandle>()
         .chain(
             manifest
                 .operators()

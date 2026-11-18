@@ -531,24 +531,21 @@ impl SourceBinding {
         }
     }
 
-    pub(crate) async fn install_history(
+    pub(crate) fn install_history(
         &mut self,
         source_id: &str,
-        transaction: Arc<crate::state::ManifestTransaction>,
+        lineage: &std::path::Path,
         epoch: Epoch,
         restored: Option<crate::SourceHistoryManifestEntry>,
     ) -> Result<()> {
         if let Some(spec) = &self.history_spec {
-            self.history = Some(
-                crate::SourceHistoryContext::new(
-                    transaction,
-                    source_id,
-                    epoch,
-                    spec.clone(),
-                    restored,
-                )
-                .await?,
-            );
+            self.history = Some(crate::SourceHistoryContext::new(
+                lineage,
+                source_id,
+                epoch,
+                spec.clone(),
+                restored,
+            )?);
         }
         Ok(())
     }

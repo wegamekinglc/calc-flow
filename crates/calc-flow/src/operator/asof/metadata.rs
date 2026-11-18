@@ -12,6 +12,8 @@ pub(super) fn validate_shape(metadata: &JsonMap) -> Result<()> {
         | "epoch"
         | "next_output_sequence" => value.as_u64().is_some(),
         "terminal" => value.is_boolean(),
+        "source_replay" => value.is_u64(),
+        crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1 => value.is_i64() || value.is_null(),
         "metrics" => metrics(value),
         "retained_payloads" | "checkpoint_log" => true,
         _ => false,

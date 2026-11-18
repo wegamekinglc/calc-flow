@@ -2,7 +2,7 @@ use super::*;
 
 mod projection;
 
-pub(super) async fn configure(
+pub(super) fn configure(
     checkpoint: Option<&OpenedCheckpointRuntime>,
     sources: &mut BTreeMap<String, SourceBinding>,
     owner: &HistoryOwner,
@@ -11,36 +11,34 @@ pub(super) async fn configure(
     if checkpoint.is_none() {
         return Ok(());
     }
-    configure_sources(checkpoint, sources, owner).await?;
+    configure_sources(checkpoint, sources, owner)?;
     configure_replay_nodes(checkpoint, sources, plan);
     Ok(())
 }
 
-async fn configure_sources(
+fn configure_sources(
     checkpoint: Option<&OpenedCheckpointRuntime>,
     sources: &mut BTreeMap<String, SourceBinding>,
     owner: &HistoryOwner,
 ) -> crate::Result<()> {
     for (source_id, source) in sources.iter_mut() {
         let restored = checkpoint
-            .and_then(|checkpoint| checkpoint.selected.as_ref())
-            .and_then(|selected| selected.manifest.sources().get(source_id))
+            .and_then(|checkpoint| checkpoint.selected_v4.as_ref())
+            .and_then(|selected| selected.manifest.sources.get(source_id))
             .and_then(|entry| entry.history.as_ref());
         source.validate_history(
             source_id,
             restored,
-            checkpoint.is_some_and(|checkpoint| checkpoint.selected.is_some()),
+            checkpoint.is_some_and(|checkpoint| checkpoint.selected_v4.is_some()),
         )?;
         if source.history_spec().is_some() {
             let checkpoint = managed_checkpoint(checkpoint)?;
-            source
-                .install_history(
-                    source_id,
-                    checkpoint.transaction.clone(),
-                    checkpoint.next_epoch,
-                    restored.cloned(),
-                )
-                .await?;
+            source.install_history(
+                source_id,
+                &checkpoint.manifest_root.join("lineage"),
+                checkpoint.next_epoch,
+                restored.cloned(),
+            )?;
             if let Some(context) = source.history_context() {
                 owner.contexts.lock().insert(source_id.clone(), context);
             }
@@ -74,9 +72,13 @@ fn configure_replay_nodes(
             continue;
         }
         let selected = checkpoint
-            .and_then(|checkpoint| checkpoint.selected.as_ref())
-            .and_then(|selected| selected.manifest.operators().get(node.operator_id.as_str()));
-        if selected.is_some_and(|entry| !entry.inline_metadata.contains_key("source_replay")) {
+            .and_then(|checkpoint| checkpoint.selected_v4.as_ref())
+            .and_then(|selected| selected.manifest.operators.get(node.operator_id.as_str()));
+        if selected.is_some_and(|entry| {
+            !entry
+                .opaque_metadata()
+                .is_some_and(|(metadata, _)| metadata.contains_key("source_replay"))
+        }) {
             continue;
         }
         let bindings =

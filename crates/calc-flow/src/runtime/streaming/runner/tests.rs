@@ -9393,12 +9393,19 @@ async fn retention_failure_after_terminal_commit_recovers_the_durable_epoch() {
         .expect("retention fault should terminate the job");
 
     assert_eq!(failed.state, ContinuousJobState::Failed);
-    assert!(failed.errors.iter().any(|failure| {
-        matches!(
-            &failure.error,
-            CalcFlowError::Internal { message } if message == "injected retention failure"
-        )
-    }));
+    assert!(
+        failed.errors.iter().any(|failure| {
+            match &failure.error {
+                CalcFlowError::Internal { message } => message == "injected retention failure",
+                CalcFlowError::Io { source, .. } => {
+                    source.to_string() == "injected checkpoint I/O fault"
+                }
+                _ => false,
+            }
+        }),
+        "{:?}",
+        failed.errors
+    );
     let failed_checkpoint = job.status().checkpoint.unwrap();
     assert_eq!(failed_checkpoint.current_epoch, Some(crate::Epoch::INITIAL));
     assert_eq!(

@@ -18,7 +18,10 @@ use crate::{
     pipeline::{CompiledStreamOperator, RuntimeStreamNode, StreamRuntimePlanParts},
     runtime::streaming::{
         operator_task::restore_terminal_asof,
-        progress::{PreparedStreamJob, restore_durable_progress, types::LogicalInstant},
+        progress::{
+            PreparedStreamJob, restore_durable_progress, restore_durable_progress_v4,
+            types::LogicalInstant,
+        },
     },
     state::ManifestTransaction,
 };
@@ -230,6 +233,9 @@ pub(super) async fn restore_terminal(
     if !plan.nodes.iter().any(|node| is_asof(&node.operator)) {
         return Ok(statuses);
     }
+    if checkpoint.selected_v4.is_some() {
+        return restore_terminal_v4(plan, checkpoint, prepared, cancellation, job).await;
+    }
     let selected = checkpoint
         .selected
         .as_ref()
@@ -264,6 +270,62 @@ pub(super) async fn restore_terminal(
             job,
         )
         .await?;
+        statuses.insert(node.node_id.clone(), progress);
+    }
+    Ok(statuses)
+}
+
+async fn restore_terminal_v4(
+    plan: &mut StreamRuntimePlanParts,
+    checkpoint: &OpenedCheckpointRuntime,
+    prepared: &PreparedStreamJob,
+    cancellation: &CancellationToken,
+    job: &crate::StreamJobContext,
+) -> Result<BTreeMap<String, OperatorProgress>> {
+    let selected = checkpoint.selected_v4.as_ref().unwrap();
+    restore_durable_progress_v4(prepared, &selected.manifest.sources, LogicalInstant::ZERO)?;
+    let mut snapshots =
+        super::checkpoint_v4::load_snapshots(checkpoint, &selected.manifest).await?;
+    let mut statuses = BTreeMap::new();
+    for node in &mut plan.nodes {
+        if !is_asof(&node.operator) {
+            continue;
+        }
+        let id = node.operator_id.as_str();
+        let entry = &selected.manifest.operators[id];
+        let raw = snapshots
+            .remove(id)
+            .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                message: format!("terminal v4 ASOF {id:?} has no snapshot"),
+            })?;
+        let admitted = super::admit_v4_snapshot(node, entry, raw)?;
+        let mut snapshot = crate::state::PreloadedSnapshot::take_legacy(&mut Arc::new(admitted))?;
+        let output_frontier = entry.output_frontier();
+        let metadata = take_output_frontier(&mut snapshot, id)?;
+        if metadata != output_frontier {
+            return Err(CalcFlowError::CheckpointMismatch {
+                message: format!("terminal v4 ASOF {id:?} frontier metadata differs"),
+            });
+        }
+        let snapshot = node.checkpoint_capability.decode_snapshot(id, snapshot)?;
+        let mut restore = OperatorRestoreState {
+            snapshot: Arc::new(crate::state::PreloadedSnapshot::uncredited(snapshot)),
+            progress: entry.progress().clone(),
+            output_frontier,
+            next_epoch: checkpoint.next_epoch,
+        };
+        let progress = restore_terminal_asof(
+            &mut node.operator,
+            node.ingress_edges.keys(),
+            &mut restore,
+            job,
+        )
+        .await?;
+        if cancellation.is_cancelled() {
+            return Err(CalcFlowError::Cancelled {
+                run_id: "checkpoint:v4-asof-terminal".into(),
+            });
+        }
         statuses.insert(node.node_id.clone(), progress);
     }
     Ok(statuses)

@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 use super::super::manifest::{
     CursorManifestEntry, OperatorIngressManifestEntry, SinkDeliveryManifest,
+    SourceHistoryManifestEntry,
 };
 use super::{MAX_MANIFEST_DOCUMENT_BYTES, Result, V4Handle, format_error, mismatch};
 use crate::{
@@ -26,15 +27,6 @@ pub(crate) enum JobKind {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SourceHistoryV4 {
-    pub(crate) format_version: u32,
-    pub(crate) contract: String,
-    pub(crate) inline_metadata: JsonMap,
-    pub(crate) segments: Vec<V4Handle>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct SourceV4 {
     #[serde(deserialize_with = "deserialize_required_option")]
     pub(crate) cursor: Option<CursorManifestEntry>,
@@ -43,7 +35,7 @@ pub(crate) struct SourceV4 {
     pub(crate) ended: bool,
     pub(crate) watermark_policy: super::super::manifest::SourceWatermarkManifestState,
     #[serde(deserialize_with = "deserialize_required_option")]
-    pub(crate) history: Option<SourceHistoryV4>,
+    pub(crate) history: Option<SourceHistoryManifestEntry>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

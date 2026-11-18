@@ -10,8 +10,8 @@ use sha2::{Digest, Sha256};
 
 use super::super::checkpoint_runtime::OpenedCheckpointRuntime;
 use crate::state::v4::{
-    JobKind, OpaqueObject, OperatorV4, SinkV4, SourceHistoryV4, SourceV4, V4Handle, V4Manifest,
-    V4OpaqueAdapter, V4Store, manifest_fingerprint,
+    JobKind, OpaqueObject, OperatorV4, SinkV4, SourceV4, V4Handle, V4Manifest, V4OpaqueAdapter,
+    V4Store, manifest_fingerprint,
 };
 use crate::state::{OperatorManifestEntry, SinkManifestEntry, SourceManifestEntry};
 use crate::{CalcFlowError, EventTime, OperatorStateSnapshot, Result};
@@ -85,7 +85,7 @@ pub(super) async fn persist_epoch(
     #[cfg(not(test))]
     let _ = cancellation;
     let mut store = V4Store::new(store_root(checkpoint));
-    let sources = persist_sources(checkpoint, &mut store, view.sources, epoch).await?;
+    let sources = persist_sources(view.sources);
     let operators = persist_operators(&mut store, view, epoch).await?;
     let sinks = persist_sinks(&mut store, view, epoch).await?;
     let mut manifest = V4Manifest {
@@ -115,7 +115,12 @@ pub(super) async fn persist_epoch(
     if real_parent_sync_failure {
         store.fail_parent_sync_for_test(checkpoint.faults.parent_sync_os_failure_probe());
     }
-    let path = match store.publish_manifest(&manifest) {
+    let publication = tokio::task::spawn_blocking(move || store.publish_manifest(&manifest))
+        .await
+        .map_err(|error| CalcFlowError::Internal {
+            message: format!("checkpoint-v4 manifest worker failed: {error}"),
+        })?;
+    let path = match publication {
         Ok(path) => path,
         #[cfg(all(test, unix))]
         Err(_) if real_parent_sync_failure => {
@@ -156,55 +161,23 @@ pub(super) async fn persist_epoch(
     Ok(path)
 }
 
-async fn persist_sources(
-    checkpoint: &OpenedCheckpointRuntime,
-    store: &mut V4Store,
-    sources: &BTreeMap<String, SourceManifestEntry>,
-    epoch: u64,
-) -> Result<BTreeMap<String, SourceV4>> {
-    let mut persisted = BTreeMap::new();
-    for (source_id, entry) in sources {
-        let history = entry
-            .history
-            .as_ref()
-            .map(|history| persist_history(checkpoint, store, source_id, history, epoch));
-        let history = match history {
-            Some(future) => Some(future.await?),
-            None => None,
-        };
-        persisted.insert(
-            source_id.clone(),
-            SourceV4 {
-                cursor: entry.cursor.clone(),
-                identity_hash: entry.identity_hash.clone(),
-                next_sequence: entry.sequence,
-                ended: entry.ended,
-                watermark_policy: entry.watermark_policy.clone(),
-                history,
-            },
-        );
-    }
-    Ok(persisted)
-}
-
-async fn persist_history(
-    checkpoint: &OpenedCheckpointRuntime,
-    store: &mut V4Store,
-    source_id: &str,
-    history: &crate::state::SourceHistoryManifestEntry,
-    epoch: u64,
-) -> Result<SourceHistoryV4> {
-    let mut handles = Vec::with_capacity(history.segments.len());
-    for handle in &history.segments {
-        let bytes = checkpoint.transaction.load_source_history(handle).await?;
-        handles.push(write_bytes(store, source_id, handle.segment_id(), bytes, epoch).await?);
-    }
-    Ok(SourceHistoryV4 {
-        format_version: history.format_version,
-        contract: history.contract.clone(),
-        inline_metadata: history.inline_metadata.clone(),
-        segments: handles,
-    })
+fn persist_sources(sources: &BTreeMap<String, SourceManifestEntry>) -> BTreeMap<String, SourceV4> {
+    sources
+        .iter()
+        .map(|(source_id, entry)| {
+            (
+                source_id.clone(),
+                SourceV4 {
+                    cursor: entry.cursor.clone(),
+                    identity_hash: entry.identity_hash.clone(),
+                    next_sequence: entry.sequence,
+                    ended: entry.ended,
+                    watermark_policy: entry.watermark_policy.clone(),
+                    history: entry.history.clone(),
+                },
+            )
+        })
+        .collect()
 }
 
 async fn persist_operators(

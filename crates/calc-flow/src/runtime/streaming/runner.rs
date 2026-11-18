@@ -2131,9 +2131,7 @@ async fn run_job_driver(
         &mut sources,
         &core.source_histories,
         &mut plan,
-    )
-    .await
-    {
+    ) {
         return core.prepare_driver_report(checkpoint_start_failure(launch_id, error));
     }
     let native_snapshots = match native_sequences::load(&plan, checkpoint.as_ref(), &context).await
@@ -2172,6 +2170,24 @@ async fn run_job_driver(
                     }
                 };
                 let mut statuses = sql_statuses;
+                match asof::restore_terminal(
+                    &mut plan,
+                    checkpoint,
+                    &prepared_progress,
+                    &core.asof_loads,
+                    &cancellation,
+                    &context,
+                )
+                .await
+                {
+                    Ok(nodes) => statuses.extend(nodes),
+                    Err(error) => {
+                        return core.prepare_driver_report(checkpoint_start_failure(
+                            launch_id,
+                            sanitize_managed_recovery_error(error, checkpoint.managed),
+                        ));
+                    }
+                }
                 match restore_terminal_joins_cancellable(
                     &mut plan,
                     checkpoint,
@@ -2708,11 +2724,18 @@ async fn restore_v4_terminal_operators(
             })?;
         let mut snapshot = admit_v4_snapshot(node, entry, snapshot)?
             .map(|snapshot| node.checkpoint_capability.decode_snapshot(id, snapshot))?;
-        let metadata_frontier = snapshot
-            .snapshot_mut()
-            .inline_metadata
-            .remove(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1);
         let required = node.operator.requires_output_frontier_state();
+        let metadata_frontier = if required {
+            snapshot
+                .inline_metadata
+                .get(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1)
+                .cloned()
+        } else {
+            snapshot
+                .snapshot_mut()
+                .inline_metadata
+                .remove(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1)
+        };
         if required {
             let expected = entry
                 .output_frontier()
@@ -3167,17 +3190,10 @@ fn restored_ended_source_cuts(
             .iter()
             .filter(|(_, entry)| entry.ended)
             .map(|(source_id, entry)| {
-                if entry.history.is_some() {
-                    return Err(CalcFlowError::CheckpointMismatch {
-                        message: format!(
-                            "restored ended source {source_id:?} requires native v4 history cuts"
-                        ),
-                    });
-                }
                 Ok((
                     super::progress::BindingIdentity::new(source_id.as_str())?,
                     DurableSourceCut {
-                        history: None,
+                        history: entry.history.clone(),
                         cursor: entry.cursor.clone(),
                         next_sequence: entry.next_sequence,
                         ended: true,
