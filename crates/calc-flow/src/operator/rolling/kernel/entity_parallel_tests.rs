@@ -13,6 +13,7 @@ use datafusion::arrow::{
 
 use super::{entity_parallel::*, *};
 use crate::CalcFlowError;
+use crate::runtime::streaming::morsel_pool::{MorselCost, MorselPool, MorselPoolConfig};
 
 mod capabilities;
 mod cpu_scaling;
@@ -387,6 +388,60 @@ fn entity_parallel_cancelled_lane_is_separate_and_does_not_count_unattempted_row
     let actual = exit(request, &token);
     assert!(matches!(actual.outcome, NumericLaneOutcome::Cancelled));
     assert_eq!(actual.work.numeric_rows, 0);
+}
+
+#[test]
+fn entity_parallel_morsel_lease_cancellation_stops_lane() {
+    let (_, [request, _], scratch) = entity_parallel_test_pair();
+    let bytes = scratch.accounted_bytes().unwrap();
+    let mut pool = MorselPool::new(
+        "rolling-lease-cancel",
+        MorselPoolConfig {
+            workers: 1,
+            max_morsels: 1,
+            max_rows: 64_000,
+            max_bytes: bytes,
+            inline_rows: 0,
+        },
+    )
+    .unwrap();
+    let client = pool.client();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let ticket = client
+        .submit(
+            request,
+            MorselCost {
+                rows: 64_000,
+                scratch_bytes: bytes,
+                output_bytes: 0,
+            },
+            move |request, lease| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                let mut progress = LaneProgress::default();
+                let outcome = match run_numeric_lane(request, lease, &mut progress) {
+                    Ok(result) => NumericLaneOutcome::Complete(result),
+                    Err(NumericLaneStop::Ordinary(error)) => {
+                        NumericLaneOutcome::OrdinaryError(error)
+                    }
+                    Err(NumericLaneStop::Cancelled) => NumericLaneOutcome::Cancelled,
+                };
+                Ok(NumericLaneExit {
+                    outcome,
+                    work: progress.work,
+                })
+            },
+        )
+        .unwrap();
+    entered_rx.recv().unwrap();
+
+    pool.cancellation().cancel();
+    release_tx.send(()).unwrap();
+    let actual = ticket.join().unwrap();
+    assert!(matches!(actual.outcome, NumericLaneOutcome::Cancelled));
+    assert_eq!(actual.work.numeric_rows, 0);
+    pool.close_and_join().unwrap();
 }
 
 #[test]

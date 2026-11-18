@@ -146,7 +146,7 @@ impl OrdinaryStreamSink for Sink {
 }
 
 #[tokio::test]
-async fn managed_native_dual_sma_registers_two_owned_numeric_lanes() {
+async fn managed_native_dual_sma_registers_two_owned_morsels() {
     let input = input();
     let plan = plan();
     let records = Arc::new(Mutex::new(Vec::new()));
@@ -187,7 +187,7 @@ async fn managed_native_dual_sma_registers_two_owned_numeric_lanes() {
     };
     let mut runner = ContinuousRunner::new();
     let job = runner.start(spec).await.unwrap();
-    job.core.entity_work.set_worker_limit_for_test(2);
+    job.core.morsels.set_worker_limit_for_test(2);
     let outcome = job.wait().await;
     assert_eq!(
         outcome.state,
@@ -226,6 +226,6 @@ async fn managed_native_dual_sma_registers_two_owned_numeric_lanes() {
     runner.shutdown().await.unwrap();
     assert_eq!(
         launched, 2,
-        "the qualified managed route must register two owned CPU lanes"
+        "the qualified managed route must register two owned compute morsels"
     );
 }

@@ -365,28 +365,24 @@ async fn observe_managed_watermark(
     output: &mut crate::EdgeCollector,
     time: i64,
 ) -> u64 {
-    use crate::runtime::streaming::entity_work::JobEntityWorkOwner;
+    use crate::runtime::streaming::morsel_pool::JobMorselOwner;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     let launches = Arc::new(AtomicU64::new(0));
-    let owner = JobEntityWorkOwner::new(7, Arc::clone(&launches));
+    let owner = JobMorselOwner::new(7, 2, Arc::clone(&launches));
     owner.set_worker_limit_for_test(2);
-    let task = owner.test_client(3, "operator:rolling".into());
-    let scope = task.callback_scope();
+    let job = job.clone().with_morsel_owner(owner.clone());
     let callback = store.begin(RollingCallback::Watermark, crate::CancellationToken::new());
-    let context = StreamOperatorContext::new(job, "rolling", operator.state.last_input_watermark)
-        .with_entity_work(task.context_client().unwrap())
+    let context = StreamOperatorContext::new(&job, "rolling", operator.state.last_input_watermark)
+        .with_task_id(Some(crate::runtime::streaming::gather_work::TaskId::new(0)))
         .with_rolling_metrics(callback.recorder());
     let result = operator
         .on_watermark(EventTime::from_micros(time), &context, output)
         .await;
     callback.complete(&result);
     result.unwrap();
-    scope.settle_abandoned().await;
     drop(context);
-    drop(scope);
-    owner.close_admission();
-    assert!(owner.drain().await.is_empty());
+    owner.close_and_drain().await.unwrap();
     launches.load(Ordering::SeqCst)
 }
 

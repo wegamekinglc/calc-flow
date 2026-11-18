@@ -11,7 +11,14 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+use tokio::sync::Notify;
+
 use crate::{CalcFlowError, CancellationToken, Result};
+
+mod job;
+pub(crate) use job::JobMorselOwner;
+#[cfg(test)]
+pub(crate) use job::MorselTestHooks;
 
 static NEXT_POOL_ID: AtomicU64 = AtomicU64::new(1);
 thread_local! {
@@ -65,6 +72,7 @@ struct Inner {
     state: Mutex<PoolState>,
     ready: Condvar,
     settled: Condvar,
+    settled_async: Notify,
     cancellation: CancellationToken,
     next_ticket: AtomicU64,
 }
@@ -100,6 +108,7 @@ impl MorselCancellation {
         if let Some(pool) = self.pool.upgrade() {
             pool.ready.notify_all();
             pool.settled.notify_all();
+            pool.settled_async.notify_waiters();
         }
     }
 }
@@ -107,7 +116,10 @@ impl MorselCancellation {
 struct TicketState<T> {
     result: Mutex<Option<Result<T>>>,
     ready: Condvar,
+    ready_async: Notify,
     refunded: AtomicBool,
+    #[cfg(test)]
+    consumed: AtomicBool,
 }
 
 /// A typed, settled-once result and cancellation handle.
@@ -142,12 +154,7 @@ impl<T> MorselTicket<T> {
 
     /// Waits for the owned result. Worker-local joins fail instead of deadlocking.
     pub(crate) fn join(self) -> Result<T> {
-        if self.pool.upgrade().is_some() && CURRENT_POOL.with(std::cell::Cell::get) != 0 {
-            return Err(invalid(
-                "morsel_pool.nested",
-                "a morsel cannot join work owned by its own pool",
-            ));
-        }
+        self.reject_nested_join()?;
         let mut result = lock(&self.state.result);
         while result.is_none() {
             result = self
@@ -156,9 +163,43 @@ impl<T> MorselTicket<T> {
                 .wait(result)
                 .unwrap_or_else(|error| panic!("morsel ticket lock poisoned: {error}"));
         }
-        result
+        let settled = result
             .take()
-            .expect("morsel ticket result is present after settlement")
+            .expect("morsel ticket result is present after settlement");
+        #[cfg(test)]
+        self.state.consumed.store(true, Ordering::Release);
+        settled
+    }
+
+    /// Awaits the owned result without blocking the async caller.
+    pub(crate) async fn join_async(self) -> Result<T> {
+        self.reject_nested_join()?;
+        loop {
+            let notified = self.state.ready_async.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(result) = lock(&self.state.result).take() {
+                #[cfg(test)]
+                self.state.consumed.store(true, Ordering::Release);
+                return result;
+            }
+            notified.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_consumed(&self) -> bool {
+        self.state.consumed.load(Ordering::Acquire)
+    }
+
+    fn reject_nested_join(&self) -> Result<()> {
+        if self.pool.upgrade().is_some() && CURRENT_POOL.with(std::cell::Cell::get) != 0 {
+            return Err(invalid(
+                "morsel_pool.nested",
+                "a morsel cannot join work owned by its own pool",
+            ));
+        }
+        Ok(())
     }
 
     fn settle(&self, result: Result<T>, pool: &Inner) {
@@ -168,6 +209,7 @@ impl<T> MorselTicket<T> {
         }
         *slot = Some(result);
         self.state.ready.notify_all();
+        self.state.ready_async.notify_waiters();
         drop(slot);
         if !self.state.refunded.swap(true, Ordering::AcqRel) {
             pool.refund(self.cost);
@@ -274,6 +316,11 @@ impl Clone for MorselClient {
 }
 
 impl MorselClient {
+    #[cfg(test)]
+    pub(crate) fn usage(&self) -> MorselUsage {
+        lock(&self.inner.state).usage
+    }
+
     pub(crate) fn submit<T, O, F>(
         &self,
         input: T,
@@ -288,13 +335,48 @@ impl MorselClient {
         Inner::reject_nested()?;
         self.inner.validate_cost(cost)?;
         let id = self.inner.admit(cost)?;
+        self.submit_admitted(input, cost, operation, id)
+    }
+
+    pub(crate) async fn submit_async<T, O, F>(
+        &self,
+        input: T,
+        cost: MorselCost,
+        operation: F,
+    ) -> Result<MorselTicket<O>>
+    where
+        T: Send + 'static,
+        O: Send + 'static,
+        F: FnOnce(T, &MorselLease) -> Result<O> + Send + 'static,
+    {
+        Inner::reject_nested()?;
+        self.inner.validate_cost(cost)?;
+        let id = self.inner.admit_async(cost).await?;
+        self.submit_admitted(input, cost, operation, id)
+    }
+
+    fn submit_admitted<T, O, F>(
+        &self,
+        input: T,
+        cost: MorselCost,
+        operation: F,
+        id: u64,
+    ) -> Result<MorselTicket<O>>
+    where
+        T: Send + 'static,
+        O: Send + 'static,
+        F: FnOnce(T, &MorselLease) -> Result<O> + Send + 'static,
+    {
         let ticket = MorselTicket {
             id,
             pool: Arc::downgrade(&self.inner),
             state: Arc::new(TicketState {
                 result: Mutex::new(None),
                 ready: Condvar::new(),
+                ready_async: Notify::new(),
                 refunded: AtomicBool::new(false),
+                #[cfg(test)]
+                consumed: AtomicBool::new(false),
             }),
             cancelled: Arc::new(AtomicBool::new(false)),
             cost,
@@ -360,6 +442,7 @@ impl MorselPool {
             }),
             ready: Condvar::new(),
             settled: Condvar::new(),
+            settled_async: Notify::new(),
             cancellation: CancellationToken::new(),
             next_ticket: AtomicU64::new(1),
         });
@@ -431,6 +514,7 @@ impl MorselPool {
         self.inner.cancel_queued();
         self.inner.ready.notify_all();
         self.inner.settled.notify_all();
+        self.inner.settled_async.notify_waiters();
         let mut first_error = None;
         for worker in self.workers.drain(..) {
             if let Err(payload) = worker.join() {
@@ -488,40 +572,69 @@ impl Inner {
         let bytes = cost.bytes()?;
         let mut state = lock(&self.state);
         loop {
-            if state.closed || self.cancellation.is_cancelled() {
-                return Err(CalcFlowError::Cancelled {
-                    run_id: self.name.clone(),
-                });
-            }
-            let next = MorselUsage {
-                morsels: state
-                    .usage
-                    .morsels
-                    .checked_add(1)
-                    .ok_or_else(|| invalid("morsel.count", "morsel count overflowed"))?,
-                rows: state
-                    .usage
-                    .rows
-                    .checked_add(cost.rows)
-                    .ok_or_else(|| invalid("morsel.rows", "morsel row charge overflowed"))?,
-                bytes: state
-                    .usage
-                    .bytes
-                    .checked_add(bytes)
-                    .ok_or_else(|| invalid("morsel.bytes", "morsel byte charge overflowed"))?,
-            };
-            if next.morsels <= self.config.max_morsels
-                && next.rows <= self.config.max_rows
-                && next.bytes <= self.config.max_bytes
-            {
-                state.usage = next;
-                return Ok(self.next_ticket.fetch_add(1, Ordering::Relaxed));
+            if let Some(id) = self.admit_if_available(&mut state, cost, bytes)? {
+                return Ok(id);
             }
             state = self
                 .settled
                 .wait(state)
                 .unwrap_or_else(|error| panic!("morsel admission lock poisoned: {error}"));
         }
+    }
+
+    async fn admit_async(&self, cost: MorselCost) -> Result<u64> {
+        let bytes = cost.bytes()?;
+        loop {
+            let notified = self.settled_async.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let admitted = {
+                let mut state = lock(&self.state);
+                self.admit_if_available(&mut state, cost, bytes)?
+            };
+            if let Some(id) = admitted {
+                return Ok(id);
+            }
+            notified.await;
+        }
+    }
+
+    fn admit_if_available(
+        &self,
+        state: &mut PoolState,
+        cost: MorselCost,
+        bytes: usize,
+    ) -> Result<Option<u64>> {
+        if state.closed || self.cancellation.is_cancelled() {
+            return Err(CalcFlowError::Cancelled {
+                run_id: self.name.clone(),
+            });
+        }
+        let next = MorselUsage {
+            morsels: state
+                .usage
+                .morsels
+                .checked_add(1)
+                .ok_or_else(|| invalid("morsel.count", "morsel count overflowed"))?,
+            rows: state
+                .usage
+                .rows
+                .checked_add(cost.rows)
+                .ok_or_else(|| invalid("morsel.rows", "morsel row charge overflowed"))?,
+            bytes: state
+                .usage
+                .bytes
+                .checked_add(bytes)
+                .ok_or_else(|| invalid("morsel.bytes", "morsel byte charge overflowed"))?,
+        };
+        if next.morsels <= self.config.max_morsels
+            && next.rows <= self.config.max_rows
+            && next.bytes <= self.config.max_bytes
+        {
+            state.usage = next;
+            return Ok(Some(self.next_ticket.fetch_add(1, Ordering::Relaxed)));
+        }
+        Ok(None)
     }
 
     fn enqueue<T, O, F>(&self, work: Work<T, O, F>) -> Result<()>
@@ -579,6 +692,7 @@ impl Inner {
         state.usage.rows = state.usage.rows.saturating_sub(cost.rows);
         state.usage.bytes = state.usage.bytes.saturating_sub(cost.bytes().unwrap_or(0));
         self.settled.notify_all();
+        self.settled_async.notify_waiters();
     }
 
     fn cancel_ticket(&self, id: u64) {
@@ -607,6 +721,7 @@ impl Inner {
         self.cancel_queued();
         self.ready.notify_all();
         self.settled.notify_all();
+        self.settled_async.notify_waiters();
     }
 }
 

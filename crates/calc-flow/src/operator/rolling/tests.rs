@@ -2734,7 +2734,7 @@ impl StreamCollector for RejectParallelOutput {
 async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-    use crate::runtime::streaming::entity_work::JobEntityWorkOwner;
+    use crate::runtime::streaming::morsel_pool::JobMorselOwner;
     use crate::{CancellationToken, StreamJobContext};
 
     let spec = kernel_spec(json!([
@@ -2802,13 +2802,14 @@ async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
     assert_eq!(snapshot.segments[segment_id].bytes(), bytes);
 
     let launches = Arc::new(AtomicU64::new(0));
-    let owner = JobEntityWorkOwner::new(7, Arc::clone(&launches));
+    let owner = JobMorselOwner::new(7, 2, Arc::clone(&launches));
     owner.set_worker_limit_for_test(2);
-    let task = owner.test_client(3, "operator:rolling".into());
-    let scope = task.callback_scope();
-    let parallel_context =
-        StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(1_279)))
-            .with_entity_work(task.context_client().unwrap());
+    let parallel_job = job.clone().with_morsel_owner(owner.clone());
+    let parallel_context = StreamOperatorContext::new(
+        &parallel_job,
+        "rolling",
+        Some(EventTime::from_micros(1_279)),
+    );
     let record = parallel_rollback_record(1_280, 64_000);
     let charge = budget::ordered_buffer_record_charge(&record, &operator.compiled, "rolling")
         .unwrap()
@@ -2826,11 +2827,8 @@ async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
             &mut RejectParallelOutput,
         )
         .await;
-    scope.settle_abandoned().await;
     drop(parallel_context);
-    drop(scope);
-    owner.close_admission();
-    assert!(owner.drain().await.is_empty());
+    owner.close_and_drain().await.unwrap();
 
     let error = result.unwrap_err();
     assert!(

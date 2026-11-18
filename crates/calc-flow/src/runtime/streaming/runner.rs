@@ -65,6 +65,7 @@ use super::{
     },
     local_edge::{LocalEdgeOwner, OperatorEdgeReceiver, OperatorEdgeSender, local_edge},
     metrics::{M2MetricsSnapshot, MetricsRecorder, MetricsTimer, sink_metric_id},
+    morsel_pool::JobMorselOwner,
     operator_task::{
         OperatorCheckpointAck, OperatorCheckpointCommand, OperatorCheckpointPort, OperatorIngress,
         OperatorProgress, OperatorProgressSnapshot, OperatorRestoreState, OperatorTaskInputs,
@@ -163,6 +164,7 @@ pub(super) struct JobCore {
     manual_checkpoint: Mutex<Option<CheckpointCoordinatorHandle>>,
     operation_cancel_requested: AtomicBool,
     entity_work: JobEntityWorkOwner,
+    morsels: JobMorselOwner,
     sql_recovery: JobSqlRecoveryOwner,
     gather_work: super::gather_work::JobGatherOwner,
     asof_loads: asof::LoadOwner,
@@ -207,6 +209,13 @@ impl JobCore {
         let sink_outputs = status_projection.sink_outputs();
         #[cfg(test)]
         let owned_lane_launches = Arc::new(AtomicU64::new(0));
+        let gather_work = super::gather_work::JobGatherOwner::new(job_id.to_string().into());
+        let morsels = JobMorselOwner::new(
+            job_id,
+            gather_work.parallelism(),
+            #[cfg(test)]
+            owned_lane_launches.clone(),
+        );
         Self {
             launch_id,
             job_id,
@@ -238,8 +247,9 @@ impl JobCore {
                 #[cfg(test)]
                 owned_lane_launches.clone(),
             ),
+            morsels,
             sql_recovery: JobSqlRecoveryOwner::new(),
-            gather_work: super::gather_work::JobGatherOwner::new(job_id.to_string().into()),
+            gather_work,
             asof_loads: asof::LoadOwner::default(),
             source_histories: source_history::HistoryOwner::default(),
             supervision: SupervisionHome::default(),
@@ -1712,6 +1722,16 @@ async fn settle_driver_report(core: &Arc<JobCore>, join_error: Option<&str>) -> 
             .extend(secondary.into_iter().map(task_runtime_failure));
         core.supervision.prepare(failed);
     }
+    let morsel_error = core.morsels.close_and_drain().await.err();
+    core.supervision
+        .append_secondary(core.morsels.drain_failures().await);
+    if let Some(error) = morsel_error {
+        core.supervision
+            .append_cleanup(vec![Arc::new(RuntimeFailure {
+                origin: FailureOrigin::RunnerLifecycle,
+                error,
+            })]);
+    }
     core.gather_work.close_admission();
     let gather_secondary = core.gather_work.close_and_drain().await;
     if !gather_secondary.is_empty() {
@@ -2065,7 +2085,9 @@ async fn run_job_driver(
     ) {
         return core.prepare_driver_report(checkpoint_start_failure(launch_id, error));
     }
-    let context = context.with_gather_owner(core.gather_work.clone());
+    let context = context
+        .with_gather_owner(core.gather_work.clone())
+        .with_morsel_owner(core.morsels.clone());
     core.runtime_status.lock().rolling_metrics = plan
         .nodes
         .iter()

@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use datafusion::arrow::array::TimestampMicrosecondArray;
 
-use crate::runtime::streaming::entity_work::JobEntityWorkOwner;
+use crate::runtime::streaming::morsel_pool::JobMorselOwner;
 
 use super::*;
 
@@ -130,18 +130,14 @@ async fn assert_cold_parallel(spec: RollingSpec, input: RecordBatch) -> RecordBa
     let serial_context = StreamOperatorContext::new(&job, "rolling", None);
     let expected = close(&mut serial, &serial_context, input.clone()).await;
     let launches = Arc::new(AtomicU64::new(0));
-    let owner = JobEntityWorkOwner::new(7, Arc::clone(&launches));
+    let owner = JobMorselOwner::new(7, 2, Arc::clone(&launches));
     owner.set_worker_limit_for_test(2);
-    let task = owner.test_client(3, "operator:rolling".into());
-    let scope = task.callback_scope();
-    let context = StreamOperatorContext::new(&job, "rolling", None)
-        .with_entity_work(task.context_client().unwrap());
+    let parallel_job = job.with_morsel_owner(owner.clone());
+    let context = StreamOperatorContext::new(&parallel_job, "rolling", None)
+        .with_task_id(Some(crate::runtime::streaming::gather_work::TaskId::new(0)));
     let actual = close(&mut parallel, &context, input).await;
-    scope.settle_abandoned().await;
     drop(context);
-    drop(scope);
-    owner.close_admission();
-    assert!(owner.drain().await.is_empty());
+    owner.close_and_drain().await.unwrap();
     assert_eq!(actual, expected);
     for (actual, expected) in actual.columns()[input_columns..]
         .iter()
@@ -190,7 +186,7 @@ async fn assert_cold_parallel(spec: RollingSpec, input: RecordBatch) -> RecordBa
     assert_eq!(
         launches.load(AtomicOrdering::SeqCst),
         expected_launches,
-        "slab plans bypass lanes; legacy typed plans retain owned lane execution"
+        "slab plans bypass morsels; legacy typed plans retain owned morsel execution"
     );
     actual
 }

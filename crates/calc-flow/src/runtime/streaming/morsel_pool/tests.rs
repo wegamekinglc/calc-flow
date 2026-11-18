@@ -152,6 +152,45 @@ fn count_admission_waits_for_capacity() {
     );
 }
 
+#[tokio::test]
+async fn async_admission_waits_for_capacity_without_blocking() {
+    let mut pool = MorselPool::new(
+        "async-admission",
+        MorselPoolConfig {
+            max_morsels: 1,
+            ..config(1)
+        },
+    )
+    .unwrap();
+    let client = pool.client();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let first = client
+        .submit(7, cost(2, 32), move |value, _| {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(value)
+        })
+        .unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let second_client = client.clone();
+    let second = tokio::spawn(async move {
+        second_client
+            .submit_async(9, cost(2, 32), |value, _| Ok(value + 1))
+            .await
+            .unwrap()
+    });
+    tokio::task::yield_now().await;
+    assert!(!second.is_finished(), "a full pool must hold admission");
+
+    release_tx.send(()).unwrap();
+    assert_eq!(first.join_async().await.unwrap(), 7);
+    let second = second.await.unwrap();
+    assert_eq!(second.join_async().await.unwrap(), 10);
+    pool.close_and_join().unwrap();
+    assert_eq!(pool.usage(), MorselUsage::default());
+}
+
 #[test]
 fn row_admission_waits_for_capacity() {
     assert_aggregate_budget_blocks(
@@ -260,6 +299,32 @@ fn small_execute_runs_inline_without_pool_admission() {
 
     release_tx.send(()).unwrap();
     assert_eq!(large.join().unwrap(), 1);
+    pool.close_and_join().unwrap();
+}
+
+#[tokio::test]
+async fn async_ticket_join_does_not_block_the_caller() {
+    let mut pool = MorselPool::new("async-join", config(1)).unwrap();
+    let client = pool.client();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let ticket = client
+        .submit(7, cost(8, 32), move |value, _| {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(value * 2)
+        })
+        .unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let mut joined = Box::pin(ticket.join_async());
+    assert!(futures::poll!(&mut joined).is_pending());
+    release_tx.send(()).unwrap();
+    let value = tokio::time::timeout(Duration::from_secs(2), joined)
+        .await
+        .expect("async ticket join must settle")
+        .unwrap();
+    assert_eq!(value, 14);
     pool.close_and_join().unwrap();
 }
 

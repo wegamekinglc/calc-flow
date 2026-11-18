@@ -25,6 +25,7 @@ pub struct StreamJobContext {
     static_inputs: Arc<BTreeMap<String, Batch>>,
     native_statics: Option<Arc<crate::array::NativeScope>>,
     gather: super::gather_work::JobGatherOwner,
+    morsels: Option<super::morsel_pool::JobMorselOwner>,
     #[cfg(feature = "benchmark-internals")]
     dispatch_trace: crate::benchmark_internals::DispatchTraceOwner,
     #[cfg(feature = "benchmark-internals")]
@@ -111,6 +112,7 @@ impl StreamJobContext {
             static_inputs: Arc::new(BTreeMap::new()),
             native_statics: None,
             gather: super::gather_work::JobGatherOwner::new(job_id.to_string().into()),
+            morsels: None,
             #[cfg(feature = "benchmark-internals")]
             dispatch_trace: crate::benchmark_internals::DispatchTraceOwner::default(),
             #[cfg(feature = "benchmark-internals")]
@@ -175,6 +177,15 @@ impl StreamJobContext {
     pub(crate) fn with_gather_owner(mut self, gather: super::gather_work::JobGatherOwner) -> Self {
         self.gather = gather;
         self
+    }
+
+    pub(crate) fn with_morsel_owner(mut self, morsels: super::morsel_pool::JobMorselOwner) -> Self {
+        self.morsels = Some(morsels);
+        self
+    }
+
+    pub(crate) fn morsel_owner(&self) -> Option<&super::morsel_pool::JobMorselOwner> {
+        self.morsels.as_ref()
     }
 
     pub(crate) fn static_input(&self, name: &str) -> Option<&Batch> {

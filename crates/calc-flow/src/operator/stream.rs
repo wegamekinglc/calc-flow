@@ -340,6 +340,10 @@ pub trait StreamCollector: Send {
 }
 
 /// The execution context the operator task hands to one stream operator.
+#[allow(
+    dead_code,
+    reason = "legacy entity-work context remains for its focused tests until final P6 cleanup"
+)]
 pub struct StreamOperatorContext<'a> {
     job: &'a StreamJobContext,
     operator_id: &'a str,
@@ -489,12 +493,6 @@ impl<'a> StreamOperatorContext<'a> {
             .client(operator.with_task(self.task_id))
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_entity_work(mut self, client: ScopedEntityWorkClient) -> Self {
-        self.entity_work = Some(client);
-        self
-    }
-
     pub(crate) fn with_entity_work_task(
         mut self,
         task: &'a crate::runtime::streaming::entity_work::TaskEntityWorkClient,
@@ -503,6 +501,10 @@ impl<'a> StreamOperatorContext<'a> {
         self
     }
 
+    #[allow(
+        dead_code,
+        reason = "legacy entity-work access remains for its focused tests until final P6 cleanup"
+    )]
     pub(crate) fn entity_work(&self) -> Option<&ScopedEntityWorkClient> {
         if let Some(client) = self.entity_work.as_ref() {
             return Some(client);
@@ -541,6 +543,10 @@ impl<'a> StreamOperatorContext<'a> {
     /// Returns the operator's node identity.
     pub const fn operator_id(&self) -> &str {
         self.operator_id
+    }
+
+    pub(crate) const fn task_id(&self) -> Option<crate::runtime::streaming::gather_work::TaskId> {
+        self.task_id
     }
 
     /// Returns the current input watermark `WM_in`; `None` while undefined
