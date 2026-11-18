@@ -1157,11 +1157,8 @@ async fn checkpoint_manifest_scan_skips_entry_removed_after_enumeration() {
     let entry = entries.next_entry().await.unwrap().unwrap();
     tokio::fs::remove_file(entry.path()).await.unwrap();
 
-    assert!(
-        read_checkpoint_manifest_document(&entry.path())
-            .await
-            .is_none()
-    );
+    let error = tokio::fs::read(entry.path()).await.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
 }
 
 #[test]

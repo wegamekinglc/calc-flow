@@ -73,6 +73,34 @@ impl OperatorV4 {
             Self::Opaque { .. } => None,
         }
     }
+
+    pub(crate) fn progress(&self) -> &BTreeMap<String, OperatorIngressManifestEntry> {
+        match self {
+            Self::Table { progress, .. } | Self::Opaque { progress, .. } => progress,
+        }
+    }
+
+    pub(crate) fn output_frontier(&self) -> Option<EventTime> {
+        match self {
+            Self::Table {
+                output_frontier, ..
+            }
+            | Self::Opaque {
+                output_frontier, ..
+            } => *output_frontier,
+        }
+    }
+
+    pub(crate) fn opaque_metadata(&self) -> Option<(&JsonMap, bool)> {
+        match self {
+            Self::Opaque {
+                inline_metadata,
+                blocks,
+                ..
+            } => Some((inline_metadata, blocks.is_empty())),
+            Self::Table { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -125,6 +153,22 @@ pub(crate) struct ManifestExpectationV4 {
 }
 
 impl V4Manifest {
+    pub(crate) fn epoch(&self) -> crate::Epoch {
+        crate::Epoch::new(self.epoch).expect("v4 manifest epoch is nonzero")
+    }
+
+    pub(crate) fn sources(&self) -> &BTreeMap<String, SourceV4> {
+        &self.sources
+    }
+
+    pub(crate) fn operators(&self) -> &BTreeMap<String, OperatorV4> {
+        &self.operators
+    }
+
+    pub(crate) fn sinks(&self) -> &BTreeMap<String, SinkV4> {
+        &self.sinks
+    }
+
     pub(crate) fn from_bytes(document: &[u8]) -> Result<Self> {
         if document.len() > MAX_MANIFEST_DOCUMENT_BYTES {
             return Err(format_error(

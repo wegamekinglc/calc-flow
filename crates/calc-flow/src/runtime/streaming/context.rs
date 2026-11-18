@@ -21,6 +21,7 @@ pub struct StreamJobContext {
     deadline_clock: Option<watch::Receiver<DateTime<Utc>>>,
     cancellation: CancellationToken,
     checkpointing: bool,
+    checkpoint_budget: crate::state::v4::V4InflightBudget,
     static_inputs: Arc<BTreeMap<String, Batch>>,
     native_statics: Option<Arc<crate::array::NativeScope>>,
     gather: super::gather_work::JobGatherOwner,
@@ -106,6 +107,7 @@ impl StreamJobContext {
             deadline_clock: None,
             cancellation,
             checkpointing: true,
+            checkpoint_budget: crate::state::v4::V4InflightBudget::default(),
             static_inputs: Arc::new(BTreeMap::new()),
             native_statics: None,
             gather: super::gather_work::JobGatherOwner::new(job_id.to_string().into()),
@@ -221,6 +223,15 @@ impl StreamJobContext {
     pub(crate) const fn with_checkpointing(mut self, checkpointing: bool) -> Self {
         self.checkpointing = checkpointing;
         self
+    }
+
+    pub(crate) fn with_checkpoint_inflight_limit(mut self, limit: u64) -> Self {
+        self.checkpoint_budget = crate::state::v4::V4InflightBudget::new(limit);
+        self
+    }
+
+    pub(crate) fn checkpoint_budget(&self) -> &crate::state::v4::V4InflightBudget {
+        &self.checkpoint_budget
     }
 
     #[allow(

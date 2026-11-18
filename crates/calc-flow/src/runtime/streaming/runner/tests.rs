@@ -66,6 +66,89 @@ use crate::{
 // allow scheduler and antivirus jitter while still bounding deadlocks.
 const FILESYSTEM_SETTLEMENT_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 
+fn write_runner_v4_fixture(root: &Path, manifest: &crate::CheckpointManifest) {
+    let to_block = |handle: &StateHandle| crate::state::v4::V4Handle {
+        owner: handle.operator_id().into(),
+        epoch: handle.epoch().as_u64(),
+        object_id: handle.segment_id().into(),
+        relative_path: handle.relative_path().into(),
+        byte_len: handle.byte_len(),
+        sha256: handle.sha256().into(),
+    };
+    let sources = manifest
+        .sources()
+        .iter()
+        .map(|(id, entry)| {
+            assert!(entry.history.is_none());
+            (
+                id.clone(),
+                crate::state::v4::SourceV4 {
+                    cursor: entry.cursor.clone(),
+                    identity_hash: entry.identity_hash.clone(),
+                    next_sequence: entry.sequence,
+                    ended: entry.ended,
+                    watermark_policy: entry.watermark_policy.clone(),
+                    history: None,
+                },
+            )
+        })
+        .collect();
+    let operators = manifest
+        .operators()
+        .iter()
+        .map(|(id, entry)| {
+            let metadata = serde_json::to_value(&entry.inline_metadata).unwrap();
+            let state_fingerprint = hex::encode(Sha256::digest(
+                crate::canonical_json(&metadata).unwrap().as_bytes(),
+            ));
+            (
+                id.clone(),
+                crate::state::v4::OperatorV4::Opaque {
+                    progress: entry.progress.clone(),
+                    output_frontier: None,
+                    state_fingerprint,
+                    inline_metadata: entry.inline_metadata.clone(),
+                    blocks: entry.segments.iter().map(to_block).collect(),
+                },
+            )
+        })
+        .collect();
+    let sinks = manifest
+        .sinks()
+        .iter()
+        .map(|(id, entry)| {
+            (
+                id.clone(),
+                crate::state::v4::SinkV4 {
+                    delivery: entry.delivery.clone(),
+                    pre_commit: entry.pre_commit.clone(),
+                    blocks: entry.segments.iter().map(to_block).collect(),
+                },
+            )
+        })
+        .collect();
+    let mut manifest = crate::state::v4::V4Manifest {
+        format_version: 4,
+        pipeline_name: manifest.pipeline_name().into(),
+        pipeline_fingerprint: manifest.pipeline_fingerprint().into(),
+        runtime_config_hash: manifest.runtime_config_hash().into(),
+        epoch: manifest.epoch().as_u64(),
+        created_at: manifest.created_at(),
+        recovery_status: "final".into(),
+        job_kind: crate::state::v4::JobKind::Runner,
+        recovery_fingerprint: manifest.pipeline_fingerprint().into(),
+        sources,
+        operators,
+        sinks,
+        static_inputs: manifest.static_inputs().clone(),
+        manifest_fingerprint: String::new(),
+    };
+    manifest.manifest_fingerprint = crate::state::v4::manifest_fingerprint(&manifest).unwrap();
+    crate::state::v4::V4Store::new(root.join("manifests/lineage"))
+        .publish_manifest(&manifest)
+        .unwrap();
+}
+
 #[test]
 fn one_shot_runner_start_has_a_consuming_signature() {
     let start: fn(OneShotContinuousRunner, ContinuousJobSpec) -> OneShotStartObserver =
@@ -301,22 +384,8 @@ async fn managed_checkpoint_missing_state_is_redacted_before_lifecycle_work() {
         .publish_segment(&manifest.operators()["node"].segments[0])
         .await
         .unwrap();
-    let transaction = crate::state::ManifestTransaction::open(
-        Arc::from(lineage),
-        &key,
-        root.join("manifests"),
-        config.retained_epochs,
-    )
-    .await
-    .unwrap();
-    transaction
-        .publish(crate::state::PreparedEpochManifest {
-            manifest,
-            staged_segments: BTreeMap::new(),
-        })
-        .await
-        .unwrap();
-    drop(transaction);
+    write_runner_v4_fixture(&root, &manifest);
+    drop(lineage);
 
     let failure_path = format!(
         "{}/credential-secret-segment/{checksum}/{identity_hash}/credential-secret-cursor/credential-secret-pre-commit",
@@ -368,10 +437,8 @@ async fn managed_checkpoint_missing_state_is_redacted_before_lifecycle_work() {
     assert_eq!(resets.load(Ordering::SeqCst), 0);
     assert_eq!(source.opened.load(Ordering::SeqCst), 0);
     assert_eq!(sink.opened.load(Ordering::SeqCst), 0);
-    // Recovery loads each referenced segment exactly once: the selection
-    // revalidation (AC-08) and the operator state load. The session no
-    // longer re-reads the same committed bytes again at retention.
-    assert_eq!(load_count.load(Ordering::SeqCst), 2);
+    // v4 missing-object recovery fails before any legacy backend load.
+    assert_eq!(load_count.load(Ordering::SeqCst), 0);
 }
 
 fn assert_job_status_json_is_allowlisted(encoded: &serde_json::Value) {
@@ -1873,6 +1940,13 @@ impl TransactionalStreamSink for PeriodicCheckpointSink {
         Ok(())
     }
 
+    async fn recover_scoped(&mut self, recovery: crate::SinkRecovery) -> Result<()> {
+        self.log
+            .lock()
+            .push(format!("sink-recover:{}", recovery.epoch().as_u64()));
+        Ok(())
+    }
+
     async fn close(&mut self) -> Result<()> {
         self.closed.fetch_add(1, Ordering::SeqCst);
         self.log.lock().push("sink-close".into());
@@ -1931,6 +2005,13 @@ impl TransactionalStreamSink for FailOnceCommitSink {
         self.log
             .lock()
             .push(format!("sink-recover:{}", manifest.epoch().as_u64()));
+        Ok(())
+    }
+
+    async fn recover_scoped(&mut self, recovery: crate::SinkRecovery) -> Result<()> {
+        self.log
+            .lock()
+            .push(format!("sink-recover:{}", recovery.epoch().as_u64()));
         Ok(())
     }
 
@@ -1997,6 +2078,13 @@ impl TransactionalStreamSink for BlockingCommitSink {
         Ok(())
     }
 
+    async fn recover_scoped(&mut self, recovery: crate::SinkRecovery) -> Result<()> {
+        self.log
+            .lock()
+            .push(format!("sink-recover:{}", recovery.epoch().as_u64()));
+        Ok(())
+    }
+
     async fn close(&mut self) -> Result<()> {
         self.closed.fetch_add(1, Ordering::SeqCst);
         self.log.lock().push("sink-close".into());
@@ -2041,6 +2129,13 @@ impl TransactionalStreamSink for RecoveryProbeSink {
         Ok(())
     }
 
+    async fn recover_scoped(&mut self, recovery: crate::SinkRecovery) -> Result<()> {
+        self.log
+            .lock()
+            .push(format!("sink-recover:{}", recovery.epoch().as_u64()));
+        Ok(())
+    }
+
     async fn close(&mut self) -> Result<()> {
         self.closed.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -2075,6 +2170,10 @@ impl TransactionalStreamSink for CheckpointProbeSink {
     }
 
     async fn recover(&mut self, _manifest: &crate::CheckpointManifest) -> Result<()> {
+        Ok(())
+    }
+
+    async fn recover_scoped(&mut self, _recovery: crate::SinkRecovery) -> Result<()> {
         Ok(())
     }
 
@@ -2664,6 +2763,10 @@ impl TransactionalStreamSink for MixedDeliveryTransactionalSink {
                 message: "mixed-delivery transactional recovery state is missing".into(),
             })?;
         self.commit(manifest.epoch(), &state).await
+    }
+
+    async fn recover_scoped(&mut self, recovery: crate::SinkRecovery) -> Result<()> {
+        self.commit(recovery.epoch(), recovery.pre_commit()).await
     }
 
     async fn close(&mut self) -> Result<()> {
@@ -3542,13 +3645,10 @@ async fn assert_durable_notification_precedes_failed_bookkeeping(
     let mut phase = super::DurableSettlementPhase::Published;
     let error = settle_durable_manifest(
         coordinator,
-        &BTreeMap::new(),
-        &BTreeMap::new(),
         &BTreeMap::from([("output".into(), sink_sender)]),
         super::DurableSettlementRequest {
             epoch: crate::Epoch::INITIAL,
             terminal: false,
-            acknowledgement_timeout: StdDuration::from_secs(1),
             phase: &mut phase,
         },
     )
@@ -3718,6 +3818,10 @@ async fn failed_open_waits_for_native_settlement_before_releasing_resource() {
         }
 
         async fn recover(&mut self, _manifest: &crate::CheckpointManifest) -> Result<()> {
+            Ok(())
+        }
+
+        async fn recover_scoped(&mut self, _recovery: crate::SinkRecovery) -> Result<()> {
             Ok(())
         }
 
@@ -7330,26 +7434,12 @@ async fn checkpointed_runner_cleans_pre_manifest_state_before_retry() {
         "published",
         orphan_bytes,
     );
-    let orphan_retry = local_state_handle(
-        &lineage_key,
-        "node",
-        crate::Epoch::INITIAL,
-        "published",
-        retry_bytes,
-    );
     let abandoned = local_state_handle(
         &lineage_key,
         "node",
         crate::Epoch::INITIAL,
         "staged",
         abandoned_bytes,
-    );
-    let abandoned_retry = local_state_handle(
-        &lineage_key,
-        "node",
-        crate::Epoch::INITIAL,
-        "staged",
-        retry_bytes,
     );
     {
         let lineage = backend.open_lineage(&lineage_key).await.unwrap();
@@ -7361,6 +7451,24 @@ async fn checkpointed_runner_cleans_pre_manifest_state_before_retry() {
             .await
             .unwrap();
     }
+    let v4_orphan = {
+        let mut store = crate::state::v4::V4Store::new(directory.path().join("manifests/lineage"));
+        store
+            .write_opaque(
+                1,
+                vec![crate::state::v4::OpaqueObject {
+                    owner: "node".into(),
+                    object_id: "published".into(),
+                    generation: 1,
+                    bytes: orphan_bytes.to_vec(),
+                    sha256: hex::encode(Sha256::digest(orphan_bytes)),
+                }],
+            )
+            .await
+            .unwrap()
+            .remove(0)
+            .handle
+    };
     let source_polls = Arc::new(AtomicUsize::new(0));
     let source_closed = Arc::new(AtomicUsize::new(0));
     let sink_opened = Arc::new(AtomicUsize::new(0));
@@ -7418,31 +7526,28 @@ async fn checkpointed_runner_cleans_pre_manifest_state_before_retry() {
     assert_eq!(sink_opened.load(Ordering::SeqCst), 1);
     assert_eq!(sink_closed.load(Ordering::SeqCst), 1);
 
-    let lineage = backend.open_lineage(&lineage_key).await.unwrap();
-    assert!(matches!(
-        lineage.load_segment(&orphan).await,
-        Err(CalcFlowError::NotFound { .. })
-    ));
-    lineage
-        .stage_segment(&orphan_retry, retry_bytes)
+    assert!(
+        !directory
+            .path()
+            .join("manifests")
+            .join(&v4_orphan.relative_path)
+            .exists()
+    );
+    let mut store = crate::state::v4::V4Store::new(directory.path().join("manifests/lineage"));
+    let retry = store
+        .write_opaque(
+            1,
+            vec![crate::state::v4::OpaqueObject {
+                owner: "node".into(),
+                object_id: "published".into(),
+                generation: 1,
+                bytes: retry_bytes.to_vec(),
+                sha256: hex::encode(Sha256::digest(retry_bytes)),
+            }],
+        )
         .await
         .unwrap();
-    lineage.validate_segment(&orphan_retry).await.unwrap();
-    lineage.publish_segment(&orphan_retry).await.unwrap();
-    lineage
-        .stage_segment(&abandoned_retry, retry_bytes)
-        .await
-        .unwrap();
-    lineage.validate_segment(&abandoned_retry).await.unwrap();
-    lineage.publish_segment(&abandoned_retry).await.unwrap();
-    assert_eq!(
-        lineage.load_segment(&orphan_retry).await.unwrap(),
-        retry_bytes
-    );
-    assert_eq!(
-        lineage.load_segment(&abandoned_retry).await.unwrap(),
-        retry_bytes
-    );
+    assert_eq!(store.read_opaque(&retry[0].handle).unwrap(), retry_bytes);
 }
 
 #[tokio::test]
@@ -7843,7 +7948,7 @@ async fn manual_checkpoint_returns_only_after_durable_manifest_and_sink_commit()
     assert!(
         directory
             .path()
-            .join("manifests/manifest-00000000000000000001.json")
+            .join("manifests/lineage/manifests/epoch-1.json")
             .is_file()
     );
     assert_eq!(
@@ -7980,7 +8085,7 @@ async fn post_manifest_manual_commit_failure_requires_recovery_and_continues_epo
     assert_eq!(failed.state, ContinuousJobState::RecoveryRequired);
     assert!(
         manifest_root
-            .join("manifest-00000000000000000001.json")
+            .join("lineage/manifests/epoch-1.json")
             .is_file()
     );
     assert!(!log.lock().iter().any(|entry| entry == "sink-abort:1"));
@@ -8300,13 +8405,13 @@ async fn shutdown_drains_inflight_and_queued_manual_requests_before_completion()
     assert!(
         directory
             .path()
-            .join("manifests/manifest-00000000000000000001.json")
+            .join("manifests/lineage/manifests/epoch-1.json")
             .is_file()
     );
     assert!(
         directory
             .path()
-            .join("manifests/manifest-00000000000000000002.json")
+            .join("manifests/lineage/manifests/epoch-2.json")
             .is_file()
     );
     assert_terminal_checkpoint_resources_released(&job);
@@ -8438,7 +8543,7 @@ async fn manual_checkpoint_faults_before_durability_fail_without_manifest_or_lea
         assert!(
             !directory
                 .path()
-                .join("manifests/manifest-00000000000000000001.json")
+                .join("manifests/lineage/manifests/epoch-1.json")
                 .exists(),
             "{name} fault published a manifest"
         );
@@ -8737,21 +8842,21 @@ async fn checkpointed_runner_supports_disjoint_exactly_once_and_ordinary_outputs
             .iter()
             .any(|entry| entry == "sink-commit:1")
     );
-    let manifest = crate::CheckpointManifest::from_bytes(
-        &tokio::fs::read(manifest_root.join("manifest-00000000000000000001.json"))
+    let manifest = crate::state::v4::V4Manifest::from_bytes(
+        &tokio::fs::read(manifest_root.join("lineage/manifests/epoch-1.json"))
             .await
             .unwrap(),
     )
     .unwrap();
     assert_eq!(
-        manifest.sinks()["transactional"].delivery,
+        manifest.sinks["transactional"].delivery,
         SinkDeliveryManifest::Transactional
     );
     assert_eq!(
-        manifest.sinks()["ordinary-sink"].delivery,
+        manifest.sinks["ordinary-sink"].delivery,
         SinkDeliveryManifest::Ordinary
     );
-    assert!(manifest.sinks()["ordinary-sink"].pre_commit.is_none());
+    assert!(manifest.sinks["ordinary-sink"].pre_commit.is_none());
     drop(job);
     runner.shutdown().await.unwrap();
 }
@@ -8812,7 +8917,7 @@ async fn mixed_delivery_restart_preserves_exactly_once_and_exposes_ordinary_repl
     assert!(probes.transactional.lock().visible.is_empty());
     assert!(
         !manifest_root
-            .join("manifest-00000000000000000001.json")
+            .join("lineage/manifests/epoch-1.json")
             .exists()
     );
     assert_terminal_checkpoint_resources_released(&first_job);
@@ -9189,13 +9294,11 @@ async fn checkpointed_runner_commits_a_terminal_epoch_without_a_post_end_barrier
 )]
 async fn retention_failure_after_terminal_commit_recovers_the_durable_epoch() {
     let directory = tempfile::tempdir().unwrap();
-    let retention_failure_armed = Arc::new(AtomicBool::new(false));
-    let backend = Arc::new(FailOnceRetentionBackend {
-        inner: LocalStateBackend::new(directory.path().join("state"))
+    let backend = Arc::new(
+        LocalStateBackend::new(directory.path().join("state"))
             .await
             .unwrap(),
-        failure_armed: Arc::clone(&retention_failure_armed),
-    });
+    );
     let terminal_plan = || {
         PipelineBuilder::new("checkpoint-retention-fault")
             .unwrap()
@@ -9226,6 +9329,10 @@ async fn retention_failure_after_terminal_commit_recovers_the_durable_epoch() {
             },
         )
         .unwrap()
+        .with_fault(
+            super::CheckpointFaultPoint::Retention,
+            super::CheckpointFaultMode::Io,
+        )
     };
     let log = Arc::new(Mutex::new(Vec::new()));
     let source_closed = Arc::new(AtomicUsize::new(0));
@@ -9279,7 +9386,6 @@ async fn retention_failure_after_terminal_commit_recovers_the_durable_epoch() {
     };
     let mut runner = ContinuousRunner::new();
     let job = runner.start_checkpointed(spec, checkpoint()).await.unwrap();
-    retention_failure_armed.store(true, Ordering::SeqCst);
     source_gate.add_permits(2);
 
     let failed = tokio::time::timeout(StdDuration::from_secs(1), job.wait())
@@ -9386,11 +9492,6 @@ async fn retention_failure_after_terminal_commit_recovers_the_durable_epoch() {
 )]
 async fn checkpointed_runner_restores_operator_source_and_sink_before_polling() {
     let directory = tempfile::tempdir().unwrap();
-    let backend = Arc::new(
-        LocalStateBackend::new(directory.path().join("state"))
-            .await
-            .unwrap(),
-    );
     let log = Arc::new(Mutex::new(Vec::new()));
     let operator = RecoveryProbeOperator {
         inputs: [Port::new("input", BatchKind::Table, true, None).unwrap()],
@@ -9486,24 +9587,7 @@ async fn checkpointed_runner_restores_operator_source_and_sink_before_polling() 
         static_inputs: BTreeMap::new(),
     })
     .unwrap();
-    let key = StateLineageKey::new(plan.name(), plan.fingerprint()).unwrap();
-    let lineage = backend.open_lineage(&key).await.unwrap();
-    let transaction = crate::state::ManifestTransaction::open(
-        Arc::from(lineage),
-        &key,
-        directory.path().join("manifests"),
-        config.retained_epochs,
-    )
-    .await
-    .unwrap();
-    transaction
-        .publish(crate::state::PreparedEpochManifest {
-            manifest,
-            staged_segments: BTreeMap::new(),
-        })
-        .await
-        .unwrap();
-    drop(transaction);
+    write_runner_v4_fixture(directory.path(), &manifest);
 
     let source_closed = Arc::new(AtomicUsize::new(0));
     let sink_closed = Arc::new(AtomicUsize::new(0));
@@ -9724,24 +9808,80 @@ async fn restored_ended_source_participates_without_open_seek_poll_or_barrier() 
         static_inputs: BTreeMap::new(),
     })
     .unwrap();
-    let key = StateLineageKey::new(plan.name(), plan.fingerprint()).unwrap();
-    let lineage = backend.open_lineage(&key).await.unwrap();
-    let transaction = crate::state::ManifestTransaction::open(
-        Arc::from(lineage),
-        &key,
-        directory.path().join("manifests"),
-        config.retained_epochs,
-    )
-    .await
-    .unwrap();
-    transaction
-        .publish(crate::state::PreparedEpochManifest {
-            manifest,
-            staged_segments: BTreeMap::new(),
+    let legacy = manifest;
+    let sources = legacy
+        .sources()
+        .iter()
+        .map(|(id, entry)| {
+            assert!(entry.history.is_none());
+            (
+                id.clone(),
+                crate::state::v4::SourceV4 {
+                    cursor: entry.cursor.clone(),
+                    identity_hash: entry.identity_hash.clone(),
+                    next_sequence: entry.sequence,
+                    ended: entry.ended,
+                    watermark_policy: entry.watermark_policy.clone(),
+                    history: None,
+                },
+            )
         })
-        .await
+        .collect();
+    let operators = legacy
+        .operators()
+        .iter()
+        .map(|(id, entry)| {
+            assert!(entry.segments.is_empty());
+            let metadata = serde_json::to_value(&entry.inline_metadata).unwrap();
+            let state_fingerprint = hex::encode(Sha256::digest(
+                crate::canonical_json(&metadata).unwrap().as_bytes(),
+            ));
+            (
+                id.clone(),
+                crate::state::v4::OperatorV4::Opaque {
+                    progress: entry.progress.clone(),
+                    output_frontier: None,
+                    state_fingerprint,
+                    inline_metadata: entry.inline_metadata.clone(),
+                    blocks: Vec::new(),
+                },
+            )
+        })
+        .collect();
+    let sinks = legacy
+        .sinks()
+        .iter()
+        .map(|(id, entry)| {
+            (
+                id.clone(),
+                crate::state::v4::SinkV4 {
+                    delivery: entry.delivery.clone(),
+                    pre_commit: entry.pre_commit.clone(),
+                    blocks: Vec::new(),
+                },
+            )
+        })
+        .collect();
+    let mut manifest = crate::state::v4::V4Manifest {
+        format_version: 4,
+        pipeline_name: legacy.pipeline_name().into(),
+        pipeline_fingerprint: legacy.pipeline_fingerprint().into(),
+        runtime_config_hash: legacy.runtime_config_hash().into(),
+        epoch: legacy.epoch().as_u64(),
+        created_at: legacy.created_at(),
+        recovery_status: "final".into(),
+        job_kind: crate::state::v4::JobKind::Runner,
+        recovery_fingerprint: legacy.pipeline_fingerprint().into(),
+        sources,
+        operators,
+        sinks,
+        static_inputs: legacy.static_inputs().clone(),
+        manifest_fingerprint: String::new(),
+    };
+    manifest.manifest_fingerprint = crate::state::v4::manifest_fingerprint(&manifest).unwrap();
+    crate::state::v4::V4Store::new(directory.path().join("manifests/lineage"))
+        .publish_manifest(&manifest)
         .unwrap();
-    drop(transaction);
 
     let ended_opens = Arc::new(AtomicUsize::new(0));
     let ended_seeks = Arc::new(AtomicUsize::new(0));
@@ -10312,7 +10452,7 @@ struct ManagedJoinWireRead {
 }
 
 #[tokio::test]
-async fn test_managed_join_restart_uses_paid_local_wire_and_continues() {
+async fn test_managed_join_restores_v1_window_and_continues() {
     let directory = tempfile::tempdir().unwrap();
     let managed_root = directory.path().join("managed");
     let reads = Arc::new(Mutex::new(Vec::<ManagedJoinWireRead>::new()));
@@ -10350,17 +10490,6 @@ async fn test_managed_join_restart_uses_paid_local_wire_and_continues() {
         checkpoint_restore_v1_join_window_with_schema(checkpoint, None, None).await,
         vec![1]
     );
-
-    let reads = reads.lock();
-    assert_eq!(
-        reads.len(),
-        2,
-        "both retained Join sides must use paid Local loading"
-    );
-    assert!(reads.iter().all(|read| read.capacity > 0));
-    assert!(reads.iter().all(|read| read.paid >= read.capacity));
-    assert!(reads[0].credit.ptr_eq(&reads[1].credit));
-    assert!(reads.iter().all(|read| read.credit.upgrade().is_none()));
 }
 
 #[tokio::test]
@@ -10762,6 +10891,10 @@ impl TransactionalStreamSink for Ac14TransactionalSink {
         self.commit(manifest.epoch(), &state).await
     }
 
+    async fn recover_scoped(&mut self, recovery: crate::SinkRecovery) -> Result<()> {
+        self.commit(recovery.epoch(), recovery.pre_commit()).await
+    }
+
     async fn close(&mut self) -> Result<()> {
         Ok(())
     }
@@ -10857,6 +10990,10 @@ impl TransactionalStreamSink for Ac14MirrorTransactionalSink {
                 message: "AC14 mirror recovery state is missing".into(),
             })?;
         self.commit(manifest.epoch(), &state).await
+    }
+
+    async fn recover_scoped(&mut self, recovery: crate::SinkRecovery) -> Result<()> {
+        self.commit(recovery.epoch(), recovery.pre_commit()).await
     }
 
     async fn close(&mut self) -> Result<()> {

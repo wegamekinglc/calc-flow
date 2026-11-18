@@ -735,11 +735,10 @@ mod tests {
                 faults: super::super::CheckpointFaultInjector::default(),
                 fault_cancellation: cancellation.clone(),
             });
-        let Ok(runtime) =
-            run_operator_entry(parts, &context, &core, &cancellation, restores, checkpoint).await
-        else {
-            panic!("graph entry failed");
-        };
+        let runtime =
+            run_operator_entry(parts, &context, &core, &cancellation, restores, checkpoint)
+                .await
+                .unwrap_or_else(|error| panic!("graph entry failed: {error:?}"));
         assert_eq!(
             runtime.supervisor.physical_driver_count(),
             if fused { 1 } else { 2 }
@@ -1076,7 +1075,7 @@ mod tests {
 
     async fn checkpoint_pending_rows(
         transaction: &Arc<crate::state::ManifestTransaction>,
-    ) -> BTreeMap<String, crate::OperatorManifestEntry> {
+    ) -> BTreeMap<String, (crate::OperatorManifestEntry, crate::OperatorStateSnapshot)> {
         use crate::{Epoch, EventTime, StreamMessage};
         let mut before = graph_harness(
             false,
@@ -1107,7 +1106,7 @@ mod tests {
         for _ in 0..2 {
             let ack = before.acks.recv().await.unwrap();
             assert_eq!(ack.epoch, Epoch::INITIAL);
-            entries.insert(ack.node_id, ack.state);
+            entries.insert(ack.node_id, (ack.state, ack.snapshot));
         }
         assert_eq!(
             entries.keys().map(String::as_str).collect::<Vec<_>>(),
@@ -1171,11 +1170,8 @@ mod tests {
         let parts = plan().into_runtime_parts(EdgeBudget::default()).unwrap();
         assert_eq!(parts.fingerprint, fingerprint);
         for node in parts.nodes {
-            let entry = &entries[&node.node_id];
-            let snapshot = transaction
-                .load_operator_state(&node.node_id, entry)
-                .await
-                .unwrap();
+            let (entry, snapshot) = &entries[&node.node_id];
+            let snapshot = snapshot.clone();
             restores.insert(
                 node.node_id.clone(),
                 OperatorRestoreState {

@@ -2235,12 +2235,12 @@ fn private_checkpoint_benchmark_target_root() -> PathBuf {
 }
 
 fn checkpoint_manifest_count(root: &Path) -> usize {
-    match std::fs::read_dir(root) {
+    match std::fs::read_dir(root.join("lineage/manifests")) {
         Ok(entries) => entries
             .filter_map(std::result::Result::ok)
             .filter(|entry| {
                 entry.file_name().to_str().is_some_and(|name| {
-                    name.starts_with("manifest-")
+                    name.starts_with("epoch-")
                         && Path::new(name)
                             .extension()
                             .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
@@ -3419,24 +3419,26 @@ async fn run_checkpoint_restart_fault_case(
         "fault case {point:?}/{mode:?} had an unexpected public terminal oracle: outcome={first_outcome:?}, status={first_status:?}, fault_triggers={}, cancellation_triggers={}",
         first_probe.checkpoint_fault_triggers, first_probe.cancellation_triggers,
     );
-    let manifest_path = manifest_root.join("manifest-00000000000000000001.json");
+    let manifest_path = manifest_root.join("lineage/manifests/epoch-1.json");
     let selected_before_restart_manifest = if manifest_path.exists() {
         Some(
-            crate::CheckpointManifest::from_bytes(&tokio::fs::read(&manifest_path).await.unwrap())
-                .unwrap(),
+            crate::state::v4::V4Manifest::from_bytes(
+                &tokio::fs::read(&manifest_path).await.unwrap(),
+            )
+            .unwrap(),
         )
     } else {
         None
     };
     let selected_before_restart = selected_before_restart_manifest
         .as_ref()
-        .map(crate::CheckpointManifest::epoch);
+        .map(|manifest| Epoch::new(manifest.epoch).unwrap());
     // The window operator encodes net per-epoch deltas, so its entry may
     // carry zero segments when every window opened and closed inside the
     // epoch; the entry itself proves the window's epoch metadata persisted.
     let window_checkpoint_persisted = selected_before_restart_manifest
         .as_ref()
-        .and_then(|manifest| manifest.operators().get("window"))
+        .and_then(|manifest| manifest.operators.get("window"))
         .is_some();
     drop(first_job);
     assert_eq!(first_source_closed.load(Ordering::SeqCst), 2);
@@ -3820,7 +3822,7 @@ async fn wait_for_completed_checkpoints(job: &PublicStreamingJob, expected: u64)
 }
 
 fn checkpoint_soak_manifest_cursors(
-    manifest: &crate::CheckpointManifest,
+    manifest: &crate::state::v4::V4Manifest,
 ) -> BTreeMap<String, String> {
     manifest
         .sources()
@@ -3845,23 +3847,23 @@ fn checkpoint_soak_open_cursors(
 }
 
 fn checkpoint_soak_restore_evidence(
-    selected: Option<&crate::CheckpointManifest>,
+    selected: Option<&crate::state::v4::V4Manifest>,
 ) -> (bool, bool, bool) {
     let Some(manifest) = selected else {
         return (false, false, false);
     };
     let window = manifest.operators().get("window");
-    let window_state = window.is_some_and(|entry| !entry.segments.is_empty());
+    let window_state = window.is_some_and(|entry| !entry.opaque_metadata().unwrap().1);
     let watermarks = window.is_some_and(|entry| {
-        !entry.progress.is_empty()
+        !entry.progress().is_empty()
             && entry
-                .progress
+                .progress()
                 .values()
                 .all(|progress| progress.watermark.is_some())
     });
     let progress = manifest.sources().values().all(|entry| {
         entry.cursor.is_some()
-            && entry.sequence > 0
+            && entry.next_sequence > 0
             && matches!(
                 entry.watermark_policy,
                 SourceWatermarkManifestState::SourceProvided {
@@ -4046,22 +4048,23 @@ async fn settle_checkpoint_soak_process(
     })
 }
 
-async fn checkpoint_manifest_documents(root: &Path) -> Vec<crate::CheckpointManifest> {
+async fn checkpoint_manifest_documents(root: &Path) -> Vec<crate::state::v4::V4Manifest> {
     let mut manifests = Vec::new();
-    let mut entries = match tokio::fs::read_dir(root).await {
+    let mut entries = match tokio::fs::read_dir(root.join("lineage/manifests")).await {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return manifests,
         Err(error) => panic!("checkpoint soak could not scan manifests: {error}"),
     };
     while let Some(entry) = entries.next_entry().await.unwrap() {
         let name = entry.file_name();
-        if name.to_string_lossy().starts_with("manifest-")
-            && let Some(manifest) = read_checkpoint_manifest_document(&entry.path()).await
+        if name.to_string_lossy().starts_with("epoch-")
+            && let Ok(bytes) = tokio::fs::read(entry.path()).await
+            && let Ok(manifest) = crate::state::v4::V4Manifest::from_bytes(&bytes)
         {
             manifests.push(manifest);
         }
     }
-    manifests.sort_by_key(crate::CheckpointManifest::epoch);
+    manifests.sort_by_key(|manifest| manifest.epoch);
     manifests
 }
 
@@ -4080,7 +4083,7 @@ async fn run_checkpoint_soak_child(
     let sink_root = plan.run_root.join("sinks");
     let before = checkpoint_manifest_documents(&manifest_root).await;
     let selected = before.last();
-    let restored_epoch = selected.map(|manifest| manifest.epoch().as_u64());
+    let restored_epoch = selected.map(|manifest| manifest.epoch);
     diagnostics::restored(restored_epoch);
     let restored_cursor_orders = selected.map_or_else(
         || BTreeMap::from([("left".into(), None), ("right".into(), None)]),
@@ -4421,11 +4424,11 @@ async fn run_checkpoint_soak_processes_with_retention(
     ))
 }
 
-fn manifest_has_compacted_window(manifest: &crate::CheckpointManifest) -> bool {
+fn manifest_has_compacted_window(manifest: &crate::state::v4::V4Manifest) -> bool {
     manifest
         .operators()
         .get("window")
-        .and_then(|entry| entry.inline_metadata.get("segment_inventory"))
+        .and_then(|entry| entry.opaque_metadata().unwrap().0.get("segment_inventory"))
         .and_then(serde_json::Value::as_array)
         .is_some_and(|inventory| {
             inventory
@@ -4461,7 +4464,7 @@ async fn directory_regular_file_bytes(root: &Path) -> u64 {
     total
 }
 
-fn checkpoint_soak_expected_records(manifest: &crate::CheckpointManifest) -> BTreeSet<String> {
+fn checkpoint_soak_expected_records(manifest: &crate::state::v4::V4Manifest) -> BTreeSet<String> {
     let cursors = manifest
         .sources()
         .iter()
@@ -5386,7 +5389,7 @@ async fn late_periodic_cut_promotes_the_same_epoch_to_terminal() {
     assert!(manifest.sources().values().all(|source| source.ended));
     assert!(manifest.operators().values().all(|operator| {
         operator
-            .progress
+            .progress()
             .values()
             .all(|ingress| matches!(ingress.state, crate::ManifestIngressState::Ended))
     }));
@@ -5730,7 +5733,7 @@ async fn public_parent_directory_sync_os_failure_requires_recovery() {
             1,
             "the public recovery result must be caused by a real parent-directory sync OS failure"
         );
-        let manifest_path = manifest_root.join("manifest-00000000000000000001.json");
+        let manifest_path = manifest_root.join("lineage/manifests/epoch-1.json");
         assert!(manifest_path.is_file());
         assert_eq!(output_probe.transactional_commits.load(Ordering::SeqCst), 0);
         assert_eq!(output_probe.transactional_aborts.load(Ordering::SeqCst), 0);

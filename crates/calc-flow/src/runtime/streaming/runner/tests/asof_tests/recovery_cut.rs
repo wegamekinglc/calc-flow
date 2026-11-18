@@ -178,14 +178,14 @@ async fn assert_mixed_cut(
     );
     let epoch = result.unwrap();
     let cut = manifest(root, epoch).await;
-    assert!(cut.sources()[&format!("{node}.input")].ended);
+    assert!(cut.sources[&format!("{node}.input")].ended);
     assert_eq!(
-        cut.sources().values().filter(|source| source.ended).count(),
+        cut.sources.values().filter(|source| source.ended).count(),
         1
     );
     assert!(
-        cut.operators()[node]
-            .progress
+        cut.operators[node]
+            .progress()
             .values()
             .all(|entry| entry.state == crate::ManifestIngressState::Ended)
     );
@@ -278,10 +278,10 @@ async fn mixed_cut(first: usize, periodic: bool, restore_ended: bool) {
             .unwrap(),
     )
     .await;
-    assert!(terminal.sources().values().all(|entry| entry.ended));
-    assert!(terminal.operators().values().all(|operator| {
+    assert!(terminal.sources.values().all(|entry| entry.ended));
+    assert!(terminal.operators.values().all(|operator| {
         operator
-            .progress
+            .progress()
             .values()
             .all(|entry| entry.state == crate::ManifestIngressState::Ended)
     }));

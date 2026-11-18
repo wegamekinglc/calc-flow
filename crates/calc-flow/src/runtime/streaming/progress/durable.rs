@@ -78,13 +78,74 @@ pub(crate) fn restore_durable_progress(
     })
 }
 
+pub(crate) fn restore_durable_progress_v4(
+    prepared: &PreparedStreamJob,
+    sources: &BTreeMap<String, crate::state::v4::SourceV4>,
+    origin: LogicalInstant,
+) -> Result<DurableProgressRestore> {
+    let expected = prepared
+        .bindings
+        .iter()
+        .map(|binding| binding.identity.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    let found = sources.keys().cloned().collect::<BTreeSet<_>>();
+    if found != expected {
+        return Err(CalcFlowError::CheckpointMismatch {
+            message: "durable source progress IDs do not match the prepared job".into(),
+        });
+    }
+    let mut restored = BTreeMap::new();
+    for binding in prepared.bindings.iter() {
+        let id = binding.identity.as_str();
+        let source = &sources[id];
+        if source.identity_hash != binding.identity_hash() {
+            return Err(CalcFlowError::CheckpointMismatch {
+                message: format!("durable source identity for {id:?} does not match preflight"),
+            });
+        }
+        let progress = restore_source_fields(
+            binding,
+            source.cursor.as_ref(),
+            source.next_sequence,
+            source.ended,
+            &source.watermark_policy,
+            origin,
+        )?;
+        restored.insert(id.to_owned(), progress);
+    }
+    Ok(DurableProgressRestore {
+        origin,
+        sources: restored,
+        next_receipt_sequence: 0,
+        trace_records: 0,
+    })
+}
+
 fn restore_source(
     binding: &super::prepare::PreparedSourceBinding,
     source: &SourceManifestEntry,
     origin: LogicalInstant,
 ) -> Result<RestoredSourceProgress> {
+    restore_source_fields(
+        binding,
+        source.cursor.as_ref(),
+        source.sequence,
+        source.ended,
+        &source.watermark_policy,
+        origin,
+    )
+}
+
+fn restore_source_fields(
+    binding: &super::prepare::PreparedSourceBinding,
+    cursor: Option<&CursorManifestEntry>,
+    next_sequence: u64,
+    ended: bool,
+    watermark_policy: &SourceWatermarkManifestState,
+    origin: LogicalInstant,
+) -> Result<RestoredSourceProgress> {
     let (idle, observed_max, last_watermark, watermark_delay, idle_delay) =
-        match (&binding.normalized_watermark, &source.watermark_policy) {
+        match (&binding.normalized_watermark, watermark_policy) {
             (
                 NormalizedWatermarkMode::SourceProvided { .. },
                 SourceWatermarkManifestState::SourceProvided {
@@ -127,12 +188,12 @@ fn restore_source(
             ),
         });
     }
-    let watermark_deadline = rearm(origin, watermark_delay, source.ended)?;
-    let idle_deadline = rearm(origin, idle_delay, source.ended)?;
+    let watermark_deadline = rearm(origin, watermark_delay, ended)?;
+    let idle_deadline = rearm(origin, idle_delay, ended)?;
     Ok(RestoredSourceProgress {
-        cursor: source.cursor.clone(),
-        next_sequence: source.sequence,
-        ended: source.ended,
+        cursor: cursor.cloned(),
+        next_sequence,
+        ended,
         idle,
         observed_max,
         last_watermark,

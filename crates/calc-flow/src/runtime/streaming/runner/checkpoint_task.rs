@@ -49,6 +49,7 @@ pub(super) enum DurableSettlementPhase {
     Published,
     SinksCommanded,
     CoordinatorDurable,
+    SinksFinalized,
     SourceAcked,
 }
 
@@ -63,7 +64,8 @@ impl DurableSettlementPhase {
             (*self, next),
             (Self::Published, Self::SinksCommanded)
                 | (Self::SinksCommanded, Self::CoordinatorDurable)
-                | (Self::CoordinatorDurable, Self::SourceAcked)
+                | (Self::CoordinatorDurable, Self::SinksFinalized)
+                | (Self::SinksFinalized, Self::SourceAcked)
         );
         if *self != expected || !adjacent {
             return Err(checkpoint_protocol_error(
@@ -79,7 +81,6 @@ impl DurableSettlementPhase {
 pub(super) struct DurableSettlementRequest<'a> {
     pub(super) epoch: Epoch,
     pub(super) terminal: bool,
-    pub(super) acknowledgement_timeout: Duration,
     pub(super) phase: &'a mut DurableSettlementPhase,
 }
 
@@ -92,6 +93,10 @@ struct EpochManifestAssembly {
     deferred_publication_error: Option<CalcFlowError>,
     sources: BTreeMap<String, SourceManifestEntry>,
     operators: BTreeMap<String, OperatorManifestEntry>,
+    operator_snapshots: BTreeMap<String, crate::OperatorStateSnapshot>,
+    operator_frontiers: BTreeMap<String, Option<EventTime>>,
+    capture_reservations: Vec<crate::state::v4::V4CaptureReservation>,
+    sink_captures: BTreeMap<String, BTreeMap<String, Vec<u8>>>,
     working_states: BTreeMap<String, Arc<crate::state::WorkingStatePins>>,
     operator_checkpoint_credits:
         BTreeMap<String, super::super::operator_task::OperatorCheckpointCredit>,
@@ -116,6 +121,10 @@ impl EpochManifestAssembly {
         }
         self.sources.clear();
         self.operators.clear();
+        self.operator_snapshots.clear();
+        self.operator_frontiers.clear();
+        self.capture_reservations.clear();
+        self.sink_captures.clear();
         self.working_states.clear();
         self.operator_checkpoint_credits.clear();
         self.sink_outputs.clear();
@@ -633,6 +642,10 @@ async fn handle_checkpoint_event(
             assembly.start(epoch, *terminal_request_active)?;
             assembly.start_metrics(metrics, *terminal_request_active)?;
             #[cfg(test)]
+            if checkpoint.inject_fault(CheckpointFaultPoint::StateStage, cancellation)? {
+                return Ok(false);
+            }
+            #[cfg(test)]
             if checkpoint.inject_fault(CheckpointFaultPoint::SourceAdmission, cancellation)? {
                 return Ok(false);
             }
@@ -690,7 +703,7 @@ async fn handle_checkpoint_event(
                     }
                 };
                 for source in sources.values() {
-                    source.commit_checkpoint(epoch)?;
+                    source.resume_checkpoint(epoch)?;
                 }
                 durable
             };
@@ -716,7 +729,6 @@ async fn handle_checkpoint_event(
             publish_epoch_manifest(
                 checkpoint,
                 coordinator,
-                sources,
                 sink_commands,
                 cancellation,
                 metrics,
@@ -734,6 +746,17 @@ async fn handle_checkpoint_event(
             if let Some(error) = assembly.deferred_publication_error.take() {
                 return Err(error);
             }
+            finalize_durable_sources(
+                checkpoint,
+                sources,
+                &assembly.sources,
+                assembly
+                    .settlement_phase
+                    .as_mut()
+                    .expect("published settlement phase"),
+                epoch,
+            )
+            .await?;
             let terminal = assembly.terminal;
             assembly.complete(epoch)?;
             assembly.complete_metrics(metrics, terminal)?;
@@ -799,10 +822,47 @@ async fn notify_terminal_checkpoint(
     clippy::too_many_arguments,
     reason = "manifest publication owns the checkpoint, participant, cancellation, metrics, and epoch boundaries"
 )]
+async fn persist_v4_epoch(
+    checkpoint: &OpenedCheckpointRuntime,
+    assembly: &EpochManifestAssembly,
+    epoch: Epoch,
+    cancellation: &CancellationToken,
+) -> crate::Result<Option<ManifestPublication>> {
+    #[cfg(not(test))]
+    let _ = cancellation;
+    #[cfg(test)]
+    if checkpoint.inject_fault(CheckpointFaultPoint::ManifestWrite, cancellation)? {
+        return Ok(None);
+    }
+    let publication = checkpoint_v4::persist_epoch(
+        checkpoint,
+        checkpoint_v4::AssemblyView {
+            sources: &assembly.sources,
+            operator_snapshots: &assembly.operator_snapshots,
+            operator_progress: &assembly.operators,
+            operator_frontiers: &assembly.operator_frontiers,
+            sink_outputs: &assembly.sink_outputs,
+            sink_captures: &assembly.sink_captures,
+        },
+        epoch.as_u64(),
+        cancellation,
+    )
+    .await;
+    match publication {
+        Ok(_) => Ok(Some(ManifestPublication::Durable)),
+        Err(error @ CalcFlowError::RecoveryRequired { .. }) => {
+            Ok(Some(ManifestPublication::Installed {
+                parent_synced: false,
+                error,
+            }))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 async fn publish_epoch_manifest(
     checkpoint: &OpenedCheckpointRuntime,
     coordinator: &CheckpointCoordinatorHandle,
-    sources: &BTreeMap<String, SourceProgress>,
     sink_commands: &BTreeMap<String, mpsc::Sender<SinkCheckpointCommand>>,
     cancellation: &CancellationToken,
     metrics: &MetricsRecorder,
@@ -817,18 +877,9 @@ async fn publish_epoch_manifest(
     let manifest = build_epoch_manifest(checkpoint, assembly, epoch)?;
     let (state_bytes, manifest_bytes) = checkpoint_manifest_sizes(&manifest)?;
     metrics.record_checkpoint_manifest(state_bytes, manifest_bytes)?;
-    let publication = checkpoint
-        .transaction
-        .publish_cancellable(
-            PreparedEpochManifest {
-                manifest,
-                staged_segments: BTreeMap::new(),
-            },
-            cancellation,
-        )
-        .await;
-    let publication = match publication {
-        Ok(publication) => publication,
+    let publication = match persist_v4_epoch(checkpoint, assembly, epoch, cancellation).await {
+        Ok(Some(publication)) => publication,
+        Ok(None) => return Ok(()),
         Err(_) if cancellation.is_cancelled() => return Ok(()),
         Err(error) => return Err(error),
     };
@@ -841,13 +892,10 @@ async fn publish_epoch_manifest(
             assembly.advance_metrics(metrics, CheckpointPhase::ManifestDurable)?;
             settle_durable_manifest(
                 coordinator,
-                sources,
-                &assembly.sources,
                 sink_commands,
                 DurableSettlementRequest {
                     epoch,
                     terminal: assembly.terminal,
-                    acknowledgement_timeout: checkpoint.config.checkpoint_timeout,
                     phase: assembly
                         .settlement_phase
                         .as_mut()
@@ -871,13 +919,10 @@ async fn publish_epoch_manifest(
                 }
                 settle_durable_manifest(
                     coordinator,
-                    sources,
-                    &assembly.sources,
                     sink_commands,
                     DurableSettlementRequest {
                         epoch,
                         terminal: assembly.terminal,
-                        acknowledgement_timeout: checkpoint.config.checkpoint_timeout,
                         phase: assembly
                             .settlement_phase
                             .as_mut()
@@ -902,15 +947,12 @@ async fn publish_epoch_manifest(
 
 pub(super) async fn settle_durable_manifest(
     coordinator: &CheckpointCoordinatorHandle,
-    sources: &BTreeMap<String, SourceProgress>,
-    source_entries: &BTreeMap<String, SourceManifestEntry>,
     sink_commands: &BTreeMap<String, mpsc::Sender<SinkCheckpointCommand>>,
     request: DurableSettlementRequest<'_>,
 ) -> crate::Result<()> {
     let DurableSettlementRequest {
         epoch,
         terminal,
-        acknowledgement_timeout,
         phase,
     } = request;
     if *phase != DurableSettlementPhase::Published {
@@ -930,10 +972,24 @@ pub(super) async fn settle_durable_manifest(
         DurableSettlementPhase::SinksCommanded,
         DurableSettlementPhase::CoordinatorDurable,
         epoch,
+    )
+}
+
+async fn finalize_durable_sources(
+    checkpoint: &OpenedCheckpointRuntime,
+    sources: &BTreeMap<String, SourceProgress>,
+    entries: &BTreeMap<String, SourceManifestEntry>,
+    phase: &mut DurableSettlementPhase,
+    epoch: Epoch,
+) -> crate::Result<()> {
+    phase.advance(
+        DurableSettlementPhase::CoordinatorDurable,
+        DurableSettlementPhase::SinksFinalized,
+        epoch,
     )?;
     tokio::time::timeout(
-        acknowledgement_timeout,
-        acknowledge_durable_source_cursors(sources, source_entries),
+        checkpoint.config.checkpoint_timeout,
+        acknowledge_durable_source_cursors(sources, entries),
     )
     .await
     .map_err(|_| CalcFlowError::Internal {
@@ -943,7 +999,7 @@ pub(super) async fn settle_durable_manifest(
         ),
     })??;
     phase.advance(
-        DurableSettlementPhase::CoordinatorDurable,
+        DurableSettlementPhase::SinksFinalized,
         DurableSettlementPhase::SourceAcked,
         epoch,
     )
@@ -975,30 +1031,35 @@ async fn retain_completed_epoch(
     metrics: &MetricsRecorder,
     epoch: Epoch,
 ) -> crate::Result<()> {
-    checkpoint.status.sinks_committed(epoch);
-    #[cfg(test)]
-    if checkpoint.inject_fault(CheckpointFaultPoint::Retention, cancellation)? {
-        return Ok(());
-    }
-    let retained = checkpoint
-        .transaction
-        .retain_cancellable(&checkpoint.identity, None, cancellation)
-        .await;
-    if cancellation.is_cancelled() {
-        return Ok(());
-    }
-    let report = match retained {
-        Ok(report) => report,
-        Err(error) => {
-            checkpoint
-                .status
-                .fail(CheckpointFailureCategory::Maintenance);
-            return Err(error);
-        }
-    };
     #[cfg(not(test))]
     let _ = cancellation;
-    metrics.record_checkpoint_orphan_cleanup(report.removed_orphan_segments)?;
+    checkpoint.status.sinks_committed(epoch);
+    #[cfg(test)]
+    if !matches!(
+        checkpoint.inject_fault(CheckpointFaultPoint::Retention, cancellation),
+        Ok(false)
+    ) {
+        checkpoint
+            .status
+            .fail(CheckpointFailureCategory::Maintenance);
+        return Err(CalcFlowError::Internal {
+            message: "injected retention failure".into(),
+        });
+    }
+    let removed = checkpoint_v4_retention::retain(checkpoint).await?;
+    #[cfg(test)]
+    if !matches!(
+        checkpoint.inject_fault(CheckpointFaultPoint::Compaction, cancellation),
+        Ok(false)
+    ) {
+        checkpoint
+            .status
+            .fail(CheckpointFailureCategory::Maintenance);
+        return Err(CalcFlowError::Internal {
+            message: "injected compaction failure".into(),
+        });
+    }
+    metrics.record_checkpoint_orphan_cleanup(removed)?;
     checkpoint.status.complete(epoch);
     Ok(())
 }
@@ -1172,6 +1233,17 @@ async fn accept_operator_ack(
         ack.epoch,
         "operator",
     )?;
+    insert_identical(
+        &mut assembly.operator_snapshots,
+        &ack.node_id,
+        ack.snapshot.clone(),
+        ack.epoch,
+        "operator snapshot",
+    )?;
+    assembly
+        .operator_frontiers
+        .insert(ack.node_id.clone(), ack.output_frontier);
+    assembly.capture_reservations.push(ack.reservation.clone());
     if let Some(credit) = &ack.capture_credit {
         assembly
             .operator_checkpoint_credits
@@ -1208,6 +1280,15 @@ async fn accept_sink_ack(
         ack.epoch,
         "sink output",
     )?;
+    for (sink_id, segments) in ack.captured_segments {
+        insert_identical(
+            &mut assembly.sink_captures,
+            &sink_id,
+            segments,
+            ack.epoch,
+            "sink capture",
+        )?;
+    }
     coordinator
         .ack(CheckpointAck::sink_precommit(
             &ack.output_id,

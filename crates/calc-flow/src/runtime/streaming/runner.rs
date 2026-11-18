@@ -1,5 +1,9 @@
 mod asof;
 mod checkpoint_task;
+pub(in crate::runtime::streaming) mod checkpoint_v4;
+mod checkpoint_v4_metadata;
+mod checkpoint_v4_retention;
+pub(in crate::runtime::streaming) mod checkpoint_v4_selection;
 mod join_terminal;
 mod native_sequences;
 pub(super) mod operator_fusion;
@@ -69,7 +73,7 @@ use super::{
     progress::{
         DurableProgressRestore, DurableSourceCut, LiveProgressCoordinator, LiveProgressEvidence,
         LiveProgressStatusHandle, prepare::NormalizedWatermarkMode, restore_durable_progress,
-        spawn_live_progress_task, types::LogicalInstant,
+        restore_durable_progress_v4, spawn_live_progress_task, types::LogicalInstant,
     },
     projection::{JobStatus, StatusProjection},
     sink_task::{
@@ -93,14 +97,13 @@ use crate::pipeline::{
 };
 #[cfg(test)]
 use crate::state::ManifestTransactionFaultPoint;
+#[cfg(test)]
+use crate::state::PreparedEpochManifest;
 use crate::{
     CalcFlowError, CancellationToken, CheckpointManifest, CheckpointManifestFields, Epoch,
     EventTime, OperatorManifestEntry, RecoveryStatus, SinkManifestEntry, SourceManifestEntry,
     StateBackend, StateLineageKey, StreamRuntimeConfig,
-    state::{
-        ManifestPublication, ManifestTransaction, PreparedEpochManifest, PreparedManifestIdentity,
-        SelectedManifest,
-    },
+    state::{ManifestPublication, ManifestTransaction, PreparedManifestIdentity, SelectedManifest},
 };
 
 pub(crate) use super::failure::{
@@ -1161,7 +1164,10 @@ impl ContinuousRunner {
                 message: "must match the runner's checkpoint storage mode".into(),
             });
         }
-        spec.context = spec.context.with_checkpointing(config.checkpointing);
+        spec.context = spec
+            .context
+            .with_checkpointing(config.checkpointing)
+            .with_checkpoint_inflight_limit(config.checkpoint_inflight_max_bytes);
         if let Err(error) = spec.plan.set_sql_budgets(&config) {
             return preflight_error_observer(error);
         }
@@ -2099,10 +2105,18 @@ async fn run_job_driver(
         }
         None => None,
     };
-    let recovered = checkpoint
-        .as_ref()
-        .and_then(|checkpoint| checkpoint.selected.as_ref())
-        .map(|selected| selected.manifest.static_inputs());
+    let recovered = checkpoint.as_ref().and_then(|checkpoint| {
+        checkpoint
+            .selected_v4
+            .as_ref()
+            .map(|selected| &selected.manifest.static_inputs)
+            .or_else(|| {
+                checkpoint
+                    .selected
+                    .as_ref()
+                    .map(|selected| selected.manifest.static_inputs())
+            })
+    });
     let context = match crate::static_input::finalize_native(context, static_inputs, recovered) {
         Ok(context) => context,
         Err(error) => {
@@ -2130,6 +2144,76 @@ async fn run_job_driver(
         }
     };
     if let Some(checkpoint) = checkpoint.as_ref()
+        && let Some(selected) = checkpoint.selected_v4.as_ref()
+    {
+        if let Err(error) = checkpoint_v4_metadata::validate_capabilities(&selected.manifest, &plan)
+        {
+            return core.prepare_driver_report(checkpoint_start_failure(launch_id, error));
+        }
+        match checkpoint_v4_metadata::is_terminal(&selected.manifest, &plan) {
+            Ok(true) => {
+                let mut sql_frames = sql_recovery::TerminalSqlFrames::default();
+                let sql_statuses = match sql_recovery::restore_terminal(
+                    &mut plan,
+                    &mut sql_frames,
+                    checkpoint,
+                    &context,
+                    &core.sql_recovery,
+                    &core.launch_cancel,
+                )
+                .await
+                {
+                    Ok(nodes) => nodes,
+                    Err(error) => {
+                        return core.prepare_driver_report(checkpoint_start_failure(
+                            launch_id,
+                            sanitize_managed_recovery_error(error, checkpoint.managed),
+                        ));
+                    }
+                };
+                let mut statuses = sql_statuses;
+                match restore_terminal_joins_cancellable(
+                    &mut plan,
+                    checkpoint,
+                    &prepared_progress,
+                    &core.asof_loads,
+                    &core.launch_cancel,
+                    &context,
+                )
+                .await
+                {
+                    Ok(nodes) => statuses.extend(nodes),
+                    Err(error) => {
+                        return core.prepare_driver_report(checkpoint_start_failure(
+                            launch_id,
+                            sanitize_managed_recovery_error(error, checkpoint.managed),
+                        ));
+                    }
+                }
+                match restore_v4_terminal_operators(&mut plan, checkpoint, &context, statuses).await
+                {
+                    Ok(nodes) => core.runtime_status.lock().nodes.extend(nodes),
+                    Err(error) => {
+                        return core.prepare_driver_report(checkpoint_start_failure(
+                            launch_id,
+                            sanitize_managed_recovery_error(error, checkpoint.managed),
+                        ));
+                    }
+                }
+                drop(sources);
+                return core.prepare_driver_report(
+                    recover_terminal_manifest_v4(launch_id, &core, checkpoint, sinks).await,
+                );
+            }
+            Ok(false) => {}
+            Err(error) => {
+                return core.prepare_driver_report(checkpoint_start_failure(
+                    launch_id,
+                    sanitize_managed_recovery_error(error, checkpoint.managed),
+                ));
+            }
+        }
+    } else if let Some(checkpoint) = checkpoint.as_ref()
         && let Some(selected) = checkpoint.selected.as_ref()
     {
         if let Err(error) = validate_manifest_operator_capabilities(&selected.manifest, &plan) {
@@ -2228,7 +2312,7 @@ async fn run_job_driver(
     }
     let recovery_timer = checkpoint
         .as_ref()
-        .and_then(|checkpoint| checkpoint.selected.as_ref())
+        .filter(|checkpoint| checkpoint.selected.is_some() || checkpoint.selected_v4.is_some())
         .map(|_| core.metrics.timer());
     let (operator_restores, durable_progress) = match checkpoint.as_ref() {
         Some(checkpoint) => {
@@ -2281,9 +2365,10 @@ async fn run_job_driver(
     let mut runtime = match entry {
         Ok(entry) => entry,
         Err(EntryFailure::Failed(primary)) => {
-            let managed_recovery = checkpoint
-                .as_ref()
-                .is_some_and(|checkpoint| checkpoint.managed && checkpoint.selected.is_some());
+            let managed_recovery = checkpoint.as_ref().is_some_and(|checkpoint| {
+                checkpoint.managed
+                    && (checkpoint.selected.is_some() || checkpoint.selected_v4.is_some())
+            });
             return core.prepare_driver_report(DriverReport {
                 launch_id,
                 completion: DriverCompletion::StartFailed(StartFailure {
@@ -2333,15 +2418,20 @@ async fn run_job_driver(
     let (opened_sources, opened_sinks) = opened_connector_bindings(std::mem::take(&mut resources));
     let mut opened_sinks = opened_sinks;
     if let Some(checkpoint) = checkpoint.as_ref()
-        && let Some(selected) = &checkpoint.selected
+        && (checkpoint.selected.is_some() || checkpoint.selected_v4.is_some())
     {
-        let recovery = recover_opened_sinks(
-            &mut opened_sinks,
-            &selected.manifest,
-            &checkpoint.transaction,
-            &core.launch_cancel,
-        )
-        .await;
+        let recovery = if checkpoint.selected_v4.is_some() {
+            recover_opened_sinks_v4(&mut opened_sinks, checkpoint, &core.launch_cancel).await
+        } else {
+            let selected = checkpoint.selected.as_ref().unwrap();
+            recover_opened_sinks(
+                &mut opened_sinks,
+                &selected.manifest,
+                &checkpoint.transaction,
+                &core.launch_cancel,
+            )
+            .await
+        };
         let recovery = match recovery {
             Ok(()) => {
                 let sink_retries = opened_sinks.values().map(Vec::len).sum();
@@ -2593,6 +2683,152 @@ fn validate_manifest_operator_capabilities(
     Ok(())
 }
 
+async fn restore_v4_terminal_operators(
+    plan: &mut StreamRuntimePlanParts,
+    checkpoint: &OpenedCheckpointRuntime,
+    context: &super::StreamJobContext,
+    mut statuses: BTreeMap<String, OperatorProgress>,
+) -> crate::Result<BTreeMap<String, OperatorProgress>> {
+    let selected = checkpoint
+        .selected_v4
+        .as_ref()
+        .expect("terminal v4 restore requires a selected manifest");
+    checkpoint_v4_metadata::prepare_join_preloads(plan, &selected.manifest)?;
+    let mut snapshots = checkpoint_v4::load_snapshots(checkpoint, &selected.manifest).await?;
+    for node in &mut plan.nodes {
+        if statuses.contains_key(&node.node_id) {
+            continue;
+        }
+        let id = node.operator_id.as_str();
+        let entry = &selected.manifest.operators[id];
+        let snapshot = snapshots
+            .remove(id)
+            .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                message: format!("terminal v4 operator {id:?} has no snapshot"),
+            })?;
+        let mut snapshot = admit_v4_snapshot(node, entry, snapshot)?
+            .map(|snapshot| node.checkpoint_capability.decode_snapshot(id, snapshot))?;
+        let metadata_frontier = snapshot
+            .snapshot_mut()
+            .inline_metadata
+            .remove(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1);
+        let required = node.operator.requires_output_frontier_state();
+        if required {
+            let expected = entry
+                .output_frontier()
+                .map_or(serde_json::Value::Null, |value| {
+                    serde_json::Value::from(value.as_micros())
+                });
+            if metadata_frontier != Some(expected) {
+                return Err(CalcFlowError::CheckpointMismatch {
+                    message: format!("terminal v4 operator {id:?} frontier metadata differs"),
+                });
+            }
+        } else if metadata_frontier.is_some() || entry.output_frontier().is_some() {
+            return Err(CalcFlowError::CheckpointMismatch {
+                message: format!("terminal v4 operator {id:?} unexpectedly has a frontier"),
+            });
+        }
+        super::operator_task::validate_sql_restore_progress(
+            node.ingress_edges.keys(),
+            entry.progress(),
+        )?;
+        node.operator
+            .restore_async(
+                &snapshot,
+                &crate::StreamOperatorContext::new(context, id, None),
+            )
+            .await?;
+        if let crate::pipeline::CompiledStreamOperator::StreamJoin(operator) = &node.operator {
+            operator.validate_terminal_recovery_state()?;
+        }
+        let progress = OperatorProgress::default();
+        if let Some(mut status) = node.operator.stream_asof_join_status() {
+            status.output_watermark_micros = entry.output_frontier();
+            progress.observe_stream_asof_join(status);
+        }
+        if let Some(status) = node.operator.stream_join_status() {
+            progress.observe_stream_join(status);
+        }
+        progress.mark_ended();
+        statuses.insert(node.node_id.clone(), progress);
+    }
+    Ok(statuses)
+}
+
+async fn recover_terminal_manifest_v4(
+    launch_id: LaunchId,
+    core: &Arc<JobCore>,
+    checkpoint: &OpenedCheckpointRuntime,
+    sinks: BTreeMap<String, Vec<ValidatedOrdinarySink>>,
+) -> DriverReport {
+    let recovery_timer = core.metrics.timer();
+    let mut resources = connector_resources(BTreeMap::new(), sinks);
+    let failures = open_connector_resources(&mut resources, &core.launch_cancel).await;
+    if !failures.is_empty() {
+        let mut supervisor = TaskSupervisor::new(core.launch_cancel.clone());
+        return finish_failed_launch(launch_id, failures, &mut resources, &mut supervisor).await;
+    }
+    let (_, mut opened_sinks) = opened_connector_bindings(std::mem::take(&mut resources));
+    if let Err(error) =
+        recover_opened_sinks_v4(&mut opened_sinks, checkpoint, &core.launch_cancel).await
+    {
+        let mut resources = connector_resources(BTreeMap::new(), opened_sinks);
+        let mut supervisor = TaskSupervisor::new(core.launch_cancel.clone());
+        return finish_failed_launch(
+            launch_id,
+            vec![Arc::new(RuntimeFailure {
+                origin: FailureOrigin::Preflight,
+                error: sanitize_managed_recovery_error(error, true),
+            })],
+            &mut resources,
+            &mut supervisor,
+        )
+        .await;
+    }
+    let sink_retries = opened_sinks.values().map(Vec::len).sum();
+    let mut resources = connector_resources(BTreeMap::new(), opened_sinks);
+    let close_failures = close_resources(&mut resources).await;
+    if let Some(primary) = close_failures.first().cloned() {
+        return DriverReport {
+            launch_id,
+            completion: DriverCompletion::StartFailed(StartFailure {
+                primary,
+                diagnostic_id: None,
+                cleanup_failures: Vec::new(),
+            }),
+            cleanup_failures: close_failures.into_iter().skip(1).collect(),
+        };
+    }
+    let metrics = recovery_timer
+        .elapsed("checkpoint", "restore_duration")
+        .and_then(|elapsed| {
+            core.metrics
+                .record_checkpoint_restore(elapsed, sink_retries)
+        })
+        .and_then(|()| core.metrics.record_checkpoint_orphan_cleanup(0));
+    if let Err(error) = metrics {
+        return checkpoint_start_failure(launch_id, error);
+    }
+    core.state.lock().launch_delivery = LaunchDeliveryState::ReadyUnclaimed;
+    core.changed.notify_waiters();
+    if !await_handle_claim(core).await {
+        return cancelled_driver_report(launch_id, &core.metrics);
+    }
+    let cause = TerminalCause::NaturalEnd;
+    core.metrics
+        .record_terminal(ContinuousJobState::Completed, cause.clone());
+    DriverReport {
+        launch_id,
+        completion: DriverCompletion::Outcome(Arc::new(ContinuousJobOutcome {
+            state: ContinuousJobState::Completed,
+            cause,
+            errors: Vec::new(),
+        })),
+        cleanup_failures: Vec::new(),
+    }
+}
+
 fn checkpoint_start_failure(launch_id: LaunchId, error: CalcFlowError) -> DriverReport {
     DriverReport {
         launch_id,
@@ -2620,6 +2856,16 @@ async fn prepare_checkpoint_recovery(
     BTreeMap<String, OperatorRestoreState>,
     Option<DurableProgressRestore>,
 )> {
+    if checkpoint.selected_v4.is_some() {
+        return prepare_v4_checkpoint_recovery(
+            checkpoint,
+            plan,
+            prepared_progress,
+            sources,
+            cancellation,
+        )
+        .await;
+    }
     let Some(selected) = &checkpoint.selected else {
         return Ok((BTreeMap::new(), None));
     };
@@ -2708,6 +2954,182 @@ async fn prepare_checkpoint_recovery(
     Ok((operators, Some(durable)))
 }
 
+fn restore_v4_sources(
+    prepared_progress: &super::progress::PreparedStreamJob,
+    manifest: &crate::state::v4::V4Manifest,
+    sources: &mut BTreeMap<String, SourceBinding>,
+) -> crate::Result<DurableProgressRestore> {
+    let durable =
+        restore_durable_progress_v4(prepared_progress, &manifest.sources, LogicalInstant::ZERO)?;
+    for (source_id, restored) in &durable.sources {
+        sources
+            .get_mut(source_id)
+            .expect("selected v4 source IDs were validated")
+            .restore(source_id, restored)?;
+    }
+    for source_id in durable
+        .sources
+        .iter()
+        .filter_map(|(source_id, restored)| restored.ended.then_some(source_id))
+    {
+        sources
+            .remove(source_id)
+            .expect("restored ended v4 source was validated");
+    }
+    Ok(durable)
+}
+
+fn admit_v4_snapshot(
+    node: &RuntimeStreamNode,
+    entry: &crate::state::v4::OperatorV4,
+    snapshot: crate::OperatorStateSnapshot,
+) -> crate::Result<crate::state::PreloadedSnapshot> {
+    let crate::state::v4::OperatorV4::Opaque {
+        inline_metadata,
+        blocks,
+        ..
+    } = entry
+    else {
+        return Err(CalcFlowError::CheckpointMismatch {
+            message: "runner v4 restore requires opaque operator state".into(),
+        });
+    };
+    let metadata =
+        serde_json::to_value(inline_metadata).map_err(|error| CalcFlowError::Format {
+            message: format!("v4 restore metadata is not JSON: {error}"),
+        })?;
+    let metadata_bytes = u64::try_from(crate::canonical_json(&metadata)?.len()).map_err(|_| {
+        CalcFlowError::CheckpointMismatch {
+            message: "v4 restore metadata is oversized".into(),
+        }
+    })?;
+    let bytes = blocks.iter().try_fold(
+        metadata_bytes + crate::state::PreloadedSnapshot::allocation_bytes(),
+        |total, block| total.checked_add(block.byte_len),
+    );
+    let reservation = match &node.operator {
+        crate::pipeline::CompiledStreamOperator::StreamJoin(operator) => {
+            let bytes = bytes.ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                message: "v4 Join restore charge overflowed".into(),
+            })?;
+            let bytes = usize::try_from(bytes).map_err(|_| CalcFlowError::CheckpointMismatch {
+                message: "v4 Join restore charge exceeds addressable memory".into(),
+            })?;
+            Some(operator.reserve_checkpoint_preload(bytes)?)
+        }
+        crate::pipeline::CompiledStreamOperator::StreamAsofJoin(operator) => {
+            Some(operator.reserve_checkpoint_preload([bytes.ok_or_else(|| {
+                CalcFlowError::CheckpointMismatch {
+                    message: "v4 ASOF restore charge overflowed".into(),
+                }
+            })?])?)
+        }
+        _ => None,
+    };
+    let Some(reservation) = reservation else {
+        return Ok(crate::state::PreloadedSnapshot::uncredited(snapshot));
+    };
+    let owner = Arc::new(reservation);
+    let snapshot = crate::OperatorStateSnapshot {
+        inline_metadata: snapshot.inline_metadata,
+        segments: snapshot
+            .segments
+            .into_iter()
+            .map(|(id, segment)| (id, segment.with_owner(owner.clone())))
+            .collect(),
+    };
+    Ok(crate::state::PreloadedSnapshot::uncredited(snapshot))
+}
+
+async fn prepare_v4_checkpoint_recovery(
+    checkpoint: &OpenedCheckpointRuntime,
+    plan: &mut StreamRuntimePlanParts,
+    prepared_progress: &super::progress::PreparedStreamJob,
+    sources: &mut BTreeMap<String, SourceBinding>,
+    cancellation: &CancellationToken,
+) -> crate::Result<(
+    BTreeMap<String, OperatorRestoreState>,
+    Option<DurableProgressRestore>,
+)> {
+    let selected = checkpoint
+        .selected_v4
+        .as_ref()
+        .expect("v4 recovery branch requires a selected manifest");
+    checkpoint_v4_metadata::prepare_join_preloads(plan, &selected.manifest)?;
+    let durable = restore_v4_sources(prepared_progress, &selected.manifest, sources)?;
+    if cancellation.is_cancelled() {
+        return Err(CalcFlowError::Cancelled {
+            run_id: "checkpoint-v4-restore".into(),
+        });
+    }
+    let mut snapshots = checkpoint_v4::load_snapshots(checkpoint, &selected.manifest).await?;
+    if cancellation.is_cancelled() {
+        return Err(CalcFlowError::Cancelled {
+            run_id: "checkpoint-v4-restore".into(),
+        });
+    }
+    let checkpoint_capabilities = plan
+        .nodes
+        .iter()
+        .map(|node| (node.operator_id.as_str(), node))
+        .collect::<BTreeMap<_, _>>();
+    let mut operators = BTreeMap::new();
+    for (operator_id, entry) in &selected.manifest.operators {
+        let node = checkpoint_capabilities
+            .get(operator_id.as_str())
+            .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                message: format!(
+                    "checkpoint operator {operator_id:?} is absent from the prepared plan"
+                ),
+            })?;
+        let checkpoint_capability = node.checkpoint_capability;
+        let requires_output_frontier = node.operator.requires_output_frontier_state();
+        let snapshot =
+            snapshots
+                .remove(operator_id)
+                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                    message: format!("checkpoint operator {operator_id:?} has no opaque snapshot"),
+                })?;
+        let mut snapshot = admit_v4_snapshot(node, entry, snapshot)?
+            .map(|snapshot| checkpoint_capability.decode_snapshot(operator_id, snapshot))?;
+        let metadata_frontier = snapshot
+            .snapshot_mut()
+            .inline_metadata
+            .remove(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1);
+        let output_frontier = entry.output_frontier();
+        let expected_metadata = output_frontier.map_or(serde_json::Value::Null, |frontier| {
+            serde_json::Value::from(frontier.as_micros())
+        });
+        if requires_output_frontier {
+            if metadata_frontier != Some(expected_metadata) {
+                return Err(CalcFlowError::CheckpointMismatch {
+                    message: format!(
+                        "checkpoint operator {operator_id:?} output-frontier metadata differs from v4 state"
+                    ),
+                });
+            }
+        } else if metadata_frontier.is_some() || output_frontier.is_some() {
+            return Err(CalcFlowError::CheckpointMismatch {
+                message: format!(
+                    "checkpoint operator {operator_id:?} unexpectedly contains an output frontier"
+                ),
+            });
+        }
+        operators.insert(
+            operator_id.clone(),
+            OperatorRestoreState {
+                snapshot: Arc::new(snapshot),
+                progress: entry.progress().clone(),
+                output_frontier: requires_output_frontier
+                    .then_some(output_frontier)
+                    .flatten(),
+                next_epoch: checkpoint.next_epoch,
+            },
+        );
+    }
+    Ok((operators, Some(durable)))
+}
+
 fn restored_output_frontier_value(
     operator_id: &str,
     required: bool,
@@ -2738,6 +3160,32 @@ fn restored_output_frontier_value(
 fn restored_ended_source_cuts(
     checkpoint: &OpenedCheckpointRuntime,
 ) -> crate::Result<BTreeMap<super::progress::BindingIdentity, DurableSourceCut>> {
+    if let Some(selected) = &checkpoint.selected_v4 {
+        return selected
+            .manifest
+            .sources
+            .iter()
+            .filter(|(_, entry)| entry.ended)
+            .map(|(source_id, entry)| {
+                if entry.history.is_some() {
+                    return Err(CalcFlowError::CheckpointMismatch {
+                        message: format!(
+                            "restored ended source {source_id:?} requires native v4 history cuts"
+                        ),
+                    });
+                }
+                Ok((
+                    super::progress::BindingIdentity::new(source_id.as_str())?,
+                    DurableSourceCut {
+                        history: None,
+                        cursor: entry.cursor.clone(),
+                        next_sequence: entry.next_sequence,
+                        ended: true,
+                    },
+                ))
+            })
+            .collect();
+    }
     checkpoint
         .selected
         .as_ref()
@@ -2793,37 +3241,117 @@ async fn recover_opened_sinks(
     Ok(())
 }
 
+async fn recover_opened_sinks_v4(
+    sinks: &mut BTreeMap<String, Vec<ValidatedOrdinarySink>>,
+    checkpoint: &OpenedCheckpointRuntime,
+    cancellation: &CancellationToken,
+) -> crate::Result<()> {
+    for output_sinks in sinks.values_mut() {
+        super::sink_task::recover_transactional_sinks_v4(output_sinks, checkpoint, cancellation)
+            .await?;
+    }
+    Ok(())
+}
+
+struct SelectedCheckpointState {
+    selected: Option<SelectedManifest>,
+    selected_v4: Option<checkpoint_v4_selection::SelectedRunnerV4>,
+    startup_orphans_removed: usize,
+}
+
+async fn select_checkpoint_state(
+    identity: &PreparedManifestIdentity,
+    manifest_root: &std::path::Path,
+    managed: bool,
+    retained_epochs: usize,
+) -> Result<SelectedCheckpointState, crate::state::NativeRecoveryError> {
+    let selected_v4 = checkpoint_v4_selection::select_latest(manifest_root, identity)
+        .await
+        .map_err(|error| {
+            native_sequences::sanitize_preflight(
+                crate::state::NativeRecoveryError::Legacy(error),
+                managed,
+            )
+        })?;
+    let startup_orphans_removed =
+        checkpoint_v4_retention::retain_root(manifest_root, retained_epochs)
+            .await
+            .map_err(|error| {
+                native_sequences::sanitize_preflight(
+                    crate::state::NativeRecoveryError::Legacy(error),
+                    managed,
+                )
+            })?;
+    Ok(SelectedCheckpointState {
+        selected: None,
+        selected_v4,
+        startup_orphans_removed,
+    })
+}
+
+struct OpenedCheckpointStorage {
+    state_backend: Arc<dyn StateBackend>,
+    manifest_root: std::path::PathBuf,
+    managed_storage: Option<super::checkpoint::OpenedManagedCheckpointRuntime>,
+    managed: bool,
+    local_backend: Option<Arc<crate::LocalStateBackend>>,
+}
+
+async fn open_checkpoint_storage(
+    storage: CheckpointRuntimeStorage,
+    cancellation: &CancellationToken,
+) -> Result<OpenedCheckpointStorage, crate::state::NativeRecoveryError> {
+    match storage {
+        CheckpointRuntimeStorage::LegacyParts {
+            state_backend,
+            manifest_root,
+        } => Ok(OpenedCheckpointStorage {
+            state_backend,
+            manifest_root,
+            managed_storage: None,
+            managed: false,
+            local_backend: None,
+        }),
+        CheckpointRuntimeStorage::Managed(storage) => {
+            let opened = storage.open(cancellation).await?;
+            let state_backend: Arc<dyn StateBackend> = opened.state_backend();
+            let manifest_root = opened.manifest_root().to_owned();
+            let local_backend = opened.state_backend();
+            Ok(OpenedCheckpointStorage {
+                state_backend,
+                manifest_root,
+                managed_storage: Some(opened),
+                managed: true,
+                local_backend: Some(local_backend),
+            })
+        }
+        #[cfg(test)]
+        CheckpointRuntimeStorage::ManagedTestParts {
+            state_backend,
+            manifest_root,
+        } => Ok(OpenedCheckpointStorage {
+            state_backend,
+            manifest_root,
+            managed_storage: None,
+            managed: true,
+            local_backend: None,
+        }),
+    }
+}
+
 async fn open_checkpoint_runtime(
     checkpoint: ValidatedCheckpointRuntime,
     cancellation: &CancellationToken,
     native_sequences: Option<Arc<crate::array::NativeSequenceInventory>>,
 ) -> Result<OpenedCheckpointRuntime, crate::state::NativeRecoveryError> {
     let ValidatedCheckpointRuntime { spec, identity } = checkpoint;
-    let (state_backend, manifest_root, managed_storage, managed, local_backend) = match spec.storage
-    {
-        CheckpointRuntimeStorage::LegacyParts {
-            state_backend,
-            manifest_root,
-        } => (state_backend, manifest_root, None, false, None),
-        CheckpointRuntimeStorage::Managed(storage) => {
-            let opened = storage.open(cancellation).await?;
-            let state_backend: Arc<dyn StateBackend> = opened.state_backend();
-            let manifest_root = opened.manifest_root().to_owned();
-            let local_backend = opened.state_backend();
-            (
-                state_backend,
-                manifest_root,
-                Some(opened),
-                true,
-                Some(local_backend),
-            )
-        }
-        #[cfg(test)]
-        CheckpointRuntimeStorage::ManagedTestParts {
-            state_backend,
-            manifest_root,
-        } => (state_backend, manifest_root, None, true, None),
-    };
+    let OpenedCheckpointStorage {
+        state_backend,
+        manifest_root,
+        managed_storage,
+        managed,
+        local_backend,
+    } = open_checkpoint_storage(spec.storage, cancellation).await?;
     let key = StateLineageKey::new(&identity.pipeline_name, &identity.pipeline_fingerprint)?;
     let (lineage, join_preload_reader) = open_checkpoint_lineage(
         &state_backend,
@@ -2851,35 +3379,44 @@ async fn open_checkpoint_runtime(
         native_sequences.clone(),
         join_preload_reader.as_ref(),
     )?;
-    let selected = transaction
-        .select_latest_native_cancellable(&identity, cancellation)
-        .await
-        .map_err(|error| native_sequences::sanitize_preflight(error, managed))?;
-    let startup_orphans_removed = transaction
-        .retain_native_cancellable(
-            &identity,
-            selected.as_ref().map(|selected| &selected.manifest),
-            cancellation,
-        )
-        .await
-        .map_err(|error| native_sequences::sanitize_preflight(error, managed))?
-        .removed_orphan_segments;
+    let SelectedCheckpointState {
+        selected,
+        selected_v4,
+        startup_orphans_removed,
+    } = select_checkpoint_state(
+        &identity,
+        &manifest_root,
+        managed,
+        spec.config.retained_epochs,
+    )
+    .await?;
     #[cfg(test)]
     let transaction =
         checkpoint_transaction_faults(transaction, spec.faults.clone(), cancellation.clone());
     let transaction = Arc::new(transaction);
-    let next_epoch = selected
+    let next_epoch = selected_v4
         .as_ref()
-        .map_or(Epoch::INITIAL, |selected| selected.next_epoch);
-    let status = CheckpointStatusHandle::new(&identity, selected.as_ref());
+        .map(|selected| selected.next_epoch)
+        .or_else(|| selected.as_ref().map(|selected| selected.next_epoch))
+        .unwrap_or(Epoch::INITIAL);
+    let status = match selected_v4.as_ref() {
+        Some(selected) => CheckpointStatusHandle::new_restored(
+            &identity,
+            Some(Epoch::new(selected.manifest.epoch).expect("manifest epoch is nonzero")),
+            selected.runtime_config_changed,
+        ),
+        None => CheckpointStatusHandle::new(&identity, selected.as_ref()),
+    };
     Ok(OpenedCheckpointRuntime {
         transaction,
         native_sequences,
         join_preload_reader,
-        _managed_storage: managed_storage,
+        _managed_lease: managed_storage,
+        manifest_root,
         identity,
         config: spec.config,
         selected,
+        selected_v4,
         next_epoch,
         status,
         startup_orphans_removed,
@@ -3082,6 +3619,7 @@ async fn cancel_after_operator_entry(
     ))
 }
 
+#[derive(Debug)]
 enum EntryFailure {
     Failed(Arc<RuntimeFailure>),
     Cancelled,

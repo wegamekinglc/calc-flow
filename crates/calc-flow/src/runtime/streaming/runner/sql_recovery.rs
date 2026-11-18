@@ -89,10 +89,12 @@ pub(super) async fn restore_terminal(
     owner: &JobSqlRecoveryOwner,
     launch_cancel: &CancellationToken,
 ) -> Result<BTreeMap<String, OperatorProgress>> {
-    let selected = checkpoint
-        .selected
-        .as_ref()
-        .expect("selected terminal manifest");
+    let mut v4_snapshots = if let Some(selected) = &checkpoint.selected_v4 {
+        Some(super::checkpoint_v4::load_snapshots(checkpoint, &selected.manifest).await?)
+    } else {
+        None
+    };
+    let selected = checkpoint.selected.as_ref();
     frames.remaining = Some(std::mem::take(&mut plan.nodes).into_iter());
     let mut statuses = BTreeMap::new();
     let mut order = 0;
@@ -105,12 +107,26 @@ pub(super) async fn restore_terminal(
             continue;
         }
         let id = node.operator_id.as_str();
-        let entry = &selected.manifest.operators()[id];
-        let snapshot = checkpoint
-            .transaction
-            .load_operator_state_cancellable(id, entry, context.cancellation())
-            .await?;
-        let snapshot = terminal_snapshot(node, entry, snapshot)?;
+        let snapshot = if let Some(snapshots) = &mut v4_snapshots {
+            snapshots
+                .remove(id)
+                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                    message: format!("terminal v4 SQL operator {id:?} has no snapshot"),
+                })?
+        } else {
+            let selected = selected.expect("selected terminal manifest");
+            let entry = &selected.manifest.operators()[id];
+            checkpoint
+                .transaction
+                .load_operator_state_cancellable(id, entry, context.cancellation())
+                .await?
+        };
+        let snapshot = if let Some(selected) = &checkpoint.selected_v4 {
+            terminal_snapshot_v4(node, &selected.manifest.operators[id], snapshot)?
+        } else {
+            let selected = selected.expect("selected terminal manifest");
+            terminal_snapshot(node, &selected.manifest.operators()[id], snapshot)?
+        };
         frames
             .restore_candidate(snapshot, order, context, owner, launch_cancel)
             .await?;
@@ -185,5 +201,30 @@ fn terminal_snapshot(
         });
     }
     validate_sql_restore_progress(node.ingress_edges.keys(), &entry.progress)?;
+    Ok(snapshot)
+}
+
+fn terminal_snapshot_v4(
+    node: &RuntimeStreamNode,
+    entry: &crate::state::v4::OperatorV4,
+    snapshot: crate::OperatorStateSnapshot,
+) -> Result<crate::OperatorStateSnapshot> {
+    let id = node.operator_id.as_str();
+    let mut snapshot = node
+        .checkpoint_capability
+        .decode_snapshot(node.operator_id.as_str(), snapshot)?;
+    if snapshot
+        .inline_metadata
+        .remove(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1)
+        .is_some()
+        || entry.output_frontier().is_some()
+    {
+        return Err(CalcFlowError::CheckpointMismatch {
+            message: format!(
+                "SQL checkpoint operator {id:?} unexpectedly contains an output frontier"
+            ),
+        });
+    }
+    validate_sql_restore_progress(node.ingress_edges.keys(), entry.progress())?;
     Ok(snapshot)
 }

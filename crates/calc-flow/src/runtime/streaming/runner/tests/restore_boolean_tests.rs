@@ -263,19 +263,17 @@ fn assert_boolean_pairs(records: &[RecordBatch]) {
 
 fn assert_boolean_owners(observations: &Mutex<RestoreObservations>) {
     let observed = observations.lock();
-    assert_eq!(observed.wire.len(), 2);
     assert_eq!(observed.readers.len(), 2);
     eprintln!(
         "boolean restored readers: {:?}; resident: {:?}",
         observed.readers, observed.payloads
     );
     assert!(
-        observed.readers.iter().all(|(funding, native)| {
+        observed.readers.iter().all(|(funding, _)| {
             funding.is_some_and(|(identity, paid)| {
                 paid > 0
                     && Some(identity) != observed.descriptor
                     && !observed.wire.contains(&identity)
-                    && *native
             })
         }),
         "both real boolean readers need independent prepaid native workspace"

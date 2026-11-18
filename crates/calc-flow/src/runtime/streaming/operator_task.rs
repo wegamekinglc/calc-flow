@@ -78,8 +78,11 @@ pub(crate) struct OperatorCheckpointAck {
     pub(crate) node_id: String,
     pub(crate) epoch: Epoch,
     pub(crate) state: crate::OperatorManifestEntry,
+    pub(crate) snapshot: crate::OperatorStateSnapshot,
+    pub(crate) output_frontier: Option<EventTime>,
     pub(crate) working: Option<Arc<crate::state::WorkingStatePins>>,
     pub(crate) capture_credit: Option<OperatorCheckpointCredit>,
+    pub(crate) reservation: crate::state::v4::V4CaptureReservation,
 }
 
 pub(crate) struct OperatorCheckpointPort {
@@ -255,11 +258,11 @@ impl OperatorProgress {
         self.0.lock().datafusion_runtime_created |= created;
     }
 
-    fn observe_stream_join(&self, status: crate::StreamJoinStatus) {
+    pub(crate) fn observe_stream_join(&self, status: crate::StreamJoinStatus) {
         self.0.lock().stream_join = Some(status);
     }
 
-    fn observe_stream_asof_join(&self, status: crate::StreamAsofJoinStatus) {
+    pub(crate) fn observe_stream_asof_join(&self, status: crate::StreamAsofJoinStatus) {
         self.0.lock().stream_asof_join = Some(status);
     }
 }
@@ -1880,24 +1883,62 @@ async fn capture_operator_checkpoint(
             run_id: inputs.context.job().job_id().to_string(),
         }),
     };
-    let transaction = inputs
-        .checkpoint
-        .as_ref()
-        .and_then(|checkpoint| checkpoint.transaction.clone());
     let snapshot =
         encode_operator_snapshot(inputs, input_progress, snapshot, capture_credit.as_ref())?;
-    let staged = stage_operator_snapshot(inputs, epoch, snapshot, transaction).await?;
+    let reservation = inputs
+        .context
+        .job()
+        .checkpoint_budget()
+        .reserve(opaque_capture_reservation(&snapshot)?)?;
+    let state = crate::OperatorManifestEntry {
+        progress: input_progress.manifest_entries()?,
+        inline_metadata: snapshot.inline_metadata.clone(),
+        segments: Vec::new(),
+    };
     Ok(OperatorCheckpointAck {
         node_id: inputs.node_id.clone(),
         epoch,
-        working: staged.working,
-        state: crate::OperatorManifestEntry {
-            progress: input_progress.manifest_entries()?,
-            inline_metadata: staged.inline_metadata,
-            segments: staged.segments,
+        state,
+        snapshot,
+        output_frontier: if inputs.operator.requires_output_frontier_state() {
+            input_progress.output_frontier
+        } else {
+            None
         },
+        working: None,
         capture_credit,
+        reservation,
     })
+}
+
+fn opaque_capture_reservation(snapshot: &crate::OperatorStateSnapshot) -> Result<u64> {
+    let metadata =
+        serde_json::to_value(&snapshot.inline_metadata).map_err(|error| CalcFlowError::Format {
+            message: format!("operator checkpoint metadata is not JSON: {error}"),
+        })?;
+    let metadata_bytes = crate::canonical_json(&metadata)?.len() as u64;
+    let segments = snapshot
+        .segments
+        .iter()
+        .try_fold(0_u64, |total, (id, segment)| {
+            let bytes = (segment.bytes().len() as u64)
+                .checked_add(id.len() as u64)
+                .and_then(|bytes| bytes.checked_add(segment.sha256().len() as u64))
+                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                    message: "opaque checkpoint reservation overflow".into(),
+                })?;
+            total
+                .checked_add(bytes)
+                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                    message: "opaque checkpoint reservation overflow".into(),
+                })
+        })?;
+    metadata_bytes
+        .checked_add(segments)
+        .and_then(|bytes| bytes.checked_mul(2))
+        .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+            message: "opaque checkpoint reservation overflow".into(),
+        })
 }
 
 async fn prepare_operator_snapshot(
@@ -1972,37 +2013,6 @@ fn encode_operator_snapshot(
         }
     }
     Ok(snapshot)
-}
-
-async fn stage_operator_snapshot(
-    inputs: &OperatorTaskInputs,
-    epoch: Epoch,
-    snapshot: crate::OperatorStateSnapshot,
-    transaction: Option<Arc<crate::state::ManifestTransaction>>,
-) -> Result<crate::state::StagedOperatorState> {
-    match transaction {
-        Some(transaction) => {
-            transaction
-                .stage_operator_state_cancellable(
-                    &inputs.node_id,
-                    epoch,
-                    snapshot,
-                    inputs.context.job().cancellation(),
-                )
-                .await
-        }
-        None if snapshot.segments.is_empty() => Ok(crate::state::StagedOperatorState {
-            inline_metadata: snapshot.inline_metadata,
-            segments: Vec::new(),
-            working: None,
-        }),
-        None => Err(CalcFlowError::Internal {
-            message: format!(
-                "operator {:?} produced state segments without a state transaction",
-                inputs.node_id
-            ),
-        }),
-    }
 }
 
 async fn send_operator_checkpoint_ack(
@@ -4470,7 +4480,7 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
-    async fn stateful_snapshot_without_transaction_forwards_no_barrier() {
+    async fn opaque_capture_without_transaction_acks_and_forwards_barrier() {
         let output_port = Port::new("output", BatchKind::Table, false, None).unwrap();
         let operator = ProbeOperator {
             input_ports: vec![Port::new("input", BatchKind::Table, true, None).unwrap()],
@@ -4501,19 +4511,22 @@ pub(super) mod tests {
             .send(StreamMessage::barrier(crate::Epoch::INITIAL))
             .await
             .unwrap();
-        sender.send(StreamMessage::end_of_input()).await.unwrap();
 
-        let report = harness.supervisor.join_all().await;
-
-        assert_eq!(report.errors.len(), 1);
-        assert!(
-            report.errors[0]
-                .error
-                .to_string()
-                .contains("state transaction")
+        let ack = checkpoint_rx.recv().await.unwrap();
+        assert_eq!(ack.snapshot.segments.len(), 1);
+        assert!(ack.state.segments.is_empty());
+        assert_eq!(
+            harness.outputs[0]
+                .recv()
+                .await
+                .unwrap()
+                .unwrap()
+                .as_barrier(),
+            Some(crate::Epoch::INITIAL)
         );
-        assert!(checkpoint_rx.recv().await.is_none());
-        assert!(harness.outputs[0].recv().await.unwrap().is_none());
+
+        harness.cancellation.cancel();
+        assert!(harness.supervisor.join_all().await.errors.is_empty());
     }
 
     #[tokio::test]

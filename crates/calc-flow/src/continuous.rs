@@ -819,6 +819,9 @@ impl<S: TransactionalStreamSink> InternalTransactionalStreamSink for Transaction
         };
         self.sink.recover(&recovery).await
     }
+    async fn recover_scoped(&mut self, recovery: SinkRecovery) -> Result<()> {
+        self.sink.recover(&recovery).await
+    }
     async fn close(&mut self) -> Result<()> {
         self.sink.close().await
     }

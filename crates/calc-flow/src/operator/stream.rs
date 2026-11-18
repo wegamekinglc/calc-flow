@@ -248,7 +248,7 @@ mod segment_tests;
 /// The runtime wraps it with input progress and segment handles into the
 /// checkpoint manifest; keyed row state never appears inline (spec D4.4), and
 /// no segment may carry secrets (I4).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct OperatorStateSnapshot {
     /// Small bounded JSON placed inline in the manifest.
     pub inline_metadata: JsonMap,

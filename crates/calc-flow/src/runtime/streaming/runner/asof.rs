@@ -7,7 +7,7 @@ use std::{
 
 use datafusion::execution::memory_pool::MemoryReservation;
 
-mod join_preload;
+pub(super) mod join_preload;
 mod load_work;
 pub(super) use load_work::LoadOwner;
 

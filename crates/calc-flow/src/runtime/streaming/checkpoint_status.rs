@@ -21,6 +21,10 @@ pub(crate) enum CheckpointFailureCategory {
     Timeout,
     Protocol,
     Io,
+    #[allow(
+        dead_code,
+        reason = "v4 retention failures retain the maintenance classification"
+    )]
     Maintenance,
     Runtime,
 }
@@ -57,6 +61,18 @@ impl CheckpointStatusHandle {
         identity: &PreparedManifestIdentity,
         selected: Option<&SelectedManifest>,
     ) -> Self {
+        Self::new_restored(
+            identity,
+            selected.map(|selected| selected.manifest.epoch()),
+            selected.is_some_and(|selected| selected.validation.runtime_config_changed),
+        )
+    }
+
+    pub(super) fn new_restored(
+        identity: &PreparedManifestIdentity,
+        last_completed_epoch: Option<Epoch>,
+        runtime_config_changed: bool,
+    ) -> Self {
         Self(Arc::new(Mutex::new(CheckpointStatusState {
             snapshot: CheckpointStatus {
                 current_epoch: None,
@@ -70,11 +86,10 @@ impl CheckpointStatusHandle {
                 expected_operators: identity.operator_ids.len(),
                 expected_sinks: identity.sink_ids.len(),
                 elapsed: None,
-                last_completed_epoch: selected.map(|selected| selected.manifest.epoch()),
+                last_completed_epoch,
                 installed_unknown_epoch: None,
                 failure_category: None,
-                runtime_config_changed: selected
-                    .is_some_and(|selected| selected.validation.runtime_config_changed),
+                runtime_config_changed,
             },
             started: None,
         })))

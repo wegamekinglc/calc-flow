@@ -2,7 +2,7 @@ use super::*;
 use std::path::Path;
 
 use crate::{
-    CheckpointManifest, StreamRuntimeConfig,
+    StreamRuntimeConfig,
     runtime::streaming::{
         checkpoint::ManagedCheckpointRuntime, checkpoint_runtime::CheckpointRuntimeSpec,
     },
@@ -38,6 +38,7 @@ fn continuation_input() -> RecordBatch {
         Arc::new(StringArray::from_iter_values(
             (TOTAL..end).map(|row| symbols[row % ENTITIES].as_str()),
         )),
+        Arc::new(Float64Array::from_iter_values((TOTAL..end).map(price))),
         Arc::new(Float64Array::from_iter_values((TOTAL..end).map(price))),
     ];
     RecordBatch::try_new(schema(), columns).unwrap()
@@ -147,14 +148,15 @@ async fn checkpoint_a_real_pair(root: &Path) {
     };
     let manifest = root
         .join("manifests")
-        .join(format!("manifest-{:020}.json", epoch.as_u64()));
+        .join(format!("lineage/manifests/epoch-{}.json", epoch.as_u64()));
     let manifest =
-        CheckpointManifest::from_bytes(&tokio::fs::read(manifest).await.unwrap()).unwrap();
+        crate::state::v4::V4Manifest::from_bytes(&tokio::fs::read(manifest).await.unwrap())
+            .unwrap();
     assert_eq!(
-        manifest.sources()["input"].cursor.as_ref().unwrap().order,
+        manifest.sources["input"].cursor.as_ref().unwrap().order,
         "02"
     );
-    assert!(!manifest.operators()["rolling"].segments.is_empty());
+    assert!(!manifest.operators["rolling"].opaque_metadata().unwrap().1);
     assert_eq!(rows(&f.records), TOTAL);
     assert_eq!(job.core.owned_lane_launches.load(Ordering::SeqCst), 2);
     assert_eq!(job.core.entity_work.active_bytes(), 0);
@@ -174,9 +176,10 @@ fn assert_continuation(records: &Arc<Mutex<Vec<RecordBatch>>>, input: &RecordBat
         concat_batches(&records[0].schema(), records.iter()).unwrap()
     };
     assert_eq!(actual.num_rows(), 2 * ROWS);
-    assert_eq!(&actual.columns()[..4], input.columns());
+    let input_width = input.num_columns();
+    assert_eq!(&actual.columns()[..input_width], input.columns());
     let spread = actual
-        .column(4)
+        .column(input_width)
         .as_any()
         .downcast_ref::<Float64Array>()
         .unwrap();

@@ -143,7 +143,8 @@ fn assert_ack(ack: &OperatorCheckpointAck) {
     assert_eq!(metadata["metrics"]["emitted_match_rows"], 1);
     assert_eq!(metadata["v2_inventory"]["base_epoch"], 1);
     assert_eq!(metadata["v2_inventory"]["deltas"], serde_json::json!([]));
-    assert_eq!(ack.state.segments.len(), 4);
+    assert!(ack.state.segments.is_empty());
+    assert_eq!(ack.snapshot.segments.len(), 4);
 }
 
 #[tokio::test]

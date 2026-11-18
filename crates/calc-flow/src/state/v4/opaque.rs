@@ -33,23 +33,20 @@ impl V4OpaqueAdapter {
             .expect("snapshot metadata is JSON")
             .into_bytes();
         let state_fingerprint = hex::encode(Sha256::digest(&inline_bytes));
-        let mut blocks = vec![OpaqueObject {
-            owner: owner.to_owned(),
-            object_id: "inline".into(),
-            generation: epoch,
-            bytes: inline_bytes,
-            sha256: state_fingerprint.clone(),
-        }];
-        blocks.extend(snapshot.segments.iter().map(|(id, segment)| {
-            let bytes = segment.bytes().to_vec();
-            OpaqueObject {
-                owner: owner.to_owned(),
-                object_id: id.clone(),
-                generation: epoch,
-                sha256: hex::encode(Sha256::digest(&bytes)),
-                bytes,
-            }
-        }));
+        let blocks = snapshot
+            .segments
+            .iter()
+            .map(|(id, segment)| {
+                let bytes = segment.bytes().to_vec();
+                OpaqueObject {
+                    owner: owner.to_owned(),
+                    object_id: id.clone(),
+                    generation: epoch,
+                    sha256: hex::encode(Sha256::digest(&bytes)),
+                    bytes,
+                }
+            })
+            .collect();
         Self {
             owner: owner.to_owned(),
             inline_metadata,
@@ -104,9 +101,6 @@ impl V4OpaqueAdapter {
         for handle in blocks {
             let bytes = store.read_opaque(handle)?;
             let id = handle.object_id.clone();
-            if id == "inline" {
-                continue;
-            }
             segments.insert(id, StateSegment::new(bytes));
         }
         let metadata_value =

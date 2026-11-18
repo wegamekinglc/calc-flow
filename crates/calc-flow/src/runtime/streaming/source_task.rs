@@ -933,11 +933,15 @@ impl SourceProgress {
         &self,
         cursor: Option<&crate::CursorManifestEntry>,
     ) -> Result<()> {
-        let (Some(acknowledger), Some(cursor)) = (&self.durable_cursor_acknowledger, cursor) else {
-            return Ok(());
-        };
-        let cursor = Cursor::from_manifest_entry(&self.binding_id, cursor)?;
-        acknowledger.acknowledge(&cursor).await
+        let cursor = cursor
+            .map(|cursor| Cursor::from_manifest_entry(&self.binding_id, cursor))
+            .transpose()?;
+        if let (Some(acknowledger), Some(cursor)) = (&self.durable_cursor_acknowledger, &cursor) {
+            acknowledger.acknowledge(cursor).await?;
+        }
+        self.snapshot.lock().durable_cursor = cursor;
+        self.acceptance.checkpoint_changed.notify_waiters();
+        Ok(())
     }
 
     pub(crate) async fn barrier(
@@ -1015,18 +1019,8 @@ impl SourceProgress {
         }
     }
 
-    pub(crate) fn commit_checkpoint(&self, epoch: Epoch) -> Result<()> {
-        let mut active = self.acceptance.checkpoint_epoch.lock();
-        validate_active_source_checkpoint(*active, epoch)?;
-        let mut snapshot = self.snapshot.lock();
-        if let Some(cursor) = snapshot.latest_observed_cursor.clone() {
-            snapshot.durable_cursor = Some(cursor);
-        }
-        *active = None;
-        drop(snapshot);
-        drop(active);
-        self.acceptance.checkpoint_changed.notify_waiters();
-        Ok(())
+    pub(crate) fn resume_checkpoint(&self, epoch: Epoch) -> Result<()> {
+        self.acceptance.finish_checkpoint(epoch)
     }
 
     pub(crate) fn abort_checkpoint(&self, epoch: Epoch) -> Result<()> {
@@ -1049,22 +1043,6 @@ impl SourceProgress {
                 .load(Ordering::Acquire),
             errors: std::mem::take(&mut *self.acceptance.close_failures.lock()),
         }
-    }
-}
-
-fn validate_active_source_checkpoint(active: Option<Epoch>, epoch: Epoch) -> Result<()> {
-    match active {
-        Some(current) if current == epoch => Ok(()),
-        Some(current) => Err(CalcFlowError::CheckpointMismatch {
-            message: format!(
-                "source checkpoint epoch {} cannot finish active epoch {}",
-                epoch.as_u64(),
-                current.as_u64()
-            ),
-        }),
-        None => Err(CalcFlowError::CheckpointMismatch {
-            message: format!("source checkpoint epoch {} is not active", epoch.as_u64()),
-        }),
     }
 }
 
@@ -2559,9 +2537,15 @@ mod tests {
         assert_pending(&mut after_cut).await;
         assert_eq!(progress.snapshot().durable_cursor, Some(cursor(0)));
 
-        progress.commit_checkpoint(Epoch::INITIAL).unwrap();
+        progress.resume_checkpoint(Epoch::INITIAL).unwrap();
         let after_cut = after_cut.await.unwrap().unwrap();
         assert_eq!(after_cut.as_data().unwrap().metadata().sequence(), 8);
+        assert_eq!(progress.snapshot().durable_cursor, Some(cursor(0)));
+
+        progress
+            .acknowledge_durable_cursor(cut.cursor.as_ref().map(Cursor::manifest_entry).as_ref())
+            .await
+            .unwrap();
         assert_eq!(progress.snapshot().durable_cursor, Some(cursor(1)));
 
         supervisor.cancel();
