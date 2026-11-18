@@ -19,7 +19,7 @@ impl StreamAsofJoinOperator {
         if !self.capture_replay_frame()? {
             return Ok(None);
         }
-        self.status.state_bytes = self.current_inventory(None)?.bytes;
+        self.status.state_bytes = self.current_inventory()?.bytes;
         let log = self
             .replay
             .as_ref()

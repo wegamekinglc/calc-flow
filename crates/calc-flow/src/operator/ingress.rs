@@ -72,16 +72,6 @@ impl Preparation {
             Self::Join(_) => Err(kind_mismatch()),
         }
     }
-
-    pub(crate) fn asof_order(&self, watermark: Option<i64>) -> Option<bool> {
-        let Self::Asof { facts, .. } = self else {
-            return None;
-        };
-        facts
-            .get()
-            .filter(|prepared| prepared.watermark() == watermark)
-            .and_then(|prepared| prepared.ordered)
-    }
 }
 
 async fn receive<T>(receiver: &Mutex<mpsc::Receiver<Result<T>>>) -> Result<T> {

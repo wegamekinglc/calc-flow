@@ -15,7 +15,6 @@ pub(super) fn validate_shape(metadata: &JsonMap) -> Result<()> {
         "source_replay" => value.is_u64(),
         crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1 => value.is_i64() || value.is_null(),
         "metrics" => metrics(value),
-        "retained_payloads" | "checkpoint_log" => true,
         _ => false,
     }) {
         return Ok(());

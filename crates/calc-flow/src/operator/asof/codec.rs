@@ -5,20 +5,13 @@ use datafusion::arrow::{datatypes::Schema, ipc::writer::StreamWriter, record_bat
 use sha2::{Digest as _, Sha256};
 use std::io::{self, Write};
 
-/// Bounded IPC sink over a caller-owned buffer. `with_capacity` fail-closes
-/// at `min(limit, capacity)` for exactly pre-sized encodes; `growable` lets
-/// the vector grow up to `limit`.
+/// Bounded IPC sink over a caller-owned buffer. The growable writer fails
+/// closed when the encoded stream exceeds the supplied limit.
 pub(super) struct BoundedWriter<'a> {
     bytes: &'a mut Vec<u8>,
     limit: usize,
 }
 impl<'a> BoundedWriter<'a> {
-    pub fn with_capacity(bytes: &'a mut Vec<u8>, capacity: usize, limit: usize) -> Self {
-        Self {
-            bytes,
-            limit: limit.min(capacity),
-        }
-    }
     pub fn growable(bytes: &'a mut Vec<u8>, limit: usize) -> Self {
         Self { bytes, limit }
     }
@@ -64,21 +57,6 @@ pub(super) fn encode_batch(
     Ok(scratch.clone())
 }
 
-/// Materialize a deferred payload into its already charged exact IPC size.
-/// Preallocating avoids the growable scratch buffer and its final copy.
-pub(super) fn encode_batch_preallocated(
-    batch: &RecordBatch,
-    capacity: usize,
-    limit: usize,
-) -> Result<Vec<u8>> {
-    let mut bytes = Vec::with_capacity(capacity);
-    write_batch(
-        batch,
-        &mut BoundedWriter::with_capacity(&mut bytes, capacity, limit),
-    )?;
-    Ok(bytes)
-}
-
 pub(super) fn decode_table_batch(
     bytes: &[u8],
     schema_digest: &[u8; 32],
@@ -102,10 +80,6 @@ pub(super) fn decode_table_batch(
         &message.version(),
     )
     .map_err(|error| super::arrow_error(&error))
-}
-
-pub(super) fn payload_body_bytes(bytes: &[u8]) -> Result<u64> {
-    framing::payload_body_bytes(bytes)
 }
 
 fn framing_error(message: &str) -> CalcFlowError {

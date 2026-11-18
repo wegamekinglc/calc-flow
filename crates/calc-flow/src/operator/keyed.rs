@@ -113,6 +113,10 @@ impl KeyStore {
         self.canonical.len()
     }
 
+    pub(crate) fn logical_bytes(&self) -> usize {
+        self.logical_bytes
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -207,6 +211,33 @@ impl KeyStore {
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<Vec<GroupId>> {
         self.route_with_limit_inner(arrays, None, limit, false, check)
+    }
+
+    pub(crate) fn probe(
+        &self,
+        arrays: &[ArrayRef],
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Vec<Option<GroupId>>> {
+        let rows = validate_arrays(&self.schema, arrays)?;
+        let hashes = hash_rows(&self.schema, arrays, None, check)?;
+        let mut variable = VariableWork::new(check);
+        let mut groups = Vec::with_capacity(rows);
+        for (row, hash) in hashes.into_iter().enumerate() {
+            if row % MORSEL_ROWS == 0 {
+                variable.chunk(0)?;
+            }
+            let mut found = None;
+            if let Some(bucket) = self.buckets.get(&hash) {
+                for &group in bucket {
+                    if self.equals(group, arrays, row, &mut variable)? {
+                        found = Some(group);
+                        break;
+                    }
+                }
+            }
+            groups.push(found);
+        }
+        Ok(groups)
     }
 
     pub(crate) fn route_selected_with_limit(
@@ -628,7 +659,7 @@ impl StableHash {
     }
 }
 
-fn hash_rows(
+pub(crate) fn hash_rows(
     schema: &KeySchema,
     arrays: &[ArrayRef],
     selection: Option<&BooleanArray>,

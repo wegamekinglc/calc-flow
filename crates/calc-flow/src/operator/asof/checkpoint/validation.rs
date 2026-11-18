@@ -1,4 +1,4 @@
-use super::{State, StreamAsofJoinStatus, mismatch};
+use super::{ColumnarState, StreamAsofJoinStatus, mismatch};
 use crate::{EventTime, IngressProgressSnapshot, IngressState, Result};
 
 pub(super) fn validate_counters(
@@ -42,7 +42,7 @@ fn validate_owned_progress(metrics: &StreamAsofJoinStatus) -> Result<()> {
 }
 
 pub(super) fn validate_progress(
-    state: &State,
+    state: &ColumnarState,
     tolerance: u64,
     terminal: bool,
     progress: &IngressProgressSnapshot,
@@ -70,14 +70,13 @@ fn validate_ingress(progress: &IngressProgressSnapshot, terminal: bool) -> Resul
 }
 
 fn validate_output_frontier(
-    state: &State,
+    state: &ColumnarState,
     progress: &IngressProgressSnapshot,
     output_frontier: Option<EventTime>,
 ) -> Result<()> {
     if state
-        .left
-        .unordered_keys()
-        .any(|(time, _, _)| output_frontier.is_some_and(|frontier| *time <= frontier.as_micros()))
+        .pending_times()
+        .any(|time| output_frontier.is_some_and(|frontier| time <= frontier.as_micros()))
     {
         return Err(mismatch("ASOF pending row is behind output frontier"));
     }
@@ -92,16 +91,15 @@ fn validate_output_frontier(
 }
 
 fn validate_pending_finality(
-    state: &State,
+    state: &ColumnarState,
     terminal: bool,
     progress: &IngressProgressSnapshot,
     output_frontier: Option<EventTime>,
 ) -> Result<()> {
     let input = super::super::frontier(progress);
     if state
-        .left
-        .unordered_keys()
-        .any(|(time, _, _)| input.is_some_and(|frontier| *time < frontier))
+        .pending_times()
+        .any(|time| input.is_some_and(|frontier| time < frontier))
     {
         return Err(mismatch(
             "ASOF snapshot contains already-finalizable pending left rows",
@@ -115,7 +113,7 @@ fn validate_pending_finality(
     Ok(())
 }
 
-fn retention_threshold(state: &State, progress: &IngressProgressSnapshot) -> i128 {
+fn retention_threshold(state: &ColumnarState, progress: &IngressProgressSnapshot) -> i128 {
     let left = progress
         .get("left")
         .expect("validated two-ingress progress");
@@ -125,26 +123,22 @@ fn retention_threshold(state: &State, progress: &IngressProgressSnapshot) -> i12
         left.watermark()
             .map_or(i128::MIN, |wm| i128::from(wm.as_micros()))
     };
-    let pending = state
-        .left
-        .first_key_value()
-        .map_or(i128::MAX, |(key, _)| i128::from(*key.0));
+    let pending = state.pending_times().min().map_or(i128::MAX, i128::from);
     future.min(pending)
 }
 
 fn validate_identity_payloads(
-    state: &State,
+    state: &ColumnarState,
     tolerance: u64,
     progress: &IngressProgressSnapshot,
 ) -> Result<()> {
     let threshold = retention_threshold(state, progress);
-    if state.right.values().any(|bucket| {
-        bucket.iter().any(|(order, row)| {
-            row.is_none()
-                && i128::from(*order.0) + i128::from(tolerance) >= threshold
-                && !bucket.has_dominating_payload(&order, threshold)
+    if state
+        .right_identities(threshold)
+        .any(|(time, has_payload, dominated)| {
+            !has_payload && !dominated && i128::from(time) + i128::from(tolerance) >= threshold
         })
-    }) {
+    {
         return Err(mismatch(
             "ASOF identity-only state discarded a potentially matching payload",
         ));
@@ -152,17 +146,21 @@ fn validate_identity_payloads(
     Ok(())
 }
 
-fn validate_expired_identities(state: &State, progress: &IngressProgressSnapshot) -> Result<()> {
+fn validate_expired_identities(
+    state: &ColumnarState,
+    progress: &IngressProgressSnapshot,
+) -> Result<()> {
     let right = progress
         .get("right")
         .expect("validated two-ingress progress");
-    if state.right.values().any(|bucket| {
-        bucket.iter().any(|((time, _), row)| {
-            row.is_none()
+    if state
+        .right_identities(i128::MIN)
+        .any(|(time, has_payload, _)| {
+            !has_payload
                 && (right.state() == IngressState::Ended
-                    || right.watermark().is_some_and(|wm| *time < wm.as_micros()))
+                    || right.watermark().is_some_and(|wm| time < wm.as_micros()))
         })
-    }) {
+    {
         return Err(mismatch(
             "ASOF identity-only state outlived its closed ingress boundary",
         ));

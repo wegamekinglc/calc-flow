@@ -562,12 +562,7 @@ impl CompiledStreamOperator {
                 }
                 Ok(Self::StreamJoin(operator))
             }
-            NodeOperator::StreamAsofJoin(mut operator) => {
-                if let Some(table) = table {
-                    operator.set_stream_resources(table.config, table.udfs.clone());
-                }
-                Ok(Self::StreamAsofJoin(operator))
-            }
+            NodeOperator::StreamAsofJoin(operator) => Ok(Self::StreamAsofJoin(operator)),
             NodeOperator::Stream(operator) => Ok(Self::External(operator)),
             NodeOperator::Batch(_) => Err(CalcFlowError::Compile {
                 message: format!(

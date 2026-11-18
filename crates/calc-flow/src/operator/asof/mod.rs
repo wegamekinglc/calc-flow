@@ -2,44 +2,37 @@
 pub(crate) mod admission;
 mod checkpoint;
 mod codec;
-mod copy;
-mod cpu;
-mod duplicate_fallback;
+mod columnar;
 mod finalize;
 mod finite;
-mod identity;
-mod identity_compare;
+#[cfg(test)]
+pub(crate) mod gather_lifecycle_bridge;
 mod kernel;
 mod metadata;
-mod output;
-mod output_plan;
 mod payload_projection;
 mod replay;
-mod retirement;
 mod schema;
 mod spec;
-mod state;
 mod status;
 #[cfg(test)]
 mod tests;
-mod workspace;
 
 use crate::{
-    Batch, BatchKind, CalcFlowError, DataFusionConfig, EventTime, IngressProgressSnapshot,
-    IngressState, JsonMap, OperatorMetadata, Port, Result, StreamCollector, StreamOperator,
-    StreamOperatorContext, StreamingFailureReason, UdfRegistrySnapshot,
+    Batch, BatchKind, CalcFlowError, EventTime, IngressProgressSnapshot, IngressState, JsonMap,
+    OperatorMetadata, Port, Result, StreamCollector, StreamOperator, StreamOperatorContext,
+    StreamingFailureReason,
 };
 use async_trait::async_trait;
-use datafusion::arrow::datatypes::SchemaRef;
+use columnar::ColumnarState;
+use datafusion::arrow::{compute::concat_batches, datatypes::SchemaRef, record_batch::RecordBatch};
+use datafusion::execution::memory_pool::{
+    GreedyMemoryPool, MemoryConsumer, MemoryPool, MemoryReservation,
+};
 pub(crate) use schema::schema_issues;
 pub use spec::{AsofJoinSide, AsofLatePolicy, AsofStateLimits, StreamAsofJoinSpec};
-use state::{Inventory, State};
 pub use status::{StreamAsofJoinSideStatus, StreamAsofJoinStatus};
+use std::{borrow::Cow, sync::Arc};
 
-/// Eviction inputs (both ingress watermarks and ended flags) under which the
-/// committed state was last swept. `State::evict` is deterministic in these
-/// inputs, so a matching stamp proves that re-sweeping the committed state
-/// would change nothing.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) struct SweepStamp {
     left_watermark: Option<EventTime>,
@@ -59,6 +52,11 @@ impl SweepStamp {
     }
 }
 
+pub(super) struct Inventory {
+    pub identities: u64,
+    pub bytes: u64,
+}
+
 /// Nearest historical match over complete finite inputs or closed stream frontiers.
 pub struct StreamAsofJoinOperator {
     name: String,
@@ -66,30 +64,16 @@ pub struct StreamAsofJoinOperator {
     inputs: Vec<Port>,
     outputs: Vec<Port>,
     schemas: [SchemaRef; 3],
-    output_columns: Option<[Vec<usize>; 2]>,
-    payload_projection: Option<Box<payload_projection::PayloadProjection>>,
-    state: State,
-    prepared: Option<checkpoint::PreparedSegment>,
-    checkpoint_log: checkpoint::LogState,
+    output_projection: Option<Vec<(usize, usize)>>,
+    state: ColumnarState,
     replay_inputs: Option<Box<replay::Inputs>>,
     replay: Option<Box<replay::Log>>,
-    deferred_index_len: Option<u64>,
-    /// `Some` when the committed state was eviction-swept under the stamped
-    /// inputs; `None` when admissions, removals or a restore may have left
-    /// evictable rows behind.
     swept: Option<SweepStamp>,
     terminal: bool,
     next_output_sequence: u64,
     status: StreamAsofJoinStatus,
-    runtime: output::OutputRuntime,
-    retirement: retirement::Owner,
+    runtime_pool: Arc<dyn MemoryPool>,
     fingerprint: String,
-    schema_digests: [[u8; 32]; 2],
-    payload_header_bytes: [u64; 2],
-    #[cfg(test)]
-    match_hook: Option<std::sync::Arc<dyn Fn(usize) + Send + Sync>>,
-    #[cfg(test)]
-    admission_hook: Option<std::sync::Arc<dyn Fn(usize) + Send + Sync>>,
 }
 
 impl StreamAsofJoinOperator {
@@ -99,10 +83,6 @@ impl StreamAsofJoinOperator {
         batch: &Batch,
         context: &dyn kernel::KernelContext,
     ) -> Result<()> {
-        #[cfg(feature = "benchmark-internals")]
-        let _phase = context
-            .trace()
-            .stage(&self.name, "admission", batch.num_rows());
         let prepared = match context.ingress_preparation() {
             Some(preparation) => {
                 let facts = preparation.asof().await;
@@ -112,159 +92,113 @@ impl StreamAsofJoinOperator {
             None => None,
         };
         let validated = self.validate_admission_with_facts(ingress, batch, prepared)?;
-        let admission = self
-            .prepare_admission(validated, batch, context)
-            .await
-            .map_err(|error| self.attempt_error(error))?;
-        if admission.len() == 0 {
+        let batches = batch.table_payload()?.batches();
+        if batches.is_empty() {
             return Ok(());
         }
-        self.install_admission(ingress, admission, validated, context)
-            .await
+        let record = self.prepare_record(batches, validated, context)?;
+        let accepted_rows = if validated.index == 0 {
+            self.status.left.accepted_rows
+        } else {
+            self.status.right.accepted_rows
+        };
+        checked(&self.name, accepted_rows, validated.accepted)?;
+        let admitted = self.state.admit(
+            validated.index,
+            record.as_ref(),
+            validated.watermark,
+            self.spec.late_policy(),
+            &mut || context.check_cancelled(),
+        );
+        let summary = match admitted {
+            Ok(summary) => summary,
+            Err(error) => {
+                if matches!(
+                    error,
+                    CalcFlowError::OperatorReason {
+                        reason_code: StreamingFailureReason::AsofStateLimitExceeded,
+                        ..
+                    }
+                ) && admission::contains_duplicate_identity(
+                    record.as_ref(),
+                    validated.side(&self.spec),
+                    validated,
+                    &mut || context.check_cancelled(),
+                )
+                .unwrap_or(false)
+                {
+                    self.record_duplicate(validated.index)?;
+                    return Err(reason(
+                        &self.name,
+                        StreamingFailureReason::AsofDuplicateIdentity,
+                        "input contains a duplicate key/event-time/sequence identity",
+                    ));
+                }
+                if matches!(
+                    error,
+                    CalcFlowError::OperatorReason {
+                        reason_code: StreamingFailureReason::AsofDuplicateIdentity,
+                        ..
+                    }
+                ) {
+                    self.record_duplicate(validated.index)?;
+                }
+                return Err(self.attempt_error(error));
+            }
+        };
+        let status = if validated.index == 0 {
+            &mut self.status.left
+        } else {
+            &mut self.status.right
+        };
+        status.accepted_rows = checked(&self.name, status.accepted_rows, summary.accepted)?;
+        self.swept = None;
+        self.refresh_state_gauges();
+        Ok(())
     }
 
-    async fn install_admission(
+    fn prepare_record<'a>(
         &mut self,
-        ingress: &str,
-        mut admission: admission::Admission,
+        batches: &'a [RecordBatch],
         validated: admission::ValidatedInput,
         context: &dyn kernel::KernelContext,
-    ) -> Result<()> {
-        #[cfg(feature = "benchmark-internals")]
-        let _phase = context
-            .trace()
-            .stage(&self.name, "state_install", admission.len());
-        let staging_workspace = self.reserve_admission_staging(&admission)?;
-        let (index_len, projected, owners) = self.checked_capacity_admission(&admission)?;
-        let journal = self
-            .prepare_log_admission(&admission, validated.index, &owners)
-            .map_err(|error| self.attempt_error(error))?;
-        let (credit, retention_bytes) = self
-            .prepare_log_retention(
-                &std::collections::BTreeMap::default(),
-                &std::collections::BTreeMap::default(),
-                context.checkpointing(),
-            )
-            .map_err(|error| self.attempt_error(error))?;
-        let projected = self
-            .log_projection(projected, index_len, &journal, retention_bytes)
-            .map_err(|error| self.attempt_error(error))?;
-        let mut status = self
-            .admitted_status(validated.index, admission.len(), &projected)
-            .map_err(|error| self.attempt_error(error))?;
-        let index_workspace = self
-            .reserve_workspace(if context.checkpointing() {
-                index_len
-            } else {
-                0
-            })
-            .map_err(|error| self.attempt_error(error))?;
-        let batches = self
-            .state
-            .batches
-            .project_admission(&admission.batches, &self.name)?
-            .new_batches;
-        if ingress == "right" && admission.permits_parallel_right() {
-            admission.right_buckets = admission::parallel::prepare(self, &admission, context)
-                .await
-                .map_err(|error| self.attempt_error(error))?;
+    ) -> Result<Cow<'a, RecordBatch>> {
+        if batches.len() == 1 {
+            return Ok(Cow::Borrowed(&batches[0]));
         }
-        let copies = self
-            .prepare_right_admission_copies(
-                if admission.right_buckets.is_some() {
-                    &[]
-                } else {
-                    &admission.right_capacities
-                },
-                context,
-            )
-            .await
-            .map_err(|error| self.attempt_error(error))?;
-        let storage = self
-            .state
-            .right
-            .prepare_storage(&admission.right_capacities, &self.runtime.pool, &self.name)
-            .map_err(|error| self.attempt_error(error))?;
-        context.check_cancelled()?;
-        // Everything after this point is synchronous and infallible. A dropped
-        // future or failed preflight cannot expose a partially admitted row.
-        storage.install(&mut self.state.right);
-        copies.install(&mut self.state.right);
-        self.state.batches.reserve_admission(batches);
-        admission.install(ingress, &mut self.state, &mut status);
-        self.state.install_encoding_owners(owners);
-        self.status = status;
-        self.checkpoint_log.install_journal(journal);
-        self.checkpoint_log.credit = credit;
-        self.checkpoint_log.retention_bytes = retention_bytes;
-        self.checkpoint_log.pending = None;
-        self.checkpoint_log.dirty_cut = self.checkpoint_log.keeps_delta();
-        self.prepared = None;
-        self.deferred_index_len = Some(index_len);
-        self.swept = None;
-        debug_assert_eq!(
-            checkpoint::v3_encoded_length(&self.state, &self.name).expect("committed index length"),
-            index_len
-        );
-        debug_assert_eq!(
-            self.current_inventory(None)
-                .expect("committed admission inventory")
-                .bytes,
-            self.status.state_bytes
-        );
-        drop((admission, index_workspace, staging_workspace));
-        self.retirement.wait(context).await
-    }
-
-    fn reserve_admission_staging(
-        &mut self,
-        admission: &admission::Admission,
-    ) -> Result<datafusion::execution::memory_pool::MemoryReservation> {
-        self.reserve_workspace(self.state.admission_staging_bytes(
-            &admission.rows,
-            admission.left_chunks.as_deref(),
-            &admission.right_capacities,
-            &admission.batches,
-            &self.name,
-        )?)
-        .map_err(|error| self.attempt_error(error))
-    }
-
-    fn checked_capacity_admission(
-        &mut self,
-        admission: &admission::Admission,
-    ) -> Result<(u64, Inventory, state::OwnerUpdates)> {
-        let projected = self
-            .state
-            .project_capacity_admission(
-                self.capacity_snapshot(),
-                &admission.rows,
-                admission.left_chunks.as_deref(),
-                &admission.right_capacities,
-                &admission.batches,
-                &self.name,
-            )
-            .map_err(|error| self.attempt_error(error))?;
-        Ok(projected)
-    }
-
-    fn admitted_status(
-        &self,
-        side: usize,
-        count: usize,
-        projected: &Inventory,
-    ) -> Result<StreamAsofJoinStatus> {
-        let mut status = self.status.clone();
-        status.pending_left_rows = checked(
-            &self.name,
-            status.pending_left_rows,
-            if side == 0 { count as u64 } else { 0 },
-        )?;
-        status.retained_right_rows = projected.right_payloads;
-        status.identity_only_rows = projected.identity_only;
-        status.state_rows = projected.identities;
-        status.state_bytes = projected.bytes;
-        Ok(status)
+        let charge = batches.iter().fold(0usize, |total, record| {
+            let accepted = admission::times(record, validated.side(&self.spec))
+                .values()
+                .iter()
+                .map(|time| !validated.is_late(*time))
+                .collect::<Vec<_>>();
+            total.saturating_add(columnar::logical_record_selection_charge(record, &accepted))
+        });
+        let reservation = match self
+            .reserve_workspace(u64::try_from(charge).expect("ASOF workspace charge fits u64"))
+        {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                if admission::contains_duplicate_identity_in_records(
+                    batches,
+                    validated.side(&self.spec),
+                    validated,
+                    &mut || context.check_cancelled(),
+                )? {
+                    self.record_duplicate(validated.index)?;
+                    return Err(reason(
+                        &self.name,
+                        StreamingFailureReason::AsofDuplicateIdentity,
+                        "input contains a duplicate key/event-time/sequence identity",
+                    ));
+                }
+                return Err(self.attempt_error(error));
+            }
+        };
+        let combined =
+            concat_batches(&batches[0].schema(), batches).map_err(|error| arrow_error(&error))?;
+        drop(reservation);
+        Ok(Cow::Owned(combined))
     }
 
     /// Constructs an independent bounded backward ASOF operator.
@@ -293,72 +227,47 @@ impl StreamAsofJoinOperator {
         })?;
         let schemas = [left_schema, right_schema, result_schema];
         let fingerprint = Self::state_fingerprint(&spec, &schemas)?;
-        let schema_digests = [
-            codec::schema_digest(&schemas[0])?,
-            codec::schema_digest(&schemas[1])?,
-        ];
-        let payload_header_bytes = [
-            workspace::payload_header_bytes(&schemas[0])?,
-            workspace::payload_header_bytes(&schemas[1])?,
-        ];
-        let mut state = State::empty_tracked();
-        state.sequence_kinds = [
-            state::SequenceKind::for_side(&schemas[0], spec.left()),
-            state::SequenceKind::for_side(&schemas[1], spec.right()),
-        ];
         let name = name.into();
-        let runtime = output::OutputRuntime::new(limit, &name);
+        let runtime_pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(limit));
+        let state = ColumnarState::new(
+            &name,
+            &spec,
+            [schemas[0].clone(), schemas[1].clone()],
+            &runtime_pool,
+        )?;
         Ok(Self {
-            fingerprint,
-            schema_digests,
-            payload_header_bytes,
-            #[cfg(test)]
-            match_hook: None,
-            #[cfg(test)]
-            admission_hook: None,
             name,
             spec,
             inputs,
             outputs,
             schemas,
-            output_columns: None,
-            payload_projection: None,
+            output_projection: None,
             state,
-            prepared: None,
-            checkpoint_log: checkpoint::LogState::default(),
             replay_inputs: None,
             replay: None,
-            deferred_index_len: None,
             swept: None,
             terminal: false,
             next_output_sequence: 0,
             status: StreamAsofJoinStatus::default(),
-            runtime,
-            retirement: retirement::Owner::default(),
+            runtime_pool,
+            fingerprint,
         })
     }
+
     /// Returns the immutable declaration.
     pub const fn spec(&self) -> &StreamAsofJoinSpec {
         &self.spec
     }
 
-    /// A physical output projection keeps the logical state schema and
-    /// fingerprint intact. Input validation and duplicate proofs still use
-    /// every declared identity column.
     pub(crate) fn set_output_projection(&mut self, columns: Vec<usize>) -> Result<()> {
         self.configure_projection(columns)
     }
+
     /// Returns payload-free committed state and attempt counters.
     pub fn status(&self) -> StreamAsofJoinStatus {
         self.status.clone()
     }
-    pub(crate) fn set_stream_resources(
-        &mut self,
-        config: DataFusionConfig,
-        _udfs: UdfRegistrySnapshot,
-    ) {
-        self.runtime.configure(config);
-    }
+
     pub(crate) fn output_frontier_candidate(
         &self,
         progress: &IngressProgressSnapshot,
@@ -378,13 +287,13 @@ impl StreamAsofJoinOperator {
             .and_then(|time| time.checked_sub(1))
             .map(EventTime::from_micros))
     }
+
     pub(crate) async fn on_ingress_progress_with_output(
         &mut self,
         _ingress: &str,
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        self.retirement.wait(context).await?;
         self.record_replay(replay::Callback::Progress, None, context)?;
         self.observe(context.ingress_progress());
         self.finalize_with_replay(
@@ -396,6 +305,26 @@ impl StreamAsofJoinOperator {
         .await
         .map_err(|error| self.attempt_error(error))
     }
+
+    pub(super) fn refresh_state_gauges(&mut self) {
+        self.status.pending_left_rows = self.state.pending_left_rows() as u64;
+        self.status.retained_right_rows = self.state.right_payload_rows() as u64;
+        self.status.identity_only_rows = self.state.identity_only_rows() as u64;
+        self.status.state_rows = self.state.state_rows() as u64;
+        self.status.state_bytes = self.state.persistent_bytes() as u64 + self.replay_bytes();
+    }
+
+    pub(super) fn current_inventory(&self) -> Result<Inventory> {
+        Ok(Inventory {
+            identities: self.state.state_rows() as u64,
+            bytes: checked(
+                &self.name,
+                self.state.persistent_bytes() as u64,
+                self.replay_bytes(),
+            )?,
+        })
+    }
+
     fn check_inventory_limits(&self, inventory: &Inventory) -> Result<()> {
         if inventory.identities > self.spec.limits().max_state_rows()
             || inventory.bytes > self.spec.limits().max_state_bytes()
@@ -432,34 +361,34 @@ impl StreamAsofJoinOperator {
         }
         error
     }
-    fn capacity_snapshot(&self) -> state::CapacitySnapshot {
-        state::CapacitySnapshot {
-            inventory: Inventory {
-                identities: self.status.state_rows,
-                right_payloads: self.status.retained_right_rows,
-                identity_only: self.status.identity_only_rows,
-                bytes: self
-                    .status
-                    .state_bytes
-                    .saturating_sub(self.checkpoint_log.bytes())
-                    .saturating_sub(self.replay_bytes())
-                    + self
-                        .deferred_index_len
-                        .map_or(0, |length| if length == 0 { 0 } else { length + 256 }),
-            },
-            index_length: self
-                .deferred_index_len
-                .or_else(|| self.prepared.as_ref().map(|segment| segment.len() as u64))
-                .unwrap_or(0),
-            index_bytes: self
-                .deferred_index_len
-                .or_else(|| {
-                    self.prepared
-                        .as_ref()
-                        .map(|segment| segment.capacity() as u64)
-                })
-                .map_or(0, |bytes| if bytes == 0 { 0 } else { bytes + 256 }),
-        }
+
+    pub(crate) fn reserve_checkpoint_preload(
+        &self,
+        lengths: impl IntoIterator<Item = u64>,
+    ) -> Result<MemoryReservation> {
+        let bytes = lengths.into_iter().try_fold(0, |total, length| {
+            checked(&self.name, checked(&self.name, total, length)?, 256)
+        })?;
+        self.reserve_workspace(bytes)
+    }
+
+    pub(super) fn reserve_workspace(&self, bytes: u64) -> Result<MemoryReservation> {
+        let bytes = usize::try_from(bytes).map_err(|_| {
+            reason(
+                &self.name,
+                StreamingFailureReason::AsofWorkspaceLimitExceeded,
+                "ASOF workspace exceeds address domain",
+            )
+        })?;
+        let reservation = MemoryConsumer::new("asof-owned-workspace").register(&self.runtime_pool);
+        reservation.try_grow(bytes).map_err(|_| {
+            reason(
+                &self.name,
+                StreamingFailureReason::AsofWorkspaceLimitExceeded,
+                "ASOF aggregate workspace exceeds max_state_bytes",
+            )
+        })?;
+        Ok(reservation)
     }
 
     fn observe(&mut self, progress: &IngressProgressSnapshot) {
@@ -502,7 +431,6 @@ impl StreamOperator for StreamAsofJoinOperator {
         _output: &mut dyn StreamCollector,
     ) -> Result<()> {
         context.check_cancelled()?;
-        self.retirement.wait(context).await?;
         self.record_replay(
             replay::Callback::Data {
                 side: u8::from(ingress == "right"),
@@ -522,37 +450,39 @@ impl StreamOperator for StreamAsofJoinOperator {
             result => result,
         }
     }
+
     async fn prepare_checkpoint_async(
         &mut self,
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
-        self.retirement.wait(context).await?;
-        if self.replay.is_some() {
-            return self.prepare_replay_anchor(context).await;
-        }
-        self.ensure_prepared_async(context).await
+        context.check_cancelled()
     }
+
     fn checkpoint(&mut self, epoch: crate::Epoch) -> Result<crate::OperatorStateSnapshot> {
         self.capture(epoch)
     }
+
     fn restore(&mut self, snapshot: &crate::OperatorStateSnapshot) -> Result<()> {
         let decoded = self.decoded_snapshot(snapshot)?;
-        self.install_restored(snapshot, decoded);
+        self.install_restored(decoded);
         Ok(())
     }
+
     fn reset(&mut self) -> Result<()> {
-        self.state = State::empty_tracked();
-        self.state.sequence_kinds = self.sequence_kinds();
+        self.state = ColumnarState::new(
+            &self.name,
+            &self.spec,
+            [self.schemas[0].clone(), self.schemas[1].clone()],
+            &self.runtime_pool,
+        )?;
         self.status = StreamAsofJoinStatus::default();
-        self.prepared = None;
-        self.checkpoint_log = checkpoint::LogState::default();
-        self.deferred_index_len = None;
         self.swept = None;
         self.terminal = false;
         self.next_output_sequence = 0;
         self.reset_replay();
         Ok(())
     }
+
     async fn on_watermark(
         &mut self,
         watermark: EventTime,
@@ -568,12 +498,12 @@ impl StreamOperator for StreamAsofJoinOperator {
                 .await
         }
     }
+
     async fn on_end(
         &mut self,
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        self.retirement.wait(context).await?;
         self.record_replay(replay::Callback::End, None, context)?;
         self.status.left.ended = true;
         self.status.right.ended = true;
@@ -595,6 +525,7 @@ fn frontier(progress: &IngressProgressSnapshot) -> Option<i64> {
     }
     minimum
 }
+
 fn all_ended(progress: &IngressProgressSnapshot) -> bool {
     ["left", "right"].iter().all(|side| {
         progress
@@ -602,6 +533,7 @@ fn all_ended(progress: &IngressProgressSnapshot) -> bool {
             .is_some_and(|value| value.state() == IngressState::Ended)
     })
 }
+
 pub(super) fn reason(
     name: &str,
     reason_code: StreamingFailureReason,
@@ -619,6 +551,7 @@ pub(super) fn arrow_error(error: &datafusion::arrow::error::ArrowError) -> CalcF
         message: format!("ASOF Arrow operation failed: {error}"),
     }
 }
+
 pub(super) fn checked(name: &str, current: u64, delta: u64) -> Result<u64> {
     current.checked_add(delta).ok_or_else(|| {
         reason(
@@ -637,6 +570,3 @@ fn input_ports(left: &SchemaRef, right: &SchemaRef) -> Result<Vec<Port>> {
         })
         .collect()
 }
-
-#[cfg(test)]
-pub(crate) use output::gather_lifecycle_bridge;

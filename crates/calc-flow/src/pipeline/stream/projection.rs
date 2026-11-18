@@ -318,20 +318,8 @@ mod tests {
         let CompiledStreamOperator::StreamAsofJoin(full) = &mut original.nodes[0].operator else {
             unreachable!()
         };
-        assert!(full.restore(&snapshot).is_err());
+        full.restore(&snapshot).unwrap();
         let mut full_collector = EdgeCollector::new(full.output_ports().to_vec());
-        let schema = full.input_ports()[0].schema().unwrap().clone();
-        full.process_data(
-            "right",
-            input(schema.clone(), true),
-            &context,
-            &mut full_collector,
-        )
-        .await
-        .unwrap();
-        full.process_data("left", input(schema, false), &context, &mut full_collector)
-            .await
-            .unwrap();
         full.on_end(&context, &mut full_collector).await.unwrap();
         let full_output = full_collector.drain("output");
         let full_record = &full_output[0]

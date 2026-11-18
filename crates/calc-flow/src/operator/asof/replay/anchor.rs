@@ -1,10 +1,7 @@
 use super::{
     Anchor, AnchorControl, Callback, Log, MAX_FRAMES, Record, codec, is_capacity_error, mismatch,
 };
-use crate::{
-    Epoch, OperatorStateSnapshot, Result, StateSegment, StreamAsofJoinOperator,
-    StreamOperatorContext,
-};
+use crate::{Epoch, OperatorStateSnapshot, Result, StateSegment, StreamAsofJoinOperator};
 use datafusion::execution::memory_pool::MemoryReservation;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -21,39 +18,18 @@ impl StreamAsofJoinOperator {
             .is_some_and(|log| log.frames.len() >= MAX_FRAMES && log.cut < log.records.len())
     }
 
-    pub(in crate::operator::asof) async fn prepare_replay_anchor(
-        &mut self,
-        context: &StreamOperatorContext<'_>,
-    ) -> Result<()> {
-        context.check_cancelled()?;
-        if !self.replay_anchor_due() {
-            return Ok(());
-        }
-        let log = self.replay.take();
-        let result = self.ensure_prepared_async(context).await;
-        self.replay = log;
-        self.status.state_bytes = self.current_inventory(self.prepared.as_ref())?.bytes;
-        match result {
-            Err(error) if is_capacity_error(&error) => {
-                self.stop_replay()?;
-                self.ensure_prepared_async(context).await
-            }
-            result => result,
-        }
-    }
-
     pub(in crate::operator::asof) fn replace_replay_anchor(
         &mut self,
         epoch: Epoch,
     ) -> Result<Option<OperatorStateSnapshot>> {
         let log = self.replay.take().expect("anchor has a replay log");
-        self.status.state_bytes = self.current_inventory(self.prepared.as_ref())?.bytes;
+        self.status.state_bytes = self.current_inventory()?.bytes;
         let (snapshot, mut log) = self.capture_anchor_snapshot(epoch, log)?;
         let anchor = self.make_replay_anchor(&snapshot, &log);
         let anchor = match anchor {
             Ok(anchor) => anchor,
             Err(error) if is_capacity_error(&error) => {
-                self.status.state_bytes = self.current_inventory(None)?.bytes;
+                self.status.state_bytes = self.current_inventory()?.bytes;
                 return Ok(Some(snapshot));
             }
             Err(error) => return self.restore_replay_error(log, error),
@@ -61,7 +37,7 @@ impl StreamAsofJoinOperator {
         reset_replay_log(&mut log, anchor)?;
         self.clear_anchor_bookkeeping();
         self.replay = Some(log);
-        self.status.state_bytes = self.current_inventory(None)?.bytes;
+        self.status.state_bytes = self.current_inventory()?.bytes;
         Ok(None)
     }
 
@@ -79,7 +55,7 @@ impl StreamAsofJoinOperator {
 
     fn restore_replay_error<T>(&mut self, log: Box<Log>, error: crate::CalcFlowError) -> Result<T> {
         self.replay = Some(log);
-        self.status.state_bytes = self.current_inventory(self.prepared.as_ref())?.bytes;
+        self.status.state_bytes = self.current_inventory()?.bytes;
         Err(error)
     }
 
@@ -125,8 +101,6 @@ impl StreamAsofJoinOperator {
     }
 
     pub(in crate::operator::asof) fn clear_anchor_bookkeeping(&mut self) {
-        self.checkpoint_log = crate::operator::asof::checkpoint::LogState::default();
-        self.prepared = None;
         self.swept = None;
     }
 

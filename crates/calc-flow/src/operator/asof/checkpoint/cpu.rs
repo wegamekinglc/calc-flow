@@ -1,32 +1,11 @@
-use super::super::{StreamAsofJoinOperator, state::PayloadBatch};
+use super::super::StreamAsofJoinOperator;
 use crate::{
     Result,
     runtime::streaming::gather_work::{
         AdmissionFailure, GatherOperatorId, GatherStop, OwnedCpuWork,
     },
 };
-use datafusion::execution::memory_pool::MemoryReservation;
 use std::sync::Arc;
-
-pub(super) struct PayloadWork {
-    pub pending: Vec<Arc<PayloadBatch>>,
-    pub workspace: MemoryReservation,
-    pub limit: usize,
-    pub name: String,
-}
-
-impl OwnedCpuWork for PayloadWork {
-    type Output = ();
-
-    fn run(self, stop: &GatherStop) -> Result<()> {
-        debug_assert!(self.workspace.size() > 0);
-        for batch in &self.pending {
-            stop.check()?;
-            batch.ensure_encoded(self.limit, &self.name)?;
-        }
-        stop.check()
-    }
-}
 
 struct RestoreWork {
     operator: Box<StreamAsofJoinOperator>,
@@ -51,6 +30,17 @@ impl OwnedCpuWork for RestoreWork {
 }
 
 impl StreamAsofJoinOperator {
+    fn cpu_work_credit(
+        &self,
+        work_bytes: usize,
+    ) -> Result<datafusion::execution::memory_pool::MemoryReservation> {
+        self.reserve_workspace(super::super::checked(
+            &self.name,
+            1024 + work_bytes as u64,
+            self.name.len() as u64 * 2,
+        )?)
+    }
+
     pub(crate) async fn restore_managed(
         self: Box<Self>,
         snapshot: crate::OperatorStateSnapshot,
