@@ -687,7 +687,31 @@ impl ContinuousJob {
                 }
             }
         }
-        result
+        let epoch = result?;
+        self.await_checkpoint_settlement(epoch).await?;
+        Ok(epoch)
+    }
+
+    async fn await_checkpoint_settlement(&self, epoch: Epoch) -> crate::Result<()> {
+        loop {
+            let settled = self.status().checkpoint.is_some_and(|checkpoint| {
+                checkpoint
+                    .last_completed_epoch
+                    .is_some_and(|completed| completed >= epoch)
+                    && checkpoint.current_epoch != Some(epoch)
+            });
+            if settled {
+                return Ok(());
+            }
+            if let Some(outcome) = self.core.state.lock().outcome.clone() {
+                return Err(manual_checkpoint_terminal_error(
+                    self.core.job_id,
+                    &self.core.pipeline_name,
+                    &outcome,
+                ));
+            }
+            tokio::task::yield_now().await;
+        }
     }
 
     pub(crate) fn shutdown(&self) -> OutcomeObserver {

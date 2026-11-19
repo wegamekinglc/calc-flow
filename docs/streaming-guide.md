@@ -639,7 +639,9 @@ Bind an independent existing [file Sink](connectors/file.md) to each physical
 output. Each has its own output directory and stable identity. Both participate
 in aligned epochs, even when the late epoch is empty. A successful
 `trigger_checkpoint_async()` identifies the durable cut from which a fresh
-compatible plan and runner can resume. Terminal recovery completes without
+compatible plan and runner can resume. The call waits for manifest publication,
+transactional sink commit, and durable source acknowledgement; a failure at any
+of these stages does not return a successful epoch. Terminal recovery completes without
 reopening ended sources or repeating final output. Restore is fail-closed
 about the independent late sequence: a checkpoint missing a compatible
 `late_output` version-1 object, or carrying one for a policy without side
