@@ -6,6 +6,7 @@
 
 mod core;
 mod layout7;
+mod layout7_history;
 mod layout7_keyed;
 mod pages;
 pub(in crate::state) mod v4;

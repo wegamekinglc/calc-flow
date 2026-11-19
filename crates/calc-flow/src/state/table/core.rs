@@ -885,6 +885,13 @@ impl TableSnapshot {
     }
 }
 
+pub(super) struct Layout7HistorySchema {
+    pub(super) counter_name: String,
+    pub(super) keyed_names: Vec<String>,
+    pub(super) history_name: String,
+    pub(super) retention: Retention,
+}
+
 pub(super) struct Layout7Schema {
     pub(super) counter_name: String,
     pub(super) keyed_names: Vec<String>,
@@ -1022,6 +1029,11 @@ impl StateTable {
         self.rings.len() - 1
     }
 
+    pub(crate) fn add_f64_rows_column(&mut self, name: &str, window: usize) -> usize {
+        assert!(window > 0, "rolling history windows must be non-empty");
+        self.add_ring_column(name, RingKind::Float64, Retention::Rows(window))
+    }
+
     pub(crate) fn add_numeric_rows_column(&mut self, name: &str, window: usize) -> usize {
         assert!(window > 0, "rolling Rows windows must be non-empty");
         let column = self.add_ring_column(name, RingKind::Float64, Retention::Rows(window));
@@ -1105,6 +1117,39 @@ impl StateTable {
             numeric_name: numeric.name.clone(),
             retention: numeric.retention,
             numeric_windows: numeric.numeric_windows.clone(),
+        })
+    }
+
+    pub(super) fn layout7_history_schema(&self) -> Option<Layout7HistorySchema> {
+        if !self.value_logs.is_empty()
+            || !self.partitions.contains_key(&KeyGroupId(0))
+            || self.keyed.is_empty()
+            || self
+                .keyed
+                .iter()
+                .any(|column| column.kind != ValueKind::UInt64)
+        {
+            return None;
+        }
+        let counter = self.keyed.first()?;
+        let [history] = self.rings.as_slice() else {
+            return None;
+        };
+        if history.numeric
+            || history.kind != RingKind::Float64
+            || !matches!(history.retention, Retention::Rows(_))
+        {
+            return None;
+        }
+        Some(Layout7HistorySchema {
+            counter_name: counter.name.clone(),
+            keyed_names: self
+                .keyed
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
+            history_name: history.name.clone(),
+            retention: history.retention,
         })
     }
 
@@ -2213,6 +2258,27 @@ impl StateTable {
         Ok(self
             .numeric_accumulator(column, group, entity)?
             .stddev(ddof))
+    }
+
+    pub(crate) fn f64_lag(
+        &self,
+        column: usize,
+        entity: EntityId,
+        periods: usize,
+    ) -> Result<Option<f64>> {
+        let (group, row) = self.location(entity)?;
+        let ring = &self.partitions[&group].rings[column][row]
+            .as_ref()
+            .expect("ring page")
+            .value
+            .ring;
+        if periods == 0 || periods > ring.len {
+            return Ok(None);
+        }
+        match ring.slots[ring.position(ring.len - periods)] {
+            RingValue::Float64(value) => Ok(value),
+            _ => Err(internal("ring column type mismatch")),
+        }
     }
 
     pub(crate) fn f64_history(&self, column: usize, entity: EntityId) -> Result<Vec<Option<f64>>> {

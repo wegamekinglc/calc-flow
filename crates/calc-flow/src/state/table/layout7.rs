@@ -31,6 +31,9 @@ struct SnapshotBatches {
 }
 
 pub(crate) fn encode_layout7(table: &StateTable) -> Result<Vec<u8>> {
+    if let Some(encoded) = super::layout7_history::encode(table) {
+        return encoded;
+    }
     if let Some(encoded) = super::layout7_keyed::encode(table) {
         return encoded;
     }
@@ -82,6 +85,9 @@ fn assemble_layout7(components: &[Vec<u8>]) -> Result<Vec<u8>> {
 }
 
 pub(crate) fn decode_layout7(table: &StateTable, bytes: &[u8]) -> Result<TableSnapshot> {
+    if let Some(decoded) = super::layout7_history::decode(table, bytes) {
+        return decoded;
+    }
     if let Some(decoded) = super::layout7_keyed::decode(table, bytes) {
         return decoded;
     }

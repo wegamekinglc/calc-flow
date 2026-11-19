@@ -180,6 +180,9 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   恢复与 128 位溢出回滚通过，Rolling 693 项和 Clippy 通过；其余 family 仍未完成。
 - 2026-11-19 P2.3 继续扩展：pure COUNT 的同一输入、多个 Rows 窗口已共享有效位 ring 并写入 layout 7，nested Arrow 输入
   不经过 ScalarValue，恢复与后续输出一致；duration 和混合节点保留旧路径。Rolling 694 项和 Clippy 通过。
+- 2026-11-19 P2.3 继续扩展：纯 Float64 lag/delta 使用独立 raw history 组件，保留 NaN/null、共享多周期历史及 O(1) 引用读取；
+  entity/keyed、history 与 ring 元数据分开编码，避免 AVG NaN 汇总污染，恢复继续校验 schema、offsets、capacity 和 logical bytes。
+  双实体 lag(1)/lag(2)/delta 与恢复测试通过，Rolling 695 项和 Clippy 通过；其他类型和 family 仍未完成。
 - 2026-11-19 当前工作区修复了既有 CI 失败：v4 恢复保留静态输入摘要诊断和安全的错误分类，
   测试改用 `manifests/lineage/manifests/epoch-N.json` 与 opaque `blocks`；typed MACD 不再误入旧 resource worker，
   late-output Rolling 可恢复当前声明 layout，native sequence 保留 operator 上下文，ASOF lifecycle fixture 不再由 worker

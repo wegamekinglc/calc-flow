@@ -135,8 +135,17 @@ impl SlabBuilder {
             return self.append(readouts.accumulators, &numeric);
         }
         let value = match output.kind {
-            TypedOutputKind::Rsi | TypedOutputKind::Atr => readouts.values[output.group][0],
             TypedOutputKind::Macd(component) => readouts.values[output.group][component],
+            TypedOutputKind::Rsi | TypedOutputKind::Atr | TypedOutputKind::Lag => {
+                readouts.values[output.group][0]
+            }
+            TypedOutputKind::Delta => match (
+                readouts.values[output.group][1],
+                readouts.values[output.group][0],
+            ) {
+                (Some(current), Some(reference)) => Some(current - reference),
+                _ => None,
+            },
             TypedOutputKind::Ewma
                 if readouts
                     .valid_counts
@@ -301,6 +310,17 @@ impl RollingKernelPlan {
                 let group = table.add_numeric_window(column, window);
                 table.set_numeric_dispersion(column, group, dispersion);
             }
+        }
+        if let Some(window) = self
+            .groups
+            .iter()
+            .filter_map(|group| match group {
+                TypedGroupPlan::Lag { periods, .. } => Some(*periods),
+                _ => None,
+            })
+            .max()
+        {
+            table.add_f64_rows_column("lag", window.max(1));
         }
         indicator::add_columns(&mut table, &self.groups);
         state.slab = Some(table);

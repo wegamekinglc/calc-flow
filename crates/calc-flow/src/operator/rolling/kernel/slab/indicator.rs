@@ -44,6 +44,13 @@ pub(super) fn supports_plan(groups: &[TypedGroupPlan], outputs: &[TypedOutputPla
     let only_counts = groups
         .iter()
         .all(|group| matches!(group, TypedGroupPlan::Count { .. }));
+    let lag_input = groups.iter().find_map(|group| match group {
+        TypedGroupPlan::Lag { input_index, .. } => Some(*input_index),
+        _ => None,
+    });
+    let only_lags = groups
+        .iter()
+        .all(|group| matches!(group, TypedGroupPlan::Lag { .. }));
     !groups.is_empty()
         && groups.iter().all(|group| match group {
             TypedGroupPlan::Numeric {
@@ -58,6 +65,11 @@ pub(super) fn supports_plan(groups: &[TypedGroupPlan], outputs: &[TypedOutputPla
             TypedGroupPlan::Count { input_index, .. } => {
                 only_counts && Some(*input_index) == count_input
             }
+            TypedGroupPlan::Lag {
+                input_index,
+                storage,
+                ..
+            } => only_lags && Some(*input_index) == lag_input && *storage == OutputStorage::Float64,
             _ => false,
         })
         && !outputs.is_empty()
@@ -80,6 +92,11 @@ fn output_supported(group: &TypedGroupPlan, output: &TypedOutputPlan) -> bool {
         TypedGroupPlan::Count { .. } => {
             matches!(output.kind, TypedOutputKind::Statistic(Statistic::Count))
                 && output.storage == OutputStorage::Count
+        }
+        TypedGroupPlan::Lag { storage, .. } => {
+            matches!(output.kind, TypedOutputKind::Lag | TypedOutputKind::Delta)
+                && *storage == OutputStorage::Float64
+                && output.storage == OutputStorage::Float64
         }
         TypedGroupPlan::Rsi { .. } => {
             matches!(output.kind, TypedOutputKind::Rsi) && output.storage == OutputStorage::Float64
@@ -227,29 +244,29 @@ pub(super) fn update<'a>(
         .any(|group| matches!(group, TypedGroupPlan::Cumulative { .. }))
         .then(|| vec![None; groups.len()]);
     let mut numeric_updated = false;
+    let mut lag_updated = false;
     for (index, (group, input)) in groups.iter().zip(inputs).enumerate() {
         match (group, input) {
             (TypedGroupPlan::Numeric { .. }, TypedGroupInput::Single(input)) => {
                 if !numeric_updated {
                     let value = valid_float64(input, row, nan_as_value);
-                    if first {
-                        table.push_numeric_rows(0, entity, value)?;
-                    } else {
-                        table.push_numeric_rows_recurrent(0, entity, value)?;
-                    }
+                    push_numeric(table, entity, value, first)?;
                     numeric_updated = true;
                 }
             }
             (TypedGroupPlan::Count { .. }, TypedGroupInput::Values(input)) => {
                 if !numeric_updated {
                     let value = input.is_valid(row).then_some(1.0);
-                    if first {
-                        table.push_numeric_rows(0, entity, value)?;
-                    } else {
-                        table.push_numeric_rows_recurrent(0, entity, value)?;
-                    }
+                    push_numeric(table, entity, value, first)?;
                     numeric_updated = true;
                 }
+            }
+            (TypedGroupPlan::Lag { periods, .. }, TypedGroupInput::Single(input)) => {
+                let (reference, current, updated) =
+                    update_lag(table, entity, *periods, input, row, !lag_updated)?;
+                values[index][0] = reference;
+                values[index][1] = current;
+                lag_updated |= updated;
             }
             (TypedGroupPlan::Rsi { .. }, TypedGroupInput::Rsi(input, field, period)) => {
                 let base = column_base(groups, index);
@@ -309,6 +326,40 @@ pub(super) fn update<'a>(
         valid_counts,
         cumulative,
     })
+}
+
+fn push_numeric(
+    table: &mut StateTable,
+    entity: EntityId,
+    value: Option<f64>,
+    first: bool,
+) -> Result<()> {
+    if first {
+        table.push_numeric_rows(0, entity, value)
+    } else {
+        table.push_numeric_rows_recurrent(0, entity, value)
+    }
+}
+
+fn update_lag(
+    table: &mut StateTable,
+    entity: EntityId,
+    periods: usize,
+    input: &Float64Array,
+    row: usize,
+    push: bool,
+) -> Result<(Option<f64>, Option<f64>, bool)> {
+    let current = input.is_valid(row).then_some(input.value(row));
+    let reference = if periods == 0 {
+        current
+    } else {
+        table.f64_lag(0, entity, periods)?
+    };
+    let updated = periods > 0 && push;
+    if updated {
+        table.push_f64(0, entity, current)?;
+    }
+    Ok((reference, current, updated))
 }
 
 fn update_ewma(

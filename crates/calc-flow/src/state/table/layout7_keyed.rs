@@ -109,7 +109,7 @@ fn decode_component(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(bytes[HEADER_BYTES..].to_vec())
 }
 
-fn read_component(bytes: &[u8]) -> Result<RecordBatch> {
+pub(super) fn read_component(bytes: &[u8]) -> Result<RecordBatch> {
     let mut reader = FileReader::try_new(Cursor::new(bytes), None)
         .map_err(|_| mismatch("rolling keyed layout-7 component is invalid"))?;
     let record = reader
@@ -156,7 +156,7 @@ fn validate_record(record: &RecordBatch, names: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn decode_keys(record: &RecordBatch) -> Result<Vec<EntityKey>> {
+pub(super) fn decode_keys(record: &RecordBatch) -> Result<Vec<EntityKey>> {
     record
         .column(0)
         .as_any()
@@ -168,7 +168,7 @@ fn decode_keys(record: &RecordBatch) -> Result<Vec<EntityKey>> {
         .ok_or_else(|| mismatch("rolling keyed layout-7 entity key is null"))
 }
 
-fn decode_logical_bytes(record: &RecordBatch) -> Result<usize> {
+pub(super) fn decode_logical_bytes(record: &RecordBatch) -> Result<usize> {
     let schema = record.schema();
     let metadata = schema.metadata();
     if metadata.len() != 1 {
@@ -181,7 +181,7 @@ fn decode_logical_bytes(record: &RecordBatch) -> Result<usize> {
         .map_err(|_| mismatch("rolling keyed layout-7 logical size is invalid"))
 }
 
-fn write_component(
+pub(super) fn write_component(
     fields: Vec<Field>,
     columns: Vec<ArrayRef>,
     metadata: HashMap<String, String>,

@@ -434,6 +434,54 @@ async fn test_count_slab_restore_accepts_nested_values() {
 }
 
 #[tokio::test]
+async fn test_float64_lag_delta_slab_restore_preserves_reference_rows() {
+    let spec = kernel_spec(json!([
+        lag_price(1),
+        delta_price(1),
+        {
+            "kind":"lag", "primitive_version":1, "input":"price", "output":"lag_two",
+            "periods":2
+        }
+    ]));
+    let input = float64_fast_record(&[
+        (1, "a", 1, None),
+        (1, "b", 1, Some(10.0)),
+        (2, "a", 2, Some(f64::NAN)),
+        (2, "b", 2, Some(20.0)),
+        (3, "a", 3, Some(1.0)),
+        (3, "b", 3, Some(30.0)),
+        (4, "a", 4, Some(3.0)),
+        (4, "b", 4, Some(40.0)),
+    ]);
+    let mut source = RollingOperator::new("rolling", input.schema(), spec.clone()).unwrap();
+    assert_eq!(source.state_layout_version(), 7);
+    let job = crate::StreamJobContext::new(
+        7,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let prefix = advance_cumulative_stream(&mut source, &input.slice(0, 6), 3, &job).await;
+    let lag = prefix
+        .column_by_name("price_lag")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert!(lag.is_null(0) && lag.is_null(1) && lag.is_null(2));
+    assert!(lag.value(4).is_nan());
+    assert_eq!(lag.value(5).to_bits(), 20.0_f64.to_bits());
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(snapshot.inline_metadata["state_layout_version"], json!(7));
+    let mut restored = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    let expected = advance_cumulative_stream(&mut source, &input.slice(6, 2), 4, &job).await;
+    let actual = advance_cumulative_stream(&mut restored, &input.slice(6, 2), 4, &job).await;
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
 async fn test_cumulative_integer_slab_restore_and_overflow_are_atomic() {
     let spec = cumulative_volume_spec();
     let mut source =
