@@ -158,15 +158,7 @@ impl CompiledBatchOperator {
                     .process(inputs, &BatchOperatorContext { run })
                     .await
             }
-            Self::Join(operator) => {
-                operator
-                    .process_finite(
-                        inputs,
-                        run,
-                        required_datafusion(datafusion, operator.name())?,
-                    )
-                    .await
-            }
+            Self::Join(operator) => operator.process_finite(inputs, run).await,
             Self::Window(operator) => {
                 operator
                     .process(inputs, &BatchOperatorContext { run })
@@ -1597,5 +1589,65 @@ mod data_tests {
                 .schema(),
             &schema
         ));
+    }
+}
+
+#[cfg(test)]
+mod join_tests {
+    use std::{collections::BTreeMap, sync::Arc, time::Duration};
+
+    use datafusion::arrow::{
+        array::{Int64Array, TimestampMicrosecondArray},
+        datatypes::{DataType, Field, Schema, TimeUnit},
+        record_batch::RecordBatch,
+    };
+
+    use super::CompiledBatchOperator;
+    use crate::{
+        Batch, BatchMetadata, CancellationToken, JoinStateLimits, JoinTimeBounds, RunContext,
+        StreamJoinOperator, StreamJoinSpec,
+    };
+
+    #[tokio::test]
+    async fn finite_join_does_not_require_datafusion() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Int64, false),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+        ]));
+        let record = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![7])),
+                Arc::new(TimestampMicrosecondArray::from(vec![100])),
+            ],
+        )
+        .unwrap();
+        let input = || Batch::table(vec![record.clone()], BatchMetadata::default()).unwrap();
+        let spec = StreamJoinSpec::inner(
+            ["key"],
+            ["key"],
+            "ts",
+            "ts",
+            JoinTimeBounds::new(Duration::ZERO, Duration::from_micros(10)).unwrap(),
+            JoinStateLimits::new(100, 1_000_000, 100).unwrap(),
+        )
+        .unwrap();
+        let mut operator = CompiledBatchOperator::Join(Box::new(
+            StreamJoinOperator::new("match", schema.clone(), schema, spec).unwrap(),
+        ));
+        let run = RunContext::new(BTreeMap::new(), None, CancellationToken::new()).unwrap();
+        let output = operator
+            .process(
+                &BTreeMap::from([("left".into(), input()), ("right".into(), input())]),
+                &run,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output["output"].num_rows(), 1);
     }
 }
