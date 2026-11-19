@@ -468,6 +468,16 @@ mod tests {
         assert!(collector.drain("output").is_empty());
     }
 
+    fn native_manifest(operator: crate::state::v4::OperatorV4) -> crate::state::v4::V4Manifest {
+        let mut manifest = crate::state::v4::V4Manifest::from_bytes(
+            include_str!("../../tests/fixtures/checkpoint-v4/manifest-v4.json").as_bytes(),
+        )
+        .unwrap();
+        manifest.operators = BTreeMap::from([("match".into(), operator)]);
+        manifest.manifest_fingerprint = crate::state::v4::manifest_fingerprint(&manifest).unwrap();
+        manifest
+    }
+
     #[tokio::test]
     async fn native_empty_checkpoint_roundtrip_preserves_identity() {
         let mut operator =
@@ -489,12 +499,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut manifest = crate::state::v4::V4Manifest::from_bytes(
-            include_str!("../../tests/fixtures/checkpoint-v4/manifest-v4.json").as_bytes(),
-        )
-        .unwrap();
-        manifest.operators = BTreeMap::from([("match".into(), operator)]);
-        manifest.manifest_fingerprint = crate::state::v4::manifest_fingerprint(&manifest).unwrap();
+        let manifest = native_manifest(operator);
         manifest.validate_structure().unwrap();
         let snapshot =
             crate::state::v4::native::load_native(&mut store, &manifest, "match").unwrap();
@@ -556,12 +561,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut manifest = crate::state::v4::V4Manifest::from_bytes(
-            include_str!("../../tests/fixtures/checkpoint-v4/manifest-v4.json").as_bytes(),
-        )
-        .unwrap();
-        manifest.operators = BTreeMap::from([("match".into(), operator)]);
-        manifest.manifest_fingerprint = crate::state::v4::manifest_fingerprint(&manifest).unwrap();
+        let manifest = native_manifest(operator);
         let snapshot =
             crate::state::v4::native::load_native(&mut store, &manifest, "match").unwrap();
         let mut missing = snapshot.clone();
@@ -612,6 +612,96 @@ mod tests {
         assert_eq!(
             original.run_core.as_ref().unwrap().fingerprint(),
             restored.run_core.as_ref().unwrap().fingerprint()
+        );
+        assert_native_eof_matches(&mut original, &mut restored, &job).await;
+    }
+
+    async fn assert_native_eof_matches(
+        original: &mut StreamJoinOperator,
+        restored: &mut StreamJoinOperator,
+        job: &StreamJobContext,
+    ) {
+        for operator in [&mut *original, &mut *restored] {
+            for ingress in ["right", "left"] {
+                operator
+                    .on_ingress_progress(
+                        ingress,
+                        &progress_context(
+                            job,
+                            (IngressState::Ended, None),
+                            (IngressState::Ended, None),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        assert_eq!(
+            original.run_core.as_ref().unwrap().fingerprint(),
+            restored.run_core.as_ref().unwrap().fingerprint()
+        );
+        assert_eq!(original.status().left.retained_bytes, 0);
+        assert_eq!(original.status().right.retained_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn native_legacy_restore_continues_with_run_core() {
+        let mut original =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut original_output = EdgeCollector::new(original.output_ports().to_vec());
+        original
+            .process_data(
+                "left",
+                left_batch(vec![100, 200]),
+                &context,
+                &mut original_output,
+            )
+            .await
+            .unwrap();
+        original.enable_native_checkpoint().unwrap();
+        let capture = original
+            .native_checkpoint(Epoch::new(1).unwrap())
+            .unwrap()
+            .expect("legacy state converts to native pages");
+        let temporary = tempfile::tempdir().unwrap();
+        let mut store = crate::state::v4::V4Store::new(temporary.path().join("lineage"));
+        let operator = crate::state::v4::native::persist_native(
+            &mut store,
+            "match",
+            capture,
+            1,
+            BTreeMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let manifest = native_manifest(operator);
+        let snapshot =
+            crate::state::v4::native::load_native(&mut store, &manifest, "match").unwrap();
+        let mut restored =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        restored.restore(&snapshot).unwrap();
+        assert!(restored.run_core.is_some());
+        let mut restored_output = EdgeCollector::new(restored.output_ports().to_vec());
+        for (operator, output) in [
+            (&mut original, &mut original_output),
+            (&mut restored, &mut restored_output),
+        ] {
+            operator
+                .process_data("right", right_batch(vec![200]), &context, output)
+                .await
+                .unwrap();
+        }
+        let expected = original_output.drain("output");
+        let actual = restored_output.drain("output");
+        assert_eq!(actual.len(), 1);
+        assert_eq!(actual[0].as_data().unwrap().metadata().sequence(), 0);
+        assert_eq!(actual[0].as_data().unwrap().num_rows(), 2);
+        assert_eq!(
+            paid_times(actual[0].as_data().unwrap()),
+            paid_times(expected[0].as_data().unwrap())
         );
     }
 
@@ -5427,7 +5517,6 @@ impl StreamJoinOperator {
         self.run_core_enabled = RunCoreMode::Columnar;
     }
 
-    #[cfg(test)]
     async fn process_runs(
         &mut self,
         ingress: &str,
@@ -5581,11 +5670,13 @@ impl StreamOperator for StreamJoinOperator {
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
         self.begin_data(context).await?;
+        let use_runs = production::supported(self) && self.run_core.is_some();
+        #[cfg(not(test))]
+        let use_runs = use_runs || production::supported(self) && !context.job().checkpointing();
         #[cfg(test)]
-        if self.run_core_enabled == RunCoreMode::Columnar
-            && !context.job().checkpointing()
-            && production::supported(self)
-        {
+        let use_runs = use_runs
+            || self.run_core_enabled == RunCoreMode::Columnar && production::supported(self);
+        if use_runs {
             return self.process_runs(ingress, &batch, context, output).await;
         }
         let (prepared, expiration_append) =
@@ -5767,10 +5858,30 @@ impl StreamJoinOperator {
         &mut self,
         epoch: Epoch,
     ) -> Result<Option<crate::state::v4::native::NativeCapture>> {
-        let Some(core) = self.run_core.as_ref() else {
+        if !production::supported(self) {
             return Ok(None);
+        }
+        #[cfg(test)]
+        if self.checkpoint_v1_test_producer
+            || self.run_core_enabled != RunCoreMode::Columnar && self.run_core.is_none()
+        {
+            return Ok(None);
+        }
+        let rebuild = match self.run_core.as_ref() {
+            None => true,
+            Some(core) => {
+                (!self.state.left.is_empty() && core.rows(JoinSide::Left) != self.state.left.len())
+                    || (!self.state.right.is_empty()
+                        && core.rows(JoinSide::Right) != self.state.right.len())
+            }
         };
-        core.native_capture(self, epoch)
+        if rebuild {
+            self.run_core = Some(Box::new(production::RunCore::from_legacy(self)?));
+        }
+        self.run_core
+            .as_ref()
+            .expect("native run core was initialized")
+            .native_capture(self, epoch)
     }
 
     fn restore_native(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()> {
@@ -5812,7 +5923,8 @@ impl StreamJoinOperator {
     }
 
     #[cfg(test)]
-    fn enable_native_checkpoint(&mut self) -> Result<()> {
+    pub(crate) fn enable_native_checkpoint(&mut self) -> Result<()> {
+        self.run_core_enabled = RunCoreMode::Columnar;
         self.run_core = Some(Box::new(production::RunCore::new(self)?));
         Ok(())
     }

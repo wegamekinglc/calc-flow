@@ -228,7 +228,7 @@ pub(crate) enum OperatorCheckpointCapability {
     Unproven,
 }
 
-const OPERATOR_STATE_VERSION_KEY: &str = "__calc_flow_operator_state_version";
+pub(crate) const OPERATOR_STATE_VERSION_KEY: &str = "__calc_flow_operator_state_version";
 pub(crate) const OUTPUT_FRONTIER_METADATA_KEY_V1: &str = "__calc_flow_output_frontier_micros_v1";
 
 impl OperatorCheckpointCapability {

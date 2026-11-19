@@ -819,7 +819,7 @@ impl RunState {
         if side.rows == 0 {
             side.runs.clear();
             side.buckets.clear();
-            side.expiration.clear();
+            side.expiration = Vec::new();
             side.expiration_head = 0;
             side.bytes = 0;
         }

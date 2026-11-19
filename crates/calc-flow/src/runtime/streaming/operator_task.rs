@@ -1890,9 +1890,12 @@ async fn capture_operator_checkpoint(
     let native = native
         .map(|capture| {
             let mut metadata = capture.metadata();
-            for (key, value) in &snapshot.inline_metadata {
-                if key != "layout_version" {
-                    metadata.insert(key.clone(), value.clone());
+            for key in [
+                crate::pipeline::OPERATOR_STATE_VERSION_KEY,
+                crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1,
+            ] {
+                if let Some(value) = snapshot.inline_metadata.get(key) {
+                    metadata.insert(key.into(), value.clone());
                 }
             }
             capture.with_metadata(metadata)

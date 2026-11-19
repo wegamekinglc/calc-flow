@@ -660,6 +660,8 @@ fn test_prefix_eviction_and_snapshot_continue_bitwise() {
     assert_eq!(ended.retired_runs, 2);
     assert_eq!(restored.rows(JoinSide::Left), 0);
     assert_eq!(restored.bytes(JoinSide::Left), 0);
+    assert_eq!(restored.evict_end(JoinSide::Left).unwrap().expired_rows, 0);
+    RunState::restore(restored.snapshot()).unwrap();
 }
 
 #[test]

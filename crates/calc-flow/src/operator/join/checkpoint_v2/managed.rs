@@ -13,6 +13,14 @@ impl StreamJoinOperator {
         task: Option<TaskId>,
     ) -> Result<()> {
         job.check_cancelled()?;
+        if snapshot
+            .inline_metadata
+            .get("layout_version")
+            .and_then(serde_json::Value::as_u64)
+            == Some(12)
+        {
+            return self.restore_native(snapshot);
+        }
         if !snapshot
             .inline_metadata
             .get("layout_version")

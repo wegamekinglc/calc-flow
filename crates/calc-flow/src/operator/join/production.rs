@@ -259,7 +259,6 @@ impl RunCore {
         Ok((rows, charge))
     }
 
-    #[cfg(test)]
     pub(super) fn rows(&self, side: JoinSide) -> usize {
         self.state.rows(side)
     }
