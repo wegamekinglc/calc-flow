@@ -122,6 +122,26 @@ fn pane_geometry_floors_negative_times_and_merges_aligned_ranges() {
 }
 
 #[test]
+fn pane_sum_merge_reassociation_is_not_bit_exact() {
+    fn sum(values: &[f64]) -> CompensatedSum {
+        let mut result = CompensatedSum::new(0.0);
+        for value in values {
+            result.add(*value);
+        }
+        result
+    }
+    let sequential = sum(&[-1e-12, 1e19, 100.0, -1e19, -100.0, 1e-13]);
+    let left = sum(&[-1e-12]);
+    let right = sum(&[1e19, 100.0, -1e19, -100.0, 1e-13]);
+    let mut merged = CompensatedSum::new(0.0);
+    merged.add(left.sum);
+    merged.add(left.correction);
+    merged.add(right.sum);
+    merged.add(right.correction);
+    assert_ne!(sequential.total().to_bits(), merged.total().to_bits());
+}
+
+#[test]
 fn pane_count_merge_checks_u64_overflow() {
     let mut target = AccumulatorValue::Count(u64::MAX);
     let error = panes::merge_accumulator(&mut target, &AccumulatorValue::Count(1)).unwrap_err();

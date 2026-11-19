@@ -238,6 +238,10 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   完整 oracle、总预算 600 秒。两次采集均在 source-ready 30 秒等待处超时，未产生有效性能样本或 p50，未执行 interval 计时。
   后续 100 行与 1M 诊断的完整输出 oracle 均通过，但不作为性能证据；按预登记停止规则不再为理想结果重试。
   Join ≤30 ms 与 interval ≤350 ms 均未验证，后续须先解决启动测量不确定性，不能以诊断通过替代门槛结论。
+- 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
+  compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
+  因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
+  9 项 pane 测试及全 feature Clippy 通过。SUM/AVG 需要能保持逐位输出的合并证明与新数值方案，P7 仍未完成。
 
 ## 1. 目标
 
