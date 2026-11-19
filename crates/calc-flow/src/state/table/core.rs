@@ -889,6 +889,7 @@ pub(super) struct Layout7HistorySchema {
     pub(super) counter_name: String,
     pub(super) keyed_names: Vec<String>,
     pub(super) history_name: String,
+    pub(super) kind: RingKind,
     pub(super) retention: Retention,
 }
 
@@ -1034,6 +1035,16 @@ impl StateTable {
         self.add_ring_column(name, RingKind::Float64, Retention::Rows(window))
     }
 
+    pub(crate) fn add_i64_rows_column(&mut self, name: &str, window: usize) -> usize {
+        assert!(window > 0, "rolling history windows must be non-empty");
+        self.add_ring_column(name, RingKind::Int64, Retention::Rows(window))
+    }
+
+    pub(crate) fn add_u64_rows_column(&mut self, name: &str, window: usize) -> usize {
+        assert!(window > 0, "rolling history windows must be non-empty");
+        self.add_ring_column(name, RingKind::UInt64, Retention::Rows(window))
+    }
+
     pub(crate) fn add_numeric_rows_column(&mut self, name: &str, window: usize) -> usize {
         assert!(window > 0, "rolling Rows windows must be non-empty");
         let column = self.add_ring_column(name, RingKind::Float64, Retention::Rows(window));
@@ -1136,7 +1147,10 @@ impl StateTable {
             return None;
         };
         if history.numeric
-            || history.kind != RingKind::Float64
+            || !matches!(
+                history.kind,
+                RingKind::Float64 | RingKind::Int64 | RingKind::UInt64
+            )
             || !matches!(history.retention, Retention::Rows(_))
         {
             return None;
@@ -1149,6 +1163,7 @@ impl StateTable {
                 .map(|column| column.name.clone())
                 .collect(),
             history_name: history.name.clone(),
+            kind: history.kind,
             retention: history.retention,
         })
     }
@@ -1656,6 +1671,32 @@ impl StateTable {
                 None => None,
                 _ => unreachable!(),
             })
+    }
+
+    pub(crate) fn push_i64(
+        &mut self,
+        column: usize,
+        entity: EntityId,
+        value: Option<i64>,
+    ) -> Result<()> {
+        if self.rings[column].kind != RingKind::Int64 {
+            return Err(internal("ring column type mismatch"));
+        }
+        self.push_ring(column, entity, RingValue::Int64(value), true)
+            .map(|_| ())
+    }
+
+    pub(crate) fn push_u64(
+        &mut self,
+        column: usize,
+        entity: EntityId,
+        value: Option<u64>,
+    ) -> Result<()> {
+        if self.rings[column].kind != RingKind::UInt64 {
+            return Err(internal("ring column type mismatch"));
+        }
+        self.push_ring(column, entity, RingValue::UInt64(value), true)
+            .map(|_| ())
     }
 
     fn push_ring(
@@ -2260,12 +2301,12 @@ impl StateTable {
             .stddev(ddof))
     }
 
-    pub(crate) fn f64_lag(
+    fn lag_value(
         &self,
         column: usize,
         entity: EntityId,
         periods: usize,
-    ) -> Result<Option<f64>> {
+    ) -> Result<Option<RingValue>> {
         let (group, row) = self.location(entity)?;
         let ring = &self.partitions[&group].rings[column][row]
             .as_ref()
@@ -2275,8 +2316,44 @@ impl StateTable {
         if periods == 0 || periods > ring.len {
             return Ok(None);
         }
-        match ring.slots[ring.position(ring.len - periods)] {
-            RingValue::Float64(value) => Ok(value),
+        Ok(Some(ring.slots[ring.position(ring.len - periods)]))
+    }
+
+    pub(crate) fn f64_lag(
+        &self,
+        column: usize,
+        entity: EntityId,
+        periods: usize,
+    ) -> Result<Option<f64>> {
+        match self.lag_value(column, entity, periods)? {
+            Some(RingValue::Float64(value)) => Ok(value),
+            None => Ok(None),
+            _ => Err(internal("ring column type mismatch")),
+        }
+    }
+
+    pub(crate) fn i64_lag(
+        &self,
+        column: usize,
+        entity: EntityId,
+        periods: usize,
+    ) -> Result<Option<i64>> {
+        match self.lag_value(column, entity, periods)? {
+            Some(RingValue::Int64(value)) => Ok(value),
+            None => Ok(None),
+            _ => Err(internal("ring column type mismatch")),
+        }
+    }
+
+    pub(crate) fn u64_lag(
+        &self,
+        column: usize,
+        entity: EntityId,
+        periods: usize,
+    ) -> Result<Option<u64>> {
+        match self.lag_value(column, entity, periods)? {
+            Some(RingValue::UInt64(value)) => Ok(value),
+            None => Ok(None),
             _ => Err(internal("ring column type mismatch")),
         }
     }
@@ -3031,11 +3108,6 @@ impl StateTable {
         snapshot: &RingSnapshot,
         index: usize,
     ) -> Result<()> {
-        let history = snapshot
-            .values
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .ok_or_else(|| internal("layout-7 history type mismatch"))?;
         let start = snapshot.offsets[index];
         let end = snapshot.offsets[index + 1];
         let capacity = snapshot.capacities[index];
@@ -3044,6 +3116,35 @@ impl StateTable {
             .as_ref()
             .and_then(|values| values.get(index))
             .cloned();
+        let values = (start..end)
+            .map(|source| match snapshot.kind {
+                RingKind::Float64 => snapshot
+                    .values
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .map(|history| {
+                        RingValue::Float64(history.is_valid(source).then(|| history.value(source)))
+                    })
+                    .ok_or_else(|| internal("layout-7 history type mismatch")),
+                RingKind::Int64 => snapshot
+                    .values
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::Int64Array>()
+                    .map(|history| {
+                        RingValue::Int64(history.is_valid(source).then(|| history.value(source)))
+                    })
+                    .ok_or_else(|| internal("layout-7 history type mismatch")),
+                RingKind::UInt64 => snapshot
+                    .values
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .map(|history| {
+                        RingValue::UInt64(history.is_valid(source).then(|| history.value(source)))
+                    })
+                    .ok_or_else(|| internal("layout-7 history type mismatch")),
+                RingKind::PairFloat64 => Err(internal("layout-7 history type mismatch")),
+            })
+            .collect::<Result<Vec<_>>>()?;
         let (group, row) = self.location(entity)?;
         let partition = self.partitions.get_mut(&group).expect("prepared group");
         let page = partition.rings[column][row].as_mut().expect("ring page");
@@ -3053,11 +3154,9 @@ impl StateTable {
         page.slot_stamps = vec![0; capacity];
         page.ring.head = 0;
         page.ring.len = end - start;
-        for offset in 0..page.ring.len {
-            let source = start + offset;
+        for (offset, value) in values.into_iter().enumerate() {
             let target = page.ring.position(offset);
-            page.ring.slots[target] =
-                RingValue::Float64(history.is_valid(source).then(|| history.value(source)));
+            page.ring.slots[target] = value;
         }
         page.numeric = numeric;
         Ok(())

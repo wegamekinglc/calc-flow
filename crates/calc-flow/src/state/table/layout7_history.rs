@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{CalcFlowError, Result};
 use datafusion::arrow::{
-    array::{Array, ArrayRef, BinaryArray, Float64Array, UInt64Array},
+    array::{Array, ArrayRef, BinaryArray, UInt64Array},
     datatypes::{DataType, Field},
 };
 
@@ -56,7 +56,11 @@ fn encode_history(table: &StateTable, schema: &Layout7HistorySchema) -> Result<V
         )]),
     )?;
     let history = write_component(
-        vec![Field::new(&schema.history_name, DataType::Float64, true)],
+        vec![Field::new(
+            &schema.history_name,
+            history_type(schema.kind),
+            true,
+        )],
         vec![ring.values.clone()],
         HashMap::new(),
     )?;
@@ -97,7 +101,7 @@ fn decode_history(table: &StateTable, bytes: &[u8]) -> Result<TableSnapshot> {
     let history = read_component(&components[1])?;
     let metadata = read_component(&components[2])?;
     validate_keyed(&keyed_record, &schema.keyed_names)?;
-    validate_history(&history, &schema.history_name)?;
+    validate_history(&history, &schema.history_name, schema.kind)?;
     validate_metadata(&metadata)?;
     let keys = decode_keys(&keyed_record)?;
     let keyed = schema
@@ -112,7 +116,7 @@ fn decode_history(table: &StateTable, bytes: &[u8]) -> Result<TableSnapshot> {
         .collect();
     let ring = RingSnapshot {
         name: schema.history_name,
-        kind: RingKind::Float64,
+        kind: schema.kind,
         retention: schema.retention,
         values: history.column(0).clone(),
         offsets: decode_usize(metadata.column(0))?,
@@ -207,18 +211,25 @@ fn validate_keyed(
     Ok(())
 }
 
+fn history_type(kind: RingKind) -> DataType {
+    match kind {
+        RingKind::Float64 => DataType::Float64,
+        RingKind::Int64 => DataType::Int64,
+        RingKind::UInt64 => DataType::UInt64,
+        RingKind::PairFloat64 => unreachable!("raw history supports only primitive scalar rings"),
+    }
+}
+
 fn validate_history(
     record: &datafusion::arrow::record_batch::RecordBatch,
     name: &str,
+    kind: RingKind,
 ) -> Result<()> {
+    let data_type = history_type(kind);
     if record.num_columns() != 1
         || record.schema().field(0).name() != name
-        || record.schema().field(0).data_type() != &DataType::Float64
-        || record
-            .column(0)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .is_none()
+        || record.schema().field(0).data_type() != &data_type
+        || record.column(0).data_type() != &data_type
     {
         return Err(mismatch("rolling history layout-7 history type mismatch"));
     }

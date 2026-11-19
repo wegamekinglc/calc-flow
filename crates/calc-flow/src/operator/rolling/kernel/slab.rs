@@ -9,7 +9,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::ScalarValue;
 
 use super::{
-    DerivedBuilder, EntityRouting, OutputStorage, Result, RollingKernelExecution,
+    DerivedBuilder, EntityRouting, LagValue, OutputStorage, Result, RollingKernelExecution,
     RollingKernelMetrics, RollingKernelPlan, RollingKernelState, RollingMetricsRecorder,
     RollingStage, RollingWork, StateCharge, Statistic, StreamKernelUpdate, TypedFrame,
     TypedGroupInput, TypedGroupPlan, TypedOutputKind, TypedOutputPlan, TypedWindowState,
@@ -99,11 +99,15 @@ impl SlabBuilder {
             | OutputStorage::UInt16
             | OutputStorage::UInt32
             | OutputStorage::UInt64
-            | OutputStorage::Float32 => Ok(Self::Derived(DerivedBuilder::new_with_inputs(
-                *output,
-                rows,
-                &[],
-            )?)),
+            | OutputStorage::Float32
+            | OutputStorage::TimestampMicrosecond
+            | OutputStorage::TimestampMicrosecondUtc
+            | OutputStorage::Date32
+            | OutputStorage::Date64
+            | OutputStorage::Time64Microsecond
+            | OutputStorage::DurationMicrosecond => Ok(Self::Derived(
+                DerivedBuilder::new_with_inputs(*output, rows, &[])?,
+            )),
             _ => Err(internal_error("rolling slab output storage mismatch")),
         }
     }
@@ -133,6 +137,14 @@ impl SlabBuilder {
                 ..*output
             };
             return self.append(readouts.accumulators, &numeric);
+        }
+        if let Some(values) = readouts.lag_values.as_ref() {
+            let (reference, current) = values[output.group];
+            return match output.kind {
+                TypedOutputKind::Lag => self.append_lag(reference),
+                TypedOutputKind::Delta => self.append_delta(current, reference, node_id),
+                _ => Err(internal_error("rolling lag output kind mismatch")),
+            };
         }
         let value = match output.kind {
             TypedOutputKind::Macd(component) => readouts.values[output.group][component],
@@ -167,6 +179,54 @@ impl SlabBuilder {
                 Err(internal_error("rolling slab output storage mismatch"))
             }
         }
+    }
+
+    fn append_lag(&mut self, value: LagValue) -> Result<()> {
+        match (self, value) {
+            (Self::Derived(DerivedBuilder::Signed(builder, _)), LagValue::Signed(value)) => {
+                builder.append_option(value);
+                Ok(())
+            }
+            (Self::Derived(DerivedBuilder::Unsigned(builder, _)), LagValue::Unsigned(value)) => {
+                builder.append_option(value);
+                Ok(())
+            }
+            _ => Err(internal_error("rolling lag builder type mismatch")),
+        }
+    }
+
+    fn append_delta(
+        &mut self,
+        current: LagValue,
+        reference: LagValue,
+        node_id: &str,
+    ) -> Result<()> {
+        let value = match (current, reference) {
+            (LagValue::Signed(Some(current)), LagValue::Signed(Some(reference))) => current
+                .checked_sub(reference)
+                .map(|difference| LagValue::Signed(Some(difference)))
+                .ok_or_else(|| {
+                    operator_error(node_id, "rolling delta integer subtraction overflowed")
+                })?,
+            (LagValue::Unsigned(Some(current)), LagValue::Unsigned(Some(reference))) => current
+                .checked_sub(reference)
+                .map(|difference| LagValue::Unsigned(Some(difference)))
+                .ok_or_else(|| {
+                    operator_error(node_id, "rolling delta integer subtraction overflowed")
+                })?,
+            (LagValue::Signed(current), LagValue::Signed(reference)) => LagValue::Signed(
+                current
+                    .zip(reference)
+                    .map(|(current, reference)| current - reference),
+            ),
+            (LagValue::Unsigned(current), LagValue::Unsigned(reference)) => LagValue::Unsigned(
+                current
+                    .zip(reference)
+                    .map(|(current, reference)| current - reference),
+            ),
+            _ => return Err(internal_error("rolling delta input type mismatch")),
+        };
+        self.append_lag(value)
     }
 
     fn append_cumulative(
@@ -320,7 +380,21 @@ impl RollingKernelPlan {
             })
             .max()
         {
-            table.add_f64_rows_column("lag", window.max(1));
+            let storage = self
+                .groups
+                .iter()
+                .find_map(|group| match group {
+                    TypedGroupPlan::Lag { storage, .. } => Some(*storage),
+                    _ => None,
+                })
+                .unwrap_or(OutputStorage::Float64);
+            if storage.is_signed() {
+                table.add_i64_rows_column("lag", window.max(1));
+            } else if storage.is_unsigned() {
+                table.add_u64_rows_column("lag", window.max(1));
+            } else {
+                table.add_f64_rows_column("lag", window.max(1));
+            }
         }
         indicator::add_columns(&mut table, &self.groups);
         state.slab = Some(table);

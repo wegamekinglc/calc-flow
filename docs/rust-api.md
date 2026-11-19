@@ -1036,8 +1036,8 @@ Cumulative sum/min/max/variance retain
 `ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION` (4) in declarations. Supported
 primitive cumulative states use layout-7 keyed summaries with exact values,
 including binary64 bits and wide integer totals; other shapes retain their
-legacy writer. Pure row-window counts share validity-only history, while pure
-Float32/Float64 lag/delta groups use an O(1)-indexed raw history component, both in
+legacy writer. Pure row-window counts share validity-only history, while primitive
+numeric and temporal lag groups use an O(1)-indexed raw history component, both in
 layout 7. Other declarations retain their declaration layouts. Recovery
 validates the layout, complete summary inventory, configuration, schema, kernel
 and numeric contract before installing state. Unknown versions and incompatible

@@ -1,9 +1,9 @@
-use datafusion::arrow::array::{Array, Float64Array};
+use datafusion::arrow::array::{Array, Float64Array, Int64Array, UInt64Array};
 
 use super::super::{
-    OutputStorage, Result, Statistic, TypedFrame, TypedGroupInput, TypedGroupPlan, TypedOutputKind,
-    TypedOutputPlan, TypedWindowState, cumulative::TypedCumulativeState, internal_error,
-    valid_float64,
+    LagValue, OutputStorage, Result, Statistic, TypedFrame, TypedGroupInput, TypedGroupPlan,
+    TypedOutputKind, TypedOutputPlan, TypedWindowState, cumulative::TypedCumulativeState,
+    internal_error, valid_float64,
 };
 use crate::{
     accumulate::NumericAccumulator,
@@ -24,6 +24,7 @@ pub(super) struct RowReadouts<'a> {
     pub(super) values: Vec<[Option<f64>; 3]>,
     pub(super) valid_counts: Option<Vec<u64>>,
     pub(super) cumulative: Option<Vec<Option<TypedWindowState>>>,
+    pub(super) lag_values: Option<Vec<(LagValue, LagValue)>>,
 }
 
 pub(super) fn supports_plan(groups: &[TypedGroupPlan], outputs: &[TypedOutputPlan]) -> bool {
@@ -72,7 +73,7 @@ pub(super) fn supports_plan(groups: &[TypedGroupPlan], outputs: &[TypedOutputPla
             } => {
                 only_lags
                     && Some(*input_index) == lag_input
-                    && matches!(storage, OutputStorage::Float32 | OutputStorage::Float64)
+                    && (storage.is_signed() || storage.is_unsigned() || storage.is_float())
             }
             _ => false,
         })
@@ -99,7 +100,7 @@ fn output_supported(group: &TypedGroupPlan, output: &TypedOutputPlan) -> bool {
         }
         TypedGroupPlan::Lag { storage, .. } => {
             matches!(output.kind, TypedOutputKind::Lag | TypedOutputKind::Delta)
-                && matches!(storage, OutputStorage::Float32 | OutputStorage::Float64)
+                && (storage.is_signed() || storage.is_unsigned() || storage.is_float())
                 && output.storage == *storage
         }
         TypedGroupPlan::Rsi { .. } => {
@@ -226,6 +227,30 @@ fn field_names(group: &TypedGroupPlan) -> &'static [&'static str] {
     }
 }
 
+type Scratch = (
+    Option<Vec<u64>>,
+    Option<Vec<Option<TypedWindowState>>>,
+    Option<Vec<(LagValue, LagValue)>>,
+);
+
+fn scratch_groups(groups: &[TypedGroupPlan]) -> Scratch {
+    let valid_counts = groups
+        .iter()
+        .any(|group| matches!(group, TypedGroupPlan::Ewma { .. }))
+        .then(|| vec![0; groups.len()]);
+    let cumulative = groups
+        .iter()
+        .any(|group| matches!(group, TypedGroupPlan::Cumulative { .. }))
+        .then(|| vec![None; groups.len()]);
+    let lag_values = groups
+        .iter()
+        .any(|group| {
+            matches!(group, TypedGroupPlan::Lag { storage, .. } if storage.is_signed() || storage.is_unsigned())
+        })
+        .then(|| vec![(LagValue::Float(None), LagValue::Float(None)); groups.len()]);
+    (valid_counts, cumulative, lag_values)
+}
+
 pub(super) fn update<'a>(
     table: &'a mut StateTable,
     position: EntityRow<'_>,
@@ -239,37 +264,40 @@ pub(super) fn update<'a>(
     }
     let EntityRow { entity, first, .. } = position;
     let mut values = vec![[None; 3]; groups.len()];
-    let mut valid_counts = groups
-        .iter()
-        .any(|group| matches!(group, TypedGroupPlan::Ewma { .. }))
-        .then(|| vec![0; groups.len()]);
-    let mut cumulative = groups
-        .iter()
-        .any(|group| matches!(group, TypedGroupPlan::Cumulative { .. }))
-        .then(|| vec![None; groups.len()]);
-    let mut numeric_updated = false;
-    let mut lag_updated = false;
+    let (mut valid_counts, mut cumulative, mut lag_values) = scratch_groups(groups);
+    let (mut numeric_updated, mut lag_updated) = (false, false);
     for (index, (group, input)) in groups.iter().zip(inputs).enumerate() {
         match (group, input) {
-            (TypedGroupPlan::Numeric { .. }, TypedGroupInput::Single(input)) => {
-                if !numeric_updated {
-                    let value = valid_float64(input, row, nan_as_value);
-                    push_numeric(table, entity, value, first)?;
-                    numeric_updated = true;
-                }
-            }
-            (TypedGroupPlan::Count { .. }, TypedGroupInput::Values(input)) => {
-                if !numeric_updated {
-                    let value = input.is_valid(row).then_some(1.0);
-                    push_numeric(table, entity, value, first)?;
-                    numeric_updated = true;
-                }
+            (
+                TypedGroupPlan::Numeric { .. } | TypedGroupPlan::Count { .. },
+                input @ (TypedGroupInput::Single(_) | TypedGroupInput::Values(_)),
+            ) => {
+                numeric_updated |= update_numeric(
+                    table,
+                    entity,
+                    first,
+                    input,
+                    row,
+                    nan_as_value,
+                    !numeric_updated,
+                )?;
             }
             (TypedGroupPlan::Lag { periods, .. }, TypedGroupInput::Single(input)) => {
                 let (reference, current, updated) =
                     update_lag(table, entity, *periods, input, row, !lag_updated)?;
                 values[index][0] = reference;
                 values[index][1] = current;
+                lag_updated |= updated;
+            }
+            (
+                TypedGroupPlan::Lag { periods, .. },
+                input @ (TypedGroupInput::Signed(_) | TypedGroupInput::Unsigned(_)),
+            ) => {
+                let (reference, current, updated) =
+                    update_integer_lag(table, entity, *periods, input, row, !lag_updated)?;
+                lag_values
+                    .as_mut()
+                    .expect("integer lag values are allocated")[index] = (reference, current);
                 lag_updated |= updated;
             }
             (TypedGroupPlan::Rsi { .. }, TypedGroupInput::Rsi(input, field, period)) => {
@@ -329,7 +357,28 @@ pub(super) fn update<'a>(
         values,
         valid_counts,
         cumulative,
+        lag_values,
     })
+}
+
+fn update_numeric(
+    table: &mut StateTable,
+    entity: EntityId,
+    first: bool,
+    input: &TypedGroupInput,
+    row: usize,
+    nan_as_value: bool,
+    push: bool,
+) -> Result<bool> {
+    let value = match input {
+        TypedGroupInput::Single(input) => valid_float64(input, row, nan_as_value),
+        TypedGroupInput::Values(input) => input.is_valid(row).then_some(1.0),
+        _ => return Err(internal_error("rolling numeric input mismatch")),
+    };
+    if push {
+        push_numeric(table, entity, value, first)?;
+    }
+    Ok(push)
 }
 
 fn push_numeric(
@@ -364,6 +413,73 @@ fn update_lag(
         table.push_f64(0, entity, current)?;
     }
     Ok((reference, current, updated))
+}
+
+fn update_integer_lag(
+    table: &mut StateTable,
+    entity: EntityId,
+    periods: usize,
+    input: &TypedGroupInput,
+    row: usize,
+    push: bool,
+) -> Result<(LagValue, LagValue, bool)> {
+    match input {
+        TypedGroupInput::Signed(input) => {
+            update_signed_lag(table, entity, periods, input, row, push)
+        }
+        TypedGroupInput::Unsigned(input) => {
+            update_unsigned_lag(table, entity, periods, input, row, push)
+        }
+        _ => Err(internal_error("rolling integer lag input mismatch")),
+    }
+}
+
+fn update_signed_lag(
+    table: &mut StateTable,
+    entity: EntityId,
+    periods: usize,
+    input: &Int64Array,
+    row: usize,
+    push: bool,
+) -> Result<(LagValue, LagValue, bool)> {
+    let current = input.is_valid(row).then_some(input.value(row));
+    let reference = if periods == 0 {
+        current
+    } else {
+        table.i64_lag(0, entity, periods)?
+    };
+    if periods > 0 && push {
+        table.push_i64(0, entity, current)?;
+    }
+    Ok((
+        LagValue::Signed(reference),
+        LagValue::Signed(current),
+        periods > 0 && push,
+    ))
+}
+
+fn update_unsigned_lag(
+    table: &mut StateTable,
+    entity: EntityId,
+    periods: usize,
+    input: &UInt64Array,
+    row: usize,
+    push: bool,
+) -> Result<(LagValue, LagValue, bool)> {
+    let current = input.is_valid(row).then_some(input.value(row));
+    let reference = if periods == 0 {
+        current
+    } else {
+        table.u64_lag(0, entity, periods)?
+    };
+    if periods > 0 && push {
+        table.push_u64(0, entity, current)?;
+    }
+    Ok((
+        LagValue::Unsigned(reference),
+        LagValue::Unsigned(current),
+        periods > 0 && push,
+    ))
 }
 
 fn update_ewma(

@@ -183,7 +183,8 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
 - 2026-11-19 P2.3 继续扩展：纯 Float64 lag/delta 使用独立 raw history 组件，保留 NaN/null、共享多周期历史及 O(1) 引用读取；
   entity/keyed、history 与 ring 元数据分开编码，避免 AVG NaN 汇总污染，恢复继续校验 schema、offsets、capacity 和 logical bytes。
   双实体 lag(1)/lag(2)/delta 与恢复测试通过，Rolling 695 项和 Clippy 通过；Float32 同构 lag/delta 也已进入同一 raw history
-  路径并通过 storage/恢复检查，Rolling 696 项和 Clippy 通过；整数、temporal 和其他 family 仍未完成。
+  路径并通过 storage/恢复检查，Rolling 696 项和 Clippy 通过。Int64/UInt64 raw ring 已保留整数精度与 checked delta，
+  Int8/Date32/UTC timestamp（含 >2^53）恢复通过，溢出和下溢不提交状态，Rolling 699 项和 Clippy 通过；其他 family 仍未完成。
 - 2026-11-19 当前工作区修复了既有 CI 失败：v4 恢复保留静态输入摘要诊断和安全的错误分类，
   测试改用 `manifests/lineage/manifests/epoch-N.json` 与 opaque `blocks`；typed MACD 不再误入旧 resource worker，
   late-output Rolling 可恢复当前声明 layout，native sequence 保留 operator 上下文，ASOF lifecycle fixture 不再由 worker
