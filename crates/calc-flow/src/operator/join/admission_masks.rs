@@ -1,8 +1,8 @@
 #[cfg(test)]
 use super::note_join_work;
 use super::{
-    BatchEventTimes, DropKind, IngressProgress, JoinTimeBounds, RowAdmission, SidePlan, columnar,
-    counter_overflow, operator_reason,
+    BatchEventTimes, DropKind, IngressProgress, JoinTimeBounds, RowAdmission, SidePlan,
+    columnar_quantum, counter_overflow, operator_reason,
 };
 use crate::{Batch, EventTime, Port, Result, StreamJoinOperator, StreamOperatorContext};
 use datafusion::arrow::{
@@ -167,7 +167,7 @@ impl AdmissionMasks {
         start: usize,
         length: usize,
         context: &StreamOperatorContext<'_>,
-        quantum: &mut columnar::Quantum,
+        quantum: &mut columnar_quantum::Quantum,
         prepared: &mut PreparedMasks,
     ) -> Result<Self> {
         debug_assert!(length <= 64);

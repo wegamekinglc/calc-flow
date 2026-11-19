@@ -171,6 +171,7 @@ impl StateSegment {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn has_owner(&self) -> bool {
         self.owner.is_some()
     }

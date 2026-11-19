@@ -186,7 +186,7 @@ impl ExpirationIndex {
     ) -> Result<AppendPlan> {
         context.check_cancelled()?;
         let mut plan = self.plan(incoming.len(), legacy)?;
-        let mut quantum = super::columnar::Quantum::default();
+        let mut quantum = super::columnar_quantum::Quantum::default();
         for (offset, &index) in indices.iter().enumerate() {
             quantum.step(context, 1, size_of::<Entry>()).await?;
             plan.entries.push(Entry {

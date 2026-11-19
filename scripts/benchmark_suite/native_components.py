@@ -5,70 +5,13 @@ from __future__ import annotations
 import math
 
 
-def validate_join_dictionary_refusal(observation: dict) -> dict:
-    """Validate the bounded refusal control without performance denominators."""
-    _require_refusal_fields(
-        observation,
-        {
-            "schema": "calc-flow.join-dictionary-refusal.v1",
-            "case": "join_dictionary_refusal_retention",
-            "check_only": True,
-            "admission_batch_rows": [2, 1],
-            "left_retained_rows": 2,
-            "right_retained_rows": 1,
-            "left_retained_bytes": 228,
-            "right_retained_bytes": 114,
-            "full_v1_row_charges": [114, 114, 114],
-            "output_keys": [["a", "a"]],
-            "state_limit_failures": 0,
-            "match_limit_failures": 0,
-            "dictionary_grant_refusals": 1,
-            "needs_rebuild_routes": 1,
-            "legacy_key_encodings": 3,
-            "sql_probe_table_builds": 1,
-            "rebuild_attempts": 0,
-            "rebuild_completions": 0,
-            "owned_cleanup_complete": True,
-        },
-    )
-    pool = observation.get("pool")
-    _require_refusal_fields(
-        pool,
-        {
-            "last_rejected_consumer": "sql-incremental:stream-join-dictionary",
-            "failed_dictionary_grows": 1,
-            "reserved_bytes": 0,
-        },
-    )
-    for field in ("admission_batch_rows", "full_v1_row_charges"):
-        if any(type(value) is not int for value in observation[field]):
-            raise ValueError(f"invalid dictionary refusal integer list: {field}")
-    _positive_refusal_counts(
-        pool,
-        (
-            "successful_sql_grows",
-            "last_rejected_bytes",
-        ),
-    )
-    if observation["dictionary_grant_refusals"] != pool["failed_dictionary_grows"]:
-        raise ValueError("dictionary refusal counter lacks matching pool evidence")
-    return dict(observation)
-
-
-def _require_refusal_fields(observation: dict, expected: dict) -> None:
+def _require_control_fields(observation: dict, expected: dict) -> None:
     if not isinstance(observation, dict):
-        raise ValueError("missing dictionary refusal evidence")
+        raise ValueError("missing Join control evidence")
     for field, value in expected.items():
         actual = observation.get(field)
         if type(actual) is not type(value) or actual != value:
-            raise ValueError(f"invalid dictionary refusal evidence: {field}")
-
-
-def _positive_refusal_counts(observation: dict, fields: tuple[str, ...]) -> None:
-    for field in fields:
-        value = observation.get(field)
-        if type(value) is not int or value <= 0:
-            raise ValueError(f"missing dictionary refusal work: {field}")
+            raise ValueError(f"invalid Join control evidence: {field}")
 
 
 HISTORY_PHASES = (
@@ -276,7 +219,7 @@ def _validate_compaction_sample(sample: dict, mode: str) -> None:
         < sample["preparation_seconds"] + sample["handler_seconds"]
     ):
         raise ValueError("combined compaction clock omits work")
-    _validate_compaction_witness(sample, mode)
+    _validate_compaction_witness(sample)
     if "schedule" in sample:
         validate_serial_compaction_schedule(sample)
 
@@ -340,7 +283,7 @@ def validate_join_layout_controls(observation: dict) -> dict:
         if identity not in expected or identity in seen:
             raise ValueError("unexpected or repeated native layout control")
         seen.add(identity)
-        _require_refusal_fields(control, _expected_layout_counts(*identity))
+        _require_control_fields(control, _expected_layout_counts(*identity))
     return dict(observation)
 
 
@@ -529,25 +472,20 @@ def _validate_snapshot_segments(observation: dict) -> None:
         raise ValueError("native snapshot segment bytes do not match total")
 
 
-def _validate_compaction_witness(sample: dict, mode: str) -> None:
+def _validate_compaction_witness(sample: dict) -> None:
     witness = sample.get("compaction_witness")
     if (
         not isinstance(witness, dict)
         or witness.get("setup_dirty_epochs") != 4
-        or witness.get("layout_version") not in (1, 2)
+        or witness.get("layout_version") != 12
+        or witness.get("stable_pages_equal") is not True
     ):
         raise ValueError("invalid native compaction witness")
-    before, after = (witness.get(f"{cut}_base_sha256") for cut in ("before", "after"))
+    before, after = (witness.get(f"{cut}_stable_sha256") for cut in ("before", "after"))
     for hashes in (before, after):
-        _validate_compaction_bases(hashes)
-    before_deltas, after_deltas = (
-        witness.get(f"{cut}_deltas") for cut in ("before", "after")
-    )
-    for deltas in (before_deltas, after_deltas):
-        _validate_compaction_deltas(deltas)
-    _validate_compaction_change(
-        witness, mode, (before, after), (before_deltas, after_deltas)
-    )
+        _validate_stable_pages(hashes)
+    if before != after:
+        raise ValueError("left append changed stable right native pages")
 
 
 def _validate_history_header(observation: dict) -> None:
@@ -676,7 +614,7 @@ def _validate_capture_snapshot(observation: dict) -> None:
         observation.get("validated_all_segments") is not True
         or observation.get("restore_output_equivalent") is not True
         or type(observation.get("snapshot_layout_version")) is not int
-        or observation["snapshot_layout_version"] not in (1, 2)
+        or observation["snapshot_layout_version"] != 12
     ):
         raise ValueError("missing native snapshot validation proof")
     _validate_snapshot_segments(observation)
@@ -735,27 +673,18 @@ def _history_alias(history: dict) -> dict:
     return alias
 
 
-def _validate_compaction_bases(hashes: dict) -> None:
+def _validate_stable_pages(hashes: dict) -> None:
     if (
         not isinstance(hashes, dict)
         or not hashes
         or any(
             not isinstance(name, str)
-            or not name.endswith("-base")
+            or not name.startswith("right/")
             or not _history_digest(digest)
             for name, digest in hashes.items()
         )
     ):
-        raise ValueError("invalid native compaction base inventory")
-
-
-def _validate_compaction_deltas(deltas: list) -> None:
-    if (
-        not isinstance(deltas, list)
-        or any(not isinstance(name, str) or "-delta-" not in name for name in deltas)
-        or len(deltas) != len(set(deltas))
-    ):
-        raise ValueError("invalid native compaction delta inventory")
+        raise ValueError("invalid stable native page inventory")
 
 
 def _validate_history_native_indexes(snapshot: dict) -> None:
@@ -788,18 +717,6 @@ def _validate_capture_rows(observation: dict) -> None:
     ):
         if type(observation.get(field)) is not int or observation[field] != 1_000_000:
             raise ValueError(f"invalid actual row denominator: {field}")
-
-
-def _validate_compaction_change(witness, mode, bases, deltas):
-    before, after = bases
-    before_deltas, after_deltas = deltas
-    if mode == "armed" and (before == after or len(before_deltas) <= len(after_deltas)):
-        raise ValueError("armed preparation did not replace the base and fold deltas")
-    if mode == "steady" and (
-        before != after
-        or witness.get("before_base_epoch") != witness.get("after_base_epoch")
-    ):
-        raise ValueError("steady preparation unexpectedly changed the base")
 
 
 def _history_delta_names(epoch: int, replacement: bool) -> list[str]:

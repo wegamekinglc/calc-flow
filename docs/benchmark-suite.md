@@ -842,14 +842,14 @@ python -m unittest scripts.test_issue406_measurement scripts.test_issue406_repor
 
 The compaction component polls actual preparation once, then marks its prepared
 incoming batch ready. It records readiness, preparation completion and handler
-start/end on one monotonic timeline. Preparation exclusively borrows the same
-operator through worker completion and installation, so handler dispatch is
-serialized. `queue_seconds` measures benchmark readiness to dispatch, not a
+start/end on one monotonic timeline. Native Join preparation has no legacy
+base/delta worker compaction; handler dispatch remains serialized by the
+operator borrow. `queue_seconds` measures benchmark readiness to dispatch, not a
 production edge queue. Preparation, handler, queue and combined p50/p95/p99 stay
-separate; queue time overlaps preparation and must not be added again. Base/delta
-replacement and a pending first poll do not prove handler overlap. The original
-during-compaction ≤2× target remains **unmeasured** for this architecture, with
-its reason and the post-compaction diagnostic preserved.
+separate; queue time overlaps preparation and must not be added again. The
+witness checks that left-only appends preserve every right native page and that
+restore replays identical output. This stable-page check is not a dirty-page
+copy-on-write cost measurement and establishes no handler-overlap claim.
 
 This instrumentation changes the measured harness identity. Build it against
 both exact product revisions through the maintained overlay; old binaries and

@@ -228,24 +228,19 @@ with a SHA-256 computed at construction). Keyed row state never appears
 inline, and no segment may carry secrets; the runtime assigns object paths,
 lengths, and checksums during v4 persistence.
 
-Streaming Join keeps semantic checkpoint state version `1`. Its Python
-capability inventory lists physical layouts `(1, 2, 3)`. Full retained payloads
-use columnar layout 2. When compiler projection actually narrows either side's
-retained schema, Join writes strict inner layout 3. Retained columns include
-consumer dependencies plus keys and event-time fields. Their independent
-buffers, sparse compaction and checkpoint IPC use the selected schemas.
-Complete logical input schemas, configuration and graph fingerprints remain
-unchanged. Project format 3 remains unchanged; the managed runner stores these
-opaque snapshots in manifest v4.
+Streaming Join writes native layout 12. Its metadata binds the Join spec,
+row-ID and output-sequence frontiers, metrics, ended state and epoch. Native
+pages contain immutable run payload and identity columns, per-key and
+expiration indexes, shared keys and control counters. The managed runner passes
+`NativeCapture` directly to manifest-v4 persistence; direct
+`checkpoint()`/`restore()` uses the same page encoding as an
+`OperatorStateSnapshot`. Layouts 1–3 remain only in explicit migration tests
+and are rejected by production restore.
 
-Layout 3 reuses frame/inventory codec 2 and adds
-`charge_mode: "v1_admission"` and an exact `retained_payloads` descriptor. Its
-only fields are `columns`, `logical_schema_digests` and `schema_digests`, each
-with left/right entries. Selected logical indices are sorted and unique;
-canonical digests bind both complete logical and retained physical schemas,
-including field order, names, types, nullability and metadata. Restore requires the
-compiled descriptor exactly, including for empty and terminal state; broader
-or narrower projected descriptors fail. Full-retention plans reject layout 3.
+Output projection is applied while materializing a result and does not create a
+second retained-schema checkpoint layout. Restore validates the spec, page
+inventory, Arrow schemas, group IDs, row locators, ordering, coverage, frontiers
+and retained accounting before installing the run core and shared key store.
 
 Join validates ingress and input schema before reserving batch-admission
 metadata. Inputs with at most 64 physical rows and four record batches use
@@ -256,53 +251,27 @@ new retained-state commit. This is separate from state and match limits and
 does not increment their failure counters. The default runtime has no implicit
 memory-pool limit.
 
-Admission preserves null/late classification and uses retained-row bitmaps to
-skip payload charging for rows that do not enter state. Retained rows' V1
-logical charges use the complete input before selecting columns. Projected
-groups with retained rows own independent selected buffers; groups with no
-retained rows can use a projected view of the input during output gathering.
-Batch-local key interning resolves repeated keys against the persistent
-dictionary once per distinct key in each eligible group, with funded scratch
-and the existing per-row fallback for unsupported keys or unavailable scratch.
-Layout 3 carries those authoritative historical charges. Every historical row's charge
-must meet a checked lower bound and the configured per-side byte cap. The bound
-includes V1 row overhead, encoded-key length, the existing 16-byte term,
-retained logical-cell charges and one validity byte per omitted logical column.
-Restore validates historical identities, keys, event times and inventory, sums
-live charges exactly into retained metrics, and reapplies live row/byte limits.
-It cannot recompute charges for discarded values. Checksums verify segment
-integrity; they do not authenticate original admission history. Logical state
-charges and limits retain their complete-input meaning. Physical payload and
-temporary work reservations separately fund actual storage.
+Admission preserves null/late classification and routes retained rows through
+the shared key store. Per-side logical charges cover live run payloads,
+identity and locator columns, run owners, per-key bucket capacity and
+expiration-index capacity. Output projection does not change those retained
+charges. Prospective admission includes replacement overlap, and restore checks
+the reconstructed live totals against metadata before applying the configured
+limits. Physical payload and temporary work reservations separately fund actual
+storage.
 
-Join tracks each side's capture row-ID frontier, dirty live-row count and
-compact tombstone list. Managed checkpoint preparation derives upserts from
-live rows at or above that frontier and encodes tombstones for previously
-captured rows that were evicted. Rows admitted and evicted between captures leave no delta
-entry. This row-ID frontier is separate from event-time watermark progress.
-Preparation also builds replacement bases on owned native workers under the
-configured memory budget. Capture shares the prepared immutable segments and
-advances the row-ID frontiers; clean captures share unchanged segment
-allocations. Direct capture without matching preparation can encode dirty
-state synchronously. Four dirty checkpoint epochs arm base compaction.
-History, prepared cuts and worker inputs bind the compiled physical layout and
-charge mode. Processing with checkpointing disabled invalidates reusable
-history and prepared cuts; a later capture requires successful preparation of
-a live base. Successful live-base preparation restores trusted incremental
-continuation and rebase.
+Join tracks run-ID, row-ID and output-sequence frontiers independently of
+watermark progress. Native capture emits deterministic run/index/control page
+images and a shared-key record for the current epoch. Unchanged pages have
+identical decoded content, while persistence retains page identity and
+reachability. Capture currently reconstructs those images; it does not yet
+provide the planned dirty-page copy-on-write cost bound.
 
-Legacy layouts 1 and 2 remain readable. Projected restore validates their full
-payload schemas, every historical upsert's key, event time and exact V1 charge,
-identities, inventory and live metrics before independently copying selected
-live payloads. It preserves no full legacy payload history. The first subsequent
-capture requires asynchronous preparation of a new narrow base, including clean,
-empty and terminal state; later captures use narrow deltas and rebase. Matching
-layout-3 restore preserves validated narrow history. Full-retention plans
-restoring layout 1 also require asynchronous base preparation before layout-2
-capture; matching layout-2 restore preserves validated full history. A refused,
-cancelled or invalid restore leaves the installed state unchanged, with
-temporary owners kept alive through actual cleanup. These physical formats
-remain distinct from the runtime capability envelope under
+Legacy layouts 1–3 and their base/delta history remain only in explicit
+migration tests. Production restore requires layout 12 and rejects those older
+formats rather than converting them. A refused, cancelled or invalid native
+restore leaves the installed state unchanged. These physical formats remain
+distinct from the runtime capability envelope under
 [checkpoint coordination](#checkpoint-coordination).
 
 On the built-in window's per-window path, the operator only marks touched,

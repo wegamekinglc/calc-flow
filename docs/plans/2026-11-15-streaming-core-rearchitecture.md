@@ -206,6 +206,13 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   late-output Rolling 可恢复当前声明 layout，native sequence 保留 operator 上下文，ASOF lifecycle fixture 不再由 worker
   持有 observer schema。完整 Python 套件为 3138 passed、3 skipped（另有 1 条 PyO3 runtime drop warning），
   相关 Rust 测试、Clippy 与 MySQL 测试编译通过。MySQL 容器、跨平台、复杂度与最终 CI 仍需重新验收。
+- 2026-11-20 Join 生产执行与恢复统一为 native run/layout 12：stream 和 finite 路径不再编译旧 SQL probe、
+  StoredRow/row IPC、三层 key 身份或 v1/v2 writer/restore；这些实现仅保留在显式迁移测试中。旧 DataFusion owned
+  query、v2 history/dictionary 诊断及其 feature 接线已删除。公共 `checkpoint()`/`restore()` 与 managed runner
+  使用同一 native page 编码，保留的 capture/compaction component 改为验证 stable right pages 和恢复等价。
+  Join 579 项、operator-task 77 项（2 ignored）、finite 8 项、native component 5 项、Python 验收/runner/fresh-harness
+  共 40 项和全 feature Clippy 通过。当前 capture 仍重建 run/index/key page images，尚未实现 dirty-page/COW 成本界限；
+  stable-page witness 不是性能测量，P5 的 1M/interval 门槛、其余 typed families、P6/P7 和最终 CI 仍未完成。
 
 ## 1. 目标
 

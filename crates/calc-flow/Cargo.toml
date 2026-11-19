@@ -19,7 +19,6 @@ nix = { version = "=0.27.1", default-features = false, features = ["time"], opti
 [features]
 benchmark-internals = ["dep:nix"]
 benchmark-checkpoint-off = ["benchmark-internals"]
-benchmark-checkpoint-diagnostic = ["benchmark-internals"]
 
 [dependencies]
 ahash.workspace = true

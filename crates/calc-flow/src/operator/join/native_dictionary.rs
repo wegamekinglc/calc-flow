@@ -1,20 +1,25 @@
 #[cfg(test)]
-use super::StoredRow;
-use super::retained::Rows;
 use super::{
+    StoredRow,
     columnar::FramedKey,
     key_dictionary::{Dictionary, Lease, SideBindings},
+    retained::Rows,
 };
 use crate::EventTime;
+#[cfg(test)]
 use datafusion::execution::memory_pool::MemoryReservation;
+#[cfg(test)]
 use hashbrown::HashTable;
+#[cfg(test)]
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
 
+#[cfg(test)]
 pub(super) const BASE_BYTES: usize = 1_024;
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct RunEntry {
     time: EventTime,
@@ -26,18 +31,21 @@ pub(super) trait TimedEntry {
     fn event_time(&self) -> EventTime;
 }
 
+#[cfg(test)]
 impl TimedEntry for RunEntry {
     fn event_time(&self) -> EventTime {
         self.time
     }
 }
 
+#[cfg(test)]
 impl RunEntry {
     fn identity(self) -> (EventTime, u64) {
         (self.time, self.row_id)
     }
 }
 
+#[cfg(test)]
 struct KeyRun {
     key: Arc<FramedKey>,
     hash: u64,
@@ -47,6 +55,7 @@ struct KeyRun {
     ordered_dense: bool,
 }
 
+#[cfg(test)]
 impl KeyRun {
     fn active(&self) -> &[RunEntry] {
         &self.rows[self.start..]
@@ -127,11 +136,13 @@ impl KeyRun {
     }
 }
 
+#[cfg(test)]
 struct Funding {
     credit: MemoryReservation,
     resident: AtomicUsize,
 }
 
+#[cfg(test)]
 pub(super) struct NativeIndex {
     entries: HashTable<u32>,
     slots: Vec<Option<KeyRun>>,
@@ -141,6 +152,7 @@ pub(super) struct NativeIndex {
     funding: Arc<Funding>,
 }
 
+#[cfg(test)]
 impl NativeIndex {
     fn owner_bytes() -> Option<usize> {
         std::alloc::Layout::new::<[AtomicUsize; 2]>()
@@ -816,6 +828,7 @@ impl WindowCursor {
     }
 }
 
+#[cfg(test)]
 fn same_key(stored: &FramedKey, key: &FramedKey) -> bool {
     match (stored.address(), key.address()) {
         (Some(left), Some(right)) => left == right && std::ptr::eq(stored, key),
@@ -825,6 +838,7 @@ fn same_key(stored: &FramedKey, key: &FramedKey) -> bool {
     }
 }
 
+#[cfg(test)]
 fn insertion_position(run: &[RunEntry], entry: RunEntry) -> usize {
     if run
         .last()
@@ -868,6 +882,7 @@ fn boundary(time: EventTime, bound: EventTime, inclusive: bool) -> bool {
     }
 }
 
+#[cfg(test)]
 fn vector_capacity(current: usize, required: usize) -> Option<usize> {
     if required <= current {
         return Some(current);
@@ -877,10 +892,12 @@ fn vector_capacity(current: usize, required: usize) -> Option<usize> {
         .map(|capacity| capacity.max(4))
 }
 
+#[cfg(test)]
 fn checked_slots(required: usize) -> Option<usize> {
     (u64::try_from(required).ok()? <= u64::from(u32::MAX) + 1).then_some(required)
 }
 
+#[cfg(test)]
 fn charge_sum<const N: usize>(terms: [Option<usize>; N]) -> Option<usize> {
     terms.into_iter().try_fold(
         BASE_BYTES.checked_add(NativeIndex::owner_bytes()?)?,
@@ -888,18 +905,22 @@ fn charge_sum<const N: usize>(terms: [Option<usize>; N]) -> Option<usize> {
     )
 }
 
+#[cfg(test)]
 fn doubled(bytes: Option<usize>) -> Option<usize> {
     bytes.and_then(|bytes| bytes.checked_mul(2))
 }
 
+#[cfg(test)]
 fn capacity_bytes(capacity: usize, width: usize) -> Option<usize> {
     capacity.checked_mul(width)
 }
 
+#[cfg(test)]
 fn capacity_peak(old: usize, new: usize, width: usize) -> Option<usize> {
     capacity_bytes(old.checked_add(new)?, width)
 }
 
+#[cfg(test)]
 fn table_charge(entries: usize) -> Option<usize> {
     if entries == 0 {
         return Some(0);
@@ -912,11 +933,13 @@ fn table_charge(entries: usize) -> Option<usize> {
     buckets.checked_mul(size_of::<u32>() + 1)?.checked_add(64)
 }
 
+#[cfg(test)]
 pub(super) struct AppendCredit {
     funding: Arc<Funding>,
     bytes: usize,
 }
 
+#[cfg(test)]
 impl AppendCredit {
     pub(super) fn commit(mut self) {
         let resident = self.funding.resident.load(Ordering::Relaxed);
@@ -927,6 +950,7 @@ impl AppendCredit {
     }
 }
 
+#[cfg(test)]
 impl Drop for AppendCredit {
     fn drop(&mut self) {
         self.funding.credit.shrink(self.bytes);
@@ -935,6 +959,7 @@ impl Drop for AppendCredit {
 
 /// A violated monotone-with-gaps invariant is an internal error, never a
 /// silent mis-tombstone (spec FR15).
+#[cfg(test)]
 fn truncation_invariant(name: &str, message: &str) -> crate::CalcFlowError {
     crate::CalcFlowError::Internal {
         message: format!("stream Join {name:?} native index truncation: {message}"),

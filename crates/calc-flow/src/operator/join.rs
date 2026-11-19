@@ -2693,50 +2693,61 @@ mod tests {
         assert_eq!(metadata["metrics"]["left"]["retained_rows"], 0);
     }
 }
-use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
-    fmt,
-    io::Cursor,
-    mem::size_of,
-    sync::Arc,
-    time::Duration,
-};
+#[cfg(test)]
+use std::{collections::BTreeMap, io::Cursor, mem::size_of};
+use std::{collections::BTreeSet, fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use datafusion::arrow::{
     array::{
-        Array, ArrayAccessor, ArrayRef, BinaryArray, BinaryViewArray, BooleanArray,
-        DictionaryArray, FixedSizeListArray, LargeBinaryArray, LargeListArray, LargeListViewArray,
-        LargeStringArray, ListArray, ListViewArray, MapArray, PrimitiveArray, RunArray,
-        StringArray, StringViewArray, StructArray, TimestampMicrosecondArray,
-        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt64Array,
-        UnionArray, new_empty_array,
+        Array, ArrayAccessor, ArrayRef, BinaryArray, BinaryViewArray, DictionaryArray,
+        FixedSizeListArray, LargeBinaryArray, LargeListArray, LargeListViewArray, LargeStringArray,
+        ListArray, ListViewArray, MapArray, PrimitiveArray, RunArray, StringArray, StringViewArray,
+        StructArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+        TimestampNanosecondArray, TimestampSecondArray, UnionArray, new_empty_array,
     },
     compute::concat,
     datatypes::{
-        ArrowPrimitiveType, DataType, Date32Type, Date64Type, Field, Int8Type, Int16Type,
-        Int32Type, Int64Type, IntervalUnit, Schema, SchemaRef, TimeUnit, TimestampMicrosecondType,
-        TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, UInt8Type,
-        UInt16Type, UInt32Type, UInt64Type,
+        ArrowPrimitiveType, DataType, Field, Int32Type, IntervalUnit, Schema, SchemaRef, TimeUnit,
+        TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+        TimestampSecondType,
     },
-    ipc::reader::StreamReader,
     record_batch::RecordBatch,
 };
-use datafusion::execution::memory_pool::{MemoryReservation, UnboundedMemoryPool};
+#[cfg(test)]
+use datafusion::arrow::{
+    array::{BooleanArray, UInt64Array},
+    datatypes::{
+        Date32Type, Date64Type, Int8Type, Int16Type, Int64Type, UInt8Type, UInt16Type, UInt32Type,
+        UInt64Type,
+    },
+    ipc::reader::StreamReader,
+};
+use datafusion::execution::memory_pool::MemoryReservation;
+#[cfg(test)]
+use datafusion::execution::memory_pool::UnboundedMemoryPool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 
 use crate::{
-    Batch, BatchKind, BatchMetadata, CalcFlowError, DataFusionConfig, Epoch, EventTime,
-    IngressProgress, IngressProgressSnapshot, JsonMap, OperatorStateSnapshot, Port, Result,
-    StateSegment, StreamCollector, StreamOperator, StreamOperatorContext, UdfRegistrySnapshot,
+    Batch, BatchKind, CalcFlowError, DataFusionConfig, Epoch, EventTime, IngressProgress,
+    IngressProgressSnapshot, JsonMap, OperatorStateSnapshot, Port, Result, StreamCollector,
+    StreamOperator, StreamOperatorContext, UdfRegistrySnapshot,
+};
+#[cfg(test)]
+use crate::{
+    BatchMetadata, StateSegment, StreamJobContext,
     expression::{ValidatedQuery, parse_select_query},
 };
+
+#[cfg(test)]
+use std::collections::HashMap;
 
 use super::{OperatorMetadata, StreamRuntimeState, is_portable_identifier, validate_operator_name};
 
 #[derive(Default)]
+#[cfg(test)]
 struct KeyDiagnostics {
     dictionary_grant_refusals: u64,
     needs_rebuild_routes: u64,
@@ -2919,6 +2930,7 @@ impl JoinTimeBounds {
         Duration::from_micros(self.after_micros)
     }
 
+    #[cfg(test)]
     pub(crate) fn contains_pair(self, left_micros: i64, right_micros: i64) -> bool {
         let left = i128::from(left_micros);
         let right = i128::from(right_micros);
@@ -3272,25 +3284,38 @@ pub struct StreamJoinOperator {
     output_ports: [Port; 1],
     logical_output_schema: SchemaRef,
     output_columns: Option<Arc<[usize]>>,
+    #[cfg(test)]
     payload_projection: Option<Arc<state_projection::Layout>>,
+    #[cfg(test)]
     checkpoint_identity: checkpoint_v2::HistoryIdentity,
     compiled: CompiledJoin,
+    #[cfg(test)]
     payload_schema_bytes: [Option<usize>; 2],
+    #[cfg(test)]
     payload_native_eligible: bool,
     runtime: StreamRuntimeState,
     state: StreamJoinState,
     run_core: Option<Box<production::RunCore>>,
     #[cfg(test)]
     run_core_enabled: RunCoreMode,
+    #[cfg(test)]
     retained_key_cache: RetainedKeyCache,
+    #[cfg(test)]
     key_dictionary: key_dictionary::Dictionary,
+    #[cfg(test)]
     key_bindings: key_dictionary::Bindings,
+    #[cfg(test)]
     key_work: KeyDiagnostics,
+    #[cfg(test)]
     key_dictionary_needs_rebuild: bool,
+    #[cfg(test)]
     legacy_restore_capture: Option<key_restore::Capture>,
     ingress_progress: IngressProgressSnapshot,
+    #[cfg(test)]
     compaction_release: Option<tokio::sync::oneshot::Receiver<()>>,
+    #[cfg(test)]
     compaction_cleanup: Option<crate::runtime::streaming::gather_work::AttemptCleanup>,
+    #[cfg(test)]
     probe_control: Option<Arc<MemoryReservation>>,
     #[cfg(test)]
     probe_test_hook: Option<data_work::TestHook>,
@@ -3300,7 +3325,9 @@ pub struct StreamJoinOperator {
     probe_result_test_gate: Option<Arc<data_work::ResultTestGate>>,
     #[cfg(test)]
     key_restore_test_hook: Option<key_restore::TestHook>,
+    #[cfg(test)]
     v2_containers: Option<Arc<checkpoint_v2::ContainerFunding>>,
+    #[cfg(test)]
     v2_writer: checkpoint_v2::WriterState,
     #[cfg(test)]
     checkpoint_v1_test_producer: bool,
@@ -3320,26 +3347,31 @@ pub struct StreamJoinOperator {
     checkpoint_writer_base_test_hook: Option<checkpoint_v2::WriterTestHook>,
 }
 
+#[cfg(test)]
 const MAX_RETAINED_KEY_CACHE_BYTES_PER_SIDE: usize = 32 * 1024 * 1024;
 
+#[cfg(test)]
 #[derive(Default)]
 struct RetainedKeyCache {
     left: Option<CachedRetainedKeys>,
     right: Option<CachedRetainedKeys>,
 }
 
+#[cfg(test)]
 struct CachedRetainedKeys {
     row_ids: Vec<u64>,
     batch: RecordBatch,
     scratch_funding: Option<Arc<sql_key_scratch::ScratchFunding>>,
 }
 
+#[cfg(test)]
 struct SqlKeyOwners {
     _retained: Arc<StateRows>,
     admitted: AdmittedBatch,
     scratch: Option<Arc<sql_key_scratch::ScratchFunding>>,
 }
 
+#[cfg(test)]
 impl SqlKeyOwners {
     fn finish(self) -> AdmittedBatch {
         let Self {
@@ -3359,21 +3391,28 @@ struct CompiledJoin {
     right_key_indices: Vec<usize>,
     left_event_time_index: usize,
     right_event_time_index: usize,
+    #[cfg(test)]
     equality_query: ValidatedQuery,
 }
 
 /// Scratch-table alias holding the admitted rows of the current input batch.
+#[cfg(test)]
 const PROBE_TABLE: &str = "probe_input";
 /// Scratch-table alias holding the opposite side's retained state rows.
+#[cfg(test)]
 const STATE_TABLE: &str = "state_input";
 /// Renamed key column prefix shared by both scratch tables.
+#[cfg(test)]
 const KEY_COLUMN_PREFIX: &str = "__cf_join_key_";
 /// Position of one admitted row inside [`PROBE_TABLE`].
+#[cfg(test)]
 const PROBE_POS_COLUMN: &str = "__cf_join_pos";
 /// Retained-state row id inside [`STATE_TABLE`].
+#[cfg(test)]
 const STATE_RID_COLUMN: &str = "__cf_join_row_id";
 
 /// One incoming row that passed null-key, null-event-time, and lateness admission.
+#[cfg(test)]
 struct AdmittedRow {
     record: columnar::RowPayload,
     event_time: EventTime,
@@ -3383,7 +3422,7 @@ struct AdmittedRow {
 
 /// Scratch accumulator for one input batch's admission pass.
 struct AdmissionBundle {
-    quantum: columnar::Quantum,
+    quantum: columnar_quantum::Quantum,
     next_row_id: u64,
     metrics: SideMetrics,
     admitted: AdmittedBatch,
@@ -3412,6 +3451,7 @@ struct MatchedPair {
 }
 
 #[derive(Clone)]
+#[cfg(test)]
 struct StoredRow {
     record: columnar::RowPayload,
     event_time: EventTime,
@@ -3428,6 +3468,7 @@ enum JoinSide {
 }
 
 impl JoinSide {
+    #[cfg(test)]
     const fn as_str(self) -> &'static str {
         match self {
             JoinSide::Left => "left",
@@ -3569,6 +3610,7 @@ impl PendingLog {
 /// Per-side compact columnar tombstone list (spec FR2): one entry per evicted
 /// row whose `row_id` lies below the side's capture watermark. Entries drain
 /// at each capture; the peak stays reservation-covered.
+#[cfg(test)]
 #[derive(Default)]
 struct Tombstones {
     row_ids: Vec<u64>,
@@ -3578,6 +3620,7 @@ struct Tombstones {
     charged: usize,
 }
 
+#[cfg(test)]
 impl Tombstones {
     fn len(&self) -> usize {
         self.row_ids.len()
@@ -3688,6 +3731,7 @@ impl Tombstones {
 /// `checkpoint` only shares the prepared segment allocations and encodes the
 /// derived delta.
 #[derive(Default)]
+#[cfg(test)]
 struct DeltaTracking {
     base: BTreeMap<&'static str, StateSegment>,
     segments: BTreeMap<(u64, &'static str), StateSegment>,
@@ -3698,6 +3742,7 @@ struct DeltaTracking {
     needs_compaction: bool,
 }
 
+#[cfg(test)]
 impl DeltaTracking {
     fn restored(
         next_row_ids: [u64; 2],
@@ -3782,19 +3827,26 @@ struct JoinMetrics {
 
 #[derive(Default)]
 struct StreamJoinState {
+    #[cfg(test)]
     left: RetainedRows,
+    #[cfg(test)]
     right: RetainedRows,
+    #[cfg(test)]
     left_expirations: ExpirationIndex,
+    #[cfg(test)]
     right_expirations: ExpirationIndex,
     next_left_row_id: u64,
     next_right_row_id: u64,
     next_output_sequence: u64,
     metrics: JoinMetrics,
     ended: bool,
+    #[cfg(test)]
     last_checkpoint_epoch: Option<Epoch>,
+    #[cfg(test)]
     deltas: DeltaTracking,
 }
 
+#[cfg(test)]
 #[derive(Default)]
 struct RetainedRows(
     Arc<StateRows>,
@@ -3802,6 +3854,7 @@ struct RetainedRows(
     columnar::SparseQueue,
 );
 
+#[cfg(test)]
 impl From<Vec<StoredRow>> for RetainedRows {
     fn from(rows: Vec<StoredRow>) -> Self {
         let mut state = StateRows::default();
@@ -3810,6 +3863,7 @@ impl From<Vec<StoredRow>> for RetainedRows {
     }
 }
 
+#[cfg(test)]
 impl RetainedRows {
     fn extend(&mut self, chunks: retained::Append, dictionary: &key_dictionary::Dictionary) {
         for owner in chunks.payload_owners() {
@@ -3849,6 +3903,7 @@ impl RetainedRows {
     }
 }
 
+#[cfg(test)]
 impl std::ops::Deref for RetainedRows {
     type Target = StateRows;
     fn deref(&self) -> &Self::Target {
@@ -3856,6 +3911,7 @@ impl std::ops::Deref for RetainedRows {
     }
 }
 
+#[cfg(test)]
 impl std::ops::DerefMut for RetainedRows {
     fn deref_mut(&mut self) -> &mut Self::Target {
         Arc::get_mut(&mut self.0).expect("compaction input released before retained mutation")
@@ -3871,6 +3927,7 @@ impl IntoIterator for RetainedRows {
     }
 }
 
+#[cfg(test)]
 impl Rows for RetainedRows {
     fn batches(&self) -> Box<dyn Iterator<Item = retained::RowBatch<'_>> + Send + '_> {
         self.0.batches()
@@ -3948,6 +4005,7 @@ type SchemaTestHook = MetadataTestHook;
 type DecodedRowTestHook =
     Arc<dyn Fn(Option<&MemoryReservation>, Option<(usize, usize)>, bool, bool) + Send + Sync>;
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct RestoreSchema<'a> {
     schema: &'a Schema,
@@ -3964,35 +4022,49 @@ struct RestoreSchema<'a> {
     decoded_owned_work: bool,
 }
 
-#[cfg(feature = "benchmark-checkpoint-diagnostic")]
-mod benchmark_checkpoint;
-#[cfg(feature = "benchmark-checkpoint-diagnostic")]
-pub(crate) use benchmark_checkpoint::run_checkpoint_history_diagnostic;
-
+#[cfg(test)]
 mod admission_charge;
+mod admission_flat;
 pub(crate) mod admission_masks;
 mod admitted;
 mod finite;
-use admitted::{AdmittedBatch, AdmittedRows, PayloadRef};
+#[cfg(test)]
+use admitted::AdmittedRows;
+use admitted::{AdmittedBatch, PayloadRef};
+#[cfg(test)]
 mod borrowed_key;
+#[cfg(test)]
 mod checkpoint_compaction;
+#[cfg(test)]
 mod checkpoint_v2;
+#[cfg(test)]
 mod columnar;
+mod columnar_quantum;
+#[cfg(test)]
 mod data_work;
+#[cfg(test)]
 mod expiration;
 mod matches;
+#[cfg(test)]
 mod retained;
 mod runs;
+#[cfg(test)]
 use expiration::ExpirationIndex;
+#[cfg(test)]
 use retained::{Rows, StateRows};
-#[cfg(feature = "benchmark-internals")]
-mod benchmark_dictionary;
+#[cfg(test)]
 mod historical_validation;
+#[cfg(test)]
 mod key_arena;
+#[cfg(test)]
 mod key_dictionary;
+#[cfg(test)]
 mod key_lifecycle;
+#[cfg(test)]
 mod key_restore;
+#[cfg(test)]
 mod materialization;
+#[cfg(test)]
 mod metadata_validation;
 mod native_dictionary;
 mod native_lookup;
@@ -4004,10 +4076,14 @@ mod row_ipc;
 #[cfg(test)]
 #[path = "join/run_tests.rs"]
 mod run_tests;
+#[cfg(test)]
 mod sql_key_scratch;
+#[cfg(test)]
 mod state_projection;
+#[cfg(test)]
 mod typed_key;
 
+#[cfg(test)]
 struct PreparedMatches {
     pairs: matches::Selection,
     keys: Option<native_lookup::NativeKeys>,
@@ -4015,6 +4091,7 @@ struct PreparedMatches {
     deferred: Option<Box<data_work::DeferredProbe>>,
 }
 
+#[cfg(test)]
 impl PreparedMatches {
     fn legacy(pairs: Vec<MatchedPair>) -> Self {
         Self {
@@ -4026,6 +4103,7 @@ impl PreparedMatches {
     }
 }
 
+#[cfg(test)]
 struct PreparedJoinBatch {
     output: matches::Selection,
     deferred: Option<Box<data_work::DeferredProbe>>,
@@ -4061,9 +4139,12 @@ impl StreamJoinOperator {
         validate_payload_charge_support(&left_schema, "left")?;
         validate_payload_charge_support(&right_schema, "right")?;
         let (output_schema, compiled) = compile_schemas(&left_schema, &right_schema, &spec)?;
+        #[cfg(test)]
         let payload_native_eligible = native_lookup::eligible(&compiled, &left_schema);
+        #[cfg(test)]
         let checkpoint_identity =
             checkpoint_v2::HistoryIdentity::full([&left_schema, &right_schema]);
+        #[cfg(test)]
         let payload_schema_bytes = [
             columnar::schema_inventory(&left_schema),
             columnar::schema_inventory(&right_schema),
@@ -4071,7 +4152,9 @@ impl StreamJoinOperator {
         Ok(Self {
             name: name.into(),
             spec,
+            #[cfg(test)]
             payload_schema_bytes,
+            #[cfg(test)]
             payload_native_eligible,
             input_ports: [
                 Port::with_schema_ref("left", BatchKind::Table, true, Some(left_schema))?,
@@ -4085,7 +4168,9 @@ impl StreamJoinOperator {
             )?],
             logical_output_schema: output_schema,
             output_columns: None,
+            #[cfg(test)]
             payload_projection: None,
+            #[cfg(test)]
             checkpoint_identity,
             compiled,
             runtime: StreamRuntimeState::new(),
@@ -4093,15 +4178,24 @@ impl StreamJoinOperator {
             run_core: None,
             #[cfg(test)]
             run_core_enabled: RunCoreMode::Legacy,
+            #[cfg(test)]
             retained_key_cache: RetainedKeyCache::default(),
+            #[cfg(test)]
             key_dictionary: key_dictionary::Dictionary::default(),
+            #[cfg(test)]
             key_bindings: key_dictionary::Bindings::default(),
+            #[cfg(test)]
             key_work: KeyDiagnostics::default(),
+            #[cfg(test)]
             key_dictionary_needs_rebuild: false,
+            #[cfg(test)]
             legacy_restore_capture: None,
             ingress_progress: IngressProgressSnapshot::default(),
+            #[cfg(test)]
             compaction_release: None,
+            #[cfg(test)]
             compaction_cleanup: None,
+            #[cfg(test)]
             probe_control: None,
             #[cfg(test)]
             probe_test_hook: None,
@@ -4111,7 +4205,9 @@ impl StreamJoinOperator {
             probe_result_test_gate: None,
             #[cfg(test)]
             key_restore_test_hook: None,
+            #[cfg(test)]
             v2_containers: None,
+            #[cfg(test)]
             v2_writer: checkpoint_v2::WriterState::with_identity(checkpoint_identity),
             #[cfg(test)]
             checkpoint_gate: None,
@@ -4199,9 +4295,21 @@ impl StreamJoinOperator {
     }
 
     pub(crate) fn validate_terminal_recovery_state(&self) -> Result<()> {
+        let empty = self.run_core.as_ref().map_or_else(
+            || {
+                #[cfg(test)]
+                {
+                    self.state.left.is_empty() && self.state.right.is_empty()
+                }
+                #[cfg(not(test))]
+                {
+                    true
+                }
+            },
+            |core| core.rows(JoinSide::Left) == 0 && core.rows(JoinSide::Right) == 0,
+        );
         if self.state.ended
-            && self.state.left.is_empty()
-            && self.state.right.is_empty()
+            && empty
             && self.state.metrics.left.retained_rows == 0
             && self.state.metrics.right.retained_rows == 0
             && self.state.metrics.left.retained_bytes == 0
@@ -4306,6 +4414,7 @@ impl StreamJoinOperator {
             .transpose()
     }
 
+    #[cfg(test)]
     async fn prepare_batch(
         &mut self,
         ingress: &str,
@@ -4351,6 +4460,7 @@ impl StreamJoinOperator {
         Ok(charges)
     }
 
+    #[cfg(test)]
     async fn finish_prepared(
         &mut self,
         plan: &SidePlan,
@@ -4452,6 +4562,7 @@ impl StreamJoinOperator {
         })
     }
 
+    #[cfg(test)]
     fn reserve_retained_append(
         &mut self,
         incoming_is_left: bool,
@@ -4468,6 +4579,7 @@ impl StreamJoinOperator {
         Ok(None)
     }
 
+    #[cfg(test)]
     async fn prepare_chunk_state(
         &mut self,
         incoming_is_left: bool,
@@ -4533,7 +4645,7 @@ impl StreamJoinOperator {
             )
         };
         Ok(AdmissionBundle {
-            quantum: columnar::Quantum::default(),
+            quantum: columnar_quantum::Quantum::default(),
             next_row_id,
             metrics,
             admitted: AdmittedBatch::reserve(self, batch)?,
@@ -4568,33 +4680,37 @@ impl StreamJoinOperator {
         source: (&RecordBatch, &SidePlan, &str, usize),
         context: &StreamOperatorContext<'_>,
         bundle: &mut AdmissionBundle,
-        quantum: &mut columnar::Quantum,
+        quantum: &mut columnar_quantum::Quantum,
     ) -> Result<()> {
         let (record, plan, ingress, source_row_base) = source;
         let index = bundle
             .admitted
             .begin_record(bundle.next_row_id, source_row_base);
+        #[cfg(test)]
         let copy = self
             .can_copy_admitted_payload(record, plan, context, quantum)
             .await?;
         self.admit_legacy_record((record, plan, ingress, index), context, bundle, quantum)
             .await?;
-        let range = bundle.admitted.group_range(index);
-        if copy && !range.is_empty() {
-            let rows = admitted::AdmittedGroup::new(&bundle.admitted, range);
-            if let Some(chunk) = self
-                .owned_payload(
-                    record,
-                    plan.port_index,
-                    columnar::SelectedRows::Admitted(rows),
-                    context,
-                    quantum,
-                )
-                .await?
-            {
-                bundle
-                    .admitted
-                    .replace(index, columnar::RowPayload::Shared { chunk, row: 0 });
+        #[cfg(test)]
+        {
+            let range = bundle.admitted.group_range(index);
+            if copy && !range.is_empty() {
+                let rows = admitted::AdmittedGroup::new(&bundle.admitted, range);
+                if let Some(chunk) = self
+                    .owned_payload(
+                        record,
+                        plan.port_index,
+                        columnar::SelectedRows::Admitted(rows),
+                        context,
+                        quantum,
+                    )
+                    .await?
+                {
+                    bundle
+                        .admitted
+                        .replace(index, columnar::RowPayload::Shared { chunk, row: 0 });
+                }
             }
         }
         bundle.admitted.complete_record();
@@ -4634,7 +4750,7 @@ impl StreamJoinOperator {
         source: (&RecordBatch, &SidePlan, &str, usize),
         context: &StreamOperatorContext<'_>,
         bundle: &mut AdmissionBundle,
-        quantum: &mut columnar::Quantum,
+        quantum: &mut columnar_quantum::Quantum,
     ) -> Result<()> {
         let (record, plan, ingress, source_row_base) = source;
         let times = BatchEventTimes::new(
@@ -4674,7 +4790,7 @@ impl StreamJoinOperator {
         block: (usize, usize, &admission_masks::AdmissionMasks),
         context: &StreamOperatorContext<'_>,
         bundle: &mut AdmissionBundle,
-        quantum: &mut columnar::Quantum,
+        quantum: &mut columnar_quantum::Quantum,
     ) -> Result<()> {
         let (_, _, ingress, record_index) = source;
         let (start, length, masks) = block;
@@ -4705,7 +4821,7 @@ impl StreamJoinOperator {
         row: (usize, usize, RowAdmission, bool),
         context: &StreamOperatorContext<'_>,
         bundle: &mut AdmissionBundle,
-        quantum: &mut columnar::Quantum,
+        quantum: &mut columnar_quantum::Quantum,
     ) -> Result<()> {
         let (record_index, physical, admission, retain) = row;
         match admission {
@@ -4728,7 +4844,7 @@ impl StreamJoinOperator {
         block: (usize, usize, &admission_masks::AdmissionMasks),
         context: &StreamOperatorContext<'_>,
         bundle: &mut AdmissionBundle,
-        quantum: &mut columnar::Quantum,
+        quantum: &mut columnar_quantum::Quantum,
     ) -> Result<()> {
         let (start, length, masks) = block;
         let mut offset = 0;
@@ -4749,6 +4865,7 @@ impl StreamJoinOperator {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn evaluate_matches(
         &mut self,
         plan: &SidePlan,
@@ -4785,6 +4902,7 @@ impl StreamJoinOperator {
         self.serial_matches(plan, admitted, keys, context).await
     }
 
+    #[cfg(test)]
     async fn serial_matches(
         &mut self,
         plan: &SidePlan,
@@ -4815,6 +4933,7 @@ impl StreamJoinOperator {
         })
     }
 
+    #[cfg(test)]
     async fn legacy_matches(
         &mut self,
         plan: &SidePlan,
@@ -4826,6 +4945,7 @@ impl StreamJoinOperator {
         self.ordered_sql_matches(plan, admitted, pairs)
     }
 
+    #[cfg(test)]
     fn ordered_sql_matches(
         &mut self,
         plan: &SidePlan,
@@ -4848,6 +4968,7 @@ impl StreamJoinOperator {
         Ok(matched)
     }
 
+    #[cfg(test)]
     async fn sql_key_pairs(
         &mut self,
         plan: &SidePlan,
@@ -4868,6 +4989,7 @@ impl StreamJoinOperator {
         decode_key_pairs(&result)
     }
 
+    #[cfg(test)]
     async fn sql_key_pairs_owned(
         &mut self,
         plan: &SidePlan,
@@ -4915,6 +5037,7 @@ impl StreamJoinOperator {
         }
     }
 
+    #[cfg(test)]
     async fn run_owned_key_query(
         &mut self,
         plan: &SidePlan,
@@ -4940,6 +5063,7 @@ impl StreamJoinOperator {
         }
     }
 
+    #[cfg(test)]
     fn finish_owned_key_failure(
         &mut self,
         failure: crate::datafusion::owned::Failure<SqlKeyOwners>,
@@ -4957,6 +5081,7 @@ impl StreamJoinOperator {
         }
     }
 
+    #[cfg(test)]
     fn discard_paid_key_cache(&mut self, plan: &SidePlan) {
         let cached = if plan.incoming_is_left {
             &mut self.retained_key_cache.right
@@ -4971,6 +5096,7 @@ impl StreamJoinOperator {
         }
     }
 
+    #[cfg(test)]
     async fn legacy_key_retry(
         &mut self,
         plan: &SidePlan,
@@ -4983,6 +5109,7 @@ impl StreamJoinOperator {
         }
     }
 
+    #[cfg(test)]
     fn opposite_state_keys(&mut self, plan: &SidePlan) -> Result<RecordBatch> {
         let declared = Arc::clone(self.retained_schema(1 - plan.port_index));
         let compiled = self.retained_compiled().clone();
@@ -5026,6 +5153,7 @@ impl StreamJoinOperator {
         Ok(batch)
     }
 
+    #[cfg(test)]
     async fn owned_state_keys(
         &mut self,
         plan: &SidePlan,
@@ -5076,6 +5204,7 @@ impl StreamJoinOperator {
             })
     }
 
+    #[cfg(test)]
     fn validate_state_admission(
         &mut self,
         incoming_is_left: bool,
@@ -5090,6 +5219,7 @@ impl StreamJoinOperator {
         )
     }
 
+    #[cfg(test)]
     fn validate_state_totals(
         &mut self,
         incoming_is_left: bool,
@@ -5132,6 +5262,7 @@ impl StreamJoinOperator {
         Ok(())
     }
 
+    #[cfg(test)]
     fn validate_restored_limits(&self, left: &[StoredRow], right: &[StoredRow]) -> Result<()> {
         for (side, rows) in [("left", left), ("right", right)] {
             let row_count =
@@ -5167,6 +5298,7 @@ impl StreamJoinOperator {
     /// while `commit_prepared` never runs. The failure aborts the operator task
     /// and job convergence discards the run's state, so no resumption observes
     /// the emitted-but-uncommitted gap.
+    #[cfg(test)]
     async fn emit_prepared(
         &mut self,
         prepared: &PreparedJoinBatch,
@@ -5192,6 +5324,7 @@ impl StreamJoinOperator {
         self.emit_matched(prepared, context, output).await
     }
 
+    #[cfg(test)]
     async fn emit_matched(
         &mut self,
         prepared: &PreparedJoinBatch,
@@ -5242,12 +5375,14 @@ impl StreamJoinOperator {
         Ok(emitted)
     }
 
+    #[cfg(test)]
     fn prepared_emitted_count(current: u64, rows: usize, operator_id: &str) -> Result<u64> {
         let emitted =
             u64::try_from(rows).map_err(|_| counter_overflow(operator_id, "emitted rows"))?;
         checked_metric(current, emitted, operator_id, "emitted_match_rows")
     }
 
+    #[cfg(test)]
     fn commit_prepared(
         &mut self,
         ingress: &str,
@@ -5310,6 +5445,7 @@ impl StreamJoinOperator {
         Ok(())
     }
 
+    #[cfg(test)]
     fn commit_key_references(
         &mut self,
         dictionary: Option<key_dictionary::Pending>,
@@ -5329,6 +5465,7 @@ impl StreamJoinOperator {
         });
     }
 
+    #[cfg(test)]
     fn evict_progress(
         &mut self,
         ingress: &str,
@@ -5403,6 +5540,7 @@ impl StreamJoinOperator {
         })
     }
 
+    #[cfg(test)]
     fn decode_restored_sides(
         &self,
         snapshot: &OperatorStateSnapshot,
@@ -5429,6 +5567,7 @@ impl StreamJoinOperator {
         )
     }
 
+    #[cfg(test)]
     fn restore_schema<'a>(
         &'a self,
         schemas: Option<&'a metadata_validation::schema::OwnedExpectedSchemas>,
@@ -5459,6 +5598,50 @@ impl StreamJoinOperator {
             .expect("stream Join inputs always have an exact schema")
     }
 
+    pub(super) fn retained_schema(&self, side: usize) -> &SchemaRef {
+        #[cfg(test)]
+        if let Some(layout) = &self.payload_projection {
+            return &layout.schemas[side];
+        }
+        self.input_schema(side)
+    }
+
+    fn retained_compiled(&self) -> &CompiledJoin {
+        #[cfg(test)]
+        if let Some(layout) = &self.payload_projection {
+            return &layout.compiled;
+        }
+        &self.compiled
+    }
+
+    pub(super) fn optional_credit(&mut self, bytes: usize) -> Result<Option<MemoryReservation>> {
+        let credit = self
+            .runtime
+            .runtime()?
+            .incremental_reservation("stream-join-native")
+            .new_empty();
+        match credit.try_grow(bytes) {
+            Ok(()) => Ok(Some(credit)),
+            Err(datafusion::common::DataFusionError::ResourcesExhausted(_)) => Ok(None),
+            Err(error) => Err(CalcFlowError::DataFusion {
+                node_id: Some(self.name.clone()),
+                message: error.to_string(),
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::operator::join) async fn project_admitted_payloads(
+        &mut self,
+        admitted: &mut AdmittedBatch,
+        side: usize,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        self.project_admitted_payloads_legacy(admitted, side, context)
+            .await
+    }
+
+    #[cfg(test)]
     fn validate_restored_join_rows(
         &self,
         metadata: &metadata_validation::ValidatedMetadata,
@@ -5498,18 +5681,18 @@ impl fmt::Debug for StreamJoinOperator {
 }
 
 impl StreamJoinOperator {
-    async fn begin_data(&mut self, context: &StreamOperatorContext<'_>) -> Result<()> {
-        context.check_cancelled()?;
-        self.await_compaction_release(context).await?;
-        if !context.job().checkpointing() {
-            self.v2_writer.invalidate_history()?;
-        }
-        Ok(())
-    }
-
     #[cfg(test)]
     fn enable_run_core(&mut self) {
         self.run_core_enabled = RunCoreMode::Columnar;
+    }
+
+    fn initialize_run_core(&mut self) -> Result<()> {
+        #[cfg(test)]
+        let core = production::RunCore::from_legacy(self)?;
+        #[cfg(not(test))]
+        let core = production::RunCore::new(self)?;
+        self.run_core = Some(Box::new(core));
+        Ok(())
     }
 
     async fn process_runs(
@@ -5520,7 +5703,7 @@ impl StreamJoinOperator {
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
         if self.run_core.is_none() {
-            self.run_core = Some(Box::new(production::RunCore::from_legacy(self)?));
+            self.initialize_run_core()?;
         }
         let mut core = self.run_core.take().expect("initialized run core");
         let result = core.process(self, ingress, batch, context, output).await;
@@ -5538,6 +5721,7 @@ impl StreamJoinOperator {
         result
     }
 
+    #[cfg(test)]
     async fn prepare_data_append(
         &mut self,
         ingress: &str,
@@ -5577,6 +5761,7 @@ impl StreamJoinOperator {
         Ok((prepared, expiration_append))
     }
 
+    #[cfg(test)]
     async fn finish_data(
         &mut self,
         ingress: &str,
@@ -5615,14 +5800,7 @@ impl StreamJoinOperator {
         Ok(())
     }
 
-    async fn await_progress_release(&mut self, context: &StreamOperatorContext<'_>) -> Result<()> {
-        if self.compaction_release.is_none() && self.compaction_cleanup.is_none() {
-            context.check_cancelled()
-        } else {
-            self.await_compaction_release(context).await
-        }
-    }
-
+    #[cfg(test)]
     fn note_checkpoint_mutation(&mut self, checkpointing: bool) -> Result<()> {
         if checkpointing {
             self.v2_writer.changed(true)
@@ -5664,7 +5842,14 @@ impl StreamOperator for StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        self.begin_data(context).await?;
+        context.check_cancelled()?;
+        #[cfg(test)]
+        {
+            self.await_compaction_release(context).await?;
+            if !context.job().checkpointing() {
+                self.v2_writer.invalidate_history()?;
+            }
+        }
         #[cfg(not(test))]
         let use_runs = production::supported(self);
         #[cfg(test)]
@@ -5673,10 +5858,16 @@ impl StreamOperator for StreamJoinOperator {
         if use_runs {
             return self.process_runs(ingress, &batch, context, output).await;
         }
-        let (prepared, expiration_append) =
-            self.prepare_data_append(ingress, &batch, context).await?;
-        self.finish_data(ingress, prepared, expiration_append, context, output)
-            .await
+        #[cfg(test)]
+        {
+            let (prepared, expiration_append) =
+                self.prepare_data_append(ingress, &batch, context).await?;
+            return self
+                .finish_data(ingress, prepared, expiration_append, context, output)
+                .await;
+        }
+        #[cfg(not(test))]
+        self.process_runs(ingress, &batch, context, output).await
     }
 
     async fn on_ingress_progress(
@@ -5685,24 +5876,40 @@ impl StreamOperator for StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
         let progress = self.required_progress(ingress, context)?;
-        self.await_progress_release(context).await?;
-        self.note_checkpoint_mutation(context.job().checkpointing())?;
         #[cfg(test)]
-        if self.run_core.is_some() {
-            let mut core = self.run_core.take().expect("active run core");
+        if self.compaction_release.is_some() || self.compaction_cleanup.is_some() {
+            self.await_compaction_release(context).await?;
+        }
+        context.check_cancelled()?;
+        #[cfg(test)]
+        self.note_checkpoint_mutation(context.job().checkpointing())?;
+        #[cfg(not(test))]
+        let use_runs = production::supported(self);
+        #[cfg(test)]
+        let use_runs = self.run_core.is_some();
+        if use_runs {
+            if self.run_core.is_none() {
+                self.initialize_run_core()?;
+            }
+            let mut core = self.run_core.take().expect("initialized run core");
             let result = core.evict(self, ingress, progress);
             self.run_core = Some(core);
             result?;
             self.ingress_progress = context.ingress_progress().clone();
             return Ok(());
         }
-        self.evict_progress(ingress, progress, context.job().checkpointing())?;
-        self.rebuild_key_identities(context).await?;
-        if self.has_sparse_candidates() {
-            return self.repair_sparse_chunks(context).await;
+        #[cfg(test)]
+        {
+            self.evict_progress(ingress, progress, context.job().checkpointing())?;
+            self.rebuild_key_identities(context).await?;
+            if self.has_sparse_candidates() {
+                return self.repair_sparse_chunks(context).await;
+            }
+            self.ingress_progress = context.ingress_progress().clone();
+            return Ok(());
         }
-        self.ingress_progress = context.ingress_progress().clone();
-        Ok(())
+        #[cfg(not(test))]
+        unreachable!("validated stream Join keys always use native runs")
     }
 
     async fn on_watermark(
@@ -5719,7 +5926,10 @@ impl StreamOperator for StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
         _output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        context.check_cancelled()?;
+        #[cfg(test)]
         self.await_compaction_release(context).await?;
+        #[cfg(test)]
         if context.job().checkpointing() {
             self.v2_writer.changed(true)?;
             // Live rows below the watermark leave terminal tombstones in
@@ -5764,14 +5974,17 @@ impl StreamOperator for StreamJoinOperator {
         } else {
             self.v2_writer.invalidate_history()?;
         }
-        self.state.left.clear();
-        self.state.right.clear();
-        self.key_dictionary = key_dictionary::Dictionary::default();
-        self.key_bindings = key_dictionary::Bindings::default();
-        self.key_dictionary_needs_rebuild = false;
-        self.state.left_expirations = ExpirationIndex::default();
-        self.state.right_expirations = ExpirationIndex::default();
-        self.retained_key_cache = RetainedKeyCache::default();
+        #[cfg(test)]
+        {
+            self.state.left.clear();
+            self.state.right.clear();
+            self.key_dictionary = key_dictionary::Dictionary::default();
+            self.key_bindings = key_dictionary::Bindings::default();
+            self.key_dictionary_needs_rebuild = false;
+            self.state.left_expirations = ExpirationIndex::default();
+            self.state.right_expirations = ExpirationIndex::default();
+            self.retained_key_cache = RetainedKeyCache::default();
+        }
         self.state.metrics.left.retained_rows = 0;
         self.state.metrics.left.retained_bytes = 0;
         self.state.metrics.right.retained_rows = 0;
@@ -5781,16 +5994,23 @@ impl StreamOperator for StreamJoinOperator {
     }
 
     fn reset(&mut self) -> Result<()> {
+        #[cfg(test)]
         let writer = self.v2_writer.next_owner(false)?;
         self.state = StreamJoinState::default();
         self.run_core = None;
-        self.key_dictionary = key_dictionary::Dictionary::default();
-        self.key_bindings = key_dictionary::Bindings::default();
-        self.key_dictionary_needs_rebuild = false;
-        self.retained_key_cache = RetainedKeyCache::default();
+        #[cfg(test)]
+        {
+            self.key_dictionary = key_dictionary::Dictionary::default();
+            self.key_bindings = key_dictionary::Bindings::default();
+            self.key_dictionary_needs_rebuild = false;
+            self.retained_key_cache = RetainedKeyCache::default();
+        }
         self.ingress_progress = IngressProgressSnapshot::default();
-        self.v2_containers = None;
-        self.v2_writer = writer;
+        #[cfg(test)]
+        {
+            self.v2_containers = None;
+            self.v2_writer = writer;
+        }
         Ok(())
     }
 
@@ -5803,11 +6023,18 @@ impl StreamOperator for StreamJoinOperator {
             self.sync_run_checkpoint()?;
         }
         #[cfg(test)]
-        if self.checkpoint_v1_test_producer {
-            self.check_v1_test_layout()?;
-            return self.prepare_compaction(context).await;
+        {
+            if self.checkpoint_v1_test_producer {
+                self.check_v1_test_layout()?;
+                return self.prepare_compaction(context).await;
+            }
+            return self.prepare_v2_checkpoint_automatic(context).await;
         }
-        self.prepare_v2_checkpoint_automatic(context).await
+        #[cfg(not(test))]
+        {
+            let _ = context;
+            Ok(())
+        }
     }
 
     fn checkpoint(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
@@ -5816,10 +6043,22 @@ impl StreamOperator for StreamJoinOperator {
             self.sync_run_checkpoint()?;
         }
         #[cfg(test)]
-        if self.checkpoint_v1_test_producer {
-            return self.checkpoint_v1(epoch);
+        {
+            if self.checkpoint_v1_test_producer {
+                return self.checkpoint_v1(epoch);
+            }
+            self.capture_v2_checkpoint(epoch)
         }
-        self.capture_v2_checkpoint(epoch)
+        #[cfg(not(test))]
+        match self.native_checkpoint(epoch)? {
+            Some(capture) => capture.into_snapshot(),
+            None => Err(CalcFlowError::CheckpointMismatch {
+                message: format!(
+                    "stream Join {:?} native checkpoint capture is unavailable",
+                    self.name
+                ),
+            }),
+        }
     }
 
     fn restore(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()> {
@@ -5831,18 +6070,28 @@ impl StreamOperator for StreamJoinOperator {
         {
             return self.restore_native(snapshot);
         }
-        if snapshot
-            .inline_metadata
-            .get("layout_version")
-            .and_then(Value::as_u64)
-            .is_some_and(|layout| {
-                matches!(layout, 2 | 3) || layout == 1 && self.payload_projection.is_some()
-            })
+        #[cfg(test)]
         {
-            return self.restore_v2_snapshot(snapshot);
+            if snapshot
+                .inline_metadata
+                .get("layout_version")
+                .and_then(Value::as_u64)
+                .is_some_and(|layout| {
+                    matches!(layout, 2 | 3) || layout == 1 && self.payload_projection.is_some()
+                })
+            {
+                return self.restore_v2_snapshot(snapshot);
+            }
+            let metadata = self.parse_restore_metadata(snapshot)?;
+            self.install_restored_metadata(snapshot, metadata, &|| Ok(()))
         }
-        let metadata = self.parse_restore_metadata(snapshot)?;
-        self.install_restored_metadata(snapshot, metadata, &|| Ok(()))
+        #[cfg(not(test))]
+        Err(CalcFlowError::CheckpointMismatch {
+            message: format!(
+                "stream Join {:?} requires native layout 12 checkpoint state",
+                self.name
+            ),
+        })
     }
 }
 
@@ -5860,16 +6109,16 @@ impl StreamJoinOperator {
         {
             return Ok(None);
         }
-        let rebuild = match self.run_core.as_ref() {
-            None => true,
-            Some(core) => {
+        let rebuild = self.run_core.is_none();
+        #[cfg(test)]
+        let rebuild = rebuild
+            || self.run_core.as_ref().is_some_and(|core| {
                 (!self.state.left.is_empty() && core.rows(JoinSide::Left) != self.state.left.len())
                     || (!self.state.right.is_empty()
                         && core.rows(JoinSide::Right) != self.state.right.len())
-            }
-        };
+            });
         if rebuild {
-            self.run_core = Some(Box::new(production::RunCore::from_legacy(self)?));
+            self.initialize_run_core()?;
         }
         self.run_core
             .as_ref()
@@ -5877,7 +6126,38 @@ impl StreamJoinOperator {
             .native_capture(self, epoch)
     }
 
-    fn restore_native(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) async fn restore_managed_snapshot(
+        &mut self,
+        snapshot: &mut OperatorStateSnapshot,
+        job: &StreamJobContext,
+        task: Option<crate::runtime::streaming::gather_work::TaskId>,
+    ) -> Result<()> {
+        if snapshot
+            .inline_metadata
+            .get("layout_version")
+            .and_then(Value::as_u64)
+            == Some(12)
+        {
+            return self.restore_native(snapshot);
+        }
+        #[cfg(test)]
+        return self
+            .restore_managed_snapshot_legacy(snapshot, job, task)
+            .await;
+        #[cfg(not(test))]
+        {
+            let _ = (snapshot, job, task);
+            Err(CalcFlowError::CheckpointMismatch {
+                message: format!(
+                    "stream Join {:?} requires native layout 12 checkpoint state",
+                    self.name
+                ),
+            })
+        }
+    }
+
+    pub(crate) fn restore_native(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()> {
         let filtered = OperatorStateSnapshot {
             inline_metadata: snapshot
                 .inline_metadata
@@ -5896,20 +6176,31 @@ impl StreamJoinOperator {
                 ),
             });
         }
-        let epoch =
-            Epoch::new(metadata.epoch).ok_or_else(|| CalcFlowError::CheckpointMismatch {
-                message: format!("stream Join {:?} native epoch is zero", self.name),
-            })?;
+        Epoch::new(metadata.epoch).ok_or_else(|| CalcFlowError::CheckpointMismatch {
+            message: format!("stream Join {:?} native epoch is zero", self.name),
+        })?;
         let core = production::RunCore::restore_native(self, &metadata, &snapshot.segments)?;
         core.validate_native_metadata(self, &metadata)?;
         self.state = StreamJoinState {
+            #[cfg(test)]
+            left: RetainedRows::default(),
+            #[cfg(test)]
+            right: RetainedRows::default(),
+            #[cfg(test)]
+            left_expirations: ExpirationIndex::default(),
+            #[cfg(test)]
+            right_expirations: ExpirationIndex::default(),
             next_left_row_id: metadata.next_left_row_id,
             next_right_row_id: metadata.next_right_row_id,
             next_output_sequence: metadata.next_output_sequence,
             metrics: metadata.metrics,
             ended: metadata.ended,
-            last_checkpoint_epoch: Some(epoch),
-            ..StreamJoinState::default()
+            #[cfg(test)]
+            last_checkpoint_epoch: Some(
+                Epoch::new(metadata.epoch).expect("validated native epoch"),
+            ),
+            #[cfg(test)]
+            deltas: DeltaTracking::default(),
         };
         self.run_core = Some(Box::new(core));
         Ok(())
@@ -6011,6 +6302,7 @@ impl StreamJoinOperator {
         Ok(())
     }
 
+    #[cfg(test)]
     fn parse_restore_metadata(
         &self,
         snapshot: &OperatorStateSnapshot,
@@ -6035,6 +6327,7 @@ impl StreamJoinOperator {
         Ok(metadata_validation::ValidatedMetadata::from(metadata))
     }
 
+    #[cfg(test)]
     fn install_restored_metadata(
         &mut self,
         snapshot: &OperatorStateSnapshot,
@@ -6044,6 +6337,7 @@ impl StreamJoinOperator {
         self.install_restored_metadata_with_schemas(snapshot, metadata, None, check)
     }
 
+    #[cfg(test)]
     fn install_restored_metadata_with_schemas(
         &mut self,
         snapshot: &OperatorStateSnapshot,
@@ -6061,6 +6355,7 @@ impl StreamJoinOperator {
         self.install_restored_rows(snapshot, metadata, left, right, issue.into_inner(), check)
     }
 
+    #[cfg(test)]
     fn install_restored_rows(
         &mut self,
         snapshot: &OperatorStateSnapshot,
@@ -6081,6 +6376,7 @@ impl StreamJoinOperator {
         self.install_legacy_keys(state, writer, check)
     }
 
+    #[cfg(test)]
     fn prepare_restored_state(
         &self,
         snapshot: &OperatorStateSnapshot,
@@ -6119,6 +6415,7 @@ impl StreamJoinOperator {
     }
 }
 
+#[cfg(test)]
 fn mark_restored_rows(rows: [&RetainedRows; 2]) {
     for rows in rows {
         for (dense, row) in rows.indexed() {
@@ -6155,7 +6452,7 @@ impl AdmissionBundle {
             &admission_masks::AdmissionMasks,
         ),
         context: &StreamOperatorContext<'_>,
-        quantum: &mut columnar::Quantum,
+        quantum: &mut columnar_quantum::Quantum,
     ) -> Result<()> {
         let (start, offsets, masks) = block;
         self.admitted
@@ -6221,6 +6518,7 @@ impl AdmissionBundle {
     }
 }
 
+#[cfg(test)]
 fn checkpoint_metadata_compatible(
     metadata: &JoinCheckpointMetadata,
     spec: &StreamJoinSpec,
@@ -6241,6 +6539,7 @@ fn decode_join_metadata(
 }
 
 /// Recomputes retained charges and rejects checkpoints that disagree with them.
+#[cfg(test)]
 fn restored_retained_metrics_match(
     metrics: &JoinMetrics,
     left: &[StoredRow],
@@ -6261,11 +6560,13 @@ fn restored_retained_metrics_match(
     })
 }
 
+#[cfg(test)]
 fn side_retained_matches(recorded: &SideMetrics, recomputed: &SideMetrics) -> bool {
     recorded.retained_rows == recomputed.retained_rows
         && recorded.retained_bytes == recomputed.retained_bytes
 }
 
+#[cfg(test)]
 fn empty_retained_metrics(metrics: &JoinMetrics) -> bool {
     [&metrics.left, &metrics.right]
         .iter()
@@ -6273,6 +6574,7 @@ fn empty_retained_metrics(metrics: &JoinMetrics) -> bool {
 }
 
 /// Prospective (rows, bytes) charge if `retained` were installed next to `current`.
+#[cfg(test)]
 fn prospective_state_charge(
     current: &SideMetrics,
     retained: &dyn Rows,
@@ -6293,10 +6595,12 @@ fn prospective_state_charge(
     Ok((rows, bytes))
 }
 
+#[cfg(test)]
 fn state_row_count(rows: &dyn Rows, operator_id: &str) -> Result<u64> {
     u64::try_from(rows.len()).map_err(|_| counter_overflow(operator_id, "state rows"))
 }
 
+#[cfg(test)]
 async fn retained_rows(
     admitted: &dyn AdmittedRows,
     key_indices: &[usize],
@@ -6308,7 +6612,7 @@ async fn retained_rows(
 ) -> Result<Vec<StoredRow>> {
     let mut retained = Vec::new();
     let mut flow = typed_key::KeyFlow::new(Some(context));
-    let mut quantum = columnar::Quantum::default();
+    let mut quantum = columnar_quantum::Quantum::default();
     let mut group_start = 0;
     for group in admitted.groups() {
         // Fully expired groups never enter state, so neither the payload
@@ -6365,6 +6669,7 @@ async fn retained_rows(
     Ok(retained)
 }
 
+#[cfg(test)]
 async fn legacy_retained_key(
     record: PayloadRef<'_>,
     key_indices: &[usize],
@@ -6382,6 +6687,7 @@ async fn legacy_retained_key(
         .unwrap_or_else(|| Arc::new(bytes.into())))
 }
 
+#[cfg(test)]
 fn admitted_charge_cache(charges: Option<Vec<u64>>, rows: &dyn AdmittedRows) -> Option<Vec<u64>> {
     charges.map(|charges| {
         let mut admitted = Vec::with_capacity(rows.len());
@@ -6394,7 +6700,7 @@ fn admitted_charge_cache(charges: Option<Vec<u64>>, rows: &dyn AdmittedRows) -> 
 
 fn append_admission_charges(charges: &mut Option<Vec<u64>>, record: &RecordBatch) -> Result<()> {
     let current =
-        materialization::flat_row_charges(record, STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1)?;
+        admission_flat::flat_row_charges(record, STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1)?;
     match (current, charges.as_mut()) {
         (Some(current), Some(charges)) => charges.extend(current),
         _ => *charges = None,
@@ -6421,6 +6727,7 @@ fn enforce_match_limit(
 }
 
 /// Builds the admitted-row scratch table with renamed key columns.
+#[cfg(test)]
 fn probe_key_batch(
     admitted: &dyn AdmittedRows,
     key_indices: &[usize],
@@ -6458,6 +6765,7 @@ fn probe_key_batch(
     })
 }
 
+#[cfg(test)]
 fn selected_probe_column(group: admitted::AdmittedGroup<'_>, key_index: usize) -> Result<ArrayRef> {
     let first = group.row(0).record;
     let contiguous = group
@@ -6478,6 +6786,7 @@ fn selected_probe_column(group: admitted::AdmittedGroup<'_>, key_index: usize) -
 }
 
 /// Builds the retained-state scratch table with renamed key columns and row ids.
+#[cfg(test)]
 fn state_key_batch(
     opposite: &dyn Rows,
     compiled: &CompiledJoin,
@@ -6526,6 +6835,7 @@ fn concat_column(slices: &[&dyn Array]) -> Result<ArrayRef> {
     })
 }
 
+#[cfg(test)]
 fn equality_tables(probe: RecordBatch, state_keys: RecordBatch) -> Result<BTreeMap<String, Batch>> {
     #[cfg(test)]
     note_join_work(|work| work.sql_probe_table_builds += 1);
@@ -6541,6 +6851,7 @@ fn equality_tables(probe: RecordBatch, state_keys: RecordBatch) -> Result<BTreeM
     ]))
 }
 
+#[cfg(test)]
 fn decode_key_pairs(result: &Batch) -> Result<Vec<(u64, u64)>> {
     let mut pairs = Vec::new();
     for record in result.table_payload()?.batches() {
@@ -6553,6 +6864,7 @@ fn decode_key_pairs(result: &Batch) -> Result<Vec<(u64, u64)>> {
     Ok(pairs)
 }
 
+#[cfg(test)]
 fn u64_column<'a>(
     record: &'a RecordBatch,
     column_index: usize,
@@ -6567,6 +6879,7 @@ fn u64_column<'a>(
         })
 }
 
+#[cfg(test)]
 fn filter_and_order_pairs(
     bounds: &JoinTimeBounds,
     plan: &SidePlan,
@@ -6602,6 +6915,7 @@ fn filter_and_order_pairs(
     matched
 }
 
+#[cfg(test)]
 fn index_by_row_id(opposite: &dyn Rows) -> BTreeMap<u64, usize> {
     opposite
         .references()
@@ -6612,6 +6926,7 @@ fn index_by_row_id(opposite: &dyn Rows) -> BTreeMap<u64, usize> {
 /// Materializes one validated chunk of matched pairs into an independent record.
 ///
 /// Columns use take/interleave in matched-pair order and detach encoded children.
+#[cfg(test)]
 #[cfg(test)]
 fn materialize_output_record(
     output_schema: &SchemaRef,
@@ -6764,6 +7079,7 @@ fn compile_schemas(
             right_key_indices,
             left_event_time_index,
             right_event_time_index,
+            #[cfg(test)]
             equality_query: parse_select_query(&equality_query(spec.left_keys.len()))?,
         },
     ))
@@ -6840,6 +7156,7 @@ fn prefixed_output_fields(left: &Schema, right: &Schema, spec: &StreamJoinSpec) 
 /// The query returns the admitted-row position and the retained-state row id
 /// for every key-equal pair; the closed time bound is applied afterwards in
 /// checked `i128` Rust arithmetic.
+#[cfg(test)]
 fn equality_query(key_count: usize) -> String {
     let equality = (0..key_count)
         .map(|position| {
@@ -6855,6 +7172,7 @@ fn equality_query(key_count: usize) -> String {
     )
 }
 
+#[cfg(test)]
 fn quote_identifier(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
@@ -6998,6 +7316,7 @@ pub(crate) fn supported_key_type(data_type: &DataType) -> bool {
     )
 }
 
+#[cfg(test)]
 const JOIN_STATE_MAGIC: &[u8; 8] = b"CFJOIN1\0";
 
 /// Number of carried delta segments that triggers compaction on the next
@@ -7005,8 +7324,11 @@ const JOIN_STATE_MAGIC: &[u8; 8] = b"CFJOIN1\0";
 #[cfg(test)]
 const JOIN_DELTA_COMPACTION_SEGMENTS: u32 = 4;
 
+#[cfg(test)]
 const JOIN_DELTA_MAGIC: &[u8; 8] = b"CFJDLT1\0";
+#[cfg(test)]
 const JOIN_DELTA_UPSERT_TAG: u8 = 1;
+#[cfg(test)]
 const JOIN_DELTA_TOMBSTONE_TAG: u8 = 2;
 
 /// Encodes the derived dirty ops of one epoch into per-side delta segments.
@@ -7121,6 +7443,7 @@ fn encode_delta_tombstone(
 
 /// Restores both sides by folding the base segment and the delta segments in
 /// ascending `(epoch, segment_id)` order; later operations win (spec FR45).
+#[cfg(test)]
 fn restore_sides_from_segments(
     snapshot: &OperatorStateSnapshot,
     left_schema: RestoreSchema<'_>,
@@ -7140,6 +7463,7 @@ fn restore_sides_from_segments(
     )
 }
 
+#[cfg(test)]
 fn restore_sides_from_segments_checked(
     snapshot: &OperatorStateSnapshot,
     left_schema: RestoreSchema<'_>,
@@ -7173,6 +7497,7 @@ fn restore_sides_from_segments_checked(
     sort_restored_sides(left, right, check)
 }
 
+#[cfg(test)]
 fn restore_segment_inventory<'a>(
     snapshot: &'a OperatorStateSnapshot,
     operator_id: &str,
@@ -7194,6 +7519,7 @@ fn restore_segment_inventory<'a>(
     Ok(inventory)
 }
 
+#[cfg(test)]
 fn sort_restored_sides(
     mut left: Vec<StoredRow>,
     mut right: Vec<StoredRow>,
@@ -7207,6 +7533,7 @@ fn sort_restored_sides(
     Ok((left, right))
 }
 
+#[cfg(test)]
 fn identity_order(left: &StoredRow, right: &StoredRow) -> std::cmp::Ordering {
     (
         left.encoded_key.as_slice(),
@@ -7222,8 +7549,10 @@ fn identity_order(left: &StoredRow, right: &StoredRow) -> std::cmp::Ordering {
 
 /// Rebuilds the carried delta-segment map from a restored snapshot so the
 /// next checkpoint carries them forward without re-encoding.
+#[cfg(test)]
 type CarriedDeltaSegments = BTreeMap<(u64, &'static str), StateSegment>;
 
+#[cfg(test)]
 fn carried_base_segments(snapshot: &OperatorStateSnapshot) -> BTreeMap<&'static str, StateSegment> {
     let mut base = BTreeMap::new();
     for (segment_id, segment) in &snapshot.segments {
@@ -7237,6 +7566,7 @@ fn carried_base_segments(snapshot: &OperatorStateSnapshot) -> BTreeMap<&'static 
     base
 }
 
+#[cfg(test)]
 fn carried_delta_segments(
     snapshot: &OperatorStateSnapshot,
     operator_id: &str,
@@ -7261,11 +7591,13 @@ fn carried_delta_segments(
     Ok(carried)
 }
 
+#[cfg(test)]
 enum SegmentKind {
     Base,
     Delta(u64),
 }
 
+#[cfg(test)]
 fn parse_segment_kind(segment_id: &str, operator_id: &str) -> Result<SegmentKind> {
     for side in ["left", "right"] {
         if segment_id == format!("{side}-base") {
@@ -7286,6 +7618,7 @@ fn parse_segment_kind(segment_id: &str, operator_id: &str) -> Result<SegmentKind
 }
 
 /// Folds one side's base and deltas into durable-identity order.
+#[cfg(test)]
 fn fold_side(
     segments: &BTreeMap<String, StateSegment>,
     inventory: &[(&str, SegmentKind)],
@@ -7314,9 +7647,12 @@ fn fold_side(
     Ok(rows)
 }
 
+#[cfg(test)]
 type OrderedRestoreSegments<'a> = Vec<(&'a str, &'a SegmentKind, &'a StateSegment)>;
+#[cfg(test)]
 type FoldedRestoreRows = BTreeMap<(Vec<u8>, i64, u64), StoredRow>;
 
+#[cfg(test)]
 fn ordered_restore_segments<'a>(
     segments: &'a BTreeMap<String, StateSegment>,
     inventory: &'a [(&'a str, SegmentKind)],
@@ -7338,6 +7674,7 @@ fn ordered_restore_segments<'a>(
     Ok(ordered)
 }
 
+#[cfg(test)]
 fn fold_restore_segment(
     bytes: &[u8],
     kind: &SegmentKind,
@@ -7351,6 +7688,7 @@ fn fold_restore_segment(
     }
 }
 
+#[cfg(test)]
 fn fold_base_rows(
     bytes: &[u8],
     decoder: &RestoreDecoder<'_>,
@@ -7379,6 +7717,7 @@ fn fold_base_rows(
 }
 
 /// Applies one delta segment's upserts and tombstones to the fold.
+#[cfg(test)]
 fn decode_delta_segment(
     bytes: &[u8],
     decoder: &RestoreDecoder<'_>,
@@ -7410,6 +7749,7 @@ fn decode_delta_segment(
     Ok(())
 }
 
+#[cfg(test)]
 fn apply_unique_delta_op(
     bytes: &[u8],
     offset: &mut usize,
@@ -7435,6 +7775,7 @@ fn apply_unique_delta_op(
     apply_delta_op(bytes, offset, decoder, header, identity, folded)
 }
 
+#[cfg(test)]
 struct RestoreDecoder<'a> {
     schema: RestoreSchema<'a>,
     key_indices: &'a [usize],
@@ -7442,6 +7783,7 @@ struct RestoreDecoder<'a> {
     side: &'a str,
 }
 
+#[cfg(test)]
 struct DeltaHeader {
     tag: u8,
     row_id: u64,
@@ -7449,6 +7791,7 @@ struct DeltaHeader {
     key: Vec<u8>,
 }
 
+#[cfg(test)]
 fn delta_op_count(bytes: &[u8], offset: &mut usize, name: &str, side: &str) -> Result<usize> {
     if take_segment_bytes(bytes, offset, JOIN_DELTA_MAGIC.len())? != JOIN_DELTA_MAGIC {
         return Err(checkpoint_error(name, side, "delta magic is invalid"));
@@ -7457,6 +7800,7 @@ fn delta_op_count(bytes: &[u8], offset: &mut usize, name: &str, side: &str) -> R
         .map_err(|_| checkpoint_error(name, side, "delta op count is invalid"))
 }
 
+#[cfg(test)]
 fn decode_delta_header(
     bytes: &[u8],
     offset: &mut usize,
@@ -7477,6 +7821,7 @@ fn decode_delta_header(
     })
 }
 
+#[cfg(test)]
 fn apply_delta_op(
     bytes: &[u8],
     offset: &mut usize,
@@ -7504,6 +7849,7 @@ fn apply_delta_op(
     Ok(())
 }
 
+#[cfg(test)]
 fn decode_delta_upsert(
     bytes: &[u8],
     offset: &mut usize,
@@ -7538,6 +7884,7 @@ fn decode_delta_upsert(
     Ok(row)
 }
 
+#[cfg(test)]
 fn read_ipc_record(
     bytes: &[u8],
     offset: &mut usize,
@@ -7555,6 +7902,7 @@ fn read_ipc_record(
     )
 }
 
+#[cfg(test)]
 #[cfg(test)]
 fn encode_side(
     rows: &dyn Rows,
@@ -7580,6 +7928,7 @@ fn encode_side(
 }
 
 #[cfg(test)]
+#[cfg(test)]
 fn ordered_checkpoint_rows(
     rows: &dyn Rows,
     check: &impl Fn() -> Result<()>,
@@ -7592,6 +7941,7 @@ fn ordered_checkpoint_rows(
     Ok(ordered)
 }
 
+#[cfg(test)]
 #[cfg(test)]
 fn append_stored_row(
     output: &mut Vec<u8>,
@@ -7613,6 +7963,7 @@ fn append_stored_row(
     Ok(())
 }
 
+#[cfg(test)]
 fn decode_side(
     bytes: &[u8],
     expected_schema: RestoreSchema<'_>,
@@ -7643,6 +7994,7 @@ fn decode_side(
 }
 
 /// Validates the state magic and returns the declared row count.
+#[cfg(test)]
 fn decode_side_header(
     bytes: &[u8],
     offset: &mut usize,
@@ -7659,6 +8011,7 @@ fn decode_side_header(
     read_segment_u64(bytes, offset)
 }
 
+#[cfg(test)]
 fn decode_side_rows(
     bytes: &[u8],
     offset: &mut usize,
@@ -7687,6 +8040,7 @@ fn decode_side_rows(
     Ok(rows)
 }
 
+#[cfg(test)]
 fn decode_row_capacity(
     row_count: u64,
     segment_len: usize,
@@ -7699,6 +8053,7 @@ fn decode_row_capacity(
         .ok_or_else(|| checkpoint_error(operator_id, side, "row count is invalid"))
 }
 
+#[cfg(test)]
 fn decode_stored_row(
     bytes: &[u8],
     offset: &mut usize,
@@ -7724,6 +8079,7 @@ fn decode_stored_row(
     Ok(row)
 }
 
+#[cfg(test)]
 fn observe_restored_row(
     row: &StoredRow,
     expected_schema: RestoreSchema<'_>,
@@ -7742,6 +8098,7 @@ fn observe_restored_row(
     }
 }
 
+#[cfg(test)]
 fn decode_ipc_row(
     ipc: &[u8],
     expected_schema: RestoreSchema<'_>,
@@ -7793,6 +8150,7 @@ fn decode_ipc_row(
     Ok(record)
 }
 
+#[cfg(test)]
 fn take_segment_bytes<'a>(bytes: &'a [u8], offset: &mut usize, length: usize) -> Result<&'a [u8]> {
     let end = offset
         .checked_add(length)
@@ -7808,6 +8166,7 @@ fn take_segment_bytes<'a>(bytes: &'a [u8], offset: &mut usize, length: usize) ->
     Ok(value)
 }
 
+#[cfg(test)]
 fn read_segment_u64(bytes: &[u8], offset: &mut usize) -> Result<u64> {
     let value = take_segment_bytes(bytes, offset, 8)?;
     Ok(u64::from_le_bytes(
@@ -7815,6 +8174,7 @@ fn read_segment_u64(bytes: &[u8], offset: &mut usize) -> Result<u64> {
     ))
 }
 
+#[cfg(test)]
 fn read_segment_i64(bytes: &[u8], offset: &mut usize) -> Result<i64> {
     let value = take_segment_bytes(bytes, offset, 8)?;
     Ok(i64::from_le_bytes(
@@ -7822,6 +8182,7 @@ fn read_segment_i64(bytes: &[u8], offset: &mut usize) -> Result<i64> {
     ))
 }
 
+#[cfg(test)]
 fn validate_restored_rows(
     rows: &[StoredRow],
     next_row_id: u64,
@@ -7840,6 +8201,7 @@ fn validate_restored_rows(
     Ok(repeated)
 }
 
+#[cfg(test)]
 fn restored_row_id_repeats(identities: &BTreeSet<(u64, i64)>, row_id: u64) -> bool {
     identities
         .range((row_id, i64::MIN)..=(row_id, i64::MAX))
@@ -7847,6 +8209,7 @@ fn restored_row_id_repeats(identities: &BTreeSet<(u64, i64)>, row_id: u64) -> bo
         .is_some()
 }
 
+#[cfg(test)]
 fn validate_restored_row_ids(repeated: [bool; 2], operator_id: &str) -> Result<()> {
     for (side, repeated) in ["left", "right"].into_iter().zip(repeated) {
         if repeated {
@@ -7860,6 +8223,7 @@ fn validate_restored_row_ids(repeated: [bool; 2], operator_id: &str) -> Result<(
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_restored_row_identity(
     row: &StoredRow,
     identities: &mut BTreeSet<(u64, i64)>,
@@ -7877,6 +8241,7 @@ fn validate_restored_row_identity(
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_restored_row_payload(
     row: &StoredRow,
     event_index: usize,
@@ -7898,6 +8263,7 @@ fn validate_restored_row_payload(
     Ok(())
 }
 
+#[cfg(test)]
 fn checkpoint_error(operator_id: &str, side: &str, message: &str) -> CalcFlowError {
     CalcFlowError::CheckpointMismatch {
         message: format!("stream Join {operator_id:?} {side} {message}"),
@@ -7905,6 +8271,7 @@ fn checkpoint_error(operator_id: &str, side: &str, message: &str) -> CalcFlowErr
 }
 
 #[derive(Clone, Copy)]
+#[cfg(test)]
 struct EvictionPolicy<'a> {
     extension_micros: u64,
     side: JoinSide,
@@ -7914,6 +8281,7 @@ struct EvictionPolicy<'a> {
 /// One planned eviction (spec FR10/FR8): the expired prefix of every
 /// expiration run is planned read-only, so a tombstone funding refusal
 /// leaves state, watermark, and list unchanged.
+#[cfg(test)]
 #[derive(Default)]
 struct EvictionPlan {
     cuts: Vec<(usize, usize)>,
@@ -7932,6 +8300,7 @@ thread_local! {
     static EVICTION_RAW_KEY_CLONES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(test)]
 impl EvictionPlan {
     fn plan(
         rows: &RetainedRows,
@@ -8036,6 +8405,7 @@ impl EvictionPlan {
     }
 }
 
+#[cfg(test)]
 fn evict_opposite(
     rows: &mut RetainedRows,
     expirations: &mut ExpirationIndex,
@@ -8059,6 +8429,7 @@ fn evict_opposite(
     )
 }
 
+#[cfg(test)]
 fn expires_all(expirations: &ExpirationIndex, progress: IngressProgress, extension: u64) -> bool {
     expirations.last_time().is_some_and(|time| {
         progress.state() == crate::IngressState::Ended
@@ -8069,6 +8440,7 @@ fn expires_all(expirations: &ExpirationIndex, progress: IngressProgress, extensi
     })
 }
 
+#[cfg(test)]
 fn expired_predicate(
     progress: IngressProgress,
     extension_micros: u64,
@@ -8082,6 +8454,7 @@ fn expired_predicate(
     }
 }
 
+#[cfg(test)]
 fn evict_expired(
     rows: &mut RetainedRows,
     expirations: &mut ExpirationIndex,
@@ -8139,6 +8512,7 @@ fn evict_expired(
     Ok(())
 }
 
+#[cfg(test)]
 fn apply_eviction_plan(
     rows: &mut RetainedRows,
     expirations: &mut ExpirationIndex,
@@ -8177,6 +8551,7 @@ fn apply_eviction_plan(
     Ok(())
 }
 
+#[cfg(test)]
 fn evict_all(
     rows: &mut RetainedRows,
     expirations: &mut ExpirationIndex,
@@ -8228,6 +8603,7 @@ fn evict_all(
     Ok(())
 }
 
+#[cfg(test)]
 fn update_evicted_metrics(
     metrics: &mut SideMetrics,
     count: u64,
@@ -8246,6 +8622,7 @@ fn update_evicted_metrics(
     Ok(())
 }
 
+#[cfg(test)]
 fn refresh_retained_metrics(
     metrics: &mut SideMetrics,
     rows: &[StoredRow],
@@ -8264,6 +8641,7 @@ fn refresh_retained_metrics(
     Ok(())
 }
 
+#[cfg(test)]
 fn event_time_at(
     record: &RecordBatch,
     column_index: usize,
@@ -8366,6 +8744,7 @@ impl<'a> BatchEventTimes<'a> {
     }
 }
 
+#[cfg(test)]
 fn downcast_timestamp<T>(
     array: &dyn Array,
     row_index: usize,
@@ -8386,10 +8765,12 @@ where
     Ok(typed.timestamp_value(row_index))
 }
 
+#[cfg(test)]
 trait TimestampValue {
     fn timestamp_value(self, row_index: usize) -> i64;
 }
 
+#[cfg(test)]
 macro_rules! impl_timestamp_value {
     ($($ty:ty),+ $(,)?) => {
         $(
@@ -8402,6 +8783,7 @@ macro_rules! impl_timestamp_value {
     };
 }
 
+#[cfg(test)]
 impl_timestamp_value!(
     TimestampSecondArray,
     TimestampMillisecondArray,
@@ -8409,6 +8791,7 @@ impl_timestamp_value!(
     TimestampNanosecondArray,
 );
 
+#[cfg(test)]
 fn state_row_charge(
     record: &RecordBatch,
     row_index: usize,
@@ -8419,6 +8802,7 @@ fn state_row_charge(
     state_row_charge_with_key(record, row_index, encoded_key.len(), operator_id)
 }
 
+#[cfg(test)]
 fn state_row_charge_with_key(
     record: &RecordBatch,
     row_index: usize,
@@ -8428,6 +8812,7 @@ fn state_row_charge_with_key(
     state_columns_charge_with_key(record.columns(), row_index, encoded_key_len, operator_id)
 }
 
+#[cfg(test)]
 fn state_columns_charge_with_key(
     columns: &[ArrayRef],
     row_index: usize,
@@ -8781,6 +9166,7 @@ fn unsupported_payload_type(data_type: &DataType) -> CalcFlowError {
 /// Each key column contributes one block: tag byte, timezone length, timezone
 /// bytes, value length, and raw value bytes. The encoding is stable and
 /// unambiguous across units, timezone metadata, and column order.
+#[cfg(test)]
 fn encode_join_key_v1(
     record: &RecordBatch,
     row_index: usize,
@@ -8789,6 +9175,7 @@ fn encode_join_key_v1(
     encode_join_key_columns_v1(record.columns(), row_index, key_indices)
 }
 
+#[cfg(test)]
 fn encode_join_key_columns_v1(
     columns: &[ArrayRef],
     row_index: usize,
@@ -8803,6 +9190,7 @@ fn encode_join_key_columns_v1(
     Ok(encoded)
 }
 
+#[cfg(test)]
 fn append_key_block(encoded: &mut Vec<u8>, array: &dyn Array, row_index: usize) -> Result<()> {
     let data_type = array.data_type();
     let tag = key_type_tag(data_type)?;
@@ -8827,6 +9215,7 @@ fn append_key_block(encoded: &mut Vec<u8>, array: &dyn Array, row_index: usize) 
     Ok(())
 }
 
+#[cfg(test)]
 fn key_type_tag(data_type: &DataType) -> Result<u8> {
     Ok(match data_type {
         DataType::Boolean => 1,
@@ -8854,6 +9243,7 @@ fn key_type_tag(data_type: &DataType) -> Result<u8> {
     })
 }
 
+#[cfg(test)]
 fn key_value_bytes(array: &dyn Array, row_index: usize) -> Result<Vec<u8>> {
     match array.data_type() {
         DataType::Timestamp(unit, _) => timestamp_key_bytes(array, row_index, *unit),
@@ -8878,6 +9268,7 @@ fn key_value_bytes(array: &dyn Array, row_index: usize) -> Result<Vec<u8>> {
     }
 }
 
+#[cfg(test)]
 fn signed_key_bytes(array: &dyn Array, row_index: usize) -> Result<Vec<u8>> {
     match array.data_type() {
         DataType::Int8 => Ok(primitive::<Int8Type>(array)?
@@ -8893,6 +9284,7 @@ fn signed_key_bytes(array: &dyn Array, row_index: usize) -> Result<Vec<u8>> {
     }
 }
 
+#[cfg(test)]
 fn unsigned_key_bytes(array: &dyn Array, row_index: usize) -> Result<Vec<u8>> {
     match array.data_type() {
         DataType::UInt8 => Ok(vec![primitive::<UInt8Type>(array)?.value(row_index)]),
@@ -8903,6 +9295,7 @@ fn unsigned_key_bytes(array: &dyn Array, row_index: usize) -> Result<Vec<u8>> {
     }
 }
 
+#[cfg(test)]
 fn string_key_bytes(array: &dyn Array, row_index: usize) -> Result<Vec<u8>> {
     Ok(match array.data_type() {
         DataType::Utf8 => array
@@ -8923,6 +9316,7 @@ fn string_key_bytes(array: &dyn Array, row_index: usize) -> Result<Vec<u8>> {
     })
 }
 
+#[cfg(test)]
 fn key_encoding_type_error(data_type: &DataType) -> CalcFlowError {
     CalcFlowError::Internal {
         message: format!("join key type {data_type} has no version-1 encoding"),
@@ -8930,10 +9324,12 @@ fn key_encoding_type_error(data_type: &DataType) -> CalcFlowError {
 }
 
 /// Little-endian key encoding shared by the fixed-width join key natives.
+#[cfg(test)]
 trait KeyLeBytes {
     fn key_le_bytes(self) -> Vec<u8>;
 }
 
+#[cfg(test)]
 macro_rules! impl_key_le_bytes {
     ($($native:ty),* $(,)?) => {
         $(
@@ -8946,8 +9342,10 @@ macro_rules! impl_key_le_bytes {
     };
 }
 
+#[cfg(test)]
 impl_key_le_bytes!(i16, i32, i64, u16, u32, u64);
 
+#[cfg(test)]
 fn little_endian_key_bytes<T>(array: &dyn Array, row_index: usize) -> Result<Vec<u8>>
 where
     T: ArrowPrimitiveType,
@@ -8956,6 +9354,7 @@ where
     Ok(primitive::<T>(array)?.value(row_index).key_le_bytes())
 }
 
+#[cfg(test)]
 fn primitive<T>(array: &dyn Array) -> Result<&PrimitiveArray<T>>
 where
     T: ArrowPrimitiveType,
@@ -9018,6 +9417,7 @@ fn default_right_prefix() -> String {
 /// Encodes one timestamp key value as its native unit's little-endian bytes.
 /// The key block already carries the unit-specific type tag and timezone, so
 /// cross-unit unambiguity does not depend on converting to microseconds here.
+#[cfg(test)]
 fn timestamp_key_bytes(array: &dyn Array, row_index: usize, unit: TimeUnit) -> Result<Vec<u8>> {
     let raw = match unit {
         TimeUnit::Second => array

@@ -1,12 +1,4 @@
 //! Immutable columnar Join runs and selection-driven probe/materialization.
-//!
-//! The v4 runner does not yet expose Join state pages. This module is the
-//! synchronous compute core; production admission and durable ownership remain
-//! at the operator boundary.
-#![allow(
-    dead_code,
-    reason = "P5 run kernels are tested directly until v4 Join state-page wiring lands"
-)]
 
 use super::{
     JoinSide, JoinStateLimits, JoinTimeBounds, MatchedPair, PayloadRef,
@@ -25,6 +17,7 @@ use datafusion::arrow::{
     datatypes::SchemaRef,
     record_batch::{RecordBatch, RecordBatchOptions},
 };
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -716,6 +709,7 @@ impl RunState {
         self.sides[side.index()].bytes
     }
 
+    #[cfg(test)]
     pub(super) fn retained(&self, side: JoinSide) -> Vec<(EventTime, u64, PayloadRef<'_>)> {
         self.sides[side.index()]
             .runs
@@ -732,6 +726,7 @@ impl RunState {
             .collect()
     }
 
+    #[cfg(test)]
     pub(super) fn restore_counters(
         &mut self,
         next_row_ids: [u64; 2],
@@ -829,6 +824,7 @@ impl RunState {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn apply(
         &mut self,
         incoming_side: JoinSide,
@@ -853,6 +849,7 @@ impl RunState {
         clippy::too_many_arguments,
         reason = "one admitted morsel needs its output context"
     )]
+    #[cfg(test)]
     pub(super) fn apply_checked(
         &mut self,
         incoming_side: JoinSide,
@@ -1326,6 +1323,7 @@ pub(super) struct RunStateSnapshot {
 }
 
 impl RunStateSnapshot {
+    #[cfg(test)]
     pub(super) fn fingerprint(&self) -> [u8; 32] {
         let mut digest = Sha256::new();
         digest.update(b"join-columnar-runs-v1");

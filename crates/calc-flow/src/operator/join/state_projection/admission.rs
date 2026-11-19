@@ -43,7 +43,7 @@ impl StreamJoinOperator {
         context.check_cancelled()
     }
 
-    pub(in crate::operator::join) async fn project_admitted_payloads(
+    pub(in crate::operator::join) async fn project_admitted_payloads_legacy(
         &mut self,
         admitted: &mut AdmittedBatch,
         side: usize,

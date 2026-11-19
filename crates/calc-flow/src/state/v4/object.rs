@@ -233,7 +233,7 @@ pub(crate) fn decode_object(handle: &V4Handle, bytes: &[u8]) -> Result<DecodedOb
     })
 }
 
-fn payload_bytes(payload: &ObjectPayload) -> Result<Vec<u8>> {
+pub(crate) fn payload_bytes(payload: &ObjectPayload) -> Result<Vec<u8>> {
     match payload {
         ObjectPayload::Bytes(bytes) => Ok(bytes.clone()),
         ObjectPayload::Json(value) => canonical_json(value).map(String::into_bytes),

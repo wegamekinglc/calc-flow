@@ -60,6 +60,31 @@ impl NativeCapture {
         Ok(self)
     }
 
+    #[cfg(not(test))]
+    pub(crate) fn into_snapshot(self) -> Result<OperatorStateSnapshot> {
+        let Self {
+            metadata,
+            partitions,
+            ..
+        } = self;
+        let mut segments = BTreeMap::new();
+        for page in partitions.into_iter().flat_map(|partition| partition.pages) {
+            let bytes = super::object::payload_bytes(&page.payload)?;
+            if segments
+                .insert(page.column, StateSegment::new(bytes))
+                .is_some()
+            {
+                return Err(mismatch(
+                    "native snapshot page identity is duplicated".into(),
+                ));
+            }
+        }
+        Ok(OperatorStateSnapshot {
+            inline_metadata: metadata,
+            segments,
+        })
+    }
+
     pub(crate) fn reservation_bytes(&self) -> Result<u64> {
         let metadata = serde_json::to_value(&self.metadata)
             .map_err(|error| mismatch(format!("native metadata is not serializable: {error}")))?;

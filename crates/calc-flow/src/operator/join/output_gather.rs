@@ -9,7 +9,9 @@ use datafusion::arrow::{
 };
 use std::collections::BTreeMap;
 
+#[cfg(test)]
 mod owned;
+#[cfg(test)]
 pub(super) use owned::{ColumnResult, cancelled, materialize};
 
 #[cfg(test)]

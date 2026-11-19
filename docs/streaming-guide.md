@@ -1549,20 +1549,25 @@ per-key heads then advance together, empty runs and buckets are released, and
 end-of-input expires the complete side. Eviction emits no matched output or
 retraction.
 
-The core's in-memory snapshot clones immutable run and index owners. Restore
-validates run identity and prefixes, row-ID uniqueness and frontiers, locator
-ordering and coverage, expiration order, and logical accounting before
-installing state. Compatible continuation produces identical subsequent output
-records and sequences, with equal snapshot fingerprints.
+Production stream and finite Join execution use this run core. Admission forms
+bounded morsels, probes through shared keys and commits runs only after output
+acceptance. Compiler output projection is applied during materialization; it
+does not select a separate retained-state implementation.
 
-This compute core is tested directly but is not yet connected to production
-`StreamJoinOperator` admission or durable ownership. The v4 runner does not yet
-expose Join state pages, and `RunStateSnapshot` is not a durable checkpoint
-encoding. The existing operator's native/DataFusion paths, logical V1 charges,
-physical layouts 1–3, and managed recovery contracts below therefore remain in
-force. Final old-layout deletion and performance acceptance remain open.
+Native layout 12 stores run payload and identity pages, per-key and expiration
+indexes, shared keys, control counters and operator metadata. The managed runner
+persists `NativeCapture` pages through manifest v4. Direct
+`checkpoint()`/`restore()` uses the same encoding and validates page inventory,
+run identity and prefixes, row-ID uniqueness and frontiers, locator ordering and
+coverage, expiration order, and logical accounting before installing state.
+Compatible continuation produces identical subsequent output records and
+sequences. Capture currently reconstructs page images; the dirty-page
+copy-on-write cost target and final performance acceptance remain open.
 
-#### Existing operator storage and recovery
+#### Legacy migration-test storage and recovery
+
+The following material describes explicit migration tests and historical
+benchmark evidence. It is not the production execution or recovery path.
 
 Join retains payload chunks with columnar row metadata and stable chunk/row
 references. Expiration advances sorted run heads without relocating surviving

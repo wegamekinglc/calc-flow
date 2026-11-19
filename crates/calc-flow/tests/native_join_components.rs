@@ -3,34 +3,6 @@
 #[path = "../benches/support/native_join_components.rs"]
 mod native_join_components;
 
-#[cfg(not(feature = "benchmark-checkpoint-diagnostic"))]
-#[test]
-fn test_checkpoint_history_requires_explicit_diagnostic_feature() {
-    let result = native_join_components::parse_arguments(&[
-        "--native-component".into(),
-        "join_checkpoint_history_4m".into(),
-        "--check".into(),
-    ]);
-    assert_eq!(result, Err("unknown native component"));
-}
-
-#[cfg(feature = "benchmark-checkpoint-diagnostic")]
-#[test]
-fn test_checkpoint_history_is_available_with_explicit_diagnostic_feature() {
-    let result = native_join_components::parse_arguments(&[
-        "--native-component".into(),
-        "join_checkpoint_history_4m".into(),
-        "--check".into(),
-    ]);
-    assert_eq!(
-        result,
-        Ok(Some((
-            native_join_components::Component::CheckpointHistory,
-            true
-        )))
-    );
-}
-
 #[test]
 fn test_native_component_arguments_are_closed_before_execution() {
     use native_join_components::{Component, parse_arguments};
@@ -159,15 +131,12 @@ async fn test_compaction_proves_replacement_and_preserves_actual_rows() {
             assert_eq!(sample["resource_phases"][phase]["status"], "measured");
         }
         assert_eq!(witness["setup_dirty_epochs"], 4);
-        if mode == "armed" {
-            assert_ne!(witness["before_base_sha256"], witness["after_base_sha256"]);
-            assert!(
-                witness["before_deltas"].as_array().unwrap().len()
-                    > witness["after_deltas"].as_array().unwrap().len()
-            );
-        } else {
-            assert_eq!(witness["before_base_sha256"], witness["after_base_sha256"]);
-        }
+        assert_eq!(witness["layout_version"], 12);
+        assert_eq!(witness["stable_pages_equal"], true);
+        assert_eq!(
+            witness["before_stable_sha256"],
+            witness["after_stable_sha256"]
+        );
         assert!(
             sample["combined_seconds"].as_f64().unwrap()
                 >= sample["preparation_seconds"].as_f64().unwrap()

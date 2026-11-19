@@ -1,4 +1,6 @@
-use super::{PayloadChunk, PayloadFunding, SelectedRows, metadata};
+use super::{
+    COPY_BYTES, PayloadChunk, PayloadFunding, Quantum, SelectedRows, metadata, reservation_control,
+};
 use crate::operator::join::{SidePlan, StreamJoinOperator};
 use crate::runtime::streaming::gather_work::{
     AdmissionFailure, GatherOperatorId, GatherStop, OwnedCpuWork, RetirementGuard, WorkOutput,
@@ -18,7 +20,7 @@ use datafusion::arrow::{
     datatypes::{ArrowPrimitiveType, DataType, SchemaRef, TimeUnit},
     record_batch::RecordBatch,
 };
-use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
+use datafusion::execution::memory_pool::MemoryReservation;
 use std::{
     fmt::Write,
     sync::{Arc, atomic::AtomicUsize},
@@ -28,9 +30,6 @@ use tokio_util::bytes::Bytes;
 const ARC_HEADER: usize = 2 * size_of::<usize>();
 // Locked Arrow 59.3 Bytes: ptr + len + three-word Deallocation, plus Arc header.
 const BUFFER_OWNER: usize = 5 * size_of::<usize>() + ARC_HEADER;
-pub(in crate::operator::join) const COPY_BYTES: usize = 4096;
-pub(in crate::operator::join) const COPY_VISITS: usize = 64;
-
 #[derive(Clone, Copy)]
 pub(in crate::operator::join) struct SelectedRow {
     pub source: usize,
@@ -58,58 +57,6 @@ impl CopySelection {
             rows: Vec::with_capacity(rows),
             _credit: credit,
         }))
-    }
-}
-
-#[derive(Default)]
-pub(in crate::operator::join) struct Quantum {
-    visits: usize,
-    bytes: usize,
-}
-
-impl Quantum {
-    pub(in crate::operator::join) async fn step(
-        &mut self,
-        context: &StreamOperatorContext<'_>,
-        visits: usize,
-        bytes: usize,
-    ) -> Result<()> {
-        #[cfg(test)]
-        super::super::note_join_work(|work| work.quantum_steps += 1);
-        debug_assert!(visits <= COPY_VISITS && bytes <= COPY_BYTES);
-        if self.visits + visits > COPY_VISITS || self.bytes + bytes > COPY_BYTES {
-            #[cfg(test)]
-            super::super::note_join_work(|work| work.quantum_boundaries += 1);
-            context.check_cancelled()?;
-            tokio::task::consume_budget().await;
-            context.check_cancelled()?;
-            self.visits = 0;
-            self.bytes = 0;
-        }
-        self.visits += visits;
-        self.bytes += bytes;
-        Ok(())
-    }
-    pub(in crate::operator::join) async fn grant_admission(
-        &mut self,
-        context: &StreamOperatorContext<'_>,
-        maximum: usize,
-    ) -> Result<usize> {
-        debug_assert!(maximum > 0);
-        let available = self.admission_capacity().min(maximum);
-        if available > 0 {
-            self.step(context, available, available * 16).await?;
-            return Ok(available);
-        }
-        self.step(context, 1, 16).await?;
-        let additional = self.admission_capacity().min(maximum - 1);
-        self.visits += additional;
-        self.bytes += additional * 16;
-        Ok(additional + 1)
-    }
-
-    fn admission_capacity(&self) -> usize {
-        (COPY_VISITS - self.visits).min((COPY_BYTES - self.bytes) / 16)
     }
 }
 
@@ -257,17 +204,6 @@ fn buffer_lease_control() -> usize {
         - 1
 }
 
-pub(in crate::operator::join) fn reservation_control() -> Option<usize> {
-    add(
-        size_of::<MemoryConsumer>()
-            + size_of::<Arc<dyn datafusion::execution::memory_pool::MemoryPool>>()
-            + ARC_HEADER,
-        3 * "sql-incremental:stream-join-native".len()
-            + size_of::<MemoryReservation>()
-            + ARC_HEADER,
-    )
-}
-
 pub(super) fn column_controls() -> Option<usize> {
     let array = size_of::<PrimitiveArray<Int64Type>>().max(size_of::<GenericStringArray<i64>>());
     let owners = 2 * (BUFFER_OWNER + buffer_lease_control());
@@ -316,6 +252,7 @@ impl StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
         quantum: &mut Quantum,
     ) -> Result<bool> {
+        #[cfg(test)]
         if self.payload_projection.is_some() {
             return Ok(false);
         }
@@ -433,6 +370,7 @@ impl StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
         quantum: &mut Quantum,
     ) -> Result<bool> {
+        #[cfg(test)]
         if self.payload_projection.is_none() {
             return Ok(true);
         }
@@ -454,13 +392,16 @@ impl StreamJoinOperator {
         if rows.is_empty() {
             return Ok(None);
         }
-        let Some(metadata) = self
+        #[cfg(test)]
+        let metadata = self
             .payload_projection
             .as_ref()
             .map_or(self.payload_schema_bytes[port], |layout| {
                 layout.schema_bytes[port]
-            })
-        else {
+            });
+        #[cfg(not(test))]
+        let metadata = self.payload_schema_bytes[port];
+        let Some(metadata) = metadata else {
             return Ok(None);
         };
         let Some(control) = controls(columns, metadata, rows.len()) else {

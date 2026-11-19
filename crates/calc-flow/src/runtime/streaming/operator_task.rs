@@ -961,19 +961,25 @@ fn reset_legacy_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Re
 async fn reset_join_metadata(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<()> {
     inputs.context.bind_task_id(task_id);
     let restore = inputs.restore.as_mut().expect("restore presence checked");
+    #[cfg(test)]
     let job = inputs.context.job();
     let operation = async {
         inputs.operator.reset()?;
         let CompiledStreamOperator::StreamJoin(operator) = &mut inputs.operator else {
             unreachable!("Join dispatch checked");
         };
-        operator
+        #[cfg(test)]
+        return operator
             .restore_managed_snapshot(
                 crate::state::PreloadedSnapshot::legacy_mut(&mut restore.snapshot)?,
                 job,
                 Some(task_id),
             )
-            .await
+            .await;
+        #[cfg(not(test))]
+        operator.restore_native(crate::state::PreloadedSnapshot::legacy_mut(
+            &mut restore.snapshot,
+        )?)
     };
     match AssertUnwindSafe(operation).catch_unwind().await {
         Ok(result) => result,
@@ -1089,6 +1095,7 @@ pub(super) async fn restore_terminal_owned_join<'a>(
             message: "terminal Join recovery requires a Join operator".into(),
         });
     };
+    #[cfg(test)]
     operator
         .restore_managed_snapshot(
             crate::state::PreloadedSnapshot::legacy_mut(&mut restore.snapshot)?,
@@ -1096,6 +1103,10 @@ pub(super) async fn restore_terminal_owned_join<'a>(
             None,
         )
         .await?;
+    #[cfg(not(test))]
+    operator.restore_native(crate::state::PreloadedSnapshot::legacy_mut(
+        &mut restore.snapshot,
+    )?)?;
     operator.validate_terminal_recovery_state()?;
     job.check_cancelled()?;
     let status = operator.status().with_ingress_progress(&restored_progress);
@@ -1849,8 +1860,8 @@ async fn capture_prepared_asof(
     crate::OperatorStateSnapshot,
     Option<OperatorCheckpointCredit>,
 )> {
+    #[cfg(test)]
     if let CompiledStreamOperator::StreamJoin(join) = operator {
-        #[cfg(test)]
         if join.checkpoint_v1_test_producer() {
             return crate::StreamOperator::checkpoint(join.as_mut(), epoch)
                 .map(|snapshot| (snapshot, None));
@@ -1858,6 +1869,12 @@ async fn capture_prepared_asof(
         return join
             .capture_v2_checkpoint_owned(epoch)
             .map(|(snapshot, credit)| (snapshot, Some(credit)));
+    }
+    #[cfg(not(test))]
+    if matches!(operator, CompiledStreamOperator::StreamJoin(_)) {
+        return Err(CalcFlowError::CheckpointMismatch {
+            message: "native Join capture is required before opaque checkpoint assembly".into(),
+        });
     }
     if !matches!(operator, CompiledStreamOperator::StreamAsofJoin(_)) {
         return operator.checkpoint(epoch).map(|snapshot| (snapshot, None));

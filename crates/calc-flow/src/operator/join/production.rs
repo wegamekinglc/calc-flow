@@ -1,15 +1,12 @@
-#![allow(
-    dead_code,
-    reason = "P5 run adapter is tested before native production activation"
-)]
-
 use super::{
-    AdmittedBatch, JoinCheckpointMetadata, JoinSide, RetainedRows, SideMetrics, StoredRow,
-    StreamJoinOperator,
+    AdmittedBatch, JoinCheckpointMetadata, JoinSide, SideMetrics, StreamJoinOperator,
     admitted::AdmittedRef,
-    checked_metric, columnar, counter_overflow, encode_join_key_v1, operator_error, output_gather,
-    retained::Rows,
+    checked_metric, counter_overflow, operator_error, output_gather,
     runs::{Incoming, PreparedRuns, RunOutputContext, RunState},
+};
+#[cfg(test)]
+use super::{
+    RetainedRows, StoredRow, columnar, encode_join_key_v1, retained::Rows,
     state_row_charge_with_key,
 };
 use crate::operator::keyed::{KeySchema, KeyStore, MORSEL_ROWS};
@@ -148,6 +145,7 @@ impl RunCore {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn from_legacy(operator: &mut StreamJoinOperator) -> Result<Self> {
         let mut core = Self::new(operator)?;
         for side in [JoinSide::Left, JoinSide::Right] {
@@ -202,6 +200,7 @@ impl RunCore {
         Ok(core)
     }
 
+    #[cfg(test)]
     pub(super) fn sync_legacy(&self, operator: &mut StreamJoinOperator) -> Result<()> {
         let left = self.legacy_side(operator, JoinSide::Left)?;
         let right = self.legacy_side(operator, JoinSide::Right)?;
@@ -216,6 +215,7 @@ impl RunCore {
         Ok(())
     }
 
+    #[cfg(test)]
     fn legacy_side(
         &self,
         operator: &StreamJoinOperator,
@@ -282,6 +282,7 @@ impl RunCore {
             .admit_batch_records(ingress, batch, &plan, context, &mut bundle)
             .await?;
         bundle.finish(&operator.name)?;
+        #[cfg(test)]
         operator
             .project_admitted_payloads(&mut bundle.admitted, plan.port_index, context)
             .await?;

@@ -599,13 +599,15 @@ def _effective_fresh(
         }
     cargo = overlay[_CARGO_PATH].decode()
     legacy = INSERTIONS[_CARGO_PATH]
-    fresh = legacy + _DIAGNOSTIC_INSERTION
     legacy_features = tomllib.loads(legacy)["features"]
-    fresh_features = tomllib.loads(fresh)["features"]
+    diagnostic_features = tomllib.loads(legacy + _DIAGNOSTIC_INSERTION)["features"]
     features = tomllib.loads(cargo)["features"]
-    if features == legacy_features:
-        cargo = cargo.replace(legacy, fresh, 1)
-    elif features != fresh_features or cargo.count(fresh) != 1:
+    current = features == legacy_features and cargo.count(legacy) == 1
+    historical = (
+        features == diagnostic_features
+        and cargo.count(legacy + _DIAGNOSTIC_INSERTION) == 1
+    )
+    if not (current or historical):
         raise ValueError("unreviewed fresh benchmark feature declaration")
     return {**overlay, _CARGO_PATH: cargo.encode()}
 

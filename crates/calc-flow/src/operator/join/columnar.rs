@@ -2,25 +2,40 @@
 use super::encode_join_key_columns_v1;
 #[cfg(test)]
 use crate::Result;
+#[cfg(test)]
 use crate::runtime::streaming::gather_work::RetirementGuard;
+#[cfg(test)]
 use datafusion::arrow::{array::ArrayRef, datatypes::SchemaRef, record_batch::RecordBatch};
+#[cfg(test)]
 use datafusion::execution::memory_pool::MemoryReservation;
+#[cfg(test)]
 use std::{ops::Deref, sync::Arc};
 
+#[cfg(test)]
 mod metadata;
+#[cfg(test)]
 mod owned_copy;
+#[cfg(test)]
 pub(super) mod restored;
+#[cfg(test)]
 mod selection;
+#[cfg(test)]
 mod sparse;
+#[cfg(test)]
+pub(super) use super::columnar_quantum::{COPY_BYTES, COPY_VISITS};
+pub(super) use super::columnar_quantum::{Quantum, reservation_control};
+#[cfg(test)]
 pub(super) use metadata::schema_inventory;
+#[cfg(test)]
 pub(super) use owned_copy::{
-    COPY_BYTES, COPY_VISITS, CopySelection, Quantum, SelectedRow, reservation_control,
+    CopySelection, SelectedRow, observe_string_allocations, take_string_allocations,
 };
 #[cfg(test)]
-pub(super) use owned_copy::{observe_string_allocations, take_string_allocations};
-pub(super) use selection::{OwnedSelection, SelectedRows};
-pub(super) use sparse::SparseQueue;
+pub(super) use selection::SelectedRows;
+#[cfg(test)]
+pub(super) use {selection::OwnedSelection, sparse::SparseQueue};
 
+#[cfg(test)]
 #[derive(Clone)]
 pub(super) enum RowPayload {
     Legacy(RecordBatch),
@@ -32,6 +47,7 @@ pub(super) enum RowPayload {
         chunk: Arc<PayloadChunk>,
         row: usize,
     },
+    #[cfg(test)]
     RestoredV2 {
         chunk: Arc<super::checkpoint_v2::payload::OwnedPayload>,
         row: usize,
@@ -87,6 +103,7 @@ pub(super) enum RowView<'a> {
         record: RecordBatch,
         _owner: Arc<PayloadChunk>,
     },
+    #[cfg(test)]
     RestoredV2 {
         record: RecordBatch,
         _owner: Arc<super::checkpoint_v2::payload::OwnedPayload>,
@@ -98,9 +115,9 @@ impl Deref for RowView<'_> {
     fn deref(&self) -> &Self::Target {
         match self {
             Self::Borrowed(record) => record,
-            Self::Parent { record, .. }
-            | Self::Owned { record, .. }
-            | Self::RestoredV2 { record, .. } => record,
+            Self::Parent { record, .. } | Self::Owned { record, .. } => record,
+            #[cfg(test)]
+            Self::RestoredV2 { record, .. } => record,
         }
     }
 }
@@ -123,6 +140,7 @@ impl RowPayload {
                 chunk: Arc::clone(chunk),
                 row: offset,
             },
+            #[cfg(test)]
             Self::RestoredV2 { chunk, .. } => Self::RestoredV2 {
                 chunk: Arc::clone(chunk),
                 row: offset,
@@ -153,6 +171,7 @@ impl RowPayload {
             Self::Legacy(record) => record.schema_ref(),
             Self::Rowed { parent, .. } => parent.schema_ref(),
             Self::Shared { chunk, .. } => &chunk.schema,
+            #[cfg(test)]
             Self::RestoredV2 { chunk, .. } => chunk.record().schema_ref(),
         }
     }
@@ -162,6 +181,7 @@ impl RowPayload {
             Self::Legacy(record) => record.columns(),
             Self::Rowed { parent, .. } => parent.columns(),
             Self::Shared { chunk, .. } => &chunk.columns,
+            #[cfg(test)]
             Self::RestoredV2 { chunk, .. } => chunk.record().columns(),
         }
     }
@@ -176,9 +196,9 @@ impl RowPayload {
     pub(super) fn offset(&self) -> usize {
         match self {
             Self::Legacy(_) => 0,
-            Self::Rowed { row, .. } | Self::Shared { row, .. } | Self::RestoredV2 { row, .. } => {
-                *row
-            }
+            Self::Rowed { row, .. } | Self::Shared { row, .. } => *row,
+            #[cfg(test)]
+            Self::RestoredV2 { row, .. } => *row,
         }
     }
 
@@ -201,6 +221,7 @@ impl RowPayload {
                     _owner: Arc::clone(chunk),
                 }
             }
+            #[cfg(test)]
             Self::RestoredV2 { chunk, row } => RowView::RestoredV2 {
                 record: chunk.record().slice(*row, 1),
                 _owner: Arc::clone(chunk),

@@ -268,7 +268,7 @@ class AcceptanceRunner:
         self.interval_fixtures = {}
         self.resources = []
         self.stop = asyncio.Event()
-        self.dictionary_refusal_checked = False
+        self.join_controls_checked = False
 
     async def register_process(self, creation):
         self.creations.add(creation)
@@ -561,7 +561,7 @@ class AcceptanceRunner:
         case = group[0]
         cpu_budget = self._cpu_budget(case)
         if side == "candidate" and case.workload.startswith("join"):
-            await self._dictionary_refusal_preflight(case)
+            await self._join_preflight(case)
         if case.workload not in RUNTIME_WORKLOADS:
             if case.row == 8:
                 worker = await self._start_worker(case, side, round_index)
@@ -603,29 +603,16 @@ class AcceptanceRunner:
             raise ValueError("worker prepared a different acceptance workload")
         return self._persist(group, side, round_index, None, response["warmup"])
 
-    async def _dictionary_refusal_preflight(self, case):
+    async def _join_preflight(self, case):
         from scripts.benchmark_suite.native_components import (
-            validate_join_dictionary_refusal,
             validate_join_layout_controls,
         )
 
-        if self.dictionary_refusal_checked:
+        if self.join_controls_checked:
             return
         binary = self.plan["native_binaries"]["candidate"]["stream_join_perf/enabled"]
         if sha256_file(Path(binary["path"])) != binary["sha256"]:
-            raise ValueError("dictionary refusal control binary changed")
-        observed = await self._run_dictionary_refusal_control(case, binary)
-        destination = self.output / "correctness" / "join-dictionary-refusal.json"
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        write_json(
-            destination,
-            {
-                "product_commit": self.release(case, "candidate")["product_commit"],
-                "binary_sha256": binary["sha256"],
-                "control": observed,
-            },
-        )
-        validate_join_dictionary_refusal(observed)
+            raise ValueError("Join control binary changed")
         layouts = await self._run_native_control(case, binary, "join_layout_controls")
         write_json(
             self.output / "correctness" / "join-layout-controls.json",
@@ -636,12 +623,7 @@ class AcceptanceRunner:
             },
         )
         validate_join_layout_controls(layouts)
-        self.dictionary_refusal_checked = True
-
-    async def _run_dictionary_refusal_control(self, case, binary):
-        return await self._run_native_control(
-            case, binary, "join_dictionary_refusal_retention"
-        )
+        self.join_controls_checked = True
 
     async def _run_native_control(self, case, binary, component):
         destination = self.output / "correctness" / component

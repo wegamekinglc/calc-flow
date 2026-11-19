@@ -44,6 +44,7 @@ pub(crate) const MAX_SQL_RESULT_BYTES: usize = 1 << 30;
 
 #[path = "datafusion_join.rs"]
 mod datafusion_join;
+#[cfg(test)]
 #[path = "datafusion_owned.rs"]
 pub(crate) mod owned;
 
@@ -114,6 +115,7 @@ impl Default for DataFusionConfig {
 }
 
 impl DataFusionConfig {
+    #[cfg(test)]
     pub(crate) const fn serial_owned_sql(self) -> bool {
         matches!(self.parallelism_mode, DataFusionParallelismMode::Fixed)
             && self.target_partitions == 1
@@ -244,6 +246,7 @@ pub struct DataFusionRuntime {
 }
 
 impl DataFusionRuntime {
+    #[cfg(test)]
     pub(crate) const fn serial_owned_sql(&self) -> bool {
         self.config.serial_owned_sql()
     }
@@ -303,7 +306,7 @@ impl DataFusionRuntime {
         Ok(runtime)
     }
 
-    #[cfg(any(test, feature = "benchmark-internals"))]
+    #[cfg(test)]
     pub(crate) fn with_benchmark_pool(
         config: DataFusionConfig,
         pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
@@ -557,6 +560,7 @@ impl DataFusionRuntime {
         self.compact_pool.take_peak()
     }
 
+    #[cfg(test)]
     pub(crate) fn incremental_memory_pool(
         &self,
     ) -> Arc<dyn datafusion::execution::memory_pool::MemoryPool> {

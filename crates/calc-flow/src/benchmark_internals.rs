@@ -137,32 +137,6 @@ pub async fn settle_job(job: &crate::StreamJobContext) -> Result<()> {
     }
 }
 
-/// Checks retained Join rows after a genuine optional dictionary grant refusal.
-///
-/// This fixed three-row control reports correctness and owned cleanup evidence.
-/// It does not collect performance measurements.
-///
-/// # Errors
-/// Returns an error if construction, production admission, validation or owned
-/// gather cleanup fails.
-pub async fn join_dictionary_refusal_retention_evidence() -> Result<Value> {
-    crate::StreamJoinOperator::benchmark_dictionary_refusal_retention().await
-}
-
-/// Checks the fixed retained Join checkpoint lifecycle with four million quotes.
-///
-/// This correctness-only diagnostic observes reservations and refunds in the
-/// default unbounded runtime pool. It does not report performance measurements.
-/// Enable it with the `benchmark-checkpoint-diagnostic` feature.
-///
-/// # Errors
-/// Returns an error if the diagnostic fixture cannot be constructed. Lifecycle
-/// failures are retained in the returned data together with cleanup evidence.
-#[cfg(feature = "benchmark-checkpoint-diagnostic")]
-pub async fn join_checkpoint_history_4m() -> Result<Value> {
-    crate::operator::run_checkpoint_history_diagnostic().await
-}
-
 /// Reads a sealed fixture and verifies its project before native compilation.
 ///
 /// # Errors

@@ -13,6 +13,7 @@ mod expression;
 pub use distinct::{DistinctHistory, DistinctOperator, DistinctSpec};
 pub(crate) mod ingress;
 mod join;
+#[cfg(test)]
 mod key_identity;
 mod keyed;
 #[cfg(test)]
@@ -49,8 +50,6 @@ pub use cross_section::{
 pub use expression::ExpressionOperator;
 pub(crate) use expression::{PreparedExpression, SyncExpressionOperator};
 pub(crate) use join::admission_masks::IngressPlan as JoinIngressPlan;
-#[cfg(feature = "benchmark-checkpoint-diagnostic")]
-pub(crate) use join::run_checkpoint_history_diagnostic;
 pub(crate) use join::supported_key_type;
 #[cfg(test)]
 pub(crate) use join::with_one_gib_pool;
@@ -148,7 +147,7 @@ impl StreamRuntimeState {
         self.runtime.is_some()
     }
 
-    #[cfg(any(test, feature = "benchmark-internals"))]
+    #[cfg(test)]
     fn initialize_benchmark_pool(
         &mut self,
         pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,

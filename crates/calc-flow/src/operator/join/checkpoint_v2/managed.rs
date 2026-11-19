@@ -6,7 +6,7 @@ use crate::runtime::streaming::gather_work::{
 use crate::{CalcFlowError, Result, StreamJobContext};
 
 impl StreamJoinOperator {
-    pub(crate) async fn restore_managed_snapshot(
+    pub(crate) async fn restore_managed_snapshot_legacy(
         &mut self,
         snapshot: &mut OperatorStateSnapshot,
         job: &StreamJobContext,
@@ -21,17 +21,27 @@ impl StreamJoinOperator {
         {
             return self.restore_native(snapshot);
         }
-        if !snapshot
-            .inline_metadata
-            .get("layout_version")
-            .and_then(serde_json::Value::as_u64)
-            .is_some_and(|layout| {
-                matches!(layout, 2 | 3) || layout == 1 && self.payload_projection.is_some()
-            })
+        #[cfg(test)]
         {
-            return self.restore_managed_metadata(snapshot, job, task).await;
+            if !snapshot
+                .inline_metadata
+                .get("layout_version")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|layout| {
+                    matches!(layout, 2 | 3) || layout == 1 && self.payload_projection.is_some()
+                })
+            {
+                return self.restore_managed_metadata(snapshot, job, task).await;
+            }
+            return self.restore_managed_v2(snapshot, job, task).await;
         }
-        self.restore_managed_v2(snapshot, job, task).await
+        #[cfg(not(test))]
+        Err(CalcFlowError::CheckpointMismatch {
+            message: format!(
+                "stream Join {:?} requires native layout 12 checkpoint state",
+                self.name
+            ),
+        })
     }
 
     async fn restore_managed_v2(

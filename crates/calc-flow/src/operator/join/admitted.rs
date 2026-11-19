@@ -1,8 +1,12 @@
-use super::{AdmittedRow, StreamJoinOperator, columnar::RowPayload, operator_error};
+#[cfg(test)]
+use super::{AdmittedRow, columnar::RowPayload};
+use super::{StreamJoinOperator, operator_error};
 use crate::{Batch, EventTime, Result, batch::TableBatch};
 use datafusion::arrow::{array::ArrayRef, datatypes::SchemaRef, record_batch::RecordBatch};
 use datafusion::execution::memory_pool::MemoryReservation;
-use std::{ops::Range, sync::Arc};
+use std::ops::Range;
+#[cfg(test)]
+use std::sync::Arc;
 
 #[cfg(test)]
 thread_local! {
@@ -32,25 +36,33 @@ use metadata::{RetainBits, SparseIndices, Values};
 
 struct Segment {
     record: usize,
+    #[cfg(test)]
     source_base: usize,
     row_id_base: u64,
     range: Range<usize>,
     first: usize,
     sparse_start: Option<usize>,
+    #[cfg(test)]
     payload: Option<RowPayload>,
+    #[cfg(test)]
     payload_base: Option<usize>,
 }
 
 impl Segment {
     fn new(record: usize, source_base: usize) -> Self {
+        #[cfg(not(test))]
+        let _ = source_base;
         Self {
             record,
+            #[cfg(test)]
             source_base,
             row_id_base: 0,
             range: 0..0,
             first: 0,
             sparse_start: None,
+            #[cfg(test)]
             payload: None,
+            #[cfg(test)]
             payload_base: None,
         }
     }
@@ -78,6 +90,7 @@ impl Segments {
         }
         self.len += 1;
     }
+    #[cfg(test)]
     fn len(&self) -> usize {
         self.len
     }
@@ -96,11 +109,13 @@ impl Segments {
 }
 
 /// One bound segment, shared by all row/selection reads in a group.
+#[cfg(test)]
 #[derive(Clone, Copy)]
 pub(super) struct GroupView<'a> {
     batch: &'a AdmittedBatch,
     segment: &'a Segment,
 }
+#[cfg(test)]
 impl<'a> GroupView<'a> {
     fn contains(self, position: usize) -> bool {
         self.segment.range.contains(&position)
@@ -154,6 +169,7 @@ pub(super) struct AdmittedBatch {
     current: usize,
     total_records: usize,
     workspace: Option<MemoryReservation>,
+    #[cfg(test)]
     parents: Option<MemoryReservation>,
 }
 
@@ -169,6 +185,7 @@ impl Default for AdmittedBatch {
             current: 0,
             total_records: 0,
             workspace: None,
+            #[cfg(test)]
             parents: None,
         }
     }
@@ -215,6 +232,7 @@ impl AdmittedBatch {
         self.len
     }
 
+    #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -238,7 +256,7 @@ impl AdmittedBatch {
         index: usize,
         physical: usize,
         context: &crate::StreamOperatorContext<'_>,
-        quantum: &mut super::columnar::Quantum,
+        quantum: &mut super::columnar_quantum::Quantum,
     ) -> Result<()> {
         debug_assert!(
             matches!(self.times, Values::Inline { .. }) || self.workspace.is_some(),
@@ -349,9 +367,29 @@ impl AdmittedBatch {
 
     #[inline]
     pub(super) fn row(&self, position: usize) -> AdmittedRef<'_> {
-        self.view(position).row(position)
+        #[cfg(test)]
+        return self.view(position).row(position);
+        #[cfg(not(test))]
+        {
+            let segment = self.segments.get(self.segment_index(position));
+            let physical = self.physical(segment, position);
+            AdmittedRef {
+                record: PayloadRef::Record(
+                    &self
+                        .table
+                        .as_ref()
+                        .expect("borrowed admission table")
+                        .batches()[segment.record],
+                    physical,
+                ),
+                row_id: segment.row_id_base + physical as u64,
+                event_time: EventTime::from_micros(self.times.get(position)),
+                retain: self.retained.get(position),
+            }
+        }
     }
 
+    #[cfg(test)]
     fn view(&self, position: usize) -> GroupView<'_> {
         GroupView {
             batch: self,
@@ -360,6 +398,7 @@ impl AdmittedBatch {
     }
 
     #[inline]
+    #[cfg(test)]
     fn cursor_view(&self, index: usize, cursor: &mut Option<usize>) -> GroupView<'_> {
         assert!(index < self.len);
         let segment = match *cursor {
@@ -380,14 +419,17 @@ impl AdmittedBatch {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn group_range(&self, index: usize) -> Range<usize> {
         self.segments.get(index).range.clone()
     }
 
+    #[cfg(test)]
     pub(super) fn record_count(&self) -> usize {
         self.segments.len()
     }
 
+    #[cfg(test)]
     pub(super) fn replace(&mut self, index: usize, payload: RowPayload) {
         let segment = self.segments.get_mut(index);
         segment.payload_base = Some(payload.offset());
@@ -398,6 +440,7 @@ impl AdmittedBatch {
     /// Installs a zero-copy projected parent indexed by physical row. The
     /// group keeps no retained row, so nothing enters state from it and the
     /// projected columns can share the incoming buffers.
+    #[cfg(test)]
     pub(super) fn replace_view(&mut self, index: usize, parent: Arc<RecordBatch>) {
         let segment = self.segments.get_mut(index);
         segment.payload_base = None;
@@ -420,15 +463,19 @@ impl AdmittedBatch {
         if self.current < self.total_records {
             return;
         }
+        #[cfg(test)]
         let borrowed = (0..self.segments.len()).any(|index| {
             let segment = self.segments.get(index);
             !segment.range.is_empty() && segment.payload.is_none()
         });
+        #[cfg(not(test))]
+        let borrowed = true;
         if !borrowed {
             self.table = None;
         }
     }
 
+    #[cfg(test)]
     pub(super) fn prepare_retained_parents(&mut self) {
         for index in 0..self.segments.len() {
             let segment = self.segments.get_mut(index);
@@ -449,6 +496,7 @@ impl AdmittedBatch {
         self.release_table();
     }
 
+    #[cfg(test)]
     fn parent_bytes(&self) -> Result<usize> {
         let mut bytes = 0_usize;
         for index in 0..self.segments.len() {
@@ -467,6 +515,7 @@ impl AdmittedBatch {
         parent_workspace_bytes(bytes)
     }
 
+    #[cfg(test)]
     pub(super) fn detach(&mut self, operator: &mut StreamJoinOperator) -> Result<bool> {
         let bytes = self.parent_bytes()?;
         if bytes == 0 {
@@ -493,6 +542,7 @@ impl AdmittedBatch {
     }
 }
 
+#[cfg(test)]
 fn record_parent_bytes(record: &RecordBatch) -> Result<usize> {
     record
         .num_columns()
@@ -501,8 +551,9 @@ fn record_parent_bytes(record: &RecordBatch) -> Result<usize> {
         .ok_or_else(|| super::charge_overflow("Join parents"))
 }
 
+#[cfg(test)]
 fn parent_workspace_bytes(bytes: usize) -> Result<usize> {
-    let control = super::columnar::reservation_control()
+    let control = super::columnar_quantum::reservation_control()
         .ok_or_else(|| super::charge_overflow("Join parents"))?;
     bytes
         .checked_add(control)
@@ -536,12 +587,13 @@ fn workspace_bytes(rows: usize, records: usize) -> Option<usize> {
     };
     metadata::metadata_bytes(rows)?
         .checked_add(segments)?
-        .checked_add(super::columnar::reservation_control()?)
+        .checked_add(super::columnar_quantum::reservation_control()?)
 }
 
 #[derive(Clone, Copy)]
 pub(super) enum PayloadRef<'a> {
     Record(&'a RecordBatch, usize),
+    #[cfg(test)]
     Payload(&'a RowPayload, usize),
 }
 
@@ -549,9 +601,11 @@ impl<'a> PayloadRef<'a> {
     pub(super) fn columns(self) -> &'a [ArrayRef] {
         match self {
             Self::Record(record, _) => record.columns(),
+            #[cfg(test)]
             Self::Payload(payload, _) => payload.columns(),
         }
     }
+    #[cfg(test)]
     pub(super) fn shared_columns(self) -> Option<&'a [ArrayRef]> {
         match self {
             Self::Record(record, _) => Some(record.columns()),
@@ -561,17 +615,21 @@ impl<'a> PayloadRef<'a> {
     pub(super) fn schema_ref(self) -> &'a SchemaRef {
         match self {
             Self::Record(record, _) => record.schema_ref(),
+            #[cfg(test)]
             Self::Payload(payload, _) => payload.schema_ref(),
         }
     }
     pub(super) fn offset(self) -> usize {
         match self {
-            Self::Record(_, row) | Self::Payload(_, row) => row,
+            Self::Record(_, row) => row,
+            #[cfg(test)]
+            Self::Payload(_, row) => row,
         }
     }
     pub(super) fn column(self, index: usize) -> &'a ArrayRef {
         &self.columns()[index]
     }
+    #[cfg(test)]
     pub(super) fn num_columns(self) -> usize {
         self.columns().len()
     }
@@ -589,16 +647,19 @@ impl<'a> PayloadRef<'a> {
         )
         .expect("validated payload position")
     }
+    #[cfg(test)]
     pub(super) fn mark_live(self, dense: usize) {
         if let Self::Payload(payload, offset) = self {
             payload.mark_live_at(offset, dense);
         }
     }
+    #[cfg(test)]
     pub(super) fn owned(self) -> RowPayload {
         self.owner()
             .expect("prepared admission parent")
             .with_offset(self.offset())
     }
+    #[cfg(test)]
     pub(super) fn owner(self) -> Option<&'a RowPayload> {
         match self {
             Self::Record(..) => None,
@@ -620,6 +681,7 @@ impl<'a> PayloadRef<'a> {
     }
 }
 
+#[cfg(test)]
 impl<'a> From<&'a RowPayload> for PayloadRef<'a> {
     fn from(payload: &'a RowPayload) -> Self {
         Self::Payload(payload, payload.offset())
@@ -634,43 +696,54 @@ pub(super) struct AdmittedRef<'a> {
 }
 
 pub(super) trait AdmittedRows: Sync {
+    #[cfg(test)]
     fn group_view(&self, _position: usize) -> Option<GroupView<'_>> {
         None
     }
     fn len(&self) -> usize;
     fn row(&self, index: usize) -> AdmittedRef<'_>;
+    #[cfg(test)]
     fn cursor_row(&self, index: usize, _segment: &mut Option<usize>) -> AdmittedRef<'_> {
         self.row(index)
     }
     /// Payload at a logical admitted position, without requiring row metadata.
+    #[cfg(test)]
     fn payload(&self, index: usize) -> PayloadRef<'_> {
         self.row(index).record
     }
+    #[cfg(test)]
     fn cursor_payload(&self, index: usize, _segment: &mut Option<usize>) -> PayloadRef<'_> {
         self.payload(index)
     }
     /// Event time at a logical admitted position, independent of payload offsets.
+    #[cfg(test)]
     fn event_time(&self, index: usize) -> EventTime {
         self.row(index).event_time
     }
+    #[cfg(test)]
     fn group_end(&self, start: usize) -> usize;
+    #[cfg(test)]
     fn source_index(&self, index: usize) -> usize;
     /// Retained bits for a window of at most 64 rows starting at `start`;
     /// bit `i` marks the row at `start + i`.
+    #[cfg(test)]
     fn retained_bits(&self, start: usize, length: usize) -> u64 {
         debug_assert!(length <= 64);
         (0..length).fold(0, |bits, offset| {
             bits | (u64::from(self.row(start + offset).retain) << offset)
         })
     }
+    #[cfg(test)]
     fn any_retained(&self, range: Range<usize>) -> bool {
         (range.start..range.end).any(|index| self.row(index).retain)
     }
+    #[cfg(test)]
     fn dense_key_range(&self, _range: Range<usize>) -> Option<Range<usize>> {
         None
     }
     /// why: key identity reads only (offset, retain), so a group can resolve
     /// its segment once instead of re-walking `row` per row
+    #[cfg(test)]
     fn key_offsets(
         &self,
         range: Range<usize>,
@@ -683,6 +756,7 @@ pub(super) trait AdmittedRows: Sync {
 }
 
 impl AdmittedRows for AdmittedBatch {
+    #[cfg(test)]
     fn group_view(&self, position: usize) -> Option<GroupView<'_>> {
         Some(self.view(position))
     }
@@ -692,32 +766,41 @@ impl AdmittedRows for AdmittedBatch {
     fn row(&self, index: usize) -> AdmittedRef<'_> {
         self.row(index)
     }
+    #[cfg(test)]
     fn cursor_row(&self, index: usize, cursor: &mut Option<usize>) -> AdmittedRef<'_> {
         self.cursor_view(index, cursor).row(index)
     }
+    #[cfg(test)]
     fn payload(&self, index: usize) -> PayloadRef<'_> {
         self.view(index).payload(index)
     }
+    #[cfg(test)]
     fn cursor_payload(&self, index: usize, cursor: &mut Option<usize>) -> PayloadRef<'_> {
         self.cursor_view(index, cursor).payload(index)
     }
+    #[cfg(test)]
     fn event_time(&self, index: usize) -> EventTime {
         assert!(index < self.len);
         EventTime::from_micros(self.times.get(index))
     }
+    #[cfg(test)]
     fn group_end(&self, start: usize) -> usize {
         self.segments.get(self.segment_index(start)).range.end
     }
+    #[cfg(test)]
     fn source_index(&self, index: usize) -> usize {
         let segment = self.segments.get(self.segment_index(index));
         segment.source_base + self.physical(segment, index)
     }
+    #[cfg(test)]
     fn retained_bits(&self, start: usize, length: usize) -> u64 {
         self.retained.bits(start, length)
     }
+    #[cfg(test)]
     fn any_retained(&self, range: Range<usize>) -> bool {
         self.retained.any(range)
     }
+    #[cfg(test)]
     fn dense_key_range(&self, range: Range<usize>) -> Option<Range<usize>> {
         if range.is_empty() {
             return None;
@@ -734,6 +817,7 @@ impl AdmittedRows for AdmittedBatch {
         let start = first.checked_add(range.start - segment.range.start)?;
         Some(start..start.checked_add(range.len())?)
     }
+    #[cfg(test)]
     fn key_offsets(
         &self,
         range: Range<usize>,
@@ -766,12 +850,14 @@ impl dyn AdmittedRows + '_ {
     pub(super) fn iter(&self) -> RowIter<'_> {
         RowIter::new(self, 0..self.len())
     }
+    #[cfg(test)]
     pub(super) fn cursor(&self) -> AdmittedCursor<'_> {
         AdmittedCursor {
             rows: self,
             segment: None,
         }
     }
+    #[cfg(test)]
     pub(super) fn groups(&self) -> GroupIter<'_> {
         GroupIter {
             rows: self,
@@ -780,11 +866,13 @@ impl dyn AdmittedRows + '_ {
     }
 }
 
+#[cfg(test)]
 pub(super) struct AdmittedCursor<'a> {
     rows: &'a dyn AdmittedRows,
     segment: Option<usize>,
 }
 
+#[cfg(test)]
 impl<'a> AdmittedCursor<'a> {
     pub(super) fn row(&mut self, index: usize) -> AdmittedRef<'a> {
         self.rows.cursor_row(index, &mut self.segment)
@@ -797,6 +885,7 @@ impl<'a> AdmittedCursor<'a> {
 pub(super) struct RowIter<'a> {
     rows: &'a dyn AdmittedRows,
     range: Range<usize>,
+    #[cfg(test)]
     view: Option<GroupView<'a>>,
 }
 impl<'a> RowIter<'a> {
@@ -804,15 +893,22 @@ impl<'a> RowIter<'a> {
         Self {
             rows,
             range,
+            #[cfg(test)]
             view: None,
         }
     }
     fn row(&mut self, position: usize) -> AdmittedRef<'a> {
+        #[cfg(test)]
         if !self.view.is_some_and(|view| view.contains(position)) {
             self.view = self.rows.group_view(position);
         }
-        self.view
-            .map_or_else(|| self.rows.row(position), |view| view.row(position))
+        #[cfg(test)]
+        let row = self
+            .view
+            .map_or_else(|| self.rows.row(position), |view| view.row(position));
+        #[cfg(not(test))]
+        let row = self.rows.row(position);
+        row
     }
 }
 impl<'a> Iterator for RowIter<'a> {
@@ -845,13 +941,16 @@ impl<'a> IntoIterator for &'a dyn AdmittedRows {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 pub(super) struct AdmittedGroup<'a> {
     rows: &'a dyn AdmittedRows,
     start: usize,
     end: usize,
+    #[cfg(test)]
     view: Option<GroupView<'a>>,
 }
+#[cfg(test)]
 impl<'a> AdmittedGroup<'a> {
     pub(super) fn new(rows: &'a dyn AdmittedRows, range: Range<usize>) -> Self {
         Self {
@@ -908,10 +1007,12 @@ impl<'a> AdmittedGroup<'a> {
         self.rows.dense_key_range(self.start..self.end)
     }
 }
+#[cfg(test)]
 pub(super) struct GroupIter<'a> {
     rows: &'a dyn AdmittedRows,
     next: usize,
 }
+#[cfg(test)]
 impl<'a> Iterator for GroupIter<'a> {
     type Item = AdmittedGroup<'a>;
     fn next(&mut self) -> Option<Self::Item> {
@@ -934,6 +1035,7 @@ impl<'a> Iterator for GroupIter<'a> {
     }
 }
 
+#[cfg(test)]
 impl AdmittedRows for Vec<AdmittedRow> {
     fn len(&self) -> usize {
         Vec::len(self)
@@ -947,12 +1049,14 @@ impl AdmittedRows for Vec<AdmittedRow> {
             retain: row.retain,
         }
     }
+    #[cfg(test)]
     fn group_end(&self, start: usize) -> usize {
         let columns = self[start].record.columns();
         (start + 1..self.len())
             .find(|&index| !std::ptr::eq(columns, self[index].record.columns()))
             .unwrap_or(self.len())
     }
+    #[cfg(test)]
     fn source_index(&self, index: usize) -> usize {
         index
     }
@@ -975,9 +1079,11 @@ mod fixtures {
                 retain: row.retain,
             }
         }
+        #[cfg(test)]
         fn group_end(&self, start: usize) -> usize {
             start + 1
         }
+        #[cfg(test)]
         fn source_index(&self, index: usize) -> usize {
             index
         }
