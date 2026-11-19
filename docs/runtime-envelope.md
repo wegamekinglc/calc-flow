@@ -261,11 +261,12 @@ limits. Physical payload and temporary work reservations separately fund actual
 storage.
 
 Join tracks run-ID, row-ID and output-sequence frontiers independently of
-watermark progress. Native capture emits deterministic run/index/control page
-images and a shared-key record for the current epoch. Unchanged pages have
-identical decoded content, while persistence retains page identity and
-reachability. Capture currently reconstructs those images; it does not yet
-provide the planned dirty-page copy-on-write cost bound.
+watermark progress. Native capture caches clean run identity, per-side index
+and shared-key page images. New runs and changed identity prefixes rebuild only
+their own pages, retired runs drop cached pages, and unchanged key records are
+shared. Control pages are reused when their counters are unchanged. The full
+capture list is still assembled and a dirty per-side index is still rebuilt, so
+this does not yet provide the planned end-to-end dirty-page cost bound.
 
 Legacy layouts 1–3 and their base/delta history remain only in explicit
 migration tests. Production restore requires layout 12 and rejects those older

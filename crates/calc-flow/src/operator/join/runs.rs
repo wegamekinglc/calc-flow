@@ -656,6 +656,12 @@ impl EvictionPlan {
     }
 }
 
+#[derive(Default)]
+struct DirtyLineage {
+    runs: [BTreeSet<RunId>; 2],
+    indexes: [bool; 2],
+}
+
 /// Live run state for both Join sides.
 pub(super) struct RunState {
     name: String,
@@ -665,6 +671,7 @@ pub(super) struct RunState {
     next_run: u64,
     next_output: u64,
     match_limit_failures: u64,
+    dirty: DirtyLineage,
 }
 
 impl RunState {
@@ -685,6 +692,7 @@ impl RunState {
             next_run: 0,
             next_output: 0,
             match_limit_failures: 0,
+            dirty: DirtyLineage::default(),
         })
     }
 
@@ -707,6 +715,16 @@ impl RunState {
 
     pub(super) fn bytes(&self, side: JoinSide) -> usize {
         self.sides[side.index()].bytes
+    }
+
+    fn mark_run(&mut self, side: JoinSide, id: RunId) {
+        let side = side.index();
+        self.dirty.runs[side].insert(id);
+        self.dirty.indexes[side] = true;
+    }
+
+    pub(super) fn finish_native_capture(&mut self) {
+        self.dirty = DirtyLineage::default();
     }
 
     #[cfg(test)]
@@ -760,17 +778,21 @@ impl RunState {
         let cut = self.expiring_rows(side, extension_micros, opposite_watermark);
         let state = &self.sides[side.index()];
         let plan = EvictionPlan::new(state, cut)?;
-        Ok(Self::apply_eviction(&mut self.sides[side.index()], plan))
+        Ok(self.apply_eviction(side, plan))
     }
 
     pub(super) fn evict_end(&mut self, side: JoinSide) -> Result<Eviction> {
         let state = &self.sides[side.index()];
         let cut = state.expiration.len() - state.expiration_head;
         let plan = EvictionPlan::new(state, cut)?;
-        Ok(Self::apply_eviction(&mut self.sides[side.index()], plan))
+        Ok(self.apply_eviction(side, plan))
     }
 
-    fn apply_eviction(side: &mut Side, plan: EvictionPlan) -> Eviction {
+    fn apply_eviction(&mut self, side: JoinSide, plan: EvictionPlan) -> Eviction {
+        let cut = plan.cut;
+        let affected = plan.run_cuts.keys().copied().collect::<Vec<_>>();
+        let index = side.index();
+        let side = &mut self.sides[index];
         let retired_runs = plan
             .run_cuts
             .iter()
@@ -818,8 +840,12 @@ impl RunState {
             side.expiration_head = 0;
             side.bytes = 0;
         }
+        if cut > 0 {
+            self.dirty.indexes[index] = true;
+            self.dirty.runs[index].extend(affected);
+        }
         Eviction {
-            expired_rows: plan.cut,
+            expired_rows: cut,
             retired_runs,
         }
     }
@@ -1295,11 +1321,13 @@ impl Prepared {
             JoinSide::Right
         };
         if let Some(update) = self.update {
+            let id = update.run.id;
             state.next_run = state
                 .next_run
                 .checked_add(1)
                 .ok_or_else(|| run_error("run-ID frontier overflowed"))?;
             update.install(&mut state.sides[incoming_side.index()]);
+            state.mark_run(incoming_side, id);
         }
         state.sides[incoming_side.index()].next_row_id = self.next_row_id;
         let outputs = u64::try_from(outputs).map_err(|_| run_error("output count overflowed"))?;
@@ -1352,6 +1380,7 @@ impl RunStateSnapshot {
 }
 
 impl RunState {
+    #[cfg(test)]
     pub(super) fn snapshot(&self) -> RunStateSnapshot {
         RunStateSnapshot {
             name: self.name.clone(),
@@ -1374,19 +1403,22 @@ impl RunState {
             next_run: snapshot.next_run,
             next_output: snapshot.next_output,
             match_limit_failures: snapshot.match_limit_failures,
+            dirty: DirtyLineage::default(),
         })
     }
 }
 
 #[path = "run_pages.rs"]
 mod pages;
+pub(super) use pages::NativePageCache;
 
 impl RunState {
     pub(super) fn native_pages(
-        &self,
+        &mut self,
         epoch: crate::Epoch,
+        cache: &mut NativePageCache,
     ) -> Result<Vec<crate::state::v4::native::NativePage>> {
-        pages::capture(self, epoch)
+        pages::capture(self, epoch, cache)
     }
 
     pub(super) fn restore_native(

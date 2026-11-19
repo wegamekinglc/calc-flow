@@ -2,7 +2,7 @@ use super::{
     AdmittedBatch, JoinCheckpointMetadata, JoinSide, SideMetrics, StreamJoinOperator,
     admitted::AdmittedRef,
     checked_metric, counter_overflow, operator_error, output_gather,
-    runs::{Incoming, PreparedRuns, RunOutputContext, RunState},
+    runs::{Incoming, NativePageCache, PreparedRuns, RunOutputContext, RunState},
 };
 #[cfg(test)]
 use super::{
@@ -21,6 +21,10 @@ use std::{collections::BTreeMap, sync::Arc};
 pub(super) struct RunCore {
     state: RunState,
     keys: KeyStore,
+    pages: NativePageCache,
+    key_page: Option<(usize, NativePage)>,
+    #[cfg(test)]
+    key_reuses: usize,
 }
 
 impl RunCore {
@@ -42,11 +46,15 @@ impl RunCore {
         Ok(Self {
             state: RunState::new(&operator.name, operator.spec.limits, operator.spec.bounds)?,
             keys,
+            pages: NativePageCache::default(),
+            key_page: None,
+            #[cfg(test)]
+            key_reuses: 0,
         })
     }
 
     pub(super) fn native_capture(
-        &self,
+        &mut self,
         operator: &StreamJoinOperator,
         epoch: crate::Epoch,
     ) -> Result<Option<NativeCapture>> {
@@ -78,18 +86,48 @@ impl RunCore {
         let serde_json::Value::Object(metadata) = metadata else {
             unreachable!("Join native metadata is an object")
         };
-        let mut pages = self.state.native_pages(epoch)?;
-        let keys = self.keys.record()?;
-        let key_rows = u64::try_from(keys.num_rows())
-            .map_err(|_| counter_overflow(&operator.name, "native key rows"))?;
-        pages.push(NativePage::arrow("keys", &keys, key_rows, 0..key_rows));
-        Ok(Some(NativeCapture::new(
+        let mut pages = self.state.native_pages(epoch, &mut self.pages)?;
+        let key_rows = self.keys.len();
+        if self
+            .key_page
+            .as_ref()
+            .is_some_and(|(cached_rows, _)| *cached_rows == key_rows)
+        {
+            #[cfg(test)]
+            {
+                self.key_reuses += 1;
+            }
+        } else {
+            let keys = self.keys.record()?;
+            let generation = u64::try_from(keys.num_rows())
+                .map_err(|_| counter_overflow(&operator.name, "native key rows"))?;
+            self.key_page = Some((
+                key_rows,
+                NativePage::arrow("keys", &keys, generation, 0..generation),
+            ));
+        }
+        pages.push(
+            self.key_page
+                .as_ref()
+                .expect("native key page was initialized")
+                .1
+                .clone(),
+        );
+        let capture = NativeCapture::new(
             metadata.into_iter().collect(),
             vec![NativePartition {
                 key_group: 0,
                 pages,
             }],
-        )?))
+        )?;
+        self.state.finish_native_capture();
+        Ok(Some(capture))
+    }
+
+    #[cfg(test)]
+    pub(super) fn native_reuse_counts(&self) -> [usize; 3] {
+        let [identities, indexes] = self.pages.reuse_counts();
+        [identities, indexes, self.key_reuses]
     }
 
     pub(super) fn restore_native(

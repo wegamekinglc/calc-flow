@@ -504,6 +504,18 @@ mod tests {
         manifest
     }
 
+    async fn assert_clean_native_epoch(
+        original: &mut StreamJoinOperator,
+        store: &mut crate::state::v4::V4Store,
+    ) {
+        persist_native_epoch(original, store, 3).await;
+        assert_eq!(store.stats().carried_objects, 12);
+        assert_eq!(
+            original.run_core.as_ref().unwrap().native_reuse_counts(),
+            [3, 3, 2]
+        );
+    }
+
     #[tokio::test]
     async fn native_empty_checkpoint_roundtrip_preserves_identity() {
         let mut operator =
@@ -621,8 +633,101 @@ mod tests {
             original.run_core.as_ref().unwrap().fingerprint(),
             second_restored.run_core.as_ref().unwrap().fingerprint()
         );
-        assert_eq!(store.stats().carried_objects, 2);
+        assert_eq!(store.stats().carried_objects, 4);
+        assert_eq!(
+            original.run_core.as_ref().unwrap().native_reuse_counts(),
+            [1, 1, 1]
+        );
+        assert_clean_native_epoch(&mut original, &mut store).await;
         assert_native_eof_matches(&mut original, &mut restored, &job).await;
+    }
+
+    #[tokio::test]
+    async fn native_eviction_reuses_surviving_pages_and_drops_retired_runs() {
+        let mut original =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        original.enable_run_core();
+        let job = job().with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut output = EdgeCollector::new(original.output_ports().to_vec());
+        original
+            .process_data("left", left_batch(vec![100, 200]), &context, &mut output)
+            .await
+            .unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let mut store = crate::state::v4::V4Store::new(temporary.path().join("lineage"));
+        persist_native_epoch(&mut original, &mut store, 1).await;
+        original
+            .on_ingress_progress(
+                "right",
+                &progress_context(
+                    &job,
+                    (IngressState::Active, None),
+                    (IngressState::Active, Some(60_000_150)),
+                ),
+            )
+            .await
+            .unwrap();
+        let second = persist_native_epoch(&mut original, &mut store, 2).await;
+        let crate::state::v4::OperatorV4::Table { partitions, .. } = &second.operators["match"]
+        else {
+            unreachable!()
+        };
+        let crate::state::v4::ObjectPayload::Bytes(root) =
+            store.read_object(&partitions[0].root).unwrap()
+        else {
+            unreachable!()
+        };
+        let index: Value = serde_json::from_slice(&root).unwrap();
+        let epochs = index["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|page| {
+                (
+                    page["column"].as_str().unwrap().to_owned(),
+                    page["page_id"]["generation"].as_u64().unwrap(),
+                    page["handle"]["epoch"].as_u64().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            store.stats().carried_objects,
+            3,
+            "reuse counts: {:?}; pages: {epochs:?}",
+            original.run_core.as_ref().unwrap().native_reuse_counts()
+        );
+        assert_eq!(
+            original.run_core.as_ref().unwrap().native_reuse_counts(),
+            [0, 1, 1]
+        );
+        let snapshot = crate::state::v4::native::load_native(&mut store, &second, "match").unwrap();
+        let mut restored =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        restored.restore(&snapshot).unwrap();
+        assert_eq!(restored.status().left.retained_rows, 1);
+        original
+            .on_ingress_progress(
+                "right",
+                &progress_context(
+                    &job,
+                    (IngressState::Active, None),
+                    (IngressState::Active, Some(600_000_000)),
+                ),
+            )
+            .await
+            .unwrap();
+        let third = persist_native_epoch(&mut original, &mut store, 3).await;
+        assert_eq!(store.stats().carried_objects, 5);
+        assert_eq!(
+            original.run_core.as_ref().unwrap().native_reuse_counts(),
+            [0, 2, 2]
+        );
+        let snapshot = crate::state::v4::native::load_native(&mut store, &third, "match").unwrap();
+        assert!(!snapshot.segments.contains_key("left/run-0/payload"));
+        assert!(!snapshot.segments.contains_key("left/run-0/identity"));
+        restored.restore(&snapshot).unwrap();
+        assert_eq!(restored.status().left.retained_rows, 0);
     }
 
     async fn assert_native_eof_matches(
@@ -6120,10 +6225,13 @@ impl StreamJoinOperator {
         if rebuild {
             self.initialize_run_core()?;
         }
-        self.run_core
-            .as_ref()
-            .expect("native run core was initialized")
-            .native_capture(self, epoch)
+        let mut core = self
+            .run_core
+            .take()
+            .expect("native run core was initialized");
+        let result = core.native_capture(self, epoch);
+        self.run_core = Some(core);
+        result
     }
 
     #[cfg(test)]

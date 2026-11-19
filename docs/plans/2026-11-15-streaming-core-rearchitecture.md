@@ -213,6 +213,11 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   Join 579 项、operator-task 77 项（2 ignored）、finite 8 项、native component 5 项、Python 验收/runner/fresh-harness
   共 40 项和全 feature Clippy 通过。当前 capture 仍重建 run/index/key page images，尚未实现 dirty-page/COW 成本界限；
   stable-page witness 不是性能测量，P5 的 1M/interval 门槛、其余 typed families、P6/P7 和最终 CI 仍未完成。
+- 2026-11-20 Join clean-page 缓存已接入：run commit/eviction 维护 dirty lineage，未修改的 run identity、
+  per-side index 和 append-only key record 跨 epoch 复用，retired run 从缓存删除，control counters 未变时复用 control page。
+  连续 epoch 的第二/第三次 capture 分别携带 4/12 个累计 clean objects，部分淘汰与整 run 退休恢复通过；Join 580 项、
+  operator-task 77 项（2 ignored）、native component 5 项及全 feature Clippy 通过。此步骤减少页面内容重建，
+  但仍装配完整页面列表并在 dirty 时重建 per-side index，端到端 O(dirty pages) capture 与 P5 性能门槛尚未完成。
 
 ## 1. 目标
 

@@ -18,7 +18,7 @@ use std::{
     sync::Arc,
 };
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Control {
     version: u32,
@@ -28,7 +28,7 @@ struct Control {
     sides: [SideControl; 2],
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SideControl {
     next_row_id: u64,
@@ -37,55 +37,162 @@ struct SideControl {
     expiration_head: u64,
 }
 
-pub(super) fn capture(state: &RunState, epoch: crate::Epoch) -> Result<Vec<NativePage>> {
-    let snapshot = state.snapshot();
+#[derive(Default)]
+pub(in crate::operator::join) struct NativePageCache {
+    runs: [BTreeMap<RunId, CachedRunPages>; 2],
+    indexes: [Option<NativePage>; 2],
+    control: Option<(Control, NativePage)>,
+    initialized: bool,
+    #[cfg(test)]
+    reused_identities: usize,
+    #[cfg(test)]
+    reused_indexes: usize,
+}
+
+struct CachedRunPages {
+    payload: NativePage,
+    identity: NativePage,
+    head: usize,
+    released_bytes: usize,
+}
+
+impl NativePageCache {
+    #[cfg(test)]
+    pub(in crate::operator::join) fn reuse_counts(&self) -> [usize; 2] {
+        [self.reused_identities, self.reused_indexes]
+    }
+}
+
+pub(super) fn capture(
+    state: &mut RunState,
+    epoch: crate::Epoch,
+    cache: &mut NativePageCache,
+) -> Result<Vec<NativePage>> {
     let epoch = epoch.as_u64();
-    let mut pages = Vec::new();
-    for (side, side_state) in snapshot.sides.iter().enumerate() {
-        let prefix = if side == 0 { "left" } else { "right" };
-        for (&run, live) in &side_state.runs {
-            let id = run.0;
-            let rows = u64::try_from(live.run.row_ids.len())
-                .map_err(|_| page_error("run rows exceed u64"))?;
-            pages.push(NativePage::arrow(
-                format!("{prefix}/run-{id}/payload"),
-                &live.run.payload,
-                id,
-                0..rows,
-            ));
-            pages.push(NativePage::arrow(
-                format!("{prefix}/run-{id}/identity"),
-                &run_identity(run, live)?,
-                epoch,
-                0..rows,
-            ));
+    let initialized = cache.initialized;
+    for side in 0..2 {
+        let dirty = if initialized {
+            state.dirty.runs[side].clone()
+        } else {
+            state.sides[side].runs.keys().copied().collect()
+        };
+        for id in dirty {
+            capture_run(state, side, id, epoch, cache)?;
         }
-        pages.push(NativePage::arrow(
-            format!("{prefix}/index"),
-            &index_record(side_state)?,
-            epoch,
-            0..index_rows(side_state),
-        ));
+        if !cache.initialized || state.dirty.indexes[side] {
+            let prefix = if side == 0 { "left" } else { "right" };
+            cache.indexes[side] = Some(NativePage::arrow(
+                format!("{prefix}/index"),
+                &index_record(&state.sides[side])?,
+                epoch,
+                0..index_rows(&state.sides[side]),
+            ));
+        } else {
+            #[cfg(test)]
+            {
+                cache.reused_indexes += 1;
+            }
+        }
     }
     let control = Control {
         version: 1,
-        next_run: snapshot.next_run,
-        next_output: snapshot.next_output,
-        match_limit_failures: snapshot.match_limit_failures,
-        sides: snapshot.sides.each_ref().map(|side| SideControl {
+        next_run: state.next_run,
+        next_output: state.next_output,
+        match_limit_failures: state.match_limit_failures,
+        sides: state.sides.each_ref().map(|side| SideControl {
             next_row_id: side.next_row_id,
             rows: u64::try_from(side.rows).expect("state rows fit u64"),
             bytes: u64::try_from(side.bytes).expect("state bytes fit u64"),
             expiration_head: u64::try_from(side.expiration_head).expect("expiration head fits u64"),
         }),
     };
-    pages.push(NativePage::json(
-        "control",
-        serde_json::to_value(control).map_err(|error| page_error(error.to_string()))?,
-        epoch,
-        0..0,
-    ));
+    let control_page = if let Some((previous, page)) = &cache.control
+        && previous == &control
+    {
+        page.clone()
+    } else {
+        NativePage::json(
+            "control",
+            serde_json::to_value(&control).map_err(|error| page_error(error.to_string()))?,
+            epoch,
+            0..0,
+        )
+    };
+    cache.control = Some((control, control_page.clone()));
+    cache.initialized = true;
+    let mut pages = Vec::new();
+    for side in 0..2 {
+        for (id, cached) in &cache.runs[side] {
+            #[cfg(not(test))]
+            let _ = id;
+            #[cfg(test)]
+            if initialized && !state.dirty.runs[side].contains(id) {
+                cache.reused_identities += 1;
+            }
+            pages.push(cached.payload.clone());
+            pages.push(cached.identity.clone());
+        }
+        pages.push(
+            cache.indexes[side]
+                .clone()
+                .expect("native index page was initialized"),
+        );
+    }
+    pages.push(control_page);
     Ok(pages)
+}
+
+fn capture_run(
+    state: &RunState,
+    side: usize,
+    id: RunId,
+    epoch: u64,
+    cache: &mut NativePageCache,
+) -> Result<()> {
+    let Some(live) = state.sides[side].runs.get(&id) else {
+        cache.runs[side].remove(&id);
+        return Ok(());
+    };
+    let prefix = if side == 0 { "left" } else { "right" };
+    let rows =
+        u64::try_from(live.run.row_ids.len()).map_err(|_| page_error("run rows exceed u64"))?;
+    let next = if let Some(cached) = cache.runs[side].get(&id) {
+        let identity = if cached.head == live.head && cached.released_bytes == live.released_bytes {
+            cached.identity.clone()
+        } else {
+            NativePage::arrow(
+                format!("{prefix}/run-{}/identity", id.0),
+                &run_identity(id, live)?,
+                epoch,
+                0..rows,
+            )
+        };
+        CachedRunPages {
+            payload: cached.payload.clone(),
+            identity,
+            head: live.head,
+            released_bytes: live.released_bytes,
+        }
+    } else {
+        CachedRunPages {
+            payload: NativePage::arrow(
+                format!("{prefix}/run-{}/payload", id.0),
+                &live.run.payload,
+                id.0,
+                0..rows,
+            ),
+            identity: NativePage::arrow(
+                format!("{prefix}/run-{}/identity", id.0),
+                &run_identity(id, live)?,
+                epoch,
+                0..rows,
+            ),
+            head: live.head,
+            released_bytes: live.released_bytes,
+        }
+    };
+    cache.runs[side].insert(id, next);
+    Ok(())
 }
 
 fn run_identity(id: RunId, live: &LiveRun) -> Result<RecordBatch> {
