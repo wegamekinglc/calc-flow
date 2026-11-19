@@ -1877,14 +1877,26 @@ async fn capture_operator_checkpoint(
     epoch: Epoch,
 ) -> Result<OperatorCheckpointAck> {
     let cancellation = inputs.context.job().cancellation().clone();
-    let (snapshot, capture_credit) = tokio::select! {
-        biased;
-        result = prepare_operator_snapshot(inputs, input_progress, epoch) => result?,
-        () = cancellation.cancelled() => return Err(CalcFlowError::Cancelled {
-            run_id: inputs.context.job().job_id().to_string(),
-        }),
-    };
+    inputs.context.job().check_cancelled()?;
     let native = inputs.operator.native_checkpoint(epoch)?;
+    inputs.context.job().check_cancelled()?;
+    let (snapshot, capture_credit) = if let Some(capture) = &native {
+        (
+            crate::OperatorStateSnapshot {
+                inline_metadata: capture.metadata(),
+                segments: BTreeMap::new(),
+            },
+            None,
+        )
+    } else {
+        tokio::select! {
+            biased;
+            result = prepare_operator_snapshot(inputs, input_progress, epoch) => result?,
+            () = cancellation.cancelled() => return Err(CalcFlowError::Cancelled {
+                run_id: inputs.context.job().job_id().to_string(),
+            }),
+        }
+    };
     let snapshot =
         encode_operator_snapshot(inputs, input_progress, snapshot, capture_credit.as_ref())?;
     let native = native
@@ -1909,11 +1921,20 @@ async fn capture_operator_checkpoint(
     } else {
         snapshot
     };
+    let native_bytes = native.as_ref().map_or(
+        Ok(0),
+        crate::state::v4::native::NativeCapture::reservation_bytes,
+    )?;
+    let reservation_bytes = opaque_capture_reservation(&snapshot)?
+        .checked_add(native_bytes)
+        .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+            message: "native checkpoint reservation overflow".into(),
+        })?;
     let reservation = inputs
         .context
         .job()
         .checkpoint_budget()
-        .reserve(opaque_capture_reservation(&snapshot)?)?;
+        .reserve(reservation_bytes)?;
     let state = crate::OperatorManifestEntry {
         progress: input_progress.manifest_entries()?,
         inline_metadata: snapshot.inline_metadata.clone(),

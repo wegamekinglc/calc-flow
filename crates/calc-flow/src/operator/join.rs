@@ -5665,12 +5665,11 @@ impl StreamOperator for StreamJoinOperator {
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
         self.begin_data(context).await?;
-        let use_runs = production::supported(self) && self.run_core.is_some();
         #[cfg(not(test))]
-        let use_runs = use_runs || production::supported(self) && !context.job().checkpointing();
+        let use_runs = production::supported(self);
         #[cfg(test)]
-        let use_runs = use_runs
-            || self.run_core_enabled == RunCoreMode::Columnar && production::supported(self);
+        let use_runs = production::supported(self)
+            && (self.run_core.is_some() || self.run_core_enabled == RunCoreMode::Columnar);
         if use_runs {
             return self.process_runs(ingress, &batch, context, output).await;
         }

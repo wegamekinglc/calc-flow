@@ -5,10 +5,13 @@ use super::{
 use crate::state::manifest::OperatorIngressManifestEntry;
 use crate::state::table::v4::{LogicalRange, PageEntry, PartitionIndex, V4PageId};
 use crate::{EventTime, JsonMap, OperatorStateSnapshot, StateSegment};
-use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::arrow::{array::Array, record_batch::RecordBatch};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    mem::{size_of, size_of_val},
+};
 
 const METADATA_COLUMN: &str = "__cf_operator_metadata";
 const MAX_METADATA_BYTES: usize = 64 * 1024;
@@ -55,6 +58,23 @@ impl NativeCapture {
         self.fingerprint = metadata_fingerprint(&metadata)?;
         self.metadata = metadata;
         Ok(self)
+    }
+
+    pub(crate) fn reservation_bytes(&self) -> Result<u64> {
+        let metadata = serde_json::to_value(&self.metadata)
+            .map_err(|error| mismatch(format!("native metadata is not serializable: {error}")))?;
+        let mut bytes = add_charge(0, crate::canonical_json(&metadata)?.len())?;
+        for partition in &self.partitions {
+            bytes = add_charge(bytes, size_of::<NativePartition>())?;
+            for page in &partition.pages {
+                bytes = bytes
+                    .checked_add(page.reservation_bytes()?)
+                    .ok_or_else(|| mismatch("native capture reservation overflow".into()))?;
+            }
+        }
+        bytes
+            .checked_mul(2)
+            .ok_or_else(|| mismatch("native capture reservation overflow".into()))
     }
 }
 
@@ -110,6 +130,18 @@ impl NativePage {
             generation,
             range,
             payload: ObjectPayload::Json(value),
+        }
+    }
+
+    fn reservation_bytes(&self) -> Result<u64> {
+        let mut bytes = add_charge(0, size_of::<NativePage>())?;
+        bytes = add_charge(bytes, self.column.len())?;
+        match &self.payload {
+            ObjectPayload::Bytes(payload) => add_charge(bytes, payload.len()),
+            ObjectPayload::Json(payload) => {
+                add_charge(bytes, crate::canonical_json(payload)?.len())
+            }
+            ObjectPayload::Arrow(payload) => arrow_reservation_bytes(payload, bytes),
         }
     }
 }
@@ -488,6 +520,38 @@ fn read_partition_index(
         return Err(mismatch("partition root key group differs".into()));
     }
     Ok(index)
+}
+
+fn add_charge(total: u64, value: usize) -> Result<u64> {
+    let value = u64::try_from(value)
+        .map_err(|_| mismatch("native capture reservation exceeds u64".into()))?;
+    total
+        .checked_add(value)
+        .ok_or_else(|| mismatch("native capture reservation overflow".into()))
+}
+
+fn arrow_reservation_bytes(payload: &super::ArrowPayload, mut bytes: u64) -> Result<u64> {
+    bytes = add_charge(bytes, size_of_val(payload.fields.as_slice()))?;
+    for field in &payload.fields {
+        bytes = add_charge(bytes, field.name().len())?;
+        bytes = map_reservation_bytes(field.metadata(), bytes)?;
+    }
+    for column in &payload.columns {
+        bytes = add_charge(bytes, column.get_array_memory_size())?;
+    }
+    map_reservation_bytes(&payload.metadata, bytes)
+}
+
+fn map_reservation_bytes(
+    values: &std::collections::HashMap<String, String>,
+    mut bytes: u64,
+) -> Result<u64> {
+    for (key, value) in values {
+        bytes = add_charge(bytes, size_of::<(String, String)>())?;
+        bytes = add_charge(bytes, key.len())?;
+        bytes = add_charge(bytes, value.len())?;
+    }
+    Ok(bytes)
 }
 
 fn metadata_fingerprint(metadata: &JsonMap) -> Result<String> {
