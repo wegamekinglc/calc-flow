@@ -1,0 +1,27 @@
+{
+  "contract": "warm-stream-build-v1",
+  "source": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture",
+  "git_sha": "434b8e4ff76d04d4eb07cf3d58dcb58fc763de34",
+  "git_clean": false,
+  "source_sha256": "78588d9ad5cd1eee80e36e4b7e53b20c79470a02cc94b8150b55ebaa79d8e7bf",
+  "cargo_lock_sha256": "00b7892fa062527bea87ce8a5f554836a007255906d82e5237cafe60a30a7d4a",
+  "wheel": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p1-numpy-native-types-build/calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+  "wheel_sha256": "c06e209ac3d541845134ff783774637f05cfa6e373083b31f43037dab71ed403",
+  "native_sha256": "ee3bb12f91084aa8a95fb97293be69f503696040685c754c8894e04cc18dec09",
+  "build_profile": "release",
+  "command": [
+    "python",
+    "-m",
+    "maturin",
+    "build",
+    "--release",
+    "--locked",
+    "--features",
+    "pyo3/abi3-py313",
+    "--out",
+    "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p1-numpy-native-types-build"
+  ],
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8",
+  "python": "3.13.9",
+  "python_executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/.venv/bin/python"
+}
