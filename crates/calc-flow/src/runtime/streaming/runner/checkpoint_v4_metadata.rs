@@ -15,12 +15,9 @@ pub(super) fn validate_capabilities(
                 message: format!("checkpoint is missing operator {operator_id:?}"),
             }
         })?;
-        let (metadata, no_blocks) =
-            entry
-                .opaque_metadata()
-                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
-                    message: format!("runner operator {operator_id:?} is not opaque v4 state"),
-                })?;
+        let Some((metadata, no_blocks)) = entry.opaque_metadata() else {
+            continue;
+        };
         node.checkpoint_capability
             .validate_snapshot_fields(operator_id, metadata, no_blocks)?;
     }

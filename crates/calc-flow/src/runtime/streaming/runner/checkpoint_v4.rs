@@ -12,6 +12,7 @@ use super::super::checkpoint_runtime::OpenedCheckpointRuntime;
 use crate::state::v4::{
     JobKind, OpaqueObject, OperatorV4, SinkV4, SourceV4, V4Handle, V4Manifest, V4OpaqueAdapter,
     V4Store, manifest_fingerprint,
+    native::{NativeCapture, load_native, persist_native},
 };
 use crate::state::{OperatorManifestEntry, SinkManifestEntry, SourceManifestEntry};
 use crate::{CalcFlowError, EventTime, OperatorStateSnapshot, Result};
@@ -20,6 +21,7 @@ use crate::{CalcFlowError, EventTime, OperatorStateSnapshot, Result};
 pub(super) struct AssemblyView<'a> {
     pub sources: &'a BTreeMap<String, SourceManifestEntry>,
     pub operator_snapshots: &'a BTreeMap<String, OperatorStateSnapshot>,
+    pub native_captures: &'a BTreeMap<String, NativeCapture>,
     pub operator_progress: &'a BTreeMap<String, OperatorManifestEntry>,
     pub operator_frontiers: &'a BTreeMap<String, Option<EventTime>>,
     pub sink_outputs: &'a BTreeMap<String, BTreeMap<String, SinkManifestEntry>>,
@@ -42,8 +44,13 @@ pub(super) async fn load_snapshots(
             .operators
             .keys()
             .map(|operator_id| {
-                V4OpaqueAdapter::restore(&mut store, &manifest, operator_id)
-                    .map(|snapshot| (operator_id.clone(), snapshot))
+                match &manifest.operators[operator_id] {
+                    OperatorV4::Table { .. } => load_native(&mut store, &manifest, operator_id),
+                    OperatorV4::Opaque { .. } => {
+                        V4OpaqueAdapter::restore(&mut store, &manifest, operator_id)
+                    }
+                }
+                .map(|snapshot| (operator_id.clone(), snapshot))
             })
             .collect()
     })
@@ -187,17 +194,32 @@ async fn persist_operators(
 ) -> Result<BTreeMap<String, OperatorV4>> {
     let mut operators = BTreeMap::new();
     for (node_id, snapshot) in view.operator_snapshots {
-        let adapter = V4OpaqueAdapter::from_snapshot(node_id, snapshot);
-        let (mut operator, _) = adapter.persist(store, epoch).await?;
-        if let OperatorV4::Opaque {
-            progress,
-            output_frontier,
-            ..
-        } = &mut operator
-        {
-            *progress = view.operator_progress[node_id].progress.clone();
-            *output_frontier = view.operator_frontiers.get(node_id).copied().flatten();
-        }
+        let progress = view.operator_progress[node_id].progress.clone();
+        let output_frontier = view.operator_frontiers.get(node_id).copied().flatten();
+        let operator = if let Some(capture) = view.native_captures.get(node_id) {
+            persist_native(
+                store,
+                node_id,
+                capture.clone(),
+                epoch,
+                progress,
+                output_frontier,
+            )
+            .await?
+        } else {
+            let adapter = V4OpaqueAdapter::from_snapshot(node_id, snapshot);
+            let (mut operator, _) = adapter.persist(store, epoch).await?;
+            if let OperatorV4::Opaque {
+                progress: current,
+                output_frontier: frontier,
+                ..
+            } = &mut operator
+            {
+                *current = progress;
+                *frontier = output_frontier;
+            }
+            operator
+        };
         operators.insert(node_id.clone(), operator);
     }
     Ok(operators)

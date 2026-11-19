@@ -3055,6 +3055,14 @@ fn admit_v4_snapshot(
     entry: &crate::state::v4::OperatorV4,
     snapshot: crate::OperatorStateSnapshot,
 ) -> crate::Result<crate::state::PreloadedSnapshot> {
+    if matches!(entry, crate::state::v4::OperatorV4::Table { .. }) {
+        node.checkpoint_capability.validate_snapshot_fields(
+            node.operator_id.as_str(),
+            &snapshot.inline_metadata,
+            snapshot.segments.is_empty(),
+        )?;
+        return Ok(crate::state::PreloadedSnapshot::uncredited(snapshot));
+    }
     let crate::state::v4::OperatorV4::Opaque {
         inline_metadata,
         blocks,

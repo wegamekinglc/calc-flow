@@ -1,5 +1,11 @@
+#![allow(
+    dead_code,
+    reason = "P5 run adapter is tested before native production activation"
+)]
+
 use super::{
-    AdmittedBatch, JoinSide, RetainedRows, SideMetrics, StoredRow, StreamJoinOperator,
+    AdmittedBatch, JoinCheckpointMetadata, JoinSide, RetainedRows, SideMetrics, StoredRow,
+    StreamJoinOperator,
     admitted::AdmittedRef,
     checked_metric, columnar, counter_overflow, encode_join_key_v1, operator_error, output_gather,
     retained::Rows,
@@ -7,6 +13,7 @@ use super::{
     state_row_charge_with_key,
 };
 use crate::operator::keyed::{KeySchema, KeyStore, MORSEL_ROWS};
+use crate::state::v4::native::{NativeCapture, NativePage, NativePartition};
 use crate::{Batch, BatchMetadata, Result, StreamCollector, StreamOperatorContext};
 use datafusion::arrow::{
     array::BooleanArray,
@@ -39,6 +46,106 @@ impl RunCore {
             state: RunState::new(&operator.name, operator.spec.limits, operator.spec.bounds)?,
             keys,
         })
+    }
+
+    pub(super) fn native_capture(
+        &self,
+        operator: &StreamJoinOperator,
+        epoch: crate::Epoch,
+    ) -> Result<Option<NativeCapture>> {
+        let mut metrics = operator.state.metrics.clone();
+        for side in [JoinSide::Left, JoinSide::Right] {
+            let rows = u64::try_from(self.state.rows(side)).unwrap_or(u64::MAX);
+            let bytes = u64::try_from(self.state.bytes(side)).unwrap_or(u64::MAX);
+            if side == JoinSide::Left {
+                metrics.left.retained_rows = rows;
+                metrics.left.retained_bytes = bytes;
+            } else {
+                metrics.right.retained_rows = rows;
+                metrics.right.retained_bytes = bytes;
+            }
+        }
+        let metadata = JoinCheckpointMetadata {
+            layout_version: 12,
+            spec: operator.spec.clone(),
+            next_left_row_id: self.state.next_row_id(JoinSide::Left),
+            next_right_row_id: self.state.next_row_id(JoinSide::Right),
+            next_output_sequence: self.state.next_output_sequence(),
+            metrics,
+            ended: operator.state.ended,
+            epoch: epoch.as_u64(),
+        };
+        let metadata = serde_json::to_value(metadata).map_err(|error| {
+            operator_error(&operator.name, &format!("native metadata: {error}"))
+        })?;
+        let serde_json::Value::Object(metadata) = metadata else {
+            unreachable!("Join native metadata is an object")
+        };
+        let mut pages = self.state.native_pages(epoch)?;
+        let keys = self.keys.record()?;
+        let key_rows = u64::try_from(keys.num_rows())
+            .map_err(|_| counter_overflow(&operator.name, "native key rows"))?;
+        pages.push(NativePage::arrow("keys", &keys, 0, 0..key_rows));
+        Ok(Some(NativeCapture::new(
+            metadata.into_iter().collect(),
+            vec![NativePartition {
+                key_group: 0,
+                pages,
+            }],
+        )?))
+    }
+
+    pub(super) fn restore_native(
+        operator: &mut StreamJoinOperator,
+        metadata: &JoinCheckpointMetadata,
+        segments: &BTreeMap<String, crate::StateSegment>,
+    ) -> Result<Self> {
+        let mut core = Self::new(operator)?;
+        core.state = RunState::restore_native(
+            &operator.name,
+            metadata.spec.limits,
+            metadata.spec.bounds,
+            segments,
+            &mut core.keys,
+        )?;
+        Ok(core)
+    }
+
+    pub(super) fn validate_native_metadata(
+        &self,
+        operator: &StreamJoinOperator,
+        metadata: &JoinCheckpointMetadata,
+    ) -> Result<()> {
+        let mismatch = || crate::CalcFlowError::CheckpointMismatch {
+            message: format!(
+                "stream Join {:?} native state counters differ",
+                operator.name
+            ),
+        };
+        let counts_match =
+            |actual: usize, expected: u64| u64::try_from(actual).ok() == Some(expected);
+        for side in [JoinSide::Left, JoinSide::Right] {
+            let metrics = if side == JoinSide::Left {
+                &metadata.metrics.left
+            } else {
+                &metadata.metrics.right
+            };
+            if !counts_match(self.state.rows(side), metrics.retained_rows)
+                || !counts_match(self.state.bytes(side), metrics.retained_bytes)
+            {
+                return Err(mismatch());
+            }
+        }
+        if self.state.next_row_id(JoinSide::Left) != metadata.next_left_row_id
+            || self.state.next_row_id(JoinSide::Right) != metadata.next_right_row_id
+            || self.state.next_output_sequence() != metadata.next_output_sequence
+            || self.state.match_limit_failures() != metadata.metrics.match_limit_failures
+            || metadata.ended
+                && (self.state.rows(JoinSide::Left) != 0 || self.state.rows(JoinSide::Right) != 0)
+        {
+            return Err(mismatch());
+        }
+        Ok(())
     }
 
     pub(super) fn from_legacy(operator: &mut StreamJoinOperator) -> Result<Self> {

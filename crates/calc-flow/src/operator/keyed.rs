@@ -2,10 +2,11 @@ use crate::{CalcFlowError, Result};
 use datafusion::arrow::{
     array::{Array, ArrayRef, BooleanArray, LargeStringArray, PrimitiveArray, StringArray},
     datatypes::{
-        ArrowPrimitiveType, ArrowTimestampType, DataType, FieldRef, TimeUnit,
+        ArrowPrimitiveType, ArrowTimestampType, DataType, FieldRef, Schema, SchemaRef, TimeUnit,
         TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
         TimestampSecondType,
     },
+    record_batch::RecordBatch,
 };
 use datafusion::common::ScalarValue;
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -478,6 +479,55 @@ impl KeyStore {
             .zip(&self.schema.fields)
             .map(|(column, field)| column.array(groups, field.data_type()))
             .collect()
+    }
+
+    pub(crate) fn schema(&self) -> SchemaRef {
+        Arc::new(Schema::new(self.schema.fields.clone()))
+    }
+
+    pub(crate) fn restore(&mut self, record: &RecordBatch) -> Result<()> {
+        if !self.is_empty() || record.schema() != self.schema() {
+            return Err(keyed_error(
+                "restored key schema differs or the key store is not empty",
+            ));
+        }
+        if record.columns().iter().any(|array| array.null_count() != 0) {
+            return Err(keyed_error("restored key columns contain nulls"));
+        }
+        let cut = self.cut();
+        let result = (|| {
+            for start in (0..record.num_rows()).step_by(MORSEL_ROWS) {
+                let len = MORSEL_ROWS.min(record.num_rows() - start);
+                let arrays = record
+                    .columns()
+                    .iter()
+                    .map(|array| array.slice(start, len))
+                    .collect::<Vec<_>>();
+                let groups = self.route_with_limit(&arrays, usize::MAX, &mut || Ok(()))?;
+                if groups
+                    .iter()
+                    .enumerate()
+                    .any(|(offset, group)| group.index() != start + offset)
+                {
+                    return Err(keyed_error(
+                        "restored key groups are duplicated or out of order",
+                    ));
+                }
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.rollback(cut);
+        }
+        result
+    }
+
+    pub(crate) fn record(&self) -> Result<RecordBatch> {
+        let groups = (0..self.len())
+            .map(GroupId::new)
+            .collect::<Result<Vec<_>>>()?;
+        RecordBatch::try_new(self.schema(), self.columns(&groups)?)
+            .map_err(|error| keyed_error(error.to_string()))
     }
 
     pub(crate) fn output_charge(&self, groups: &[GroupId]) -> Result<usize> {

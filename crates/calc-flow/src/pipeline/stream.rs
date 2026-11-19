@@ -636,6 +636,17 @@ impl CompiledStreamOperator {
         }
     }
 
+    pub(crate) fn native_checkpoint(
+        &mut self,
+        epoch: crate::Epoch,
+    ) -> Result<Option<crate::state::v4::native::NativeCapture>> {
+        match self {
+            Self::StreamJoin(operator) => operator.native_checkpoint(epoch),
+            Self::CheckpointLoan => Err(checkpoint_loan_error()),
+            _ => Ok(None),
+        }
+    }
+
     #[allow(
         dead_code,
         reason = "M5 barrier coordination calls the M4 lifecycle dispatch seam"

@@ -93,7 +93,11 @@ async fn load_restore(
     let id = node.operator_id.as_str();
     if let Some(selected) = &checkpoint.selected_v4 {
         let entry = &selected.manifest.operators[id];
-        let (raw, prepaid) = if let Some(reader) = checkpoint.join_preload_reader.as_ref() {
+        let (raw, prepaid) = if let Some(reader) = checkpoint
+            .join_preload_reader
+            .as_ref()
+            .filter(|_| matches!(entry, crate::state::v4::OperatorV4::Opaque { .. }))
+        {
             let CompiledStreamOperator::StreamJoin(operator) = &node.operator else {
                 unreachable!("Join terminal restore requires a Join operator")
             };

@@ -3,6 +3,7 @@ use crate::{CalcFlowError, DataFusionConfig, DataFusionRuntime};
 use datafusion::arrow::{
     array::{Array, ArrayRef},
     datatypes::{DataType, Field, FieldRef, TimeUnit},
+    record_batch::RecordBatch,
 };
 use datafusion::common::ScalarValue;
 use std::{collections::BTreeSet, sync::Arc};
@@ -337,4 +338,50 @@ fn test_keyed_rejects_wrong_input_type_without_mutation() {
     assert!(result.is_err());
     assert_eq!(store.len(), 0);
     assert_eq!(store.reserved_bytes(), 0);
+}
+
+#[test]
+fn test_keyed_restore_preserves_group_ids_and_rolls_back_duplicates() {
+    let runtime = runtime();
+    let array: ArrayRef = Arc::new(datafusion::arrow::array::Int64Array::from(vec![9, 7, 9, 8]));
+    let mut original = store(&runtime, vec![field(DataType::Int64)]);
+    assert_eq!(
+        original
+            .route(std::slice::from_ref(&array), &mut || Ok(()))
+            .unwrap()
+            .iter()
+            .map(|group| group.index())
+            .collect::<Vec<_>>(),
+        [0, 1, 0, 2]
+    );
+    let groups = (0..3)
+        .map(GroupId::new)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let record =
+        RecordBatch::try_new(original.schema(), original.columns(&groups).unwrap()).unwrap();
+    let mut restored = store(&runtime, vec![field(DataType::Int64)]);
+    restored.restore(&record).unwrap();
+    assert_eq!(restored.canonical_bytes(), original.canonical_bytes());
+    assert_eq!(
+        restored
+            .route(std::slice::from_ref(&array), &mut || Ok(()))
+            .unwrap()
+            .iter()
+            .map(|group| group.index())
+            .collect::<Vec<_>>(),
+        [0, 1, 0, 2]
+    );
+
+    let duplicated = RecordBatch::try_new(
+        original.schema(),
+        original
+            .columns(&[GroupId::new(0).unwrap(), GroupId::new(0).unwrap()])
+            .unwrap(),
+    )
+    .unwrap();
+    let mut rejected = store(&runtime, vec![field(DataType::Int64)]);
+    assert!(rejected.restore(&duplicated).is_err());
+    assert_eq!(rejected.len(), 0);
+    assert_eq!(rejected.reserved_bytes(), 0);
 }

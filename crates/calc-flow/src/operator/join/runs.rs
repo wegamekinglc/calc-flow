@@ -1380,6 +1380,28 @@ impl RunState {
     }
 }
 
+#[path = "run_pages.rs"]
+mod pages;
+
+impl RunState {
+    pub(super) fn native_pages(
+        &self,
+        epoch: crate::Epoch,
+    ) -> Result<Vec<crate::state::v4::native::NativePage>> {
+        pages::capture(self, epoch)
+    }
+
+    pub(super) fn restore_native(
+        name: &str,
+        limits: JoinStateLimits,
+        bounds: JoinTimeBounds,
+        segments: &BTreeMap<String, crate::StateSegment>,
+        keys: &mut crate::operator::keyed::KeyStore,
+    ) -> Result<Self> {
+        pages::restore(name, limits, bounds, segments, keys)
+    }
+}
+
 fn validate_snapshot(snapshot: &RunStateSnapshot) -> Result<()> {
     for side in &snapshot.sides {
         let mut identities = BTreeSet::new();

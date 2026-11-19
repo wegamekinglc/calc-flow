@@ -1,6 +1,7 @@
 pub(crate) mod budget;
 pub(crate) mod coordinator;
 pub(crate) mod manifest;
+pub(crate) mod native;
 pub(crate) mod object;
 pub(crate) mod opaque;
 pub(crate) mod store;

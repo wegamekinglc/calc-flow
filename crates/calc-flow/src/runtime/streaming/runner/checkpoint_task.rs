@@ -94,6 +94,7 @@ struct EpochManifestAssembly {
     sources: BTreeMap<String, SourceManifestEntry>,
     operators: BTreeMap<String, OperatorManifestEntry>,
     operator_snapshots: BTreeMap<String, crate::OperatorStateSnapshot>,
+    native_captures: BTreeMap<String, crate::state::v4::native::NativeCapture>,
     operator_frontiers: BTreeMap<String, Option<EventTime>>,
     capture_reservations: Vec<crate::state::v4::V4CaptureReservation>,
     sink_captures: BTreeMap<String, BTreeMap<String, Vec<u8>>>,
@@ -122,6 +123,7 @@ impl EpochManifestAssembly {
         self.sources.clear();
         self.operators.clear();
         self.operator_snapshots.clear();
+        self.native_captures.clear();
         self.operator_frontiers.clear();
         self.capture_reservations.clear();
         self.sink_captures.clear();
@@ -839,6 +841,7 @@ async fn persist_v4_epoch(
         checkpoint_v4::AssemblyView {
             sources: &assembly.sources,
             operator_snapshots: &assembly.operator_snapshots,
+            native_captures: &assembly.native_captures,
             operator_progress: &assembly.operators,
             operator_frontiers: &assembly.operator_frontiers,
             sink_outputs: &assembly.sink_outputs,
@@ -1246,6 +1249,9 @@ async fn accept_operator_ack(
         ack.epoch,
         "operator snapshot",
     )?;
+    if let Some(native) = ack.native {
+        assembly.native_captures.insert(ack.node_id.clone(), native);
+    }
     assembly
         .operator_frontiers
         .insert(ack.node_id.clone(), ack.output_frontier);

@@ -79,6 +79,7 @@ pub(crate) struct OperatorCheckpointAck {
     pub(crate) epoch: Epoch,
     pub(crate) state: crate::OperatorManifestEntry,
     pub(crate) snapshot: crate::OperatorStateSnapshot,
+    pub(crate) native: Option<crate::state::v4::native::NativeCapture>,
     pub(crate) output_frontier: Option<EventTime>,
     pub(crate) working: Option<Arc<crate::state::WorkingStatePins>>,
     pub(crate) capture_credit: Option<OperatorCheckpointCredit>,
@@ -1883,8 +1884,28 @@ async fn capture_operator_checkpoint(
             run_id: inputs.context.job().job_id().to_string(),
         }),
     };
+    let native = inputs.operator.native_checkpoint(epoch)?;
     let snapshot =
         encode_operator_snapshot(inputs, input_progress, snapshot, capture_credit.as_ref())?;
+    let native = native
+        .map(|capture| {
+            let mut metadata = capture.metadata();
+            for (key, value) in &snapshot.inline_metadata {
+                if key != "layout_version" {
+                    metadata.insert(key.clone(), value.clone());
+                }
+            }
+            capture.with_metadata(metadata)
+        })
+        .transpose()?;
+    let snapshot = if let Some(capture) = &native {
+        crate::OperatorStateSnapshot {
+            inline_metadata: capture.metadata(),
+            ..snapshot
+        }
+    } else {
+        snapshot
+    };
     let reservation = inputs
         .context
         .job()
@@ -1900,6 +1921,7 @@ async fn capture_operator_checkpoint(
         epoch,
         state,
         snapshot,
+        native,
         output_frontier: if inputs.operator.requires_output_frontier_state() {
             input_progress.output_frontier
         } else {

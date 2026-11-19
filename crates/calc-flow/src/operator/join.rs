@@ -468,6 +468,153 @@ mod tests {
         assert!(collector.drain("output").is_empty());
     }
 
+    #[tokio::test]
+    async fn native_empty_checkpoint_roundtrip_preserves_identity() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        operator.enable_native_checkpoint().unwrap();
+        let capture = operator
+            .native_checkpoint(Epoch::new(1).unwrap())
+            .unwrap()
+            .expect("empty native capture");
+        let temporary = tempfile::tempdir().unwrap();
+        let mut store = crate::state::v4::V4Store::new(temporary.path().join("lineage"));
+        let operator = crate::state::v4::native::persist_native(
+            &mut store,
+            "match",
+            capture,
+            1,
+            BTreeMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut manifest = crate::state::v4::V4Manifest::from_bytes(
+            include_str!("../../tests/fixtures/checkpoint-v4/manifest-v4.json").as_bytes(),
+        )
+        .unwrap();
+        manifest.operators = BTreeMap::from([("match".into(), operator)]);
+        manifest.manifest_fingerprint = crate::state::v4::manifest_fingerprint(&manifest).unwrap();
+        manifest.validate_structure().unwrap();
+        let snapshot =
+            crate::state::v4::native::load_native(&mut store, &manifest, "match").unwrap();
+        assert_eq!(snapshot.inline_metadata["layout_version"], 12);
+        let mut restored =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        restored.restore(&snapshot).unwrap();
+        assert_eq!(restored.status().left.retained_rows, 0);
+        assert_eq!(restored.state.last_checkpoint_epoch, Epoch::new(1));
+        assert!(
+            restored
+                .native_checkpoint(Epoch::new(2).unwrap())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_run_checkpoint_restore_continues_bitwise() {
+        let mut original =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        original.enable_run_core();
+        let job = job().with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut original_output = EdgeCollector::new(original.output_ports().to_vec());
+        original
+            .process_data(
+                "left",
+                left_batch(vec![100, 200]),
+                &context,
+                &mut original_output,
+            )
+            .await
+            .unwrap();
+        original
+            .on_ingress_progress(
+                "right",
+                &progress_context(
+                    &job,
+                    (IngressState::Active, None),
+                    (IngressState::Active, Some(60_000_150)),
+                ),
+            )
+            .await
+            .unwrap();
+        let capture = original
+            .native_checkpoint(Epoch::new(1).unwrap())
+            .unwrap()
+            .expect("retained native capture");
+        let temporary = tempfile::tempdir().unwrap();
+        let mut store = crate::state::v4::V4Store::new(temporary.path().join("lineage"));
+        let operator = crate::state::v4::native::persist_native(
+            &mut store,
+            "match",
+            capture,
+            1,
+            BTreeMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut manifest = crate::state::v4::V4Manifest::from_bytes(
+            include_str!("../../tests/fixtures/checkpoint-v4/manifest-v4.json").as_bytes(),
+        )
+        .unwrap();
+        manifest.operators = BTreeMap::from([("match".into(), operator)]);
+        manifest.manifest_fingerprint = crate::state::v4::manifest_fingerprint(&manifest).unwrap();
+        let snapshot =
+            crate::state::v4::native::load_native(&mut store, &manifest, "match").unwrap();
+        let mut missing = snapshot.clone();
+        missing.segments.remove("left/index");
+        let mut rejected =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        assert!(rejected.restore(&missing).is_err());
+        assert_eq!(rejected.state.next_left_row_id, 0);
+        let mut counters = snapshot.clone();
+        counters
+            .inline_metadata
+            .insert("next_left_row_id".into(), 99.into());
+        let mut rejected =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        assert!(rejected.restore(&counters).is_err());
+        assert_eq!(rejected.state.next_left_row_id, 0);
+        let mut restored =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        restored.restore(&snapshot).unwrap();
+        restored.enable_run_core();
+        assert_eq!(
+            original.run_core.as_ref().unwrap().fingerprint(),
+            restored.run_core.as_ref().unwrap().fingerprint()
+        );
+        assert_eq!(
+            original.status().left.retained_bytes,
+            restored.status().left.retained_bytes
+        );
+        let mut restored_output = EdgeCollector::new(restored.output_ports().to_vec());
+        for (operator, output) in [
+            (&mut original, &mut original_output),
+            (&mut restored, &mut restored_output),
+        ] {
+            operator
+                .process_data("right", right_batch(vec![200]), &context, output)
+                .await
+                .unwrap();
+        }
+        let expected = original_output.drain("output");
+        let actual = restored_output.drain("output");
+        assert_eq!(actual.len(), 1);
+        assert_eq!(actual[0].as_data().unwrap().metadata().sequence(), 0);
+        assert_eq!(actual[0].as_data().unwrap().num_rows(), 1);
+        assert_eq!(
+            paid_times(actual[0].as_data().unwrap()),
+            paid_times(expected[0].as_data().unwrap())
+        );
+        assert_eq!(
+            original.run_core.as_ref().unwrap().fingerprint(),
+            restored.run_core.as_ref().unwrap().fingerprint()
+        );
+    }
+
     fn paid_times(data: &Batch) -> Vec<i64> {
         data.table_payload()
             .unwrap()
@@ -3047,7 +3194,6 @@ pub struct StreamJoinOperator {
     payload_native_eligible: bool,
     runtime: StreamRuntimeState,
     state: StreamJoinState,
-    #[cfg(test)]
     run_core: Option<Box<production::RunCore>>,
     #[cfg(test)]
     run_core_enabled: RunCoreMode,
@@ -3767,7 +3913,6 @@ mod native_dictionary;
 mod native_lookup;
 mod output_gather;
 mod output_projection;
-#[cfg(test)]
 mod production;
 #[cfg(test)]
 mod row_ipc;
@@ -3860,7 +4005,6 @@ impl StreamJoinOperator {
             compiled,
             runtime: StreamRuntimeState::new(),
             state: StreamJoinState::default(),
-            #[cfg(test)]
             run_core: None,
             #[cfg(test)]
             run_core_enabled: RunCoreMode::Legacy,
@@ -5537,10 +5681,7 @@ impl StreamOperator for StreamJoinOperator {
         }
         self.state.left.clear();
         self.state.right.clear();
-        #[cfg(test)]
-        {
-            self.run_core = None;
-        }
+        self.run_core = None;
         self.key_dictionary = key_dictionary::Dictionary::default();
         self.key_bindings = key_dictionary::Bindings::default();
         self.key_dictionary_needs_rebuild = false;
@@ -5558,10 +5699,7 @@ impl StreamOperator for StreamJoinOperator {
     fn reset(&mut self) -> Result<()> {
         let writer = self.v2_writer.next_owner(false)?;
         self.state = StreamJoinState::default();
-        #[cfg(test)]
-        {
-            self.run_core = None;
-        }
+        self.run_core = None;
         self.key_dictionary = key_dictionary::Dictionary::default();
         self.key_bindings = key_dictionary::Bindings::default();
         self.key_dictionary_needs_rebuild = false;
@@ -5605,6 +5743,14 @@ impl StreamOperator for StreamJoinOperator {
             .inline_metadata
             .get("layout_version")
             .and_then(Value::as_u64)
+            == Some(12)
+        {
+            return self.restore_native(snapshot);
+        }
+        if snapshot
+            .inline_metadata
+            .get("layout_version")
+            .and_then(Value::as_u64)
             .is_some_and(|layout| {
                 matches!(layout, 2 | 3) || layout == 1 && self.payload_projection.is_some()
             })
@@ -5617,6 +5763,60 @@ impl StreamOperator for StreamJoinOperator {
 }
 
 impl StreamJoinOperator {
+    pub(crate) fn native_checkpoint(
+        &mut self,
+        epoch: Epoch,
+    ) -> Result<Option<crate::state::v4::native::NativeCapture>> {
+        let Some(core) = self.run_core.as_ref() else {
+            return Ok(None);
+        };
+        core.native_capture(self, epoch)
+    }
+
+    fn restore_native(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()> {
+        let filtered = OperatorStateSnapshot {
+            inline_metadata: snapshot
+                .inline_metadata
+                .iter()
+                .filter(|(key, _)| key.as_str() != crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1)
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            segments: snapshot.segments.clone(),
+        };
+        let metadata = decode_join_metadata(&filtered, &self.name)?;
+        if metadata.layout_version != 12 || metadata.spec != self.spec {
+            return Err(CalcFlowError::CheckpointMismatch {
+                message: format!(
+                    "stream Join {:?} native metadata is incompatible",
+                    self.name
+                ),
+            });
+        }
+        let epoch =
+            Epoch::new(metadata.epoch).ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                message: format!("stream Join {:?} native epoch is zero", self.name),
+            })?;
+        let core = production::RunCore::restore_native(self, &metadata, &snapshot.segments)?;
+        core.validate_native_metadata(self, &metadata)?;
+        self.state = StreamJoinState {
+            next_left_row_id: metadata.next_left_row_id,
+            next_right_row_id: metadata.next_right_row_id,
+            next_output_sequence: metadata.next_output_sequence,
+            metrics: metadata.metrics,
+            ended: metadata.ended,
+            last_checkpoint_epoch: Some(epoch),
+            ..StreamJoinState::default()
+        };
+        self.run_core = Some(Box::new(core));
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn enable_native_checkpoint(&mut self) -> Result<()> {
+        self.run_core = Some(Box::new(production::RunCore::new(self)?));
+        Ok(())
+    }
+
     #[cfg(test)]
     fn check_v1_test_layout(&self) -> Result<()> {
         if self.payload_projection.is_some() {

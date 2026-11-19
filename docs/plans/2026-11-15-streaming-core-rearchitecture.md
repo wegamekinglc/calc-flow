@@ -134,6 +134,12 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   Arrow morsel，经 shared-key routing、native probe 和 selection gather 产生输出，并在输出接受后提交 run/frontier。
   match/state limit 与淘汰指标失败保持原子性，legacy capture/restore 仅作为迁移测试边界。该路径只在显式测试中启用，
   公共生产路径尚未切换。Join 576 项和 Clippy 通过；native v4 pages、旧实现删除、统一 checkpoint-on/off 与性能验收未完成。
+- 2026-11-19 P3/P5 native 页面与恢复：`state::v4::native` 以 `OperatorV4::Table` partition roots、Arrow/JSON pages
+  和 metadata fingerprint 持久化状态，retention 递归保留 root 引用的全部页面。Join 增加 run payload/identity、
+  per-key/expiration index 与 shared-key pages；恢复校验 group 域、locator 覆盖、capacity、row-ID/frontier、spec 和
+  retained-byte counters，前缀淘汰后的 fingerprint 与后续输出保持一致，缺失页面及篡改 counters 拒绝安装。
+  `KeyStore::restore` 保持原始 group ID 与 canonical bytes，重复输入完整回滚。Join 578 项、operator-task 76 项和
+  Clippy 通过。统一生产切换、dirty-page reuse、旧实现删除和性能验收仍未完成。
 - 2026-11-19 durable ACK 完成边界修复（`f4c88429`）：手动 `trigger_checkpoint` 不再于 sink commit 后提前返回，
   而是等待 manifest、transactional sink commit 与 durable source acknowledgement 全部完成；失败终态返回错误。
   ACK 测试改用 v4 `lineage/manifests/epoch-1.json`，正常、ACK 失败、ACK 挂起及 `continuous_public` 18 项通过。

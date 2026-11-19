@@ -27,6 +27,7 @@ async fn stage_ack(transaction: &ManifestTransaction, epoch: Epoch) -> OperatorC
         node_id: "operator".into(),
         epoch,
         snapshot,
+        native: None,
         output_frontier: None,
         reservation: crate::state::v4::V4InflightBudget::new(1 << 20)
             .reserve(0)

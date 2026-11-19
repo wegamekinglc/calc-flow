@@ -4,7 +4,7 @@ use std::{
 };
 
 use super::super::checkpoint_runtime::OpenedCheckpointRuntime;
-use crate::state::v4::{OperatorV4, V4Manifest};
+use crate::state::v4::{OperatorV4, V4Manifest, V4Store, native::native_partition_handles};
 use crate::{CalcFlowError, Result};
 
 pub(super) async fn retain(checkpoint: &OpenedCheckpointRuntime) -> Result<usize> {
@@ -25,11 +25,12 @@ fn retain_sync(root: &Path, retained_epochs: usize) -> Result<usize> {
     let mut epochs = manifests;
     epochs.sort_by(|left, right| right.0.cmp(&left.0));
     let mut referenced = BTreeSet::new();
+    let mut store = V4Store::new(root.join("lineage"));
     let retained = retained_epochs.min(epochs.len());
     for (_, path) in &epochs[..retained] {
         let bytes = std::fs::read(path).map_err(|error| io_error(path, error))?;
         let manifest = V4Manifest::from_bytes(&bytes)?;
-        collect_references(&manifest, &mut referenced);
+        collect_references(&mut store, &manifest, &mut referenced)?;
     }
     for (_, path) in &epochs[retained..] {
         std::fs::remove_file(path).map_err(|error| io_error(path, error))?;
@@ -74,7 +75,11 @@ fn manifest_files(root: &Path) -> Result<Vec<(u64, PathBuf)>> {
     Ok(manifests)
 }
 
-fn collect_references(manifest: &V4Manifest, referenced: &mut BTreeSet<String>) {
+fn collect_references(
+    store: &mut V4Store,
+    manifest: &V4Manifest,
+    referenced: &mut BTreeSet<String>,
+) -> Result<()> {
     for source in manifest.sources.values() {
         if let Some(history) = &source.history {
             referenced.extend(
@@ -91,11 +96,14 @@ fn collect_references(manifest: &V4Manifest, referenced: &mut BTreeSet<String>) 
                 referenced.extend(blocks.iter().map(|handle| handle.relative_path.clone()));
             }
             OperatorV4::Table { partitions, .. } => {
-                referenced.extend(
-                    partitions
-                        .iter()
-                        .map(|partition| partition.root.relative_path.clone()),
-                );
+                for partition in partitions {
+                    referenced.insert(partition.root.relative_path.clone());
+                    referenced.extend(
+                        native_partition_handles(store, partition, manifest.epoch)?
+                            .into_iter()
+                            .map(|handle| handle.relative_path),
+                    );
+                }
             }
         }
     }
@@ -106,6 +114,7 @@ fn collect_references(manifest: &V4Manifest, referenced: &mut BTreeSet<String>) 
                 .map(|handle| handle.relative_path.clone()),
         );
     }
+    Ok(())
 }
 
 fn remove_unreferenced(root: &Path, referenced: &BTreeSet<String>) -> Result<usize> {
@@ -266,5 +275,43 @@ mod tests {
         assert_eq!(store.read_opaque(&first).unwrap(), b"first");
         assert_eq!(store.read_opaque(&second).unwrap(), b"second");
         assert!(store.read_opaque(&orphan).is_err());
+    }
+
+    #[tokio::test]
+    async fn retention_preserves_native_partition_pages() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest_root = root.path().join("manifests");
+        let mut store = V4Store::new(manifest_root.join("lineage"));
+        let capture = crate::state::v4::native::NativeCapture::new(
+            JsonMap::from_iter([("layout_version".into(), 12.into())]),
+            vec![crate::state::v4::native::NativePartition {
+                key_group: 0,
+                pages: vec![crate::state::v4::native::NativePage::json(
+                    "run-0",
+                    serde_json::json!({"rows": 1}),
+                    0,
+                    0..1,
+                )],
+            }],
+        )
+        .unwrap();
+        let operator = crate::state::v4::native::persist_native(
+            &mut store,
+            "operator",
+            capture,
+            1,
+            BTreeMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut manifest = manifest(1, Vec::new());
+        manifest.operators.insert("operator".into(), operator);
+        manifest.manifest_fingerprint = manifest_fingerprint(&manifest).unwrap();
+        store.publish_manifest(&manifest).unwrap();
+        assert_eq!(retain_root(&manifest_root, 1).await.unwrap(), 0);
+        let snapshot =
+            crate::state::v4::native::load_native(&mut store, &manifest, "operator").unwrap();
+        assert_eq!(snapshot.segments["run-0"].bytes(), br#"{"rows":1}"#);
     }
 }
