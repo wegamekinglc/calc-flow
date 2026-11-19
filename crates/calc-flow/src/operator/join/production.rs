@@ -10,7 +10,7 @@ use super::{
     state_row_charge_with_key,
 };
 use crate::operator::keyed::{KeySchema, KeyStore, MORSEL_ROWS};
-use crate::state::v4::native::{NativeCapture, NativePage, NativePartition};
+use crate::state::v4::native::{NativeCapture, NativePage, NativePageChange, NativePartition};
 use crate::{Batch, BatchMetadata, Result, StreamCollector, StreamOperatorContext};
 use datafusion::arrow::{
     array::BooleanArray,
@@ -25,6 +25,8 @@ pub(super) struct RunCore {
     key_page: Option<(usize, NativePage)>,
     #[cfg(test)]
     key_reuses: usize,
+    #[cfg(test)]
+    last_change_count: usize,
 }
 
 impl RunCore {
@@ -50,6 +52,8 @@ impl RunCore {
             key_page: None,
             #[cfg(test)]
             key_reuses: 0,
+            #[cfg(test)]
+            last_change_count: 0,
         })
     }
 
@@ -86,7 +90,8 @@ impl RunCore {
         let serde_json::Value::Object(metadata) = metadata else {
             unreachable!("Join native metadata is an object")
         };
-        let mut pages = self.state.native_pages(epoch, &mut self.pages)?;
+        let pages = self.state.native_pages(epoch, &mut self.pages)?;
+        let mut changes = Vec::new();
         let key_rows = self.keys.len();
         if self
             .key_page
@@ -101,18 +106,19 @@ impl RunCore {
             let keys = self.keys.record()?;
             let generation = u64::try_from(keys.num_rows())
                 .map_err(|_| counter_overflow(&operator.name, "native key rows"))?;
-            self.key_page = Some((
-                key_rows,
-                NativePage::arrow("keys", &keys, generation, 0..generation),
-            ));
+            let page = NativePage::arrow("keys", &keys, generation, 0..generation);
+            changes.push(NativePageChange::upsert(
+                page.clone(),
+                self.key_page.as_ref().map(|(_, previous)| previous),
+            )?);
+            self.key_page = Some((key_rows, page));
         }
-        pages.push(
-            self.key_page
-                .as_ref()
-                .expect("native key page was initialized")
-                .1
-                .clone(),
-        );
+        let pages = pages.extend(changes)?;
+        #[cfg(test)]
+        {
+            self.last_change_count = pages.change_count();
+        }
+        let lineage = Arc::new(pages.clone());
         let capture = NativeCapture::new(
             metadata.into_iter().collect(),
             vec![NativePartition {
@@ -120,6 +126,7 @@ impl RunCore {
                 pages,
             }],
         )?;
+        self.pages.lineage = Some(lineage);
         self.state.finish_native_capture();
         Ok(Some(capture))
     }
@@ -128,6 +135,16 @@ impl RunCore {
     pub(super) fn native_reuse_counts(&self) -> [usize; 3] {
         let [identities, indexes] = self.pages.reuse_counts();
         [identities, indexes, self.key_reuses]
+    }
+
+    #[cfg(test)]
+    pub(super) fn native_change_count(&self) -> usize {
+        self.last_change_count
+    }
+
+    #[cfg(test)]
+    pub(super) fn native_reuse_and_change_counts(&self) -> ([usize; 3], usize) {
+        (self.native_reuse_counts(), self.native_change_count())
     }
 
     pub(super) fn restore_native(

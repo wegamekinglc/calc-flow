@@ -508,6 +508,17 @@ mod tests {
         manifest
     }
 
+    fn assert_native_counts(operator: &StreamJoinOperator, reuse: [usize; 3], changes: usize) {
+        assert_eq!(
+            operator
+                .run_core
+                .as_ref()
+                .unwrap()
+                .native_reuse_and_change_counts(),
+            (reuse, changes)
+        );
+    }
+
     async fn assert_clean_native_epoch(
         original: &mut StreamJoinOperator,
         store: &mut crate::state::v4::V4Store,
@@ -518,6 +529,7 @@ mod tests {
             original.run_core.as_ref().unwrap().native_reuse_counts(),
             [3, 6, 2]
         );
+        assert_eq!(original.run_core.as_ref().unwrap().native_change_count(), 0);
     }
 
     #[tokio::test]
@@ -641,10 +653,7 @@ mod tests {
             second_restored.run_core.as_ref().unwrap().fingerprint()
         );
         assert_eq!(store.stats().carried_objects, 5);
-        assert_eq!(
-            original.run_core.as_ref().unwrap().native_reuse_counts(),
-            [1, 2, 1]
-        );
+        assert_native_counts(&original, [1, 2, 1], 5);
         assert_clean_native_epoch(&mut original, &mut store).await;
         assert_native_eof_matches(&mut original, &mut restored, &job).await;
     }
@@ -752,6 +761,7 @@ mod tests {
             original.run_core.as_ref().unwrap().native_reuse_counts(),
             [0, 1, 1]
         );
+        assert_eq!(original.run_core.as_ref().unwrap().native_change_count(), 4);
         let snapshot = crate::state::v4::native::load_native(&mut store, &second, "match").unwrap();
         let mut restored =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
@@ -774,6 +784,7 @@ mod tests {
             original.run_core.as_ref().unwrap().native_reuse_counts(),
             [0, 2, 2]
         );
+        assert_eq!(original.run_core.as_ref().unwrap().native_change_count(), 5);
         let snapshot = crate::state::v4::native::load_native(&mut store, &third, "match").unwrap();
         assert!(!snapshot.segments.contains_key("left/run-0/payload"));
         assert!(!snapshot.segments.contains_key("left/run-0/identity"));

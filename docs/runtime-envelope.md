@@ -266,8 +266,11 @@ expiration and shared-key page images. New runs and changed identity prefixes
 rebuild only their own pages; touched buckets and expiration are tracked
 separately, retired runs and buckets drop cached pages, and unchanged key
 records are shared. Control pages are reused when their counters are unchanged.
-The full capture list is still assembled, so this does not yet provide the
-planned end-to-end dirty-page cost bound.
+Capture assembles only upsert/remove changes against the previous page lineage
+and incrementally maintains page-count and reservation summaries. Direct
+snapshot conversion and the current persistence implementation still
+materialize the complete partition, so end-to-end dirty-page cost and the final
+performance bound remain open.
 
 Legacy layouts 1–3 and their base/delta history remain only in explicit
 migration tests. Production restore requires layout 12 and rejects those older

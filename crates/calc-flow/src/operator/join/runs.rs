@@ -1422,7 +1422,7 @@ impl RunState {
         &mut self,
         epoch: crate::Epoch,
         cache: &mut NativePageCache,
-    ) -> Result<Vec<crate::state::v4::native::NativePage>> {
+    ) -> Result<crate::state::v4::native::NativePageSet> {
         pages::capture(self, epoch, cache)
     }
 

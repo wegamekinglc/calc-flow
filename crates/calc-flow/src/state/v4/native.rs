@@ -16,6 +16,9 @@ use std::{
 const METADATA_COLUMN: &str = "__cf_operator_metadata";
 const MAX_METADATA_BYTES: usize = 64 * 1024;
 
+mod pages;
+pub(crate) use pages::{NativePageChange, NativePageSet};
+
 #[derive(Clone, Debug)]
 pub(crate) struct NativeCapture {
     metadata: JsonMap,
@@ -32,11 +35,11 @@ impl NativeCapture {
         if partitions.is_empty()
             || partitions.iter().any(|partition| {
                 !groups.insert(partition.key_group)
-                    || partition.pages.iter().any(|page| {
-                        page.range.start > page.range.end
-                            || page.column == METADATA_COLUMN
-                            || !columns.insert(page.column.clone())
-                    })
+                    || partition
+                        .pages
+                        .changes()
+                        .iter()
+                        .any(|change| !columns.insert(change.column().to_owned()))
             })
         {
             return Err(mismatch(
@@ -68,7 +71,10 @@ impl NativeCapture {
             ..
         } = self;
         let mut segments = BTreeMap::new();
-        for page in partitions.into_iter().flat_map(|partition| partition.pages) {
+        for page in partitions
+            .into_iter()
+            .flat_map(|partition| partition.pages.materialize())
+        {
             let bytes = super::object::payload_bytes(&page.payload)?;
             if segments
                 .insert(page.column, StateSegment::new(bytes))
@@ -91,11 +97,9 @@ impl NativeCapture {
         let mut bytes = add_charge(0, crate::canonical_json(&metadata)?.len())?;
         for partition in &self.partitions {
             bytes = add_charge(bytes, size_of::<NativePartition>())?;
-            for page in &partition.pages {
-                bytes = bytes
-                    .checked_add(page.reservation_bytes()?)
-                    .ok_or_else(|| mismatch("native capture reservation overflow".into()))?;
-            }
+            bytes = bytes
+                .checked_add(partition.pages.reservation_bytes())
+                .ok_or_else(|| mismatch("native capture reservation overflow".into()))?;
         }
         bytes
             .checked_mul(2)
@@ -106,7 +110,7 @@ impl NativeCapture {
 #[derive(Clone, Debug)]
 pub(crate) struct NativePartition {
     pub(crate) key_group: u32,
-    pub(crate) pages: Vec<NativePage>,
+    pub(crate) pages: NativePageSet,
 }
 
 #[derive(Clone, Debug)]
@@ -374,11 +378,12 @@ async fn persist_partition(
     store: &mut V4Store,
     owner: &str,
     key_group: u32,
-    pages: Vec<NativePage>,
+    pages: NativePageSet,
     metadata: &serde_json::Value,
     epoch: u64,
     previous: Option<&PartitionIndex>,
 ) -> Result<(PartitionIndex, usize)> {
+    let pages = pages.materialize();
     let mut previous = PreviousPartition::new(previous)?;
     let mut pending = BTreeMap::new();
     let mut objects = Vec::with_capacity(pages.len() + 1);
@@ -592,7 +597,10 @@ fn metadata_fingerprint(metadata: &JsonMap) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{NativeCapture, NativePage, NativePartition, load_native, persist_native};
+    use super::{
+        NativeCapture, NativePage, NativePageChange, NativePageSet, NativePartition, load_native,
+        persist_native,
+    };
     use crate::state::v4::{
         JobKind, OperatorV4, V4Manifest, V4Store, manifest_fingerprint,
         native::native_partition_handles,
@@ -616,6 +624,36 @@ mod tests {
         manifest
     }
 
+    #[test]
+    fn native_incremental_page_set_materializes_and_accounts_changes() {
+        let record = RecordBatch::try_from_iter(vec![(
+            "value",
+            Arc::new(Int64Array::from(vec![7])) as ArrayRef,
+        )])
+        .unwrap();
+        let left = NativePage::arrow("left", &record, 1, 0..1);
+        let right = NativePage::arrow("right", &record, 1, 0..1);
+        let base = NativePageSet::full(vec![left.clone(), right.clone()]).unwrap();
+        let replacement = NativePage::arrow("left", &record, 2, 0..1);
+        let pages = NativePageSet::new(
+            Some(Arc::new(base)),
+            vec![
+                NativePageChange::upsert(replacement.clone(), Some(&left)).unwrap(),
+                NativePageChange::remove(&right).unwrap(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(pages.change_count(), 2);
+        assert_eq!(
+            pages.reservation_bytes(),
+            replacement.reservation_bytes().unwrap()
+        );
+        let materialized = pages.materialize();
+        assert_eq!(materialized.len(), 1);
+        assert_eq!(materialized[0].column, "left");
+        assert_eq!(materialized[0].generation, 2);
+    }
+
     #[tokio::test]
     async fn native_partition_pages_roundtrip_and_validate_metadata() {
         let temporary = tempfile::tempdir().unwrap();
@@ -633,10 +671,11 @@ mod tests {
             metadata.clone(),
             vec![NativePartition {
                 key_group: 0,
-                pages: vec![
+                pages: NativePageSet::full(vec![
                     NativePage::arrow("left/run-0", &record, 0, 0..2),
                     NativePage::json("control", serde_json::json!({"rows": 2}), 0, 0..0),
-                ],
+                ])
+                .unwrap(),
             }],
         )
         .unwrap();
@@ -703,18 +742,21 @@ mod tests {
                 BTreeMap::from([("epoch".into(), Value::from(epoch))]),
                 vec![NativePartition {
                     key_group: 0,
-                    pages: pages
-                        .into_iter()
-                        .map(|(name, generation)| {
-                            NativePage::arrow(name, &record, generation, 0..1)
-                        })
-                        .chain(std::iter::once(NativePage::json(
-                            "control",
-                            Value::from(epoch),
-                            epoch,
-                            0..0,
-                        )))
-                        .collect(),
+                    pages: NativePageSet::full(
+                        pages
+                            .into_iter()
+                            .map(|(name, generation)| {
+                                NativePage::arrow(name, &record, generation, 0..1)
+                            })
+                            .chain(std::iter::once(NativePage::json(
+                                "control",
+                                Value::from(epoch),
+                                epoch,
+                                0..0,
+                            )))
+                            .collect(),
+                    )
+                    .unwrap(),
                 }],
             )
             .unwrap()

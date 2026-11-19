@@ -286,12 +286,15 @@ mod tests {
             JsonMap::from_iter([("layout_version".into(), 12.into())]),
             vec![crate::state::v4::native::NativePartition {
                 key_group: 0,
-                pages: vec![crate::state::v4::native::NativePage::json(
-                    "run-0",
-                    serde_json::json!({"rows": 1}),
-                    0,
-                    0..1,
-                )],
+                pages: crate::state::v4::native::NativePageSet::full(vec![
+                    crate::state::v4::native::NativePage::json(
+                        "run-0",
+                        serde_json::json!({"rows": 1}),
+                        0,
+                        0..1,
+                    ),
+                ])
+                .unwrap(),
             }],
         )
         .unwrap();

@@ -3,7 +3,7 @@ use super::{
     Side,
 };
 use crate::operator::keyed::{GroupId, KeyStore};
-use crate::state::v4::native::NativePage;
+use crate::state::v4::native::{NativePage, NativePageChange, NativePageSet};
 use crate::{CalcFlowError, EventTime, Result, StateSegment};
 use datafusion::arrow::{
     array::{Array, ArrayRef, Int64Array, UInt8Array, UInt32Array, UInt64Array},
@@ -43,6 +43,7 @@ pub(in crate::operator::join) struct NativePageCache {
     groups: [BTreeMap<GroupId, NativePage>; 2],
     expiration: [Option<NativePage>; 2],
     control: Option<(Control, NativePage)>,
+    pub(in crate::operator::join) lineage: Option<Arc<NativePageSet>>,
     initialized: bool,
     #[cfg(test)]
     reused_identities: usize,
@@ -68,36 +69,58 @@ pub(super) fn capture(
     state: &mut RunState,
     epoch: crate::Epoch,
     cache: &mut NativePageCache,
-) -> Result<Vec<NativePage>> {
+) -> Result<NativePageSet> {
     let epoch = epoch.as_u64();
     let initialized = cache.initialized;
+    let mut changes = Vec::new();
     for side in 0..2 {
         let dirty = if initialized {
             state.dirty.runs[side].clone()
         } else {
             state.sides[side].runs.keys().copied().collect()
         };
+        #[cfg(test)]
+        if initialized {
+            let dirty_existing = dirty
+                .iter()
+                .filter(|id| cache.runs[side].contains_key(id))
+                .count();
+            cache.reused_identities += cache.runs[side].len().saturating_sub(dirty_existing);
+        }
         for id in dirty {
-            capture_run(state, side, id, epoch, cache)?;
+            capture_run(state, side, id, epoch, cache, &mut changes)?;
         }
         let dirty_groups = if initialized {
             state.dirty.groups[side].clone()
         } else {
             state.sides[side].buckets.keys().copied().collect()
         };
+        #[cfg(test)]
+        if initialized {
+            let dirty_existing = dirty_groups
+                .iter()
+                .filter(|group| cache.groups[side].contains_key(group))
+                .count();
+            cache.reused_indexes += cache.groups[side].len().saturating_sub(dirty_existing);
+        }
         for group in dirty_groups {
-            capture_group(state, side, group, epoch, cache)?;
+            capture_group(state, side, group, epoch, cache, &mut changes)?;
         }
         if !initialized || state.dirty.expiration[side] {
             let prefix = if side == 0 { "left" } else { "right" };
             let rows = u64::try_from(state.sides[side].expiration.len())
                 .map_err(|_| page_error("expiration rows exceed u64"))?;
-            cache.expiration[side] = Some(NativePage::arrow(
+            let page = NativePage::arrow(
                 format!("{prefix}/expiration"),
                 &expiration_record(&state.sides[side])?,
                 epoch,
                 0..rows,
-            ));
+            );
+            changes.push(NativePageChange::upsert(
+                page.clone(),
+                cache.expiration[side].as_ref(),
+            )?);
+            cache.expiration[side] = Some(page);
         } else {
             #[cfg(test)]
             {
@@ -122,44 +145,21 @@ pub(super) fn capture(
     {
         page.clone()
     } else {
-        NativePage::json(
+        let page = NativePage::json(
             "control",
             serde_json::to_value(&control).map_err(|error| page_error(error.to_string()))?,
             epoch,
             0..0,
-        )
-    };
-    cache.control = Some((control, control_page.clone()));
-    cache.initialized = true;
-    let mut pages = Vec::new();
-    for side in 0..2 {
-        for (id, cached) in &cache.runs[side] {
-            #[cfg(not(test))]
-            let _ = id;
-            #[cfg(test)]
-            if initialized && !state.dirty.runs[side].contains(id) {
-                cache.reused_identities += 1;
-            }
-            pages.push(cached.payload.clone());
-            pages.push(cached.identity.clone());
-        }
-        for (group, page) in &cache.groups[side] {
-            #[cfg(not(test))]
-            let _ = group;
-            #[cfg(test)]
-            if initialized && !state.dirty.groups[side].contains(group) {
-                cache.reused_indexes += 1;
-            }
-            pages.push(page.clone());
-        }
-        pages.push(
-            cache.expiration[side]
-                .clone()
-                .expect("native expiration page was initialized"),
         );
-    }
-    pages.push(control_page);
-    Ok(pages)
+        changes.push(NativePageChange::upsert(
+            page.clone(),
+            cache.control.as_ref().map(|(_, previous)| previous),
+        )?);
+        page
+    };
+    cache.control = Some((control, control_page));
+    cache.initialized = true;
+    NativePageSet::new(cache.lineage.clone(), changes)
 }
 
 fn capture_run(
@@ -168,9 +168,13 @@ fn capture_run(
     id: RunId,
     epoch: u64,
     cache: &mut NativePageCache,
+    changes: &mut Vec<NativePageChange>,
 ) -> Result<()> {
     let Some(live) = state.sides[side].runs.get(&id) else {
-        cache.runs[side].remove(&id);
+        if let Some(cached) = cache.runs[side].remove(&id) {
+            changes.push(NativePageChange::remove(&cached.payload)?);
+            changes.push(NativePageChange::remove(&cached.identity)?);
+        }
         return Ok(());
     };
     let prefix = if side == 0 { "left" } else { "right" };
@@ -180,12 +184,17 @@ fn capture_run(
         let identity = if cached.head == live.head && cached.released_bytes == live.released_bytes {
             cached.identity.clone()
         } else {
-            NativePage::arrow(
+            let page = NativePage::arrow(
                 format!("{prefix}/run-{}/identity", id.0),
                 &run_identity(id, live)?,
                 epoch,
                 0..rows,
-            )
+            );
+            changes.push(NativePageChange::upsert(
+                page.clone(),
+                Some(&cached.identity),
+            )?);
+            page
         };
         CachedRunPages {
             payload: cached.payload.clone(),
@@ -194,19 +203,23 @@ fn capture_run(
             released_bytes: live.released_bytes,
         }
     } else {
+        let payload = NativePage::arrow(
+            format!("{prefix}/run-{}/payload", id.0),
+            &live.run.payload,
+            id.0,
+            0..rows,
+        );
+        let identity = NativePage::arrow(
+            format!("{prefix}/run-{}/identity", id.0),
+            &run_identity(id, live)?,
+            epoch,
+            0..rows,
+        );
+        changes.push(NativePageChange::upsert(payload.clone(), None)?);
+        changes.push(NativePageChange::upsert(identity.clone(), None)?);
         CachedRunPages {
-            payload: NativePage::arrow(
-                format!("{prefix}/run-{}/payload", id.0),
-                &live.run.payload,
-                id.0,
-                0..rows,
-            ),
-            identity: NativePage::arrow(
-                format!("{prefix}/run-{}/identity", id.0),
-                &run_identity(id, live)?,
-                epoch,
-                0..rows,
-            ),
+            payload,
+            identity,
             head: live.head,
             released_bytes: live.released_bytes,
         }
@@ -221,23 +234,28 @@ fn capture_group(
     group: GroupId,
     epoch: u64,
     cache: &mut NativePageCache,
+    changes: &mut Vec<NativePageChange>,
 ) -> Result<()> {
     let Some(bucket) = state.sides[side].buckets.get(&group) else {
-        cache.groups[side].remove(&group);
+        if let Some(previous) = cache.groups[side].remove(&group) {
+            changes.push(NativePageChange::remove(&previous)?);
+        }
         return Ok(());
     };
     let prefix = if side == 0 { "left" } else { "right" };
     let rows =
         u64::try_from(bucket.entries.len()).map_err(|_| page_error("bucket rows exceed u64"))?;
-    cache.groups[side].insert(
-        group,
-        NativePage::arrow(
-            format!("{prefix}/group-{}", group.index()),
-            &bucket_record(group, bucket)?,
-            epoch,
-            0..rows,
-        ),
+    let page = NativePage::arrow(
+        format!("{prefix}/group-{}", group.index()),
+        &bucket_record(group, bucket)?,
+        epoch,
+        0..rows,
     );
+    changes.push(NativePageChange::upsert(
+        page.clone(),
+        cache.groups[side].get(&group),
+    )?);
+    cache.groups[side].insert(group, page);
     Ok(())
 }
 

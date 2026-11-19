@@ -223,6 +223,11 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   顺序和 accounting。连续 epoch 的第二/第三次 capture 分别累计携带 5/15 个 clean objects；两个 key 中仅一组变化时，
   另一 bucket、旧 run、另一侧 expiration 和 key record 均复用。Join 581 项、operator-task 77 项（2 ignored）、
   native component 5 项及全 feature Clippy 通过。完整页面列表仍按全量装配，O(dirty) 增量装配与 P5 验收尚未完成。
+- 2026-11-20 Join capture 已改为 previous-lineage 增量页面集合：run/group/expiration/control/key 仅记录
+  upsert/remove，页数与 reservation 汇总随变更更新，不再为每次 capture 装配完整页面 Vec。第二次 capture 仅 5 个变更，
+  clean 第三次为 0，部分淘汰与整 run 退休分别为 4/5；直接 snapshot 与 manifest 恢复保持等价。Join 581 项、
+  operator-task 77 项（2 ignored）、native page-set 3 项、native component 5 项及全 feature Clippy 通过。
+  当前直接 snapshot 和 persistence 仍物化完整 partition，端到端成本、持久化增量化和 P5 门槛尚未完成。
 
 ## 1. 目标
 
