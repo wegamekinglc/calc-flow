@@ -696,3 +696,97 @@ fn test_cancellation_before_morsel_leaves_run_state_unchanged() {
     assert_eq!(state.next_output_sequence(), 0);
     assert_eq!(state.snapshot().fingerprint(), before.fingerprint());
 }
+
+#[test]
+fn test_production_morsels_share_one_atomic_match_limit_and_commit() {
+    let make_state = state;
+    let mut state = state(1);
+    let left_record = record(&[1], &[10]);
+    let left = incoming(
+        &left_record,
+        vec![0],
+        vec![GroupId::new(0).unwrap()],
+        &[10],
+        &[0],
+        vec![true],
+        1,
+    );
+    state
+        .apply(
+            JoinSide::Left,
+            left,
+            &output_schema(),
+            Some(&[1, 3]),
+            2,
+            EdgeBudget::default(),
+        )
+        .unwrap();
+    let right_record = record(&[1, 1], &[100, 101]);
+    let make_right = |row| {
+        incoming(
+            &right_record,
+            vec![row],
+            vec![GroupId::new(0).unwrap()],
+            &[10],
+            &[row as u64],
+            vec![false],
+            row as u64 + 1,
+        )
+    };
+    let before = state.snapshot();
+    let error = state
+        .prepare_batch(
+            JoinSide::Right,
+            vec![make_right(0), make_right(1)],
+            &output_schema(),
+            Some(&[1, 3]),
+            2,
+            EdgeBudget::default(),
+            &mut || Ok(()),
+        )
+        .err()
+        .expect("two morsels share one match limit");
+    assert!(error.to_string().contains("match limit"));
+    assert_eq!(state.next_row_id(JoinSide::Right), 0);
+    assert_eq!(state.next_output_sequence(), 0);
+    assert_eq!(state.snapshot().fingerprint(), before.fingerprint());
+
+    drop(state);
+    let mut accepted = make_state(100);
+    let left = incoming(
+        &left_record,
+        vec![0],
+        vec![GroupId::new(0).unwrap()],
+        &[10],
+        &[0],
+        vec![true],
+        1,
+    );
+    accepted
+        .apply(
+            JoinSide::Left,
+            left,
+            &output_schema(),
+            Some(&[1, 3]),
+            2,
+            EdgeBudget::default(),
+        )
+        .unwrap();
+    let prepared = accepted
+        .prepare_batch(
+            JoinSide::Right,
+            vec![make_right(0), make_right(1)],
+            &output_schema(),
+            Some(&[1, 3]),
+            2,
+            EdgeBudget::default(),
+            &mut || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(prepared.outputs().len(), 2);
+    assert_eq!(accepted.rows(JoinSide::Right), 0);
+    assert_eq!(accepted.next_output_sequence(), 0);
+    prepared.commit(&mut accepted).unwrap();
+    assert_eq!(accepted.next_row_id(JoinSide::Right), 2);
+    assert_eq!(accepted.next_output_sequence(), 2);
+}

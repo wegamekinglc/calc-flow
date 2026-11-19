@@ -523,6 +523,47 @@ pub(super) struct RunOutput {
     pub(super) sequences: Vec<u64>,
 }
 
+pub(super) struct PreparedRuns {
+    incoming_side: JoinSide,
+    prepared: Vec<Prepared>,
+    outputs: Vec<RunOutput>,
+}
+
+impl PreparedRuns {
+    pub(super) fn outputs(&self) -> &[RunOutput] {
+        &self.outputs
+    }
+
+    pub(super) fn matched_rows(&self) -> usize {
+        self.prepared
+            .iter()
+            .map(|prepared| prepared.probe.len())
+            .sum()
+    }
+
+    pub(super) fn commit(self, state: &mut RunState) -> Result<Vec<RunOutput>> {
+        if self
+            .prepared
+            .first()
+            .is_some_and(|prepared| prepared.output_base != state.next_output)
+        {
+            return Err(run_error("prepared batch output sequence is stale"));
+        }
+        let counts = self
+            .outputs
+            .iter()
+            .map(|output| output.records.len())
+            .collect::<Vec<_>>();
+        for (prepared, count) in self.prepared.into_iter().zip(counts) {
+            if prepared.incoming_is_left != (self.incoming_side == JoinSide::Left) {
+                return Err(run_error("prepared batch changed its input side"));
+            }
+            prepared.commit(state, count)?;
+        }
+        Ok(self.outputs)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Eviction {
     pub(super) expired_rows: usize,
@@ -638,12 +679,44 @@ impl RunState {
         self.sides[side.index()].bytes
     }
 
+    pub(super) fn retained(&self, side: JoinSide) -> Vec<(EventTime, u64, PayloadRef<'_>)> {
+        self.sides[side.index()]
+            .runs
+            .values()
+            .flat_map(|live| {
+                live.run.order[live.head..].iter().map(|&row| {
+                    (
+                        EventTime::from_micros(live.run.times[row]),
+                        live.run.row_ids[row],
+                        PayloadRef::Record(&live.run.payload, row),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    pub(super) fn restore_counters(
+        &mut self,
+        next_row_ids: [u64; 2],
+        next_output: u64,
+        match_limit_failures: u64,
+    ) {
+        self.sides[0].next_row_id = next_row_ids[0];
+        self.sides[1].next_row_id = next_row_ids[1];
+        self.next_output = next_output;
+        self.match_limit_failures = match_limit_failures;
+    }
+
     pub(super) fn next_row_id(&self, side: JoinSide) -> u64 {
         self.sides[side.index()].next_row_id
     }
 
     pub(super) fn next_output_sequence(&self) -> u64 {
         self.next_output
+    }
+
+    pub(super) fn match_limit_failures(&self) -> u64 {
+        self.match_limit_failures
     }
 
     pub(super) fn evict(
@@ -756,14 +829,73 @@ impl RunState {
         budget: EdgeBudget,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<RunOutput> {
+        let prepared = self.prepare_batch(
+            incoming_side,
+            vec![incoming],
+            schema,
+            projection,
+            left_width,
+            budget,
+            check,
+        )?;
+        let mut outputs = prepared.commit(self)?;
+        Ok(outputs.remove(0))
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one input batch carries all its morsels and the output context"
+    )]
+    pub(super) fn prepare_batch(
+        &mut self,
+        incoming_side: JoinSide,
+        incoming: Vec<Incoming>,
+        schema: &SchemaRef,
+        projection: Option<&[usize]>,
+        left_width: usize,
+        budget: EdgeBudget,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<PreparedRuns> {
         check()?;
-        let prepared = self.prepare(incoming_side, incoming, check)?;
-        let records = prepared.materialize(self, schema, projection, left_width, budget, check)?;
+        let mut matches = 0usize;
+        let mut prepared = incoming
+            .into_iter()
+            .map(|incoming| {
+                let prepared = self.prepare(incoming_side, incoming, check)?;
+                matches = matches
+                    .checked_add(prepared.probe.len())
+                    .ok_or_else(|| run_error("input batch match count overflowed"))?;
+                Ok(prepared)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        super::enforce_match_limit(
+            matches,
+            &mut self.match_limit_failures,
+            self.limits.max_matches_per_input_batch(),
+            &self.name,
+        )?;
+        let mut next_output = self.next_output;
+        let mut outputs = Vec::with_capacity(prepared.len());
+        for prepared in &mut prepared {
+            prepared.output_base = next_output;
+            let records =
+                prepared.materialize(self, schema, projection, left_width, budget, check)?;
+            let count = u64::try_from(records.len())
+                .map_err(|_| run_error("output sequence overflowed"))?;
+            next_output = next_output
+                .checked_add(count)
+                .ok_or_else(|| run_error("output sequence overflowed"))?;
+            let sequences = (0..count)
+                .map(|offset| prepared.output_base + offset)
+                .collect();
+            outputs.push(RunOutput { records, sequences });
+        }
         check()?;
-        let count = records.len();
-        let sequences = self.output_sequences(count)?;
-        prepared.commit(self, count)?;
-        Ok(RunOutput { records, sequences })
+        Ok(PreparedRuns {
+            incoming_side,
+            prepared,
+            outputs,
+        })
     }
 
     fn prepare(
@@ -838,17 +970,7 @@ impl RunState {
                 .checked_add(found.matches())
                 .ok_or_else(|| run_error("match count overflowed"))?;
             bounds.push(found);
-            if u64::try_from(count).unwrap_or(u64::MAX) > self.limits.max_matches_per_input_batch()
-            {
-                break;
-            }
         }
-        super::enforce_match_limit(
-            count,
-            &mut self.match_limit_failures,
-            self.limits.max_matches_per_input_batch(),
-            &self.name,
-        )?;
         let mut selection = Selection::with_capacity(count, incoming.len());
         let mut selected = Vec::with_capacity(count);
         for (row, found) in bounds.into_iter().enumerate() {
