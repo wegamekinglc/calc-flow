@@ -54,6 +54,31 @@ def test_native_numpy_snapshot_is_owned_and_deeply_readonly(dtype: str) -> None:
         array.shape = (2, 2)
 
 
+def test_native_valid_numpy_export_avoids_python_arrow_roundtrip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import calc_flow._native_array as native_array
+
+    def unexpected_roundtrip(*args: object) -> None:
+        raise AssertionError(f"unexpected Python Arrow conversion: {args}")
+
+    monkeypatch.setattr(native_array, "_to_numpy", unexpected_roundtrip)
+    for shape in ((4,), (2, 2), ()):
+        for dtype in (np.float32, np.float64):
+            expected = np.arange(np.prod(shape, dtype=int), dtype=dtype).reshape(shape)
+            result = cfa.from_numpy(expected).to_numpy()
+            np.testing.assert_array_equal(result, expected)
+            assert result.dtype == expected.dtype
+            assert result.shape == shape
+            while isinstance(result, np.ndarray):
+                with pytest.raises(ValueError):
+                    result.setflags(write=True)
+                result = result.base
+            assert isinstance(result, bytes)
+    sliced = cfa.from_arrow(pa.array([1.0, 2.0, 3.0, 4.0]).slice(1, 2))
+    np.testing.assert_array_equal(sliced.to_numpy(), [2.0, 3.0])
+
+
 def test_native_arrow_slice_preserves_nulls_and_shares_buffers() -> None:
     source = pa.array([9.0, None, float("nan"), -0.0, 5.0]).slice(1, 3)
     array = cfa.from_arrow(source)

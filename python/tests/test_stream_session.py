@@ -191,7 +191,9 @@ def test_indicator_session_matches_stream_under_source_provided_watermarks() -> 
     ]
 
 
-def test_native_array_sequence_session_accepts_native_and_numpy_backed_inputs() -> None:
+def test_native_array_sequence_session_accepts_native_and_numpy_backed_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import numpy as np
 
     import calc_flow.array as cfa
@@ -216,16 +218,35 @@ def test_native_array_sequence_session_accepts_native_and_numpy_backed_inputs() 
     session = _native._StreamSession(plan._inner, CONFIG._native(), {})
     (input_id,) = session.input_ids
     (output_id,) = session.output_ids
-    for value, expected, wrap in [(1.0, 1.0, False), (3.0, 2.0, True)]:
+    wrapped = cf.Batch.from_array(
+        cfa.from_numpy(np.asarray([3.0], dtype=np.float64)), backend="native"
+    )
+
+    def unexpected_numpy_conversion(values: object) -> None:
+        raise AssertionError(f"unexpected Python NumPy conversion: {values}")
+
+    monkeypatch.setattr(cfa, "from_numpy", unexpected_numpy_conversion)
+    for value, expected, wrap in [
+        (1.0, 1.0, False),
+        (3.0, 2.0, True),
+        (5.0, 4.0, False),
+    ]:
         values = np.asarray([value], dtype=np.float64)
-        batch = (
-            cf.Batch.from_array(cfa.from_numpy(values), backend="native")
-            if wrap
-            else values
-        )
+        batch = wrapped if wrap else values
         emitted = session.push(input_id, batch)
         assert len(emitted[output_id]) == 1
         assert emitted[output_id][0].to_numpy().tolist() == [expected]
+    reversed = np.asarray([3.0, 4.0])[::-1]
+    emitted = session.push(input_id, reversed)
+    assert emitted[output_id][0].to_numpy().tolist() == [4.5, 3.5]
+    for invalid in (
+        np.asarray([1.0], dtype=">f8"),
+        np.asarray([1], dtype=np.int64),
+        np.ones((1, 1, 1)),
+        np.asarray([1.0]).view(type("ArraySubclass", (np.ndarray,), {})),
+    ):
+        with pytest.raises((cf.ConfigError, TypeError)):
+            session.push(input_id, invalid)
     assert session.finish() == {}
     session.close()
 

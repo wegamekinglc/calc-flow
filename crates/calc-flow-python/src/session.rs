@@ -338,27 +338,17 @@ fn input_batch(batch: &Bound<'_, PyAny>) -> PyResult<calc_flow::Batch> {
         )
         .map_err(crate::error::to_py_err);
     }
-    if is_numpy_array(batch)? {
-        let native = batch
-            .py()
-            .import("calc_flow.array")?
-            .getattr("from_numpy")?
-            .call1((batch,))?;
-        let native = native.cast::<crate::array::PyNativeArray>()?;
-        return calc_flow::Batch::external(
-            Arc::new(native.get().inner.clone()),
-            calc_flow::BatchMetadata::default(),
-        )
-        .map_err(crate::error::to_py_err);
+    if is_numpy_array(batch) {
+        let native = crate::array::numpy_snapshot(batch)?;
+        return calc_flow::Batch::external(Arc::new(native), calc_flow::BatchMetadata::default())
+            .map_err(crate::error::to_py_err);
     }
     calc_flow::Batch::table(arrow_records(batch)?, calc_flow::BatchMetadata::default())
         .map_err(crate::error::to_py_err)
 }
 
-fn is_numpy_array(batch: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let class = batch.getattr("__class__")?;
-    Ok(class.getattr("__module__")?.extract::<String>()? == "numpy"
-        && class.getattr("__name__")?.extract::<String>()? == "ndarray")
+fn is_numpy_array(batch: &Bound<'_, PyAny>) -> bool {
+    batch.is_exact_instance_of::<numpy::PyUntypedArray>()
 }
 
 /// Imports a record batch or table through the Arrow C data/stream interface.

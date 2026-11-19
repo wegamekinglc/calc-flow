@@ -160,6 +160,15 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   其后仅合并启动参数，未改热路径。与最终代码一致的 sealed wheel 已正式验收 NumPy：30 个样本的数值全部正确，
   p50 为 9.419 µs（`target/p1-inline-numpy-sealed.json`，1.662 秒），未达到 ≤5 µs。输入准备不计时，
   `_StreamSession.push` 到 `NativeArray.to_numpy()` 计入；该门槛仍未完成，后续优化不得删除输出转换来规避。
+- 2026-11-19 NumPy 导出优化：有效 Float32/Float64 直接在 PyO3 层创建只读 NumPy 快照，不再经 Python/Arrow 往返；
+  null/fill value 和 Boolean 保留原路径。预登记以 `434b8e4f` 的 9.419 µs 为对照，候选为当前工作区，仍仅测同一
+  单行 rolling mean 用例，5 次预热、30 个样本、p50 ≤5 µs，隔离安装及测量预算 20 秒，构建另计，不扩展或重试。
+  sealed 复测为 6.613 µs（`target/p1-numpy-direct.json`，1.758 秒），较前值下降 2.806 µs，但仍未达到门槛；
+  后续只优化同一输入/输出路径，不改变计时边界；仅在实现变更后重新构建测量，相同构建不为理想结果重试。
+  输入现已在 PyO3 层形成拥有副本，sealed 复测为 5.196 µs（`target/p1-numpy-snapshot.json`），仍未达到门槛。
+  随后以原生类型描述符取代每次调用的 `__class__`/dtype 字符串属性读取，61 项测试通过。最终 sealed 结果为
+  **2.885 µs p50，满足 ≤5 µs**（`target/p1-numpy-native-types.json`）；默认 feature 的 PyO3 Clippy 通过。
+  全 feature Clippy 的本机构建在第三方 `rdkafka-sys` 处因缺少 `curl/curl.h` 停止，不能据此宣称全 feature 检查通过。
 - 2026-11-19 当前工作区修复了既有 CI 失败：v4 恢复保留静态输入摘要诊断和安全的错误分类，
   测试改用 `manifests/lineage/manifests/epoch-N.json` 与 opaque `blocks`；typed MACD 不再误入旧 resource worker，
   late-output Rolling 可恢复当前声明 layout，native sequence 保留 operator 上下文，ASOF lifecycle fixture 不再由 worker
