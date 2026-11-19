@@ -10,15 +10,29 @@ use crate::{
     state::{EntityId, StateTable, ValueKind},
 };
 
+#[derive(Clone, Copy)]
+pub(super) struct EntityRow<'a> {
+    pub(super) entity: EntityId,
+    pub(super) first: bool,
+    pub(super) node_id: &'a str,
+}
+
 pub(super) struct RowReadouts<'a> {
     pub(super) accumulators: &'a [NumericAccumulator],
     pub(super) values: Vec<[Option<f64>; 3]>,
+    pub(super) valid_counts: Option<Vec<u64>>,
 }
 
 pub(super) fn supports_plan(groups: &[TypedGroupPlan], outputs: &[TypedOutputPlan]) -> bool {
     let numeric_input = groups.iter().find_map(|group| match group {
         TypedGroupPlan::Numeric { input_index, .. } => Some(*input_index),
         _ => None,
+    });
+    let has_indicator = groups.iter().any(|group| {
+        matches!(
+            group,
+            TypedGroupPlan::Rsi { .. } | TypedGroupPlan::Atr { .. } | TypedGroupPlan::Macd { .. }
+        )
     });
     !groups.is_empty()
         && groups.iter().all(|group| match group {
@@ -30,6 +44,7 @@ pub(super) fn supports_plan(groups: &[TypedGroupPlan], outputs: &[TypedOutputPla
             TypedGroupPlan::Rsi { .. }
             | TypedGroupPlan::Atr { .. }
             | TypedGroupPlan::Macd { .. } => true,
+            TypedGroupPlan::Ewma { .. } => !has_indicator,
             _ => false,
         })
         && !outputs.is_empty()
@@ -58,6 +73,9 @@ fn output_supported(group: &TypedGroupPlan, output: &TypedOutputPlan) -> bool {
         TypedGroupPlan::Macd { .. } => {
             matches!(output.kind, TypedOutputKind::Macd(component) if component < 3)
                 && output.storage == OutputStorage::Float64
+        }
+        TypedGroupPlan::Ewma { .. } => {
+            matches!(output.kind, TypedOutputKind::Ewma) && output.storage == OutputStorage::Float64
         }
         _ => false,
     }
@@ -109,27 +127,37 @@ fn field_names(group: &TypedGroupPlan) -> &'static [&'static str] {
         "signal_count",
         "signal_value",
     ];
+    const EWMA: &[&str] = &["valid_count", "value"];
     match group {
         TypedGroupPlan::Rsi { .. } => RSI,
         TypedGroupPlan::Atr { .. } => ATR,
         TypedGroupPlan::Macd { .. } => MACD,
+        TypedGroupPlan::Ewma { .. } => EWMA,
         _ => &[],
     }
 }
 
 pub(super) fn update<'a>(
     table: &'a mut StateTable,
-    entity: EntityId,
+    position: EntityRow<'_>,
     groups: &[TypedGroupPlan],
     inputs: &[TypedGroupInput],
     row: usize,
     nan_as_value: bool,
-    first: bool,
 ) -> Result<RowReadouts<'a>> {
     if groups.len() != inputs.len() {
         return Err(internal_error("rolling slab group input width mismatch"));
     }
+    let EntityRow {
+        entity,
+        first,
+        node_id,
+    } = position;
     let mut values = vec![[None; 3]; groups.len()];
+    let mut valid_counts = groups
+        .iter()
+        .any(|group| matches!(group, TypedGroupPlan::Ewma { .. }))
+        .then(|| vec![0; groups.len()]);
     let mut numeric_updated = false;
     for (index, (group, input)) in groups.iter().zip(inputs).enumerate() {
         match (group, input) {
@@ -178,6 +206,27 @@ pub(super) fn update<'a>(
                 )?;
                 write_macd(table, entity, base, kernel)?;
             }
+            (
+                TypedGroupPlan::Ewma {
+                    alpha, cumulative, ..
+                },
+                TypedGroupInput::Single(input),
+            ) => {
+                let base = column_base(groups, index);
+                let (count, value) = crate::array::rolling::next_ewma(
+                    table.u64(base, entity)?,
+                    f64::from_bits(table.u64(base + 1, entity)?),
+                    valid_float64(input, row, false),
+                    *alpha,
+                    *cumulative,
+                )
+                .ok_or_else(|| {
+                    super::super::operator_error(node_id, "rolling EWMA sample count overflowed")
+                })?;
+                valid_counts.as_mut().expect("EWMA counts are allocated")[index] = count;
+                values[index][0] = Some(value);
+                write_fields(table, entity, base, &[count, value.to_bits()])?;
+            }
             _ => return Err(internal_error("rolling slab group input mismatch")),
         }
     }
@@ -189,6 +238,7 @@ pub(super) fn update<'a>(
     Ok(RowReadouts {
         accumulators,
         values,
+        valid_counts,
     })
 }
 

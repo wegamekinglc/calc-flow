@@ -169,6 +169,9 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   随后以原生类型描述符取代每次调用的 `__class__`/dtype 字符串属性读取，61 项测试通过。最终 sealed 结果为
   **2.885 µs p50，满足 ≤5 µs**（`target/p1-numpy-native-types.json`）；默认 feature 的 PyO3 Clippy 通过。
   全 feature Clippy 的本机构建在第三方 `rdkafka-sys` 处因缺少 `curl/curl.h` 停止，不能据此宣称全 feature 检查通过。
+- 2026-11-19 P2.3 继续交付：独立 EWMA 及 numeric+EWMA 节点以 keyed recurrence 写入 layout 7，复用 `next_ewma`，
+  恢复保存有效样本数与浮点位模式，min_periods、null/NaN 和后续输出保持一致。indicator+EWMA 仍走旧 resource/layout 5/6，
+  其余 typed families 和旧子系统删除未完成。Rolling 689 项、EWMA 恢复测试和 Clippy 通过，未新增性能结论。
 - 2026-11-19 当前工作区修复了既有 CI 失败：v4 恢复保留静态输入摘要诊断和安全的错误分类，
   测试改用 `manifests/lineage/manifests/epoch-N.json` 与 opaque `blocks`；typed MACD 不再误入旧 resource worker，
   late-output Rolling 可恢复当前声明 layout，native sequence 保留 operator 上下文，ASOF lifecycle fixture 不再由 worker

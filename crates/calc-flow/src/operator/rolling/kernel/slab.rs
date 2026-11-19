@@ -108,6 +108,16 @@ impl SlabBuilder {
         let value = match output.kind {
             TypedOutputKind::Rsi | TypedOutputKind::Atr => readouts.values[output.group][0],
             TypedOutputKind::Macd(component) => readouts.values[output.group][component],
+            TypedOutputKind::Ewma
+                if readouts
+                    .valid_counts
+                    .as_ref()
+                    .expect("EWMA counts are present")[output.group]
+                    >= output.min_periods =>
+            {
+                readouts.values[output.group][0]
+            }
+            TypedOutputKind::Ewma => None,
             _ => return Err(internal_error("rolling slab output kind mismatch")),
         };
         match self {
@@ -385,20 +395,18 @@ impl RollingKernelPlan {
     fn append_slab_row(
         &self,
         table: &mut StateTable,
-        entity: EntityId,
-        first: bool,
+        position: indicator::EntityRow<'_>,
         inputs: &[TypedGroupInput],
         row: usize,
         builders: &mut [SlabBuilder],
     ) -> Result<()> {
         let readouts = indicator::update(
             table,
-            entity,
+            position,
             &self.groups,
             inputs,
             row,
             self.nan_as_value,
-            first,
         )?;
         for (builder, output) in builders.iter_mut().zip(&self.outputs) {
             builder.append_row(&self.groups, output, &readouts)?;
@@ -455,8 +463,11 @@ impl RollingKernelPlan {
             for (row, &entity) in ids.iter().enumerate() {
                 self.append_slab_row(
                     table,
-                    entity,
-                    routing.rows.first_rows[routing.entity_ids[row]] == row,
+                    indicator::EntityRow {
+                        entity,
+                        first: routing.rows.first_rows[routing.entity_ids[row]] == row,
+                        node_id,
+                    },
                     inputs,
                     row,
                     &mut builders,
