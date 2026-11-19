@@ -1564,9 +1564,11 @@ Compatible continuation produces identical subsequent output records and
 sequences. Capture reuses clean run identity, per-key bucket, expiration and
 shared-key pages and retires removed runs and buckets from its cache. Capture
 assembles only changes against the previous page lineage and maintains
-reservation summaries incrementally. Direct snapshots and persistence still
-materialize the complete partition, so end-to-end dirty-page cost and final
-performance acceptance remain open.
+reservation summaries incrementally. Persistence applies those changes directly
+to the previous partition index and writes only changed payloads plus metadata.
+Direct snapshots still materialize every page, and each epoch serializes a
+complete partition index, so the final cost bound and performance acceptance
+remain open.
 
 #### Legacy migration-test storage and recovery
 

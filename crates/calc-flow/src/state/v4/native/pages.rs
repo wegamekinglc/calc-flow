@@ -5,6 +5,21 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(test)]
+thread_local! {
+    static MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_materializations() {
+    MATERIALIZATIONS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn materializations() -> usize {
+    MATERIALIZATIONS.get()
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum NativePageChange {
     Upsert {
@@ -139,6 +154,10 @@ impl NativePageSet {
         Self::new(parent, changes)
     }
 
+    pub(crate) fn is_incremental(&self) -> bool {
+        self.parent.is_some()
+    }
+
     pub(crate) fn changes(&self) -> &[NativePageChange] {
         &self.changes
     }
@@ -153,6 +172,8 @@ impl NativePageSet {
     }
 
     pub(crate) fn materialize(&self) -> Vec<NativePage> {
+        #[cfg(test)]
+        MATERIALIZATIONS.set(MATERIALIZATIONS.get() + 1);
         let mut lineage = Vec::new();
         let mut current = self;
         loop {

@@ -267,10 +267,11 @@ rebuild only their own pages; touched buckets and expiration are tracked
 separately, retired runs and buckets drop cached pages, and unchanged key
 records are shared. Control pages are reused when their counters are unchanged.
 Capture assembles only upsert/remove changes against the previous page lineage
-and incrementally maintains page-count and reservation summaries. Direct
-snapshot conversion and the current persistence implementation still
-materialize the complete partition, so end-to-end dirty-page cost and the final
-performance bound remain open.
+and incrementally maintains page-count and reservation summaries. Persistence
+applies those changes directly to the previous partition index and writes only
+changed payloads plus metadata; clean handles remain unchanged. Direct
+snapshots still materialize every page, and each epoch still serializes a
+complete partition index, so the final end-to-end cost bound remains open.
 
 Legacy layouts 1–3 and their base/delta history remain only in explicit
 migration tests. Production restore requires layout 12 and rejects those older

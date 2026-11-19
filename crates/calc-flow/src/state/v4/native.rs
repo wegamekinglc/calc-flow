@@ -18,6 +18,8 @@ const MAX_METADATA_BYTES: usize = 64 * 1024;
 
 mod pages;
 pub(crate) use pages::{NativePageChange, NativePageSet};
+#[cfg(test)]
+pub(crate) use pages::{materializations, reset_materializations};
 
 #[derive(Clone, Debug)]
 pub(crate) struct NativeCapture {
@@ -238,6 +240,7 @@ impl PreviousPartition {
             if page.generation < next {
                 return Err(mismatch("native page generation regressed".into()));
             }
+            self.pages.remove(&page.column);
             self.next_generations.insert(
                 slot,
                 page.generation
@@ -258,6 +261,21 @@ impl PreviousPartition {
                 .ok_or_else(|| mismatch("native page generation overflow".into()))?,
         );
         Ok((slot, None))
+    }
+
+    fn remove(&mut self, column: &str) -> Result<()> {
+        let previous = self
+            .pages
+            .remove(column)
+            .ok_or_else(|| mismatch("removed native page is absent".into()))?;
+        self.used_slots.remove(&previous.page_id.slot);
+        self.free_slots.insert(previous.page_id.slot);
+        Ok(())
+    }
+
+    fn retain_all(&mut self) {
+        self.used_slots
+            .extend(self.pages.values().map(|page| page.page_id.slot));
     }
 
     fn finish(self) -> (BTreeMap<u32, u64>, Vec<u32>) {
@@ -383,8 +401,82 @@ async fn persist_partition(
     epoch: u64,
     previous: Option<&PartitionIndex>,
 ) -> Result<(PartitionIndex, usize)> {
+    if pages.is_incremental() {
+        let previous = previous.ok_or_else(|| {
+            mismatch("incremental native capture requires a previous partition".into())
+        })?;
+        return persist_delta_partition(store, owner, key_group, pages, metadata, epoch, previous)
+            .await;
+    }
     let pages = pages.materialize();
     let mut previous = PreviousPartition::new(previous)?;
+    let (entries, carried) = write_assigned_pages(
+        store,
+        owner,
+        key_group,
+        pages,
+        metadata,
+        epoch,
+        &mut previous,
+    )
+    .await?;
+    finish_partition_index(previous, key_group, entries, carried, epoch)
+}
+
+async fn persist_delta_partition(
+    store: &mut V4Store,
+    owner: &str,
+    key_group: u32,
+    pages: NativePageSet,
+    metadata: &serde_json::Value,
+    epoch: u64,
+    previous: &PartitionIndex,
+) -> Result<(PartitionIndex, usize)> {
+    let mut previous = PreviousPartition::new(Some(previous))?;
+    previous.retain_all();
+    let mut upserts = Vec::new();
+    for change in pages.changes() {
+        match change {
+            NativePageChange::Upsert { page, .. } => upserts.push(page.clone()),
+            NativePageChange::Remove { column, .. } => previous.remove(column)?,
+        }
+    }
+    let updated = upserts
+        .iter()
+        .map(|page| page.column.clone())
+        .collect::<BTreeSet<_>>();
+    let (mut entries, mut carried) = write_assigned_pages(
+        store,
+        owner,
+        key_group,
+        upserts,
+        metadata,
+        epoch,
+        &mut previous,
+    )
+    .await?;
+    let clean = previous
+        .pages
+        .values()
+        .filter(|page| !updated.contains(&page.column))
+        .cloned()
+        .collect::<Vec<_>>();
+    carried = carried
+        .checked_add(clean.len())
+        .ok_or_else(|| mismatch("carried native page count overflow".into()))?;
+    entries.extend(clean);
+    finish_partition_index(previous, key_group, entries, carried, epoch)
+}
+
+async fn write_assigned_pages(
+    store: &mut V4Store,
+    owner: &str,
+    key_group: u32,
+    pages: Vec<NativePage>,
+    metadata: &serde_json::Value,
+    epoch: u64,
+    previous: &mut PreviousPartition,
+) -> Result<(Vec<PageEntry>, usize)> {
     let mut pending = BTreeMap::new();
     let mut objects = Vec::with_capacity(pages.len() + 1);
     let mut entries = Vec::with_capacity(pages.len() + 1);
@@ -448,6 +540,16 @@ async fn persist_partition(
             "persisted native page inventory is incomplete".into(),
         ));
     }
+    Ok((entries, carried))
+}
+
+fn finish_partition_index(
+    previous: PreviousPartition,
+    key_group: u32,
+    mut entries: Vec<PageEntry>,
+    carried: usize,
+    epoch: u64,
+) -> Result<(PartitionIndex, usize)> {
     entries.sort_by_key(|page| page.page_id);
     let (next_generations, free_slots) = previous.finish();
     let index = PartitionIndex {

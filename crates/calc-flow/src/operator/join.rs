@@ -530,6 +530,7 @@ mod tests {
             [3, 6, 2]
         );
         assert_eq!(original.run_core.as_ref().unwrap().native_change_count(), 0);
+        assert_eq!(crate::state::v4::native::materializations(), 1);
     }
 
     #[tokio::test]
@@ -559,6 +560,7 @@ mod tests {
 
     #[tokio::test]
     async fn native_run_checkpoint_restore_continues_bitwise() {
+        crate::state::v4::native::reset_materializations();
         let mut original =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
         original.enable_run_core();
@@ -592,6 +594,7 @@ mod tests {
             crate::state::v4::native::load_native(&mut store, &manifest, "match").unwrap();
         let mut missing = snapshot.clone();
         missing.segments.remove("left/expiration");
+        assert_eq!(crate::state::v4::native::materializations(), 1);
         let mut rejected =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
         assert!(rejected.restore(&missing).is_err());
@@ -654,6 +657,7 @@ mod tests {
         );
         assert_eq!(store.stats().carried_objects, 5);
         assert_native_counts(&original, [1, 2, 1], 5);
+        assert_eq!(crate::state::v4::native::materializations(), 1);
         assert_clean_native_epoch(&mut original, &mut store).await;
         assert_native_eof_matches(&mut original, &mut restored, &job).await;
     }

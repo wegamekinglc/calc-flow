@@ -228,6 +228,11 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   clean 第三次为 0，部分淘汰与整 run 退休分别为 4/5；直接 snapshot 与 manifest 恢复保持等价。Join 581 项、
   operator-task 77 项（2 ignored）、native page-set 3 项、native component 5 项及全 feature Clippy 通过。
   当前直接 snapshot 和 persistence 仍物化完整 partition，端到端成本、持久化增量化和 P5 门槛尚未完成。
+- 2026-11-20 Native persistence 已直接应用 upsert/remove 到 previous partition index：clean pages 只保留原 handle，
+  changed payloads 与 metadata 才写入，replacement/removal 保持 slot、generation、free-slot 和恢复语义。首次 full capture
+  物化 1 次，后续增量 capture 不再增加物化次数；连续 epoch、部分淘汰、整 run 退休、普通 full capture 和 retention 均通过。
+  Join 581 项、operator-task 77 项（2 ignored）、native page-set 3 项、native component 5 项及全 feature Clippy 通过。
+  直接 snapshot 仍物化全部页面，partition index 仍每 epoch 全量序列化；端到端成本与 P5 门槛仍需验收。
 
 ## 1. 目标
 
