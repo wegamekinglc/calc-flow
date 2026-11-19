@@ -141,7 +141,9 @@ pub(crate) struct SessionEnvelope {
     pub(crate) message: StreamMessage,
 }
 
-pub(crate) struct SessionEdgeSender(Arc<SessionQueue>);
+pub(crate) struct SessionEdgeSender {
+    queue: Arc<SessionQueue>,
+}
 pub(crate) struct SessionEdgeReceiver(Arc<SessionQueue>);
 
 pub(super) fn session_edge(
@@ -162,14 +164,16 @@ pub(super) fn session_edge(
         queue: Mutex::new(VecDeque::new()),
     });
     Ok((
-        SessionEdgeSender(Arc::clone(&shared)),
+        SessionEdgeSender {
+            queue: Arc::clone(&shared),
+        },
         SessionEdgeReceiver(shared),
     ))
 }
 
 impl SessionEdgeSender {
     fn set_producer(&self, producer: usize) {
-        self.0.producer.store(producer, Ordering::Relaxed);
+        self.queue.producer.store(producer, Ordering::Relaxed);
     }
 
     pub(super) fn validate_message(&self, message: &StreamMessage) -> Result<()> {
@@ -178,7 +182,7 @@ impl SessionEdgeSender {
 
     /// Applies the runtime edges' oversize rule to an already computed cost.
     pub(super) fn check_cost(&self, cost: &EnvelopeCost) -> Result<()> {
-        reject_oversize(&self.0.edge, self.0.budget, cost)
+        reject_oversize(&self.queue.edge, self.queue.budget, cost)
     }
 
     /// Appends after the runtime edges' oversize rule; never waits.
@@ -190,11 +194,11 @@ impl SessionEdgeSender {
 
     /// Appends a message whose envelope the caller already admitted.
     pub(super) fn enqueue(&self, message: StreamMessage) {
-        let producer = match self.0.producer.load(Ordering::Relaxed) {
+        let producer = match self.queue.producer.load(Ordering::Relaxed) {
             usize::MAX => None,
             producer => Some(producer),
         };
-        self.0
+        self.queue
             .queue
             .lock()
             .push_back(SessionEnvelope { producer, message });
@@ -240,7 +244,7 @@ impl OperatorEdgeSender {
         match self {
             Self::Physical(sender) => sender.edge(),
             Self::Local(sender) => &sender.0.core.edge,
-            Self::Session(sender) => &sender.0.edge,
+            Self::Session(sender) => &sender.queue.edge,
         }
     }
 
@@ -248,7 +252,19 @@ impl OperatorEdgeSender {
         match self {
             Self::Physical(sender) => sender.budget(),
             Self::Local(sender) => sender.0.core.budget,
-            Self::Session(sender) => sender.0.budget,
+            Self::Session(sender) => sender.queue.budget,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn metrics(&self) -> ChannelMetrics {
+        match self {
+            Self::Physical(sender) => sender.metrics(),
+            Self::Local(sender) => sender.0.core.metrics(),
+            Self::Session(sender) => ChannelMetrics {
+                queue_depth: sender.queue.queue.lock().len(),
+                ..ChannelMetrics::default()
+            },
         }
     }
 

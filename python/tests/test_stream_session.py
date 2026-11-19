@@ -191,6 +191,45 @@ def test_indicator_session_matches_stream_under_source_provided_watermarks() -> 
     ]
 
 
+def test_native_array_sequence_session_accepts_native_and_numpy_backed_inputs() -> None:
+    import numpy as np
+
+    import calc_flow.array as cfa
+
+    runtime = cf.Runtime()
+    cfa.register_native(runtime)
+    plan = (
+        cf.PipelineBuilder("native-sequence-session")
+        .external(
+            "sequence",
+            "native",
+            "array_sequence",
+            "1",
+            {
+                "ir_version": 1,
+                "input_dtype": "float64",
+                "kernel": {"function": "rolling_mean", "window": 2},
+            },
+        )
+        .compile_stream(runtime=runtime)
+    )
+    session = _native._StreamSession(plan._inner, CONFIG._native(), {})
+    (input_id,) = session.input_ids
+    (output_id,) = session.output_ids
+    for value, expected, wrap in [(1.0, 1.0, False), (3.0, 2.0, True)]:
+        values = np.asarray([value], dtype=np.float64)
+        batch = (
+            cf.Batch.from_array(cfa.from_numpy(values), backend="native")
+            if wrap
+            else values
+        )
+        emitted = session.push(input_id, batch)
+        assert len(emitted[output_id]) == 1
+        assert emitted[output_id][0].to_numpy().tolist() == [expected]
+    assert session.finish() == {}
+    session.close()
+
+
 def test_program_session_returns_every_declared_output() -> None:
     quotes = _quotes()
     program = Program(

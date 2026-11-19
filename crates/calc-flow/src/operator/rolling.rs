@@ -16,7 +16,7 @@ use std::{
 use async_trait::async_trait;
 use datafusion::arrow::{
     array::{Array, ArrayRef, Float64Array, UInt8Array, UInt64Array, new_null_array},
-    compute::concat_batches,
+    compute::{cast as arrow_cast, concat_batches},
     datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
     ipc::{
         convert::IpcSchemaEncoder,
@@ -1664,6 +1664,81 @@ struct RollingSnapshotMetadata {
     late_output: Option<super::late_output::LateOutputSnapshot>,
 }
 
+impl RollingOperator {
+    fn validate_indicator_batch(&self, input: &TableBatch) -> Result<()> {
+        if self.indicator_resources.is_some() {
+            return Ok(());
+        }
+        for record in input.batches() {
+            for group in &self.compiled.indicator_groups {
+                match group {
+                    indicators::Group::Rsi { input, field, .. } => {
+                        let values = arrow_cast(record.column(*input), &DataType::Float64)
+                            .map_err(|error| operator_error(&self.name, &error.to_string()))?;
+                        let values = values
+                            .as_any()
+                            .downcast_ref::<Float64Array>()
+                            .expect("indicator cast produces Float64");
+                        for row in 0..values.len() {
+                            crate::array::indicators::validate_rsi_sample(
+                                values.is_valid(row).then_some(values.value(row)),
+                                field,
+                            )
+                            .map_err(|error| {
+                                indicators::numeric_error(
+                                    error,
+                                    &self.name,
+                                    indicators::Coordinate::InputRow(row),
+                                )
+                            })?;
+                        }
+                    }
+                    indicators::Group::Atr { inputs, fields, .. } => {
+                        let columns = inputs.map(|index| {
+                            arrow_cast(record.column(index), &DataType::Float64)
+                                .map_err(|error| operator_error(&self.name, &error.to_string()))
+                        });
+                        let columns = columns
+                            .into_iter()
+                            .collect::<Result<Vec<_>>>()?
+                            .into_iter()
+                            .map(|array| {
+                                array
+                                    .as_any()
+                                    .downcast_ref::<Float64Array>()
+                                    .expect("indicator cast produces Float64")
+                                    .clone()
+                            })
+                            .collect::<Vec<_>>();
+                        let [high, low, close] = columns.as_slice() else {
+                            unreachable!("ATR has three inputs")
+                        };
+                        for row in 0..high.len() {
+                            crate::array::indicators::validate_atr_samples(
+                                [
+                                    high.is_valid(row).then_some(high.value(row)),
+                                    low.is_valid(row).then_some(low.value(row)),
+                                    close.is_valid(row).then_some(close.value(row)),
+                                ],
+                                fields.each_ref().map(String::as_str),
+                            )
+                            .map_err(|error| {
+                                indicators::numeric_error(
+                                    error,
+                                    &self.name,
+                                    indicators::Coordinate::InputRow(row),
+                                )
+                            })?;
+                        }
+                    }
+                    indicators::Group::Macd(_) => {}
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl StreamOperator for RollingOperator {
     /// Classifies and buffers one input envelope atomically (SCE-00 D7): the
@@ -1699,6 +1774,7 @@ impl StreamOperator for RollingOperator {
                 "received data after end-of-input",
             ));
         }
+        self.validate_indicator_batch(batch.table_payload()?)?;
         let watermark = context.input_watermark();
         drop(validation);
         if self.indicator_resources.is_some() {

@@ -82,6 +82,10 @@ impl CallerDrivenOperator {
         sync_adapter::is_sync(&self.inputs.operator)
     }
 
+    pub(in crate::runtime::streaming) fn data_gate_open(&self) -> bool {
+        *self.inputs.data_gate.borrow()
+    }
+
     fn next_sync_envelope(
         &mut self,
         ingress: usize,

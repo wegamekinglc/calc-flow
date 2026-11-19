@@ -60,7 +60,7 @@ use crate::{
 /// bounded by the operators' own output chunking.
 ///
 /// Construction admits one dynamic input (no static inputs) feeding `Rolling`,
-/// `Expression` and `Union` nodes, with
+/// `Expression`, `Union` and native array-sequence nodes, with
 /// no exactly-once output. Other graphs return
 /// [`CalcFlowError::InvalidArgument`] naming the field and should use
 /// [`StreamingRunner`](crate::StreamingRunner).
@@ -841,8 +841,7 @@ fn unsupported(field: String, message: String) -> CalcFlowError {
     CalcFlowError::InvalidArgument { field, message }
 }
 
-/// Admits plans with one dynamic input, no static inputs, no native array
-/// sequence nodes and no exactly-once outputs.
+/// Admits plans with one dynamic input, no static inputs and no exactly-once outputs.
 fn admit_plan(plan: &StreamExecutionPlan) -> Result<()> {
     let inputs = plan.source_binding_ids().len();
     if inputs != 1 {
@@ -859,13 +858,6 @@ fn admit_plan(plan: &StreamExecutionPlan) -> Result<()> {
             "static inputs are not supported by StreamSession; use StreamingRunner".into(),
         ));
     }
-    if let Some(node_id) = plan.native_sequence_node_ids().next() {
-        return Err(unsupported(
-            format!("session.nodes.{node_id}"),
-            "native array sequence nodes are not supported by StreamSession; use StreamingRunner"
-                .into(),
-        ));
-    }
     if let Some((output, _)) = plan
         .requirements()
         .delivery
@@ -880,8 +872,8 @@ fn admit_plan(plan: &StreamExecutionPlan) -> Result<()> {
     Ok(())
 }
 
-/// Admits `Rolling`, `Expression` and `Union` nodes; every other kind stays on
-/// `StreamingRunner`.
+/// Admits `Rolling`, `Expression`, `Union` and native array-sequence nodes;
+/// every other kind stays on `StreamingRunner`.
 fn admit_nodes(nodes: &[RuntimeStreamNode]) -> Result<()> {
     nodes
         .iter()
@@ -899,6 +891,8 @@ fn admit_nodes(nodes: &[RuntimeStreamNode]) -> Result<()> {
 fn node_rejection(operator: &CompiledStreamOperator) -> Option<String> {
     let kind = match operator {
         CompiledStreamOperator::Expression(_)
+        | CompiledStreamOperator::NativeSequence(_)
+        | CompiledStreamOperator::SyncArraySequence(_)
         | CompiledStreamOperator::SyncExpression(_)
         | CompiledStreamOperator::SyncRolling(_)
         | CompiledStreamOperator::Rolling(_)

@@ -21,12 +21,13 @@ use super::super::{
 };
 use crate::{
     Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken, Edge, EdgeBudget,
-    EdgeReceiver, EdgeSender, EventTime, ExpressionOperator, JsonMap, OperatorMetadata,
-    PipelineBuilder, Port, PortEndpoint, Result, RollingOperator, StreamJobContext, StreamMessage,
-    StreamMessageKind, StreamRequirements, UdfRegistry,
+    EdgeReceiver, EventTime, ExpressionOperator, JsonMap, OperatorMetadata, PipelineBuilder, Port,
+    PortEndpoint, Result, RollingOperator, StreamJobContext, StreamMessage, StreamMessageKind,
+    StreamRequirements, UdfRegistry,
     operator::rolling_metrics::RollingMetricsStore,
     pipeline::StreamRuntimePlanParts,
     runtime::streaming::{
+        local_edge::OperatorEdgeSender,
         metrics::MetricsRecorder,
         operator_task::{spawn_fused_operator_task_pair, spawn_operator_task},
         projection::StatusProjection,
@@ -291,7 +292,7 @@ fn validate_means(actual: &RecordBatch, expected: &RecordBatch, rows: usize) -> 
 
 struct TaskFixture {
     supervisor: TaskSupervisor,
-    source: EdgeSender,
+    source: OperatorEdgeSender,
     sink: EdgeReceiver,
     core: Arc<JobCore>,
 }

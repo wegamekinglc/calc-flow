@@ -543,16 +543,20 @@ have no combined order. A call can emit no rows until progress closes them.
 
 Construction, including `restore=True`, compiles and rejects a running event
 loop with `RuntimeError`. A session admits one dynamic table input feeding
-rolling `cf.ts` features
-(except RSI, ATR, and MACD), row-local expressions such as `with_columns`,
+rolling `cf.ts` features, row-local expressions such as `with_columns`,
 `select`, and `filter`, and `union_all`. Static parameters and native array
-inputs raise `ValueError` before compilation. Native admission rejects other
+inputs to these table declarations raise `ValueError` before compilation.
+Native admission rejects other
 node kinds, including SQL, snapshot SQL, cross-section, window, join, ASOF,
 DISTINCT, ordering, and external-provider nodes, and outputs that request
 ExactlyOnce delivery, with `ConfigError`; use `stream` or `StreamingRunner`
-for those graphs. Native admission and call errors name the physical binding
-and node IDs of the compiled plan, which can differ from logical declaration
-names. Python-side checks name logical inputs.
+for those graphs. An explicitly compiled `native:array_sequence@1` plan can
+instead use the native `_StreamSession` binding with a NativeArray, a native
+array `Batch`, or an exact `numpy.ndarray`. It returns NativeArray outputs;
+other external providers remain rejected. This low-level path does not add an
+`ArrayExpr.session` convenience API. Native admission and call errors name the
+physical binding and node IDs of the compiled plan, which can differ from
+logical declaration names. Python-side checks name logical inputs.
 
 `watermarks` accepts one policy or a mapping by logical dynamic input name, as
 for `stream`. Each policy maps to caller-driven progress:

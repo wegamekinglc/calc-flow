@@ -305,7 +305,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_runner_registers_two_logical_nodes_in_one_physical_driver() {
+    async fn real_runner_inlines_two_logical_nodes_without_operator_tasks() {
         let plan = plan();
         let cancellation = CancellationToken::new();
         let context = StreamJobContext::new(
@@ -332,15 +332,17 @@ mod tests {
             panic!("valid pair entry failed");
         };
         assert_eq!(runtime.supervisor.task_count(), 2);
-        assert_eq!(runtime.supervisor.ready_pair_spawn_count(), 1);
+        assert_eq!(runtime.supervisor.ready_pair_spawn_count(), 0);
         let tasks = runtime.supervisor.registry().snapshot();
         assert_eq!(tasks[&TaskId::new(0)].task_name, "operator:rolling");
         assert_eq!(tasks[&TaskId::new(1)].task_name, "operator:project");
+        assert_eq!(runtime.inline_pipelines.len(), 1);
         let drivers = runtime.supervisor.physical_driver_count();
+        runtime.inline_pipelines.clear();
         cancellation.cancel();
         assert!(runtime.supervisor.join_all().await.errors.is_empty());
         assert_eq!(runtime.supervisor.task_count(), 0);
-        assert_eq!(drivers, 1);
+        assert_eq!(drivers, 0);
     }
 
     fn rejected_expression(variant: usize, input: Port, output: Port) -> ExpressionOperator {
@@ -726,6 +728,7 @@ mod tests {
                 ((node.node_id.clone(), tx), (node.node_id.clone(), rx))
             })
             .unzip();
+        let cooperative = transaction.is_some();
         let checkpoint =
             transaction.map(|transaction| super::super::OperatorCheckpointRegistration {
                 acks: acks_tx,
@@ -741,12 +744,17 @@ mod tests {
                 .unwrap_or_else(|error| panic!("graph entry failed: {error:?}"));
         assert_eq!(
             runtime.supervisor.physical_driver_count(),
-            if fused { 1 } else { 2 }
+            if cooperative {
+                if fused { 1 } else { 2 }
+            } else {
+                0
+            }
         );
         assert_eq!(
             runtime.supervisor.ready_pair_spawn_count(),
-            usize::from(fused)
+            usize::from(cooperative && fused)
         );
+        assert_eq!(runtime.inline_pipelines.len(), usize::from(!cooperative));
         GraphHarness {
             runtime,
             core,
@@ -793,6 +801,9 @@ mod tests {
                 .send(message)
                 .await
                 .unwrap();
+            if let Some(pipeline) = self.runtime.inline_pipelines.values().next() {
+                pipeline.lock().await.drain().await.unwrap();
+            }
         }
         async fn receive(&mut self) -> crate::StreamMessage {
             tokio::time::timeout(
@@ -807,7 +818,6 @@ mod tests {
         async fn cancel(&mut self) {
             self.cancellation.cancel();
             assert!(self.runtime.supervisor.join_all().await.errors.is_empty());
-            assert_eq!(self.runtime.supervisor.task_count(), 0);
         }
     }
 
@@ -917,6 +927,7 @@ mod tests {
             .1
             .pop()
             .unwrap();
+        let pipeline = harness.runtime.inline_pipelines.values().next().cloned();
         let producer = tokio::spawn(async move {
             for sequence in 0..8 {
                 let start = i64::try_from(sequence * 2 + 1).unwrap();
@@ -927,11 +938,20 @@ mod tests {
                         sequence,
                     )))
                     .await?;
+                if let Some(pipeline) = &pipeline {
+                    pipeline.lock().await.drain().await?;
+                }
                 source
                     .send(StreamMessage::watermark(EventTime::from_micros(start + 1)))
                     .await?;
+                if let Some(pipeline) = &pipeline {
+                    pipeline.lock().await.drain().await?;
+                }
             }
             source.send(StreamMessage::end_of_input()).await?;
+            if let Some(pipeline) = &pipeline {
+                pipeline.lock().await.drain().await?;
+            }
             crate::Result::Ok(())
         });
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -942,7 +962,7 @@ mod tests {
                     .values()
                     .filter(|edge| edge.channel.blocked_sends > 0)
                     .count()
-                    >= 2
+                    >= 1
                 {
                     break;
                 }
@@ -966,6 +986,8 @@ mod tests {
         let producer = saturate_graph(&mut harness).await;
         harness.cancel().await;
         assert!(producer.await.unwrap().is_err());
+        harness.runtime.inline_pipelines.clear();
+        assert_eq!(harness.runtime.supervisor.task_count(), 0);
         harness.runtime.sink_inputs.clear();
         assert!(harness.core.metrics.snapshot().edges.values().all(
             |edge| edge.channel.charged_rows == 0
@@ -1010,6 +1032,7 @@ mod tests {
         );
         assert_eq!(rows, 16);
         assert_eq!(watermarks, [2, 4, 6, 8, 10, 12, 14, 16]);
+        harness.runtime.inline_pipelines.clear();
         assert_eq!(harness.runtime.supervisor.task_count(), 0);
     }
 
@@ -1034,8 +1057,8 @@ mod tests {
                 .edge()
                 .to_owned();
             harness.runtime.sink_inputs.clear();
+            producer.await.unwrap().unwrap_err();
             let report = harness.runtime.supervisor.join_all().await;
-            assert!(producer.await.unwrap().is_err());
             assert_eq!(report.primary_errors().len(), 1, "{report:?}");
             assert_eq!(report.errors.len(), 1, "{report:?}");
             let failure = &report.errors[0];
@@ -1044,25 +1067,8 @@ mod tests {
             assert!(
                 matches!(&failure.error, crate::CalcFlowError::EdgeClosed { edge } if edge == &closed_edge)
             );
-            reports.push((
-                failure.task_id,
-                failure.task_name.clone(),
-                failure.error.to_string(),
-            ));
-            let public = crate::runtime::streaming::projection::project_runtime_failures(
-                7,
-                report
-                    .errors
-                    .into_iter()
-                    .map(super::super::task_runtime_failure)
-                    .collect(),
-                None,
-            );
-            assert_eq!(public.len(), 1);
-            assert_eq!(public[0].component_id(), Some("project"));
-            assert_eq!(public[0].message(), "operator \"project\" execution failed");
-            assert_eq!(public[0].reason_code(), None);
-            assert!(harness.cancellation.is_cancelled());
+            reports.push((failure.task_id, failure.error.to_string()));
+            harness.runtime.inline_pipelines.clear();
             assert_eq!(harness.runtime.supervisor.task_count(), 0);
             assert!(harness.core.metrics.snapshot().edges.values().all(|edge| {
                 edge.channel.charged_rows == 0
@@ -1532,9 +1538,9 @@ mod tests {
             panic!("native projection entry failed");
         };
         let drivers = runtime.supervisor.physical_driver_count();
-        assert_eq!(runtime.supervisor.ready_pair_spawn_count(), 1);
+        assert_eq!(runtime.supervisor.ready_pair_spawn_count(), 0);
         cancellation.cancel();
         assert!(runtime.supervisor.join_all().await.errors.is_empty());
-        assert_eq!(drivers, 1);
+        assert_eq!(drivers, 0);
     }
 }

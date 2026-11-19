@@ -48,7 +48,7 @@ use tokio::{
 };
 
 use super::{
-    ChannelMetrics, EdgeReceiver, EdgeSender,
+    ChannelMetrics, EdgeReceiver,
     channel::edge_channel_with_metrics,
     checkpoint::{
         ManagedCheckpointRuntime,
@@ -63,7 +63,9 @@ use super::{
         ContinuousJobSpec, OrdinarySinkBinding, OwningContinuousJob, StableSinkId,
         ValidatedContinuousJob, ValidatedOrdinarySink, preflight_job,
     },
-    local_edge::{LocalEdgeOwner, OperatorEdgeReceiver, OperatorEdgeSender, local_edge},
+    local_edge::{
+        LocalEdgeOwner, OperatorEdgeReceiver, OperatorEdgeSender, local_edge, session_edge,
+    },
     metrics::{M2MetricsSnapshot, MetricsRecorder, MetricsTimer, sink_metric_id},
     morsel_pool::JobMorselOwner,
     operator_task::{
@@ -3676,7 +3678,8 @@ enum EntryFailure {
 struct RegisteredRuntime {
     supervisor: SupervisorLoan,
     data_gate: watch::Sender<bool>,
-    source_outputs: BTreeMap<String, Vec<EdgeSender>>,
+    source_outputs: BTreeMap<String, Vec<OperatorEdgeSender>>,
+    inline_pipelines: BTreeMap<String, super::SharedInlinePipeline>,
     sink_inputs: BTreeMap<String, EdgeReceiver>,
 }
 
@@ -3881,6 +3884,63 @@ fn create_runtime_edges(
     Ok(channels)
 }
 
+fn inline_admission(
+    plan: &StreamRuntimePlanParts,
+    restores: &BTreeMap<String, OperatorRestoreState>,
+    checkpoint: Option<&OperatorCheckpointRegistration>,
+) -> bool {
+    plan.source_routes.len() == 1
+        && plan.static_input_ids.is_empty()
+        && restores.is_empty()
+        && checkpoint.is_none()
+        && plan
+            .requirements
+            .delivery
+            .values()
+            .all(|guarantee| *guarantee != crate::DeliveryGuarantee::ExactlyOnce)
+        && !plan.nodes.is_empty()
+        && plan.nodes.iter().all(|node| {
+            node.input_ports.len() == 1
+                && node.ingress_edges.len() == 1
+                && matches!(
+                    node.operator,
+                    crate::pipeline::CompiledStreamOperator::Expression(_)
+                        | crate::pipeline::CompiledStreamOperator::SyncExpression(_)
+                        | crate::pipeline::CompiledStreamOperator::Rolling(_)
+                        | crate::pipeline::CompiledStreamOperator::SyncRolling(_)
+                        | crate::pipeline::CompiledStreamOperator::NativeSequence(_)
+                        | crate::pipeline::CompiledStreamOperator::SyncArraySequence(_)
+                )
+        })
+}
+
+fn create_inline_runtime_edges(
+    plan: &StreamRuntimePlanParts,
+    metrics: &MetricsRecorder,
+) -> crate::Result<RuntimeChannels> {
+    let mut channels = RuntimeChannels {
+        senders: BTreeMap::new(),
+        receivers: BTreeMap::new(),
+        local_owners: BTreeMap::new(),
+    };
+    for (edge_id, edge) in &plan.edges {
+        let (sender, receiver) = if edge.kind == crate::pipeline::RuntimeEdgeKind::SinkBoundary {
+            let (sender, receiver) =
+                edge_channel_with_metrics(edge_id.clone(), edge.budget, metrics.clone())?;
+            (sender.into(), receiver.into())
+        } else {
+            let (sender, receiver) = session_edge(edge_id.clone(), edge.budget)?;
+            (
+                OperatorEdgeSender::Session(sender),
+                OperatorEdgeReceiver::Session(receiver),
+            )
+        };
+        channels.senders.insert(edge_id.clone(), sender);
+        channels.receivers.insert(edge_id.clone(), receiver);
+    }
+    Ok(channels)
+}
+
 pub(super) fn take_node_ingresses(
     node: &RuntimeStreamNode,
     receivers: &mut BTreeMap<String, OperatorEdgeReceiver>,
@@ -3929,7 +3989,25 @@ pub(super) fn take_node_outputs(
         .collect()
 }
 
-async fn run_operator_entry(
+fn run_operator_entry(
+    plan: StreamRuntimePlanParts,
+    context: &super::StreamJobContext,
+    core: &Arc<JobCore>,
+    cancellation: &CancellationToken,
+    restores: BTreeMap<String, OperatorRestoreState>,
+    checkpoint: Option<OperatorCheckpointRegistration>,
+) -> impl Future<Output = Result<RegisteredRuntime, EntryFailure>> + Send {
+    Box::pin(run_operator_entry_inner(
+        plan,
+        context,
+        core,
+        cancellation,
+        restores,
+        checkpoint,
+    ))
+}
+
+async fn run_operator_entry_inner(
     plan: StreamRuntimePlanParts,
     context: &super::StreamJobContext,
     core: &Arc<JobCore>,
@@ -3951,13 +4029,23 @@ async fn run_operator_entry(
     let (entry_tx, _) = watch::channel(false);
     let (data_tx, _) = watch::channel(false);
     let (ack_tx, mut ack_rx) = mpsc::unbounded_channel();
-    let layout = operator_fusion::plan_fusion(&plan);
+    let pipeline = inline_admission(&plan, &restores, checkpoint.as_ref());
+    let layout = if pipeline {
+        BTreeMap::new()
+    } else {
+        operator_fusion::plan_fusion(&plan)
+    };
     let RuntimeChannels {
         mut senders,
         mut receivers,
         mut local_owners,
-    } = create_runtime_edges(&plan, &layout, &core.metrics).map_err(preflight_entry_failure)?;
-    let node_count = plan.nodes.len();
+    } = if pipeline {
+        create_inline_runtime_edges(&plan, &core.metrics)
+    } else {
+        create_runtime_edges(&plan, &layout, &core.metrics)
+    }
+    .map_err(preflight_entry_failure)?;
+    let node_count = if pipeline { 0 } else { plan.nodes.len() };
     let native_entries = native_sequences::entry_nodes(&plan, &restores, context);
     let registration = &mut OperatorRegistration {
         next_node_order: 0,
@@ -3975,11 +4063,24 @@ async fn run_operator_entry(
         restores: &mut restores,
         checkpoint: checkpoint.as_ref(),
     };
-    if let Err(failure) = register_operator_nodes(plan.nodes, layout, registration) {
-        supervisor.cancel();
-        let _ = supervisor.join_all().await;
-        return Err(failure);
-    }
+    let source_routes = plan.source_routes;
+    let sink_routes = plan.sink_routes;
+    let inline_pipelines = match Box::pin(prepare_entry_nodes(
+        plan.nodes,
+        source_routes.keys().next().cloned(),
+        pipeline,
+        layout,
+        registration,
+    ))
+    .await
+    {
+        Ok(pipelines) => pipelines,
+        Err(failure) => {
+            supervisor.cancel();
+            let _ = supervisor.join_all().await;
+            return Err(failure);
+        }
+    };
     if !restores.is_empty() {
         return fail_registered_entry(
             &mut supervisor,
@@ -3989,22 +4090,39 @@ async fn run_operator_entry(
         )
         .await;
     }
-    drop(ack_tx);
-    let _ = entry_tx.send(true);
-    await_operator_entry(
-        node_count,
+    acknowledge_operator_entry(
         core,
-        &mut ack_rx,
         &mut supervisor,
+        ack_tx,
+        &mut ack_rx,
+        entry_tx,
         &native_entries,
+        node_count,
     )
     .await?;
-    let endpoints = take_boundary_endpoints(
-        plan.source_routes,
-        plan.sink_routes,
-        &mut senders,
-        &mut receivers,
-    );
+    finish_registered_entry(
+        source_routes,
+        sink_routes,
+        supervisor,
+        data_tx,
+        senders,
+        receivers,
+        inline_pipelines,
+    )
+    .await
+}
+
+async fn finish_registered_entry(
+    source_routes: BTreeMap<String, RuntimeSourceRoute>,
+    sink_routes: BTreeMap<String, RuntimeSinkRoute>,
+    mut supervisor: SupervisorLoan,
+    data_tx: watch::Sender<bool>,
+    mut senders: BTreeMap<String, OperatorEdgeSender>,
+    mut receivers: BTreeMap<String, OperatorEdgeReceiver>,
+    inline_pipelines: BTreeMap<String, super::SharedInlinePipeline>,
+) -> Result<RegisteredRuntime, EntryFailure> {
+    let endpoints =
+        take_boundary_endpoints(source_routes, sink_routes, &mut senders, &mut receivers);
     let (source_outputs, sink_inputs) = match endpoints {
         Ok(endpoints) if senders.is_empty() && receivers.is_empty() => endpoints,
         Ok(_) => {
@@ -4022,6 +4140,7 @@ async fn run_operator_entry(
         supervisor,
         data_gate: data_tx,
         source_outputs,
+        inline_pipelines,
         sink_inputs,
     })
 }
@@ -4041,6 +4160,25 @@ struct OperatorRegistration<'a> {
     runtime_status: &'a Mutex<RuntimeStatus>,
     restores: &'a mut BTreeMap<String, OperatorRestoreState>,
     checkpoint: Option<&'a OperatorCheckpointRegistration>,
+}
+
+async fn prepare_entry_nodes(
+    nodes: Vec<RuntimeStreamNode>,
+    binding_id: Option<String>,
+    pipeline: bool,
+    layout: BTreeMap<String, operator_fusion::FusionProof>,
+    registration: &mut OperatorRegistration<'_>,
+) -> Result<BTreeMap<String, super::SharedInlinePipeline>, EntryFailure> {
+    if pipeline {
+        return Box::pin(prepare_inline_nodes(
+            nodes,
+            binding_id.expect("inline admission requires one source"),
+            registration,
+        ))
+        .await;
+    }
+    register_operator_nodes(nodes, layout, registration)?;
+    Ok(BTreeMap::new())
 }
 
 fn register_operator_nodes(
@@ -4107,6 +4245,38 @@ fn register_operator_nodes(
         registration.supervisor.spawn_prepared_group(group);
     }
     Ok(())
+}
+
+async fn prepare_inline_nodes(
+    nodes: Vec<RuntimeStreamNode>,
+    binding_id: String,
+    registration: &mut OperatorRegistration<'_>,
+) -> Result<BTreeMap<String, super::SharedInlinePipeline>, EntryFailure> {
+    let mut prepared = Vec::with_capacity(nodes.len());
+    let mut reservations = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let mut inputs = prepare_operator_task(node, registration)?;
+        let reservation = registration
+            .supervisor
+            .reserve_logical(format!("operator:{}", inputs.node_id));
+        let task_id = reservation.task_id();
+        reservations.push(reservation);
+        inputs.context.bind_task_id(task_id);
+        if let Some(client) = &mut inputs.entity_work {
+            client.activate(task_id);
+        }
+        if let Some(client) = &mut inputs.sql_recovery {
+            client.activate(task_id);
+        }
+        let operator = super::operator_task::caller_driven::CallerDrivenOperator::prepare(inputs)
+            .await
+            .map_err(preflight_entry_failure)?;
+        prepared.push(operator);
+    }
+    Ok(BTreeMap::from([(
+        binding_id,
+        super::InlinePipeline::new_shared(prepared, reservations, true),
+    )]))
 }
 
 fn prepare_operator_task(
@@ -4179,6 +4349,20 @@ fn prepare_operator_task(
     Ok(inputs)
 }
 
+async fn acknowledge_operator_entry(
+    core: &Arc<JobCore>,
+    supervisor: &mut SupervisorLoan,
+    ack_tx: mpsc::UnboundedSender<super::operator_task::OperatorEntryAck>,
+    ack_rx: &mut mpsc::UnboundedReceiver<super::operator_task::OperatorEntryAck>,
+    entry_tx: watch::Sender<bool>,
+    native_entries: &BTreeSet<String>,
+    node_count: usize,
+) -> Result<(), EntryFailure> {
+    drop(ack_tx);
+    let _ = entry_tx.send(true);
+    await_operator_entry(node_count, core, ack_rx, supervisor, native_entries).await
+}
+
 async fn await_operator_entry(
     node_count: usize,
     core: &Arc<JobCore>,
@@ -4234,7 +4418,7 @@ async fn await_operator_entry(
 }
 
 type BoundaryEndpoints = (
-    BTreeMap<String, Vec<EdgeSender>>,
+    BTreeMap<String, Vec<OperatorEdgeSender>>,
     BTreeMap<String, EdgeReceiver>,
 );
 
@@ -4258,10 +4442,7 @@ fn take_boundary_endpoints(
                     },
                 }))
             })?;
-            Ok((
-                binding_id,
-                vec![sender.into_physical().map_err(preflight_entry_failure)?],
-            ))
+            Ok((binding_id, vec![sender]))
         })
         .collect::<Result<BTreeMap<_, _>, EntryFailure>>()?;
     let sink_inputs = sink_routes
@@ -4404,6 +4585,22 @@ fn register_boundary_tasks(
     let (mut direct_outputs, live_progress) = if direct {
         (Some(source_outputs), None)
     } else {
+        let source_outputs = source_outputs
+            .into_iter()
+            .map(|(binding_id, senders)| {
+                (
+                    binding_id,
+                    senders
+                        .into_iter()
+                        .map(|sender| {
+                            sender
+                                .into_physical()
+                                .expect("coordinated progress requires physical source edges")
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         let coordinated = match durable_progress {
             Some(restored) => LiveProgressCoordinator::new_restored(
                 &prepared_progress,
@@ -4442,16 +4639,32 @@ fn register_boundary_tasks(
                 .expect("direct progress retains source outputs")
                 .remove(&binding_id)
                 .expect("preflight projected the direct source route");
-            spawn_source_tasks_gated_with_metrics(
-                &mut runtime.supervisor,
-                context,
-                &binding_id,
-                binding,
-                outputs,
-                runtime.data_gate.subscribe(),
-                core.launch_cancel.clone(),
-                core.metrics.clone(),
-            )
+            if let Some(pipeline) = runtime.inline_pipelines.remove(&binding_id) {
+                super::source_task::spawn_source_tasks_gated_with_inline(
+                    &mut runtime.supervisor,
+                    context,
+                    &binding_id,
+                    binding,
+                    super::source_task::InlineSource {
+                        outputs,
+                        pipeline,
+                        data_gate: runtime.data_gate.subscribe(),
+                        launch_cancel: core.launch_cancel.clone(),
+                        metrics: core.metrics.clone(),
+                    },
+                )
+            } else {
+                spawn_source_tasks_gated_with_metrics(
+                    &mut runtime.supervisor,
+                    context,
+                    &binding_id,
+                    binding,
+                    outputs,
+                    runtime.data_gate.subscribe(),
+                    core.launch_cancel.clone(),
+                    core.metrics.clone(),
+                )
+            }
         }
         .expect("preflight validated every source task scope and first-hop budget");
         source_progress.insert(binding_id, progress);
@@ -4537,6 +4750,7 @@ fn register_boundary_tasks(
         );
     }
     debug_assert!(runtime.source_outputs.is_empty());
+    debug_assert!(runtime.inline_pipelines.is_empty());
     debug_assert!(direct_outputs.as_ref().is_none_or(BTreeMap::is_empty));
     debug_assert!(runtime.sink_inputs.is_empty());
     {

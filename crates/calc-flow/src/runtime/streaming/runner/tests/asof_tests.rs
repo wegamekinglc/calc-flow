@@ -875,10 +875,20 @@ async fn test_asof_managed_recovery_rejects_missing_and_corrupted_state_before_s
             .start_checkpointed(scenario.spec(51), checkpoint(directory.path()))
             .await
             .expect_err("invalid ASOF state must fail managed recovery");
-        assert!(matches!(
-            failure.primary.error,
-            CalcFlowError::Internal { .. }
-        ));
+        if missing {
+            assert!(
+                matches!(failure.primary.error, CalcFlowError::Internal { .. }),
+                "{failure:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    failure.primary.error,
+                    CalcFlowError::CheckpointMismatch { .. }
+                ),
+                "{failure:?}"
+            );
+        }
         runner.shutdown().await.unwrap();
         assert_eq!(runner.registry_counts(), (0, 0));
         assert_eq!(
@@ -938,8 +948,8 @@ async fn test_asof_terminal_manifest_valid_checksum_still_validates_native_state
         .await
         .expect_err("terminal recovery must validate the ASOF counters before sink recovery");
     assert!(
-        matches!(error.primary.error, CalcFlowError::Internal { ref message }
-        if message == "managed checkpoint recovery failed"),
+        matches!(error.primary.error, CalcFlowError::CheckpointMismatch { ref message }
+        if message == "checkpoint lineage contains invalid recovery data"),
         "{error:?}"
     );
     runner.shutdown().await.unwrap();

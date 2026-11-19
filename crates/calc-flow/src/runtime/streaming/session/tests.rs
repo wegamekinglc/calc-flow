@@ -1129,6 +1129,64 @@ fn test_fan_out_outputs_and_union_match_runner() {
     assert_eq!(rows, expected);
 }
 
+#[test]
+fn test_native_array_sequence_runs_on_the_calling_thread() {
+    use crate::StreamOperatorFactory;
+
+    let options = serde_json::from_value(json!({
+        "ir_version": 1,
+        "input_dtype": "float64",
+        "kernel": {"function": "rolling_mean", "window": 2}
+    }))
+    .unwrap();
+    let operator = crate::array::NativeArraySequenceFactory::default()
+        .create(
+            &crate::ExternalOperatorSpec::new("native", "array_sequence", "1", options).unwrap(),
+            vec![Port::new("input", BatchKind::Array, true, None).unwrap()],
+            vec![Port::new("output", BatchKind::Array, true, None).unwrap()],
+        )
+        .unwrap();
+    let plan = PipelineBuilder::new("native-sequence")
+        .unwrap()
+        .add_node("sequence", operator)
+        .unwrap()
+        .compile_stream(
+            &UdfRegistry::new().snapshot(),
+            &StreamRequirements::default(),
+        )
+        .unwrap();
+    let mut session = StreamSession::new(plan, &session_config(), BTreeMap::new()).unwrap();
+    let (input, output) = (
+        session.input_ids()[0].to_owned(),
+        session.output_ids()[0].to_owned(),
+    );
+    for (value, expected) in [(1.0, 1.0), (3.0, 2.0)] {
+        let array = crate::array::NativeArray::from_f64(vec![value], vec![1], None).unwrap();
+        let emitted = session
+            .push(
+                &input,
+                Batch::external(Arc::new(array), BatchMetadata::default()).unwrap(),
+                None,
+            )
+            .unwrap();
+        let batches = emitted.batches(&output);
+        assert_eq!(batches.len(), 1);
+        let payload = batches[0].external_payload().unwrap();
+        let array = payload
+            .as_any()
+            .downcast_ref::<crate::array::NativeArray>()
+            .unwrap();
+        let values = array
+            .as_arrow()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!((values.value(0) - expected).abs() < f64::EPSILON);
+    }
+    assert!(session.runtime.is_none());
+    assert!(session.finish().unwrap().is_empty());
+}
+
 fn assert_rejected(
     plan: StreamExecutionPlan,
     watermarks: BTreeMap<String, SessionWatermark>,

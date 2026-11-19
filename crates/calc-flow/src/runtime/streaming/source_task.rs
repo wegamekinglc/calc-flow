@@ -9,9 +9,11 @@ use parking_lot::Mutex;
 use tokio::sync::{Notify, mpsc, watch};
 
 use super::{
-    EdgeSender, EnvelopeCost, StreamJobContext, StreamMessage,
+    EnvelopeCost, StreamJobContext, StreamMessage,
     context::wait_for_task_gate,
     failure::panic_message,
+    inline_pipeline::SharedInlinePipeline,
+    local_edge::OperatorEdgeSender,
     metrics::MetricsRecorder,
     progress::{
         BindingIdentity, DeclaredSchema, ExistingPrivateToggleRoute, LiveProgressCoordinator,
@@ -1071,7 +1073,8 @@ struct SourceTaskInputs {
     keep_source_cursor: bool,
     first_sequence: u64,
     resume_cursor: Option<Cursor>,
-    outputs: Vec<EdgeSender>,
+    outputs: Vec<OperatorEdgeSender>,
+    inline: Option<SharedInlinePipeline>,
     slot: mpsc::Receiver<PumpEvent>,
     progress: SourceProgress,
     acceptance: Arc<SourceAcceptance>,
@@ -1106,9 +1109,10 @@ pub(crate) fn spawn_source_tasks(
     context: &StreamJobContext,
     binding_id: &str,
     binding: SourceBinding,
-    outputs: Vec<EdgeSender>,
+    outputs: impl IntoIterator<Item = impl Into<OperatorEdgeSender>>,
 ) -> Result<SourceProgress> {
     let (data_gate, data_gate_rx) = watch::channel(true);
+    let outputs = outputs.into_iter().map(Into::into).collect::<Vec<_>>();
     let progress = spawn_source_tasks_gated(
         supervisor,
         context,
@@ -1129,10 +1133,11 @@ pub(crate) fn spawn_source_tasks_gated(
     context: &StreamJobContext,
     binding_id: &str,
     binding: SourceBinding,
-    outputs: Vec<EdgeSender>,
+    outputs: impl IntoIterator<Item = impl Into<OperatorEdgeSender>>,
     data_gate: watch::Receiver<bool>,
     launch_cancel: crate::CancellationToken,
 ) -> Result<SourceProgress> {
+    let outputs = outputs.into_iter().map(Into::into).collect::<Vec<_>>();
     spawn_source_tasks_gated_with_metrics(
         supervisor,
         context,
@@ -1155,11 +1160,12 @@ pub(crate) fn spawn_source_tasks_gated_with_metrics(
     context: &StreamJobContext,
     binding_id: &str,
     binding: SourceBinding,
-    outputs: Vec<EdgeSender>,
+    outputs: impl IntoIterator<Item = impl Into<OperatorEdgeSender>>,
     data_gate: watch::Receiver<bool>,
     launch_cancel: crate::CancellationToken,
     metrics: MetricsRecorder,
 ) -> Result<SourceProgress> {
+    let outputs = outputs.into_iter().map(Into::into).collect::<Vec<_>>();
     spawn_source_tasks_gated_with_optional_progress(
         supervisor,
         context,
@@ -1169,6 +1175,7 @@ pub(crate) fn spawn_source_tasks_gated_with_metrics(
         data_gate,
         launch_cancel,
         metrics,
+        None,
         None,
     )
 }
@@ -1200,6 +1207,43 @@ pub(crate) fn spawn_source_tasks_gated_with_live_progress(
         launch_cancel,
         metrics,
         Some(live_progress),
+        None,
+    )
+}
+
+pub(in crate::runtime::streaming) struct InlineSource {
+    pub(in crate::runtime::streaming) outputs: Vec<OperatorEdgeSender>,
+    pub(in crate::runtime::streaming) pipeline: SharedInlinePipeline,
+    pub(in crate::runtime::streaming) data_gate: watch::Receiver<bool>,
+    pub(in crate::runtime::streaming) launch_cancel: crate::CancellationToken,
+    pub(in crate::runtime::streaming) metrics: MetricsRecorder,
+}
+
+pub(in crate::runtime::streaming) fn spawn_source_tasks_gated_with_inline(
+    supervisor: &mut TaskSupervisor,
+    context: &StreamJobContext,
+    binding_id: &str,
+    binding: SourceBinding,
+    inline: InlineSource,
+) -> Result<SourceProgress> {
+    let InlineSource {
+        outputs,
+        pipeline,
+        data_gate,
+        launch_cancel,
+        metrics,
+    } = inline;
+    spawn_source_tasks_gated_with_optional_progress(
+        supervisor,
+        context,
+        binding_id,
+        binding,
+        outputs,
+        data_gate,
+        launch_cancel,
+        metrics,
+        None,
+        Some(pipeline),
     )
 }
 
@@ -1213,11 +1257,12 @@ fn spawn_source_tasks_gated_with_optional_progress(
     context: &StreamJobContext,
     binding_id: &str,
     mut binding: SourceBinding,
-    outputs: Vec<EdgeSender>,
+    outputs: Vec<OperatorEdgeSender>,
     data_gate: watch::Receiver<bool>,
     launch_cancel: crate::CancellationToken,
     metrics: MetricsRecorder,
     live_progress: Option<LiveProgressCoordinator>,
+    pipeline: Option<SharedInlinePipeline>,
 ) -> Result<SourceProgress> {
     let source_context = context.for_source(binding_id)?;
     let binding_id = source_context.scope_id().to_owned();
@@ -1247,6 +1292,7 @@ fn spawn_source_tasks_gated_with_optional_progress(
         launch_cancel,
         metrics,
         live_progress,
+        pipeline,
     ))
 }
 
@@ -1267,7 +1313,7 @@ fn take_live_progress_binding(
         })
 }
 
-fn validate_source_outputs(binding_id: &str, outputs: &[EdgeSender]) -> Result<()> {
+fn validate_source_outputs(binding_id: &str, outputs: &[OperatorEdgeSender]) -> Result<()> {
     if outputs.is_empty() {
         return Err(CalcFlowError::InvalidArgument {
             field: format!("sources.{binding_id}.outputs"),
@@ -1299,7 +1345,7 @@ pub(super) fn validate_source_capabilities(
 fn validate_source_edge_budgets(
     binding_id: &str,
     capabilities: SourceCapabilities,
-    outputs: &[EdgeSender],
+    outputs: &[OperatorEdgeSender],
 ) -> Result<()> {
     for output in outputs {
         let budget = output.budget();
@@ -1329,11 +1375,12 @@ fn spawn_validated_source_tasks(
     binding_id: String,
     binding: SourceBinding,
     capabilities: SourceCapabilities,
-    outputs: Vec<EdgeSender>,
+    outputs: Vec<OperatorEdgeSender>,
     data_gate: watch::Receiver<bool>,
     launch_cancel: crate::CancellationToken,
     metrics: MetricsRecorder,
     live_progress: Option<LiveSourceProgress>,
+    pipeline: Option<SharedInlinePipeline>,
 ) -> SourceProgress {
     let SourceBinding {
         source,
@@ -1420,6 +1467,7 @@ fn spawn_validated_source_tasks(
                     first_sequence: next_sequence,
                     resume_cursor,
                     outputs,
+                    inline: pipeline,
                     slot: slot_rx,
                     progress: task_progress,
                     acceptance,
@@ -1823,6 +1871,9 @@ async fn process_pump_event(
                 &inputs.cancellation,
             )
             .await?;
+            if sent {
+                drain_inline(inputs).await?;
+            }
             Ok(if sent {
                 SourceLoopStep::Continue
             } else {
@@ -1896,6 +1947,13 @@ pub(super) fn sequenced_source_message(
     Ok((sequence, message, cost))
 }
 
+async fn drain_inline(inputs: &mut SourceTaskInputs) -> Result<()> {
+    if let Some(pipeline) = &inputs.inline {
+        Box::pin(pipeline.lock().await.drain()).await?;
+    }
+    Ok(())
+}
+
 async fn send_source_data(
     inputs: &mut SourceTaskInputs,
     message: StreamMessage,
@@ -1908,6 +1966,7 @@ async fn send_source_data(
     if !send_fanout(&mut inputs.outputs, message, &inputs.cancellation).await? {
         return Ok(false);
     }
+    drain_inline(inputs).await?;
     inputs
         .metrics
         .record_source_output(&inputs.binding_id, cost)?;
@@ -1981,6 +2040,9 @@ async fn process_source_watermark(
         &inputs.cancellation,
     )
     .await?;
+    if sent {
+        drain_inline(inputs).await?;
+    }
     order.last_watermark = Some(watermark);
     if sent {
         inputs.progress.snapshot.lock().last_watermark = Some(watermark);
@@ -2015,6 +2077,7 @@ async fn on_source_end(inputs: &mut SourceTaskInputs) -> Result<()> {
     )
     .await?
     {
+        drain_inline(inputs).await?;
         inputs.metrics.record_source_end(&inputs.binding_id)?;
         inputs.progress.snapshot.lock().ended = true;
     }
@@ -2057,7 +2120,7 @@ fn raw_upstream_position(
 }
 
 async fn send_fanout(
-    outputs: &mut [EdgeSender],
+    outputs: &mut [OperatorEdgeSender],
     message: StreamMessage,
     cancellation: &crate::CancellationToken,
 ) -> Result<bool> {
@@ -2073,7 +2136,7 @@ async fn send_fanout(
 }
 
 async fn send_edge(
-    output: &mut EdgeSender,
+    output: &mut OperatorEdgeSender,
     message: StreamMessage,
     cancellation: &crate::CancellationToken,
 ) -> Result<bool> {

@@ -167,10 +167,14 @@ dashes span the full column width, including cell spaces.
   `StreamExecutionPlan` and returns an owning `StreamingJob` with whole-job
   preflight, bounded source/operator/sink tasks, job-scoped event-time progress,
   aligned epoch checkpoints, managed v4 manifest recovery for durable restart,
-  per-output delivery proof, and deterministic metrics. Control construction,
+  per-output delivery proof, and deterministic metrics. Admitted single-source
+  Rolling, Expression, and native array-sequence chains run inline in the source
+  task without checkpoint or restore, retaining logical task identities and
+  bounded sink backpressure; other graphs keep separate operator tasks. Control construction,
   task/coordinator/supervisor internals, and reaper ownership remain
   crate-private. The crate-root `StreamSession` instead drives an admitted
-  plan (one dynamic input; rolling, expression, and union nodes) synchronously
+  plan (one dynamic input; rolling, expression, union, and native array-sequence
+  nodes) synchronously
   on the caller's thread over session edges, with no tasks or queue
   backpressure. `StreamSession::new` retains the in-memory behavior;
   `new_with_checkpoints`, `restore`, and `checkpoint` add opt-in managed

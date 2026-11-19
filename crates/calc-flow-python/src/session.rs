@@ -1,6 +1,6 @@
 //! Python binding for the caller-driven `StreamSession`.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use datafusion::arrow::record_batch::RecordBatch;
 use parking_lot::Mutex;
@@ -331,8 +331,34 @@ fn input_batch(batch: &Bound<'_, PyAny>) -> PyResult<calc_flow::Batch> {
     if let Ok(native) = batch.cast::<PyBatch>() {
         return native.get().clone_inner();
     }
+    if let Ok(native) = batch.cast::<crate::array::PyNativeArray>() {
+        return calc_flow::Batch::external(
+            Arc::new(native.get().inner.clone()),
+            calc_flow::BatchMetadata::default(),
+        )
+        .map_err(crate::error::to_py_err);
+    }
+    if is_numpy_array(batch)? {
+        let native = batch
+            .py()
+            .import("calc_flow.array")?
+            .getattr("from_numpy")?
+            .call1((batch,))?;
+        let native = native.cast::<crate::array::PyNativeArray>()?;
+        return calc_flow::Batch::external(
+            Arc::new(native.get().inner.clone()),
+            calc_flow::BatchMetadata::default(),
+        )
+        .map_err(crate::error::to_py_err);
+    }
     calc_flow::Batch::table(arrow_records(batch)?, calc_flow::BatchMetadata::default())
         .map_err(crate::error::to_py_err)
+}
+
+fn is_numpy_array(batch: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let class = batch.getattr("__class__")?;
+    Ok(class.getattr("__module__")?.extract::<String>()? == "numpy"
+        && class.getattr("__name__")?.extract::<String>()? == "ndarray")
 }
 
 /// Imports a record batch or table through the Arrow C data/stream interface.
@@ -363,8 +389,33 @@ fn outputs_to_python(py: Python<'_>, output: calc_flow::SessionOutput) -> PyResu
     for (name, batches) in output.into_batches() {
         let records = PyList::empty(py);
         for batch in batches {
+            if batch.kind() == calc_flow::BatchKind::Array {
+                let payload = batch.external_payload().map_err(|_| {
+                    PyTypeError::new_err(format!("session output {name:?} has no array payload"))
+                })?;
+                if let Some(native) = payload
+                    .as_any()
+                    .downcast_ref::<calc_flow::array::NativeArray>()
+                {
+                    records.append(
+                        Py::new(py, crate::array::PyNativeArray::from_inner(native.clone()))?
+                            .into_any(),
+                    )?;
+                    continue;
+                }
+                let payload = payload
+                    .as_any()
+                    .downcast_ref::<crate::batch::PythonPayload>()
+                    .ok_or_else(|| {
+                        PyTypeError::new_err(format!(
+                            "session output {name:?} has an unknown array payload"
+                        ))
+                    })?;
+                records.append(payload.object.clone_ref(py))?;
+                continue;
+            }
             let table = batch.table_payload().map_err(|_| {
-                PyTypeError::new_err(format!("session output {name:?} emitted an array batch"))
+                PyTypeError::new_err(format!("session output {name:?} has no table payload"))
             })?;
             for record in table.batches() {
                 records.append(PyRecordBatch::new(record.clone()).into_pyarrow(py)?)?;

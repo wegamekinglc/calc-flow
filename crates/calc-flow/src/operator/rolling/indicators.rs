@@ -22,7 +22,7 @@ pub(super) mod materialize;
 mod native;
 mod numeric_diagnostic;
 pub(super) use numeric_diagnostic::Coordinate;
-use numeric_diagnostic::numeric_error;
+pub(super) use numeric_diagnostic::numeric_error;
 mod prefix;
 mod resources;
 mod scalar_materialization_plan;

@@ -18,6 +18,7 @@ mod edge_queue;
 pub(crate) mod entity_work;
 pub(crate) mod failure;
 pub(crate) mod gather_work;
+mod inline_pipeline;
 #[allow(
     dead_code,
     reason = "runtime completion is owned behind the safe continuous facade"
@@ -82,6 +83,7 @@ mod test_seams;
 pub use channel::{ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, edge_channel};
 pub use context::StreamJobContext;
 pub(crate) use context::StreamJobControl;
+pub(in crate::runtime::streaming) use inline_pipeline::{InlinePipeline, SharedInlinePipeline};
 pub(crate) use local_edge::OperatorEdgeSender;
 pub use message::{StreamMessage, StreamMessageKind};
 #[cfg(feature = "benchmark-internals")]

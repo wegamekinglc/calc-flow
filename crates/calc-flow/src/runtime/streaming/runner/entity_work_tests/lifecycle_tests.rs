@@ -274,7 +274,9 @@ async fn worker_panic_preserves_original_operator_id_and_interrupted_p2_work() {
     };
     assert_eq!(primary_task_id.as_u64(), 0);
     assert!(
-        matches!(&outcome.errors[0].origin, FailureOrigin::Task { task_id, task_name } if task_id == &primary_task_id && task_name == "operator:rolling")
+        matches!(&outcome.errors[0].origin, FailureOrigin::Task { task_id, task_name } if task_id == &primary_task_id && task_name == "operator:rolling"),
+        "{:?}",
+        outcome.errors
     );
     assert!(
         matches!(&outcome.errors[0].error, crate::CalcFlowError::TaskPanicked { task_id: 0, message } if message == "real numeric worker panic")

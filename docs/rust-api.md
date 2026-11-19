@@ -1535,8 +1535,10 @@ interval or idle timeout, and an explicit watermark combines with the generated
 candidate as their maximum. The Python adapter chooses `Ordered` or `Disabled`
 when no policy is given; see [session watermarks](streaming-guide.md#session-watermarks).
 
-The session owns one current-thread Tokio runtime with only the timer driver
-and blocks the caller on it. `push`, `advance`, and `finish` check for a Tokio
+For graphs that require asynchronous adapters, the session owns one
+current-thread Tokio runtime with only the timer driver and blocks the caller on
+it; fully synchronous graphs do not create a runtime. `push`, `advance`, and
+`finish` check for a Tokio
 runtime context before any work: inside one they return
 `CalcFlowError::InvalidArgument` at field `session` with the message
 `cannot run inside a Tokio runtime; call it from a blocking thread`. From async
@@ -1573,10 +1575,9 @@ invalidate the complete epoch, which remains available to `restore`.
 runners apply them. Internal edges have no queue backpressure; see
 [caller-driven sessions](runtime-envelope.md#caller-driven-sessions).
 
-`new` admits one dynamic input with no static inputs, no native array sequence
-nodes, and no ExactlyOnce output, feeding only `Rolling`, `Expression`, and
-`Union` nodes. Rolling nodes with the RSI/ATR or MACD state layouts are
-rejected; rolling late side outputs are admitted. Every rejection is
+`new` admits one dynamic input with no static inputs and no ExactlyOnce output,
+feeding `Rolling`, `Expression`, `Union`, and native array-sequence nodes.
+Rolling late side outputs are admitted. Every rejection is
 `CalcFlowError::InvalidArgument` and names `StreamingRunner` as the
 alternative:
 
@@ -1584,7 +1585,7 @@ alternative:
 |---------------------------------------------------------------------|---------------------------------------------------|
 | Not exactly one dynamic source binding                              | `session.inputs`                                  |
 | Static inputs                                                       | `session.static_inputs`                           |
-| Native array sequence node, unsupported node kind or rolling layout | `session.nodes.<id>`                              |
+| Unsupported node kind or rolling layout                          | `session.nodes.<id>`                              |
 | Output requesting `DeliveryGuarantee::ExactlyOnce`                  | `session.requirements.delivery.<output>`          |
 | `watermarks` key other than the input                               | `session.watermarks.<key>`                        |
 | Missing or non-timestamp event-time column, or no exact schema      | `session.watermarks.<input>.event_time_column`    |

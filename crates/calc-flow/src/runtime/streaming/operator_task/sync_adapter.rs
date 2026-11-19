@@ -17,14 +17,18 @@ use crate::{
 pub(super) fn is_sync(operator: &CompiledStreamOperator) -> bool {
     matches!(
         operator,
-        CompiledStreamOperator::SyncExpression(_) | CompiledStreamOperator::SyncRolling(_)
+        CompiledStreamOperator::SyncArraySequence(_)
+            | CompiledStreamOperator::SyncExpression(_)
+            | CompiledStreamOperator::SyncRolling(_)
     )
 }
 
 pub(super) async fn prepare(inputs: &mut OperatorTaskInputs) -> Result<()> {
     if !matches!(
         &inputs.operator,
-        CompiledStreamOperator::Expression(_) | CompiledStreamOperator::Rolling(_)
+        CompiledStreamOperator::Expression(_)
+            | CompiledStreamOperator::NativeSequence(_)
+            | CompiledStreamOperator::Rolling(_)
     ) {
         return Ok(());
     }
@@ -45,6 +49,11 @@ pub(super) async fn prepare(inputs: &mut OperatorTaskInputs) -> Result<()> {
                 }
             }
         }
+        CompiledStreamOperator::NativeSequence(operator) => {
+            inputs.operator = CompiledStreamOperator::SyncArraySequence(Box::new(make_sync_node(
+                inputs, operator,
+            )));
+        }
         CompiledStreamOperator::Rolling(operator) => {
             if operator.supports_sync() {
                 inputs.operator = CompiledStreamOperator::SyncRolling(Box::new(make_sync_node(
@@ -55,7 +64,7 @@ pub(super) async fn prepare(inputs: &mut OperatorTaskInputs) -> Result<()> {
                 inputs.operator = CompiledStreamOperator::Rolling(operator);
             }
         }
-        _ => unreachable!("sync preparation only accepts Expression or Rolling"),
+        _ => unreachable!("sync preparation only accepts Expression, NativeSequence or Rolling"),
     }
     Ok(())
 }
@@ -522,7 +531,9 @@ fn forward_control_session(inputs: &mut OperatorTaskInputs, message: &StreamMess
 }
 
 pub(super) fn recycle(operator: &mut CompiledStreamOperator, batch: crate::Batch) {
-    if let CompiledStreamOperator::SyncExpression(node) = operator {
+    if let CompiledStreamOperator::SyncArraySequence(node) = operator {
+        node.recycle(batch);
+    } else if let CompiledStreamOperator::SyncExpression(node) = operator {
         node.recycle(batch);
     } else if let CompiledStreamOperator::SyncRolling(node) = operator {
         node.recycle(batch);
@@ -530,6 +541,7 @@ pub(super) fn recycle(operator: &mut CompiledStreamOperator, batch: crate::Batch
 }
 
 enum SyncOperatorNodeRef<'a> {
+    ArraySequence(&'a mut SyncNode<crate::array::NativeStreamOperator>),
     Expression(&'a mut SyncNode<SyncExpressionOperator>),
     Rolling(&'a mut SyncNode<crate::operator::rolling::sync::SyncRollingOperator>),
 }
@@ -537,6 +549,7 @@ enum SyncOperatorNodeRef<'a> {
 impl SyncOperatorNodeRef<'_> {
     fn context_mut(&mut self) -> &mut SyncContext<'static> {
         match self {
+            Self::ArraySequence(node) => node.context_mut(),
             Self::Expression(node) => node.context_mut(),
             Self::Rolling(node) => node.context_mut(),
         }
@@ -544,6 +557,7 @@ impl SyncOperatorNodeRef<'_> {
 
     fn emitter(&self) -> &Emitter {
         match self {
+            Self::ArraySequence(node) => node.emitter(),
             Self::Expression(node) => node.emitter(),
             Self::Rolling(node) => node.emitter(),
         }
@@ -551,6 +565,7 @@ impl SyncOperatorNodeRef<'_> {
 
     fn emitter_mut(&mut self) -> &mut Emitter {
         match self {
+            Self::ArraySequence(node) => node.emitter_mut(),
             Self::Expression(node) => node.emitter_mut(),
             Self::Rolling(node) => node.emitter_mut(),
         }
@@ -558,6 +573,10 @@ impl SyncOperatorNodeRef<'_> {
 
     fn on_data(&mut self, ingress: usize, batch: crate::Batch) -> Result<()> {
         match self {
+            Self::ArraySequence(node) => {
+                let (operator, context, emitter) = node.parts_mut();
+                operator.on_data(ingress, batch, context, emitter)
+            }
             Self::Expression(node) => {
                 let (operator, context, emitter) = node.parts_mut();
                 operator.on_data(ingress, batch, context, emitter)
@@ -571,6 +590,10 @@ impl SyncOperatorNodeRef<'_> {
 
     fn on_watermark(&mut self, watermark: EventTime) -> Result<()> {
         match self {
+            Self::ArraySequence(node) => {
+                let (operator, context, emitter) = node.parts_mut();
+                operator.on_watermark(watermark, context, emitter)
+            }
             Self::Expression(node) => {
                 let (operator, context, emitter) = node.parts_mut();
                 operator.on_watermark(watermark, context, emitter)
@@ -584,6 +607,10 @@ impl SyncOperatorNodeRef<'_> {
 
     fn on_end(&mut self) -> Result<()> {
         match self {
+            Self::ArraySequence(node) => {
+                let (operator, context, emitter) = node.parts_mut();
+                operator.on_end(context, emitter)
+            }
             Self::Expression(node) => {
                 let (operator, context, emitter) = node.parts_mut();
                 operator.on_end(context, emitter)
@@ -598,6 +625,7 @@ impl SyncOperatorNodeRef<'_> {
 
 fn node_mut(operator: &mut CompiledStreamOperator) -> SyncOperatorNodeRef<'_> {
     match operator {
+        CompiledStreamOperator::SyncArraySequence(node) => SyncOperatorNodeRef::ArraySequence(node),
         CompiledStreamOperator::SyncExpression(node) => SyncOperatorNodeRef::Expression(node),
         CompiledStreamOperator::SyncRolling(node) => SyncOperatorNodeRef::Rolling(node),
         _ => unreachable!("sync adapter called for an async operator"),

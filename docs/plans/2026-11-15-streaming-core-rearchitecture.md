@@ -35,7 +35,7 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   显式 `StreamingRunner` 仍默认开启 checkpoint。配对测量已完成并归档在
   `benchmarks/stream-convenience-defaults/`：2 批用例按维护规则 improved（−39.24%），
   32 批用例为 inconclusive（−9.33%）；两项默认变化合并测量，不能分别归因。
-- P1 其余项尚未开始：NumPy 路径，以及单源链路在 runner source task 内联（取代草稿 PR #616）。
+- P1 NumPy 路径与单源 runner 内联已实现并处于性能验收阶段（取代草稿 PR #616），结果见后续执行记录。
 - P2.1（完成；基线登记 `bb201632`）：五个 rolling dispatch 证据用例和 native 配对控制器已并入；
   10 轮基线在 14.8 秒内完成，原始样本、二进制身份和协议归档于 `benchmarks/rolling-kernel-v2/`。绝对基线为
   G1 6.264 µs、G2 19.577 ns/window-row、G3 452.568 µs；两臂使用同一二进制，1.00x 不是性能结论。
@@ -146,6 +146,20 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   与不中断运行一致。rank/quantile explain 也已恢复 typed scan 报告。Rolling 688 项、layout/slab focused、optimizer/lowering 52 项、
   Clippy 与 Ruff 通过。indicator 与 EWMA 等尚未迁 slab 的 family 混合时仍保留旧 resource/layout 5/6 路径；其余 family、
   旧子系统删除和性能门槛尚未完成。复杂度门禁仍是此前同一组既有增长项，本步骤没有新增失败位置。
+- 2026-11-19 P1 后续实现已落地：NativeArray、原生 array batch 与精确 `numpy.ndarray` 均可进入同步 sequence session，
+  单源 Rolling/Expression/NativeSequence 图在 runner source task 内联执行并保留逻辑 task identity、背压、错误归属和 reservation 清理。
+  Rust session 26 项、operator fusion 26 项、source 31 项、entity 10 项、非 soak streaming 700 项及 Python 66 项通过；
+  真实 rolling_runner 3 项通过。性能预登记：基线 `3638876c`，候选为当前工作区，共 3 例、预算 590 秒（构建另计）。
+  NumPy 1 行 rolling mean 取 30 个测量值（5 次预热），候选 p50 ≤5 µs，无可用旧基线；单行 dual-SMA 和 6,400×64
+  各取 30 对 AB/BA，评估相对回退，均不扩展案例、样本或为理想结果重试。预算分配为配对测量最多 570 秒，
+  NumPy 隔离安装、预热与测量最多 20 秒。配对测量已完成（`target/p1-inline-performance.json`，总计 4.154 秒）：
+  单行 dual-SMA 为 0.976x（95% CI 0.934–1.137），6,400×64 为 0.962x（0.881–1.031），两项均为 inconclusive，
+  未确认回退。NumPy 初次测量误用相对安装路径，子进程切换目录后加载了开发模块；其 136.003 µs 结果无效且不得用于验收。
+  修正路径后，sealed 候选的分段诊断（不作为门槛结果）为 push 5.52 µs、`to_numpy` 3.85 µs，证明输出转换也是固定成本。
+  内联启动参数已合并，新增复杂度豁免已删除，复杂度报告回到此前同一组既有债务；配对结果来自内联实现 wheel，
+  其后仅合并启动参数，未改热路径。与最终代码一致的 sealed wheel 已正式验收 NumPy：30 个样本的数值全部正确，
+  p50 为 9.419 µs（`target/p1-inline-numpy-sealed.json`，1.662 秒），未达到 ≤5 µs。输入准备不计时，
+  `_StreamSession.push` 到 `NativeArray.to_numpy()` 计入；该门槛仍未完成，后续优化不得删除输出转换来规避。
 - 2026-11-19 当前工作区修复了既有 CI 失败：v4 恢复保留静态输入摘要诊断和安全的错误分类，
   测试改用 `manifests/lineage/manifests/epoch-N.json` 与 opaque `blocks`；typed MACD 不再误入旧 resource worker，
   late-output Rolling 可恢复当前声明 layout，native sequence 保留 operator 上下文，ASOF lifecycle fixture 不再由 worker

@@ -60,7 +60,7 @@ pub use provider::{
 };
 pub(crate) use provider::{
     NativeCheckpointRecord, NativeIoCompletion, NativeSequenceFailure, NativeSequenceInventory,
-    is_native_sequence_operator,
+    NativeStreamOperator, into_native_sequence, is_native_sequence_operator,
 };
 pub use reduction::{Reduction, ReductionOptions, max, mean, min, reduce, sum};
 pub use rolling::{EwmaOptions, ewma};

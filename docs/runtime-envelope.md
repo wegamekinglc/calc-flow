@@ -540,6 +540,14 @@ simultaneous failures still retain their stable task-ID ordering.
 
 ## Operator tasks and barrier alignment
 
+For an admitted single-source chain of Rolling, Expression, or native array
+sequence nodes without checkpoints or restore, the source task instead owns and
+drains one inline pipeline over session edges after each input event. There is
+no independent operator driver; logical task reservations still identify morsel
+workers and failure origins, physical sink emission provides backpressure, and
+pipeline completion releases the reservations. Other graphs retain the operator
+task model below.
+
 One logical operator task owns each compiled stream operator. It selects ready
 ingresses without weakening per-ingress FIFO, validates data emissions before
 the first send, fans out over real bounded edges, and owns one lazy
