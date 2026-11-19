@@ -37,6 +37,13 @@ pub(super) fn supports_plan(groups: &[TypedGroupPlan], outputs: &[TypedOutputPla
             TypedGroupPlan::Rsi { .. } | TypedGroupPlan::Atr { .. } | TypedGroupPlan::Macd { .. }
         )
     });
+    let count_input = groups.iter().find_map(|group| match group {
+        TypedGroupPlan::Count { input_index, .. } => Some(*input_index),
+        _ => None,
+    });
+    let only_counts = groups
+        .iter()
+        .all(|group| matches!(group, TypedGroupPlan::Count { .. }));
     !groups.is_empty()
         && groups.iter().all(|group| match group {
             TypedGroupPlan::Numeric {
@@ -48,6 +55,9 @@ pub(super) fn supports_plan(groups: &[TypedGroupPlan], outputs: &[TypedOutputPla
             | TypedGroupPlan::Atr { .. }
             | TypedGroupPlan::Macd { .. } => true,
             TypedGroupPlan::Ewma { .. } | TypedGroupPlan::Cumulative { .. } => !has_indicator,
+            TypedGroupPlan::Count { input_index, .. } => {
+                only_counts && Some(*input_index) == count_input
+            }
             _ => false,
         })
         && !outputs.is_empty()
@@ -67,6 +77,10 @@ fn output_supported(group: &TypedGroupPlan, output: &TypedOutputPlan) -> bool {
             ) => output.storage == OutputStorage::Float64,
             _ => false,
         },
+        TypedGroupPlan::Count { .. } => {
+            matches!(output.kind, TypedOutputKind::Statistic(Statistic::Count))
+                && output.storage == OutputStorage::Count
+        }
         TypedGroupPlan::Rsi { .. } => {
             matches!(output.kind, TypedOutputKind::Rsi) && output.storage == OutputStorage::Float64
         }
@@ -128,7 +142,12 @@ pub(super) fn numeric_only(groups: &[TypedGroupPlan]) -> bool {
 pub(super) fn numeric_ordinal(groups: &[TypedGroupPlan], group: usize) -> usize {
     groups[..group]
         .iter()
-        .filter(|candidate| matches!(candidate, TypedGroupPlan::Numeric { .. }))
+        .filter(|candidate| {
+            matches!(
+                candidate,
+                TypedGroupPlan::Numeric { .. } | TypedGroupPlan::Count { .. }
+            )
+        })
         .count()
 }
 
@@ -213,6 +232,17 @@ pub(super) fn update<'a>(
             (TypedGroupPlan::Numeric { .. }, TypedGroupInput::Single(input)) => {
                 if !numeric_updated {
                     let value = valid_float64(input, row, nan_as_value);
+                    if first {
+                        table.push_numeric_rows(0, entity, value)?;
+                    } else {
+                        table.push_numeric_rows_recurrent(0, entity, value)?;
+                    }
+                    numeric_updated = true;
+                }
+            }
+            (TypedGroupPlan::Count { .. }, TypedGroupInput::Values(input)) => {
+                if !numeric_updated {
+                    let value = input.is_valid(row).then_some(1.0);
                     if first {
                         table.push_numeric_rows(0, entity, value)?;
                     } else {

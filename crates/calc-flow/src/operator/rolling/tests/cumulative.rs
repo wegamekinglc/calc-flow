@@ -386,6 +386,54 @@ async fn test_cumulative_primitive_slab_outputs_preserve_storage() {
 }
 
 #[tokio::test]
+async fn test_count_slab_restore_accepts_nested_values() {
+    use datafusion::arrow::array::{Int32Builder, ListBuilder};
+
+    let spec = kernel_spec(json!([
+        aggregate_output("count", "volume", "two", 2),
+        {
+            "kind":"count", "primitive_version":1, "input":"volume", "output":"three",
+            "frame":{"kind":"rows", "size":3}, "min_periods":1
+        }
+    ]));
+    let mut values = ListBuilder::new(Int32Builder::new());
+    values.values().append_value(1);
+    values.append(true);
+    values.append(false);
+    values.values().append_value(4);
+    values.append(true);
+    let (schema, input) = primitive_volume_record(Arc::new(values.finish()));
+    let mut source = RollingOperator::new("rolling", Arc::new(schema), spec.clone()).unwrap();
+    assert_eq!(source.state_layout_version(), 7);
+    let job = crate::StreamJobContext::new(
+        7,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let prefix = advance_cumulative_stream(&mut source, &input.slice(0, 2), 2, &job).await;
+    assert_eq!(
+        prefix
+            .column_by_name("two")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .values()
+            .as_ref(),
+        &[1, 1]
+    );
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(snapshot.inline_metadata["state_layout_version"], json!(7));
+    let mut restored = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    let expected = advance_cumulative_stream(&mut source, &input.slice(2, 1), 3, &job).await;
+    let actual = advance_cumulative_stream(&mut restored, &input.slice(2, 1), 3, &job).await;
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
 async fn test_cumulative_integer_slab_restore_and_overflow_are_atomic() {
     let spec = cumulative_volume_spec();
     let mut source =

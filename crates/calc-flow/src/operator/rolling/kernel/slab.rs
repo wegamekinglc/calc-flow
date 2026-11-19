@@ -124,7 +124,10 @@ impl SlabBuilder {
                 .expect("cumulative group was updated");
             return self.append_cumulative(summary, output, node_id);
         }
-        if matches!(groups[output.group], TypedGroupPlan::Numeric { .. }) {
+        if matches!(
+            groups[output.group],
+            TypedGroupPlan::Numeric { .. } | TypedGroupPlan::Count { .. }
+        ) {
             let numeric = TypedOutputPlan {
                 group: indicator::numeric_ordinal(groups, output.group),
                 ..*output
@@ -285,6 +288,10 @@ impl RollingKernelPlan {
                 dispersion,
                 ..
             } => Some((*window, *dispersion)),
+            TypedGroupPlan::Count {
+                frame: TypedFrame::Rows(window),
+                ..
+            } => Some((*window, false)),
             _ => None,
         });
         if let Some((first_window, first_dispersion)) = windows.next() {
