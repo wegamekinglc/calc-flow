@@ -9,10 +9,11 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::ScalarValue;
 
 use super::{
-    EntityRouting, OutputStorage, Result, RollingKernelExecution, RollingKernelMetrics,
-    RollingKernelPlan, RollingKernelState, RollingMetricsRecorder, RollingStage, RollingWork,
-    StateCharge, Statistic, StreamKernelUpdate, TypedFrame, TypedGroupInput, TypedGroupPlan,
-    TypedOutputKind, TypedOutputPlan, internal_error, nanos, operator_error,
+    DerivedBuilder, EntityRouting, OutputStorage, Result, RollingKernelExecution,
+    RollingKernelMetrics, RollingKernelPlan, RollingKernelState, RollingMetricsRecorder,
+    RollingStage, RollingWork, StateCharge, Statistic, StreamKernelUpdate, TypedFrame,
+    TypedGroupInput, TypedGroupPlan, TypedOutputKind, TypedOutputPlan, TypedWindowState,
+    internal_error, nanos, operator_error,
 };
 use crate::{
     accumulate::NumericAccumulator,
@@ -82,6 +83,7 @@ fn charge(table: &StateTable, node_id: &str) -> Result<StateCharge> {
 enum SlabBuilder {
     Float(Float64Builder),
     Count(UInt64Builder),
+    Derived(DerivedBuilder),
 }
 
 impl SlabBuilder {
@@ -89,6 +91,19 @@ impl SlabBuilder {
         match output.storage {
             OutputStorage::Float64 => Ok(Self::Float(Float64Builder::with_capacity(rows))),
             OutputStorage::Count => Ok(Self::Count(UInt64Builder::with_capacity(rows))),
+            OutputStorage::Int8
+            | OutputStorage::Int16
+            | OutputStorage::Int32
+            | OutputStorage::Int64
+            | OutputStorage::UInt8
+            | OutputStorage::UInt16
+            | OutputStorage::UInt32
+            | OutputStorage::UInt64
+            | OutputStorage::Float32 => Ok(Self::Derived(DerivedBuilder::new_with_inputs(
+                *output,
+                rows,
+                &[],
+            )?)),
             _ => Err(internal_error("rolling slab output storage mismatch")),
         }
     }
@@ -107,21 +122,7 @@ impl SlabBuilder {
                 .expect("cumulative state is present")[output.group]
                 .as_ref()
                 .expect("cumulative group was updated");
-            let value = if summary.valid_count() < output.min_periods {
-                None
-            } else if matches!(output.kind, TypedOutputKind::Statistic(Statistic::Variance)) {
-                summary.variance(output.ddof)
-            } else {
-                let ScalarValue::Float64(value) = summary.scalar(node_id)? else {
-                    return Err(internal_error("cumulative slab output type mismatch"));
-                };
-                value
-            };
-            let Self::Float(builder) = self else {
-                return Err(internal_error("cumulative slab builder type mismatch"));
-            };
-            builder.append_option(value);
-            return Ok(());
+            return self.append_cumulative(summary, output, node_id);
         }
         if matches!(groups[output.group], TypedGroupPlan::Numeric { .. }) {
             let numeric = TypedOutputPlan {
@@ -150,8 +151,43 @@ impl SlabBuilder {
                 builder.append_option(value);
                 Ok(())
             }
-            Self::Count(_) => Err(internal_error("rolling slab output storage mismatch")),
+            Self::Count(_) | Self::Derived(_) => {
+                Err(internal_error("rolling slab output storage mismatch"))
+            }
         }
+    }
+
+    fn append_cumulative(
+        &mut self,
+        summary: &TypedWindowState,
+        output: &TypedOutputPlan,
+        node_id: &str,
+    ) -> Result<()> {
+        if let Self::Derived(builder) = self {
+            return builder.append(
+                std::slice::from_ref(summary),
+                &TypedOutputPlan {
+                    group: 0,
+                    ..*output
+                },
+                node_id,
+            );
+        }
+        let (Self::Float(builder), TypedWindowState::Cumulative(summary)) = (self, summary) else {
+            return Err(internal_error("cumulative slab builder type mismatch"));
+        };
+        let value = if summary.accumulator.valid_count() < output.min_periods {
+            None
+        } else if matches!(output.kind, TypedOutputKind::Statistic(Statistic::Variance)) {
+            summary.accumulator.variance(output.ddof)
+        } else {
+            let ScalarValue::Float64(value) = summary.accumulator.scalar(node_id)? else {
+                return Err(internal_error("cumulative slab output type mismatch"));
+            };
+            value
+        };
+        builder.append_option(value);
+        Ok(())
     }
 
     fn append(
@@ -175,6 +211,7 @@ impl SlabBuilder {
                 _ => Err(internal_error("rolling slab output kind mismatch")),
             },
             Self::Float(builder) => Self::append_float(builder, accumulator, output),
+            Self::Derived(_) => Err(internal_error("rolling slab output kind mismatch")),
         }
     }
 
@@ -182,6 +219,7 @@ impl SlabBuilder {
         match self {
             Self::Float(builder) => builder.append_null(),
             Self::Count(builder) => builder.append_null(),
+            Self::Derived(builder) => builder.append_null(),
         }
     }
 
@@ -212,10 +250,11 @@ impl SlabBuilder {
         Ok(())
     }
 
-    fn finish(self) -> ArrayRef {
+    fn finish(self) -> Result<ArrayRef> {
         match self {
-            Self::Float(mut builder) => Arc::new(builder.finish()),
-            Self::Count(mut builder) => Arc::new(builder.finish()),
+            Self::Float(mut builder) => Ok(Arc::new(builder.finish())),
+            Self::Count(mut builder) => Ok(Arc::new(builder.finish())),
+            Self::Derived(builder) => builder.finish(),
         }
     }
 }
@@ -503,10 +542,7 @@ impl RollingKernelPlan {
             recorder.add(RollingWork::NumericRows, input_rows);
             recorder.add(RollingWork::NumericSerialCalls, 1);
         }
-        Ok(builders
-            .into_iter()
-            .map(SlabBuilder::finish)
-            .collect::<Vec<_>>())
+        builders.into_iter().map(SlabBuilder::finish).collect()
     }
 
     fn finish_slab_columns(

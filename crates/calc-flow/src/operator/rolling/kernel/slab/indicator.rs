@@ -1,16 +1,14 @@
-use datafusion::arrow::{
-    array::{Array, Float64Array},
-    datatypes::DataType,
-};
+use datafusion::arrow::array::{Array, Float64Array};
 
 use super::super::{
     OutputStorage, Result, Statistic, TypedFrame, TypedGroupInput, TypedGroupPlan, TypedOutputKind,
-    TypedOutputPlan, internal_error, valid_float64,
+    TypedOutputPlan, TypedWindowState, cumulative::TypedCumulativeState, internal_error,
+    valid_float64,
 };
 use crate::{
     accumulate::NumericAccumulator,
     array::indicators::{AtrKernel, MacdKernel, MacdParameters, RsiKernel},
-    operator::rolling::cumulative::{CumulativeAccumulator, NumericValue},
+    operator::rolling::cumulative::CumulativeAccumulator,
     state::{EntityId, StateTable, ValueKind},
 };
 
@@ -25,7 +23,7 @@ pub(super) struct RowReadouts<'a> {
     pub(super) accumulators: &'a [NumericAccumulator],
     pub(super) values: Vec<[Option<f64>; 3]>,
     pub(super) valid_counts: Option<Vec<u64>>,
-    pub(super) cumulative: Option<Vec<Option<CumulativeAccumulator>>>,
+    pub(super) cumulative: Option<Vec<Option<TypedWindowState>>>,
 }
 
 pub(super) fn supports_plan(groups: &[TypedGroupPlan], outputs: &[TypedOutputPlan]) -> bool {
@@ -83,13 +81,39 @@ fn output_supported(group: &TypedGroupPlan, output: &TypedOutputPlan) -> bool {
             matches!(output.kind, TypedOutputKind::Ewma) && output.storage == OutputStorage::Float64
         }
         TypedGroupPlan::Cumulative { storage, .. } => {
-            matches!(
-                output.kind,
-                TypedOutputKind::Statistic(
-                    Statistic::Sum | Statistic::Min | Statistic::Max | Statistic::Variance
-                )
-            ) && *storage == OutputStorage::Float64
-                && output.storage == OutputStorage::Float64
+            if !matches!(
+                storage,
+                OutputStorage::Int8
+                    | OutputStorage::Int16
+                    | OutputStorage::Int32
+                    | OutputStorage::Int64
+                    | OutputStorage::UInt8
+                    | OutputStorage::UInt16
+                    | OutputStorage::UInt32
+                    | OutputStorage::UInt64
+                    | OutputStorage::Float32
+                    | OutputStorage::Float64
+            ) {
+                return false;
+            }
+            let expected = match output.kind {
+                TypedOutputKind::Statistic(Statistic::Sum) => match storage {
+                    OutputStorage::Int8
+                    | OutputStorage::Int16
+                    | OutputStorage::Int32
+                    | OutputStorage::Int64 => OutputStorage::Int64,
+                    OutputStorage::UInt8
+                    | OutputStorage::UInt16
+                    | OutputStorage::UInt32
+                    | OutputStorage::UInt64 => OutputStorage::UInt64,
+                    OutputStorage::Float32 | OutputStorage::Float64 => OutputStorage::Float64,
+                    _ => return false,
+                },
+                TypedOutputKind::Statistic(Statistic::Min | Statistic::Max) => *storage,
+                TypedOutputKind::Statistic(Statistic::Variance) => OutputStorage::Float64,
+                _ => return false,
+            };
+            output.storage == expected
         }
         _ => false,
     }
@@ -237,16 +261,8 @@ pub(super) fn update<'a>(
                 valid_counts.as_mut().expect("EWMA counts are allocated")[index] = count;
                 values[index][0] = Some(value);
             }
-            (
-                TypedGroupPlan::Cumulative {
-                    statistic,
-                    storage: OutputStorage::Float64,
-                    ..
-                },
-                TypedGroupInput::Single(input),
-            ) => {
-                let summary =
-                    update_cumulative(table, position, groups, index, input, row, *statistic)?;
+            (TypedGroupPlan::Cumulative { .. }, input) => {
+                let summary = update_cumulative(table, position, groups, index, input, row, group)?;
                 cumulative.as_mut().expect("cumulative state is allocated")[index] = Some(summary);
             }
             _ => return Err(internal_error("rolling slab group input mismatch")),
@@ -300,21 +316,22 @@ fn update_cumulative(
     position: EntityRow<'_>,
     groups: &[TypedGroupPlan],
     index: usize,
-    input: &Float64Array,
+    input: &TypedGroupInput,
     row: usize,
-    statistic: Statistic,
-) -> Result<CumulativeAccumulator> {
+    group: &TypedGroupPlan,
+) -> Result<TypedWindowState> {
+    let TypedGroupPlan::Cumulative {
+        statistic, storage, ..
+    } = group
+    else {
+        return Err(internal_error("rolling cumulative plan mismatch"));
+    };
+    let (statistic, storage) = (*statistic, *storage);
     let base = column_base(groups, index);
-    let mut summary = read_cumulative(table, position.entity, base, statistic)?;
-    if let Some(sample) = valid_float64(input, row, false) {
-        summary.add_numeric(
-            NumericValue::Float(sample.to_bits()),
-            statistic,
-            position.node_id,
-        )?;
-    }
-    write_fields(table, position.entity, base, &summary.columns())?;
-    Ok(summary)
+    let mut summary = read_cumulative(table, position.entity, base, statistic, storage)?;
+    summary.update(input, row, position.node_id)?;
+    write_fields(table, position.entity, base, &summary.accumulator.columns())?;
+    Ok(TypedWindowState::Cumulative(summary))
 }
 
 fn read_cumulative(
@@ -322,12 +339,16 @@ fn read_cumulative(
     entity: EntityId,
     base: usize,
     statistic: Statistic,
-) -> Result<CumulativeAccumulator> {
+    storage: OutputStorage,
+) -> Result<TypedCumulativeState> {
     let mut columns = [0; 8];
     for (offset, value) in columns.iter_mut().enumerate() {
         *value = table.u64(base + offset, entity)?;
     }
-    CumulativeAccumulator::from_columns(columns, statistic, &DataType::Float64)
+    let mut summary = TypedCumulativeState::new(statistic);
+    summary.accumulator =
+        CumulativeAccumulator::from_columns(columns, statistic, &storage.data_type())?;
+    Ok(summary)
 }
 
 fn column_base(groups: &[TypedGroupPlan], index: usize) -> usize {

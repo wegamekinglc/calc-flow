@@ -332,6 +332,104 @@ async fn assert_cumulative_prefix_overflow_is_atomic(
 }
 
 #[tokio::test]
+async fn test_cumulative_primitive_slab_outputs_preserve_storage() {
+    for data_type in [DataType::Int8, DataType::UInt64, DataType::Float32] {
+        let values = datafusion::arrow::compute::cast(
+            &Int64Array::from(vec![Some(2), None, Some(3)]),
+            &data_type,
+        )
+        .unwrap();
+        let (schema, input) = primitive_volume_record(values);
+        let spec = cumulative_volume_spec();
+        let mut source = RollingOperator::new("rolling", Arc::new(schema), spec.clone()).unwrap();
+        let job = crate::StreamJobContext::new(
+            7,
+            TEST_FINGERPRINT,
+            JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        );
+        let prefix = advance_cumulative_stream(&mut source, &input.slice(0, 2), 2, &job).await;
+        let sum_type = match data_type {
+            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => DataType::Int64,
+            DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+                DataType::UInt64
+            }
+            DataType::Float32 | DataType::Float64 => DataType::Float64,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            prefix.column_by_name("total").unwrap().data_type(),
+            &sum_type
+        );
+        for name in ["low", "high"] {
+            assert_eq!(prefix.column_by_name(name).unwrap().data_type(), &data_type);
+        }
+        for name in ["variance", "population"] {
+            assert_eq!(
+                prefix.column_by_name(name).unwrap().data_type(),
+                &DataType::Float64
+            );
+        }
+        let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+        assert_eq!(snapshot.inline_metadata["state_layout_version"], json!(7));
+        let mut restored = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+        StreamOperator::restore(&mut restored, &snapshot).unwrap();
+        let expected = advance_cumulative_stream(&mut source, &input.slice(2, 1), 3, &job).await;
+        let actual = advance_cumulative_stream(&mut restored, &input.slice(2, 1), 3, &job).await;
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual.column_by_name("total").unwrap().data_type(),
+            &sum_type
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_cumulative_integer_slab_restore_and_overflow_are_atomic() {
+    let spec = cumulative_volume_spec();
+    let mut source =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
+    assert_eq!(source.state_layout_version(), 7);
+    let job = crate::StreamJobContext::new(
+        7,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let input = int64_fast_record(&[
+        Some(-i64::MAX),
+        Some(i64::MAX),
+        Some(i64::MAX),
+        Some(0),
+        Some(1),
+    ]);
+    let prefix = advance_cumulative_stream(&mut source, &input.slice(0, 3), 3, &job).await;
+    assert_eq!(
+        prefix
+            .column_by_name("total")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .values()
+            .as_ref(),
+        &[-i64::MAX, 0, i64::MAX]
+    );
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(snapshot.inline_metadata["state_layout_version"], json!(7));
+    let mut restored = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    let expected = advance_cumulative_stream(&mut source, &input.slice(3, 1), 4, &job).await;
+    let actual = advance_cumulative_stream(&mut restored, &input.slice(3, 1), 4, &job).await;
+    assert_eq!(actual, expected);
+    for operator in [&mut source, &mut restored] {
+        assert_cumulative_prefix_overflow_is_atomic(operator, &input.slice(4, 1), &job).await;
+    }
+}
+
+#[tokio::test]
 async fn test_cumulative_mixed_integer_restore_replays_only_window_history() {
     let mut spec = cumulative_volume_spec();
     spec.outputs.truncate(1);
