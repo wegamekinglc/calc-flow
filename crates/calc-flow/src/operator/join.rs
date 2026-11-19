@@ -478,28 +478,40 @@ mod tests {
         manifest
     }
 
-    #[tokio::test]
-    async fn native_empty_checkpoint_roundtrip_preserves_identity() {
-        let mut operator =
-            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
-        operator.enable_native_checkpoint().unwrap();
+    async fn persist_native_epoch(
+        operator: &mut StreamJoinOperator,
+        store: &mut crate::state::v4::V4Store,
+        epoch: u64,
+    ) -> crate::state::v4::V4Manifest {
         let capture = operator
-            .native_checkpoint(Epoch::new(1).unwrap())
+            .native_checkpoint(Epoch::new(epoch).unwrap())
             .unwrap()
-            .expect("empty native capture");
-        let temporary = tempfile::tempdir().unwrap();
-        let mut store = crate::state::v4::V4Store::new(temporary.path().join("lineage"));
-        let operator = crate::state::v4::native::persist_native(
-            &mut store,
+            .expect("native capture");
+        let entry = crate::state::v4::native::persist_native(
+            store,
             "match",
             capture,
-            1,
+            epoch,
             BTreeMap::new(),
             None,
         )
         .await
         .unwrap();
-        let manifest = native_manifest(operator);
+        let mut manifest = native_manifest(entry);
+        manifest.epoch = epoch;
+        manifest.manifest_fingerprint = crate::state::v4::manifest_fingerprint(&manifest).unwrap();
+        store.publish_manifest(&manifest).unwrap();
+        manifest
+    }
+
+    #[tokio::test]
+    async fn native_empty_checkpoint_roundtrip_preserves_identity() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        operator.enable_native_checkpoint().unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let mut store = crate::state::v4::V4Store::new(temporary.path().join("lineage"));
+        let manifest = persist_native_epoch(&mut operator, &mut store, 1).await;
         manifest.validate_structure().unwrap();
         let snapshot =
             crate::state::v4::native::load_native(&mut store, &manifest, "match").unwrap();
@@ -545,23 +557,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let capture = original
-            .native_checkpoint(Epoch::new(1).unwrap())
-            .unwrap()
-            .expect("retained native capture");
         let temporary = tempfile::tempdir().unwrap();
         let mut store = crate::state::v4::V4Store::new(temporary.path().join("lineage"));
-        let operator = crate::state::v4::native::persist_native(
-            &mut store,
-            "match",
-            capture,
-            1,
-            BTreeMap::new(),
-            None,
-        )
-        .await
-        .unwrap();
-        let manifest = native_manifest(operator);
+        let manifest = persist_native_epoch(&mut original, &mut store, 1).await;
         let snapshot =
             crate::state::v4::native::load_native(&mut store, &manifest, "match").unwrap();
         let mut missing = snapshot.clone();
@@ -613,6 +611,17 @@ mod tests {
             original.run_core.as_ref().unwrap().fingerprint(),
             restored.run_core.as_ref().unwrap().fingerprint()
         );
+        let second = persist_native_epoch(&mut original, &mut store, 2).await;
+        let second_snapshot =
+            crate::state::v4::native::load_native(&mut store, &second, "match").unwrap();
+        let mut second_restored =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        second_restored.restore(&second_snapshot).unwrap();
+        assert_eq!(
+            original.run_core.as_ref().unwrap().fingerprint(),
+            second_restored.run_core.as_ref().unwrap().fingerprint()
+        );
+        assert_eq!(store.stats().carried_objects, 2);
         assert_native_eof_matches(&mut original, &mut restored, &job).await;
     }
 
@@ -661,23 +670,9 @@ mod tests {
             .await
             .unwrap();
         original.enable_native_checkpoint().unwrap();
-        let capture = original
-            .native_checkpoint(Epoch::new(1).unwrap())
-            .unwrap()
-            .expect("legacy state converts to native pages");
         let temporary = tempfile::tempdir().unwrap();
         let mut store = crate::state::v4::V4Store::new(temporary.path().join("lineage"));
-        let operator = crate::state::v4::native::persist_native(
-            &mut store,
-            "match",
-            capture,
-            1,
-            BTreeMap::new(),
-            None,
-        )
-        .await
-        .unwrap();
-        let manifest = native_manifest(operator);
+        let manifest = persist_native_epoch(&mut original, &mut store, 1).await;
         let snapshot =
             crate::state::v4::native::load_native(&mut store, &manifest, "match").unwrap();
         let mut restored =
@@ -5772,7 +5767,6 @@ impl StreamOperator for StreamJoinOperator {
         }
         self.state.left.clear();
         self.state.right.clear();
-        self.run_core = None;
         self.key_dictionary = key_dictionary::Dictionary::default();
         self.key_bindings = key_dictionary::Bindings::default();
         self.key_dictionary_needs_rebuild = false;

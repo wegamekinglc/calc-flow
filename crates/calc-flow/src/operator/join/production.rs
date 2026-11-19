@@ -85,7 +85,7 @@ impl RunCore {
         let keys = self.keys.record()?;
         let key_rows = u64::try_from(keys.num_rows())
             .map_err(|_| counter_overflow(&operator.name, "native key rows"))?;
-        pages.push(NativePage::arrow("keys", &keys, 0, 0..key_rows));
+        pages.push(NativePage::arrow("keys", &keys, key_rows, 0..key_rows));
         Ok(Some(NativeCapture::new(
             metadata.into_iter().collect(),
             vec![NativePartition {

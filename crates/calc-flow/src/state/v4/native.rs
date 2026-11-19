@@ -121,6 +121,96 @@ struct NativeMetadata {
     inline_metadata: JsonMap,
 }
 
+#[derive(Default)]
+struct PreviousPartition {
+    pages: BTreeMap<String, PageEntry>,
+    next_generations: BTreeMap<u32, u64>,
+    free_slots: BTreeSet<u32>,
+    used_slots: BTreeSet<u32>,
+    next_slot: u32,
+}
+
+impl PreviousPartition {
+    fn new(previous: Option<&PartitionIndex>) -> Result<Self> {
+        let Some(previous) = previous else {
+            return Ok(Self::default());
+        };
+        let mut pages = BTreeMap::new();
+        for page in &previous.pages {
+            if pages.insert(page.column.clone(), page.clone()).is_some() {
+                return Err(mismatch("previous native page column is duplicated".into()));
+            }
+        }
+        let next_slot = previous
+            .next_generations
+            .keys()
+            .chain(previous.pages.iter().map(|page| &page.page_id.slot))
+            .max()
+            .copied()
+            .map_or(Ok(0), |slot| {
+                slot.checked_add(1)
+                    .ok_or_else(|| mismatch("native partition slot space exhausted".into()))
+            })?;
+        Ok(Self {
+            pages,
+            next_generations: previous.next_generations.clone(),
+            free_slots: previous.free_slots.iter().copied().collect(),
+            used_slots: BTreeSet::new(),
+            next_slot,
+        })
+    }
+
+    fn assign(&mut self, page: &NativePage) -> Result<(u32, Option<PageEntry>)> {
+        if let Some(previous) = self.pages.get(&page.column).cloned() {
+            let slot = previous.page_id.slot;
+            self.used_slots.insert(slot);
+            let next = self.next_generations.get(&slot).copied().unwrap_or(0);
+            if previous.page_id.generation == page.generation {
+                if previous.kind != page.kind
+                    || previous.logical_range.start != page.range.start
+                    || previous.logical_range.end != page.range.end
+                {
+                    return Err(mismatch("reused native page geometry differs".into()));
+                }
+                return Ok((slot, Some(previous)));
+            }
+            if page.generation < next {
+                return Err(mismatch("native page generation regressed".into()));
+            }
+            self.next_generations.insert(
+                slot,
+                page.generation
+                    .checked_add(1)
+                    .ok_or_else(|| mismatch("native page generation overflow".into()))?,
+            );
+            return Ok((slot, None));
+        }
+        let slot = self.next_slot;
+        self.next_slot = self
+            .next_slot
+            .checked_add(1)
+            .ok_or_else(|| mismatch("native partition slot space exhausted".into()))?;
+        self.next_generations.insert(
+            slot,
+            page.generation
+                .checked_add(1)
+                .ok_or_else(|| mismatch("native page generation overflow".into()))?,
+        );
+        Ok((slot, None))
+    }
+
+    fn finish(self) -> (BTreeMap<u32, u64>, Vec<u32>) {
+        let mut free_slots = self.free_slots;
+        free_slots.extend(
+            self.pages
+                .values()
+                .filter(|page| !self.used_slots.contains(&page.page_id.slot))
+                .map(|page| page.page_id.slot),
+        );
+        (self.next_generations, free_slots.into_iter().collect())
+    }
+}
+
 pub(crate) async fn persist_native(
     store: &mut V4Store,
     owner: &str,
@@ -143,17 +233,23 @@ pub(crate) async fn persist_native(
     };
     let metadata = serde_json::to_value(metadata)
         .map_err(|error| mismatch(format!("native metadata encoding failed: {error}")))?;
+    let previous = previous_native_partitions(store, owner, epoch)?;
     let mut roots = Vec::with_capacity(partitions.len());
+    let mut carried = 0usize;
     for partition in partitions {
-        let index = persist_partition(
+        let (index, partition_carried) = persist_partition(
             store,
             owner,
             partition.key_group,
             partition.pages,
             &metadata,
             epoch,
+            previous.get(&partition.key_group),
         )
         .await?;
+        carried = carried
+            .checked_add(partition_carried)
+            .ok_or_else(|| mismatch("carried native page count overflow".into()))?;
         roots.push(NewObject {
             kind: ObjectKind::PartitionIndex,
             owner: owner.into(),
@@ -166,6 +262,7 @@ pub(crate) async fn persist_native(
         });
     }
     let roots = store.write_objects(epoch, roots).await?;
+    store.record_carried(carried);
     let partitions = roots
         .into_iter()
         .map(|root| {
@@ -188,6 +285,34 @@ pub(crate) async fn persist_native(
     })
 }
 
+fn previous_native_partitions(
+    store: &mut V4Store,
+    owner: &str,
+    epoch: u64,
+) -> Result<BTreeMap<u32, PartitionIndex>> {
+    if epoch == 1 {
+        return Ok(BTreeMap::new());
+    }
+    let previous_epoch = epoch - 1;
+    let manifest = store
+        .read_epoch_manifest(previous_epoch)?
+        .ok_or_else(|| mismatch("previous native manifest is absent".into()))?;
+    let operator = manifest
+        .operators
+        .get(owner)
+        .ok_or_else(|| mismatch("previous native operator is absent".into()))?;
+    let OperatorV4::Table { partitions, .. } = operator else {
+        return Ok(BTreeMap::new());
+    };
+    partitions
+        .iter()
+        .map(|partition| {
+            read_partition_index(store, partition, previous_epoch)
+                .map(|index| (partition.key_group, index))
+        })
+        .collect()
+}
+
 async fn persist_partition(
     store: &mut V4Store,
     owner: &str,
@@ -195,19 +320,24 @@ async fn persist_partition(
     pages: Vec<NativePage>,
     metadata: &serde_json::Value,
     epoch: u64,
-) -> Result<PartitionIndex> {
+    previous: Option<&PartitionIndex>,
+) -> Result<(PartitionIndex, usize)> {
+    let mut previous = PreviousPartition::new(previous)?;
     let mut pending = BTreeMap::new();
     let mut objects = Vec::with_capacity(pages.len() + 1);
-    let mut next_generations = BTreeMap::new();
-    for (slot, page) in pages.into_iter().enumerate() {
-        let slot = u32::try_from(slot).map_err(|_| mismatch("partition slot overflow".into()))?;
-        let generation = page.generation;
-        next_generations.insert(
-            slot,
-            generation
+    let mut entries = Vec::with_capacity(pages.len() + 1);
+    let mut carried = 0usize;
+    let metadata = NativePage::json(METADATA_COLUMN, metadata.clone(), epoch, 0..0);
+    for page in pages.into_iter().chain(std::iter::once(metadata)) {
+        let (slot, reused) = previous.assign(&page)?;
+        if let Some(entry) = reused {
+            entries.push(entry);
+            carried = carried
                 .checked_add(1)
-                .ok_or_else(|| mismatch("page generation overflow".into()))?,
-        );
+                .ok_or_else(|| mismatch("carried native page count overflow".into()))?;
+            continue;
+        }
+        let generation = page.generation;
         let object_id = format!("{key_group}/{slot}/{generation}");
         pending.insert(
             object_id.clone(),
@@ -221,67 +351,53 @@ async fn persist_partition(
             payload: page.payload,
         });
     }
-    let metadata_slot = u32::try_from(pending.len())
-        .map_err(|_| mismatch("partition metadata slot overflow".into()))?;
-    next_generations.insert(metadata_slot, 1);
-    let metadata_id = format!("{key_group}/{metadata_slot}/0");
-    let metadata = NativePage::json(METADATA_COLUMN, metadata.clone(), 0, 0..0);
-    pending.insert(
-        metadata_id.clone(),
-        (
-            metadata_slot,
-            0,
-            metadata.column.clone(),
-            metadata.kind,
-            metadata.range.clone(),
-        ),
-    );
-    objects.push(NewObject {
-        kind: ObjectKind::Page,
-        owner: owner.into(),
-        object_id: metadata_id,
-        generation: 0,
-        payload: metadata.payload,
-    });
     let encoded = store.write_objects(epoch, objects).await?;
-    let mut pages = encoded
-        .into_iter()
-        .map(|object| {
-            let id = object.handle.object_id.clone();
-            let (slot, generation, column, kind, range) = pending
-                .remove(&id)
-                .ok_or_else(|| mismatch("persisted page identity is unknown".into()))?;
-            let byte_len = object.handle.byte_len;
-            let sha256 = object.handle.sha256.clone();
-            Ok(PageEntry {
-                page_id: V4PageId {
-                    key_group,
-                    slot,
-                    generation,
-                },
-                column,
-                kind: kind.into(),
-                logical_range: LogicalRange {
-                    start: range.start,
-                    end: range.end,
-                },
-                byte_len,
-                sha256,
-                handle: object.handle,
+    entries.extend(
+        encoded
+            .into_iter()
+            .map(|object| {
+                let id = object.handle.object_id.clone();
+                let (slot, generation, column, kind, range) = pending
+                    .remove(&id)
+                    .ok_or_else(|| mismatch("persisted page identity is unknown".into()))?;
+                let byte_len = object.handle.byte_len;
+                let sha256 = object.handle.sha256.clone();
+                Ok(PageEntry {
+                    page_id: V4PageId {
+                        key_group,
+                        slot,
+                        generation,
+                    },
+                    column,
+                    kind: kind.into(),
+                    logical_range: LogicalRange {
+                        start: range.start,
+                        end: range.end,
+                    },
+                    byte_len,
+                    sha256,
+                    handle: object.handle,
+                })
             })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    pages.sort_by_key(|page| page.page_id);
+            .collect::<Result<Vec<_>>>()?,
+    );
+    if !pending.is_empty() {
+        return Err(mismatch(
+            "persisted native page inventory is incomplete".into(),
+        ));
+    }
+    entries.sort_by_key(|page| page.page_id);
+    let (next_generations, free_slots) = previous.finish();
     let index = PartitionIndex {
         format_version: 4,
         kind: "partition_index".into(),
         key_group,
-        pages,
+        pages: entries,
         next_generations,
-        free_slots: Vec::new(),
+        free_slots,
     };
     index.validate(epoch)?;
-    Ok(index)
+    Ok((index, carried))
 }
 
 pub(crate) fn load_native(
@@ -482,5 +598,96 @@ mod tests {
         *state_fingerprint = "damaged".into();
         let damaged = manifest_with_operator(damaged);
         assert!(load_native(&mut store, &damaged, "join").is_err());
+    }
+
+    #[tokio::test]
+    async fn native_successive_epochs_preserve_lineage_and_carry_clean_pages() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut store = V4Store::new(temporary.path().join("lineage"));
+        let record = RecordBatch::try_from_iter(vec![(
+            "value",
+            Arc::new(Int64Array::from(vec![7])) as ArrayRef,
+        )])
+        .unwrap();
+        let capture = |epoch, pages: Vec<(&str, u64)>| {
+            NativeCapture::new(
+                BTreeMap::from([("epoch".into(), Value::from(epoch))]),
+                vec![NativePartition {
+                    key_group: 0,
+                    pages: pages
+                        .into_iter()
+                        .map(|(name, generation)| {
+                            NativePage::arrow(name, &record, generation, 0..1)
+                        })
+                        .chain(std::iter::once(NativePage::json(
+                            "control",
+                            Value::from(epoch),
+                            epoch,
+                            0..0,
+                        )))
+                        .collect(),
+                }],
+            )
+            .unwrap()
+        };
+        let first = persist_native(
+            &mut store,
+            "join",
+            capture(1, vec![("run-a", 7), ("run-b", 9)]),
+            1,
+            BTreeMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut first = manifest_with_operator(first);
+        first.epoch = 1;
+        first.manifest_fingerprint = manifest_fingerprint(&first).unwrap();
+        store.publish_manifest(&first).unwrap();
+        let second = persist_native(
+            &mut store,
+            "join",
+            capture(2, vec![("run-b", 9), ("run-c", 11)]),
+            2,
+            BTreeMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut second = manifest_with_operator(second);
+        second.epoch = 2;
+        second.manifest_fingerprint = manifest_fingerprint(&second).unwrap();
+        store.publish_manifest(&second).unwrap();
+
+        let restored_first = load_native(&mut store, &first, "join").unwrap();
+        assert_eq!(restored_first.inline_metadata["epoch"], 1);
+        assert_eq!(
+            restored_first.segments.keys().collect::<Vec<_>>(),
+            ["control", "run-a", "run-b"]
+        );
+        let restored_second = load_native(&mut store, &second, "join").unwrap();
+        assert_eq!(restored_second.inline_metadata["epoch"], 2);
+        assert_eq!(
+            restored_second.segments.keys().collect::<Vec<_>>(),
+            ["control", "run-b", "run-c"]
+        );
+        let mut handle = |manifest: &V4Manifest, column: &str| {
+            let OperatorV4::Table { partitions, .. } = &manifest.operators["join"] else {
+                unreachable!()
+            };
+            super::read_partition_index(&mut store, &partitions[0], manifest.epoch)
+                .unwrap()
+                .pages
+                .into_iter()
+                .find(|page| page.column == column)
+                .unwrap()
+                .handle
+        };
+        assert_eq!(handle(&first, "run-b"), handle(&second, "run-b"));
+        assert_ne!(
+            handle(&first, "__cf_operator_metadata").object_id,
+            handle(&second, "__cf_operator_metadata").object_id
+        );
+        assert_eq!(store.stats().carried_objects, 1);
     }
 }

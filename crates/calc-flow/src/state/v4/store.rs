@@ -221,6 +221,19 @@ impl V4Store {
         V4Manifest::from_bytes(&bytes)
     }
 
+    pub(crate) fn read_epoch_manifest(&self, epoch: u64) -> Result<Option<V4Manifest>> {
+        let path = self
+            .root
+            .join("manifests")
+            .join(format!("epoch-{epoch}.json"));
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(io_error(&path, source)),
+        };
+        V4Manifest::from_bytes(&bytes).map(Some)
+    }
+
     pub(crate) fn read_object(&mut self, handle: &V4Handle) -> Result<ObjectPayload> {
         let path = self.absolute(handle);
         let bytes = std::fs::read(&path).map_err(|source| io_error(&path, source))?;
