@@ -233,6 +233,11 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   物化 1 次，后续增量 capture 不再增加物化次数；连续 epoch、部分淘汰、整 run 退休、普通 full capture 和 retention 均通过。
   Join 581 项、operator-task 77 项（2 ignored）、native page-set 3 项、native component 5 项及全 feature Clippy 通过。
   直接 snapshot 仍物化全部页面，partition index 仍每 epoch 全量序列化；端到端成本与 P5 门槛仍需验收。
+- 2026-11-20 P5 首轮性能验收为 **inconclusive**：候选 `6581fdda` sealed wheel（wheel SHA `aa308dac`，
+  loaded native SHA `759dc99`）单独构建耗时 563.654 秒，固定 Join 1M 与 interval 1M、单核、2 次预热 + 10 个正式样本、
+  完整 oracle、总预算 600 秒。两次采集均在 source-ready 30 秒等待处超时，未产生有效性能样本或 p50，未执行 interval 计时。
+  后续 100 行与 1M 诊断的完整输出 oracle 均通过，但不作为性能证据；按预登记停止规则不再为理想结果重试。
+  Join ≤30 ms 与 interval ≤350 ms 均未验证，后续须先解决启动测量不确定性，不能以诊断通过替代门槛结论。
 
 ## 1. 目标
 
