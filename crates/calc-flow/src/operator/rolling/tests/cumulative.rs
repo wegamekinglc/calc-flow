@@ -482,6 +482,43 @@ async fn test_float64_lag_delta_slab_restore_preserves_reference_rows() {
 }
 
 #[tokio::test]
+async fn test_float32_lag_delta_slab_restore_preserves_storage() {
+    let spec = kernel_spec(json!([
+        {"kind":"lag", "primitive_version":1, "input":"volume", "output":"lag", "periods":1},
+        {"kind":"delta", "primitive_version":1, "input":"volume", "output":"delta", "periods":1}
+    ]));
+    let (schema, input) = primitive_volume_record(Arc::new(
+        datafusion::arrow::array::Float32Array::from(vec![Some(1.5), None, Some(3.0), Some(5.0)]),
+    ));
+    let mut source = RollingOperator::new("rolling", Arc::new(schema), spec.clone()).unwrap();
+    assert_eq!(source.state_layout_version(), 7);
+    let job = crate::StreamJobContext::new(
+        7,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let prefix = advance_cumulative_stream(&mut source, &input.slice(0, 3), 3, &job).await;
+    let lag = prefix
+        .column_by_name("lag")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Float32Array>()
+        .unwrap();
+    assert!(lag.is_null(0));
+    assert_eq!(lag.value(1).to_bits(), 1.5_f32.to_bits());
+    assert!(lag.is_null(2));
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(snapshot.inline_metadata["state_layout_version"], json!(7));
+    let mut restored = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    let expected = advance_cumulative_stream(&mut source, &input.slice(3, 1), 4, &job).await;
+    let actual = advance_cumulative_stream(&mut restored, &input.slice(3, 1), 4, &job).await;
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
 async fn test_cumulative_integer_slab_restore_and_overflow_are_atomic() {
     let spec = cumulative_volume_spec();
     let mut source =

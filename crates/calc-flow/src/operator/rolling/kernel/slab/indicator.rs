@@ -69,7 +69,11 @@ pub(super) fn supports_plan(groups: &[TypedGroupPlan], outputs: &[TypedOutputPla
                 input_index,
                 storage,
                 ..
-            } => only_lags && Some(*input_index) == lag_input && *storage == OutputStorage::Float64,
+            } => {
+                only_lags
+                    && Some(*input_index) == lag_input
+                    && matches!(storage, OutputStorage::Float32 | OutputStorage::Float64)
+            }
             _ => false,
         })
         && !outputs.is_empty()
@@ -95,8 +99,8 @@ fn output_supported(group: &TypedGroupPlan, output: &TypedOutputPlan) -> bool {
         }
         TypedGroupPlan::Lag { storage, .. } => {
             matches!(output.kind, TypedOutputKind::Lag | TypedOutputKind::Delta)
-                && *storage == OutputStorage::Float64
-                && output.storage == OutputStorage::Float64
+                && matches!(storage, OutputStorage::Float32 | OutputStorage::Float64)
+                && output.storage == *storage
         }
         TypedGroupPlan::Rsi { .. } => {
             matches!(output.kind, TypedOutputKind::Rsi) && output.storage == OutputStorage::Float64

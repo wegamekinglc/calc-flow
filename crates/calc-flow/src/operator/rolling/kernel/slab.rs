@@ -159,7 +159,7 @@ impl SlabBuilder {
             _ => return Err(internal_error("rolling slab output kind mismatch")),
         };
         match self {
-            Self::Float(builder) => {
+            Self::Float(builder) | Self::Derived(DerivedBuilder::Float(builder, _)) => {
                 builder.append_option(value);
                 Ok(())
             }
