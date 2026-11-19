@@ -659,7 +659,8 @@ impl EvictionPlan {
 #[derive(Default)]
 struct DirtyLineage {
     runs: [BTreeSet<RunId>; 2],
-    indexes: [bool; 2],
+    groups: [BTreeSet<GroupId>; 2],
+    expiration: [bool; 2],
 }
 
 /// Live run state for both Join sides.
@@ -717,10 +718,11 @@ impl RunState {
         self.sides[side.index()].bytes
     }
 
-    fn mark_run(&mut self, side: JoinSide, id: RunId) {
+    fn mark_run(&mut self, side: JoinSide, id: RunId, groups: Vec<GroupId>) {
         let side = side.index();
         self.dirty.runs[side].insert(id);
-        self.dirty.indexes[side] = true;
+        self.dirty.groups[side].extend(groups);
+        self.dirty.expiration[side] = true;
     }
 
     pub(super) fn finish_native_capture(&mut self) {
@@ -791,6 +793,7 @@ impl RunState {
     fn apply_eviction(&mut self, side: JoinSide, plan: EvictionPlan) -> Eviction {
         let cut = plan.cut;
         let affected = plan.run_cuts.keys().copied().collect::<Vec<_>>();
+        let groups = plan.group_cuts.keys().copied().collect::<Vec<_>>();
         let index = side.index();
         let side = &mut self.sides[index];
         let retired_runs = plan
@@ -841,8 +844,9 @@ impl RunState {
             side.bytes = 0;
         }
         if cut > 0 {
-            self.dirty.indexes[index] = true;
             self.dirty.runs[index].extend(affected);
+            self.dirty.groups[index].extend(groups);
+            self.dirty.expiration[index] = true;
         }
         Eviction {
             expired_rows: cut,
@@ -1322,12 +1326,13 @@ impl Prepared {
         };
         if let Some(update) = self.update {
             let id = update.run.id;
+            let groups = update.buckets.iter().map(|(group, _)| *group).collect();
             state.next_run = state
                 .next_run
                 .checked_add(1)
                 .ok_or_else(|| run_error("run-ID frontier overflowed"))?;
             update.install(&mut state.sides[incoming_side.index()]);
-            state.mark_run(incoming_side, id);
+            state.mark_run(incoming_side, id, groups);
         }
         state.sides[incoming_side.index()].next_row_id = self.next_row_id;
         let outputs = u64::try_from(outputs).map_err(|_| run_error("output count overflowed"))?;

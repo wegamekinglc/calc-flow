@@ -69,13 +69,17 @@ mod tests {
     }
 
     fn left_batch(times: Vec<i64>) -> Batch {
+        left_batch_with_keys(vec![7; times.len()], times)
+    }
+
+    fn left_batch_with_keys(keys: Vec<i64>, times: Vec<i64>) -> Batch {
         let rows = times.len();
         Batch::table(
             vec![
                 RecordBatch::try_new(
                     left_schema(),
                     vec![
-                        Arc::new(Int64Array::from(vec![7; rows])),
+                        Arc::new(Int64Array::from(keys)),
                         Arc::new(TimestampMicrosecondArray::from(times).with_timezone("UTC")),
                         Arc::new(Int64Array::from(vec![42; rows])),
                     ],
@@ -509,10 +513,10 @@ mod tests {
         store: &mut crate::state::v4::V4Store,
     ) {
         persist_native_epoch(original, store, 3).await;
-        assert_eq!(store.stats().carried_objects, 12);
+        assert_eq!(store.stats().carried_objects, 15);
         assert_eq!(
             original.run_core.as_ref().unwrap().native_reuse_counts(),
-            [3, 3, 2]
+            [3, 6, 2]
         );
     }
 
@@ -575,7 +579,7 @@ mod tests {
         let snapshot =
             crate::state::v4::native::load_native(&mut store, &manifest, "match").unwrap();
         let mut missing = snapshot.clone();
-        missing.segments.remove("left/index");
+        missing.segments.remove("left/expiration");
         let mut rejected =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
         assert!(rejected.restore(&missing).is_err());
@@ -626,6 +630,9 @@ mod tests {
         let second = persist_native_epoch(&mut original, &mut store, 2).await;
         let second_snapshot =
             crate::state::v4::native::load_native(&mut store, &second, "match").unwrap();
+        assert!(second_snapshot.segments.contains_key("left/group-0"));
+        assert!(second_snapshot.segments.contains_key("right/group-0"));
+        assert!(!second_snapshot.segments.contains_key("left/index"));
         let mut second_restored =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
         second_restored.restore(&second_snapshot).unwrap();
@@ -633,13 +640,57 @@ mod tests {
             original.run_core.as_ref().unwrap().fingerprint(),
             second_restored.run_core.as_ref().unwrap().fingerprint()
         );
-        assert_eq!(store.stats().carried_objects, 4);
+        assert_eq!(store.stats().carried_objects, 5);
         assert_eq!(
             original.run_core.as_ref().unwrap().native_reuse_counts(),
-            [1, 1, 1]
+            [1, 2, 1]
         );
         assert_clean_native_epoch(&mut original, &mut store).await;
         assert_native_eof_matches(&mut original, &mut restored, &job).await;
+    }
+
+    #[tokio::test]
+    async fn native_group_capture_rebuilds_only_touched_bucket() {
+        let mut original =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        original.enable_run_core();
+        let job = job().with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut output = EdgeCollector::new(original.output_ports().to_vec());
+        original
+            .process_data(
+                "left",
+                left_batch_with_keys(vec![7, 8], vec![100, 100]),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let mut store = crate::state::v4::V4Store::new(temporary.path().join("lineage"));
+        persist_native_epoch(&mut original, &mut store, 1).await;
+        original
+            .process_data(
+                "left",
+                left_batch_with_keys(vec![7], vec![200]),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        let second = persist_native_epoch(&mut original, &mut store, 2).await;
+        assert_eq!(store.stats().carried_objects, 5);
+        assert_eq!(
+            original.run_core.as_ref().unwrap().native_reuse_counts(),
+            [1, 2, 1]
+        );
+        let snapshot = crate::state::v4::native::load_native(&mut store, &second, "match").unwrap();
+        assert!(snapshot.segments.contains_key("left/group-0"));
+        assert!(snapshot.segments.contains_key("left/group-1"));
+        let mut restored =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        restored.restore(&snapshot).unwrap();
+        assert_eq!(restored.status().left.retained_rows, 3);
     }
 
     #[tokio::test]

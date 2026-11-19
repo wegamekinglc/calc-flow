@@ -1561,9 +1561,9 @@ persists `NativeCapture` pages through manifest v4. Direct
 run identity and prefixes, row-ID uniqueness and frontiers, locator ordering and
 coverage, expiration order, and logical accounting before installing state.
 Compatible continuation produces identical subsequent output records and
-sequences. Capture reuses clean run identity, index and shared-key pages and
-retires removed runs from its cache. Full page-list assembly and dirty per-side
-index rebuilding remain, so the end-to-end dirty-page cost target and final
+sequences. Capture reuses clean run identity, per-key bucket, expiration and
+shared-key pages and retires removed runs and buckets from its cache. Full
+page-list assembly remains, so the end-to-end dirty-page cost target and final
 performance acceptance remain open.
 
 #### Legacy migration-test storage and recovery

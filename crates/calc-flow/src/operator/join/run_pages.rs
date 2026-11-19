@@ -40,7 +40,8 @@ struct SideControl {
 #[derive(Default)]
 pub(in crate::operator::join) struct NativePageCache {
     runs: [BTreeMap<RunId, CachedRunPages>; 2],
-    indexes: [Option<NativePage>; 2],
+    groups: [BTreeMap<GroupId, NativePage>; 2],
+    expiration: [Option<NativePage>; 2],
     control: Option<(Control, NativePage)>,
     initialized: bool,
     #[cfg(test)]
@@ -79,13 +80,23 @@ pub(super) fn capture(
         for id in dirty {
             capture_run(state, side, id, epoch, cache)?;
         }
-        if !cache.initialized || state.dirty.indexes[side] {
+        let dirty_groups = if initialized {
+            state.dirty.groups[side].clone()
+        } else {
+            state.sides[side].buckets.keys().copied().collect()
+        };
+        for group in dirty_groups {
+            capture_group(state, side, group, epoch, cache)?;
+        }
+        if !initialized || state.dirty.expiration[side] {
             let prefix = if side == 0 { "left" } else { "right" };
-            cache.indexes[side] = Some(NativePage::arrow(
-                format!("{prefix}/index"),
-                &index_record(&state.sides[side])?,
+            let rows = u64::try_from(state.sides[side].expiration.len())
+                .map_err(|_| page_error("expiration rows exceed u64"))?;
+            cache.expiration[side] = Some(NativePage::arrow(
+                format!("{prefix}/expiration"),
+                &expiration_record(&state.sides[side])?,
                 epoch,
-                0..index_rows(&state.sides[side]),
+                0..rows,
             ));
         } else {
             #[cfg(test)]
@@ -132,10 +143,19 @@ pub(super) fn capture(
             pages.push(cached.payload.clone());
             pages.push(cached.identity.clone());
         }
+        for (group, page) in &cache.groups[side] {
+            #[cfg(not(test))]
+            let _ = group;
+            #[cfg(test)]
+            if initialized && !state.dirty.groups[side].contains(group) {
+                cache.reused_indexes += 1;
+            }
+            pages.push(page.clone());
+        }
         pages.push(
-            cache.indexes[side]
+            cache.expiration[side]
                 .clone()
-                .expect("native index page was initialized"),
+                .expect("native expiration page was initialized"),
         );
     }
     pages.push(control_page);
@@ -195,6 +215,32 @@ fn capture_run(
     Ok(())
 }
 
+fn capture_group(
+    state: &RunState,
+    side: usize,
+    group: GroupId,
+    epoch: u64,
+    cache: &mut NativePageCache,
+) -> Result<()> {
+    let Some(bucket) = state.sides[side].buckets.get(&group) else {
+        cache.groups[side].remove(&group);
+        return Ok(());
+    };
+    let prefix = if side == 0 { "left" } else { "right" };
+    let rows =
+        u64::try_from(bucket.entries.len()).map_err(|_| page_error("bucket rows exceed u64"))?;
+    cache.groups[side].insert(
+        group,
+        NativePage::arrow(
+            format!("{prefix}/group-{}", group.index()),
+            &bucket_record(group, bucket)?,
+            epoch,
+            0..rows,
+        ),
+    );
+    Ok(())
+}
+
 fn run_identity(id: RunId, live: &LiveRun) -> Result<RecordBatch> {
     let run = &live.run;
     let rows = run.row_ids.len();
@@ -238,14 +284,6 @@ fn run_identity(id: RunId, live: &LiveRun) -> Result<RecordBatch> {
         .map_err(|error| page_error(error.to_string()))
 }
 
-fn index_rows(side: &Side) -> u64 {
-    side.buckets
-        .values()
-        .map(|bucket| u64::try_from(bucket.entries.len()).expect("bucket rows fit u64"))
-        .sum::<u64>()
-        + u64::try_from(side.expiration.len()).expect("expiration rows fit u64")
-}
-
 #[derive(Default)]
 struct LocatorColumns {
     kind: Vec<u8>,
@@ -281,13 +319,16 @@ impl LocatorColumns {
     }
 }
 
-fn index_record(side: &Side) -> Result<RecordBatch> {
+fn bucket_record(group: GroupId, bucket: &Bucket) -> Result<RecordBatch> {
     let mut columns = LocatorColumns::default();
-    for (&group, bucket) in &side.buckets {
-        for entry in &bucket.entries {
-            columns.push(0, group, entry, bucket.head, bucket.entries.capacity());
-        }
+    for entry in &bucket.entries {
+        columns.push(0, group, entry, bucket.head, bucket.entries.capacity());
     }
+    locator_record(columns)
+}
+
+fn expiration_record(side: &Side) -> Result<RecordBatch> {
+    let mut columns = LocatorColumns::default();
     for entry in &side.expiration {
         columns.push(
             1,
@@ -297,6 +338,10 @@ fn index_record(side: &Side) -> Result<RecordBatch> {
             side.expiration.capacity(),
         );
     }
+    locator_record(columns)
+}
+
+fn locator_record(columns: LocatorColumns) -> Result<RecordBatch> {
     let fields = vec![
         Field::new("kind", DataType::UInt8, false),
         Field::new("group", DataType::UInt32, false),
@@ -346,22 +391,14 @@ pub(super) fn restore(
     let mut expected = BTreeSet::from([
         "control".to_owned(),
         "keys".to_owned(),
-        "left/index".to_owned(),
-        "right/index".to_owned(),
+        "left/expiration".to_owned(),
+        "right/expiration".to_owned(),
     ]);
     let mut seen_runs = BTreeSet::new();
     let mut sides = [Side::empty(), Side::empty()];
     for (side, state) in sides.iter_mut().enumerate() {
         let prefix = if side == 0 { "left" } else { "right" };
-        let index_name = format!("{prefix}/index");
-        restore_index(
-            state,
-            &decode_record(
-                segments
-                    .get(&index_name)
-                    .ok_or_else(|| page_error("missing index"))?,
-            )?,
-        )?;
+        restore_index_pages(state, side, segments, &mut expected)?;
         for (name, payload) in segments.iter().filter(|(name, _)| {
             name.starts_with(&format!("{prefix}/run-")) && name.ends_with("/payload")
         }) {
@@ -421,6 +458,59 @@ pub(super) fn restore(
         next_output: control.next_output,
         match_limit_failures: control.match_limit_failures,
     })
+}
+
+fn restore_index_pages(
+    state: &mut Side,
+    side: usize,
+    segments: &BTreeMap<String, StateSegment>,
+    expected: &mut BTreeSet<String>,
+) -> Result<()> {
+    let prefix = if side == 0 { "left" } else { "right" };
+    let expiration_name = format!("{prefix}/expiration");
+    let expiration = decode_record(
+        segments
+            .get(&expiration_name)
+            .ok_or_else(|| page_error("missing expiration index"))?,
+    )?;
+    if uint8s(&expiration, 0)?.iter().any(|kind| *kind != 1) {
+        return Err(page_error("expiration page contains a bucket entry"));
+    }
+    let mut records = vec![expiration];
+    let group_prefix = format!("{prefix}/group-");
+    let mut seen_groups = BTreeSet::new();
+    for (name, segment) in segments
+        .iter()
+        .filter(|(name, _)| name.starts_with(&group_prefix))
+    {
+        let group = name[group_prefix.len()..]
+            .parse::<usize>()
+            .ok()
+            .and_then(|group| GroupId::new(group).ok())
+            .ok_or_else(|| page_error("invalid bucket page group"))?;
+        let record = decode_record(segment)?;
+        if uint8s(&record, 0)?.iter().any(|kind| *kind != 0) {
+            return Err(page_error("bucket page contains an expiration entry"));
+        }
+        let groups = uint32s(&record, 1)?;
+        let record_group_id = groups
+            .first()
+            .copied()
+            .and_then(|group| usize::try_from(group).ok())
+            .and_then(|group| GroupId::new(group).ok())
+            .ok_or_else(|| page_error("empty bucket page"))?;
+        let record_group =
+            u32::try_from(record_group_id.index()).expect("GroupId is backed by u32");
+        if group != record_group_id
+            || groups.iter().any(|value| *value != record_group)
+            || !seen_groups.insert(group)
+        {
+            return Err(page_error("duplicated or mismatched bucket page group"));
+        }
+        expected.insert(name.clone());
+        records.push(record);
+    }
+    restore_index(state, &records)
 }
 
 fn restore_run(payload: &StateSegment, identity: &RecordBatch) -> Result<(RunId, LiveRun)> {
@@ -493,56 +583,59 @@ fn restore_run(payload: &StateSegment, identity: &RecordBatch) -> Result<(RunId,
     ))
 }
 
-fn restore_index(side: &mut Side, record: &RecordBatch) -> Result<()> {
-    if record.num_columns() != 8 || record.columns().iter().any(|array| array.null_count() != 0) {
-        return Err(page_error("index schema differs"));
-    }
-    let kinds = uint8s(record, 0)?;
-    let groups = uint32s(record, 1)?;
-    let times = int64s(record, 2)?;
-    let row_ids = uint64s(record, 3)?;
-    let runs = uint64s(record, 4)?;
-    let rows = uint32s(record, 5)?;
-    let heads = uint64s(record, 6)?;
-    let capacities = uint64s(record, 7)?;
+fn restore_index(side: &mut Side, records: &[RecordBatch]) -> Result<()> {
     let mut buckets = BTreeMap::<GroupId, (usize, usize, Vec<LocatorEntry>)>::new();
     let mut expiration = (0usize, 0usize, Vec::new());
-    for row in 0..record.num_rows() {
-        let group = GroupId::new(usize::try_from(groups[row]).expect("u32 group fits usize"))
-            .map_err(|error| page_error(error.to_string()))?;
-        let entry = LocatorEntry {
-            time: EventTime::from_micros(times[row]),
-            row_id: row_ids[row],
-            locator: RowLocator {
-                run: RunId(runs[row]),
-                row: rows[row],
-            },
-            group,
-        };
-        let head =
-            usize::try_from(heads[row]).map_err(|_| page_error("index head exceeds usize"))?;
-        let capacity = usize::try_from(capacities[row])
-            .map_err(|_| page_error("index capacity exceeds usize"))?;
-        match kinds[row] {
-            0 => {
-                let bucket = buckets
-                    .entry(group)
-                    .or_insert_with(|| (head, capacity, Vec::with_capacity(capacity)));
-                if bucket.0 != head || bucket.1 != capacity {
-                    return Err(page_error("bucket descriptors differ"));
+    for record in records {
+        if record.num_columns() != 8 || record.columns().iter().any(|array| array.null_count() != 0)
+        {
+            return Err(page_error("index schema differs"));
+        }
+        let kinds = uint8s(record, 0)?;
+        let groups = uint32s(record, 1)?;
+        let times = int64s(record, 2)?;
+        let row_ids = uint64s(record, 3)?;
+        let runs = uint64s(record, 4)?;
+        let rows = uint32s(record, 5)?;
+        let heads = uint64s(record, 6)?;
+        let capacities = uint64s(record, 7)?;
+        for row in 0..record.num_rows() {
+            let group = GroupId::new(usize::try_from(groups[row]).expect("u32 group fits usize"))
+                .map_err(|error| page_error(error.to_string()))?;
+            let entry = LocatorEntry {
+                time: EventTime::from_micros(times[row]),
+                row_id: row_ids[row],
+                locator: RowLocator {
+                    run: RunId(runs[row]),
+                    row: rows[row],
+                },
+                group,
+            };
+            let head =
+                usize::try_from(heads[row]).map_err(|_| page_error("index head exceeds usize"))?;
+            let capacity = usize::try_from(capacities[row])
+                .map_err(|_| page_error("index capacity exceeds usize"))?;
+            match kinds[row] {
+                0 => {
+                    let bucket = buckets
+                        .entry(group)
+                        .or_insert_with(|| (head, capacity, Vec::with_capacity(capacity)));
+                    if bucket.0 != head || bucket.1 != capacity {
+                        return Err(page_error("bucket descriptors differ"));
+                    }
+                    bucket.2.push(entry);
                 }
-                bucket.2.push(entry);
+                1 => {
+                    if expiration.2.is_empty() {
+                        expiration = (head, capacity, Vec::with_capacity(capacity));
+                    }
+                    if expiration.0 != head || expiration.1 != capacity {
+                        return Err(page_error("expiration descriptors differ"));
+                    }
+                    expiration.2.push(entry);
+                }
+                _ => return Err(page_error("unknown index entry kind")),
             }
-            1 => {
-                if expiration.2.is_empty() {
-                    expiration = (head, capacity, Vec::with_capacity(capacity));
-                }
-                if expiration.0 != head || expiration.1 != capacity {
-                    return Err(page_error("expiration descriptors differ"));
-                }
-                expiration.2.push(entry);
-            }
-            _ => return Err(page_error("unknown index entry kind")),
         }
     }
     side.buckets = buckets

@@ -218,6 +218,11 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   连续 epoch 的第二/第三次 capture 分别携带 4/12 个累计 clean objects，部分淘汰与整 run 退休恢复通过；Join 580 项、
   operator-task 77 项（2 ignored）、native component 5 项及全 feature Clippy 通过。此步骤减少页面内容重建，
   但仍装配完整页面列表并在 dirty 时重建 per-side index，端到端 O(dirty pages) capture 与 P5 性能门槛尚未完成。
+- 2026-11-20 Join 索引页已拆为 per-key bucket 与独立 expiration：commit/eviction 分别记录 dirty run、group 和
+  expiration，单组追加只重建该 bucket，未触及 bucket 继续复用；恢复严格校验页面组身份、entry kind、descriptor、
+  顺序和 accounting。连续 epoch 的第二/第三次 capture 分别累计携带 5/15 个 clean objects；两个 key 中仅一组变化时，
+  另一 bucket、旧 run、另一侧 expiration 和 key record 均复用。Join 581 项、operator-task 77 项（2 ignored）、
+  native component 5 项及全 feature Clippy 通过。完整页面列表仍按全量装配，O(dirty) 增量装配与 P5 验收尚未完成。
 
 ## 1. 目标
 
