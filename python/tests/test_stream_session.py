@@ -146,6 +146,51 @@ def test_table_session_matches_stream_under_source_provided_watermarks() -> None
     ]
 
 
+def test_indicator_session_matches_stream_under_source_provided_watermarks() -> None:
+    quotes = _quotes()
+    macd = ts.macd_components(quotes["x"], fast_span=1, slow_span=2, signal_span=1)
+    signals = quotes.with_columns(
+        FeatureSet(
+            [
+                ("rsi", ts.rsi(quotes["x"], period=2)),
+                ("histogram", macd.histogram),
+            ]
+        )
+    )
+    pushes = [
+        (_rows((0, "a", 0, 1.0)), _at(0)),
+        (_rows((1, "a", 1, 2.0)), _at(1)),
+        (_rows((2, "a", 2, 4.0)), _at(2)),
+    ]
+    with signals.session(
+        config=CONFIG, watermarks=cf.SourceProvidedWatermarks()
+    ) as session:
+        emitted = [session.push(table, watermark=at) for table, at in pushes]
+        emitted.append(session.finish())
+
+    async def feed():
+        for table, at in pushes:
+            yield table
+            yield cf.Watermark(at)
+
+    async def collect() -> list[pa.Table]:
+        async with signals.stream(
+            feed(), config=CONFIG, watermarks=cf.SourceProvidedWatermarks()
+        ) as results:
+            return [table async for table in results]
+
+    expected = asyncio.run(collect())
+    assert [
+        row
+        for table in emitted
+        for row in table.select(["symbol", "seq", "rsi", "histogram"]).to_pylist()
+    ] == [
+        row
+        for table in expected
+        for row in table.select(["symbol", "seq", "rsi", "histogram"]).to_pylist()
+    ]
+
+
 def test_program_session_returns_every_declared_output() -> None:
     quotes = _quotes()
     program = Program(

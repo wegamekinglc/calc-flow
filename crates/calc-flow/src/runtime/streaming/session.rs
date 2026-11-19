@@ -59,8 +59,8 @@ use crate::{
 /// buffers what each operator emits during its turn, so memory per call is
 /// bounded by the operators' own output chunking.
 ///
-/// Construction admits one dynamic input (no static inputs) feeding `Rolling`
-/// (not the indicator or MACD layouts), `Expression` and `Union` nodes, with
+/// Construction admits one dynamic input (no static inputs) feeding `Rolling`,
+/// `Expression` and `Union` nodes, with
 /// no exactly-once output. Other graphs return
 /// [`CalcFlowError::InvalidArgument`] naming the field and should use
 /// [`StreamingRunner`](crate::StreamingRunner).
@@ -880,8 +880,8 @@ fn admit_plan(plan: &StreamExecutionPlan) -> Result<()> {
     Ok(())
 }
 
-/// Admits `Rolling` (except indicator and MACD layouts), `Expression` and
-/// `Union` nodes; every other kind stays on `StreamingRunner`.
+/// Admits `Rolling`, `Expression` and `Union` nodes; every other kind stays on
+/// `StreamingRunner`.
 fn admit_nodes(nodes: &[RuntimeStreamNode]) -> Result<()> {
     nodes
         .iter()
@@ -901,10 +901,8 @@ fn node_rejection(operator: &CompiledStreamOperator) -> Option<String> {
         CompiledStreamOperator::Expression(_)
         | CompiledStreamOperator::SyncExpression(_)
         | CompiledStreamOperator::SyncRolling(_)
+        | CompiledStreamOperator::Rolling(_)
         | CompiledStreamOperator::Union(_) => return None,
-        CompiledStreamOperator::Rolling(rolling) => {
-            return rolling_rejection(rolling.state_layout_version());
-        }
         CompiledStreamOperator::Sql(_)
         | CompiledStreamOperator::SnapshotSql(_)
         | CompiledStreamOperator::BoundedOrder(_)
@@ -919,18 +917,6 @@ fn node_rejection(operator: &CompiledStreamOperator) -> Option<String> {
     Some(format!(
         "{kind} nodes are not supported by StreamSession; use StreamingRunner"
     ))
-}
-
-fn rolling_rejection(layout: u32) -> Option<String> {
-    matches!(
-        layout,
-        crate::ROLLING_INDICATOR_STATE_LAYOUT_VERSION | crate::ROLLING_MACD_STATE_LAYOUT_VERSION
-    )
-    .then(|| {
-        format!(
-            "rolling indicator state layout {layout} is not supported by StreamSession; use StreamingRunner"
-        )
-    })
 }
 
 /// Names the SQL-planned kinds grouped in `node_rejection`.

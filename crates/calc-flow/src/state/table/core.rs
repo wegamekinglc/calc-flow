@@ -887,6 +887,7 @@ impl TableSnapshot {
 
 pub(super) struct Layout7Schema {
     pub(super) counter_name: String,
+    pub(super) keyed_names: Vec<String>,
     pub(super) numeric_name: String,
     pub(super) retention: Retention,
     pub(super) numeric_windows: Vec<usize>,
@@ -1067,12 +1068,17 @@ impl StateTable {
     }
 
     fn layout7_columns(&self) -> Option<(&KeyedColumn, &RingColumn)> {
-        if !self.value_logs.is_empty() || !self.partitions.contains_key(&KeyGroupId(0)) {
+        if !self.value_logs.is_empty()
+            || !self.partitions.contains_key(&KeyGroupId(0))
+            || self.keyed.is_empty()
+            || self
+                .keyed
+                .iter()
+                .any(|column| column.kind != ValueKind::UInt64)
+        {
             return None;
         }
-        let [counter] = self.keyed.as_slice() else {
-            return None;
-        };
+        let counter = self.keyed.first()?;
         let [numeric] = self.rings.as_slice() else {
             return None;
         };
@@ -1091,10 +1097,36 @@ impl StateTable {
         let (counter, numeric) = self.layout7_columns()?;
         Some(Layout7Schema {
             counter_name: counter.name.clone(),
+            keyed_names: self
+                .keyed
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
             numeric_name: numeric.name.clone(),
             retention: numeric.retention,
             numeric_windows: numeric.numeric_windows.clone(),
         })
+    }
+
+    pub(super) fn layout7_keyed_schema(&self) -> Option<Vec<String>> {
+        if !self.value_logs.is_empty()
+            || !self.rings.is_empty()
+            || self.keyed.is_empty()
+            || self.partitions.len() != 1
+            || !self.partitions.contains_key(&KeyGroupId(0))
+            || self
+                .keyed
+                .iter()
+                .any(|column| column.kind != ValueKind::UInt64)
+        {
+            return None;
+        }
+        Some(
+            self.keyed
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
+        )
     }
 
     pub(crate) fn begin(&mut self) -> Result<()> {
@@ -2883,18 +2915,28 @@ impl StateTable {
     }
 
     fn install_layout7_entities(restored: &mut StateTable, snapshot: &TableSnapshot) -> Result<()> {
-        let counters = snapshot.keyed[0]
-            .values
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .ok_or_else(|| internal("layout-7 counter type mismatch"))?;
+        let keyed = snapshot
+            .keyed
+            .iter()
+            .map(|column| {
+                column
+                    .values
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .ok_or_else(|| internal("layout-7 keyed column type mismatch"))
+            })
+            .collect::<Result<Vec<_>>>()?;
         for (index, key) in snapshot.keys.iter().enumerate() {
-            if !counters.is_valid(index) {
-                return Err(internal("layout-7 counter is null"));
-            }
             let entity = restored.resolve_or_append(key.clone())?;
-            restored.set_u64(0, entity, counters.value(index))?;
-            restored.install_layout7_ring(0, entity, &snapshot.rings[0], index)?;
+            for (column, values) in keyed.iter().enumerate() {
+                if !values.is_valid(index) {
+                    return Err(internal("layout-7 keyed value is null"));
+                }
+                restored.set_u64(column, entity, values.value(index))?;
+            }
+            for (column, ring) in snapshot.rings.iter().enumerate() {
+                restored.install_layout7_ring(column, entity, ring, index)?;
+            }
         }
         Ok(())
     }

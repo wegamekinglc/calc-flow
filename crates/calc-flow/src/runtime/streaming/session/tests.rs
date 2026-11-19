@@ -1254,26 +1254,6 @@ fn test_admission_rejects_unsupported_nodes_with_field_paths() {
         BTreeMap::new(),
         "session.nodes.join",
     );
-
-    let indicator: RollingSpec = serde_json::from_value(json!({
-        "configuration_version": 1, "state_layout_version": crate::ROLLING_INDICATOR_STATE_LAYOUT_VERSION,
-        "partition_by": ["symbol"], "event_time": "ts", "sequence_by": ["sequence"],
-        "outputs": [{"kind": "rsi", "primitive_version": 1, "input": "price", "output": "rsi", "period": 2}],
-        "allowed_lateness_micros": 0, "late_policy": {"kind": "drop", "metrics_version": 1},
-        "value_policy": "stateful_numeric_v1",
-    }))
-    .unwrap();
-    let indicator = RollingOperator::new("rsi", input_schema(), indicator).unwrap();
-    assert_rejected(
-        compile(
-            PipelineBuilder::new("rsi")
-                .unwrap()
-                .add_node("rsi", indicator)
-                .unwrap(),
-        ),
-        BTreeMap::new(),
-        "session.nodes.rsi",
-    );
 }
 
 #[test]

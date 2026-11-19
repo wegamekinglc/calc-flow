@@ -623,13 +623,13 @@ publishing a prepared result. See the [native numerical
 semantics](python-api.md#native-arrays) for eager use, zero rules and the
 specified float64 underflow result.
 
-These primitives use rolling `primitive_version=1` and state layout 5. A mixed
-stage containing RSI/ATR uses layout 5 for its other rolling outputs too;
-old-only declarations retain their existing layout selection and semantics.
-Indicator-containing Rust RollingOperator nodes use their selected StateBudget
-byte limit for participating state, candidate, output, scratch and retained
-checkpoint storage. Python adds no rolling-budget option. Existing `ts.ema`
-and `ts.macd` retain their declarations and numerical contracts.
+These primitives use rolling `primitive_version=1` and declaration layout 5.
+Pure indicator stages and stages combining indicators with Float64 Rows numeric
+outputs persist layout-7 state-table recurrence columns. Stages mixing
+indicators with other rolling families retain the legacy layout-5 resource path
+until those families migrate. Old-only declarations retain their existing
+layout selection and semantics. Python adds no rolling-budget option. Existing
+`ts.ema` and `ts.macd` retain their declarations and numerical contracts.
 
 ## MACD components
 
@@ -666,9 +666,10 @@ identify one MACD owner across a Program's named outputs, before branches
 fork. Only consumed columns are emitted; all three recurrences remain active
 when only histogram or line is consumed. An unused container creates no live
 state. The declaration uses `macd_component@1` with a `line`, `signal` or
-`histogram` selector, and a stage containing MACD selects rolling layout 6;
-RSI/ATR-only stages retain layout 5. Explanation reports shared groups and
-the general-path fallback until a typed MACD kernel exists.
+`histogram` selector, and a stage containing MACD selects declaration layout 6;
+RSI/ATR-only stages retain declaration layout 5. Supported indicator/numeric
+stages persist layout-7 recurrence columns, and explanation reports their typed
+scan or indicator groups without a general-path fallback.
 
 When components are consumed on both sides of a native array attachment or a
 projection, the compiler forwards private component columns through proven

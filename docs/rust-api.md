@@ -990,8 +990,10 @@ and nullable float64 output. RSI names one floating input; ATR names floating
 `ROLLING_INDICATOR_STATE_LAYOUT_VERSION` (5). Identical operand/period groups
 share one recurrence per entity, independently of output aliases. They reuse
 the [native indicator numerical contract](#native-rsi-and-atr), including
-complete-segment warm-up and null/NaN resets. Indicator-containing mixed nodes
-currently use the general row fallback.
+complete-segment warm-up and null/NaN resets. Pure indicator nodes and nodes
+combining indicators with Float64 Rows numeric outputs use the typed state-table
+slab. Mixed nodes with other rolling families retain the general resource/worker
+path until those families migrate.
 Kind `cumulative_mean` carries an input, output, and positive `min_periods`;
 it stores one count and arithmetic mean per entity. Kinds `cumulative_sum`,
 `cumulative_min`, `cumulative_max`, and `cumulative_variance` carry numeric
@@ -1020,10 +1022,12 @@ spans 12/26/9 and price/signal minima 1/1; fast must be less than slow. Minima
 may exceed their spans. Components and aliases sharing the same input and all
 five parameters advance one full recurrence per finalized row. A ready carried
 line still advances the signal after a missing price. Selecting only histogram
-keeps the complete 56-byte logical numerical group and 104-byte checkpoint
-payload. Layout 6 also accepts RSI, ATR and the previous rolling outputs;
-layout 5 rejects MACD and keeps its previous payloads. The same bounded worker,
-state budget, checkpoint preparation and managed recovery apply.
+keeps the complete 56-byte logical numerical group. Pure indicator nodes and
+indicator nodes combined with Float64 Rows numeric outputs persist those bits in
+layout-7 keyed recurrence columns; their declarations retain layout 6, or layout
+5 for RSI/ATR-only nodes. Mixed nodes with other rolling families retain the
+layout-5/6 bounded worker and checkpoint-preparation path until those families
+migrate.
 [`native_table_macd.rs`](../crates/calc-flow/examples/native_table_macd.rs) shows
 all three components over nullable integer prices.
 
@@ -1070,9 +1074,11 @@ default, and this runtime limit does not change the project fingerprint.
 The preceding retained-only rule applies to old-only nodes, including old-only
 declarations that explicitly select layout 5 or 6.
 
-For nodes containing RSI, ATR or MACD, the same `StateBudget.max_bytes` instead
-bounds the whole operator's participating peak: committed state, isolated
-candidates, all prepared output chunks, scratch and live encoded
+For supported indicator/numeric slab nodes, `StateBudget.max_bytes` covers the
+state table's logical retained state under the standard checkpoint-copy
+exclusion. For indicator nodes that remain on the legacy mixed-family path, it
+instead bounds the whole operator's participating peak: committed state,
+isolated candidates, all prepared output chunks, scratch and live encoded
 checkpoint/restore segments. Mixed old rolling outputs participate too.
 Shared allocations count once by ownership, while distinct copies count
 separately. `max_rows` keeps its retained-row meaning. The rule applies to
@@ -1089,9 +1095,9 @@ they may only reference already funded owners and numeric charges. This
 excludes no computational or payload containers and does not shorten their
 funded lifetime when ownership moves into a lease.
 
-Layout 5 preserves complete indicator groups and mixed old state with strict
-schema/configuration/kernel/numeric-contract fingerprints. Preparation runs through
-the controlled asynchronous worker path. Capture only attaches prepared bytes
+Legacy layouts 5 and 6 preserve complete indicator groups and mixed old state
+with strict schema/configuration/kernel/numeric-contract fingerprints. Preparation
+runs through the controlled asynchronous worker path. Capture only attaches prepared bytes
 for the exact state revision; an unprepared synchronous capture returns a
 preparation error. Unchanged payload storage can be reused across epochs;
 inventory descriptors remain epoch-specific. Managed recovery validates both

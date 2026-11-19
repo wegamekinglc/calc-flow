@@ -27,9 +27,13 @@ struct SnapshotBatches {
     offsets: RecordBatch,
     values: RecordBatch,
     shared: Vec<RecordBatch>,
+    keyed: Option<RecordBatch>,
 }
 
 pub(crate) fn encode_layout7(table: &StateTable) -> Result<Vec<u8>> {
+    if let Some(encoded) = super::layout7_keyed::encode(table) {
+        return encoded;
+    }
     let schema = validate_shape(table)?;
     let snapshot = table.snapshot_for_layout7();
     let components = encode_components(&snapshot, schema.numeric_windows.len())?;
@@ -37,12 +41,24 @@ pub(crate) fn encode_layout7(table: &StateTable) -> Result<Vec<u8>> {
 }
 
 fn encode_components(snapshot: &TableSnapshot, windows: usize) -> Result<Vec<Vec<u8>>> {
-    let mut components = Vec::with_capacity(BASE_COMPONENTS + windows - 1);
+    let extra_keyed = usize::from(snapshot.keyed.len() > 1);
+    let mut components = Vec::with_capacity(BASE_COMPONENTS + windows - 1 + extra_keyed);
     components.push(encode_entity(snapshot)?);
     components.push(encode_offsets(snapshot)?);
     components.push(encode_values(snapshot)?);
     for group in 1..windows {
         components.push(encode_shared_entity(snapshot, group)?);
+    }
+    if snapshot.keyed.len() > 1 {
+        let fields = snapshot.keyed[1..]
+            .iter()
+            .map(|column| Field::new(&column.name, DataType::UInt64, false))
+            .collect();
+        let columns = snapshot.keyed[1..]
+            .iter()
+            .map(|column| column.values.clone())
+            .collect();
+        components.push(write_component(fields, columns, HashMap::new())?);
     }
     Ok(components)
 }
@@ -66,9 +82,12 @@ fn assemble_layout7(components: &[Vec<u8>]) -> Result<Vec<u8>> {
 }
 
 pub(crate) fn decode_layout7(table: &StateTable, bytes: &[u8]) -> Result<TableSnapshot> {
+    if let Some(decoded) = super::layout7_keyed::decode(table, bytes) {
+        return decoded;
+    }
     let schema = validate_shape(table)?;
-    let components = decode_components(bytes, schema.numeric_windows.len())?;
-    let batches = decode_snapshot_batches(&components, schema.numeric_windows.len())?;
+    let components = decode_components(bytes, &schema)?;
+    let batches = decode_snapshot_batches(&components, &schema)?;
     let snapshot = decode_snapshot(
         table,
         &schema,
@@ -76,12 +95,18 @@ pub(crate) fn decode_layout7(table: &StateTable, bytes: &[u8]) -> Result<TableSn
         &batches.offsets,
         &batches.values,
         &batches.shared,
+        batches.keyed.as_ref(),
     )?;
     validate_numeric(&schema, &snapshot)?;
     Ok(snapshot)
 }
 
-fn decode_snapshot_batches(components: &[Vec<u8>], windows: usize) -> Result<SnapshotBatches> {
+fn decode_snapshot_batches(
+    components: &[Vec<u8>],
+    schema: &Layout7Schema,
+) -> Result<SnapshotBatches> {
+    let windows = schema.numeric_windows.len();
+    let keyed_index = BASE_COMPONENTS + windows - 1;
     Ok(SnapshotBatches {
         entity: read_component(&components[0])?,
         offsets: read_component(&components[1])?,
@@ -89,6 +114,9 @@ fn decode_snapshot_batches(components: &[Vec<u8>], windows: usize) -> Result<Sna
         shared: (1..windows)
             .map(|group| read_component(&components[BASE_COMPONENTS + group - 1]))
             .collect::<Result<Vec<_>>>()?,
+        keyed: (schema.keyed_names.len() > 1)
+            .then(|| read_component(&components[keyed_index]))
+            .transpose()?,
     })
 }
 
@@ -316,8 +344,8 @@ fn decode_component(bytes: &[u8], cursor: &mut usize, index: usize) -> Result<Ve
     Ok(component)
 }
 
-fn decode_components(bytes: &[u8], windows: usize) -> Result<Vec<Vec<u8>>> {
-    let count = decode_component_count(bytes, windows)?;
+fn decode_components(bytes: &[u8], schema: &Layout7Schema) -> Result<Vec<Vec<u8>>> {
+    let count = decode_component_count(bytes, schema)?;
     let header_bytes = 12 + count * 8;
     let mut cursor = header_bytes;
     let mut components = Vec::with_capacity(count);
@@ -330,14 +358,16 @@ fn decode_components(bytes: &[u8], windows: usize) -> Result<Vec<Vec<u8>>> {
     Ok(components)
 }
 
-fn decode_component_count(bytes: &[u8], windows: usize) -> Result<usize> {
+fn decode_component_count(bytes: &[u8], schema: &Layout7Schema) -> Result<usize> {
     if bytes.len() < MIN_HEADER_BYTES || &bytes[..8] != MAGIC {
         return Err(layout7_error(
             "rolling state layout is not 7; start a new lineage",
         ));
     }
     let count = read_u32(bytes, 8)? as usize;
-    if count != BASE_COMPONENTS + windows - 1 {
+    let expected = BASE_COMPONENTS + schema.numeric_windows.len() - 1
+        + usize::from(schema.keyed_names.len() > 1);
+    if count != expected {
         return Err(layout7_error(
             "rolling layout-7 component count mismatch; start a new lineage",
         ));
@@ -412,13 +442,17 @@ fn decode_snapshot(
     offsets: &RecordBatch,
     values: &RecordBatch,
     shared: &[RecordBatch],
+    extra_keyed: Option<&RecordBatch>,
 ) -> Result<TableSnapshot> {
     let fields = decode_snapshot_fields(entity, offsets, values, shared)?;
-    let keyed = vec![KeyedSnapshot {
+    let mut keyed = vec![KeyedSnapshot {
         name: schema.counter_name.clone(),
         kind: ValueKind::UInt64,
         values: entity.column(1).clone(),
     }];
+    if let Some(record) = extra_keyed {
+        keyed.extend(decode_extra_keyed(record, &schema.keyed_names[1..])?);
+    }
     let rings = vec![RingSnapshot {
         name: schema.numeric_name.clone(),
         kind: RingKind::Float64,
@@ -436,6 +470,40 @@ fn decode_snapshot(
         )));
     }
     Ok(snapshot)
+}
+
+fn decode_extra_keyed(record: &RecordBatch, names: &[String]) -> Result<Vec<KeyedSnapshot>> {
+    if record.num_columns() != names.len() {
+        return Err(layout7_error(
+            "rolling layout-7 keyed column inventory mismatch",
+        ));
+    }
+    let schema = record.schema();
+    names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let field = &schema.fields()[index];
+            let values = record
+                .column(index)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .ok_or_else(|| layout7_error("rolling layout-7 keyed column type mismatch"))?;
+            if field.name() != name
+                || field.data_type() != &DataType::UInt64
+                || values.null_count() != 0
+            {
+                return Err(layout7_error(
+                    "rolling layout-7 keyed column inventory mismatch",
+                ));
+            }
+            Ok(KeyedSnapshot {
+                name: name.clone(),
+                kind: ValueKind::UInt64,
+                values: record.column(index).clone(),
+            })
+        })
+        .collect()
 }
 
 struct NumericColumns<'a> {
@@ -806,6 +874,49 @@ mod tests {
         assert_eq!(
             restored.numeric_mean(0, entity).unwrap().unwrap().to_bits(),
             4.0_f64.to_bits()
+        );
+    }
+
+    #[test]
+    fn layout7_keyed_family_restores_recurrence_bits_and_continues() {
+        fn keyed_schema() -> StateTable {
+            let mut table = StateTable::new();
+            table.add_keyed_column("transition_count", ValueKind::UInt64);
+            table.add_keyed_column("rsi_positions", ValueKind::UInt64);
+            table.add_keyed_column("rsi_previous_price", ValueKind::UInt64);
+            table.add_keyed_column("rsi_mean_gain", ValueKind::UInt64);
+            table
+        }
+
+        let mut source = keyed_schema();
+        source.begin().unwrap();
+        let entity = source
+            .resolve_or_append(EntityKey::new(b"a".to_vec()))
+            .unwrap();
+        source.set_u64(0, entity, 4).unwrap();
+        source.set_u64(1, entity, 3).unwrap();
+        source.set_u64(2, entity, 3.5_f64.to_bits()).unwrap();
+        source.set_u64(3, entity, 0.25_f64.to_bits()).unwrap();
+        source.commit().unwrap();
+        let encoded = encode_layout7(&source).unwrap();
+
+        let mut restored = keyed_schema();
+        let snapshot = decode_layout7(&restored, &encoded).unwrap();
+        restored.restore(snapshot).unwrap();
+        assert_eq!(
+            restored.canonical_state_for_test(),
+            source.canonical_state_for_test()
+        );
+
+        for table in [&mut source, &mut restored] {
+            table.begin().unwrap();
+            table.set_u64(1, entity, 4).unwrap();
+            table.set_u64(2, entity, 4.5_f64.to_bits()).unwrap();
+            table.commit().unwrap();
+        }
+        assert_eq!(
+            restored.canonical_state_for_test(),
+            source.canonical_state_for_test()
         );
     }
 

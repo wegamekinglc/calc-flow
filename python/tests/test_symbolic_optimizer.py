@@ -228,6 +228,29 @@ def test_cumulative_mean_explain_uses_typed_ewma_transition() -> None:
     assert _rolling_group_key(output) == ("ewma", "x", 0)
 
 
+@pytest.mark.parametrize("kind", ["rank", "quantile"])
+def test_scan_explain_uses_typed_group_for_every_native_scan(kind: str) -> None:
+    output = {"kind": kind, "input": "x", "frame": {"kind": "rows", "size": 3}}
+    assert _rolling_group_key(output) == ("scan", kind, "x", "rows", 3)
+    assert _rolling_kernel_fallback(output, {"x": "float64"}) is None
+
+    quotes = _ordered()
+    features = quotes.with_columns(
+        FeatureSet(((kind, getattr(ts, kind)(quotes["x"], window=rows(3))),))
+    )
+    program = Program(
+        f"{kind}-explain",
+        engine="sql",
+        inputs=(quotes,),
+        outputs=(("features", features),),
+    )
+
+    explanation = program.explain(Runtime())
+
+    assert "selected=ordered_primitive" in explanation
+    assert "shared_state_groups=1 fallback=none" in explanation
+
+
 def test_filter_is_not_moved_across_a_rolling_finality_boundary() -> None:
     quotes = _ordered()
     filtered = table.filter(quotes, quotes["x"] > 0.0)

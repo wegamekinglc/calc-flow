@@ -1988,10 +1988,11 @@ needs one price/close followed by `period` differences/true ranges. See the
 State is shared by outputs with identical operands, period and numerical
 semantics, independently within each entity. Aliases do not advance a group
 twice. RSI and ATR can coexist with lag, windows and cumulative summaries.
-Indicator-containing nodes currently use the general row execution path;
-their presence does not imply typed Arrow-kernel execution. Existing late-row
-policies and `with_late_output` remain applicable. Dropped or routed late rows
-do not update the indicator.
+Pure indicator nodes and indicator nodes combined with Float64 Rows numeric
+outputs use the typed state-table slab. Mixed nodes with other rolling families
+retain the general resource/worker path until those families migrate. Existing
+late-row policies and `with_late_output` remain applicable. Dropped or routed
+late rows do not update the indicator.
 
 Input admission checks infinity and the ATR high/low domain before accepting
 the envelope. Differences and gaps depend on finalized entity order, so
@@ -2004,11 +2005,13 @@ original input. Recovery follows the source replay and job failure contract.
 Existing delivery rules still apply if an emission fails after a prepared
 chunk has already been accepted downstream.
 
-Rust `RollingOperator::set_state_budget` supplies the existing limit. For a
-node containing at least one RSI, ATR or MACD, `max_bytes` covers all simultaneously
-participating committed state, isolated candidates, prepared outputs, scratch
-and live encoded checkpoint/restore segments. This includes old rolling
-outputs in a mixed node. Shared Arrow allocations are charged once at their
+Rust `RollingOperator::set_state_budget` supplies the existing limit. Supported
+indicator/numeric slab nodes use the standard state-table charge and
+checkpoint-copy exclusion. For an indicator node still on the legacy
+mixed-family path, `max_bytes` covers all simultaneously participating committed
+state, isolated candidates, prepared outputs, scratch and live encoded
+checkpoint/restore segments. This includes old rolling outputs in that mixed
+node. Shared Arrow allocations are charged once at their
 observable ownership boundary; distinct copies are separate. `max_rows`
 retains its existing entity/history/pending-row meaning. Old-only nodes keep
 retained-state accounting and checkpoint-copy exclusion, even with explicit
@@ -2024,8 +2027,8 @@ they may only reference already funded owners and numeric charges. This
 excludes no computational or payload containers and does not shorten their
 funded lifetime when ownership moves into a lease.
 
-Layouts 5 and 6 persist complete indicator state and fingerprints alongside mixed
-history and pending rows. Asynchronous checkpoint preparation admits encoding
+Legacy layouts 5 and 6 persist complete indicator state and fingerprints
+alongside mixed history and pending rows. Asynchronous checkpoint preparation admits encoding
 work before allocation. Capture reuses immutable prepared bytes for the exact
 revision; a direct synchronous capture of an unprepared revision fails with a
 preparation error. Unchanged payload bytes may be shared across epochs, while
@@ -2041,14 +2044,15 @@ identity and safe `state.*` path without echoing checkpoint values or unknown
 metadata keys. Existing layouts 1–4 keep their compatibility rules.
 
 
-MACD components use the same owned streaming lifecycle with rolling layout 6.
-`ts.macd_components` shares one complete group across aliases, subsets and named
-output forks. Each group retains 56 logical numerical bytes and a 104-byte raw
-Table checkpoint payload, including all five parameters and all three EWMA
-states. Missing prices can carry a valid line and continue updating the signal;
-Inf/generated NaN follow existing EWMA arithmetic. Previous rolling layouts and
-RSI/ATR-only layout-5 payloads retain their contracts. Both ordinary and terminal
-layout-6 recovery validate the full group and identity before connectors open.
+MACD components keep declaration layout 6. `ts.macd_components` shares one
+complete group across aliases, subsets and named output forks. Each group retains
+56 logical numerical bytes, including all five parameters and all three EWMA
+states. Pure indicator nodes and indicator nodes combined with Float64 Rows
+numeric outputs persist those bits in layout-7 keyed recurrence columns. Mixed
+nodes with other rolling families retain their layout-5/6 worker payloads until
+those families migrate. Missing prices can carry a valid line and continue
+updating the signal; Inf/generated NaN follow existing EWMA arithmetic. Managed
+recovery validates the full group and identity before connectors open.
 
 ## Native array sequence recovery
 

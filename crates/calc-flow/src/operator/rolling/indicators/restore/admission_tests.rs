@@ -17,7 +17,7 @@ fn operator() -> RollingOperator {
         Field::new("seq", DataType::UInt64, false),
         Field::new("price", DataType::Float64, true),
     ]));
-    let spec:RollingSpec=serde_json::from_value(json!({"configuration_version":1,"state_layout_version":5,"partition_by":["seq"],"event_time":"time","sequence_by":["seq"],"outputs":[{"kind":"rsi","primitive_version":1,"input":"price","output":"rsi","period":2}],"allowed_lateness_micros":0,"late_policy":{"kind":"error","scope":"envelope"},"value_policy":"stateful_numeric_v1"})).unwrap();
+    let spec:RollingSpec=serde_json::from_value(json!({"configuration_version":1,"state_layout_version":5,"partition_by":["seq"],"event_time":"time","sequence_by":["seq"],"outputs":[{"kind":"rsi","primitive_version":1,"input":"price","output":"rsi","period":2},{"kind":"ewma","primitive_version":1,"input":"price","output":"ewma","span":2,"min_periods":1}],"allowed_lateness_micros":0,"late_policy":{"kind":"error","scope":"envelope"},"value_policy":"stateful_numeric_v1"})).unwrap();
     let mut operator = RollingOperator::new("features", schema, spec).unwrap();
     operator
         .set_state_budget(StateBudget::new(32, 64 << 10).unwrap())

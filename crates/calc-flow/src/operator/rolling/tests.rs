@@ -3559,7 +3559,8 @@ fn typed_rsi_atr_match_general() {
     let input = RecordBatch::try_new(Arc::new(schema), columns).unwrap();
     assert_typed_matches_general(&spec, &input.schema(), &input);
     let operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
-    assert!(operator.indicator_resources.is_some());
+    assert!(operator.indicator_resources.is_none());
+    assert_eq!(operator.state_layout_version(), 7);
 }
 
 #[test]
@@ -3606,6 +3607,110 @@ fn typed_macd_matches_general_for_all_components() {
     assert_typed_matches_general(&spec, &input.schema(), &input);
     let operator = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
     assert!(operator.indicator_resources.is_none());
+    assert_eq!(operator.state_layout_version(), 7);
+}
+
+#[tokio::test]
+async fn indicator_slab_restore_matches_uninterrupted_bits() {
+    let mut spec = kernel_spec(json!([
+        {"kind":"rsi", "primitive_version":1, "input":"price", "output":"rsi", "period":2},
+        {
+            "kind":"atr", "primitive_version":1, "high":"price", "low":"price",
+            "close":"price", "output":"atr", "period":2
+        },
+        {
+            "kind":"macd_component", "primitive_version":1, "input":"price",
+            "output":"macd_line", "fast_span":1, "slow_span":2,
+            "signal_span":1, "component":"line"
+        },
+        {
+            "kind":"macd_component", "primitive_version":1, "input":"price",
+            "output":"macd_signal", "fast_span":1, "slow_span":2,
+            "signal_span":1, "component":"signal"
+        },
+        aggregate_output("mean", "price", "mean", 2)
+    ]));
+    spec.state_layout_version = 6;
+    let schema = Arc::new(kernel_schema());
+    let mut source = RollingOperator::new("rolling", schema.clone(), spec.clone()).unwrap();
+    let mut restored = RollingOperator::new("rolling", schema, spec).unwrap();
+    let job = crate::StreamJobContext::new(
+        1,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut source_output = crate::EdgeCollector::new(source.output_ports().to_vec());
+    source
+        .process_data(
+            "input",
+            Batch::table(
+                vec![float64_fast_record(&[
+                    (1, "a", 1, Some(1.0)),
+                    (2, "a", 2, Some(2.0)),
+                    (3, "a", 3, Some(4.0)),
+                    (4, "a", 4, Some(3.0)),
+                ])],
+                BatchMetadata::default(),
+            )
+            .unwrap(),
+            &context,
+            &mut source_output,
+        )
+        .await
+        .unwrap();
+    source
+        .on_watermark(EventTime::from_micros(4), &context, &mut source_output)
+        .await
+        .unwrap();
+    source_output.drain("output");
+
+    source.prepare_checkpoint_async(&context).await.unwrap();
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(snapshot.inline_metadata["state_layout_version"], json!(7));
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    assert!(restored.indicator_resources.is_none());
+    assert_eq!(
+        source
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .unwrap()
+            .canonical_state_for_test(),
+        restored
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .unwrap()
+            .canonical_state_for_test()
+    );
+
+    let continuation = float64_fast_record(&[(5, "a", 5, Some(5.0)), (6, "a", 6, Some(2.0))]);
+    let mut restored_output = crate::EdgeCollector::new(restored.output_ports().to_vec());
+    for (operator, output) in [
+        (&mut source, &mut source_output),
+        (&mut restored, &mut restored_output),
+    ] {
+        operator
+            .process_data(
+                "input",
+                Batch::table(vec![continuation.clone()], BatchMetadata::default()).unwrap(),
+                &context,
+                output,
+            )
+            .await
+            .unwrap();
+        operator
+            .on_watermark(EventTime::from_micros(6), &context, output)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        format!("{:?}", source_output.drain("output")),
+        format!("{:?}", restored_output.drain("output"))
+    );
 }
 
 #[test]

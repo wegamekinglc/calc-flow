@@ -268,16 +268,16 @@ The [Rust Table example](../crates/calc-flow/examples/native_table_indicators.rs
 combines RSI, ATR and lag in one native operator.
 
 Rust callers can set `RollingOperator::set_state_budget` before compiling a
-finite plan. For an operator containing RSI, ATR or MACD, `max_bytes` bounds its
-participating peak: state, isolated candidates, prepared output, scratch and
-live checkpoint storage. Mixed old/new outputs share the limit. `max_rows`
-keeps its retained-row meaning. An old-only operator keeps its existing
-retained-state accounting, including when explicitly using layout 5.
-Both default counters are 9,007,199,254,740,991; no smaller implicit byte cap
-or Python/project rolling-budget option is added. This logical charge is
-separate from process RSS, DataFusion pools and application-owned results.
-Retained footprints count observable buffer storage and identifiable Array/
-container descriptors; private immutable Buffer owner control blocks are
+finite plan. Indicator/numeric slab nodes use the standard state-table charge.
+For an indicator node still on the legacy mixed-family path, `max_bytes` bounds
+its participating peak: state, isolated candidates, prepared output, scratch and
+live checkpoint storage. `max_rows` keeps its retained-row meaning. An old-only
+operator keeps its existing retained-state accounting, including when explicitly
+using layout 5. Both default counters are 9,007,199,254,740,991; no smaller
+implicit byte cap or Python/project rolling-budget option is added. This logical
+charge is separate from process RSS, DataFusion pools and application-owned
+results. Retained footprints count observable buffer storage and identifiable
+Array/container descriptors; private immutable Buffer owner control blocks are
 excluded. Construction reservations may conservatively include that overhead.
 Pure accounting owner-key/reservation indexes are not recursively charged;
 they may only reference already funded owners and numeric charges. This
@@ -293,8 +293,9 @@ shared native recurrence advances per ordered entity row. Signed/unsigned
 8–64-bit integers and float32/float64 use the existing float64 EWMA conversion.
 The fast span must be less than slow; all counts are positive u64 values and
 both minima may exceed spans. A missing price can carry the line, which still
-updates the signal. The stage uses layout 6 and can include earlier rolling
-outputs. See [component ownership](symbolic-api.md#macd-components) and the
+updates the signal. The declaration uses layout 6; supported indicator/numeric
+stages persist layout-7 state-table recurrence columns. See
+[component ownership](symbolic-api.md#macd-components) and the
 [Python example](../examples/native_macd.py).
 
 ## Async execution and deadlines

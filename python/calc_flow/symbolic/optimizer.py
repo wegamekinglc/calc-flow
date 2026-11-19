@@ -492,7 +492,7 @@ def _rolling_group_key(output: dict[str, object], /) -> tuple[object, ...] | Non
         return "cumulative", kind, output.get("input")
     if kind in {"ewma", "cumulative_mean"}:
         return "ewma", output.get("input"), output.get("span", 0)
-    if kind in {"argmax", "argmin", "unique_count", "decay"}:
+    if kind in {"argmax", "argmin", "rank", "quantile", "unique_count", "decay"}:
         return "scan", kind, output.get("input"), *frame
     return _indicator_group_key(output)
 

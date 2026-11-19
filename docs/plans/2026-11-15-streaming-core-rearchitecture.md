@@ -140,6 +140,12 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   独立审查已批准。最终 P5 性能验收、P6 和最终 CI 仍未完成。
 - P6 统一 morsel 池与 Rolling lanes 迁移（`84d7e23f`、`378736b0`、`1ad671d8`）已交付，
   包含有界票据、取消/异常结算和有序合并；Join/ASOF 迁移、固定分区执行器、I/O 分离和性能门槛仍未完成。
+- 2026-11-19 P2.5 继续交付：纯 RSI/ATR/MACD 及其与同一 Float64 Rows numeric 输入的混合节点已迁入事务化 slab，
+  recurrence 的 u64/浮点位模式写入 layout 7 keyed family；numeric ring 与额外 keyed 列可共存，旧 numeric 编码不变。
+  StreamSession 不再拒绝 indicator，Python RSI+MACD session 与 runner 结果一致；混合 RSI/ATR/MACD+mean 的冷恢复及后续输出
+  与不中断运行一致。rank/quantile explain 也已恢复 typed scan 报告。Rolling 688 项、layout/slab focused、optimizer/lowering 52 项、
+  Clippy 与 Ruff 通过。indicator 与 EWMA 等尚未迁 slab 的 family 混合时仍保留旧 resource/layout 5/6 路径；其余 family、
+  旧子系统删除和性能门槛尚未完成。复杂度门禁仍是此前同一组既有增长项，本步骤没有新增失败位置。
 - 2026-11-19 当前工作区修复了既有 CI 失败：v4 恢复保留静态输入摘要诊断和安全的错误分类，
   测试改用 `manifests/lineage/manifests/epoch-N.json` 与 opaque `blocks`；typed MACD 不再误入旧 resource worker，
   late-output Rolling 可恢复当前声明 layout，native sequence 保留 operator 上下文，ASOF lifecycle fixture 不再由 worker

@@ -1,5 +1,7 @@
 //! State-table ownership for typed rolling stream transitions.
 
+mod indicator;
+
 use std::{sync::Arc, time::Instant};
 
 use datafusion::arrow::array::{ArrayRef, Float64Array, Float64Builder, UInt64Builder};
@@ -9,7 +11,7 @@ use super::{
     EntityRouting, OutputStorage, Result, RollingKernelExecution, RollingKernelMetrics,
     RollingKernelPlan, RollingKernelState, RollingMetricsRecorder, RollingStage, RollingWork,
     StateCharge, Statistic, StreamKernelUpdate, TypedFrame, TypedGroupInput, TypedGroupPlan,
-    TypedOutputKind, TypedOutputPlan, internal_error, nanos, operator_error, valid_float64,
+    TypedOutputKind, TypedOutputPlan, internal_error, nanos, operator_error,
 };
 use crate::{
     accumulate::NumericAccumulator,
@@ -90,6 +92,33 @@ impl SlabBuilder {
         }
     }
 
+    fn append_row(
+        &mut self,
+        groups: &[TypedGroupPlan],
+        output: &TypedOutputPlan,
+        readouts: &indicator::RowReadouts<'_>,
+    ) -> Result<()> {
+        if matches!(groups[output.group], TypedGroupPlan::Numeric { .. }) {
+            let numeric = TypedOutputPlan {
+                group: indicator::numeric_ordinal(groups, output.group),
+                ..*output
+            };
+            return self.append(readouts.accumulators, &numeric);
+        }
+        let value = match output.kind {
+            TypedOutputKind::Rsi | TypedOutputKind::Atr => readouts.values[output.group][0],
+            TypedOutputKind::Macd(component) => readouts.values[output.group][component],
+            _ => return Err(internal_error("rolling slab output kind mismatch")),
+        };
+        match self {
+            Self::Float(builder) => {
+                builder.append_option(value);
+                Ok(())
+            }
+            Self::Count(_) => Err(internal_error("rolling slab output storage mismatch")),
+        }
+    }
+
     fn append(
         &mut self,
         accumulators: &[NumericAccumulator],
@@ -157,75 +186,43 @@ impl SlabBuilder {
 }
 
 struct SlabInput {
-    values: Float64Array,
+    inputs: Vec<TypedGroupInput>,
     last_identity: Option<Vec<u8>>,
 }
 
 impl RollingKernelPlan {
     pub(in crate::operator::rolling) fn supports_slab(&self) -> bool {
-        let Some(TypedGroupPlan::Numeric { input_index, .. }) = self.groups.first() else {
-            return false;
-        };
-        self.groups.iter().all(|group| {
-            matches!(
-                group,
-                TypedGroupPlan::Numeric {
-                    input_index: candidate,
-                    frame: TypedFrame::Rows(_),
-                    ..
-                } if candidate == input_index
-            )
-        }) && !self.outputs.is_empty()
-            && self.outputs.iter().all(|output| {
-                output.group < self.groups.len()
-                    && match output.kind {
-                        TypedOutputKind::Statistic(Statistic::Count) => {
-                            output.storage == OutputStorage::Count
-                        }
-                        TypedOutputKind::Statistic(
-                            Statistic::Sum
-                            | Statistic::Mean
-                            | Statistic::Variance
-                            | Statistic::Stddev,
-                        ) => output.storage == OutputStorage::Float64,
-                        _ => false,
-                    }
-            })
+        indicator::supports_plan(&self.groups, &self.outputs)
     }
 
     pub(in crate::operator::rolling) fn can_use_slab(&self, state: &RollingKernelState) -> bool {
         self.supports_slab() && (state.slab.is_some() || state.states.is_empty())
     }
 
-    fn ensure_slab(&self, state: &mut RollingKernelState) -> Result<()> {
+    fn ensure_slab(&self, state: &mut RollingKernelState) {
         if state.slab.is_some() {
-            return Ok(());
+            return;
         }
-        let mut windows = self.groups.iter().map(|group| match group {
+        let mut table = StateTable::new();
+        table.add_keyed_column("transition_count", ValueKind::UInt64);
+        let mut windows = self.groups.iter().filter_map(|group| match group {
             TypedGroupPlan::Numeric {
                 frame: TypedFrame::Rows(window),
                 dispersion,
                 ..
-            } => Ok((*window, *dispersion)),
-            _ => Err(internal_error(
-                "rolling slab plan contains a non-numeric Rows group",
-            )),
+            } => Some((*window, *dispersion)),
+            _ => None,
         });
-        let Some(first) = windows.next() else {
-            return Err(internal_error("rolling slab plan has no numeric groups"));
-        };
-        let (first_window, first_dispersion) = first?;
-        let mut table = StateTable::new();
-        table.add_keyed_column("transition_count", ValueKind::UInt64);
-        let column = table.add_numeric_rows_column("numeric", first_window);
-        table.set_numeric_dispersion(column, 0, first_dispersion);
-        for window in windows {
-            let (window, dispersion) = window?;
-            let group = table.add_numeric_window(column, window);
-            table.set_numeric_dispersion(column, group, dispersion);
+        if let Some((first_window, first_dispersion)) = windows.next() {
+            let column = table.add_numeric_rows_column("numeric", first_window);
+            table.set_numeric_dispersion(column, 0, first_dispersion);
+            for (window, dispersion) in windows {
+                let group = table.add_numeric_window(column, window);
+                table.set_numeric_dispersion(column, group, dispersion);
+            }
         }
+        indicator::add_columns(&mut table, &self.groups);
         state.slab = Some(table);
-        Ok(())
     }
 
     pub(in crate::operator::rolling) fn encode_slab_state(
@@ -244,7 +241,7 @@ impl RollingKernelPlan {
         last_identity: Option<Vec<u8>>,
     ) -> Result<RollingKernelState> {
         let mut state = RollingKernelState::default();
-        self.ensure_slab(&mut state)?;
+        self.ensure_slab(&mut state);
         let table = state.slab.as_mut().expect("slab initialized");
         let snapshot = crate::state::decode_layout7(table, bytes)?;
         table.restore(snapshot)?;
@@ -322,20 +319,8 @@ impl RollingKernelPlan {
     }
 
     fn slab_input(&self, input: &RecordBatch, node_id: &str) -> Result<SlabInput> {
-        let columns = self.typed_inputs(input, node_id)?;
-        if !columns
-            .iter()
-            .all(|input| matches!(input, TypedGroupInput::Single(_)))
-        {
-            return Err(internal_error(
-                "rolling slab input is not one shared Float64 column",
-            ));
-        }
-        let Some(TypedGroupInput::Single(values)) = columns.first() else {
-            return Err(internal_error("rolling slab has no Float64 input"));
-        };
         Ok(SlabInput {
-            values: values.clone(),
+            inputs: self.typed_inputs(input, node_id)?,
             last_identity: self.last_ordered_identity(input, node_id)?,
         })
     }
@@ -398,20 +383,27 @@ impl RollingKernelPlan {
     }
 
     fn append_slab_row(
+        &self,
         table: &mut StateTable,
         entity: EntityId,
         first: bool,
-        value: Option<f64>,
+        inputs: &[TypedGroupInput],
+        row: usize,
         builders: &mut [SlabBuilder],
-        outputs: &[TypedOutputPlan],
     ) -> Result<()> {
-        if first {
-            table.push_numeric_rows(0, entity, value)?;
-        } else {
-            table.push_numeric_rows_recurrent(0, entity, value)?;
+        let readouts = indicator::update(
+            table,
+            entity,
+            &self.groups,
+            inputs,
+            row,
+            self.nan_as_value,
+            first,
+        )?;
+        for (builder, output) in builders.iter_mut().zip(&self.outputs) {
+            builder.append_row(&self.groups, output, &readouts)?;
         }
-        let accumulators = table.numeric_accumulators(0, entity)?;
-        Self::append_slab_outputs(builders, outputs, accumulators)
+        Ok(())
     }
 
     fn write_full_tick(
@@ -438,7 +430,7 @@ impl RollingKernelPlan {
     fn fill_slab_rows(
         &self,
         table: &mut StateTable,
-        values: &Float64Array,
+        inputs: &[TypedGroupInput],
         routing: &EntityRouting,
         input_rows: usize,
         node_id: &str,
@@ -451,17 +443,23 @@ impl RollingKernelPlan {
             .map(|output| SlabBuilder::new(output, input_rows))
             .collect::<Result<Vec<_>>>()?;
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
-        let full_tick =
-            self.write_full_tick(table, &ids, values, routing.keys.len(), &mut builders)?;
+        let full_tick = if indicator::numeric_only(&self.groups) {
+            let Some(TypedGroupInput::Single(values)) = inputs.first() else {
+                return Err(internal_error("rolling numeric slab input mismatch"));
+            };
+            self.write_full_tick(table, &ids, values, routing.keys.len(), &mut builders)?
+        } else {
+            false
+        };
         if !full_tick {
             for (row, &entity) in ids.iter().enumerate() {
-                Self::append_slab_row(
+                self.append_slab_row(
                     table,
                     entity,
                     routing.rows.first_rows[routing.entity_ids[row]] == row,
-                    valid_float64(values, row, self.nan_as_value),
+                    inputs,
+                    row,
                     &mut builders,
-                    &self.outputs,
                 )?;
             }
         }
@@ -501,7 +499,7 @@ impl RollingKernelPlan {
     ) -> Result<StreamKernelUpdate> {
         self.validate_state(state, node_id)?;
         let created = state.slab.is_none();
-        self.ensure_slab(state)?;
+        self.ensure_slab(state);
         let batch = self.slab_input(input, node_id)?;
         let (routing, entity_encode_ns) = self.route_slab(state, input, node_id, observer)?;
         let previous_charge = charge(state.slab.as_ref().expect("slab initialized"), node_id)?;
@@ -511,7 +509,7 @@ impl RollingKernelPlan {
         let local_ids = routing.entity_ids.clone();
         let result = self.fill_slab_rows(
             state.slab.as_mut().expect("slab initialized"),
-            &batch.values,
+            &batch.inputs,
             &routing,
             input.num_rows(),
             node_id,
