@@ -1,4 +1,7 @@
-use datafusion::arrow::array::Array;
+use datafusion::arrow::{
+    array::{Array, Float64Array},
+    datatypes::DataType,
+};
 
 use super::super::{
     OutputStorage, Result, Statistic, TypedFrame, TypedGroupInput, TypedGroupPlan, TypedOutputKind,
@@ -7,6 +10,7 @@ use super::super::{
 use crate::{
     accumulate::NumericAccumulator,
     array::indicators::{AtrKernel, MacdKernel, MacdParameters, RsiKernel},
+    operator::rolling::cumulative::{CumulativeAccumulator, NumericValue},
     state::{EntityId, StateTable, ValueKind},
 };
 
@@ -21,6 +25,7 @@ pub(super) struct RowReadouts<'a> {
     pub(super) accumulators: &'a [NumericAccumulator],
     pub(super) values: Vec<[Option<f64>; 3]>,
     pub(super) valid_counts: Option<Vec<u64>>,
+    pub(super) cumulative: Option<Vec<Option<CumulativeAccumulator>>>,
 }
 
 pub(super) fn supports_plan(groups: &[TypedGroupPlan], outputs: &[TypedOutputPlan]) -> bool {
@@ -44,7 +49,7 @@ pub(super) fn supports_plan(groups: &[TypedGroupPlan], outputs: &[TypedOutputPla
             TypedGroupPlan::Rsi { .. }
             | TypedGroupPlan::Atr { .. }
             | TypedGroupPlan::Macd { .. } => true,
-            TypedGroupPlan::Ewma { .. } => !has_indicator,
+            TypedGroupPlan::Ewma { .. } | TypedGroupPlan::Cumulative { .. } => !has_indicator,
             _ => false,
         })
         && !outputs.is_empty()
@@ -76,6 +81,15 @@ fn output_supported(group: &TypedGroupPlan, output: &TypedOutputPlan) -> bool {
         }
         TypedGroupPlan::Ewma { .. } => {
             matches!(output.kind, TypedOutputKind::Ewma) && output.storage == OutputStorage::Float64
+        }
+        TypedGroupPlan::Cumulative { storage, .. } => {
+            matches!(
+                output.kind,
+                TypedOutputKind::Statistic(
+                    Statistic::Sum | Statistic::Min | Statistic::Max | Statistic::Variance
+                )
+            ) && *storage == OutputStorage::Float64
+                && output.storage == OutputStorage::Float64
         }
         _ => false,
     }
@@ -128,11 +142,22 @@ fn field_names(group: &TypedGroupPlan) -> &'static [&'static str] {
         "signal_value",
     ];
     const EWMA: &[&str] = &["valid_count", "value"];
+    const CUMULATIVE: &[&str] = &[
+        "valid_count",
+        "value_kind",
+        "value_low",
+        "value_high",
+        "origin",
+        "mean",
+        "m2",
+        "has_infinity",
+    ];
     match group {
         TypedGroupPlan::Rsi { .. } => RSI,
         TypedGroupPlan::Atr { .. } => ATR,
         TypedGroupPlan::Macd { .. } => MACD,
         TypedGroupPlan::Ewma { .. } => EWMA,
+        TypedGroupPlan::Cumulative { .. } => CUMULATIVE,
         _ => &[],
     }
 }
@@ -148,16 +173,16 @@ pub(super) fn update<'a>(
     if groups.len() != inputs.len() {
         return Err(internal_error("rolling slab group input width mismatch"));
     }
-    let EntityRow {
-        entity,
-        first,
-        node_id,
-    } = position;
+    let EntityRow { entity, first, .. } = position;
     let mut values = vec![[None; 3]; groups.len()];
     let mut valid_counts = groups
         .iter()
         .any(|group| matches!(group, TypedGroupPlan::Ewma { .. }))
         .then(|| vec![0; groups.len()]);
+    let mut cumulative = groups
+        .iter()
+        .any(|group| matches!(group, TypedGroupPlan::Cumulative { .. }))
+        .then(|| vec![None; groups.len()]);
     let mut numeric_updated = false;
     for (index, (group, input)) in groups.iter().zip(inputs).enumerate() {
         match (group, input) {
@@ -206,26 +231,23 @@ pub(super) fn update<'a>(
                 )?;
                 write_macd(table, entity, base, kernel)?;
             }
+            (TypedGroupPlan::Ewma { .. }, TypedGroupInput::Single(input)) => {
+                let (count, value) =
+                    update_ewma(table, position, groups, index, group, input, row)?;
+                valid_counts.as_mut().expect("EWMA counts are allocated")[index] = count;
+                values[index][0] = Some(value);
+            }
             (
-                TypedGroupPlan::Ewma {
-                    alpha, cumulative, ..
+                TypedGroupPlan::Cumulative {
+                    statistic,
+                    storage: OutputStorage::Float64,
+                    ..
                 },
                 TypedGroupInput::Single(input),
             ) => {
-                let base = column_base(groups, index);
-                let (count, value) = crate::array::rolling::next_ewma(
-                    table.u64(base, entity)?,
-                    f64::from_bits(table.u64(base + 1, entity)?),
-                    valid_float64(input, row, false),
-                    *alpha,
-                    *cumulative,
-                )
-                .ok_or_else(|| {
-                    super::super::operator_error(node_id, "rolling EWMA sample count overflowed")
-                })?;
-                valid_counts.as_mut().expect("EWMA counts are allocated")[index] = count;
-                values[index][0] = Some(value);
-                write_fields(table, entity, base, &[count, value.to_bits()])?;
+                let summary =
+                    update_cumulative(table, position, groups, index, input, row, *statistic)?;
+                cumulative.as_mut().expect("cumulative state is allocated")[index] = Some(summary);
             }
             _ => return Err(internal_error("rolling slab group input mismatch")),
         }
@@ -239,7 +261,73 @@ pub(super) fn update<'a>(
         accumulators,
         values,
         valid_counts,
+        cumulative,
     })
+}
+
+fn update_ewma(
+    table: &mut StateTable,
+    position: EntityRow<'_>,
+    groups: &[TypedGroupPlan],
+    index: usize,
+    group: &TypedGroupPlan,
+    input: &Float64Array,
+    row: usize,
+) -> Result<(u64, f64)> {
+    let TypedGroupPlan::Ewma {
+        alpha, cumulative, ..
+    } = group
+    else {
+        return Err(internal_error("rolling EWMA plan mismatch"));
+    };
+    let base = column_base(groups, index);
+    let (count, value) = crate::array::rolling::next_ewma(
+        table.u64(base, position.entity)?,
+        f64::from_bits(table.u64(base + 1, position.entity)?),
+        valid_float64(input, row, false),
+        *alpha,
+        *cumulative,
+    )
+    .ok_or_else(|| {
+        super::super::operator_error(position.node_id, "rolling EWMA sample count overflowed")
+    })?;
+    write_fields(table, position.entity, base, &[count, value.to_bits()])?;
+    Ok((count, value))
+}
+
+fn update_cumulative(
+    table: &mut StateTable,
+    position: EntityRow<'_>,
+    groups: &[TypedGroupPlan],
+    index: usize,
+    input: &Float64Array,
+    row: usize,
+    statistic: Statistic,
+) -> Result<CumulativeAccumulator> {
+    let base = column_base(groups, index);
+    let mut summary = read_cumulative(table, position.entity, base, statistic)?;
+    if let Some(sample) = valid_float64(input, row, false) {
+        summary.add_numeric(
+            NumericValue::Float(sample.to_bits()),
+            statistic,
+            position.node_id,
+        )?;
+    }
+    write_fields(table, position.entity, base, &summary.columns())?;
+    Ok(summary)
+}
+
+fn read_cumulative(
+    table: &StateTable,
+    entity: EntityId,
+    base: usize,
+    statistic: Statistic,
+) -> Result<CumulativeAccumulator> {
+    let mut columns = [0; 8];
+    for (offset, value) in columns.iter_mut().enumerate() {
+        *value = table.u64(base + offset, entity)?;
+    }
+    CumulativeAccumulator::from_columns(columns, statistic, &DataType::Float64)
 }
 
 fn column_base(groups: &[TypedGroupPlan], index: usize) -> usize {

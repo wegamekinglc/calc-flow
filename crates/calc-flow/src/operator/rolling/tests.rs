@@ -3611,6 +3611,96 @@ fn typed_macd_matches_general_for_all_components() {
 }
 
 #[tokio::test]
+async fn cumulative_float64_slab_restore_matches_uninterrupted_bits() {
+    let mut spec = kernel_spec(json!([
+        {"kind":"cumulative_sum", "primitive_version":1, "input":"price", "output":"sum", "min_periods":1},
+        {"kind":"cumulative_min", "primitive_version":1, "input":"price", "output":"min", "min_periods":1},
+        {"kind":"cumulative_max", "primitive_version":1, "input":"price", "output":"max", "min_periods":1},
+        {"kind":"cumulative_variance", "primitive_version":1, "input":"price", "output":"variance", "min_periods":1, "ddof":0}
+    ]));
+    spec.state_layout_version = 4;
+    let schema = Arc::new(kernel_schema());
+    let mut source = RollingOperator::new("rolling", schema.clone(), spec.clone()).unwrap();
+    let mut restored = RollingOperator::new("rolling", schema, spec).unwrap();
+    assert_eq!(source.state_layout_version(), 7);
+    let job = crate::StreamJobContext::new(
+        1,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut source_output = crate::EdgeCollector::new(source.output_ports().to_vec());
+    source
+        .process_data(
+            "input",
+            Batch::table(
+                vec![float64_fast_record(&[
+                    (1, "a", 1, Some(1.0)),
+                    (2, "a", 2, None),
+                    (3, "a", 3, Some(3.0)),
+                    (4, "a", 4, Some(-2.0)),
+                ])],
+                BatchMetadata::default(),
+            )
+            .unwrap(),
+            &context,
+            &mut source_output,
+        )
+        .await
+        .unwrap();
+    source
+        .on_watermark(EventTime::from_micros(4), &context, &mut source_output)
+        .await
+        .unwrap();
+    source_output.drain("output");
+    source.prepare_checkpoint_async(&context).await.unwrap();
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(snapshot.inline_metadata["state_layout_version"], json!(7));
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    assert_eq!(
+        source
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .unwrap()
+            .canonical_state_for_test(),
+        restored
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .unwrap()
+            .canonical_state_for_test()
+    );
+
+    let continuation = float64_fast_record(&[(5, "a", 5, Some(5.0)), (6, "a", 6, Some(4.0))]);
+    let mut restored_output = crate::EdgeCollector::new(restored.output_ports().to_vec());
+    for (operator, output) in [
+        (&mut source, &mut source_output),
+        (&mut restored, &mut restored_output),
+    ] {
+        operator
+            .process_data(
+                "input",
+                Batch::table(vec![continuation.clone()], BatchMetadata::default()).unwrap(),
+                &context,
+                output,
+            )
+            .await
+            .unwrap();
+        operator
+            .on_watermark(EventTime::from_micros(6), &context, output)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        format!("{:?}", source_output.drain("output")),
+        format!("{:?}", restored_output.drain("output"))
+    );
+}
+
+#[tokio::test]
 async fn ewma_slab_restore_matches_uninterrupted_bits() {
     let spec = exponential_kernel_spec(json!([ewma_price(3, 1, "ema")]));
     let schema = Arc::new(kernel_schema());

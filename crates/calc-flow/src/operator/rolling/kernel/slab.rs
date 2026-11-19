@@ -6,6 +6,7 @@ use std::{sync::Arc, time::Instant};
 
 use datafusion::arrow::array::{ArrayRef, Float64Array, Float64Builder, UInt64Builder};
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::ScalarValue;
 
 use super::{
     EntityRouting, OutputStorage, Result, RollingKernelExecution, RollingKernelMetrics,
@@ -97,7 +98,31 @@ impl SlabBuilder {
         groups: &[TypedGroupPlan],
         output: &TypedOutputPlan,
         readouts: &indicator::RowReadouts<'_>,
+        node_id: &str,
     ) -> Result<()> {
+        if matches!(groups[output.group], TypedGroupPlan::Cumulative { .. }) {
+            let summary = readouts
+                .cumulative
+                .as_ref()
+                .expect("cumulative state is present")[output.group]
+                .as_ref()
+                .expect("cumulative group was updated");
+            let value = if summary.valid_count() < output.min_periods {
+                None
+            } else if matches!(output.kind, TypedOutputKind::Statistic(Statistic::Variance)) {
+                summary.variance(output.ddof)
+            } else {
+                let ScalarValue::Float64(value) = summary.scalar(node_id)? else {
+                    return Err(internal_error("cumulative slab output type mismatch"));
+                };
+                value
+            };
+            let Self::Float(builder) = self else {
+                return Err(internal_error("cumulative slab builder type mismatch"));
+            };
+            builder.append_option(value);
+            return Ok(());
+        }
         if matches!(groups[output.group], TypedGroupPlan::Numeric { .. }) {
             let numeric = TypedOutputPlan {
                 group: indicator::numeric_ordinal(groups, output.group),
@@ -409,7 +434,7 @@ impl RollingKernelPlan {
             self.nan_as_value,
         )?;
         for (builder, output) in builders.iter_mut().zip(&self.outputs) {
-            builder.append_row(&self.groups, output, &readouts)?;
+            builder.append_row(&self.groups, output, &readouts, position.node_id)?;
         }
         Ok(())
     }

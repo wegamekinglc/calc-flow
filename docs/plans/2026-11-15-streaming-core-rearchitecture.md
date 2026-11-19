@@ -172,6 +172,9 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
 - 2026-11-19 P2.3 继续交付：独立 EWMA 及 numeric+EWMA 节点以 keyed recurrence 写入 layout 7，复用 `next_ewma`，
   恢复保存有效样本数与浮点位模式，min_periods、null/NaN 和后续输出保持一致。indicator+EWMA 仍走旧 resource/layout 5/6，
   其余 typed families 和旧子系统删除未完成。Rolling 689 项、EWMA 恢复测试和 Clippy 通过，未新增性能结论。
+- 2026-11-19 P2.3 继续交付：Float64 cumulative sum/min/max/variance 复用 `CumulativeAccumulator` 的 canonical 列编码进入 layout 7，
+  覆盖恢复和后续输出一致性、128 位总量拆列与非法 value 状态拒绝。indicator+cumulative、整数和其他类型仍保留旧路径；
+  旧 snapshot fixture 已改为 layout 7 的缺失 segment 契约；Rolling 691 项、三项 slab 恢复用例和 Clippy 通过，未新增性能结论。
 - 2026-11-19 当前工作区修复了既有 CI 失败：v4 恢复保留静态输入摘要诊断和安全的错误分类，
   测试改用 `manifests/lineage/manifests/epoch-N.json` 与 opaque `blocks`；typed MACD 不再误入旧 resource worker，
   late-output Rolling 可恢复当前声明 layout，native sequence 保留 operator 上下文，ASOF lifecycle fixture 不再由 worker

@@ -396,42 +396,11 @@ fn drain(collector: &mut crate::EdgeCollector) -> Vec<RecordBatch> {
         .collect()
 }
 
-fn remove_cumulative_summaries(
+fn remove_cumulative_prefix(
     snapshot: &crate::OperatorStateSnapshot,
 ) -> crate::OperatorStateSnapshot {
-    use datafusion::arrow::{array::BooleanArray, compute::filter_record_batch};
-
     let mut snapshot = snapshot.clone();
-    let (segment_id, segment) = snapshot.segments.iter().next().unwrap();
-    let segment_id = segment_id.clone();
-    let mut reader = FileReader::try_new(Cursor::new(segment.bytes()), None).unwrap();
-    let record = reader.next().unwrap().unwrap();
-    let kinds = record
-        .column(0)
-        .as_any()
-        .downcast_ref::<UInt8Array>()
-        .unwrap();
-    let keep = kinds
-        .values()
-        .iter()
-        .map(|kind| *kind != 4)
-        .collect::<BooleanArray>();
-    let stripped = filter_record_batch(&record, &keep).unwrap();
-    assert!(stripped.num_rows() < record.num_rows());
-    let mut bytes = Vec::new();
-    {
-        let mut writer = FileWriter::try_new(&mut bytes, stripped.schema().as_ref()).unwrap();
-        writer.write(&stripped).unwrap();
-        writer.finish().unwrap();
-    }
-    let replacement = crate::StateSegment::new(bytes);
-    let handle = &mut snapshot
-        .inline_metadata
-        .get_mut("segment_inventory")
-        .unwrap()[0]["handle"];
-    handle["byte_len"] = json!(replacement.bytes().len());
-    handle["sha256"] = json!(replacement.sha256());
-    snapshot.segments.insert(segment_id, replacement);
+    snapshot.segments.clear();
     snapshot
 }
 
@@ -484,7 +453,7 @@ async fn test_cumulative_snapshot_rejects_missing_prefix_inventory() {
     let mut restored =
         RollingOperator::new("rolling", Arc::new(kernel_schema()), source.spec().clone()).unwrap();
     StreamOperator::restore(&mut restored, &snapshot).unwrap();
-    let corrupted = remove_cumulative_summaries(&snapshot);
+    let corrupted = remove_cumulative_prefix(&snapshot);
     assert!(
         StreamOperator::restore(&mut restored, &corrupted).is_err(),
         "restore accepted a processed prefix without any cumulative summaries"
@@ -543,7 +512,7 @@ async fn test_cumulative_snapshot_restores_summaries_and_pending_rows() {
     let spec = cumulative_spec();
     let mut source =
         RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
-    assert_eq!(source.state_layout_version(), 4);
+    assert_eq!(source.state_layout_version(), 7);
     let job = StreamJobContext::new(
         7,
         TEST_FINGERPRINT,
