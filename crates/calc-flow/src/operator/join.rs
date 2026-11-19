@@ -244,6 +244,230 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn production_inner_join_uses_columnar_runs_without_sql_probe() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        operator.enable_run_core();
+        let job = StreamJobContext::new(
+            1,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let job = job.with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        reset_join_work();
+        operator
+            .process_data("left", left_batch(vec![100, 100]), &context, &mut collector)
+            .await
+            .unwrap();
+        operator
+            .process_data("right", right_batch(vec![100]), &context, &mut collector)
+            .await
+            .unwrap();
+        let core = operator
+            .run_core
+            .as_ref()
+            .expect("columnar production core");
+        assert_eq!(core.rows(JoinSide::Left), 2);
+        assert_eq!(core.rows(JoinSide::Right), 1);
+        assert_eq!(join_work().sql_probe_table_builds, 0);
+        assert_eq!(operator.status().emitted_match_rows, 2);
+        assert_eq!(
+            collector.drain("output")[0].as_data().unwrap().num_rows(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn production_checkpoint_restore_continues_run_output() {
+        let mut original =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        original.enable_run_core();
+        let job = job().with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut original_output = EdgeCollector::new(original.output_ports().to_vec());
+        original
+            .process_data(
+                "left",
+                left_batch(vec![100, 200]),
+                &context,
+                &mut original_output,
+            )
+            .await
+            .unwrap();
+        original.prepare_checkpoint_async(&context).await.unwrap();
+        let snapshot = original.checkpoint(Epoch::new(1).unwrap()).unwrap();
+        let mut restored =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        restored.restore(&snapshot).unwrap();
+        restored.enable_run_core();
+        let mut restored_output = EdgeCollector::new(restored.output_ports().to_vec());
+        for (operator, output) in [
+            (&mut original, &mut original_output),
+            (&mut restored, &mut restored_output),
+        ] {
+            operator
+                .process_data("right", right_batch(vec![100, 200]), &context, output)
+                .await
+                .unwrap();
+        }
+        assert_eq!(restored.status().left.retained_rows, 2);
+        let expected = original_output.drain("output");
+        let actual = restored_output.drain("output");
+        assert_eq!(actual.len(), 1);
+        assert_eq!(actual[0].as_data().unwrap().metadata().sequence(), 0);
+        assert_eq!(
+            paid_times(actual[0].as_data().unwrap()),
+            paid_times(expected[0].as_data().unwrap())
+        );
+        assert_eq!(actual[0].as_data().unwrap().num_rows(), 4);
+    }
+
+    #[tokio::test]
+    async fn production_morsels_reject_the_whole_batch_at_match_limit() {
+        let limited = StreamJoinSpec::inner(
+            ["account_id"],
+            ["account_id"],
+            "authorized_at",
+            "paid_at",
+            JoinTimeBounds::new(Duration::from_secs(300), Duration::from_secs(60)).unwrap(),
+            JoinStateLimits::new(10_000, 10_000_000, 1).unwrap(),
+        )
+        .unwrap();
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), limited).unwrap();
+        operator.enable_run_core();
+        let job = job().with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", left_batch(vec![100, 100]), &context, &mut collector)
+            .await
+            .unwrap();
+        let error = operator
+            .process_data(
+                "right",
+                right_batch(vec![100; crate::operator::keyed::MORSEL_ROWS + 1]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("match limit"));
+        assert_eq!(operator.run_core.as_ref().unwrap().rows(JoinSide::Right), 0);
+        assert_eq!(operator.state.next_right_row_id, 0);
+        assert_eq!(operator.status().match_limit_failures, 1);
+        assert!(collector.drain("output").is_empty());
+    }
+
+    #[tokio::test]
+    async fn production_watermark_evicts_run_prefix_and_metrics() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        operator.enable_run_core();
+        let job = job().with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", left_batch(vec![100]), &context, &mut collector)
+            .await
+            .unwrap();
+        operator
+            .on_ingress_progress(
+                "right",
+                &progress_context(
+                    &job,
+                    (IngressState::Active, Some(100)),
+                    (IngressState::Active, Some(60_000_101)),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(operator.run_core.as_ref().unwrap().rows(JoinSide::Left), 0);
+        assert_eq!(operator.status().left.retained_rows, 0);
+        assert_eq!(operator.status().left.retained_bytes, 0);
+        assert_eq!(operator.status().left.evicted_rows, 1);
+    }
+
+    #[tokio::test]
+    async fn production_state_limit_failure_is_atomic() {
+        let limited = StreamJoinSpec::inner(
+            ["account_id"],
+            ["account_id"],
+            "authorized_at",
+            "paid_at",
+            JoinTimeBounds::new(Duration::from_secs(300), Duration::from_secs(60)).unwrap(),
+            JoinStateLimits::new(1, 1_000_000, 1_000).unwrap(),
+        )
+        .unwrap();
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), limited).unwrap();
+        operator.enable_run_core();
+        let job = job().with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", left_batch(vec![0]), &context, &mut collector)
+            .await
+            .unwrap();
+        let error = operator
+            .process_data("left", left_batch(vec![1]), &context, &mut collector)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            reason_of(&error),
+            Some(crate::StreamingFailureReason::JoinStateLimitExceeded)
+        );
+        assert_eq!(operator.status().state_limit_failures, 1);
+        assert_eq!(operator.status().left.retained_rows, 1);
+        assert_eq!(operator.state.next_left_row_id, 1);
+        assert!(collector.drain("output").is_empty());
+    }
+
+    #[tokio::test]
+    async fn production_eviction_metric_overflow_is_atomic() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        operator.enable_run_core();
+        let job = job().with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "left",
+                left_batch(vec![3, 0, 2, 1]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        operator.state.metrics.left.evicted_rows = u64::MAX;
+        let before = operator.status();
+        let fingerprint = operator.run_core.as_ref().unwrap().fingerprint();
+        let error = operator
+            .on_ingress_progress(
+                "right",
+                &progress_context(
+                    &job,
+                    (IngressState::Active, None),
+                    (IngressState::Active, Some(60_000_004)),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("evicted_rows"));
+        assert_eq!(operator.status(), before);
+        assert_eq!(
+            operator.run_core.as_ref().unwrap().fingerprint(),
+            fingerprint
+        );
+        assert!(collector.drain("output").is_empty());
+    }
+
     fn paid_times(data: &Batch) -> Vec<i64> {
         data.table_payload()
             .unwrap()
@@ -345,13 +569,15 @@ mod tests {
         let mut operator =
             StreamJoinOperator::new("match", Arc::clone(&dict_schema), right_schema(), spec())
                 .unwrap();
+        operator.enable_run_core();
         let job = StreamJobContext::new(
             1,
             "fingerprint",
             JsonMap::new(),
             None,
             CancellationToken::new(),
-        );
+        )
+        .with_checkpointing(false);
         let context = StreamOperatorContext::new(&job, "match", None);
         let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
 
@@ -2799,6 +3025,13 @@ fn side_status(metrics: &SideMetrics) -> StreamJoinSideStatus {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RunCoreMode {
+    Legacy,
+    Columnar,
+}
+
 /// Stateful two-input bounded event-time Join.
 pub struct StreamJoinOperator {
     name: String,
@@ -2814,6 +3047,10 @@ pub struct StreamJoinOperator {
     payload_native_eligible: bool,
     runtime: StreamRuntimeState,
     state: StreamJoinState,
+    #[cfg(test)]
+    run_core: Option<Box<production::RunCore>>,
+    #[cfg(test)]
+    run_core_enabled: RunCoreMode,
     retained_key_cache: RetainedKeyCache,
     key_dictionary: key_dictionary::Dictionary,
     key_bindings: key_dictionary::Bindings,
@@ -3531,6 +3768,8 @@ mod native_lookup;
 mod output_gather;
 mod output_projection;
 #[cfg(test)]
+mod production;
+#[cfg(test)]
 mod row_ipc;
 #[cfg(test)]
 #[path = "join/run_tests.rs"]
@@ -3621,6 +3860,10 @@ impl StreamJoinOperator {
             compiled,
             runtime: StreamRuntimeState::new(),
             state: StreamJoinState::default(),
+            #[cfg(test)]
+            run_core: None,
+            #[cfg(test)]
+            run_core_enabled: RunCoreMode::Legacy,
             retained_key_cache: RetainedKeyCache::default(),
             key_dictionary: key_dictionary::Dictionary::default(),
             key_bindings: key_dictionary::Bindings::default(),
@@ -5035,6 +5278,38 @@ impl StreamJoinOperator {
         Ok(())
     }
 
+    #[cfg(test)]
+    fn enable_run_core(&mut self) {
+        self.run_core_enabled = RunCoreMode::Columnar;
+    }
+
+    #[cfg(test)]
+    async fn process_runs(
+        &mut self,
+        ingress: &str,
+        batch: &Batch,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        if self.run_core.is_none() {
+            self.run_core = Some(Box::new(production::RunCore::from_legacy(self)?));
+        }
+        let mut core = self.run_core.take().expect("initialized run core");
+        let result = core.process(self, ingress, batch, context, output).await;
+        self.run_core = Some(core);
+        result
+    }
+
+    #[cfg(test)]
+    fn sync_run_checkpoint(&mut self) -> Result<()> {
+        let Some(core) = self.run_core.take() else {
+            return Ok(());
+        };
+        let result = core.sync_legacy(self);
+        self.run_core = Some(core);
+        result
+    }
+
     async fn prepare_data_append(
         &mut self,
         ingress: &str,
@@ -5162,6 +5437,13 @@ impl StreamOperator for StreamJoinOperator {
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
         self.begin_data(context).await?;
+        #[cfg(test)]
+        if self.run_core_enabled == RunCoreMode::Columnar
+            && !context.job().checkpointing()
+            && production::supported(self)
+        {
+            return self.process_runs(ingress, &batch, context, output).await;
+        }
         let (prepared, expiration_append) =
             self.prepare_data_append(ingress, &batch, context).await?;
         self.finish_data(ingress, prepared, expiration_append, context, output)
@@ -5176,6 +5458,15 @@ impl StreamOperator for StreamJoinOperator {
         let progress = self.required_progress(ingress, context)?;
         self.await_progress_release(context).await?;
         self.note_checkpoint_mutation(context.job().checkpointing())?;
+        #[cfg(test)]
+        if self.run_core.is_some() {
+            let mut core = self.run_core.take().expect("active run core");
+            let result = core.evict(self, ingress, progress);
+            self.run_core = Some(core);
+            result?;
+            self.ingress_progress = context.ingress_progress().clone();
+            return Ok(());
+        }
         self.evict_progress(ingress, progress, context.job().checkpointing())?;
         self.rebuild_key_identities(context).await?;
         if self.has_sparse_candidates() {
@@ -5246,6 +5537,10 @@ impl StreamOperator for StreamJoinOperator {
         }
         self.state.left.clear();
         self.state.right.clear();
+        #[cfg(test)]
+        {
+            self.run_core = None;
+        }
         self.key_dictionary = key_dictionary::Dictionary::default();
         self.key_bindings = key_dictionary::Bindings::default();
         self.key_dictionary_needs_rebuild = false;
@@ -5263,6 +5558,10 @@ impl StreamOperator for StreamJoinOperator {
     fn reset(&mut self) -> Result<()> {
         let writer = self.v2_writer.next_owner(false)?;
         self.state = StreamJoinState::default();
+        #[cfg(test)]
+        {
+            self.run_core = None;
+        }
         self.key_dictionary = key_dictionary::Dictionary::default();
         self.key_bindings = key_dictionary::Bindings::default();
         self.key_dictionary_needs_rebuild = false;
@@ -5278,6 +5577,10 @@ impl StreamOperator for StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
         #[cfg(test)]
+        {
+            self.sync_run_checkpoint()?;
+        }
+        #[cfg(test)]
         if self.checkpoint_v1_test_producer {
             self.check_v1_test_layout()?;
             return self.prepare_compaction(context).await;
@@ -5286,6 +5589,10 @@ impl StreamOperator for StreamJoinOperator {
     }
 
     fn checkpoint(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
+        #[cfg(test)]
+        {
+            self.sync_run_checkpoint()?;
+        }
         #[cfg(test)]
         if self.checkpoint_v1_test_producer {
             return self.checkpoint_v1(epoch);

@@ -127,6 +127,16 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   内存 snapshot/restore 校验 locator 覆盖、顺序、row-ID/frontier 和 accounting，后续输出与序列一致且 snapshot fingerprint
   相同。Join 569 项和 clippy 通过。该核心尚未接入生产 `StreamJoinOperator` admission 或 v4 state pages；
   现有 managed Join layouts 1–3 和恢复路径保持不变。生产接线、最终旧 layout 删除和性能门槛仍未完成。
+- 2026-11-19 P5.1 整批原子预检（`76630a79`）：`RunState` 可在一个输入批内预检多个 morsel，统一执行 match cap，
+  在全部输出物化成功后由调用方显式提交 run/frontier/sequence；输出上限或 match cap 失败不提交半批状态。
+  10 项 run 测试通过。此提交不包含生产 admission 接线或 v4 pages，生产 Join 仍保持原路径。
+- 2026-11-19 P5.1 run 迁移适配验证：`join::production::RunCore` 复用既有 admission，按最多 4,096 行构造
+  Arrow morsel，经 shared-key routing、native probe 和 selection gather 产生输出，并在输出接受后提交 run/frontier。
+  match/state limit 与淘汰指标失败保持原子性，legacy capture/restore 仅作为迁移测试边界。该路径只在显式测试中启用，
+  公共生产路径尚未切换。Join 576 项和 Clippy 通过；native v4 pages、旧实现删除、统一 checkpoint-on/off 与性能验收未完成。
+- 2026-11-19 durable ACK 完成边界修复（`f4c88429`）：手动 `trigger_checkpoint` 不再于 sink commit 后提前返回，
+  而是等待 manifest、transactional sink commit 与 durable source acknowledgement 全部完成；失败终态返回错误。
+  ACK 测试改用 v4 `lineage/manifests/epoch-1.json`，正常、ACK 失败、ACK 挂起及 `continuous_public` 18 项通过。
 - P5.2 ASOF columnar 生产迁移（`888d7f93`，已批准）：生产 `StreamAsofJoinOperator` 以 shared-key columnar runs
   替换旧 row/object state。每个 admitted batch 形成不可变 Arrow run，携带 group/time/sequence 与 payload/identity
   liveness；稳定 `(run ID, row offset)` locator 按 per-key `(time, sequence)` 和全局 pending-left

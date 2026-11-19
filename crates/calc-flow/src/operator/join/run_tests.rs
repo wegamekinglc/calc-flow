@@ -1,6 +1,6 @@
 use super::{
     JoinSide, JoinStateLimits, JoinTimeBounds,
-    runs::{Incoming, RunState},
+    runs::{Incoming, RunOutputContext, RunState},
 };
 use crate::operator::keyed::{GroupId, KeySchema, KeyStore};
 use crate::{Batch, BatchMetadata, DataFusionConfig, DataFusionRuntime, EdgeBudget, EventTime};
@@ -738,10 +738,7 @@ fn test_production_morsels_share_one_atomic_match_limit_and_commit() {
         .prepare_batch(
             JoinSide::Right,
             vec![make_right(0), make_right(1)],
-            &output_schema(),
-            Some(&[1, 3]),
-            2,
-            EdgeBudget::default(),
+            RunOutputContext::new(&output_schema(), Some(&[1, 3]), 2, EdgeBudget::default()),
             &mut || Ok(()),
         )
         .err()
@@ -776,10 +773,7 @@ fn test_production_morsels_share_one_atomic_match_limit_and_commit() {
         .prepare_batch(
             JoinSide::Right,
             vec![make_right(0), make_right(1)],
-            &output_schema(),
-            Some(&[1, 3]),
-            2,
-            EdgeBudget::default(),
+            RunOutputContext::new(&output_schema(), Some(&[1, 3]), 2, EdgeBudget::default()),
             &mut || Ok(()),
         )
         .unwrap();

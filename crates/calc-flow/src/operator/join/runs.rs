@@ -516,6 +516,30 @@ struct Prepared {
     output_base: u64,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct RunOutputContext<'a> {
+    schema: &'a SchemaRef,
+    projection: Option<&'a [usize]>,
+    left_width: usize,
+    budget: EdgeBudget,
+}
+
+impl RunOutputContext<'_> {
+    pub(super) fn new<'a>(
+        schema: &'a SchemaRef,
+        projection: Option<&'a [usize]>,
+        left_width: usize,
+        budget: EdgeBudget,
+    ) -> RunOutputContext<'a> {
+        RunOutputContext {
+            schema,
+            projection,
+            left_width,
+            budget,
+        }
+    }
+}
+
 /// Complete immutable output for one prepared input morsel.
 #[derive(Debug)]
 pub(super) struct RunOutput {
@@ -675,6 +699,19 @@ impl RunState {
         self.sides[side.index()].rows
     }
 
+    pub(super) fn expiring_rows(
+        &self,
+        side: JoinSide,
+        extension_micros: u64,
+        opposite_watermark: EventTime,
+    ) -> usize {
+        let state = &self.sides[side.index()];
+        state.expiration[state.expiration_head..].partition_point(|entry| {
+            i128::from(entry.time.as_micros()) + i128::from(extension_micros)
+                < i128::from(opposite_watermark.as_micros())
+        })
+    }
+
     pub(super) fn bytes(&self, side: JoinSide) -> usize {
         self.sides[side.index()].bytes
     }
@@ -725,11 +762,8 @@ impl RunState {
         extension_micros: u64,
         opposite_watermark: EventTime,
     ) -> Result<Eviction> {
+        let cut = self.expiring_rows(side, extension_micros, opposite_watermark);
         let state = &self.sides[side.index()];
-        let cut = state.expiration[state.expiration_head..].partition_point(|entry| {
-            i128::from(entry.time.as_micros()) + i128::from(extension_micros)
-                < i128::from(opposite_watermark.as_micros())
-        });
         let plan = EvictionPlan::new(state, cut)?;
         Ok(Self::apply_eviction(&mut self.sides[side.index()], plan))
     }
@@ -832,28 +866,18 @@ impl RunState {
         let prepared = self.prepare_batch(
             incoming_side,
             vec![incoming],
-            schema,
-            projection,
-            left_width,
-            budget,
+            RunOutputContext::new(schema, projection, left_width, budget),
             check,
         )?;
         let mut outputs = prepared.commit(self)?;
         Ok(outputs.remove(0))
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "one input batch carries all its morsels and the output context"
-    )]
     pub(super) fn prepare_batch(
         &mut self,
         incoming_side: JoinSide,
         incoming: Vec<Incoming>,
-        schema: &SchemaRef,
-        projection: Option<&[usize]>,
-        left_width: usize,
-        budget: EdgeBudget,
+        output: RunOutputContext<'_>,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<PreparedRuns> {
         check()?;
@@ -878,8 +902,14 @@ impl RunState {
         let mut outputs = Vec::with_capacity(prepared.len());
         for prepared in &mut prepared {
             prepared.output_base = next_output;
-            let records =
-                prepared.materialize(self, schema, projection, left_width, budget, check)?;
+            let records = prepared.materialize(
+                self,
+                output.schema,
+                output.projection,
+                output.left_width,
+                output.budget,
+                check,
+            )?;
             let count = u64::try_from(records.len())
                 .map_err(|_| run_error("output sequence overflowed"))?;
             next_output = next_output
