@@ -138,6 +138,13 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   和 counters，后续 output sequence 与 snapshot bytes 保持一致。旧 ASOF row/object codecs 和 base/delta
   checkpoint machinery 已删除，较早 native layouts 拒绝恢复并要求新 lineage。133 项 focused 测试通过，
   独立审查已批准。最终 P5 性能验收、P6 和最终 CI 仍未完成。
+- P6 统一 morsel 池与 Rolling lanes 迁移（`84d7e23f`、`378736b0`、`1ad671d8`）已交付，
+  包含有界票据、取消/异常结算和有序合并；Join/ASOF 迁移、固定分区执行器、I/O 分离和性能门槛仍未完成。
+- 2026-11-19 当前工作区修复了既有 CI 失败：v4 恢复保留静态输入摘要诊断和安全的错误分类，
+  测试改用 `manifests/lineage/manifests/epoch-N.json` 与 opaque `blocks`；typed MACD 不再误入旧 resource worker，
+  late-output Rolling 可恢复当前声明 layout，native sequence 保留 operator 上下文，ASOF lifecycle fixture 不再由 worker
+  持有 observer schema。完整 Python 套件为 3138 passed、3 skipped（另有 1 条 PyO3 runtime drop warning），
+  相关 Rust 测试、Clippy 与 MySQL 测试编译通过。MySQL 容器、跨平台、复杂度与最终 CI 仍需重新验收。
 
 ## 1. 目标
 

@@ -166,7 +166,7 @@ dashes span the full column width, including cell spaces.
   control-injection API. The crate-root public `StreamingRunner` consumes a
   `StreamExecutionPlan` and returns an owning `StreamingJob` with whole-job
   preflight, bounded source/operator/sink tasks, job-scoped event-time progress,
-  aligned epoch checkpoints, managed v3 manifest recovery for durable restart,
+  aligned epoch checkpoints, managed v4 manifest recovery for durable restart,
   per-output delivery proof, and deterministic metrics. Control construction,
   task/coordinator/supervisor internals, and reaper ownership remain
   crate-private. The crate-root `StreamSession` instead drives an admitted
@@ -203,9 +203,10 @@ dashes span the full column width, including cell spaces.
   `UdfRegistrySnapshot` is captured at compile time; configurations contain
   only `UdfReference` values.
 - `StateBackend` opens lineage-exclusive state sessions.
-  `LocalStateBackend` publishes immutable, checksum-verified segments, while
-  `CheckpointManifest` is the strict v3 state-manifest contract and the managed
-  continuous runtime's durable recovery truth.
+  `LocalStateBackend` publishes immutable, checksum-verified segments.
+  `CheckpointManifest` remains the strict v3 contract for direct legacy state
+  transactions; managed runners and durable sessions use strict v4 manifests
+  as their durable recovery truth.
 - The old v2 `Source`/`Sink`, `MicroBatchRunner`, formed-batch push runner, and
   public `FileCheckpointStore` are removed. `FileProjectStore` remains the
   bounded atomic project-document store.

@@ -408,8 +408,31 @@ fn validate_expected_participants(
     validate_ids("source", &manifest.sources, &expected.source_ids)?;
     validate_ids("operator", &manifest.operators, &expected.operator_ids)?;
     validate_ids("sink", &manifest.sinks, &expected.sink_ids)?;
-    if manifest.static_inputs != expected.static_inputs {
-        return Err(mismatch("static-input participants differ".into()));
+    validate_static_inputs(manifest, expected)
+}
+
+fn validate_static_inputs(manifest: &V4Manifest, expected: &ManifestExpectationV4) -> Result<()> {
+    for (name, prepared) in &expected.static_inputs {
+        let Some(stored) = manifest.static_inputs.get(name) else {
+            return Err(mismatch(format!(
+                "static_inputs.{name}: checkpoint does not include the prepared static input"
+            )));
+        };
+        if stored.digest_version != prepared.digest_version || stored.sha256 != prepared.sha256 {
+            return Err(mismatch(format!(
+                "static_inputs.{name}.digest: checkpoint digest {} does not match prepared digest {} for {}",
+                stored.sha256,
+                prepared.sha256,
+                crate::STATIC_INPUT_DIGEST_VERSION
+            )));
+        }
+    }
+    for name in manifest.static_inputs.keys() {
+        if !expected.static_inputs.contains_key(name) {
+            return Err(mismatch(format!(
+                "static_inputs.{name}: checkpoint records an unexpected static input"
+            )));
+        }
     }
     Ok(())
 }

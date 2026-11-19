@@ -599,7 +599,8 @@ async fn layout7_restore_matches_uninterrupted_bits_and_rejects_old_layouts() {
     old.inline_metadata
         .insert("state_layout_version".into(), json!(3));
     let error = StreamOperator::restore(&mut restored, &old).unwrap_err();
-    assert!(error.to_string().contains("start a new lineage"), "{error}");
+    assert!(matches!(&error, CalcFlowError::CheckpointMismatch { .. }));
+    assert!(error.to_string().contains("layout"), "{error}");
 }
 
 fn input_schema() -> Schema {

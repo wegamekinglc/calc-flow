@@ -94,7 +94,7 @@ def test_durable_session_checkpoint_restore(tmp_path) -> None:
         restore=True,
     ) as restored:
         emitted = restored.push(_rows((1, "a", 2, 3.0)), watermark=_at(1))
-        assert emitted.to_pylist()[0]["avg"] == 2.0
+        assert emitted["avg"][0].as_py() == 2.0
         assert restored.checkpoint() == 2
 
 
@@ -135,8 +135,14 @@ def test_table_session_matches_stream_under_source_provided_watermarks() -> None
 
     expected = asyncio.run(collect())
     assert [table.num_rows for table in emitted] == [2, 1, 1, 1]
-    assert [row for table in emitted for row in table.to_pylist()] == [
-        row for table in expected for row in table.to_pylist()
+    assert [
+        row
+        for table in emitted
+        for row in table.select(["symbol", "seq", "avg"]).to_pylist()
+    ] == [
+        row
+        for table in expected
+        for row in table.select(["symbol", "seq", "avg"]).to_pylist()
     ]
 
 

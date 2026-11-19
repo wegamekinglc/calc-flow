@@ -800,14 +800,6 @@ fn expected_schema_fingerprint<'a>(
     metadata: &RollingSnapshotMetadata,
     compiled: &'a CompiledRollingSpec,
 ) -> Result<&'a String> {
-    if compiled.kernel_plan.supports_slab()
-        && metadata.state_layout_version != super::ROLLING_STATE_TABLE_LAYOUT_VERSION
-    {
-        return Err(checkpoint_mismatch(format!(
-            "rolling state layout version {} is not 7; start a new lineage",
-            metadata.state_layout_version
-        )));
-    }
     if (compiled.kernel_plan.supports_slab()
         && metadata.state_layout_version == super::ROLLING_STATE_TABLE_LAYOUT_VERSION)
         || metadata.state_layout_version == compiled.state_layout_version
@@ -817,7 +809,7 @@ fn expected_schema_fingerprint<'a>(
         Ok(&compiled.legacy_state_schema_fingerprint)
     } else {
         Err(checkpoint_mismatch(format!(
-            "rolling state layout version {} does not match current {} or declared legacy {}",
+            "rolling state layout version {} does not match current {} or declared legacy {}; start a new lineage",
             metadata.state_layout_version,
             compiled.state_layout_version,
             compiled.legacy_state_layout_version

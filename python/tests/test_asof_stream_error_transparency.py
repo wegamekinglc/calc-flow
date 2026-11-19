@@ -238,7 +238,7 @@ def test_convenience_path_workspace_failure_surfaces_reason_detail(checkpointing
             _drain_convenience(cf.AsofStateLimits(100_000, 64 * 1024), chunks, config)
         )
     message = str(raised.value)
-    phases = ["ASOF aggregate workspace exceeds max_state_bytes"]
+    phases = ["ASOF admission workspace exceeds max_state_bytes"]
     if not checkpointing:
         # Without checkpoints, source interleaving can trip index preparation first.
         phases.append("ASOF expiration index and dictionary preparation exceed")
@@ -268,5 +268,5 @@ def test_explicit_path_workspace_failure_surfaces_reason_detail(tmp_path):
     )
     assert state == "failed"
     assert failure is not None
-    assert "ASOF aggregate workspace exceeds max_state_bytes" in failure
+    assert "ASOF admission workspace exceeds max_state_bytes" in failure
     assert "asof_workspace_limit_exceeded" in failure

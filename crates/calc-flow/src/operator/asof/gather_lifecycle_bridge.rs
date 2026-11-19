@@ -26,7 +26,6 @@ pub(crate) struct Probe {
 pub(crate) fn materialization(job: StreamJobContext) -> (impl Future<Output = Result<()>>, Probe) {
     let record = record(&[1, 2, 3]);
     let source = Arc::downgrade(record.column(0));
-    let schema = output_schema();
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1_048_576));
     let reservation = MemoryConsumer::new("gather-lifecycle-bridge").register(&pool);
     reservation.try_grow(32_768).unwrap();
@@ -34,7 +33,6 @@ pub(crate) fn materialization(job: StreamJobContext) -> (impl Future<Output = Re
     let release = Arc::new(Barrier::new(2));
     let plan = BridgePlan {
         record,
-        _schema: schema,
         started: parking_lot::Mutex::new(Some(started_tx)),
         release: release.clone(),
         worker: None,
@@ -62,7 +60,6 @@ pub(crate) fn materialization(job: StreamJobContext) -> (impl Future<Output = Re
 
 struct BridgePlan {
     record: Arc<RecordBatch>,
-    _schema: Arc<Schema>,
     started: parking_lot::Mutex<Option<mpsc::Sender<()>>>,
     release: Arc<Barrier>,
     worker: Option<Arc<WorkerProbe>>,
@@ -105,7 +102,6 @@ impl GatherPlan for BridgePlan {
 pub(crate) fn ungated_plan(value: i64) -> Arc<dyn GatherPlan> {
     Arc::new(BridgePlan {
         record: record(&[value]),
-        _schema: output_schema(),
         started: parking_lot::Mutex::new(None),
         release: Arc::new(Barrier::new(2)),
         worker: None,
@@ -291,12 +287,12 @@ pub(crate) fn runtime_materialization(
     });
     let plan = BridgePlan {
         record,
-        _schema: schema,
         started: parking_lot::Mutex::new(None),
         release: Arc::new(Barrier::new(2)),
         worker: Some(worker.clone()),
     };
     let future = async move {
+        let observer_schema = schema;
         let context = crate::StreamOperatorContext::new(&job, "bridge", None);
         let client = context.gather_client(GatherOperatorId::new("operator:bridge".into()));
         let scope = client.scope()?;
@@ -304,6 +300,7 @@ pub(crate) fn runtime_materialization(
             .submit_work(plan, reservation, GatherStop::from_job(&job))
             .await?;
         let _ = ticket.finish().await?;
+        drop(observer_schema);
         Ok(())
     };
     (

@@ -10,9 +10,9 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use datafusion::{
-    arrow::array::ArrayRef, common::DataFusionError, execution::memory_pool::MemoryReservation,
-};
+#[cfg(test)]
+use datafusion::arrow::array::ArrayRef;
+use datafusion::{common::DataFusionError, execution::memory_pool::MemoryReservation};
 use parking_lot::{Condvar, Mutex};
 use tokio::sync::Notify;
 
@@ -49,19 +49,23 @@ const _: () = assert!(
 #[cfg(test)]
 pub(crate) mod admission_probe;
 mod cleanup;
+#[cfg(test)]
 mod columns;
 pub(crate) use cleanup::{AttemptCleanup, ObservedTicket, cleanup_control_bytes};
 mod parallel;
 pub(crate) use parallel::ParallelCpuWork;
 mod process;
+#[cfg(test)]
 mod row_gather;
 #[cfg(test)]
 pub(crate) use process::TestService;
+#[cfg(test)]
 pub(crate) use row_gather::RowGather;
 #[cfg(test)]
 mod tests;
 mod worker;
 
+#[cfg(test)]
 pub(crate) trait GatherPlan: Send + Sync {
     fn column_count(&self) -> usize;
     fn gather(&self, ordinal: usize, stop: &GatherStop) -> Result<ArrayRef>;
@@ -164,12 +168,14 @@ impl<W: OwnedCpuWork> ErasedWork for WorkAdapter<W> {
     }
 }
 
+#[cfg(test)]
 struct ColumnsWork {
     plan: Arc<dyn GatherPlan>,
     workers: usize,
     rows: Option<RowGather>,
 }
 
+#[cfg(test)]
 impl ColumnsWork {
     fn new(plan: Arc<dyn GatherPlan>, capacity: usize) -> Result<Self> {
         let workers = plan.parallelism().max(1).min(capacity);
@@ -186,6 +192,7 @@ impl ColumnsWork {
     }
 }
 
+#[cfg(test)]
 impl WorkPackage for ColumnsWork {
     type Output = Vec<ArrayRef>;
 
@@ -210,6 +217,7 @@ impl WorkPackage for ColumnsWork {
     }
 }
 
+#[cfg(test)]
 impl OwnedCpuWork for ColumnsWork {
     type Output = Vec<ArrayRef>;
 
@@ -233,6 +241,7 @@ enum ReadyWork {
         outcome: Option<Result<ErasedOutput>>,
         running: bool,
     },
+    #[cfg(test)]
     Columns(columns::Columns),
     Parallel(parallel::Units),
 }
@@ -249,6 +258,7 @@ impl ReadyWork {
     fn units(&self) -> usize {
         match self {
             Self::Single { .. } => 1,
+            #[cfg(test)]
             Self::Columns(columns) => columns.count(),
             Self::Parallel(units) => units.count(),
         }
@@ -257,6 +267,7 @@ impl ReadyWork {
     fn workers(&self) -> usize {
         match self {
             Self::Single { .. } => 1,
+            #[cfg(test)]
             Self::Columns(columns) => columns.workers(),
             Self::Parallel(units) => units.workers(),
         }
@@ -265,6 +276,7 @@ impl ReadyWork {
     fn active(&self) -> usize {
         match self {
             Self::Single { running, .. } => usize::from(*running),
+            #[cfg(test)]
             Self::Columns(columns) => columns.active(),
             Self::Parallel(units) => units.active(),
         }
@@ -278,6 +290,7 @@ impl ReadyWork {
                 Some(ClaimedWork::Single(work))
             }
             Self::Single { .. } => None,
+            #[cfg(test)]
             Self::Columns(columns) => columns.claim(ordinal),
             Self::Parallel(units) => units.claim(ordinal),
         }
@@ -292,6 +305,7 @@ impl ReadyWork {
                 *running = false;
                 true
             }
+            #[cfg(test)]
             Self::Columns(columns) => columns.complete(ordinal, value),
             Self::Parallel(units) => units.complete(ordinal, value),
         }
@@ -299,6 +313,7 @@ impl ReadyWork {
 
     fn cancel_pending(&mut self, run_id: &str) {
         match self {
+            #[cfg(test)]
             Self::Columns(columns) => columns.cancel_pending(run_id),
             Self::Parallel(units) => units.cancel_pending(run_id),
             Self::Single { .. } => {}
@@ -311,10 +326,13 @@ impl ReadyWork {
         operator: &GatherOperatorId,
         stop: &GatherStop,
     ) -> Result<ErasedOutput> {
+        #[cfg(not(test))]
+        let _ = stop;
         match self {
             Self::Single { outcome, .. } => {
                 outcome.ok_or_else(|| internal("missing unit outcome"))?
             }
+            #[cfg(test)]
             Self::Columns(columns) => columns.finish(home, operator, stop),
             Self::Parallel(units) => units.finish(home, operator),
         }
@@ -323,6 +341,7 @@ impl ReadyWork {
 
 enum ClaimedWork {
     Single(Box<dyn ErasedWork>),
+    #[cfg(test)]
     Column {
         plan: Arc<dyn GatherPlan>,
         ordinal: usize,
@@ -335,6 +354,7 @@ impl ClaimedWork {
     fn run(self, stop: &GatherStop) -> Result<ErasedOutput> {
         match self {
             Self::Single(work) => work.run(stop),
+            #[cfg(test)]
             Self::Column {
                 plan,
                 ordinal,
@@ -385,7 +405,7 @@ impl GatherOperatorId {
         }
     }
 
-    #[cfg(feature = "benchmark-internals")]
+    #[cfg(all(test, feature = "benchmark-internals"))]
     pub(crate) fn with_join_cpu_name(mut self, name: Arc<str>) -> Self {
         self.join_cpu_name = name;
         self
@@ -562,6 +582,7 @@ pub(crate) struct GatherScope {
     reuse_only: bool,
 }
 
+#[cfg(test)]
 pub(crate) type GatherTicket = WorkTicket<Vec<ArrayRef>>;
 
 pub(crate) struct WorkTicket<T: Send + 'static> {
@@ -804,6 +825,7 @@ impl GatherScope {
         self
     }
 
+    #[cfg(test)]
     pub(crate) async fn submit_parallel_work<W: ParallelCpuWork>(
         &self,
         work: Arc<W>,
@@ -814,6 +836,7 @@ impl GatherScope {
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn submit(
         &self,
         plan: Arc<dyn GatherPlan>,

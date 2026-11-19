@@ -817,7 +817,7 @@ def test_hopping_late_row_contributes_only_to_still_open_assignment(
 
 
 def _manifest(root: Path) -> tuple[Path, dict[str, object]]:
-    paths = list((root / "manifests").glob("manifest-*.json"))
+    paths = list((root / "manifests" / "lineage" / "manifests").glob("epoch-*.json"))
     assert len(paths) == 1
     return paths[0], json.loads(paths[0].read_text(encoding="utf-8"))
 
@@ -911,15 +911,13 @@ def test_equal_rebuilt_declarations_share_one_manifest_state_owner(
         owners = {
             owner: entry
             for owner, entry in manifest["operators"].items()
-            if entry["segments"]
+            if entry["blocks"]
         }
         assert list(owners) == window_ids
         entry = owners[window_ids[0]]
         assert entry["inline_metadata"]["state_layout_version"] == 2
         assert entry["inline_metadata"]["next_output_sequence"] == 0
-        assert all(
-            segment["operator_id"] == window_ids[0] for segment in entry["segments"]
-        )
+        assert all(segment["owner"] == window_ids[0] for segment in entry["blocks"])
         recovered_plan = _program(fanout=True).compile_stream(Runtime())
         job = await _runner(
             recovered_plan, _ScriptedSource(events, opened=opened), sinks, state_root
@@ -974,7 +972,7 @@ def test_distinct_window_declarations_own_distinct_manifest_state(
     )
     _, manifest = _manifest(tmp_path)
     owners = {
-        owner for owner, entry in manifest["operators"].items() if entry["segments"]
+        owner for owner, entry in manifest["operators"].items() if entry["blocks"]
     }
     assert owners == window_ids
     assert len(manifest["sources"]) == 1
@@ -1006,23 +1004,25 @@ def test_empty_batches_and_empty_run_emit_no_window_rows(
     asyncio.run(exercise())
 
 
-def _state_checksum(manifest: dict[str, object]) -> str:
-    state = {key: manifest[key] for key in ("operators", "sinks", "sources")}
-    if manifest.get("static_inputs"):
-        state["static_inputs"] = manifest["static_inputs"]
-    return hashlib.sha256(
-        json.dumps(state, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+def _canonical(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _manifest_fingerprint(manifest: dict[str, object]) -> str:
+    contents = {
+        key: value for key, value in manifest.items() if key != "manifest_fingerprint"
+    }
+    return hashlib.sha256(_canonical(contents)).hexdigest()
 
 
 def _corrupt_checkpoint(root: Path, fault: str) -> None:
     path, manifest = _manifest(root)
-    assert manifest["state_checksum"] == _state_checksum(manifest)
-    owners = [entry for entry in manifest["operators"].values() if entry["segments"]]
+    assert manifest["manifest_fingerprint"] == _manifest_fingerprint(manifest)
+    owners = [entry for entry in manifest["operators"].values() if entry["blocks"]]
     assert len(owners) == 1
     entry = owners[0]
     if fault == "segment":
-        relative = entry["segments"][0]["relative_path"]
+        relative = entry["blocks"][0]["relative_path"]
         candidates = [
             candidate
             for candidate in root.rglob(Path(relative).name)
@@ -1039,19 +1039,23 @@ def _corrupt_checkpoint(root: Path, fault: str) -> None:
         entry["inline_metadata"][fault] = (
             999 if fault == "state_layout_version" else "0" * 64
         )
-        manifest["state_checksum"] = _state_checksum(manifest)
-    path.write_text(
-        json.dumps(manifest, sort_keys=True, separators=(",", ":")), encoding="utf-8"
-    )
+        entry["state_fingerprint"] = hashlib.sha256(
+            _canonical(entry["inline_metadata"])
+        ).hexdigest()
+    manifest["manifest_fingerprint"] = _manifest_fingerprint(manifest)
+    path.write_bytes(_canonical(manifest))
 
 
 @pytest.mark.parametrize("kind", ["native", "symbolic"])
 @pytest.mark.parametrize(
     ("fault", "message"),
     [
-        ("state_layout_version", "streaming runtime initialization failed"),
-        ("configuration_hash", "streaming runtime initialization failed"),
-        ("state_schema_fingerprint", "streaming runtime initialization failed"),
+        ("state_layout_version", "checkpoint lineage contains invalid recovery data"),
+        ("configuration_hash", "checkpoint lineage contains invalid recovery data"),
+        (
+            "state_schema_fingerprint",
+            "checkpoint lineage contains invalid recovery data",
+        ),
         ("pipeline_fingerprint", "checkpoint lineage contains invalid recovery data"),
         ("segment", "checkpoint lineage contains invalid recovery data"),
     ],

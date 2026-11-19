@@ -765,7 +765,8 @@ class CollectSink:
 def _assert_single_late_state_owner(root: Path) -> None:
     import json
 
-    manifests = list((root / "manifests").glob("manifest-*.json"))
+    manifest_root = root / "manifests" / "lineage" / "manifests"
+    manifests = list(manifest_root.glob("epoch-*.json"))
     assert len(manifests) == 1
     manifest = json.loads(manifests[0].read_text())
     state_owners = [

@@ -3585,6 +3585,16 @@ fn safe_managed_recovery_error(error: &CalcFlowError) -> CalcFlowError {
         CalcFlowError::Cancelled { .. } => CalcFlowError::Cancelled {
             run_id: "managed-checkpoint-recovery".into(),
         },
+        CalcFlowError::CheckpointMismatch { message }
+            if message.starts_with("native:array_sequence@1 state.") =>
+        {
+            CalcFlowError::CheckpointMismatch {
+                message: message.clone(),
+            }
+        }
+        CalcFlowError::CheckpointMismatch { .. } => CalcFlowError::CheckpointMismatch {
+            message: "checkpoint lineage contains invalid recovery data".into(),
+        },
         _ => CalcFlowError::Internal {
             message: "managed checkpoint recovery failed".into(),
         },

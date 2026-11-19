@@ -1679,7 +1679,7 @@ impl StreamOperator for RollingOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        if !self.compiled.indicator_groups.is_empty() {
+        if self.indicator_resources.is_some() {
             context.check_cancelled()?;
         }
         let checkpoint_guard = self.try_native_checkpoint_guard(context.operator_id())?;
@@ -1701,7 +1701,7 @@ impl StreamOperator for RollingOperator {
         }
         let watermark = context.input_watermark();
         drop(validation);
-        if !self.compiled.indicator_groups.is_empty() {
+        if self.indicator_resources.is_some() {
             return self
                 .process_indicator_input_worker(
                     batch,
@@ -1766,7 +1766,7 @@ impl StreamOperator for RollingOperator {
         // emission leaves the buffered rows available for a retry.
         context.check_cancelled()?;
         self.observe_context(context)?;
-        if !self.compiled.indicator_groups.is_empty() {
+        if self.indicator_resources.is_some() {
             return self
                 .finalize_indicator_worker(Some(watermark), context, output)
                 .await;
@@ -1823,7 +1823,7 @@ impl StreamOperator for RollingOperator {
         if self.state.ended {
             return Ok(());
         }
-        if !self.compiled.indicator_groups.is_empty() {
+        if self.indicator_resources.is_some() {
             return self.finalize_indicator_worker(None, context, output).await;
         }
         if self.state.ordered.is_empty() {

@@ -83,17 +83,19 @@ def _canonical(value: object) -> bytes:
 
 
 def _corrupt_layout_with_valid_checksums(root: Path) -> None:
-    path = root / "manifests" / "manifest-00000000000000000001.json"
+    path = root / "manifests" / "lineage" / "manifests" / "epoch-1.json"
     manifest = json.loads(path.read_bytes())
-    handle = manifest["operators"]["sequence"]["segments"][0]
-    segment_path = root / "state" / handle["relative_path"]
+    handle = manifest["operators"]["sequence"]["blocks"][0]
+    segment_path = root / "manifests" / handle["relative_path"]
     encoded = bytearray(segment_path.read_bytes())
     assert encoded[:8] == b"CFASEQ\0\0"
     encoded[8] = 2
     segment_path.write_bytes(encoded)
     handle["sha256"] = hashlib.sha256(encoded).hexdigest()
-    state = {name: manifest[name] for name in ("sources", "operators", "sinks")}
-    manifest["state_checksum"] = hashlib.sha256(_canonical(state)).hexdigest()
+    contents = {
+        key: value for key, value in manifest.items() if key != "manifest_fingerprint"
+    }
+    manifest["manifest_fingerprint"] = hashlib.sha256(_canonical(contents)).hexdigest()
     path.write_bytes(_canonical(manifest))
 
 
@@ -114,7 +116,7 @@ def test_real_native_terminal_bad_codec_preserves_python_error_context_before_op
         with pytest.raises(cf.StreamingRuntimeError) as captured:
             await _runner(tmp_path, opens).start_async()
         error = captured.value
-        assert error.category == "checkpoint_mismatch"
+        assert error.category == "checkpoint_mismatch", error.message
         assert error.component_kind == "operator"
         assert error.component_id == "sequence"
         assert "state.layout" in error.message

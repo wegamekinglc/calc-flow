@@ -42,7 +42,7 @@ def _program(data: pa.Table, aggregate: str, *, replacement: bool) -> cf.Program
 
 
 def _captured_entry(manifest: dict[str, object], layout: int) -> dict[str, object]:
-    owners = [entry for entry in manifest["operators"].values() if entry["segments"]]
+    owners = [entry for entry in manifest["operators"].values() if entry["blocks"]]
     if layout == 6:
         assert len(owners) == 2
         assert {entry["inline_metadata"]["state_layout"] for entry in owners} == {3, 6}
@@ -103,15 +103,15 @@ def _capture(
         )
     )
     assert sink.tables[0].num_rows == len(actual)
-    paths = list((root / "manifests").glob("manifest-*.json"))
+    paths = list((root / "manifests" / "lineage" / "manifests").glob("epoch-*.json"))
     assert len(paths) == 1
     manifest = json.loads(paths[0].read_text(encoding="utf-8"))
     entry = _captured_entry(manifest, layout)
     segments = {}
-    for handle in entry["segments"]:
-        payload = (root / "state" / handle["relative_path"]).read_bytes()
+    for handle in entry["blocks"]:
+        payload = (root / "manifests" / handle["relative_path"]).read_bytes()
         assert hashlib.sha256(payload).hexdigest() == handle["sha256"]
-        segments[handle["segment_id"]] = payload
+        segments[handle["object_id"]] = payload
     control = json.loads(segments["control"])
     assert control["state_layout"] == entry["inline_metadata"]["state_layout"]
     assert control["datafusion_version"] == "55.0.0"

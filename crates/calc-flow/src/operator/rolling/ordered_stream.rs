@@ -1131,7 +1131,7 @@ impl NumericMorselGroup {
         owner: &JobMorselOwner,
         task_id: TaskId,
         task_name: String,
-        #[cfg(test)] hooks: MorselTestHooks,
+        #[cfg(test)] hooks: &MorselTestHooks,
     ) -> Self {
         let lanes = requests.len();
         let metrics = Arc::new(NumericMorselMetrics::new(observer, lanes));
@@ -1315,7 +1315,7 @@ async fn run_ordered_morsels(
         task_id,
         task_name,
         #[cfg(test)]
-        owner.hooks(),
+        &owner.hooks(),
     );
     while let Some(input) = group.pending.pop_front() {
         #[cfg(test)]
@@ -1983,9 +1983,7 @@ mod tests {
         owner.set_worker_limit_for_test(2);
         owner.set_hooks(MorselTestHooks {
             after_run: Some(Arc::new(|lane| {
-                if lane == 0 {
-                    panic!("abandoned numeric lane panic");
-                }
+                assert!(lane != 0, "abandoned numeric lane panic");
             })),
             ..MorselTestHooks::default()
         });
@@ -2000,7 +1998,7 @@ mod tests {
             &owner,
             task_id,
             "operator:rolling".into(),
-            owner.hooks(),
+            &owner.hooks(),
         );
         while let Some(input) = group.pending.pop_front() {
             let cost = input.cost;
@@ -2062,9 +2060,7 @@ mod tests {
                 })
             }),
             after_run: Some(Arc::new(|lane| {
-                if lane == 1 {
-                    panic!("abandoned partial lane panic");
-                }
+                assert!(lane != 1, "abandoned partial lane panic");
             })),
             ..MorselTestHooks::default()
         });
@@ -2079,7 +2075,7 @@ mod tests {
             &owner,
             task_id,
             "operator:rolling".into(),
-            owner.hooks(),
+            &owner.hooks(),
         );
         while let Some(input) = group.pending.pop_front() {
             let cost = input.cost;
@@ -2150,9 +2146,7 @@ mod tests {
                 })
             }),
             after_run: Some(Arc::new(|lane| {
-                if lane == 0 {
-                    panic!("abandoned first lane panic");
-                }
+                assert!(lane != 0, "abandoned first lane panic");
             })),
             ..MorselTestHooks::default()
         });
@@ -2167,7 +2161,7 @@ mod tests {
             &owner,
             task_id,
             "operator:rolling".into(),
-            owner.hooks(),
+            &owner.hooks(),
         );
         while let Some(input) = group.pending.pop_front() {
             let cost = input.cost;
@@ -2281,9 +2275,7 @@ mod tests {
                 })
             }),
             after_run: Some(Arc::new(|lane| {
-                if lane == 2 {
-                    panic!("abandoned cleanup lane panic");
-                }
+                assert!(lane != 2, "abandoned cleanup lane panic");
             })),
             ..MorselTestHooks::default()
         });
@@ -2298,7 +2290,7 @@ mod tests {
             &owner,
             task_id,
             "operator:rolling".into(),
-            owner.hooks(),
+            &owner.hooks(),
         );
         while let Some(input) = group.pending.pop_front() {
             let cost = input.cost;
