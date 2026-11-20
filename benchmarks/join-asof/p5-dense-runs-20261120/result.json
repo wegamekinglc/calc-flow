@@ -1,0 +1,351 @@
+{
+  "schema": "calc-flow.join-p5-performance-result.v1",
+  "plan": {
+    "schema": "calc-flow.join-p5-performance-plan.v1",
+    "created_at": "2026-11-20T20:05:00+08:00",
+    "baseline": {
+      "kind": "previous_sealed_candidate",
+      "revision": "12d7759c",
+      "evidence": "benchmarks/join-asof/p5-probe-cache-20261120/result.json",
+      "join_p50_ms": 450.0378075,
+      "interval_p50_ms": 1167.624011,
+      "paired_comparison": false
+    },
+    "candidate": {
+      "kind": "sealed_default_feature_release_wheel",
+      "revision": "fcec2dc3",
+      "required_tracked_source_clean_before_build": true,
+      "build_budget": "separate from the 600-second acquisition budget",
+      "change": "reuse contiguous admitted Arrow slices and fully retained payloads; retain sparse and schema-converting gather fallbacks"
+    },
+    "execution": {
+      "cpu_affinity": 0,
+      "tokio_worker_threads": 1,
+      "blas_openmp_workers": 1,
+      "checkpoint": "enabled with a 24-hour interval; no trigger in the timed path",
+      "timing_scope": "ready-source enqueue through Arrow output",
+      "warmups_per_case": 2,
+      "measured_samples_per_case": 10,
+      "sample_order": "Join, interval; no retries or extensions",
+      "correctness": "maintained EngineCase full-output oracle on every sample",
+      "total_budget_seconds": 600,
+      "acquisition_stop_seconds": 570,
+      "owned_cleanup_reserve_seconds": 30,
+      "external_backstop": "timeout --kill-after=30s 600s",
+      "state_root_policy": "new empty root for every warmup and measured observation"
+    },
+    "cases": [
+      {
+        "id": "join-1m-single-cpu",
+        "scenario": "join",
+        "backend": "calc-flow-stream",
+        "rows": 1000000,
+        "connection": "dense ordinary Join morsel, key and payload buffer reuse",
+        "threshold_p50_ms": 30,
+        "baseline_p50_ms": 450.0378075
+      },
+      {
+        "id": "interval-1m-single-cpu",
+        "scenario": "interval_join",
+        "backend": "calc-flow-stream",
+        "rows": 1000000,
+        "connection": "dense interval retained-run buffer reuse and complete output",
+        "threshold_p50_ms": 350,
+        "baseline_p50_ms": 1167.624011
+      }
+    ],
+    "unmeasured": "ASOF, other row counts/types/modes, partitioned execution and remaining acceptance matrix"
+  },
+  "candidate": {
+    "wheel": "target/p5-join-wheel-fcec2dc3/calc_flow_python-2026.11.14-cp313-cp313-linux_x86_64.whl",
+    "wheel_sha256": "6d2d1fe9bf3017c7b8ea595db9cade52783f4751de0771cfa58b0aa14819a1f3",
+    "loaded_native": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p5-join-venv/lib/python3.13/site-packages/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+    "loaded_native_sha256": "b45035b4cb68e68a9522c32aa3db31773208ebec44f19bce44c805f36d30ec8b",
+    "distribution_version": "2026.11.14"
+  },
+  "environment": {
+    "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+    "tokio_worker_threads": "1",
+    "openblas_num_threads": "1",
+    "omp_num_threads": "1",
+    "taskset": "cpu0",
+    "cpus_allowed": "Cpus_allowed_list:\t0"
+  },
+  "cases": [
+    {
+      "id": "join-1m-single-cpu",
+      "scenario": "join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "dense ordinary Join morsel, key and payload buffer reuse",
+      "threshold_p50_ms": 30,
+      "baseline_p50_ms": 450.0378075,
+      "samples": [
+        {
+          "seconds": 0.420695669,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.435003761,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.426919964,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.422390934,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.427238435,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.420613106,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.420457709,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.422473588,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.41746001,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.427244052,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        }
+      ],
+      "p50_ms": 422.432261,
+      "p95_ms": 431.51189194999995,
+      "threshold_pass": false,
+      "output_rows": 1000000,
+      "all_oracles_passed": true
+    },
+    {
+      "id": "interval-1m-single-cpu",
+      "scenario": "interval_join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "dense interval retained-run buffer reuse and complete output",
+      "threshold_p50_ms": 350,
+      "baseline_p50_ms": 1167.624011,
+      "samples": [
+        {
+          "seconds": 1.169802007,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.143860119,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.196008669,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.158394392,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.147146441,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.097221205,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.150570554,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.117427257,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.091640376,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.148070699,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        }
+      ],
+      "p50_ms": 1147.60857,
+      "p95_ms": 1184.2156711,
+      "threshold_pass": false,
+      "output_rows": 10998080,
+      "all_oracles_passed": true
+    }
+  ],
+  "wall_seconds": 43.173075553029776,
+  "within_budget": true,
+  "error": null
+}
