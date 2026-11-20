@@ -329,6 +329,13 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   `benchmarks/sum-state/p6-delegated-20261121/ordinal-*`。构建 receipt 的 source HEAD 为 `1aab97c6`，
   运行时代码相对 `74ac0775` 仅增加验收计划文档。撤回整批 SQL 委托，下一步直接消除原生 SUM 的逐行
   `BTreeMap` 状态访问，不以 DataFusion 局部聚合替代端到端验收。
+- 2026-11-21 P6 连续 SUM 状态数组（`439395a5`）取得首个明确 keyed 性能改进：每分区值改按 `group_id / N`
+  直接索引，保留 routing、首见组顺序、undo 与 checkpoint 表示。相同 `2ac1af5f` 基线和两轮各 10 组 AB/BA 下，
+  stock 单核 204.988 → **136.503 ms**（−33.41%，improved），八逻辑核 138.317 → **97.288 ms**
+  （−29.66%，约 1.42×，improved），sparse −29.89%，finite control inconclusive；160 个观测的完整 oracle
+  全部通过，采集 120.656 秒。四物理核 ≥3× 仍未达到，但保留该严格改进。诊断观测的 apply 从约 72 ms
+  降到 21.506 ms，route 仍为 58.818 ms，后续须处理 key routing 与整批调度成本。完整 SQL 344 项及全 feature
+  Clippy 通过；证据见 `benchmarks/sum-state/p6-vector-sums-20261121/`，10M P4 仍待独立采集。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
