@@ -75,6 +75,24 @@ pub(crate) struct KeyStore {
     reservation: MemoryReservation,
     canonical_births: usize,
     fingerprint: [u8; 32],
+    route_cache: Option<RouteCache>,
+}
+
+struct RouteCache {
+    arrays: Vec<ArrayRef>,
+    groups: Vec<GroupId>,
+}
+
+impl RouteCache {
+    fn matches(&self, arrays: &[ArrayRef]) -> bool {
+        self.arrays.len() == arrays.len()
+            && self.groups.len() == arrays[0].len()
+            && self
+                .arrays
+                .iter()
+                .zip(arrays)
+                .all(|(left, right)| left.to_data() == right.to_data())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -107,6 +125,7 @@ impl KeyStore {
             reservation,
             canonical_births: 0,
             fingerprint,
+            route_cache: None,
         }
     }
 
@@ -276,6 +295,33 @@ impl KeyStore {
                 Err(error)
             }
         }
+    }
+
+    pub(crate) fn route_with_limit_cached(
+        &mut self,
+        arrays: &[ArrayRef],
+        limit: usize,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Vec<GroupId>> {
+        check()?;
+        if self
+            .route_cache
+            .as_ref()
+            .is_some_and(|cache| cache.matches(arrays))
+        {
+            return Ok(self
+                .route_cache
+                .as_ref()
+                .expect("route cache")
+                .groups
+                .clone());
+        }
+        let groups = self.route_with_limit_inner(arrays, None, limit, false, check)?;
+        self.route_cache = Some(RouteCache {
+            arrays: arrays.to_vec(),
+            groups: groups.clone(),
+        });
+        Ok(groups)
     }
 
     fn route_attempt(
@@ -450,6 +496,7 @@ impl KeyStore {
     }
 
     pub(crate) fn rollback(&mut self, cut: KeyCut) {
+        self.route_cache = None;
         for &hash in self.hashes[cut.groups..].iter().rev() {
             let remove = if let Some(bucket) = self.buckets.get_mut(&hash) {
                 bucket.pop();
@@ -709,12 +756,29 @@ impl StableHash {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static HASH_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_hash_calls() {
+    HASH_CALLS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn hash_calls() -> usize {
+    HASH_CALLS.get()
+}
+
 pub(crate) fn hash_rows(
     schema: &KeySchema,
     arrays: &[ArrayRef],
     selection: Option<&BooleanArray>,
     check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Vec<u64>> {
+    #[cfg(test)]
+    HASH_CALLS.with(|count| count.set(count.get() + 1));
     let rows = arrays[0].len();
     let mut hashes = vec![StableHash::new(); rows];
     let mut variable = VariableWork::new(check);
@@ -1806,3 +1870,7 @@ where
     );
     Ok(Arc::new(values.with_timezone_opt(timezone.clone())))
 }
+
+#[cfg(test)]
+#[path = "keyed_route_tests.rs"]
+mod route_tests;

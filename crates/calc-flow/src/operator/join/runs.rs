@@ -192,7 +192,7 @@ impl Incoming {
         }
         let cut = keys.cut();
         match keys
-            .route_with_limit(&arrays, usize::MAX, check)
+            .route_with_limit_cached(&arrays, usize::MAX, check)
             .and_then(|groups| {
                 Self::new(
                     payload.clone(),
