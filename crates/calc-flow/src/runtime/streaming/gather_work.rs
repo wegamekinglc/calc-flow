@@ -401,25 +401,16 @@ pub(crate) struct GatherOperatorId {
     #[cfg(all(test, feature = "benchmark-internals"))]
     join_cpu_name: Arc<str>,
     task: Option<TaskId>,
-    _reservation: Option<Arc<MemoryReservation>>,
 }
 
 impl GatherOperatorId {
     pub(crate) fn new(name: Arc<str>) -> Self {
         Self {
             token: Arc::new(()),
-            _reservation: None,
             #[cfg(all(test, feature = "benchmark-internals"))]
             join_cpu_name: name.clone(),
             name,
             task: None,
-        }
-    }
-
-    pub(crate) fn with_reservation_owner(self, owner: Arc<MemoryReservation>) -> Self {
-        Self {
-            _reservation: Some(owner),
-            ..self
         }
     }
 

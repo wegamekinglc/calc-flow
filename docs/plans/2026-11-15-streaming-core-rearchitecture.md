@@ -253,6 +253,11 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   reservation 随输出保留到调用方取得结果，旧 gather 准入关闭后的排序仍与 DataFusion oracle 一致。
   SQL 337 项、ASOF 49 项、morsel pool 20 项、Rolling parallel 4 项及全 feature Clippy 通过。
   global record、bounded order、Join 迁移测试辅助路径、固定分区执行器和其余 I/O 分离尚未完成。
+- 2026-11-20 P6 bounded order 的流式 FinalWork 已迁入统一 morsel 池，finite finalize 保持原路径；
+  排序/analytic 共用原执行函数，按历史行数与 control output bytes 准入，control reservation 随输出释放，
+  analytic 的 StateBudgetExceeded 映射及输出拒绝语义不变。旧 GatherOperatorId reservation-owner 接口和过时测试已删除，
+  declaration 由 FinalWork 自身持有。旧 gather 关闭后的 on_end 输出、order 11 项、bounded_global_ordering 10 项、
+  order_closure 2 项及全 feature Clippy 通过。global record、Join 迁移测试辅助路径、固定分区执行器和其余 I/O 分离尚未完成。
 
 ## 1. 目标
 

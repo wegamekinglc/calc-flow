@@ -1,8 +1,9 @@
 //! Owned sort work never captures raw ingress or caller schema owners.
 use super::{BoundedOrderOperator, SortKey, SortTies, owned, workspace_bound};
 use crate::Batch;
-use crate::runtime::streaming::gather_work::{
-    AdmissionFailure, GatherOperatorId, GatherStop, OwnedCpuWork,
+use crate::runtime::streaming::{
+    gather_work::GatherStop,
+    morsel_pool::{ManagedMorsel, MorselCost, MorselLease, execute_managed},
 };
 use crate::{Result, RunContext, StreamOperatorContext};
 use datafusion::{
@@ -25,6 +26,12 @@ pub(super) struct FinalWork {
     pool: Arc<dyn MemoryPool>,
     _workspace: MemoryReservation,
     _declaration: Arc<MemoryReservation>,
+    control: Option<MemoryReservation>,
+}
+
+struct FinalOutput {
+    batch: owned::OwnedBatch,
+    _control: MemoryReservation,
 }
 impl FinalWork {
     fn execute(&self, check: &dyn Fn() -> Result<()>) -> Result<owned::OwnedBatch> {
@@ -71,10 +78,17 @@ impl FinalWork {
         Ok(indices.slice(start, count))
     }
 }
-impl OwnedCpuWork for FinalWork {
-    type Output = owned::OwnedBatch;
-    fn run(self, stop: &GatherStop) -> Result<Self::Output> {
+impl FinalWork {
+    fn run(self, stop: &GatherStop) -> Result<owned::OwnedBatch> {
         self.execute(&|| stop.check())
+    }
+
+    fn run_morsel(self, lease: &MorselLease) -> Result<FinalOutput> {
+        let batch = self.execute(&|| lease.check())?;
+        Ok(FinalOutput {
+            batch,
+            _control: self.control.expect("stream final work has control credit"),
+        })
     }
 }
 impl BoundedOrderOperator {
@@ -109,21 +123,29 @@ impl BoundedOrderOperator {
             pool,
             _workspace: workspace,
             _declaration: declaration,
+            control: None,
         })
     }
-    fn work_failure(&self, failure: AdmissionFailure) -> crate::CalcFlowError {
-        match failure {
-            AdmissionFailure::Budget { stage, source } if self.is_over() => {
-                crate::CalcFlowError::OperatorReason {
-                    node_id: self.name.to_string(),
-                    reason_code: crate::StreamingFailureReason::StateBudgetExceeded,
-                    message: format!(
-                        "state_budget_exceeded: copy_visible_v2 analytic worker {stage}; required allocation rejected, limit={} bytes: {source}",
-                        self.spec.state_budget().max_bytes()
-                    ),
-                }
+    fn work_failure(&self, error: crate::CalcFlowError) -> crate::CalcFlowError {
+        let budget = matches!(
+            &error,
+            crate::CalcFlowError::InvalidArgument { field, .. }
+                if matches!(field.as_str(), "morsel.rows" | "morsel.bytes" | "morsel.count")
+        );
+        if !budget {
+            return error;
+        }
+        if self.is_over() {
+            crate::CalcFlowError::OperatorReason {
+                node_id: self.name.to_string(),
+                reason_code: crate::StreamingFailureReason::StateBudgetExceeded,
+                message: format!(
+                    "state_budget_exceeded: copy_visible_v2 analytic worker morsel admission; required allocation rejected, limit={} bytes: {error}",
+                    self.spec.state_budget().max_bytes()
+                ),
             }
-            other => admission_error(other),
+        } else {
+            owned::error("sort worker admission exceeds runtime budget")
         }
     }
     pub(super) async fn finalize_finite(
@@ -150,37 +172,39 @@ impl BoundedOrderOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<owned::OwnedBatch> {
         context.check_cancelled()?;
-        let work = self.final_work(history, self.pool.clone(), self.declaration.clone())?;
+        let mut work = self.final_work(history, self.pool.clone(), self.declaration.clone())?;
         let role = if self.is_over() {
             "analytic worker control"
         } else {
             "sort worker control"
         };
         let credit = owned::reserve(&work.pool, 1024, role)?;
-        let scope = context
-            .gather_client(
-                GatherOperatorId::new(self.name.clone())
-                    .with_reservation_owner(self.declaration.clone()),
-            )
-            .scope()?;
-        let ticket = scope
-            .submit_work(work, credit, GatherStop::from_job(context.job()))
-            .await
-            .map_err(|failure| self.work_failure(failure))?;
-        let output = ticket.finish().await?;
+        let cost = MorselCost {
+            rows: work
+                .history
+                .batch
+                .table_payload()?
+                .batches()
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum(),
+            scratch_bytes: 0,
+            output_bytes: credit.size(),
+        };
+        work.control = Some(credit);
+        let output = execute_managed(
+            context.job(),
+            &self.name,
+            context.task_id(),
+            ManagedMorsel::new(work, cost, FinalWork::run_morsel),
+            |error| self.work_failure(error),
+        )
+        .await?;
         context.check_cancelled()?;
-        Ok(output.value)
+        Ok(output.batch)
     }
 }
 
-fn admission_error(failure: AdmissionFailure) -> crate::CalcFlowError {
-    match failure {
-        AdmissionFailure::Runtime(error) => error,
-        AdmissionFailure::Budget { .. } => {
-            owned::error("sort worker admission exceeds runtime budget")
-        }
-    }
-}
 fn take_batch(
     input: &RecordBatch,
     indices: &datafusion::arrow::array::UInt32Array,
