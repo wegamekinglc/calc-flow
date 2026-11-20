@@ -331,6 +331,14 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   该实现比 dense marks 更慢且增加分区扫描，不能留在默认路径。采集 120.230 秒、release 构建 621.022 秒，
   全部 oracle 通过。撤回后 `keyed_sum.rs` 与 `d80a334a` 逐字一致，不重复同一性能检查。
   后续先量化全局 key routing 与实际 partition update 成本，不再凭锁假设增加优化。
+- 2026-11-20 P6 生产并行激活已修复并完成首轮真实测量（`6dcacab6`）：此前 `update_keyed_records`
+  每个 4,096 行调用 `apply`，64,000 行并行门槛永不触发；现仅路由阶段按 morsel 切片并合并 group ids，整批可进入 worker。
+  70,001 行测试证明至少两个真实 worker 激活、完整 oracle 与内存释放，SQL 345 项及 Clippy 通过。
+  证据归档于 `benchmarks/sum-state/p6-production-parallel-20261120/`。兼容串行基线改为 `2ac1af5f`，
+  避免旧 `aefd17dc` harness 身份不匹配。stock-stream-1cpu −0.66%（no confirmed regression），stock-stream-8cpu
+  +15.63%（inconclusive），sparse +3.72%、finite −3.33%（均 inconclusive）；P6 4 核 ≥3 倍明确未达到。
+  示例 route/apply 约 60/53 ms（串行）与 65/73 ms（并行），并行没有降低 apply 时间且 CPU 更高。
+  此前 lease 实验没有真正执行并行，不能据此判定锁分摊无效；下一步仅在 worker 内预取旧组，避免串行新增扫描，仍无收益则关闭默认并行。
 - 2026-11-20 P6 SQL restore/capture prepare 已从独立 `spawn_blocking` 执行迁入 job morsel：
   保留 JobSqlRecoveryOwner 的串行准入、join loan、候选算子安装与 abandoned-work 结算，启动 gate 改为异步 oneshot，
   morsel lease 并入 prepare 的取消检查。池关闭后拒绝新 prepare，不再绕过统一准入；3 项 SQL worker 生命周期测试及全 feature Clippy 通过。
