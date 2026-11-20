@@ -8,9 +8,9 @@
     "timer_boundary": "lazy source generation through completed cumulative positions; same example and built-in check"
   },
   "candidate": {
-    "revision": "5d666afa",
-    "binary": "target/p6-delegated-cargo/release/examples/30_streaming_stock_positions",
-    "implementation": "DataFusion whole-batch stock SUM with first-sequence ordering and compact-state merge"
+    "revision": "74ac0775",
+    "binary": "target/p6-ordinal-cargo/release/examples/30_streaming_stock_positions",
+    "implementation": "DataFusion whole-batch stock SUM with ROW_NUMBER first-seen ordering and compact-state merge"
   },
   "execution": {
     "command": "taskset -c 0 <binary> --rows 10000000 --batch-size 1000000",
