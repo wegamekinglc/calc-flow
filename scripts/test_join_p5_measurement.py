@@ -17,12 +17,17 @@ def load_measurement():
     module = importlib.util.module_from_spec(spec)
     engine = ModuleType("benchmarks.engine_comparison")
     engine.EngineCase = object
+    stream = ModuleType("benchmarks.engine_stream")
+    stream.run_stream = Mock()
+    stream.run_variant_stream = Mock()
+    stream.stream_plan = Mock()
     calc_flow = ModuleType("calc_flow")
     calc_flow._native = ModuleType("calc_flow._native")
     with patch.dict(
         sys.modules,
         {
             "benchmarks.engine_comparison": engine,
+            "benchmarks.engine_stream": stream,
             "calc_flow": calc_flow,
             "calc_flow._native": calc_flow._native,
             spec.name: module,
@@ -36,10 +41,8 @@ class JoinP5MeasurementTests(unittest.TestCase):
     def test_observation_passes_remaining_deadline_to_real_execution(self):
         module = load_measurement()
         stream = object()
-        wait = object()
         engine = SimpleNamespace(
             loop=SimpleNamespace(run_until_complete=Mock(return_value=("table", 1.25))),
-            _stream=Mock(return_value=stream),
             validate=Mock(return_value={"passed": True, "rows": 3}),
             finish=Mock(return_value={"state": "completed"}),
             close=Mock(),
@@ -47,16 +50,53 @@ class JoinP5MeasurementTests(unittest.TestCase):
         with (
             patch.object(module, "EngineCase", return_value=engine),
             patch.object(
-                module.asyncio, "wait_for", Mock(return_value=wait)
-            ) as wait_for,
+                module, "bounded_stream", Mock(return_value=stream)
+            ) as bounded,
         ):
             result = module.observe({"rows": 3}, Path("sample"), 12.5)
-        wait_for.assert_called_once_with(stream, timeout=12.5)
-        engine.loop.run_until_complete.assert_called_once_with(wait)
+        bounded.assert_called_once_with(engine, {"rows": 3}, Path("sample"), 12.5)
+        engine.loop.run_until_complete.assert_called_once_with(stream)
         engine.validate.assert_called_once_with("table")
         engine.close.assert_called_once_with()
         self.assertEqual(result["seconds"], 1.25)
         self.assertEqual(result["correctness"]["rows"], 3)
+
+    def test_bounded_stream_wraps_the_maintained_coroutine(self):
+        module = load_measurement()
+        engine = SimpleNamespace(
+            count=0,
+            data=SimpleNamespace(table="table", dimension="dimension"),
+            expected=SimpleNamespace(num_rows=3),
+            streams="streams",
+        )
+        timeouts = []
+
+        async def execute():
+            return "table", 1.25
+
+        def wait_for(operation, timeout):
+            timeouts.append(timeout)
+            return operation
+
+        with (
+            patch.object(module, "stream_plan", return_value="plan") as plan,
+            patch.object(module, "run_stream", return_value=execute()) as run,
+            patch.object(module.asyncio, "wait_for", Mock(side_effect=wait_for)),
+        ):
+            result = module.asyncio.run(
+                module.bounded_stream(engine, {"scenario": "join"}, Path("case"), 12.5)
+            )
+        self.assertEqual(result, ("table", 1.25))
+        self.assertEqual(timeouts, [12.5])
+        self.assertEqual(engine.count, 1)
+        plan.assert_called_once_with("join", "table", "dimension")
+        run.assert_called_once_with(
+            "plan",
+            "streams",
+            Path("case/sample-1"),
+            3,
+            static_join=True,
+        )
 
     def test_case_does_not_start_an_observation_after_the_deadline(self):
         module = load_measurement()

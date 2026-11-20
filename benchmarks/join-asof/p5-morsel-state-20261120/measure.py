@@ -13,6 +13,7 @@ from importlib import metadata
 from pathlib import Path
 
 from benchmarks.engine_comparison import EngineCase
+from benchmarks.engine_stream import run_stream, run_variant_stream, stream_plan
 from calc_flow import _native
 
 
@@ -55,13 +56,41 @@ def native_evidence(wheel: Path) -> dict:
     }
 
 
+async def bounded_stream(engine, case: dict, root: Path, timeout: float):
+    engine.count += 1
+    scenario = case["scenario"]
+    if "batch_rows" in case:
+        operation = run_variant_stream(
+            lambda: stream_plan(
+                scenario,
+                engine.data.table,
+                engine.data.dimension,
+                batch_rows=case["batch_rows"],
+            ),
+            engine.streams,
+            root / f"sample-{engine.count}",
+            engine.expected.num_rows,
+            case=case,
+        )
+    else:
+        plan = stream_plan(scenario, engine.data.table, engine.data.dimension)
+        operation = run_stream(
+            plan,
+            engine.streams,
+            root / f"sample-{engine.count}",
+            engine.expected.num_rows,
+            static_join=scenario == "join",
+        )
+    return await asyncio.wait_for(operation, timeout=timeout)
+
+
 def observe(case: dict, root: Path, timeout: float) -> dict:
     if timeout <= 0:
         raise TimeoutError("performance acquisition deadline reached")
     engine = EngineCase(case, root)
     try:
         result = engine.loop.run_until_complete(
-            asyncio.wait_for(engine._stream(), timeout=timeout)
+            bounded_stream(engine, case, root, timeout)
         )
         return {
             "seconds": result[1],

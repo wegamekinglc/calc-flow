@@ -249,6 +249,12 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   仅输出 5,376/10,998,080 行，无有效 P50，≤350 ms 未通过。采集总耗时 610.174 秒，超过 600 秒预算；
   wrapper 未在 `acquisition_stop_seconds=570` 阻止进入 interval 的 600 秒等待，协议缺陷已公开记录。
   wheel 构建耗时 1084.473 秒，wheel/loaded native SHA 已归档。后续先修复性能与 interval 输出推进问题，不追加计时样本。
+- 2026-11-20 P5 多 morsel 正确性修复（`dfc077eb`）及复测完成，证据归档于 `benchmarks/join-asof/p5-morsel-state-20261120/`。
+  prepare 现在预留不同 run ID，并串联前序 prepared side update；空 morsel 保留最近非空累计状态。此前重复 ID 和基于批前状态的更新
+  使 interval 仅输出部分匹配。直接状态与生产回归均从 18,928 恢复到 108,080 行，空 morsel、匹配上限、驱逐和恢复共 19 项测试通过。
+  1M 单核正式采集完成两例各 2 次预热 + 10 个样本，Join P50 **461.093 ms**、interval P50 **3,699.085 ms**，两例 10/10 完整 oracle
+  均通过且正常结束；采集耗时 84.957 秒，在 600 秒预算内。Join ≤30 ms 与 interval ≤350 ms 仍未通过，不将正确性恢复表述为性能达标。
+  新 wrapper 将剩余截止时间传入底层 `run_stream`，保留原计时边界，4 项协议测试通过；wheel 构建耗时 557.219 秒，SHA 已归档。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
