@@ -294,6 +294,13 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   **没有有效样本、P50/P95 或该候选的完整 oracle 结论**；wheel 单独构建 1,181.720 秒，采集在预算内以 `TimeoutError` 结束。
   证据见 `benchmarks/join-asof/p5-projected-hot-20261121/`。该 temporal SQL 物理计划被拒绝，下一候选改为 per-key 哈希索引、
   排序时间项、边界二分和 Arrow `take`，不是对旧候选追加计时。
+- 2026-11-21 P5 原生时间索引候选 `7ba44180` 首次取得重大端到端提升：静态 Join 使用 per-key 哈希索引、
+  排序右时间项、检查后含边界二分和裁剪 Arrow `take`，interval 使用四列原生 BandJoin。固定两例各 2 次预热 + 10 个样本，
+  Join P50 **39.336 ms**、P95 **73.729 ms**，较 399.845 ms 基线约 **10.17×**；interval P50 **363.002 ms**、
+  P95 **451.309 ms**，较 1,076.113 ms 基线约 **2.96×**。两例 10/10 完整 oracle 通过，采集 37.375 秒，
+  wheel 单独构建 986.940 秒。≤30 ms/≤350 ms 仍分别差 9.336/13.002 ms，不宣称门槛完成；
+  证据见 `benchmarks/join-asof/p5-native-temporal-index-20261121/`。下一步融合 Join 与下游 projection，
+  直接生成静态 `sequence/value` 和 interval `sequence/right_sequence/value`，去除剩余列物化与算术。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
