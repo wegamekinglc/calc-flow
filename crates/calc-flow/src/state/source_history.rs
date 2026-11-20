@@ -9,7 +9,7 @@ use work::WorkOwner;
 mod tests;
 
 use super::SourceHistoryManifestEntry;
-use super::v4::{OpaqueObject, SourceHistorySegmentHandle, V4Store};
+use super::v4::{OpaqueObject, SourceHistorySegmentHandle, V4Store, native::V4ObjectStore};
 use crate::{CalcFlowError, Epoch, JsonMap, Result, StateSegment};
 use parking_lot::Mutex;
 use sha2::{Digest as _, Sha256};
@@ -68,6 +68,7 @@ struct Inner {
     ledger: Arc<Ledger>,
     history: Arc<Mutex<History>>,
     work: Arc<WorkOwner>,
+    objects: Option<Arc<tokio::sync::Mutex<Box<dyn V4ObjectStore>>>>,
 }
 
 /// Runtime-owned managed storage for one immutable source history.
@@ -119,7 +120,23 @@ impl SourceHistoryContext {
             ledger,
             history: Arc::new(Mutex::new(history)),
             work: Arc::new(WorkOwner::default()),
+            objects: None,
         })))
+    }
+
+    pub(crate) fn with_object_store(mut self, store: Box<dyn V4ObjectStore>) -> Self {
+        let objects = Some(Arc::new(tokio::sync::Mutex::new(store)));
+        self.0 = Arc::new(Inner {
+            lineage: self.0.lineage.clone(),
+            source_id: self.0.source_id.clone(),
+            epoch: self.0.epoch,
+            spec: self.0.spec.clone(),
+            ledger: self.0.ledger.clone(),
+            history: self.0.history.clone(),
+            work: self.0.work.clone(),
+            objects,
+        });
+        self
     }
 
     pub(crate) fn fork(&self) -> Self {
@@ -170,6 +187,7 @@ impl SourceHistoryContext {
         let lineage = self.0.lineage.clone();
         let ledger = self.0.ledger.clone();
         let history = self.0.history.clone();
+        let objects = self.0.objects.clone();
         let source_id = self.0.source_id.clone();
         let epoch = self.0.epoch;
         let segment_id = segment_id.to_owned();
@@ -187,9 +205,20 @@ impl SourceHistoryContext {
                             message: format!("history file read failed: {error}"),
                         })??;
                 let (segment, storage) = read;
-                let (handle, entry) =
+                let (handle, entry) = if let Some(store) = objects {
+                    persist_archived_segment(
+                        &mut **store.lock().await,
+                        epoch,
+                        &source_id,
+                        &segment_id,
+                        segment,
+                        storage,
+                    )
+                    .await?
+                } else {
                     archived_segment(&lineage, &source_id, epoch, &segment_id, segment, storage)
-                        .await?;
+                        .await?
+                };
                 history.lock().segments.insert(segment_id, entry);
                 Ok(handle)
             })
@@ -363,6 +392,18 @@ async fn archived_segment(
     segment: StateSegment,
     storage: StorageCredit,
 ) -> Result<(SourceHistorySegmentHandle, Arc<Segment>)> {
+    let mut store = V4Store::new(lineage);
+    persist_archived_segment(&mut store, epoch, source_id, segment_id, segment, storage).await
+}
+
+async fn persist_archived_segment<S: V4ObjectStore + ?Sized>(
+    store: &mut S,
+    epoch: Epoch,
+    source_id: &str,
+    segment_id: &str,
+    segment: StateSegment,
+    storage: StorageCredit,
+) -> Result<(SourceHistorySegmentHandle, Arc<Segment>)> {
     let bytes = segment.bytes().to_vec();
     let object = OpaqueObject {
         owner: source_id.into(),
@@ -371,7 +412,6 @@ async fn archived_segment(
         sha256: hex::encode(Sha256::digest(&bytes)),
         bytes,
     };
-    let mut store = V4Store::new(lineage);
     let mut encoded = store.write_opaque(epoch.as_u64(), vec![object]).await?;
     let handle = encoded.remove(0).handle;
     let entry = Arc::new(Segment {

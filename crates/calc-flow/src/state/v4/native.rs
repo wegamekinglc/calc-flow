@@ -17,11 +17,16 @@ const METADATA_COLUMN: &str = "__cf_operator_metadata";
 const MAX_METADATA_BYTES: usize = 64 * 1024;
 
 #[async_trait::async_trait]
-pub(crate) trait V4ObjectStore {
+pub(crate) trait V4ObjectStore: Send {
     async fn write_objects(
         &mut self,
         epoch: u64,
         objects: Vec<NewObject>,
+    ) -> Result<Vec<EncodedObject>>;
+    async fn write_opaque(
+        &mut self,
+        epoch: u64,
+        objects: Vec<super::OpaqueObject>,
     ) -> Result<Vec<EncodedObject>>;
     fn record_carried(&mut self, count: usize);
     fn read_epoch_manifest(&self, epoch: u64) -> Result<Option<V4Manifest>>;
@@ -36,6 +41,14 @@ impl V4ObjectStore for V4Store {
         objects: Vec<NewObject>,
     ) -> Result<Vec<EncodedObject>> {
         V4Store::write_objects(self, epoch, objects).await
+    }
+
+    async fn write_opaque(
+        &mut self,
+        epoch: u64,
+        objects: Vec<super::OpaqueObject>,
+    ) -> Result<Vec<EncodedObject>> {
+        V4Store::write_opaque(self, epoch, objects).await
     }
 
     fn record_carried(&mut self, count: usize) {

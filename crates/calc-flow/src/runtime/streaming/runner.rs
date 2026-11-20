@@ -7,7 +7,7 @@ pub(in crate::runtime::streaming) mod checkpoint_v4_selection;
 mod join_terminal;
 mod native_sequences;
 pub(super) mod operator_fusion;
-mod source_history;
+pub(crate) mod source_history;
 mod sql_recovery;
 mod supervision;
 
@@ -2197,6 +2197,7 @@ async fn run_job_driver(
     }
     if let Err(error) = source_history::configure(
         checkpoint.as_ref(),
+        &context,
         &mut sources,
         &core.source_histories,
         &mut plan,

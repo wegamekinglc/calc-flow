@@ -287,6 +287,11 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   previous manifest/index、page 分配、引用校验和 carried 计数继续复用原实现。池关闭在写入前拒绝，
   开放池完成 partition/page 持久化。native page 3 项、Join 581 项、SQL recovery 24 项及全 feature Clippy 通过。
   固定 N 分区、table/source-history 其余编码迁移和性能门槛尚未完成。
+- 2026-11-20 P6 runner source-history 编码已接入 managed morsel：V4ObjectStore 同时覆盖 native/opaque，
+  SourceHistoryContext 可注入共享对象存储且公共 archive_file 签名和默认行为不变；frozen source 安装时注入
+  真实 job 的 ManagedHistoryStore，archive/seal/load 连续通过，池关闭在写入前拒绝。source-history 6 项、
+  connectors 6 项及全 feature Clippy 通过。table v4 的 session N=1 coordinator 保持原路径，
+  固定 N 分区及其余 CPU 编码迁移和性能门槛尚未完成。
 
 ## 1. 目标
 

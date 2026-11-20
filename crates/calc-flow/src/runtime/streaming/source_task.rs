@@ -537,17 +537,26 @@ impl SourceBinding {
         &mut self,
         source_id: &str,
         lineage: &std::path::Path,
+        job: &StreamJobContext,
         epoch: Epoch,
         restored: Option<crate::SourceHistoryManifestEntry>,
     ) -> Result<()> {
         if let Some(spec) = &self.history_spec {
-            self.history = Some(crate::SourceHistoryContext::new(
-                lineage,
-                source_id,
-                epoch,
-                spec.clone(),
-                restored,
-            )?);
+            self.history = Some(
+                crate::SourceHistoryContext::new(
+                    lineage,
+                    source_id,
+                    epoch,
+                    spec.clone(),
+                    restored,
+                )?
+                .with_object_store(Box::new(
+                    super::runner::source_history::ManagedHistoryStore::new(
+                        lineage.to_owned(),
+                        job,
+                    ),
+                )),
+            );
         }
         Ok(())
     }

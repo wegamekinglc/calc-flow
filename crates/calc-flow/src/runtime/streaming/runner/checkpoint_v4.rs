@@ -50,7 +50,7 @@ impl OpaqueEncodingWork {
     }
 }
 
-async fn encode_objects(
+pub(super) async fn encode_objects(
     job: &StreamJobContext,
     owner: &str,
     objects: Vec<OpaqueObject>,
@@ -98,6 +98,36 @@ impl NativeEncodingWork {
     }
 }
 
+pub(super) async fn encode_new_objects(
+    job: &StreamJobContext,
+    owner: &str,
+    objects: Vec<NewObject>,
+    root: PathBuf,
+    epoch: u64,
+) -> Result<Vec<EncodedObject>> {
+    let cost = MorselCost {
+        rows: objects.len(),
+        scratch_bytes: 0,
+        output_bytes: 0,
+    };
+    execute_managed(
+        job,
+        owner,
+        None,
+        ManagedMorsel::new(
+            NativeEncodingWork {
+                objects,
+                root,
+                epoch,
+            },
+            cost,
+            NativeEncodingWork::run,
+        ),
+        |error| error,
+    )
+    .await
+}
+
 struct ManagedNativeStore<'a> {
     store: &'a mut V4Store,
     job: &'a StreamJobContext,
@@ -116,28 +146,31 @@ impl V4ObjectStore for ManagedNativeStore<'_> {
         epoch: u64,
         objects: Vec<NewObject>,
     ) -> Result<Vec<EncodedObject>> {
-        let cost = MorselCost {
-            rows: objects.len(),
-            scratch_bytes: 0,
-            output_bytes: 0,
-        };
-        let encoded = execute_managed(
+        let encoded = encode_new_objects(
             self.job,
             "native-v4-objects",
-            None,
-            ManagedMorsel::new(
-                NativeEncodingWork {
-                    objects,
-                    root: self.store.root().to_owned(),
-                    epoch,
-                },
-                cost,
-                NativeEncodingWork::run,
-            ),
-            |error| error,
+            objects,
+            self.store.root().to_owned(),
+            epoch,
         )
         .await?;
         self.store.write_encoded_objects(encoded).await
+    }
+
+    async fn write_opaque(
+        &mut self,
+        epoch: u64,
+        objects: Vec<OpaqueObject>,
+    ) -> Result<Vec<EncodedObject>> {
+        let encoded = encode_objects(
+            self.job,
+            "native-v4-opaque",
+            objects,
+            self.store.root().to_owned(),
+            epoch,
+        )
+        .await?;
+        self.store.write_encoded_opaque(encoded).await
     }
 
     fn record_carried(&mut self, count: usize) {
@@ -532,5 +565,75 @@ mod tests {
         };
         assert_eq!(partitions.len(), 1);
         assert!(managed.store.stats().content_hashes > 0);
+    }
+
+    #[tokio::test]
+    async fn history_write_requires_an_open_job_morsel_pool() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.json");
+        std::fs::write(&path, b"payload").unwrap();
+        let job = StreamJobContext::new(
+            955,
+            "v4-history-morsel-write",
+            crate::JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        );
+        job.managed_morsel_owner().close_and_drain().await.unwrap();
+        let history = crate::SourceHistoryContext::new(
+            directory.path().join("lineage"),
+            "input",
+            crate::Epoch::INITIAL,
+            crate::SourceHistorySpec::new(
+                "test_history",
+                crate::SourceHistoryLimits::new(1, 4096, 4096).unwrap(),
+            )
+            .unwrap(),
+            None,
+        )
+        .unwrap()
+        .with_object_store(Box::new(
+            super::super::source_history::ManagedHistoryStore::new(
+                directory.path().join("lineage"),
+                &job,
+            ),
+        ));
+
+        let result = history.archive_file("file-0", &path, 16).await;
+        assert!(
+            matches!(result, Err(CalcFlowError::Cancelled { .. })),
+            "{result:?}"
+        );
+
+        let job = StreamJobContext::new(
+            956,
+            "v4-history-morsel-write",
+            crate::JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        );
+        let history = crate::SourceHistoryContext::new(
+            directory.path().join("lineage"),
+            "input",
+            crate::Epoch::INITIAL,
+            crate::SourceHistorySpec::new(
+                "test_history",
+                crate::SourceHistoryLimits::new(1, 4096, 4096).unwrap(),
+            )
+            .unwrap(),
+            None,
+        )
+        .unwrap()
+        .with_object_store(Box::new(
+            super::super::source_history::ManagedHistoryStore::new(
+                directory.path().join("lineage"),
+                &job,
+            ),
+        ));
+        history.archive_file("file-0", &path, 16).await.unwrap();
+        history.seal(BTreeMap::new()).unwrap();
+        let bytes = history.load("file-0").await.unwrap();
+        assert_eq!(bytes.bytes(), b"payload");
+        assert!(history.drain().await.is_empty());
     }
 }
