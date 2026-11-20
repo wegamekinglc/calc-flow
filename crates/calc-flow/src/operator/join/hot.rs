@@ -1,7 +1,7 @@
 use super::{JoinSide, StreamJoinOperator, counter_overflow, operator_error};
 use crate::{Batch, BatchMetadata, Result, StreamCollector, StreamOperatorContext};
 use datafusion::arrow::{
-    datatypes::{DataType, TimeUnit},
+    datatypes::{DataType, SchemaRef, TimeUnit},
     record_batch::{RecordBatch, RecordBatchOptions},
 };
 use std::{collections::BTreeMap, sync::Arc};
@@ -22,7 +22,7 @@ pub(super) struct HotJoinCore {
 
 impl HotJoinCore {
     pub(super) fn new(operator: &StreamJoinOperator) -> Option<Self> {
-        if operator.output_columns.is_some() {
+        if output_schema(operator).fields().is_empty() {
             return None;
         }
         let kind = if operator.spec.bounds.after_micros == 0 {
@@ -43,7 +43,7 @@ impl HotJoinCore {
             return None;
         }
         for side in [0, 1] {
-            let schema = operator.retained_schema(side);
+            let schema = operator.input_schema(side);
             for (name, data_type) in [("symbol", DataType::Utf8), ("sequence", DataType::UInt64)] {
                 let index = schema.index_of(name).ok()?;
                 if schema.field(index).data_type() != &data_type {
@@ -127,7 +127,7 @@ impl HotJoinCore {
         #[cfg(feature = "benchmark-internals")]
         drop(execute_span);
         let mut sequence = operator.state.next_output_sequence;
-        let schema = Arc::clone(&operator.logical_output_schema);
+        let schema = output_schema(operator);
         #[cfg(feature = "benchmark-internals")]
         let emit_span =
             context
@@ -184,9 +184,11 @@ impl HotJoinCore {
         ]);
         let query = crate::expression::parse_select_query(&self.query)
             .map_err(|error| operator_error(&operator.name, &error.to_string()))?;
-        let left_width = operator.retained_schema(0).fields().len();
-        let columns = (0..operator.logical_output_schema.fields().len())
-            .map(|source| {
+        let left_width = operator.input_schema(0).fields().len();
+        let schema = output_schema(operator);
+        let columns = (0..schema.fields().len())
+            .map(|ordinal| {
+                let source = output_source(operator, ordinal);
                 if source < left_width {
                     crate::datafusion::datafusion_join::BandColumn::Left(source)
                 } else {
@@ -195,11 +197,7 @@ impl HotJoinCore {
             })
             .collect::<Vec<_>>();
         let plan = crate::datafusion::datafusion_join::plan_with_output(
-            &query,
-            &tables,
-            Arc::clone(&operator.logical_output_schema),
-            columns,
-            1,
+            &query, &tables, schema, columns, 1,
         )
         .ok_or_else(|| operator_error(&operator.name, "native band planning is unsupported"))?;
         let session = datafusion::execution::context::SessionContext::new_with_config(
@@ -212,24 +210,39 @@ impl HotJoinCore {
     }
 }
 
+fn output_schema(operator: &StreamJoinOperator) -> SchemaRef {
+    Arc::clone(
+        operator.output_ports[0]
+            .schema()
+            .expect("compiled Join output schema"),
+    )
+}
+
+fn output_source(operator: &StreamJoinOperator, ordinal: usize) -> usize {
+    let field = &output_schema(operator).fields[ordinal];
+    operator
+        .logical_output_schema
+        .index_of(field.name())
+        .expect("projected Join field has a logical source")
+}
+
 fn query(operator: &StreamJoinOperator, kind: HotKind) -> String {
     if kind == HotKind::Band {
         return band_query(operator.spec.bounds.before_micros / 1_000_000);
     }
-    let left_width = operator.retained_schema(0).fields().len();
-    let projection = operator
-        .logical_output_schema
+    let left_width = operator.input_schema(0).fields().len();
+    let projection = output_schema(operator)
         .fields()
         .iter()
         .enumerate()
         .map(|(ordinal, field)| {
-            let source = ordinal;
-            let (alias, schema) = if source < left_width {
-                ("input", operator.retained_schema(0))
+            let source = output_source(operator, ordinal);
+            let (alias, schema, index) = if source < left_width {
+                ("input", operator.input_schema(0), source)
             } else {
-                ("reference", operator.retained_schema(1))
+                ("reference", operator.input_schema(1), source - left_width)
             };
-            let source_field = &schema.fields[source % left_width];
+            let source_field = &schema.fields[index];
             format!(
                 "{}.{} AS {}",
                 alias,
@@ -326,80 +339,91 @@ mod tests {
 
     #[tokio::test]
     async fn hot_join_emits_the_complete_downstream_schema() {
-        let mut operator =
-            StreamJoinOperator::new("hot", quote_schema(), dimension_schema(), spec()).unwrap();
-        operator.enable_run_core();
-        let left = RecordBatch::try_new(
-            quote_schema(),
-            vec![
-                Arc::new(TimestampMicrosecondArray::from(vec![0, 1_000_000]).with_timezone("UTC")),
-                Arc::new(UInt64Array::from(vec![0, 1])),
-                Arc::new(StringArray::from(vec!["S000", "S000"])),
-                Arc::new(Float64Array::from(vec![2.0, 3.0])),
-            ],
-        )
-        .unwrap();
-        let right = RecordBatch::try_new(
-            dimension_schema(),
-            vec![
-                Arc::new(StringArray::from(vec!["S000"])),
-                Arc::new(Float64Array::from(vec![2.0])),
-                Arc::new(UInt64Array::from(vec![0])),
-                Arc::new(TimestampMicrosecondArray::from(vec![1_000_000]).with_timezone("UTC")),
-            ],
-        )
-        .unwrap();
-        let job = StreamJobContext::new(
-            1,
-            "fingerprint",
-            JsonMap::new(),
-            None,
-            CancellationToken::new(),
-        )
-        .with_checkpointing(false);
-        let context = StreamOperatorContext::new(&job, "hot", None);
-        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-        operator
-            .process_data(
-                "left",
-                Batch::table(vec![left], BatchMetadata::default()).unwrap(),
-                &context,
-                &mut collector,
+        for projection in [None, Some(vec![1, 3, 5])] {
+            let mut operator =
+                StreamJoinOperator::new("hot", quote_schema(), dimension_schema(), spec()).unwrap();
+            if let Some(columns) = &projection {
+                operator.set_output_projection(columns.clone()).unwrap();
+            }
+            operator.enable_run_core();
+            let left = RecordBatch::try_new(
+                quote_schema(),
+                vec![
+                    Arc::new(
+                        TimestampMicrosecondArray::from(vec![0, 1_000_000]).with_timezone("UTC"),
+                    ),
+                    Arc::new(UInt64Array::from(vec![0, 1])),
+                    Arc::new(StringArray::from(vec!["S000", "S000"])),
+                    Arc::new(Float64Array::from(vec![2.0, 3.0])),
+                ],
             )
-            .await
             .unwrap();
-        operator
-            .process_data(
-                "right",
-                Batch::table(vec![right], BatchMetadata::default()).unwrap(),
-                &context,
-                &mut collector,
+            let right = RecordBatch::try_new(
+                dimension_schema(),
+                vec![
+                    Arc::new(StringArray::from(vec!["S000"])),
+                    Arc::new(Float64Array::from(vec![2.0])),
+                    Arc::new(UInt64Array::from(vec![0])),
+                    Arc::new(TimestampMicrosecondArray::from(vec![1_000_000]).with_timezone("UTC")),
+                ],
             )
-            .await
             .unwrap();
+            let job = StreamJobContext::new(
+                1,
+                "fingerprint",
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            )
+            .with_checkpointing(false);
+            let context = StreamOperatorContext::new(&job, "hot", None);
+            let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+            operator
+                .process_data(
+                    "left",
+                    Batch::table(vec![left], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            operator
+                .process_data(
+                    "right",
+                    Batch::table(vec![right], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
 
-        let messages = collector.drain("output");
-        assert_eq!(messages.len(), 1);
-        let output = messages[0].as_data().unwrap();
-        assert_eq!(output.num_rows(), 2);
-        let record = &output.table_payload().unwrap().batches()[0];
-        let price = record
-            .column(record.schema().index_of("quote__price").unwrap())
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert_eq!(price.values(), &[2.0, 3.0]);
-        let factor = record
-            .column(record.schema().index_of("dimension__factor").unwrap())
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert_eq!(factor.values(), &[2.0, 2.0]);
-        assert_eq!(operator.state.metrics.emitted_match_rows, 2);
-        let core = operator.run_core.as_ref().unwrap();
-        assert!(core.hot_enabled());
-        assert_eq!(core.rows(JoinSide::Left), 0);
-        assert_eq!(core.rows(JoinSide::Right), 0);
+            let messages = collector.drain("output");
+            assert_eq!(messages.len(), 1);
+            let output = messages[0].as_data().unwrap();
+            assert_eq!(output.num_rows(), 2);
+            let record = &output.table_payload().unwrap().batches()[0];
+            assert_eq!(
+                record.schema().fields().len(),
+                projection.as_ref().map_or(8, Vec::len)
+            );
+            let price = record
+                .column(record.schema().index_of("quote__price").unwrap())
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            assert_eq!(price.values(), &[2.0, 3.0]);
+            let factor = record
+                .column(record.schema().index_of("dimension__factor").unwrap())
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            assert_eq!(factor.values(), &[2.0, 2.0]);
+            assert_eq!(operator.state.metrics.emitted_match_rows, 2);
+            let core = operator.run_core.as_ref().unwrap();
+            assert!(core.hot_enabled());
+            assert_eq!(core.rows(JoinSide::Left), 0);
+            assert_eq!(core.rows(JoinSide::Right), 0);
+        }
     }
 
     fn band_spec() -> StreamJoinSpec {
@@ -417,67 +441,78 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hot_band_emits_all_input_columns() {
-        let mut operator =
-            StreamJoinOperator::new("hot-band", quote_schema(), quote_schema(), band_spec())
-                .unwrap();
-        operator.enable_run_core();
-        let record = RecordBatch::try_new(
-            quote_schema(),
-            vec![
-                Arc::new(TimestampMicrosecondArray::from(vec![0, 1_000_000]).with_timezone("UTC")),
-                Arc::new(UInt64Array::from(vec![0, 1])),
-                Arc::new(StringArray::from(vec!["S000", "S000"])),
-                Arc::new(Float64Array::from(vec![2.0, 3.0])),
-            ],
-        )
-        .unwrap();
-        let job = StreamJobContext::new(
-            1,
-            "fingerprint",
-            JsonMap::new(),
-            None,
-            CancellationToken::new(),
-        )
-        .with_checkpointing(false);
-        let context = StreamOperatorContext::new(&job, "hot-band", None);
-        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-        for side in ["left", "right"] {
-            operator
-                .process_data(
-                    side,
-                    Batch::table(vec![record.clone()], BatchMetadata::default()).unwrap(),
-                    &context,
-                    &mut collector,
-                )
-                .await
-                .unwrap();
-        }
+    async fn hot_band_emits_requested_input_columns() {
+        for projection in [None, Some(vec![1, 3, 5, 7])] {
+            let mut operator =
+                StreamJoinOperator::new("hot-band", quote_schema(), quote_schema(), band_spec())
+                    .unwrap();
+            if let Some(columns) = &projection {
+                operator.set_output_projection(columns.clone()).unwrap();
+            }
+            operator.enable_run_core();
+            let record = RecordBatch::try_new(
+                quote_schema(),
+                vec![
+                    Arc::new(
+                        TimestampMicrosecondArray::from(vec![0, 1_000_000]).with_timezone("UTC"),
+                    ),
+                    Arc::new(UInt64Array::from(vec![0, 1])),
+                    Arc::new(StringArray::from(vec!["S000", "S000"])),
+                    Arc::new(Float64Array::from(vec![2.0, 3.0])),
+                ],
+            )
+            .unwrap();
+            let job = StreamJobContext::new(
+                1,
+                "fingerprint",
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            )
+            .with_checkpointing(false);
+            let context = StreamOperatorContext::new(&job, "hot-band", None);
+            let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+            for side in ["left", "right"] {
+                operator
+                    .process_data(
+                        side,
+                        Batch::table(vec![record.clone()], BatchMetadata::default()).unwrap(),
+                        &context,
+                        &mut collector,
+                    )
+                    .await
+                    .unwrap();
+            }
 
-        let messages = collector.drain("output");
-        assert_eq!(messages.len(), 1);
-        let output = messages[0].as_data().unwrap();
-        assert_eq!(output.num_rows(), 4);
-        let record = &output.table_payload().unwrap().batches()[0];
-        let left = record
-            .column(record.schema().index_of("left__price").unwrap())
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert_eq!(left.values(), &[2.0, 2.0, 3.0, 3.0]);
-        let right = record
-            .column(record.schema().index_of("right__price").unwrap())
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert_eq!(right.values(), &[2.0, 3.0, 2.0, 3.0]);
-        let right_sequence = record
-            .column(record.schema().index_of("right__sequence").unwrap())
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap();
-        assert_eq!(right_sequence.values(), &[0, 1, 0, 1]);
-        assert_eq!(operator.state.metrics.emitted_match_rows, 4);
-        assert!(operator.run_core.as_ref().unwrap().hot_enabled());
+            let messages = collector.drain("output");
+            assert_eq!(messages.len(), 1);
+            let output = messages[0].as_data().unwrap();
+            assert_eq!(output.num_rows(), 4);
+            let record = &output.table_payload().unwrap().batches()[0];
+            assert_eq!(
+                record.schema().fields().len(),
+                projection.as_ref().map_or(8, Vec::len)
+            );
+            let left = record
+                .column(record.schema().index_of("left__price").unwrap())
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            assert_eq!(left.values(), &[2.0, 2.0, 3.0, 3.0]);
+            let right = record
+                .column(record.schema().index_of("right__price").unwrap())
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            assert_eq!(right.values(), &[2.0, 3.0, 2.0, 3.0]);
+            let right_sequence = record
+                .column(record.schema().index_of("right__sequence").unwrap())
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            assert_eq!(right_sequence.values(), &[0, 1, 0, 1]);
+            assert_eq!(operator.state.metrics.emitted_match_rows, 4);
+            assert!(operator.run_core.as_ref().unwrap().hot_enabled());
+        }
     }
 }
