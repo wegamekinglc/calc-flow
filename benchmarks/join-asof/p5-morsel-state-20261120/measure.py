@@ -134,6 +134,24 @@ def measure_case(plan: dict, case_plan: dict, root: Path, deadline: float) -> di
     }
 
 
+def execution_environment() -> dict:
+    return {
+        "python": os.sys.version,
+        "tokio_worker_threads": os.environ.get("TOKIO_WORKER_THREADS"),
+        "openblas_num_threads": os.environ.get("OPENBLAS_NUM_THREADS"),
+        "omp_num_threads": os.environ.get("OMP_NUM_THREADS"),
+        "taskset": os.environ.get("CALC_FLOW_TASKSET"),
+        "cpus_allowed": next(
+            (
+                line.strip()
+                for line in Path("/proc/self/status").read_text().splitlines()
+                if line.startswith("Cpus_allowed_list:")
+            ),
+            None,
+        ),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--plan", type=Path, required=True)
@@ -158,21 +176,7 @@ def main() -> None:
         "schema": "calc-flow.join-p5-performance-result.v1",
         "plan": plan,
         "candidate": evidence,
-        "environment": {
-            "python": os.sys.version,
-            "tokio_worker_threads": os.environ.get("TOKIO_WORKER_THREADS"),
-            "openblas_num_threads": os.environ.get("OPENBLAS_NUM_THREADS"),
-            "omp_num_threads": os.environ.get("OMP_NUM_THREADS"),
-            "taskset": os.environ.get("CALC_FLOW_TASKSET"),
-            "cpus_allowed": next(
-                (
-                    line.strip()
-                    for line in Path("/proc/self/status").read_text().splitlines()
-                    if line.startswith("Cpus_allowed_list:")
-                ),
-                None,
-            ),
-        },
+        "environment": execution_environment(),
         "cases": results,
         "wall_seconds": elapsed,
         "within_budget": elapsed <= plan["execution"]["total_budget_seconds"],
