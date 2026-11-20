@@ -238,6 +238,11 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   完整 oracle、总预算 600 秒。两次采集均在 source-ready 30 秒等待处超时，未产生有效性能样本或 p50，未执行 interval 计时。
   后续 100 行与 1M 诊断的完整输出 oracle 均通过，但不作为性能证据；按预登记停止规则不再为理想结果重试。
   Join ≤30 ms 与 interval ≤350 ms 均未验证，后续须先解决启动测量不确定性，不能以诊断通过替代门槛结论。
+  后续检查 `failure-before-cancel.json` 与 100 行连续 observation 诊断已定位启动原因：每次新建 `EngineCase`
+  都从 `sample-1` 开始，第二次 warmup 恢复到第一次 warmup 的 terminal checkpoint，当前 Python sources/sink 从未打开，
+  因而 source-ready 超时；单次 1M 成功与 clone 无关，也不是 runner-ready 的产品缺陷。测量脚本已为每个 warmup/正式 observation
+  分配独立 root，100 行连续 2 次预热 + 2 次 observation 的完整 oracle 验证通过。下一轮预登记 `212ca55b`，使用独立
+  observation roots、2 次预热 + 10 个样本和独立 600 秒预算；这是测量有效性修复，不进行计时驱动的重试。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
@@ -302,6 +307,12 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   N=1 或小批保持串行，不增加线程成本。逐行捕获 worker panic 后恢复原分区状态，回滚所有分区及 key births，
   清除故障后同一输入可重试；强制并行测试证明至少两个真实 worker 参与。SQL 344 项及全 feature Clippy 通过。
   本步不含性能提升声明；其他 keyed 算子、统一分片执行面、其余 I/O 分离和 P6 性能门槛尚未完成。
+- 2026-11-20 P6 keyed SUM 首轮四例配对验收已完成，证据归档于 `benchmarks/sum-state/p6-fixed-partitions-20261120/`。
+  基线为 `aefd17dc`（固定 N 串行 apply），候选为 `212ca55b`（scoped parallel apply），每例 2 轮×10 对 AB/BA，
+  全部 snapshot/lifecycle oracle 通过，采集 120.299 秒，未增加样本或重试。stock-stream-1cpu 从 199.879 ms 增至
+  249.977 ms（+25.06%，regression），stock-stream-8cpu 从 136.195 ms 增至 164.141 ms（+20.52%，regression），
+  sparse-stream-1cpu +5.18%（inconclusive），finite 控制 +1.82%（inconclusive）。release 构建分别为 671.666/970.241 秒。
+  因此当前并行实现不是性能升级，P6 4 核 ≥3 倍门槛明确未通过；后续先定位并消除回退，不扩张 keyed 功能面。
 - 2026-11-20 P6 SQL restore/capture prepare 已从独立 `spawn_blocking` 执行迁入 job morsel：
   保留 JobSqlRecoveryOwner 的串行准入、join loan、候选算子安装与 abandoned-work 结算，启动 gate 改为异步 oneshot，
   morsel lease 并入 prepare 的取消检查。池关闭后拒绝新 prepare，不再绕过统一准入；3 项 SQL worker 生命周期测试及全 feature Clippy 通过。
