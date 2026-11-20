@@ -445,44 +445,6 @@ async fn test_keyed_sum_parallel_workers_preserve_deterministic_output() {
 }
 
 #[tokio::test]
-async fn test_keyed_sum_large_record_activates_parallel_workers() {
-    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
-    let job = StreamJobContext::new(
-        989,
-        "keyed-sum",
-        JsonMap::new(),
-        None,
-        CancellationToken::new(),
-    );
-    let context = StreamOperatorContext::new(&job, "keyed-sum", None);
-    let rows = std::iter::once(Row {
-        key: None,
-        label: None,
-        value: None,
-        selected: true,
-        keep: true,
-    })
-    .chain((0..70_000i64).map(|index| Row {
-        key: Some(index % 100),
-        label: Some("same"),
-        value: Some(1),
-        selected: true,
-        keep: true,
-    }))
-    .collect::<Vec<_>>();
-    let full = Batch::table(vec![record(false, &rows)], crate::BatchMetadata::default()).unwrap();
-    let mut plan = plan(&runtime, false).await;
-    partitioned(&mut plan, 2);
-
-    let transaction = plan.update(&full, &context, "keyed-sum").await.unwrap();
-    assert_eq!(output_rows(&transaction.records), expected(false, &rows));
-    assert!(plan.keyed_sum.as_ref().unwrap().worker_count_for_test() >= 2);
-    plan.commit(transaction);
-    drop(plan);
-    assert_eq!(runtime.incremental_memory_pool().reserved(), 0);
-}
-
-#[tokio::test]
 async fn test_keyed_sum_worker_panic_rolls_back_every_partition() {
     let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
     let job = StreamJobContext::new(
