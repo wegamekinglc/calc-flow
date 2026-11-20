@@ -536,50 +536,78 @@ impl Transaction {
             .unwrap_or_else(PoisonError::into_inner)
             .keys
             .transaction_reservation();
-        let mut result = Ok(());
-        for (row, group) in rows {
-            let attempt = catch_unwind(AssertUnwindSafe(|| {
-                apply_row(
-                    execution.state,
-                    RowContext {
-                        generation: execution.generation,
-                        old_groups: execution.old_groups,
-                        partitions: execution.partitions,
-                        kind: execution.kind,
-                        input: execution.input,
-                        selection: execution.selection,
-                        filter: execution.filter,
-                        row,
-                        group,
-                    },
-                    &mut values,
-                    &mut marks,
-                    &mut TouchUndo {
-                        affected: &mut affected,
-                        leased: &mut leased,
-                        undo: &mut undo,
-                        reservation: &mut reservation,
-                    },
-                )
-            }));
-            match attempt {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    result = Err(error);
-                    break;
-                }
-                Err(payload) => {
-                    result = Err(super::df_error(
-                        "keyed SUM",
-                        format!(
-                            "partition worker panicked: {}",
-                            payload
-                                .downcast_ref::<&str>()
-                                .copied()
-                                .unwrap_or("non-string panic payload")
-                        ),
-                    ));
-                    break;
+        let mut result = catch_unwind(AssertUnwindSafe(|| {
+            touch_partition(
+                &execution,
+                &values,
+                &mut marks,
+                rows.iter().map(|(row, group)| (*row, *group)),
+                &mut TouchUndo {
+                    affected: &mut affected,
+                    leased: &mut leased,
+                    undo: &mut undo,
+                    reservation: &mut reservation,
+                },
+            )
+        }))
+        .map_err(|payload| {
+            super::df_error(
+                "keyed SUM",
+                format!(
+                    "partition worker panicked: {}",
+                    payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .unwrap_or("non-string panic payload")
+                ),
+            )
+        })
+        .and_then(|result| result);
+        if result.is_ok() {
+            for (row, group) in rows {
+                let attempt = catch_unwind(AssertUnwindSafe(|| {
+                    apply_row(
+                        execution.state,
+                        RowContext {
+                            generation: execution.generation,
+                            old_groups: execution.old_groups,
+                            partitions: execution.partitions,
+                            kind: execution.kind,
+                            input: execution.input,
+                            selection: execution.selection,
+                            filter: execution.filter,
+                            row,
+                            group,
+                        },
+                        &mut values,
+                        &mut marks,
+                        &mut TouchUndo {
+                            affected: &mut affected,
+                            leased: &mut leased,
+                            undo: &mut undo,
+                            reservation: &mut reservation,
+                        },
+                    )
+                }));
+                match attempt {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        result = Err(error);
+                        break;
+                    }
+                    Err(payload) => {
+                        result = Err(super::df_error(
+                            "keyed SUM",
+                            format!(
+                                "partition worker panicked: {}",
+                                payload
+                                    .downcast_ref::<&str>()
+                                    .copied()
+                                    .unwrap_or("non-string panic payload")
+                            ),
+                        ));
+                        break;
+                    }
                 }
             }
         }
@@ -877,6 +905,52 @@ fn apply_row(
     }
     if let Some(value) = context.input.value(context.row) {
         add_value(context.kind, values, context.group, value);
+    }
+    Ok(())
+}
+
+fn touch_partition(
+    execution: &PartitionExecution<'_>,
+    values: &std::collections::BTreeMap<GroupId, SumValue>,
+    marks: &mut [u64],
+    groups: impl Iterator<Item = (usize, GroupId)>,
+    undo: &mut TouchUndo<'_>,
+) -> Result<()> {
+    let mut state = None;
+    for (row, group) in groups {
+        if execution
+            .selection
+            .is_some_and(|selection| !predicate::selected(selection, row))
+        {
+            continue;
+        }
+        let local = group.index() / execution.partitions;
+        if marks[local] == execution.generation {
+            continue;
+        }
+        let existing = usize::from(group.index() < execution.old_groups);
+        let charge = size_of::<GroupId>()
+            + existing * (size_of::<GroupId>() + size_of::<(GroupId, SumValue)>());
+        undo.reservation
+            .try_grow(charge)
+            .map_err(|error| super::df_error("keyed SUM", error))?;
+        marks[local] = execution.generation;
+        undo.affected.push(group);
+        if group.index() < execution.old_groups {
+            let previous = values
+                .get(&group)
+                .copied()
+                .unwrap_or_else(|| null_value(execution.kind));
+            let state = state.get_or_insert_with(|| {
+                execution
+                    .state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+            });
+            state.keys.acquire(group)?;
+            undo.leased.push(group);
+            undo.undo.push((group, previous));
+        }
     }
     Ok(())
 }
