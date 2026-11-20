@@ -434,11 +434,25 @@ fn candidate_witness(
     reserved: usize,
     backing: Vec<Weak<MemoryReservation>>,
 ) -> Witness {
+    let wire_metadata = records
+        .first()
+        .map(|record| {
+            let metadata = record.schema().metadata().clone();
+            assert_eq!(metadata.len(), 1);
+            let layout = metadata.get("key_layout").expect("key layout is present");
+            assert_eq!(layout.len(), 64);
+            assert!(layout.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            metadata
+        })
+        .unwrap_or_default();
     let expected_record = RecordBatch::try_new(
-        Arc::new(Schema::new(vec![
-            Field::new("key_0", DataType::Utf8, false),
-            Field::new("state_0_0", DataType::Int64, true),
-        ])),
+        Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new("key_0", DataType::Utf8, false),
+                Field::new("state_0_0", DataType::Int64, true),
+            ],
+            wire_metadata,
+        )),
         vec![
             Arc::new(StringArray::from(vec!["a"])),
             Arc::new(Int64Array::from(vec![7])),
@@ -471,7 +485,8 @@ fn assert_released(gate: &Gate, expected_bytes: u64) {
     assert!(state.execution.entered && state.execution.callback_exited && state.ledger.paid);
     assert_eq!(state.ledger.rows, 2);
     assert_eq!(state.ledger.bytes, expected_bytes);
-    assert!(state.ledger.metadata_ok && state.ledger.values_ok);
+    assert!(state.ledger.metadata_ok, "candidate metadata differs");
+    assert!(state.ledger.values_ok, "candidate records differ");
     assert_eq!(state.ledger.arrays.len(), 2);
     assert!(!state.ledger.backing.is_empty());
     assert!(
