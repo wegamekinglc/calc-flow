@@ -133,16 +133,9 @@ struct PlanParts<'a> {
     variable_columns: Vec<usize>,
     keyed_sum: Option<keyed_sum::KeyedSum>,
     keyed_state: Option<keyed_state::KeyedState>,
-    delegation: Option<Delegation>,
-}
-
-struct Delegation {
-    runtime: DataFusionRuntime,
-    query: ValidatedQuery,
 }
 
 pub(super) struct IncrementalSql {
-    delegation: Option<Delegation>,
     keyed_sum: Option<keyed_sum::KeyedSum>,
     keyed_state: Option<keyed_state::KeyedState>,
     output_mode: SqlAggregateOutputMode,
@@ -178,8 +171,6 @@ pub(super) struct IncrementalSql {
     global_records: Option<global_record::Proof>,
     container_fee: Option<MemoryReservation>,
     reservation: MemoryReservation,
-    #[cfg(test)]
-    delegated_applications: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pub(super) finalized_groups: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
@@ -952,47 +943,6 @@ impl IncrementalSql {
         normalized.map_or((raw, analyzed), |plans| (&plans.raw, &plans.analyzed))
     }
 
-    fn delegation(
-        runtime: &DataFusionRuntime,
-        query: &ValidatedQuery,
-        schema: &SchemaRef,
-        name: &str,
-    ) -> Result<Option<Delegation>> {
-        const STOCK_QUERY: &str =
-            "select account, stock, sum(delta) as position from input group by account, stock";
-        let normalized = query
-            .text()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        if normalized.to_ascii_lowercase() != STOCK_QUERY
-            || !runtime.grouped_float_model_supported(name)?
-        {
-            return Ok(None);
-        }
-        for (field, data_type) in [
-            ("account", DataType::Utf8),
-            ("stock", DataType::Utf8),
-            ("delta", DataType::Int64),
-        ] {
-            let Ok(index) = schema.index_of(field) else {
-                return Ok(None);
-            };
-            if schema.field(index).data_type() != &data_type {
-                return Ok(None);
-            }
-        }
-        let query = crate::expression::parse_select_query(
-            "SELECT account, stock, SUM(delta) AS position, MIN(_cf_first) AS _cf_first \
-             FROM (SELECT account, stock, delta, ROW_NUMBER() OVER () AS _cf_first FROM input) AS input \
-             GROUP BY account, stock ORDER BY _cf_first",
-        )?;
-        Ok(Some(Delegation {
-            runtime: DataFusionRuntime::new(crate::DataFusionConfig::default())?,
-            query,
-        }))
-    }
-
     pub(super) fn from_plan(
         runtime: &DataFusionRuntime,
         query: &ValidatedQuery,
@@ -1062,7 +1012,6 @@ impl IncrementalSql {
             return Ok(None);
         };
         Ok(Some(Self::from_parts(PlanParts {
-            delegation: Self::delegation(runtime, query, &schema, name)?,
             keyed_sum,
             keyed_state,
             scratch: runtime.incremental_reservation(name),
@@ -1094,7 +1043,6 @@ impl IncrementalSql {
     fn from_parts(parts: PlanParts<'_>) -> Self {
         Self {
             output_mode: SqlAggregateOutputMode::Snapshot,
-            delegation: parts.delegation,
             keyed_sum: parts.keyed_sum,
             keyed_state: parts.keyed_state,
             ordered_last: parts
@@ -1132,8 +1080,6 @@ impl IncrementalSql {
             index: HashMap::with_hasher(RandomState::new()),
             reservation: parts.reservation,
             #[cfg(test)]
-            delegated_applications: std::sync::atomic::AtomicUsize::new(0),
-            #[cfg(test)]
             finalized_groups: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
             partial_groups: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -1142,12 +1088,6 @@ impl IncrementalSql {
             #[cfg(test)]
             encoded_rows: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn delegated_applications_for_test(&self) -> usize {
-        self.delegated_applications
-            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub(super) fn requires_ordered_last_proof(&self) -> bool {
@@ -1867,15 +1807,13 @@ impl IncrementalSql {
         let keyed = self.keyed_sum.as_ref().expect("keyed SUM plan");
         let (reservation, workspace) = self.input_workspace(batch.num_rows(), name)?;
         let mut transaction = keyed.begin(self.compact_budget)?;
-        let rows = self
-            .update_keyed_records(
-                batch.table_payload()?.batches(),
-                &mut transaction,
-                (&reservation, workspace),
-                context,
-                name,
-            )
-            .await?;
+        let rows = self.update_keyed_records(
+            batch.table_payload()?.batches(),
+            &mut transaction,
+            (&reservation, workspace),
+            context,
+            name,
+        )?;
         #[cfg(not(test))]
         let _ = rows;
         let PreparedKeyedOutput {
@@ -1909,7 +1847,7 @@ impl IncrementalSql {
         })
     }
 
-    async fn update_keyed_records(
+    fn update_keyed_records(
         &self,
         records: &[RecordBatch],
         transaction: &mut keyed_sum::Transaction,
@@ -1930,15 +1868,14 @@ impl IncrementalSql {
                     workspace.1,
                     context,
                     name,
-                )
-                .await?;
+                )?;
                 processed += chunk.num_rows();
             }
         }
         Ok(processed)
     }
 
-    async fn update_keyed_chunk(
+    fn update_keyed_chunk(
         &self,
         chunk: &RecordBatch,
         transaction: &mut keyed_sum::Transaction,
@@ -1960,11 +1897,6 @@ impl IncrementalSql {
         if chunk.num_rows() == 0 {
             return Ok(());
         }
-        if let Some(delegation) = &self.delegation {
-            return self
-                .apply_delegation(delegation, chunk, transaction, context, name)
-                .await;
-        }
         let input = self.chunk_input(chunk, name)?;
         transaction.apply(
             &input.keys,
@@ -1973,34 +1905,6 @@ impl IncrementalSql {
             input.filters.first().and_then(Option::as_ref),
             &mut || context.check_cancelled(),
         )
-    }
-
-    async fn apply_delegation(
-        &self,
-        delegation: &Delegation,
-        chunk: &RecordBatch,
-        transaction: &mut keyed_sum::Transaction,
-        context: &StreamOperatorContext<'_>,
-        name: &str,
-    ) -> Result<()> {
-        let input = Batch::table(vec![chunk.clone()], crate::BatchMetadata::default())?;
-        let tables = std::collections::BTreeMap::from([("input".to_owned(), input)]);
-        let output = delegation
-            .runtime
-            .sql_validated(&delegation.query, &tables, Some(name))
-            .await?;
-        for record in output.table_payload()?.batches() {
-            let keys = record.columns()[..2].to_vec();
-            transaction.apply(&keys, &record.columns()[2], None, None, &mut || {
-                context.check_cancelled()
-            })?;
-        }
-        #[cfg(test)]
-        {
-            self.delegated_applications
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        Ok(())
     }
 
     fn prepare_keyed_records<T: SnapshotTransaction>(
