@@ -60,7 +60,7 @@ enum SumKind {
 
 struct PartitionedSums {
     kind: SumKind,
-    partitions: Vec<std::collections::BTreeMap<GroupId, SumValue>>,
+    partitions: Vec<Vec<SumValue>>,
     marks: Vec<Vec<u64>>,
     groups: usize,
     parallel_min_rows: usize,
@@ -710,7 +710,7 @@ impl Transaction {
         context: RowContext<'_>,
         replace: bool,
         seen: &mut std::collections::BTreeSet<GroupId>,
-        values: &mut std::collections::BTreeMap<GroupId, SumValue>,
+        values: &mut [SumValue],
         marks: &mut [u64],
         undo: &mut TouchUndo<'_>,
     ) -> Result<()> {
@@ -722,13 +722,10 @@ impl Transaction {
             ));
         }
         touch(state, &context, values, marks, undo)?;
-        values.insert(
-            group,
-            context
-                .input
-                .value(context.row)
-                .unwrap_or_else(|| null_value(context.kind)),
-        );
+        values[group.index() / context.partitions] = context
+            .input
+            .value(context.row)
+            .unwrap_or_else(|| null_value(context.kind));
         Ok(())
     }
 
@@ -800,13 +797,13 @@ struct PartitionExecution<'a> {
 }
 
 struct PartitionWork {
-    values: std::collections::BTreeMap<GroupId, SumValue>,
+    values: Vec<SumValue>,
     marks: Vec<u64>,
     rows: Vec<(usize, GroupId)>,
 }
 
 struct ParallelOutcome {
-    values: std::collections::BTreeMap<GroupId, SumValue>,
+    values: Vec<SumValue>,
     marks: Vec<u64>,
     affected: Vec<GroupId>,
     leased: Vec<GroupId>,
@@ -818,7 +815,7 @@ struct ParallelOutcome {
 fn apply_row(
     state: &Arc<Mutex<KeyedSumState>>,
     context: RowContext<'_>,
-    values: &mut std::collections::BTreeMap<GroupId, SumValue>,
+    values: &mut [SumValue],
     marks: &mut [u64],
     undo: &mut TouchUndo<'_>,
 ) -> Result<()> {
@@ -845,7 +842,7 @@ fn apply_row(
         return Ok(());
     }
     if let Some(value) = context.input.value(context.row) {
-        add_value(context.kind, values, context.group, value);
+        add_value(values, context.group.index() / context.partitions, value);
     }
     Ok(())
 }
@@ -853,7 +850,7 @@ fn apply_row(
 fn touch(
     state: &Arc<Mutex<KeyedSumState>>,
     context: &RowContext<'_>,
-    values: &std::collections::BTreeMap<GroupId, SumValue>,
+    values: &[SumValue],
     marks: &mut [u64],
     undo: &mut TouchUndo<'_>,
 ) -> Result<()> {
@@ -872,7 +869,7 @@ fn touch(
     undo.affected.push(group);
     if group.index() < context.old_groups {
         let previous = values
-            .get(&group)
+            .get(local)
             .copied()
             .unwrap_or_else(|| null_value(context.kind));
         state
@@ -886,13 +883,8 @@ fn touch(
     Ok(())
 }
 
-fn add_value(
-    kind: SumKind,
-    values: &mut std::collections::BTreeMap<GroupId, SumValue>,
-    group: GroupId,
-    value: SumValue,
-) {
-    let current = values.entry(group).or_insert_with(|| null_value(kind));
+fn add_value(values: &mut [SumValue], local: usize, value: SumValue) {
+    let current = &mut values[local];
     match current {
         SumValue::Int64(current_value) => {
             let SumValue::Int64(value) = value else {
@@ -1008,9 +1000,7 @@ impl PartitionedSums {
         assert!(partitions > 0);
         Self {
             kind,
-            partitions: (0..partitions)
-                .map(|_| std::collections::BTreeMap::new())
-                .collect(),
+            partitions: (0..partitions).map(|_| Vec::new()).collect(),
             marks: (0..partitions).map(|_| Vec::new()).collect(),
             groups: 0,
             parallel_min_rows: 64_000,
@@ -1030,14 +1020,8 @@ impl PartitionedSums {
     fn set_partition_count(&mut self, partitions: usize) {
         assert!(partitions > 0);
         assert_eq!(self.groups, 0);
-        assert!(
-            self.partitions
-                .iter()
-                .all(std::collections::BTreeMap::is_empty)
-        );
-        self.partitions = (0..partitions)
-            .map(|_| std::collections::BTreeMap::new())
-            .collect();
+        assert!(self.partitions.iter().all(Vec::is_empty));
+        self.partitions = (0..partitions).map(|_| Vec::new()).collect();
         self.marks = (0..partitions).map(|_| Vec::new()).collect();
     }
 
@@ -1075,16 +1059,29 @@ impl PartitionedSums {
         }
     }
 
+    fn resize_values(&mut self) {
+        let groups = self.groups;
+        let partitions = self.partitions.len();
+        let null = self.null();
+        for (partition, values) in self.partitions.iter_mut().enumerate() {
+            let len = if partition < groups {
+                (groups - 1 - partition) / partitions + 1
+            } else {
+                0
+            };
+            values.resize(len, null);
+        }
+    }
+
     fn grow(&mut self, groups: usize) {
         self.groups = self.groups.max(groups);
+        self.resize_values();
         self.resize_marks();
     }
 
     fn truncate(&mut self, groups: usize) {
         self.groups = groups;
-        for partition in &mut self.partitions {
-            partition.retain(|group, _| group.index() < groups);
-        }
+        self.resize_values();
         for marks in &mut self.marks {
             marks.fill(0);
         }
@@ -1092,8 +1089,9 @@ impl PartitionedSums {
     }
 
     fn value(&self, group: GroupId) -> SumValue {
+        let local = group.index() / self.partitions.len();
         self.partitions[self.owner(group)]
-            .get(&group)
+            .get(local)
             .copied()
             .unwrap_or_else(|| self.null())
     }
@@ -1101,7 +1099,8 @@ impl PartitionedSums {
     fn set(&mut self, group: GroupId, value: Option<SumValue>) {
         let null = self.null();
         let owner = self.owner(group);
-        self.partitions[owner].insert(group, value.unwrap_or(null));
+        let local = group.index() / self.partitions.len();
+        self.partitions[owner][local] = value.unwrap_or(null);
     }
 
     fn array(&self, groups: &[GroupId]) -> ArrayRef {
