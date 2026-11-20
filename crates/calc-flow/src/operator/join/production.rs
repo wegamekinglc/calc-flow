@@ -560,6 +560,28 @@ fn morsel(rows: &[AdmittedRef<'_>]) -> Result<RecordBatch> {
     let first = rows
         .first()
         .ok_or_else(|| operator_error("Join runs", "cannot route an empty admitted morsel"))?;
+    let schema = first.record.schema_ref();
+    let columns = first.record.columns();
+    let first_offset = first.record.offset();
+    let dense = rows.iter().enumerate().all(|(index, row)| {
+        std::ptr::eq(columns, row.record.columns()) && row.record.offset() == first_offset + index
+    });
+    if dense
+        && columns
+            .iter()
+            .zip(schema.fields())
+            .all(|(column, field)| column.data_type() == field.data_type())
+    {
+        return RecordBatch::try_new_with_options(
+            Arc::clone(schema),
+            columns
+                .iter()
+                .map(|column| column.slice(first_offset, rows.len()))
+                .collect(),
+            &RecordBatchOptions::new().with_row_count(Some(rows.len())),
+        )
+        .map_err(|error| operator_error("Join runs", &format!("admitted morsel failed: {error}")));
+    }
     let gather = output_gather::SideGather::new(rows.iter().map(|row| row.record));
     let schema = first.record.schema_ref();
     let columns = schema
@@ -595,4 +617,50 @@ pub(super) fn supported(operator: &StreamJoinOperator) -> bool {
                 .collect(),
         )
         .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::operator::join::PayloadRef;
+    use datafusion::arrow::array::{Array, ArrayRef, Int64Array};
+
+    #[test]
+    fn morsel_shares_dense_source_buffers() {
+        let record = RecordBatch::try_from_iter(vec![
+            (
+                "key",
+                Arc::new(Int64Array::from(vec![10, 11, 12, 13])) as ArrayRef,
+            ),
+            (
+                "value",
+                Arc::new(Int64Array::from(vec![20, 21, 22, 23])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        let rows = (1usize..3)
+            .map(|row| AdmittedRef {
+                record: PayloadRef::Record(&record, row),
+                event_time: crate::EventTime::from_micros(i64::try_from(row).unwrap()),
+                row_id: u64::try_from(row).unwrap(),
+                retain: true,
+            })
+            .collect::<Vec<_>>();
+        let actual = morsel(&rows).unwrap();
+        let expected = record
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let actual = actual
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(actual.values(), &[11, 12]);
+        assert_eq!(
+            actual.to_data().buffers()[0].data_ptr(),
+            expected.to_data().buffers()[0].data_ptr()
+        );
+    }
 }

@@ -163,18 +163,30 @@ impl Incoming {
         {
             return Err(run_error("invalid admitted run columns or row-ID frontier"));
         }
-        let source_rows = physical
-            .iter()
-            .map(|&row| u64::try_from(row).map_err(|_| run_error("source row exceeds u64")))
-            .collect::<Result<Vec<_>>>()?;
-        let source_rows = UInt64Array::from(source_rows);
-        let arrays = key_indices
-            .iter()
-            .map(|&index| {
-                take(payload.column(index).as_ref(), &source_rows, None)
-                    .map_err(|error| run_error(format!("key take failed: {error}")))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let dense = physical.len() == payload.num_rows()
+            && physical
+                .iter()
+                .enumerate()
+                .all(|(index, &row)| index == row);
+        let arrays = if dense {
+            key_indices
+                .iter()
+                .map(|&index| payload.column(index).clone())
+                .collect()
+        } else {
+            let source_rows = physical
+                .iter()
+                .map(|&row| u64::try_from(row).map_err(|_| run_error("source row exceeds u64")))
+                .collect::<Result<Vec<_>>>()?;
+            let source_rows = UInt64Array::from(source_rows);
+            key_indices
+                .iter()
+                .map(|&index| {
+                    take(payload.column(index).as_ref(), &source_rows, None)
+                        .map_err(|error| run_error(format!("key take failed: {error}")))
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
         if arrays.iter().any(|array| array.null_count() != 0) {
             return Err(run_error("Join run routing received a null key"));
         }
@@ -304,20 +316,28 @@ impl Run {
         if selected.is_empty() {
             return Ok(None);
         }
-        let source_rows =
-            UInt64Array::from_iter_values(selected.iter().map(|&row| {
+        let dense = selected.len() == incoming.payload.num_rows()
+            && selected
+                .iter()
+                .enumerate()
+                .all(|(index, &row)| incoming.physical[row] == index);
+        let columns = if dense {
+            incoming.payload.columns().to_vec()
+        } else {
+            let source_rows = UInt64Array::from_iter_values(selected.iter().map(|&row| {
                 u64::try_from(incoming.physical[row]).expect("validated usize fits u64")
             }));
-        let columns = incoming
-            .payload
-            .columns()
-            .iter()
-            .map(|column| {
-                take(column.as_ref(), &source_rows, None).map_err(|error| {
-                    operator_error("Join runs", &format!("retained take failed: {error}"))
+            incoming
+                .payload
+                .columns()
+                .iter()
+                .map(|column| {
+                    take(column.as_ref(), &source_rows, None).map_err(|error| {
+                        operator_error("Join runs", &format!("retained take failed: {error}"))
+                    })
                 })
-            })
-            .collect::<Result<Vec<_>>>()?;
+                .collect::<Result<Vec<_>>>()?
+        };
         let payload = RecordBatch::try_new_with_options(
             incoming.payload.schema(),
             columns,

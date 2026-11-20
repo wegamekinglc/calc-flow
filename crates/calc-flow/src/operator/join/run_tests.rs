@@ -126,6 +126,47 @@ fn test_run_probe_orders_locators_by_time_then_physical_row_id() {
 }
 
 #[test]
+fn test_retained_run_shares_dense_input_buffers() {
+    let record = record(&[1, 1], &[10, 11]);
+    let expected = record
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    let left = incoming(
+        &record,
+        vec![0, 1],
+        vec![GroupId::new(0).unwrap(); 2],
+        &[10, 20],
+        &[0, 1],
+        vec![true; 2],
+        2,
+    );
+    let mut state = state(100);
+    state
+        .apply(
+            JoinSide::Left,
+            left,
+            &output_schema(),
+            Some(&[1, 3]),
+            2,
+            EdgeBudget::default(),
+        )
+        .unwrap();
+    let retained = state.retained(JoinSide::Left);
+    let actual = retained[0]
+        .2
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert!(std::ptr::eq(
+        actual.values().as_ptr(),
+        expected.values().as_ptr()
+    ));
+}
+
+#[test]
 fn test_match_limit_rejects_before_run_or_frontier_commit() {
     let mut state = state(1);
     let left = record(&[1, 1, 1], &[10, 11, 12]);
