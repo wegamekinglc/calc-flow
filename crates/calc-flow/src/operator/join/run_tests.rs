@@ -843,14 +843,16 @@ fn test_morsel_preparation_chains_across_unretained_rows() {
 fn test_run_interval_large_batch_emits_every_match() {
     let rows = 10_000usize;
     let make = |keys: &mut KeyStore, retain: bool| {
-        let values = (0..rows).map(|row| (row % 64) as i64).collect::<Vec<_>>();
+        let values = (0..rows)
+            .map(|row| i64::try_from(row % 64).unwrap())
+            .collect::<Vec<_>>();
         let record = record(&values, &values);
         (0..rows)
             .step_by(MORSEL_ROWS)
             .map(|start| {
                 let end = (start + MORSEL_ROWS).min(rows);
                 let times = (start..end)
-                    .map(|row| EventTime::from_micros((row / 64) as i64 * 1_000_000))
+                    .map(|row| EventTime::from_micros(i64::try_from(row / 64).unwrap() * 1_000_000))
                     .collect::<Vec<_>>();
                 Incoming::route(
                     &record,

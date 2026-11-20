@@ -304,9 +304,12 @@ mod tests {
         let job = job().with_checkpointing(false);
         let context = StreamOperatorContext::new(&job, "match", None);
         let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-        let keys = (0..rows).map(|row| (row % 64) as i64).collect::<Vec<_>>();
+        reset_join_work();
+        let keys = (0..rows)
+            .map(|row| i64::try_from(row % 64).unwrap())
+            .collect::<Vec<_>>();
         let times = (0..rows)
-            .map(|row| (row / 64) as i64 * 1_000_000)
+            .map(|row| i64::try_from(row / 64).unwrap() * 1_000_000)
             .collect::<Vec<_>>();
         operator
             .process_data(
@@ -317,7 +320,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let watermark = ((rows / 64 - 1) * 1_000_000 + 1) as i64;
+        let watermark = i64::try_from((rows / 64 - 1) * 1_000_000 + 1).unwrap();
         operator
             .on_ingress_progress(
                 "left",
@@ -358,6 +361,7 @@ mod tests {
             .sum::<usize>();
         assert_eq!(emitted, 108_080);
         assert_eq!(operator.status().emitted_match_rows, 108_080);
+        assert_eq!(join_work().quantum_boundaries, 0);
     }
 
     #[tokio::test]

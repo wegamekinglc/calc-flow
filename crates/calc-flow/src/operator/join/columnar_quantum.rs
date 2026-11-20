@@ -5,13 +5,30 @@ const ARC_HEADER: usize = 2 * size_of::<usize>();
 pub(in crate::operator::join) const COPY_BYTES: usize = 4096;
 pub(in crate::operator::join) const COPY_VISITS: usize = 64;
 
-#[derive(Default)]
 pub(in crate::operator::join) struct Quantum {
     visits: usize,
     bytes: usize,
+    cooperative: bool,
+}
+
+impl Default for Quantum {
+    fn default() -> Self {
+        Self {
+            visits: 0,
+            bytes: 0,
+            cooperative: true,
+        }
+    }
 }
 
 impl Quantum {
+    pub(in crate::operator::join) fn bulk() -> Self {
+        Self {
+            cooperative: false,
+            ..Self::default()
+        }
+    }
+
     pub(in crate::operator::join) async fn step(
         &mut self,
         context: &StreamOperatorContext<'_>,
@@ -21,6 +38,12 @@ impl Quantum {
         #[cfg(test)]
         super::note_join_work(|work| work.quantum_steps += 1);
         debug_assert!(visits <= COPY_VISITS && bytes <= COPY_BYTES);
+        if !self.cooperative {
+            context.check_cancelled()?;
+            self.visits += visits;
+            self.bytes += bytes;
+            return Ok(());
+        }
         if self.visits + visits > COPY_VISITS || self.bytes + bytes > COPY_BYTES {
             #[cfg(test)]
             super::note_join_work(|work| work.quantum_boundaries += 1);
@@ -41,6 +64,10 @@ impl Quantum {
         maximum: usize,
     ) -> Result<usize> {
         debug_assert!(maximum > 0);
+        if !self.cooperative {
+            context.check_cancelled()?;
+            return Ok(maximum);
+        }
         let available = self.admission_capacity().min(maximum);
         if available > 0 {
             self.step(context, available, available * 16).await?;

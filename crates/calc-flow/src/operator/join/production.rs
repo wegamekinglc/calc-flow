@@ -333,6 +333,7 @@ impl RunCore {
     ) -> Result<()> {
         let plan = operator.begin_batch(ingress, batch)?;
         let mut bundle = operator.admission_bundle(&plan, batch)?;
+        bundle.quantum = super::columnar_quantum::Quantum::bulk();
         operator
             .admit_batch_records(ingress, batch, &plan, context, &mut bundle)
             .await?;
