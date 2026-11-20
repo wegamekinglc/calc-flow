@@ -243,6 +243,12 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   因而 source-ready 超时；单次 1M 成功与 clone 无关，也不是 runner-ready 的产品缺陷。测量脚本已为每个 warmup/正式 observation
   分配独立 root，100 行连续 2 次预热 + 2 次 observation 的完整 oracle 验证通过。下一轮预登记 `212ca55b`，使用独立
   observation roots、2 次预热 + 10 个样本和独立 600 秒预算；这是测量有效性修复，不进行计时驱动的重试。
+- 2026-11-20 P5 fresh-observation-root 验收完成，证据归档于 `benchmarks/join-asof/p5-native-runs-20261120/`。
+  Join 1M 单核完成 2 次预热 + 10 个正式样本，P50 **424.412 ms**、P95 430.192 ms，10/10 完整 oracle 通过，
+  ≤30 ms 门槛未通过且慢于 archived descriptive 78.51 ms，不声称配对加速比。interval 的首个 warmup 在 600 秒等待时
+  仅输出 5,376/10,998,080 行，无有效 P50，≤350 ms 未通过。采集总耗时 610.174 秒，超过 600 秒预算；
+  wrapper 未在 `acquisition_stop_seconds=570` 阻止进入 interval 的 600 秒等待，协议缺陷已公开记录。
+  wheel 构建耗时 1084.473 秒，wheel/loaded native SHA 已归档。后续先修复性能与 interval 输出推进问题，不追加计时样本。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
