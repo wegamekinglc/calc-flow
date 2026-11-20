@@ -11,4 +11,6 @@ The baseline is sealed candidate `705adc7f` from `../p5-key-run-cache-20261120/r
 
 **Both absolute gates failed, and this is not a performance upgrade.** The descriptive changes are +21.6% Join time and +13.6% interval time, not paired significance evidence. Earlier direct native `collect` diagnostics are not stream acceptance results and did not reproduce here.
 
-The next diagnosis must establish whether the production plan actually enters `HotJoinCore` and separate physical execution from runner/admission/materialization costs. Do not repeat the unchanged acquisition to seek a better median. Multi-batch hot-path inputs and durable hot-path restore remain unsupported and unmeasured.
+Follow-up code inspection found the activation defect: production output pruning calls `set_output_projection`, but `HotJoinCore::new` rejected every `output_columns=Some(...)` graph. The benchmark requires three physical Join columns, so this acquisition exercised the old run fallback rather than the intended hot path. The negative result remains valid for that candidate, but is not evidence that the native physical Join itself is slow. The earlier direct `collect` Join diagnostic also used a symbol-only, two-column query rather than the temporal, projected stream shape.
+
+The next candidate must cover projected hot-path activation before a fresh formal acquisition. Do not repeat the unchanged acquisition to seek a better median. Multi-batch hot-path inputs and durable hot-path restore remain unsupported and unmeasured.

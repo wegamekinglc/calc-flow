@@ -286,7 +286,9 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   P95 **552.442 ms**，interval P50 **1,222.780 ms**、P95 **1,266.255 ms**；两例 10/10 完整 oracle 通过，
   采集 47.213 秒，wheel 单独构建 724.140 秒。相对上轮描述性变慢 21.6%/13.6%，≤30 ms/≤350 ms 均未达到，
   直接 `collect` 诊断不构成 stream 验收。证据见 `benchmarks/join-asof/p5-hot-whole-batch-20261120/`；
-  下一步先确认生产计划是否实际进入 `HotJoinCore`，再分离物理执行与 runner/物化成本，不重复相同样本寻找更优中位数。
+  后续代码检查确认生产裁剪会设置 `output_columns=Some(...)`，而 `HotJoinCore::new` 拒绝该图，因此本轮实际测量的是旧 run 回退，
+  不是原生热路径本身；此前直接 `collect` 的静态 Join 也使用不同的 symbol-only 两列查询。下一步先覆盖裁剪图激活，再重新正式测量，
+  不重复相同样本寻找更优中位数。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
