@@ -736,23 +736,22 @@ macro_rules! key_value {
 
 key_value!(i8, i16, i32, i64, u8, u16, u32, u64);
 
-#[derive(Clone, Copy)]
-struct StableHash(u64);
+#[derive(Clone)]
+struct StableHash(ahash::AHasher);
 
 impl StableHash {
     fn new() -> Self {
-        Self(0xcbf2_9ce4_8422_2325)
+        Self(std::hash::BuildHasher::build_hasher(
+            &ahash::RandomState::with_seeds(0, 0, 0, 0),
+        ))
     }
 
     fn bytes(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.0 ^= u64::from(*byte);
-            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
-        }
+        std::hash::Hasher::write(&mut self.0, bytes);
     }
 
     fn finish(self) -> u64 {
-        self.0
+        std::hash::Hasher::finish(&self.0)
     }
 }
 
