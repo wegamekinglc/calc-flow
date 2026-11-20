@@ -11,6 +11,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::Cursor,
     path::{Component, Path},
+    sync::atomic::{AtomicU64, Ordering},
     time::Instant,
 };
 
@@ -57,6 +58,25 @@ pub(crate) fn invalid(message: impl Into<String>) -> CalcFlowError {
         field: "benchmark_fixture".into(),
         message: message.into(),
     }
+}
+
+static KEYED_SUM_ROUTE_NS: AtomicU64 = AtomicU64::new(0);
+static KEYED_SUM_APPLY_NS: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn note_keyed_sum_route_ns(value: u64) {
+    KEYED_SUM_ROUTE_NS.fetch_add(value, Ordering::Relaxed);
+}
+
+pub(crate) fn note_keyed_sum_apply_ns(value: u64) {
+    KEYED_SUM_APPLY_NS.fetch_add(value, Ordering::Relaxed);
+}
+
+/// Returns cumulative keyed SUM routing and apply nanoseconds in this process.
+pub fn keyed_sum_stage_ns() -> (u64, u64) {
+    (
+        KEYED_SUM_ROUTE_NS.load(Ordering::Relaxed),
+        KEYED_SUM_APPLY_NS.load(Ordering::Relaxed),
+    )
 }
 
 /// Observes the running benchmark process's affinity and thread settings.

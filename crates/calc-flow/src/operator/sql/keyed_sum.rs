@@ -7,6 +7,8 @@ use crate::operator::keyed::{ExportValue, GroupId, KeyCut, KeySchema, KeyStore, 
 use datafusion::arrow::{array::Array, datatypes::DataType};
 use datafusion::execution::memory_pool::MemoryReservation;
 use sha2::{Digest, Sha256};
+#[cfg(feature = "benchmark-internals")]
+use std::time::Instant;
 use std::{
     mem::size_of,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -319,6 +321,8 @@ impl Transaction {
         filter: Option<&BooleanArray>,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
+        #[cfg(feature = "benchmark-internals")]
+        let route_started = Instant::now();
         let input = SumInput::new(values)?;
         let state = self.state.clone();
         let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -334,12 +338,22 @@ impl Transaction {
         let parallel_min_rows = guard.sums.parallel_min_rows;
         let mut sums = std::mem::replace(&mut guard.sums, PartitionedSums::new(kind, count));
         drop(guard);
+        #[cfg(feature = "benchmark-internals")]
+        crate::benchmark_internals::note_keyed_sum_route_ns(
+            u64::try_from(route_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+        );
+        #[cfg(feature = "benchmark-internals")]
+        let apply_started = Instant::now();
         let parallel = count > 1 && groups.len() >= parallel_min_rows;
         let result = if parallel {
             self.apply_parallel(&state, &input, selection, filter, &groups, &mut sums)
         } else {
             self.apply_serial(&state, &input, selection, filter, &groups, &mut sums)
         };
+        #[cfg(feature = "benchmark-internals")]
+        crate::benchmark_internals::note_keyed_sum_apply_ns(
+            u64::try_from(apply_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+        );
         state.lock().unwrap_or_else(PoisonError::into_inner).sums = sums;
         result
     }

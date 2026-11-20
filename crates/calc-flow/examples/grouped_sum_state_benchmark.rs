@@ -468,6 +468,7 @@ async fn sample(
         "pid": std::process::id(),
         "seconds": seconds,
         "process_cpu_ns": cpu_ns,
+        "keyed_sum_stage_ns": calc_flow::benchmark_internals::keyed_sum_stage_ns(),
         "start_ns": start_ns,
         "end_ns": end_ns,
         "input_sha256": input_hash,
