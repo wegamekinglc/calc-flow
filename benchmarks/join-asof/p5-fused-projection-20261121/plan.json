@@ -11,7 +11,7 @@
   },
   "candidate": {
     "kind": "sealed_default_feature_release_wheel",
-    "revision": "111a606c",
+    "revision": "5e7c22db",
     "required_tracked_source_clean_before_build": true,
     "build_budget": "separate from the 600-second acquisition budget",
     "change": "exact single-consumer Join projections fuse into native final outputs: static sequence/value and interval sequence/right_sequence/value; downstream becomes identity projection"
