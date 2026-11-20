@@ -8,7 +8,7 @@ The next candidate replaces the nonexistent-column dependency with a single-part
 
 ## Ordinal candidate result
 
-Runtime candidate `74ac0775`, sealed at source HEAD `1aab97c6` after a documentation-only plan commit, activated on the real stock schema. It also failed the performance gate. Two rounds of ten AB/BA pairs completed 160 observations in 123.625 seconds with full snapshot and lifecycle oracles passing.
+Runtime candidate `74ac0775`, sealed at source HEAD `1aab97c6` after a documentation-only plan commit, removed the missing-column gate but did not activate under the P6 harness. Delegation required `DataFusionConfig::default()`, while the stock cases explicitly select fixed parallelism and `min_rows_per_partition=1`. The candidate's approximately 59/72 ms route/apply stage timings match the baseline and confirm continued per-row keyed execution. Two rounds of ten AB/BA pairs completed 160 observations in 123.625 seconds with full snapshot and lifecycle oracles passing.
 
 | Case | Baseline P50 | Candidate P50 | Time change | Verdict |
 |------|-------------:|--------------:|------------:|---------|
@@ -17,4 +17,4 @@ Runtime candidate `74ac0775`, sealed at source HEAD `1aab97c6` after a documenta
 | sparse-stream-1cpu | 21.430 ms | 21.852 ms | +1.97% | inconclusive |
 | stock-batch-8cpu | 57.138 ms | 57.916 ms | +1.36% | inconclusive |
 
-The four-physical-core ≥3× gate is not met. Raw acquisition is preserved in `ordinal-summary.json`, `ordinal-samples.csv`, `ordinal-environment.json` and `ordinal-driver-plan.json`. The candidate is rejected rather than retimed; no additional samples were collected.
+The four-physical-core ≥3× gate is not met, but these observations do not establish a performance verdict for DataFusion aggregation itself. Raw acquisition is preserved in `ordinal-summary.json`, `ordinal-samples.csv`, `ordinal-environment.json` and `ordinal-driver-plan.json`. The delegation approach was withdrawn based on the activated P4 result, not retimed under a changed P6 configuration; no additional samples were collected.
