@@ -312,6 +312,13 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   大批次较融合候选描述性降低 20.4%，相对最初基线约 3.81×。结合静态 Join **17.047 ms**，两个重点 Join 门槛均已完成。
   证据见 `benchmarks/join-asof/p5-band-output-batch-20261121/`。下一阶段转向 keyed SUM 的 P4/P6 性能目标；
   多批热路径输入、durable 热路径恢复、ASOF 和高重复右表 BandJoin 异常仍需独立验收，不在本次完成声明内。
+- 2026-11-21 P4/P6 dense UTF-8 keyed SUM 实验（`aa63c80c`）被性能证据否决：同 harness 配对中 stock stream
+  单核 P50 从 202.164 ms 增至 **369.360 ms**（+82.70%），八核从 137.041 ms 增至 **254.165 ms**（+85.47%），
+  sparse 从 20.633 ms 增至 33.882 ms（+64.21%），finite control 为 inconclusive。独立 10M example30 的
+  P50 为 **2,448 ms**，未达 ≤500 ms 且慢于历史 1,669 ms。完整 snapshot/lifecycle 与 positions oracle 均通过，
+  但不构成性能升级；采集分别在 127.048/29.587 秒内完成。证据见 `benchmarks/sum-state/p6-dense-utf8-20261121/`
+  和 `benchmarks/sum-state/p4-dense-10m-20261121/`。旧 `aefd17dc` 因缺少当前 harness 所需接口而在计时前排除，
+  随后使用兼容的 `2ac1af5f`。dense 绕过旧阶段计时，根因尚未隔离；撤回该实现，不追加样本寻找有利中位数。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
