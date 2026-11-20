@@ -276,6 +276,11 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   `run_materialize` 140.155 ms（20.0%）、`run_probe` 79.144 ms（11.3%）、`run_admit` 11.400 ms（1.6%）。
   带记录器的 701.569 ms 不与默认 P50 比较，也不作为门槛样本。证据见 `benchmarks/join-asof/p5-stage-profile-20261120/`；
   下一步针对重复 key-run 的 group ID 复用，默认 KeyStore 的所有权行为不变。
+- 2026-11-20 P5 重复 key-run group ID 复用（`705adc7f`）已完成正式复测，证据归档于
+  `benchmarks/join-asof/p5-key-run-cache-20261120/`。固定两例各 2 次预热 + 10 个样本，Join P50 **399.845 ms**、
+  P95 **429.574 ms**，interval P50 **1,076.113 ms**、P95 **1,199.817 ms**；两例 10/10 完整 oracle 通过，
+  采集 42.759 秒，在 600 秒预算内。相对上轮仅为描述性改进，≤30 ms/≤350 ms 仍未达到；停止旧逐 morsel
+  run/key 状态机的微优化，转向面向重点场景的整批原生物理执行。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
