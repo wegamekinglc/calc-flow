@@ -289,6 +289,11 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   后续代码检查确认生产裁剪会设置 `output_columns=Some(...)`，而 `HotJoinCore::new` 拒绝该图，因此本轮实际测量的是旧 run 回退，
   不是原生热路径本身；此前直接 `collect` 的静态 Join 也使用不同的 symbol-only 两列查询。下一步先覆盖裁剪图激活，再重新正式测量，
   不重复相同样本寻找更优中位数。
+- 2026-11-21 P5 裁剪热路径候选 `2983e787` 已修复输出/retained-layout 激活，完整与裁剪回归、Join 589 项、
+  共享 Join 28 项及诊断 feature Clippy 通过。正式采集的首个静态 Join warmup 在 570 秒截止时仍未完成，interval 未开始，
+  **没有有效样本、P50/P95 或该候选的完整 oracle 结论**；wheel 单独构建 1,181.720 秒，采集在预算内以 `TimeoutError` 结束。
+  证据见 `benchmarks/join-asof/p5-projected-hot-20261121/`。该 temporal SQL 物理计划被拒绝，下一候选改为 per-key 哈希索引、
+  排序时间项、边界二分和 Arrow `take`，不是对旧候选追加计时。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
