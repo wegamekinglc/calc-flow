@@ -1,6 +1,9 @@
 use super::{
     JoinSide, JoinStateLimits, JoinTimeBounds,
-    runs::{Incoming, RunOutputContext, RunState, merge_visits, reset_merge_visits},
+    runs::{
+        Incoming, RunOutputContext, RunState, merge_visits, reset_merge_visits, reset_run_lookups,
+        run_lookups,
+    },
 };
 use crate::operator::keyed::{GroupId, KeySchema, KeyStore, MORSEL_ROWS};
 use crate::{Batch, BatchMetadata, DataFusionConfig, DataFusionRuntime, EdgeBudget, EventTime};
@@ -979,6 +982,7 @@ fn test_run_interval_large_batch_emits_every_match() {
     );
     assert_eq!(batched.snapshot().fingerprint(), sequential);
     RunState::restore(batched.snapshot()).unwrap();
+    reset_run_lookups();
     let prepared = batched
         .prepare_batch(
             JoinSide::Right,
@@ -988,4 +992,13 @@ fn test_run_interval_large_batch_emits_every_match() {
         )
         .unwrap();
     assert_eq!(prepared.matched_rows(), 108_080);
+    assert_eq!(run_lookups(), 7);
+    assert_eq!(
+        prepared
+            .outputs()
+            .iter()
+            .map(|output| output.records.len())
+            .sum::<usize>(),
+        3
+    );
 }

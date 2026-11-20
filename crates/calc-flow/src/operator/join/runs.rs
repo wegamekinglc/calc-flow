@@ -25,6 +25,7 @@ use std::{
     sync::Arc,
 };
 
+const OUTPUT_CHUNK_ROWS: usize = 64_000;
 const RUN_OWNER_BYTES: usize = size_of::<Run>() + size_of::<LiveRun>() + 64;
 const BUCKET_OWNER_BYTES: usize = size_of::<Bucket>() + 64;
 const ROW_COLUMN_BYTES: usize =
@@ -43,6 +44,21 @@ pub(super) fn reset_merge_visits() {
 #[cfg(test)]
 pub(super) fn merge_visits() -> usize {
     MERGE_VISITS.get()
+}
+
+#[cfg(test)]
+thread_local! {
+    static RUN_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn reset_run_lookups() {
+    RUN_LOOKUPS.set(0);
+}
+
+#[cfg(test)]
+pub(super) fn run_lookups() -> usize {
+    RUN_LOOKUPS.get()
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -531,11 +547,24 @@ impl SideUpdate {
 struct Probe {
     selection: Selection,
     opposite: Vec<RowLocator>,
+    runs: Vec<Option<Arc<Run>>>,
 }
 
 impl Probe {
     fn len(&self) -> usize {
         self.selection.len()
+    }
+
+    fn payload(&self, locator: RowLocator) -> PayloadRef<'_> {
+        let run = usize::try_from(locator.run.0)
+            .ok()
+            .and_then(|index| self.runs.get(index))
+            .and_then(Option::as_ref)
+            .expect("probed run");
+        PayloadRef::Record(
+            &run.payload,
+            usize::try_from(locator.row).expect("u32 locator fits usize"),
+        )
     }
 }
 
@@ -1122,6 +1151,7 @@ impl RunState {
         }
         let mut selection = Selection::with_capacity(count, incoming.len());
         let mut selected = Vec::with_capacity(count);
+        let mut runs = Vec::<Option<Arc<Run>>>::new();
         for (row, found) in bounds.into_iter().enumerate() {
             if found.matches() == 0 {
                 continue;
@@ -1129,26 +1159,27 @@ impl RunState {
             let group = incoming.groups[row];
             let bucket = opposite.buckets.get(&group).expect("probed bucket");
             let start = selected.len();
-            selected.extend(
-                bucket.active()[found.range()]
-                    .iter()
-                    .map(|entry| entry.locator),
-            );
+            for entry in &bucket.active()[found.range()] {
+                let locator = entry.locator;
+                let index = usize::try_from(locator.run.0).expect("run locator fits usize");
+                if runs.len() <= index {
+                    runs.resize(index + 1, None);
+                }
+                if runs[index].is_none() {
+                    #[cfg(test)]
+                    RUN_LOOKUPS.with(|count| count.set(count.get() + 1));
+                    runs[index] = Some(Arc::clone(&opposite.runs[&locator.run].run));
+                }
+                selected.push(locator);
+            }
             selection.append_run(row, start..selected.len());
         }
         debug_assert_eq!(selected.len(), count);
         Ok(Probe {
             selection,
             opposite: selected,
+            runs,
         })
-    }
-
-    fn payload(&self, side: JoinSide, locator: RowLocator) -> PayloadRef<'_> {
-        let run = &self.sides[side.index()].runs[&locator.run].run;
-        PayloadRef::Record(
-            &run.payload,
-            usize::try_from(locator.row).expect("u32 locator fits usize"),
-        )
     }
 
     fn output_sequences(&self, count: usize) -> Result<Vec<u64>> {
@@ -1174,7 +1205,7 @@ impl Prepared {
         if self.probe.len() == 0 {
             return Ok(Vec::new());
         }
-        let ranges = self.ranges(state, schema, projection, left_width, budget, check)?;
+        let ranges = self.ranges(schema, projection, left_width, budget, check)?;
         // Validate the complete sequence range before gathering any output.
         drop(state.output_sequences(ranges.len())?);
         let mut records = Vec::with_capacity(ranges.len());
@@ -1196,7 +1227,6 @@ impl Prepared {
 
     fn ranges(
         &self,
-        state: &RunState,
         schema: &SchemaRef,
         projection: Option<&[usize]>,
         left_width: usize,
@@ -1209,7 +1239,7 @@ impl Prepared {
             } else {
                 (budget.max_bytes / row_bytes).min(budget.max_rows)
             }
-            .min(MORSEL_ROWS);
+            .min(OUTPUT_CHUNK_ROWS);
             if per_chunk == 0 {
                 return Err(
                     OutputChunkErrors::STREAM_JOIN.over_budget_row(row_bytes, budget.max_bytes)
@@ -1233,9 +1263,9 @@ impl Prepared {
             if index % MORSEL_ROWS == 0 {
                 check()?;
             }
-            let row = self.pair_charge(state, pair, schema, projection, left_width)?;
+            let row = self.pair_charge(pair, schema, projection, left_width)?;
             let rows = index - start;
-            let full = rows == budget.max_rows.min(MORSEL_ROWS)
+            let full = rows == budget.max_rows.min(OUTPUT_CHUNK_ROWS)
                 || bytes
                     .checked_add(row)
                     .is_none_or(|candidate| candidate > budget.max_bytes);
@@ -1256,22 +1286,13 @@ impl Prepared {
 
     fn pair_charge(
         &self,
-        state: &RunState,
         pair: MatchedPair,
         schema: &SchemaRef,
         projection: Option<&[usize]>,
         left_width: usize,
     ) -> Result<usize> {
-        let incoming_side = if self.incoming_is_left {
-            JoinSide::Left
-        } else {
-            JoinSide::Right
-        };
         let incoming = self.incoming.payload_at(pair.pos);
-        let retained = state.payload(
-            opposite(incoming_side),
-            self.probe.opposite[pair.opposite_index],
-        );
+        let retained = self.probe.payload(self.probe.opposite[pair.opposite_index]);
         let (left, right) = if self.incoming_is_left {
             (incoming, retained)
         } else {
@@ -1355,12 +1376,6 @@ impl Prepared {
         left_width: usize,
         range: std::ops::Range<usize>,
     ) -> Result<RecordBatch> {
-        let incoming_side = if self.incoming_is_left {
-            JoinSide::Left
-        } else {
-            JoinSide::Right
-        };
-        let opposite_side = opposite(incoming_side);
         let incoming = output_gather::SideGather::new(
             self.probe
                 .selection
@@ -1377,7 +1392,7 @@ impl Prepared {
                 .take(range.len())
                 .map(|pair| {
                     let locator = self.probe.opposite[pair.opposite_index];
-                    state.payload(opposite_side, locator)
+                    self.probe.payload(locator)
                 }),
         );
         let (left, right) = if self.incoming_is_left {

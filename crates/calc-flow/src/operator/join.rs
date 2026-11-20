@@ -354,11 +354,12 @@ mod tests {
             )
             .await
             .unwrap();
-        let emitted = collector
-            .drain("output")
+        let outputs = collector.drain("output");
+        let emitted = outputs
             .iter()
             .map(|message| message.as_data().unwrap().num_rows())
             .sum::<usize>();
+        assert_eq!(outputs.len(), 3);
         assert_eq!(emitted, 108_080);
         assert_eq!(operator.status().emitted_match_rows, 108_080);
         assert_eq!(join_work().quantum_boundaries, 0);
