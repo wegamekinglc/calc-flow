@@ -59,7 +59,7 @@ enum SumKind {
 struct PartitionedSums {
     kind: SumKind,
     partitions: Vec<std::collections::BTreeMap<GroupId, SumValue>>,
-    marks: Vec<std::collections::BTreeMap<GroupId, u64>>,
+    marks: Vec<Vec<u64>>,
     groups: usize,
     parallel_min_rows: usize,
     #[cfg(test)]
@@ -365,6 +365,7 @@ impl Transaction {
                 RowContext {
                     generation: self.generation,
                     old_groups: self.old_groups,
+                    partitions: partitions.len(),
                     kind,
                     input,
                     selection,
@@ -418,6 +419,7 @@ impl Transaction {
             state,
             generation,
             old_groups,
+            partitions: partition_count,
             kind,
             input,
             selection,
@@ -453,9 +455,7 @@ impl Transaction {
                 .collect::<Result<Vec<_>>>()
         });
         let outcomes = outcomes?;
-        sums.marks = (0..outcomes.len())
-            .map(|_| std::collections::BTreeMap::new())
-            .collect();
+        sums.marks = (0..outcomes.len()).map(|_| Vec::new()).collect();
         let mut first_error = None;
         for (index, outcome) in outcomes.into_iter().enumerate() {
             sums.partitions[index] = outcome.values;
@@ -499,6 +499,7 @@ impl Transaction {
                     RowContext {
                         generation: execution.generation,
                         old_groups: execution.old_groups,
+                        partitions: execution.partitions,
                         kind: execution.kind,
                         input: execution.input,
                         selection: execution.selection,
@@ -668,6 +669,7 @@ impl Transaction {
                 RowContext {
                     generation,
                     old_groups,
+                    partitions: sums.partitions.len(),
                     kind,
                     input: &input,
                     selection: None,
@@ -695,7 +697,7 @@ impl Transaction {
         replace: bool,
         seen: &mut std::collections::BTreeSet<GroupId>,
         values: &mut std::collections::BTreeMap<GroupId, SumValue>,
-        marks: &mut std::collections::BTreeMap<GroupId, u64>,
+        marks: &mut [u64],
         undo: &mut TouchUndo<'_>,
     ) -> Result<()> {
         let group = context.group;
@@ -762,6 +764,7 @@ fn grow(state: &mut KeyedSumState) -> Result<()> {
 struct RowContext<'a> {
     generation: u64,
     old_groups: usize,
+    partitions: usize,
     kind: SumKind,
     input: &'a SumInput<'a>,
     selection: Option<&'a BooleanArray>,
@@ -775,6 +778,7 @@ struct PartitionExecution<'a> {
     state: &'a Arc<Mutex<KeyedSumState>>,
     generation: u64,
     old_groups: usize,
+    partitions: usize,
     kind: SumKind,
     input: &'a SumInput<'a>,
     selection: Option<&'a BooleanArray>,
@@ -783,13 +787,13 @@ struct PartitionExecution<'a> {
 
 struct PartitionWork {
     values: std::collections::BTreeMap<GroupId, SumValue>,
-    marks: std::collections::BTreeMap<GroupId, u64>,
+    marks: Vec<u64>,
     rows: Vec<(usize, GroupId)>,
 }
 
 struct ParallelOutcome {
     values: std::collections::BTreeMap<GroupId, SumValue>,
-    marks: std::collections::BTreeMap<GroupId, u64>,
+    marks: Vec<u64>,
     affected: Vec<GroupId>,
     leased: Vec<GroupId>,
     undo: Vec<(GroupId, SumValue)>,
@@ -801,7 +805,7 @@ fn apply_row(
     state: &Arc<Mutex<KeyedSumState>>,
     context: RowContext<'_>,
     values: &mut std::collections::BTreeMap<GroupId, SumValue>,
-    marks: &mut std::collections::BTreeMap<GroupId, u64>,
+    marks: &mut [u64],
     undo: &mut TouchUndo<'_>,
 ) -> Result<()> {
     #[cfg(test)]
@@ -836,11 +840,12 @@ fn touch(
     state: &Arc<Mutex<KeyedSumState>>,
     context: &RowContext<'_>,
     values: &std::collections::BTreeMap<GroupId, SumValue>,
-    marks: &mut std::collections::BTreeMap<GroupId, u64>,
+    marks: &mut [u64],
     undo: &mut TouchUndo<'_>,
 ) -> Result<()> {
     let group = context.group;
-    if marks.get(&group) == Some(&context.generation) {
+    let local = group.index() / context.partitions;
+    if marks[local] == context.generation {
         return Ok(());
     }
     let existing = usize::from(group.index() < context.old_groups);
@@ -849,7 +854,7 @@ fn touch(
     undo.reservation
         .try_grow(charge)
         .map_err(|error| super::df_error("keyed SUM", error))?;
-    marks.insert(group, context.generation);
+    marks[local] = context.generation;
     undo.affected.push(group);
     if group.index() < context.old_groups {
         let previous = values
@@ -992,9 +997,7 @@ impl PartitionedSums {
             partitions: (0..partitions)
                 .map(|_| std::collections::BTreeMap::new())
                 .collect(),
-            marks: (0..partitions)
-                .map(|_| std::collections::BTreeMap::new())
-                .collect(),
+            marks: (0..partitions).map(|_| Vec::new()).collect(),
             groups: 0,
             parallel_min_rows: 64_000,
             #[cfg(test)]
@@ -1021,9 +1024,7 @@ impl PartitionedSums {
         self.partitions = (0..partitions)
             .map(|_| std::collections::BTreeMap::new())
             .collect();
-        self.marks = (0..partitions)
-            .map(|_| std::collections::BTreeMap::new())
-            .collect();
+        self.marks = (0..partitions).map(|_| Vec::new()).collect();
     }
 
     #[cfg(test)]
@@ -1047,8 +1048,22 @@ impl PartitionedSums {
         scalar + size_of::<(GroupId, SumValue)>() + 6 * size_of::<usize>()
     }
 
+    fn resize_marks(&mut self) {
+        let groups = self.groups;
+        let partitions = self.partitions.len();
+        for (partition, marks) in self.marks.iter_mut().enumerate() {
+            let len = if partition < groups {
+                (groups - 1 - partition) / partitions + 1
+            } else {
+                0
+            };
+            marks.resize(len, 0);
+        }
+    }
+
     fn grow(&mut self, groups: usize) {
         self.groups = self.groups.max(groups);
+        self.resize_marks();
     }
 
     fn truncate(&mut self, groups: usize) {
@@ -1057,8 +1072,9 @@ impl PartitionedSums {
             partition.retain(|group, _| group.index() < groups);
         }
         for marks in &mut self.marks {
-            marks.clear();
+            marks.fill(0);
         }
+        self.resize_marks();
     }
 
     fn value(&self, group: GroupId) -> SumValue {
