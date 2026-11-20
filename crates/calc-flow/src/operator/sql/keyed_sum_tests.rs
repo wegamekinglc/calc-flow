@@ -530,10 +530,6 @@ async fn test_delegated_stock_sum_preserves_birth_order_and_rollback() {
     let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
     let record = RecordBatch::try_from_iter(vec![
         (
-            "sequence",
-            Arc::new(UInt64Array::from(vec![30, 31, 32, 33])) as ArrayRef,
-        ),
-        (
             "account",
             Arc::new(StringArray::from(vec!["b", "a", "b", "a"])) as ArrayRef,
         ),

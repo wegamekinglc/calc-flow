@@ -974,7 +974,6 @@ impl IncrementalSql {
             ("account", DataType::Utf8),
             ("stock", DataType::Utf8),
             ("delta", DataType::Int64),
-            ("sequence", DataType::UInt64),
         ] {
             let Ok(index) = schema.index_of(field) else {
                 return Ok(None);
@@ -984,8 +983,9 @@ impl IncrementalSql {
             }
         }
         let query = crate::expression::parse_select_query(
-            "SELECT account, stock, SUM(delta) AS position, MIN(sequence) AS _cf_first \
-         FROM input GROUP BY account, stock ORDER BY _cf_first",
+            "SELECT account, stock, SUM(delta) AS position, MIN(_cf_first) AS _cf_first \
+             FROM (SELECT account, stock, delta, ROW_NUMBER() OVER () AS _cf_first FROM input) AS input \
+             GROUP BY account, stock ORDER BY _cf_first",
         )?;
         Ok(Some(Delegation {
             runtime: DataFusionRuntime::new(crate::DataFusionConfig::default())?,
