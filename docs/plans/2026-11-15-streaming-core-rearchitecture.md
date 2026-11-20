@@ -292,6 +292,11 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   真实 job 的 ManagedHistoryStore，archive/seal/load 连续通过，池关闭在写入前拒绝。source-history 6 项、
   connectors 6 项及全 feature Clippy 通过。table v4 的 session N=1 coordinator 保持原路径，
   固定 N 分区及其余 CPU 编码迁移和性能门槛尚未完成。
+- 2026-11-20 P6 grouped integer SUM 已建立真实固定 N 状态所有权：plan 时固定最多 4 个分区，
+  全局 KeyStore 只路由一次并保留 group-id，group_id % N 的分区各自持有 SUM/undo，输出按全局 id 合并，
+  不复制 key、重哈希或合并跨分区累加器。N 与 fixed-group-id-modulo-v1 路由身份纳入 layout fingerprint 和
+  wire metadata，N=1/2/4 输出与 owner 跨批次一致，N 不匹配恢复拒绝。SQL 342 项及非 test/test Clippy 通过。
+  本步不含并行 worker 或性能提升声明；并行执行、其他 keyed 算子和 P6 性能门槛尚未完成。
 
 ## 1. 目标
 

@@ -172,6 +172,20 @@ impl IncrementalSql {
                     }),
             )
             .collect::<Vec<_>>();
+        let key_layout = self
+            .keyed_sum
+            .as_ref()
+            .map(super::keyed_sum::KeyedSum::layout_fingerprint)
+            .or_else(|| {
+                self.keyed_state
+                    .as_ref()
+                    .map(super::keyed_state::KeyedState::layout_fingerprint)
+            })
+            .map(hex::encode);
+        let wire_metadata = key_layout
+            .as_ref()
+            .map(|layout| std::collections::HashMap::from([("key_layout".into(), layout.clone())]))
+            .unwrap_or_default();
         Ok(NativeStateDescriptor {
             key_inputs,
             key_fields,
@@ -183,7 +197,7 @@ impl IncrementalSql {
             filtered_input: self.predicate.is_some(),
             state_fields,
             result_fields,
-            wire_schema: Arc::new(Schema::new(fields)),
+            wire_schema: Arc::new(Schema::new_with_metadata(fields, wire_metadata)),
             output_schema: self.output_schema.clone(),
             projection,
             post_filter,
@@ -192,16 +206,7 @@ impl IncrementalSql {
             group_count: self.group_count(),
             ordered_last,
             policy: self.native_policy(),
-            key_layout: self
-                .keyed_sum
-                .as_ref()
-                .map(super::keyed_sum::KeyedSum::layout_fingerprint)
-                .or_else(|| {
-                    self.keyed_state
-                        .as_ref()
-                        .map(super::keyed_state::KeyedState::layout_fingerprint)
-                })
-                .map(hex::encode),
+            key_layout,
             _reservation: reservation,
         })
     }

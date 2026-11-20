@@ -354,3 +354,102 @@ async fn test_keyed_integer_sum_restore_reexports_identically_and_continues() {
         assert_eq!(runtime.incremental_memory_pool().reserved(), 0);
     }
 }
+
+fn partitioned(plan: &mut IncrementalSql, partitions: usize) {
+    let keyed = plan
+        .keyed_sum
+        .take()
+        .unwrap()
+        .with_partition_count_for_test(partitions);
+    plan.keyed_sum = Some(keyed);
+}
+
+#[tokio::test]
+async fn test_keyed_sum_fixed_partitions_preserve_output_and_owner() {
+    for unsigned in [false, true] {
+        let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+        let job = StreamJobContext::new(
+            985,
+            "keyed-sum",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let context = StreamOperatorContext::new(&job, "keyed-sum", None);
+        let rows = fixture(unsigned);
+        let full = record(unsigned, &rows);
+        let full_batch = Batch::table(vec![full], crate::BatchMetadata::default()).unwrap();
+        for partitions in [1, 2, 4] {
+            let mut plan = plan(&runtime, unsigned).await;
+            partitioned(&mut plan, partitions);
+            let first = plan
+                .update(&full_batch, &context, "keyed-sum")
+                .await
+                .unwrap();
+            assert_eq!(output_rows(&first.records), expected(unsigned, &rows));
+            plan.commit(first);
+            let keyed = plan.keyed_sum.as_ref().unwrap().clone();
+            assert_eq!(keyed.partition_count_for_test(), partitions);
+            let owners = (0..keyed.group_count())
+                .map(|group| {
+                    let group = crate::operator::keyed::GroupId::new(group).unwrap();
+                    keyed.owner_for_test(group)
+                })
+                .collect::<Vec<_>>();
+            let expected_owners = (0..keyed.group_count())
+                .map(|group| group % partitions)
+                .collect::<Vec<_>>();
+            assert_eq!(owners, expected_owners);
+
+            let second = plan
+                .update(&full_batch, &context, "keyed-sum")
+                .await
+                .unwrap();
+            let history = [rows.clone(), rows.clone()].concat();
+            assert_eq!(output_rows(&second.records), expected(unsigned, &history));
+            plan.commit(second);
+            let owners_after = (0..keyed.group_count())
+                .map(|group| {
+                    let group = crate::operator::keyed::GroupId::new(group).unwrap();
+                    keyed.owner_for_test(group)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(owners_after, owners);
+        }
+        assert_eq!(runtime.incremental_memory_pool().reserved(), 0);
+    }
+}
+
+#[tokio::test]
+async fn test_keyed_sum_restore_rejects_partition_count_mismatch() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let job = StreamJobContext::new(
+        986,
+        "keyed-sum",
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "keyed-sum", None);
+    let rows = fixture(false);
+    let full = record(false, &rows);
+    let mut original = plan(&runtime, false).await;
+    partitioned(&mut original, 1);
+    let initial = Batch::table(vec![full.slice(0, 8)], crate::BatchMetadata::default()).unwrap();
+    let transaction = original
+        .update(&initial, &context, "keyed-sum")
+        .await
+        .unwrap();
+    original.commit(transaction);
+    let exported = original
+        .export_native_state("keyed-sum", || Ok(()))
+        .unwrap();
+    let mut restored = plan(&runtime, false).await;
+    partitioned(&mut restored, 2);
+
+    assert!(
+        restored
+            .import_native_state(exported.records(), 8, true, || Ok(()), "keyed-sum")
+            .is_err()
+    );
+}

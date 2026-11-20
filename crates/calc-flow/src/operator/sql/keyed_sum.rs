@@ -6,6 +6,7 @@ use crate::StateBudget;
 use crate::operator::keyed::{ExportValue, GroupId, KeyCut, KeySchema, KeyStore, MORSEL_ROWS};
 use datafusion::arrow::{array::Array, datatypes::DataType};
 use datafusion::execution::memory_pool::MemoryReservation;
+use sha2::{Digest, Sha256};
 use std::{
     mem::size_of,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
@@ -18,7 +19,7 @@ pub(super) struct KeyedSum {
 
 pub(super) struct KeyedSumState {
     keys: KeyStore,
-    sums: SumColumn,
+    sums: PartitionedSums,
     marks: Vec<u64>,
     generation: u64,
     active: bool,
@@ -47,9 +48,16 @@ enum SumValue {
     UInt64(Option<u64>),
 }
 
-enum SumColumn {
-    Int64(Vec<Option<i64>>),
-    UInt64(Vec<Option<u64>>),
+#[derive(Clone, Copy)]
+enum SumKind {
+    Int64,
+    UInt64,
+}
+
+struct PartitionedSums {
+    kind: SumKind,
+    partitions: Vec<std::collections::BTreeMap<GroupId, SumValue>>,
+    groups: usize,
 }
 
 enum SumInput<'a> {
@@ -80,11 +88,12 @@ impl KeyedSum {
         }
         let fields = keys.iter().map(|key| key.field.clone()).collect();
         let schema = KeySchema::groupable(fields)?;
-        let sums = match expression.field().data_type() {
-            DataType::Int64 => SumColumn::Int64(Vec::new()),
-            DataType::UInt64 => SumColumn::UInt64(Vec::new()),
+        let kind = match expression.field().data_type() {
+            DataType::Int64 => SumKind::Int64,
+            DataType::UInt64 => SumKind::UInt64,
             _ => return Ok(None),
         };
+        let sums = PartitionedSums::new(kind, default_partitions());
         Ok(Some(Self {
             state: Arc::new(Mutex::new(KeyedSumState {
                 keys: KeyStore::new(schema, reservation),
@@ -105,7 +114,29 @@ impl KeyedSum {
     }
 
     pub(super) fn layout_fingerprint(&self) -> [u8; 32] {
-        self.lock().keys.layout_fingerprint()
+        let state = self.lock();
+        state.sums.layout_fingerprint(&state.keys)
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_partition_count_for_test(self, partitions: usize) -> Self {
+        assert!(self.is_empty());
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .sums
+            .set_partition_count(partitions);
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn partition_count_for_test(&self) -> usize {
+        self.lock().sums.partition_count()
+    }
+
+    #[cfg(test)]
+    pub(super) fn owner_for_test(&self, group: GroupId) -> usize {
+        self.lock().sums.owner(group)
     }
 
     pub(super) fn group_count(&self) -> usize {
@@ -595,89 +626,135 @@ impl<'a> SumInput<'a> {
     }
 }
 
-impl SumColumn {
-    fn len(&self) -> usize {
-        match self {
-            Self::Int64(values) => values.len(),
-            Self::UInt64(values) => values.len(),
+impl PartitionedSums {
+    fn new(kind: SumKind, partitions: usize) -> Self {
+        assert!(partitions > 0);
+        Self {
+            kind,
+            partitions: (0..partitions)
+                .map(|_| std::collections::BTreeMap::new())
+                .collect(),
+            groups: 0,
         }
+    }
+
+    fn layout_fingerprint(&self, keys: &KeyStore) -> [u8; 32] {
+        let mut identity = keys.layout_fingerprint().to_vec();
+        identity.extend_from_slice(b":fixed-group-id-modulo-v1:");
+        identity.extend_from_slice(self.partitions.len().to_string().as_bytes());
+        Sha256::digest(identity).into()
+    }
+
+    #[cfg(test)]
+    fn set_partition_count(&mut self, partitions: usize) {
+        assert!(partitions > 0);
+        assert_eq!(self.groups, 0);
+        assert!(
+            self.partitions
+                .iter()
+                .all(std::collections::BTreeMap::is_empty)
+        );
+        self.partitions = (0..partitions)
+            .map(|_| std::collections::BTreeMap::new())
+            .collect();
+    }
+
+    #[cfg(test)]
+    fn partition_count(&self) -> usize {
+        self.partitions.len()
+    }
+
+    fn owner(&self, group: GroupId) -> usize {
+        group.index() % self.partitions.len()
+    }
+
+    fn len(&self) -> usize {
+        self.groups
     }
 
     fn width(&self) -> usize {
-        match self {
-            Self::Int64(_) => size_of::<Option<i64>>(),
-            Self::UInt64(_) => size_of::<Option<u64>>(),
-        }
+        let scalar = match self.kind {
+            SumKind::Int64 => size_of::<Option<i64>>(),
+            SumKind::UInt64 => size_of::<Option<u64>>(),
+        };
+        scalar + size_of::<(GroupId, SumValue)>() + 6 * size_of::<usize>()
     }
 
     fn grow(&mut self, groups: usize) {
-        match self {
-            Self::Int64(values) => values.resize(groups, None),
-            Self::UInt64(values) => values.resize(groups, None),
-        }
+        self.groups = self.groups.max(groups);
     }
 
     fn truncate(&mut self, groups: usize) {
-        match self {
-            Self::Int64(values) => values.truncate(groups),
-            Self::UInt64(values) => values.truncate(groups),
+        self.groups = groups;
+        for partition in &mut self.partitions {
+            partition.retain(|group, _| group.index() < groups);
         }
     }
 
     fn value(&self, group: GroupId) -> SumValue {
-        match self {
-            Self::Int64(values) => SumValue::Int64(values[group.index()]),
-            Self::UInt64(values) => SumValue::UInt64(values[group.index()]),
-        }
+        self.partitions[self.owner(group)]
+            .get(&group)
+            .copied()
+            .unwrap_or_else(|| self.null())
     }
 
     fn set(&mut self, group: GroupId, value: Option<SumValue>) {
-        match self {
-            Self::Int64(values) => {
-                values[group.index()] = match value {
-                    Some(SumValue::Int64(value)) => value,
-                    None => None,
-                    _ => unreachable!("typed SUM state and input were compiled together"),
-                };
-            }
-            Self::UInt64(values) => {
-                values[group.index()] = match value {
-                    Some(SumValue::UInt64(value)) => value,
-                    None => None,
-                    _ => unreachable!("typed SUM state and input were compiled together"),
-                };
-            }
-        }
+        let null = self.null();
+        let owner = self.owner(group);
+        self.partitions[owner].insert(group, value.unwrap_or(null));
     }
 
     fn add(&mut self, group: GroupId, value: SumValue) {
-        match (self, value) {
-            (Self::Int64(values), SumValue::Int64(value)) => {
-                let current = &mut values[group.index()];
-                *current = value.map(|value| current.unwrap_or(0).wrapping_add(value));
+        let null = self.null();
+        let owner = self.owner(group);
+        let current = self.partitions[owner].entry(group).or_insert(null);
+        match current {
+            SumValue::Int64(current_value) => {
+                let SumValue::Int64(value) = value else {
+                    unreachable!("typed SUM state and input were compiled together")
+                };
+                *current_value = value.map(|value| current_value.unwrap_or(0).wrapping_add(value));
             }
-            (Self::UInt64(values), SumValue::UInt64(value)) => {
-                let current = &mut values[group.index()];
-                *current = value.map(|value| current.unwrap_or(0).wrapping_add(value));
+            SumValue::UInt64(current_value) => {
+                let SumValue::UInt64(value) = value else {
+                    unreachable!("typed SUM state and input were compiled together")
+                };
+                *current_value = value.map(|value| current_value.unwrap_or(0).wrapping_add(value));
             }
-            _ => unreachable!("typed SUM state and input were compiled together"),
         }
     }
 
     fn array(&self, groups: &[GroupId]) -> ArrayRef {
-        match self {
-            Self::Int64(values) => Arc::new(Int64Array::from(
+        match self.kind {
+            SumKind::Int64 => Arc::new(Int64Array::from(
                 groups
                     .iter()
-                    .map(|group| values[group.index()])
+                    .map(|group| match self.value(*group) {
+                        SumValue::Int64(value) => value,
+                        SumValue::UInt64(_) => unreachable!(),
+                    })
                     .collect::<Vec<_>>(),
             )),
-            Self::UInt64(values) => Arc::new(UInt64Array::from(
+            SumKind::UInt64 => Arc::new(UInt64Array::from(
                 groups
                     .iter()
-                    .map(|group| values[group.index()])
+                    .map(|group| match self.value(*group) {
+                        SumValue::Int64(_) => unreachable!(),
+                        SumValue::UInt64(value) => value,
+                    })
                     .collect::<Vec<_>>(),
             )),
         }
     }
+
+    fn null(&self) -> SumValue {
+        match self.kind {
+            SumKind::Int64 => SumValue::Int64(None),
+            SumKind::UInt64 => SumValue::UInt64(None),
+        }
+    }
+}
+
+fn default_partitions() -> usize {
+    std::thread::available_parallelism().map_or(1, |available| available.get().min(4))
 }
