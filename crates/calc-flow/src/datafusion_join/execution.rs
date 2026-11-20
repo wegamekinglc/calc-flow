@@ -568,24 +568,24 @@ struct BandRows {
 
 impl BandRows {
     fn new(output: &BandOutput, capacity: usize) -> Self {
-        let values = matches!(output, BandOutput::Values);
-        Self {
-            len: 0,
-            sequences: values
-                .then(|| Vec::with_capacity(capacity))
-                .unwrap_or_default(),
-            right_sequences: values
-                .then(|| Vec::with_capacity(capacity))
-                .unwrap_or_default(),
-            values: values
-                .then(|| Vec::with_capacity(capacity))
-                .unwrap_or_default(),
-            left_indices: (!values)
-                .then(|| Vec::with_capacity(capacity))
-                .unwrap_or_default(),
-            right_indices: (!values)
-                .then(|| Vec::with_capacity(capacity))
-                .unwrap_or_default(),
+        if matches!(output, BandOutput::Values) {
+            Self {
+                len: 0,
+                sequences: Vec::with_capacity(capacity),
+                right_sequences: Vec::with_capacity(capacity),
+                values: Vec::with_capacity(capacity),
+                left_indices: Vec::new(),
+                right_indices: Vec::new(),
+            }
+        } else {
+            Self {
+                len: 0,
+                sequences: Vec::new(),
+                right_sequences: Vec::new(),
+                values: Vec::new(),
+                left_indices: Vec::with_capacity(capacity),
+                right_indices: Vec::with_capacity(capacity),
+            }
         }
     }
 }
