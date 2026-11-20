@@ -1,6 +1,8 @@
 use super::{JoinSide, StreamJoinOperator, counter_overflow, operator_error};
 use crate::{Batch, BatchMetadata, Result, StreamCollector, StreamOperatorContext};
 use datafusion::arrow::{
+    array::{Array, StringArray, TimestampMicrosecondArray, UInt64Array},
+    compute::{concat_batches, take},
     datatypes::{DataType, SchemaRef, TimeUnit},
     record_batch::{RecordBatch, RecordBatchOptions},
 };
@@ -68,9 +70,14 @@ impl HotJoinCore {
                 }
             }
         }
+        let query = if kind == HotKind::Band {
+            band_query(operator.spec.bounds.before_micros / 1_000_000)
+        } else {
+            String::new()
+        };
         Some(Self {
             kind,
-            query: query(operator, kind),
+            query,
             left: None,
             right: None,
             completed: false,
@@ -111,17 +118,7 @@ impl HotJoinCore {
                 .join_cpu_trace()
                 .stage(&operator.name, "hot_execute", batch.num_rows());
         let joined = match self.kind {
-            HotKind::Equi => {
-                let tables = BTreeMap::from([
-                    ("input".into(), left.clone()),
-                    ("reference".into(), right.clone()),
-                ]);
-                operator
-                    .runtime
-                    .runtime()?
-                    .sql(&self.query, &tables, Some(&operator.name))
-                    .await?
-            }
+            HotKind::Equi => self.execute_equi(operator, left, right)?,
             HotKind::Band => self.execute_band(operator, left, right).await?,
         };
         #[cfg(feature = "benchmark-internals")]
@@ -172,6 +169,46 @@ impl HotJoinCore {
         Ok(())
     }
 
+    fn execute_equi(
+        &self,
+        operator: &StreamJoinOperator,
+        left: &Batch,
+        right: &Batch,
+    ) -> Result<Batch> {
+        let left = concat_input(operator, left)?;
+        let right = concat_input(operator, right)?;
+        let (left_indices, right_indices) =
+            temporal_indices(operator, &left, &right, operator.spec.bounds.before_micros);
+        let schema = output_schema(operator);
+        let left_width = operator.input_schema(0).fields().len();
+        let sources = (0..schema.fields().len())
+            .map(|ordinal| output_source(operator, ordinal))
+            .collect::<Vec<_>>();
+        let records = (0..left_indices.len())
+            .step_by(65_536)
+            .map(|start| {
+                let length = (left_indices.len() - start).min(65_536);
+                let left_indices = left_indices.slice(start, length);
+                let right_indices = right_indices.slice(start, length);
+                let columns = sources
+                    .iter()
+                    .map(|&source| {
+                        let (input, indices, column) = if source < left_width {
+                            (&left, &left_indices, source)
+                        } else {
+                            (&right, &right_indices, source - left_width)
+                        };
+                        take(input.column(column), &indices, None)
+                            .map_err(|error| operator_error(&operator.name, &error.to_string()))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                RecordBatch::try_new(Arc::clone(&schema), columns)
+                    .map_err(|error| operator_error(&operator.name, &error.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Batch::table(records, BatchMetadata::default())
+    }
+
     async fn execute_band(
         &self,
         operator: &StreamJoinOperator,
@@ -210,6 +247,86 @@ impl HotJoinCore {
     }
 }
 
+#[derive(Clone, Copy)]
+struct TemporalEntry {
+    time: i64,
+    row: u64,
+}
+
+fn concat_input(operator: &StreamJoinOperator, input: &Batch) -> Result<RecordBatch> {
+    let table = input.table_payload()?;
+    concat_batches(table.schema(), table.batches())
+        .map_err(|error| operator_error(&operator.name, &error.to_string()))
+}
+
+fn temporal_indices(
+    operator: &StreamJoinOperator,
+    left: &RecordBatch,
+    right: &RecordBatch,
+    before: u64,
+) -> (UInt64Array, UInt64Array) {
+    let right_keys = right
+        .column(operator.compiled.right_key_indices[0])
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("hot Join key is Utf8");
+    let right_times = right
+        .column(operator.compiled.right_event_time_index)
+        .as_any()
+        .downcast_ref::<TimestampMicrosecondArray>()
+        .expect("hot Join time is microseconds");
+    let mut entries =
+        hashbrown::HashMap::<String, Vec<TemporalEntry>, ahash::RandomState>::default();
+    for row in 0..right.num_rows() {
+        if right_keys.is_null(row) || right_times.is_null(row) {
+            continue;
+        }
+        entries
+            .entry_ref(right_keys.value(row))
+            .or_default()
+            .push(TemporalEntry {
+                time: right_times.value(row),
+                row: u64::try_from(row).expect("Arrow row fits u64"),
+            });
+    }
+    for values in entries.values_mut() {
+        values.sort_unstable_by_key(|entry| (entry.time, entry.row));
+    }
+
+    let left_keys = left
+        .column(operator.compiled.left_key_indices[0])
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("hot Join key is Utf8");
+    let left_times = left
+        .column(operator.compiled.left_event_time_index)
+        .as_any()
+        .downcast_ref::<TimestampMicrosecondArray>()
+        .expect("hot Join time is microseconds");
+    let before = i128::from(before);
+    let mut left_indices = Vec::new();
+    let mut right_indices = Vec::new();
+    for row in 0..left.num_rows() {
+        if left_keys.is_null(row) || left_times.is_null(row) {
+            continue;
+        }
+        let Some(candidates) = entries.get(left_keys.value(row)) else {
+            continue;
+        };
+        let time = i128::from(left_times.value(row));
+        let lower = time - before;
+        let start = candidates.partition_point(|entry| i128::from(entry.time) < lower);
+        let end = candidates.partition_point(|entry| i128::from(entry.time) <= time);
+        let row = u64::try_from(row).expect("Arrow row fits u64");
+        left_indices.extend(std::iter::repeat_n(row, end - start));
+        right_indices.extend(candidates[start..end].iter().map(|entry| entry.row));
+    }
+    (
+        UInt64Array::from_iter_values(left_indices),
+        UInt64Array::from_iter_values(right_indices),
+    )
+}
+
 fn output_schema(operator: &StreamJoinOperator) -> SchemaRef {
     Arc::clone(
         operator.output_ports[0]
@@ -224,40 +341,6 @@ fn output_source(operator: &StreamJoinOperator, ordinal: usize) -> usize {
         .logical_output_schema
         .index_of(field.name())
         .expect("projected Join field has a logical source")
-}
-
-fn query(operator: &StreamJoinOperator, kind: HotKind) -> String {
-    if kind == HotKind::Band {
-        return band_query(operator.spec.bounds.before_micros / 1_000_000);
-    }
-    let left_width = operator.input_schema(0).fields().len();
-    let projection = output_schema(operator)
-        .fields()
-        .iter()
-        .enumerate()
-        .map(|(ordinal, field)| {
-            let source = output_source(operator, ordinal);
-            let (alias, schema, index) = if source < left_width {
-                ("input", operator.input_schema(0), source)
-            } else {
-                ("reference", operator.input_schema(1), source - left_width)
-            };
-            let source_field = &schema.fields[index];
-            format!(
-                "{}.{} AS {}",
-                alias,
-                quote(source_field.name()),
-                quote(field.name())
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let before = operator.spec.bounds.before_micros;
-    format!(
-        "SELECT {projection} FROM input JOIN reference ON input.\"symbol\" = reference.\"symbol\" \
-         AND input.\"event_time\" >= reference.\"event_time\" - INTERVAL '{before} microseconds' \
-         AND input.\"event_time\" <= reference.\"event_time\""
-    )
 }
 
 fn band_query(seconds: u64) -> String {
@@ -278,10 +361,6 @@ fn band_query(seconds: u64) -> String {
          ON probes.left_symbol = reference.symbol \
          AND probes.match_time = reference.event_time"
     )
-}
-
-fn quote(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 #[cfg(test)]
@@ -400,7 +479,7 @@ mod tests {
             let messages = collector.drain("output");
             assert_eq!(messages.len(), 1);
             let output = messages[0].as_data().unwrap();
-            assert_eq!(output.num_rows(), 2);
+            assert_eq!(output.num_rows(), 1);
             let record = &output.table_payload().unwrap().batches()[0];
             assert_eq!(
                 record.schema().fields().len(),
@@ -411,14 +490,14 @@ mod tests {
                 .as_any()
                 .downcast_ref::<Float64Array>()
                 .unwrap();
-            assert_eq!(price.values(), &[2.0, 3.0]);
+            assert_eq!(price.values(), &[3.0]);
             let factor = record
                 .column(record.schema().index_of("dimension__factor").unwrap())
                 .as_any()
                 .downcast_ref::<Float64Array>()
                 .unwrap();
-            assert_eq!(factor.values(), &[2.0, 2.0]);
-            assert_eq!(operator.state.metrics.emitted_match_rows, 2);
+            assert_eq!(factor.values(), &[2.0]);
+            assert_eq!(operator.state.metrics.emitted_match_rows, 1);
             let core = operator.run_core.as_ref().unwrap();
             assert!(core.hot_enabled());
             assert_eq!(core.rows(JoinSide::Left), 0);
