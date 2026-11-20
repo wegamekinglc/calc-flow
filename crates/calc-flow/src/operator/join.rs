@@ -287,6 +287,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn production_interval_large_batch_emits_every_match() {
+        let rows = 10_000usize;
+        let interval = StreamJoinSpec::inner(
+            ["account_id"],
+            ["account_id"],
+            "authorized_at",
+            "paid_at",
+            JoinTimeBounds::new(Duration::from_secs(5), Duration::from_secs(5)).unwrap(),
+            JoinStateLimits::new(100_000, 1 << 30, 1_000_000).unwrap(),
+        )
+        .unwrap();
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), interval).unwrap();
+        operator.enable_run_core();
+        let job = job().with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        let keys = (0..rows).map(|row| (row % 64) as i64).collect::<Vec<_>>();
+        let times = (0..rows)
+            .map(|row| (row / 64) as i64 * 1_000_000)
+            .collect::<Vec<_>>();
+        operator
+            .process_data(
+                "left",
+                left_batch_with_keys(keys.clone(), times.clone()),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        let watermark = ((rows / 64 - 1) * 1_000_000 + 1) as i64;
+        operator
+            .on_ingress_progress(
+                "left",
+                &progress_context(
+                    &job,
+                    (IngressState::Active, Some(watermark)),
+                    (IngressState::Active, None),
+                ),
+            )
+            .await
+            .unwrap();
+        let right = RecordBatch::try_new(
+            right_schema(),
+            vec![
+                Arc::new(Int64Array::from(keys)),
+                Arc::new(TimestampMicrosecondArray::from(times).with_timezone("UTC")),
+                Arc::new(StringArray::from(vec!["paid"; rows])),
+            ],
+        )
+        .unwrap();
+        operator
+            .process_data(
+                "right",
+                Batch::table(vec![right], BatchMetadata::default()).unwrap(),
+                &progress_context(
+                    &job,
+                    (IngressState::Active, Some(watermark)),
+                    (IngressState::Active, None),
+                ),
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        let emitted = collector
+            .drain("output")
+            .iter()
+            .map(|message| message.as_data().unwrap().num_rows())
+            .sum::<usize>();
+        assert_eq!(emitted, 108_080);
+        assert_eq!(operator.status().emitted_match_rows, 108_080);
+    }
+
+    #[tokio::test]
     async fn production_checkpoint_restore_continues_run_output() {
         let mut original =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();

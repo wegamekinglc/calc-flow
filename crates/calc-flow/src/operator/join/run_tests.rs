@@ -2,7 +2,7 @@ use super::{
     JoinSide, JoinStateLimits, JoinTimeBounds,
     runs::{Incoming, RunOutputContext, RunState},
 };
-use crate::operator::keyed::{GroupId, KeySchema, KeyStore};
+use crate::operator::keyed::{GroupId, KeySchema, KeyStore, MORSEL_ROWS};
 use crate::{Batch, BatchMetadata, DataFusionConfig, DataFusionRuntime, EdgeBudget, EventTime};
 use datafusion::arrow::{
     array::{Array, ArrayRef, DictionaryArray, Int32Array, Int64Array, ListArray, StringArray},
@@ -785,4 +785,144 @@ fn test_production_morsels_share_one_atomic_match_limit_and_commit() {
     prepared.commit(&mut accepted).unwrap();
     assert_eq!(accepted.next_row_id(JoinSide::Right), 2);
     assert_eq!(accepted.next_output_sequence(), 2);
+}
+
+#[test]
+fn test_morsel_preparation_chains_across_unretained_rows() {
+    let mut state = state(100);
+    let make_left = |value, time, row_id, retain| {
+        incoming(
+            &record(&[1], &[value]),
+            vec![0],
+            vec![GroupId::new(0).unwrap()],
+            &[time],
+            &[row_id],
+            vec![retain],
+            row_id + 1,
+        )
+    };
+    let prepared = state
+        .prepare_batch(
+            JoinSide::Left,
+            vec![
+                make_left(10, 10, 0, true),
+                make_left(20, 20, 1, false),
+                make_left(30, 30, 2, true),
+            ],
+            RunOutputContext::new(&output_schema(), Some(&[1, 3]), 2, EdgeBudget::default()),
+            &mut || Ok(()),
+        )
+        .unwrap();
+    prepared.commit(&mut state).unwrap();
+    assert_eq!(state.rows(JoinSide::Left), 2);
+
+    let right = incoming(
+        &record(&[1], &[100]),
+        vec![0],
+        vec![GroupId::new(0).unwrap()],
+        &[10],
+        &[0],
+        vec![false],
+        1,
+    );
+    let output = state
+        .apply(
+            JoinSide::Right,
+            right,
+            &output_schema(),
+            Some(&[1, 3]),
+            2,
+            EdgeBudget::default(),
+        )
+        .unwrap();
+    assert_eq!(values(&output.records[0], 0), [10]);
+    RunState::restore(state.snapshot()).unwrap();
+}
+
+#[test]
+fn test_run_interval_large_batch_emits_every_match() {
+    let rows = 10_000usize;
+    let make = |keys: &mut KeyStore, retain: bool| {
+        let values = (0..rows).map(|row| (row % 64) as i64).collect::<Vec<_>>();
+        let record = record(&values, &values);
+        (0..rows)
+            .step_by(MORSEL_ROWS)
+            .map(|start| {
+                let end = (start + MORSEL_ROWS).min(rows);
+                let times = (start..end)
+                    .map(|row| EventTime::from_micros((row / 64) as i64 * 1_000_000))
+                    .collect::<Vec<_>>();
+                Incoming::route(
+                    &record,
+                    &[0],
+                    (start..end).collect(),
+                    times,
+                    (start..end).map(|row| row as u64).collect(),
+                    datafusion::arrow::array::BooleanArray::from(
+                        (start..end)
+                            .map(|row| retain || row / 64 >= 151)
+                            .collect::<Vec<_>>(),
+                    ),
+                    end as u64,
+                    keys,
+                    &mut || Ok(()),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let mut keys = KeyStore::new(
+        KeySchema::groupable(vec![Arc::new(Field::new("key", DataType::Int64, false))]).unwrap(),
+        runtime.incremental_reservation("join-run-large-test"),
+    );
+    let mut state = RunState::new(
+        "run-large-interval",
+        JoinStateLimits::new(100_000, 1 << 30, 1_000_000).unwrap(),
+        JoinTimeBounds::from_micros(5_000_000, 5_000_000).unwrap(),
+    )
+    .unwrap();
+    for left in make(&mut keys, true) {
+        state
+            .apply(
+                JoinSide::Left,
+                left,
+                &output_schema(),
+                None,
+                2,
+                EdgeBudget::default(),
+            )
+            .unwrap();
+    }
+    let sequential = state.snapshot().fingerprint();
+    let mut batched = RunState::new(
+        "run-large-interval",
+        JoinStateLimits::new(100_000, 1 << 30, 1_000_000).unwrap(),
+        JoinTimeBounds::from_micros(5_000_000, 5_000_000).unwrap(),
+    )
+    .unwrap();
+    let left = batched
+        .prepare_batch(
+            JoinSide::Left,
+            make(&mut keys, true),
+            RunOutputContext::new(&output_schema(), None, 2, EdgeBudget::default()),
+            &mut || Ok(()),
+        )
+        .unwrap();
+    left.commit(&mut batched).unwrap();
+    assert_eq!(
+        batched.locators(JoinSide::Left),
+        state.locators(JoinSide::Left)
+    );
+    assert_eq!(batched.snapshot().fingerprint(), sequential);
+    RunState::restore(batched.snapshot()).unwrap();
+    let prepared = batched
+        .prepare_batch(
+            JoinSide::Right,
+            make(&mut keys, false),
+            RunOutputContext::new(&output_schema(), None, 2, EdgeBudget::default()),
+            &mut || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(prepared.matched_rows(), 108_080);
 }
