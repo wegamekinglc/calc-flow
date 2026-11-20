@@ -10,10 +10,11 @@ use futures::{Future, FutureExt, future::select_all};
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
 
+#[cfg(test)]
+use super::entity_work::TaskEntityWorkClient;
 use super::{
     EnvelopeCost, StreamMessage, StreamMessageKind,
     context::{StreamTaskContext, wait_for_task_gate},
-    entity_work::TaskEntityWorkClient,
     failure::{indicator_diagnostic::SafeIndicatorDiagnostic, panic_message},
     local_edge::{LocalEdgeOwner, OperatorEdgeReceiver, OperatorEdgeSender},
     metrics::OperatorMetricsHandle,
@@ -311,6 +312,7 @@ impl LateMetricSink for OperatorProgress {
 }
 
 pub(crate) struct OperatorTaskInputs {
+    #[cfg(test)]
     pub(crate) entity_work: Option<TaskEntityWorkClient>,
     pub(crate) sql_recovery: Option<SqlRecoveryClient>,
     pub(crate) node_id: String,
@@ -332,6 +334,7 @@ pub(crate) struct OperatorTaskInputs {
 }
 
 struct OperatorEntryFrame {
+    #[cfg(test)]
     entity_work: Option<TaskEntityWorkClient>,
     sql_recovery: Option<SqlRecoveryClient>,
     node_id: String,
@@ -370,6 +373,7 @@ impl RetainedOperatorInputs {
             };
         }
         let OperatorTaskInputs {
+            #[cfg(test)]
             entity_work,
             sql_recovery,
             node_id,
@@ -392,6 +396,7 @@ impl RetainedOperatorInputs {
         Self {
             inputs: None,
             frame: Some(OperatorEntryFrame {
+                #[cfg(test)]
                 entity_work,
                 sql_recovery,
                 node_id,
@@ -415,6 +420,7 @@ impl RetainedOperatorInputs {
     }
     fn assemble(&mut self) {
         let OperatorEntryFrame {
+            #[cfg(test)]
             entity_work,
             sql_recovery,
             node_id,
@@ -435,6 +441,7 @@ impl RetainedOperatorInputs {
         } = self.frame.take().expect("owned operator frame");
         let operator = self.operator.take().expect("returned actual operator");
         self.inputs = Some(OperatorTaskInputs {
+            #[cfg(test)]
             entity_work,
             sql_recovery,
             node_id,
@@ -798,6 +805,7 @@ async fn run_after_operator_entry(
         return Ok(());
     }
     inputs.context.bind_task_id(task_id);
+    #[cfg(test)]
     if let Some(client) = &mut inputs.entity_work {
         client.activate(task_id);
     }
@@ -1264,6 +1272,7 @@ async fn finish_operator(
         .progress
         .begin_rolling(RollingCallback::End, &cancellation);
     let context = attach_rolling_context(context, callback.as_ref());
+    #[cfg(test)]
     let context = attach_entity_context(context, inputs.entity_work.as_ref());
     let mut collector = ChannelStreamCollector::new(
         &inputs.node_id,
@@ -1284,12 +1293,14 @@ async fn finish_operator(
         if let Some(callback) = callback {
             callback.complete(&result);
         }
+        #[cfg(test)]
         if let Some(task) = &inputs.entity_work {
             task.settle_current_scope().await;
         }
         result?;
     } else {
         drop(callback);
+        #[cfg(test)]
         if let Some(task) = &inputs.entity_work {
             task.settle_current_scope().await;
         }
@@ -1328,6 +1339,7 @@ async fn finish_sync_operator(
     if let Some(callback) = callback {
         callback.complete(&result);
     }
+    #[cfg(test)]
     if let Some(task) = &inputs.entity_work {
         task.settle_current_scope().await;
     }
@@ -1478,6 +1490,7 @@ async fn dispatch_or_cancel(
     } else {
         result
     };
+    #[cfg(test)]
     if let Some(task) = &inputs.entity_work {
         task.settle_current_scope().await;
     }
@@ -2172,6 +2185,7 @@ async fn dispatch_data(
         .with_task_id(inputs.context.task_id());
         let context = attach_rolling_context(context, callback.as_ref());
         let context = context.with_ingress_preparation(preparation.as_ref());
+        #[cfg(test)]
         let context = attach_entity_context(context, inputs.entity_work.as_ref());
         let mut collector = ChannelStreamCollector::new(
             &inputs.node_id,
@@ -2232,6 +2246,7 @@ async fn dispatch_watermark_handler(
     )
     .with_task_id(inputs.context.task_id());
     let context = attach_rolling_context(context, callback.as_ref());
+    #[cfg(test)]
     let context = attach_entity_context(context, inputs.entity_work.as_ref());
     let mut collector = ChannelStreamCollector::new(
         &inputs.node_id,
@@ -2272,6 +2287,7 @@ fn attach_rolling_context<'a>(
     }
 }
 
+#[cfg(test)]
 fn attach_entity_context<'a>(
     context: StreamOperatorContext<'a>,
     task: Option<&'a TaskEntityWorkClient>,

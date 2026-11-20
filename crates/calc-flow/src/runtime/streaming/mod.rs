@@ -15,6 +15,7 @@ mod checkpoint_runtime;
 mod checkpoint_status;
 mod context;
 mod edge_queue;
+#[cfg(test)]
 pub(crate) mod entity_work;
 pub(crate) mod failure;
 #[cfg(test)]

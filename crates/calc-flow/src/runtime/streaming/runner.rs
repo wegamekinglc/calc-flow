@@ -47,6 +47,8 @@ use tokio::{
     task::JoinSet,
 };
 
+#[cfg(test)]
+use super::entity_work::JobEntityWorkOwner;
 use super::{
     ChannelMetrics, EdgeReceiver,
     channel::edge_channel_with_metrics,
@@ -58,7 +60,6 @@ use super::{
             ParticipantSet, spawn_checkpoint_coordinator,
         },
     },
-    entity_work::JobEntityWorkOwner,
     job::{
         ContinuousJobSpec, OrdinarySinkBinding, OwningContinuousJob, StableSinkId,
         ValidatedContinuousJob, ValidatedOrdinarySink, preflight_job,
@@ -165,6 +166,7 @@ pub(super) struct JobCore {
     sink_lifecycle_timeout: Duration,
     manual_checkpoint: Mutex<Option<CheckpointCoordinatorHandle>>,
     operation_cancel_requested: AtomicBool,
+    #[cfg(test)]
     entity_work: JobEntityWorkOwner,
     morsels: JobMorselOwner,
     sql_recovery: JobSqlRecoveryOwner,
@@ -250,6 +252,7 @@ impl JobCore {
             sink_lifecycle_timeout: CONNECTOR_CLOSE_TIMEOUT,
             manual_checkpoint: Mutex::new(None),
             operation_cancel_requested: AtomicBool::new(false),
+            #[cfg(test)]
             entity_work: JobEntityWorkOwner::new(
                 job_id,
                 #[cfg(test)]
@@ -1722,6 +1725,7 @@ async fn settle_driver_report(core: &Arc<JobCore>, join_error: Option<&str>) -> 
             })]);
     }
     if let Some(mut loan) = core.supervision.take(
+        #[cfg(test)]
         core.entity_work.clone(),
         core.sql_recovery.clone(),
         #[cfg(test)]
@@ -1740,14 +1744,15 @@ async fn settle_driver_report(core: &Arc<JobCore>, join_error: Option<&str>) -> 
     let sql_failures = core.sql_recovery.drain().await;
     core.supervision.append_cleanup(sql_failures);
     if !core.supervision.has_report() {
-        core.entity_work.close_admission();
-        let secondary = core.entity_work.drain().await;
         #[cfg(test)]
         let secondary = {
-            let mut secondary = secondary;
+            core.entity_work.close_admission();
+            let mut secondary = core.entity_work.drain().await;
             secondary.extend(core.gather_work.close_and_drain().await);
             secondary
         };
+        #[cfg(not(test))]
+        let secondary = Vec::new();
         let mut failed = unprepared_driver_report(
             core,
             SupervisionReport {
@@ -4069,6 +4074,7 @@ async fn run_operator_entry_inner(
     );
     let mut supervisor = core.supervision.install(
         supervisor,
+        #[cfg(test)]
         core.entity_work.clone(),
         core.sql_recovery.clone(),
         #[cfg(test)]
@@ -4311,6 +4317,7 @@ async fn prepare_inline_nodes(
         let task_id = reservation.task_id();
         reservations.push(reservation);
         inputs.context.bind_task_id(task_id);
+        #[cfg(test)]
         if let Some(client) = &mut inputs.entity_work {
             client.activate(task_id);
         }
@@ -4359,6 +4366,7 @@ fn prepare_operator_task(
             task_id: None,
         }),
         late_output_ports: node.late_output_ports,
+        #[cfg(test)]
         entity_work: matches!(
             &node.operator,
             crate::pipeline::CompiledStreamOperator::Rolling(_)

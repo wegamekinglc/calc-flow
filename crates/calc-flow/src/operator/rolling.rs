@@ -81,18 +81,19 @@ use super::checkpoint::{checkpoint_mismatch, compile_error, internal_error, stat
 use budget::StateCharge;
 #[cfg(test)]
 use kernel::KernelSelection;
+pub(crate) use kernel::entity_parallel::{
+    ActualNumericWork, LaneProgress, LocatedPanic, NumericLaneExit, NumericLaneOutcome,
+    NumericLaneRequest, NumericLaneStop, merge_numeric_results, run_numeric_lane,
+};
 #[cfg(test)]
 pub(crate) use kernel::entity_parallel_tests::{
     entity_parallel_test_pair, entity_parallel_test_work,
 };
 use kernel::{RollingKernelPlan, RollingKernelState, TypedStreamTransition};
+#[cfg(test)]
 pub(crate) use kernel::{
     StreamKernelUpdate,
-    entity_parallel::{
-        ActualNumericWork, LaneProgress, LocatedPanic, NumericJoinSeed, NumericLaneExit,
-        NumericLaneOutcome, NumericLaneRequest, NumericLaneStop, ScratchPlan,
-        merge_numeric_results, run_numeric_lane,
-    },
+    entity_parallel::{NumericJoinSeed, ScratchPlan},
 };
 
 /// Semantic configuration version of the first rolling operator release.

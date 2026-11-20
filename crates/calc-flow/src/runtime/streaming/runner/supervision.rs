@@ -1,10 +1,12 @@
+#[cfg(test)]
+use crate::runtime::streaming::entity_work::JobEntityWorkOwner;
 use crate::runtime::streaming::sql_recovery_work::JobSqlRecoveryOwner;
 
 use std::ops::{Deref, DerefMut};
 
 use super::{
-    Arc, DriverReport, JobEntityWorkOwner, Mutex, RuntimeFailure, SupervisionReport, TaskFailure,
-    TaskSupervisor, task_runtime_failure,
+    Arc, DriverReport, Mutex, RuntimeFailure, SupervisionReport, TaskFailure, TaskSupervisor,
+    task_runtime_failure,
 };
 
 #[derive(Default)]
@@ -24,7 +26,7 @@ impl SupervisionHome {
     pub(super) fn install(
         &self,
         supervisor: TaskSupervisor,
-        cpu: JobEntityWorkOwner,
+        #[cfg(test)] cpu: JobEntityWorkOwner,
         sql: JobSqlRecoveryOwner,
         #[cfg(test)] gather: super::super::gather_work::JobGatherOwner,
     ) -> SupervisorLoan {
@@ -34,6 +36,7 @@ impl SupervisionHome {
         SupervisorLoan {
             home: self.clone(),
             supervisor: Some(supervisor),
+            #[cfg(test)]
             cpu,
             sql,
             #[cfg(test)]
@@ -43,7 +46,7 @@ impl SupervisionHome {
 
     pub(super) fn take(
         &self,
-        cpu: JobEntityWorkOwner,
+        #[cfg(test)] cpu: JobEntityWorkOwner,
         sql: JobSqlRecoveryOwner,
         #[cfg(test)] gather: super::super::gather_work::JobGatherOwner,
     ) -> Option<SupervisorLoan> {
@@ -54,6 +57,7 @@ impl SupervisionHome {
         Some(SupervisorLoan {
             home: self.clone(),
             supervisor: Some(supervisor),
+            #[cfg(test)]
             cpu,
             sql,
             #[cfg(test)]
@@ -126,6 +130,7 @@ impl SupervisionHome {
 pub(super) struct SupervisorLoan {
     home: SupervisionHome,
     supervisor: Option<TaskSupervisor>,
+    #[cfg(test)]
     cpu: JobEntityWorkOwner,
     sql: JobSqlRecoveryOwner,
     #[cfg(test)]
@@ -135,16 +140,18 @@ pub(super) struct SupervisorLoan {
 impl SupervisorLoan {
     pub(super) async fn join_all(&mut self) -> SupervisionReport {
         self.deref_mut().settle_tasks().await;
+        #[cfg(test)]
         self.cpu.close_admission();
         #[cfg(test)]
         self.gather.close_admission();
-        let secondary = self.cpu.drain().await;
         #[cfg(test)]
         let secondary = {
-            let mut secondary = secondary;
+            let mut secondary = self.cpu.drain().await;
             secondary.extend(self.gather.close_and_drain().await);
             secondary
         };
+        #[cfg(not(test))]
+        let secondary = Vec::new();
         self.home.0.lock().secondary.extend(secondary);
         self.sql.close_admission();
         let failures = self.sql.drain().await;
@@ -168,6 +175,7 @@ impl DerefMut for SupervisorLoan {
 
 impl Drop for SupervisorLoan {
     fn drop(&mut self) {
+        #[cfg(test)]
         self.cpu.close_admission();
         self.sql.close_admission();
         #[cfg(test)]

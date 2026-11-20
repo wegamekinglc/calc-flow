@@ -264,6 +264,11 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   共用停止检查移到独立 stop 模块，runner/supervision 的旧 owner 仅在 test 保留作迁移证据，benchmark 收尾改用 morsel owner。
   SQL 339 项、legacy gather 43 项、supervision 5 项、operator-task 77 项（2 ignored）、order 11 项、ASOF 49 项、
   Rolling parallel 4 项及非 test/test 全 feature Clippy 通过。entity_work、固定分区执行器、其余 I/O 分离与性能门槛尚未完成。
+- 2026-11-20 P6 legacy entity_work 已退出生产构建：Rolling 生产只使用统一 morsel 池，runner、supervision、
+  operator task 与 StreamOperatorContext 不再创建或携带旧 lane owner；旧 entity_work 仅在 test 编译，保留迁移证据，
+  没有 dead-code 豁免或非 test 兼容壳。非 test 全 feature compile 无警告，legacy entity 12 项、真实 morsel runner 10 项、
+  operator-task 77 项（2 ignored）、Rolling 699 项、supervision 5 项、session 26 项及全 feature Clippy 通过。
+  固定分区执行器、其余 I/O 分离与性能门槛尚未完成。
 
 ## 1. 目标
 

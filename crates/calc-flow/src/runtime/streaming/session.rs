@@ -1130,6 +1130,7 @@ fn prepare_node(
     let (_, data_gate) = watch::channel(true);
     let (entry_ack, _) = mpsc::unbounded_channel();
     Ok(OperatorTaskInputs {
+        #[cfg(test)]
         entity_work: None,
         sql_recovery: None,
         context: job.for_node(&node_id)?,
