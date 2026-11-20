@@ -2,8 +2,8 @@ use super::super::StreamAsofJoinOperator;
 use crate::{
     CalcFlowError, Result,
     runtime::streaming::{
-        gather_work::{GatherStop, TaskId},
-        morsel_pool::{JobMorselOwner, MorselCost, MorselLease, MorselTicket},
+        gather_work::TaskId,
+        morsel_pool::{ManagedMorsel, MorselCost, MorselLease, execute_managed},
     },
 };
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -29,94 +29,22 @@ impl RestoreWork {
     }
 }
 
-struct CancelOnDrop<T: Send + 'static> {
-    ticket: Option<MorselTicket<T>>,
-    owner: JobMorselOwner,
-    task: Option<TaskId>,
-    task_name: String,
-}
-
-impl<T: Send + 'static> CancelOnDrop<T> {
-    fn disarm(&mut self) {
-        self.ticket = None;
+fn admission_error(name: &str, stage: &str, error: CalcFlowError) -> CalcFlowError {
+    match error {
+        CalcFlowError::InvalidArgument { ref field, .. }
+            if matches!(
+                field.as_str(),
+                "morsel.rows" | "morsel.bytes" | "morsel.count"
+            ) =>
+        {
+            crate::operator::asof::reason(
+                name,
+                crate::StreamingFailureReason::AsofWorkspaceLimitExceeded,
+                &format!("ASOF {stage} work admission exceeds max_state_bytes"),
+            )
+        }
+        error => error,
     }
-}
-
-impl<T: Send + 'static> Drop for CancelOnDrop<T> {
-    fn drop(&mut self) {
-        let Some(ticket) = self.ticket.take() else {
-            return;
-        };
-        ticket.cancel();
-        if let Some(task) = self.task {
-            self.owner.retain_abandoned(
-                vec![ticket],
-                task,
-                std::mem::take(&mut self.task_name),
-                |result| match result {
-                    Ok(_) | Err(CalcFlowError::Cancelled { .. }) => None,
-                    Err(error) => Some(error),
-                },
-            );
-        }
-    }
-}
-
-async fn execute_managed<T, O, F>(
-    job: &crate::StreamJobContext,
-    name: &str,
-    stage: &str,
-    task: Option<TaskId>,
-    input: T,
-    cost: MorselCost,
-    operation: F,
-) -> Result<O>
-where
-    T: Send + 'static,
-    O: Send + 'static,
-    F: FnOnce(T, &MorselLease) -> Result<O> + Send + 'static,
-{
-    let owner = job.morsel_owner().ok_or_else(|| CalcFlowError::Internal {
-        message: format!("ASOF {name} managed checkpoint has no job morsel pool"),
-    })?;
-    let client = owner.client()?;
-    let stop = GatherStop::from_job(job);
-    let submission = client.submit_async(input, cost, operation);
-    tokio::pin!(submission);
-    let ticket = tokio::select! {
-        biased;
-        () = stop.wait() => {
-            return Err(CalcFlowError::Cancelled { run_id: job.job_id().to_string() });
-        }
-        result = &mut submission => result.map_err(|error| match error {
-            CalcFlowError::InvalidArgument { ref field, .. }
-                if matches!(field.as_str(), "morsel.rows" | "morsel.bytes" | "morsel.count") =>
-            {
-                crate::operator::asof::reason(
-                    name,
-                    crate::StreamingFailureReason::AsofWorkspaceLimitExceeded,
-                    &format!("ASOF {stage} work admission exceeds max_state_bytes"),
-                )
-            }
-            error => error,
-        })?,
-    };
-    let mut cancel = CancelOnDrop {
-        ticket: Some(ticket.clone()),
-        owner: owner.clone(),
-        task,
-        task_name: name.to_owned(),
-    };
-    let output = tokio::select! {
-        biased;
-        () = stop.wait() => {
-            return Err(CalcFlowError::Cancelled { run_id: job.job_id().to_string() });
-        }
-        result = ticket.join_async() => result,
-    };
-    cancel.disarm();
-    stop.check()?;
-    output
 }
 
 impl StreamAsofJoinOperator {
@@ -168,7 +96,14 @@ impl StreamAsofJoinOperator {
             frontier,
             _credit: credit,
         };
-        execute_managed(job, &name, "restore", task, work, cost, RestoreWork::run).await
+        execute_managed(
+            job,
+            &name,
+            task,
+            ManagedMorsel::new(work, cost, RestoreWork::run),
+            |error| admission_error(&name, "restore", error),
+        )
+        .await
     }
 }
 
@@ -210,7 +145,14 @@ impl StreamAsofJoinOperator {
             epoch,
             _credit: credit,
         };
-        execute_managed(job, &name, "capture", task, work, cost, CaptureWork::run).await
+        execute_managed(
+            job,
+            &name,
+            task,
+            ManagedMorsel::new(work, cost, CaptureWork::run),
+            |error| admission_error(&name, "capture", error),
+        )
+        .await
     }
 }
 
@@ -238,21 +180,23 @@ mod tests {
             execute_managed(
                 &job,
                 "asof",
-                "capture",
                 Some(task_id),
-                (),
-                MorselCost {
-                    rows: 1,
-                    scratch_bytes: 64,
-                    output_bytes: 0,
-                },
-                move |(), _lease| {
-                    entered_tx.send(()).unwrap();
-                    release_rx.blocking_recv().unwrap();
-                    Err::<(), _>(CalcFlowError::Internal {
-                        message: "abandoned ASOF capture failed".into(),
-                    })
-                },
+                ManagedMorsel::new(
+                    (),
+                    MorselCost {
+                        rows: 1,
+                        scratch_bytes: 64,
+                        output_bytes: 0,
+                    },
+                    move |(), _lease: &MorselLease| {
+                        entered_tx.send(()).unwrap();
+                        release_rx.blocking_recv().unwrap();
+                        Err::<(), _>(CalcFlowError::Internal {
+                            message: "abandoned ASOF capture failed".into(),
+                        })
+                    },
+                ),
+                |error| error,
             )
             .await
         });

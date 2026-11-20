@@ -5,9 +5,14 @@ use futures::future::BoxFuture;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use super::{MorselClient, MorselPool, MorselPoolConfig, MorselTicket, lock};
-use crate::runtime::streaming::supervisor::{TaskFailure, TaskId};
-use crate::{CalcFlowError, Result};
+use super::{
+    MorselClient, MorselCost, MorselLease, MorselPool, MorselPoolConfig, MorselTicket, lock,
+};
+use crate::runtime::streaming::{
+    gather_work::GatherStop,
+    supervisor::{TaskFailure, TaskId},
+};
+use crate::{CalcFlowError, Result, StreamJobContext};
 
 const MAX_JOB_MORSEL_ROWS: usize = 64 * 1024 * 1024;
 const MAX_JOB_MORSEL_BYTES: usize = 4 << 30;
@@ -228,6 +233,106 @@ impl JobMorselOwner {
             .as_ref()
             .map_or(0, |client| client.usage().bytes)
     }
+}
+
+pub(crate) struct ManagedMorsel<T, F> {
+    input: T,
+    cost: MorselCost,
+    operation: F,
+}
+
+impl<T, F> ManagedMorsel<T, F> {
+    pub(crate) fn new(input: T, cost: MorselCost, operation: F) -> Self {
+        Self {
+            input,
+            cost,
+            operation,
+        }
+    }
+}
+
+struct CancelOnDrop<T: Send + 'static> {
+    ticket: Option<MorselTicket<Result<T>>>,
+    owner: JobMorselOwner,
+    task: Option<TaskId>,
+    task_name: String,
+}
+
+impl<T: Send + 'static> CancelOnDrop<T> {
+    fn disarm(&mut self) {
+        self.ticket = None;
+    }
+}
+
+impl<T: Send + 'static> Drop for CancelOnDrop<T> {
+    fn drop(&mut self) {
+        let Some(ticket) = self.ticket.take() else {
+            return;
+        };
+        ticket.cancel();
+        if let Some(task) = self.task {
+            self.owner.retain_abandoned(
+                vec![ticket],
+                task,
+                std::mem::take(&mut self.task_name),
+                |result| match result {
+                    Ok(Ok(_) | Err(CalcFlowError::Cancelled { .. }))
+                    | Err(CalcFlowError::Cancelled { .. }) => None,
+                    Ok(Err(error)) | Err(error) => Some(error),
+                },
+            );
+        }
+    }
+}
+
+pub(crate) async fn execute_managed<T, O, F, M>(
+    job: &StreamJobContext,
+    name: &str,
+    task: Option<TaskId>,
+    work: ManagedMorsel<T, F>,
+    map_submission: M,
+) -> Result<O>
+where
+    T: Send + 'static,
+    O: Send + 'static,
+    F: FnOnce(T, &MorselLease) -> Result<O> + Send + 'static,
+    M: FnOnce(CalcFlowError) -> CalcFlowError + Send,
+{
+    let owner = job.managed_morsel_owner();
+    let client = owner.client()?;
+    let stop = GatherStop::from_job(job);
+    let ManagedMorsel {
+        input,
+        cost,
+        operation,
+    } = work;
+    let submission = client.submit_async(input, cost, move |input, lease: &MorselLease| {
+        Ok(operation(input, lease))
+    });
+    tokio::pin!(submission);
+    let ticket = tokio::select! {
+        biased;
+        () = stop.wait() => {
+            return Err(CalcFlowError::Cancelled { run_id: job.job_id().to_string() });
+        }
+        result = &mut submission => result.map_err(map_submission)?,
+    };
+    let mut cancel = CancelOnDrop {
+        ticket: Some(ticket.clone()),
+        owner: owner.clone(),
+        task,
+        task_name: name.to_owned(),
+    };
+    let output = tokio::select! {
+        biased;
+        () = stop.wait() => {
+            return Err(CalcFlowError::Cancelled { run_id: job.job_id().to_string() });
+        }
+        result = ticket.join_async() => result,
+    };
+    cancel.disarm();
+    stop.check()?;
+    output?
 }
 
 impl Drop for JobMorselInner {

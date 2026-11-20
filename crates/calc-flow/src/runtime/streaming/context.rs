@@ -25,7 +25,7 @@ pub struct StreamJobContext {
     static_inputs: Arc<BTreeMap<String, Batch>>,
     native_statics: Option<Arc<crate::array::NativeScope>>,
     gather: super::gather_work::JobGatherOwner,
-    morsels: Option<super::morsel_pool::JobMorselOwner>,
+    morsels: std::sync::OnceLock<super::morsel_pool::JobMorselOwner>,
     #[cfg(feature = "benchmark-internals")]
     dispatch_trace: crate::benchmark_internals::DispatchTraceOwner,
     #[cfg(feature = "benchmark-internals")]
@@ -112,7 +112,7 @@ impl StreamJobContext {
             static_inputs: Arc::new(BTreeMap::new()),
             native_statics: None,
             gather: super::gather_work::JobGatherOwner::new(job_id.to_string().into()),
-            morsels: None,
+            morsels: std::sync::OnceLock::new(),
             #[cfg(feature = "benchmark-internals")]
             dispatch_trace: crate::benchmark_internals::DispatchTraceOwner::default(),
             #[cfg(feature = "benchmark-internals")]
@@ -180,12 +180,23 @@ impl StreamJobContext {
     }
 
     pub(crate) fn with_morsel_owner(mut self, morsels: super::morsel_pool::JobMorselOwner) -> Self {
-        self.morsels = Some(morsels);
+        self.morsels = std::sync::OnceLock::from(morsels);
         self
     }
 
     pub(crate) fn morsel_owner(&self) -> Option<&super::morsel_pool::JobMorselOwner> {
-        self.morsels.as_ref()
+        self.morsels.get()
+    }
+
+    pub(crate) fn managed_morsel_owner(&self) -> &super::morsel_pool::JobMorselOwner {
+        self.morsels.get_or_init(|| {
+            super::morsel_pool::JobMorselOwner::new(
+                self.job_id,
+                self.gather.parallelism(),
+                #[cfg(test)]
+                Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            )
+        })
     }
 
     pub(crate) fn static_input(&self, name: &str) -> Option<&Batch> {

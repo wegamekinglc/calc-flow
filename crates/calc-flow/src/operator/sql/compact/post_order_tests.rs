@@ -1,6 +1,24 @@
 use super::*;
 
 #[tokio::test]
+async fn test_order_uses_morsels_after_gather_admission_closes() {
+    let dtype = DataType::Float64;
+    let query = "SELECT key, SUM(value) AS total FROM events GROUP BY key ORDER BY total DESC NULLS LAST, key ASC";
+    let job = job();
+    job.gather_owner().close_admission();
+    let context = StreamOperatorContext::new(&job, "float_extrema", None);
+    let mut state = operator(&dtype, query);
+    let parts = vec![vec![Some(ONE), Some(TWO)], vec![Some(TWO)]];
+
+    let actual = process(&mut state, post_input(&dtype, &parts, 0), &context).await;
+    post_oracle(&actual, query, &dtype, &parts, 0).await;
+
+    drop((state, actual, context));
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+}
+
+#[tokio::test]
 async fn test_order_limit_offsets_full_snapshots_without_discarding_groups() {
     let queries = [
         "SELECT key, SUM(value) AS total, COUNT(value) AS valid FROM events GROUP BY key ORDER BY total DESC NULLS LAST, key ASC",

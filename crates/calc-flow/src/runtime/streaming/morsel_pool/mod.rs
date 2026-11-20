@@ -16,9 +16,9 @@ use tokio::sync::Notify;
 use crate::{CalcFlowError, CancellationToken, Result};
 
 mod job;
-pub(crate) use job::JobMorselOwner;
 #[cfg(test)]
 pub(crate) use job::MorselTestHooks;
+pub(crate) use job::{JobMorselOwner, ManagedMorsel, execute_managed};
 
 static NEXT_POOL_ID: AtomicU64 = AtomicU64::new(1);
 thread_local! {

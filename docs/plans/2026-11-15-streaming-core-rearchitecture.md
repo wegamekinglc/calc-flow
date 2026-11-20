@@ -247,6 +247,12 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   新增旧 gather 准入关闭后的 capture/restore 回归及 abandoned failure 诊断回归，ASOF 49 项、operator-task 77 项
   （2 ignored）和全 feature Clippy 通过。SQL/order、Join 迁移测试辅助路径等其他 gather 用户、固定分区执行器、
   剩余 I/O 分离与 P6 性能门槛尚未完成。
+- 2026-11-20 P6 SQL incremental output ORDER 已迁入统一 morsel 池：job context 可懒初始化唯一 owner，
+  ASOF 与排序共用 managed ticket 的取消/deadline 和 abandoned failure 托管；普通计算错误只返回原 ticket，
+  不再污染后续可重试工作，panic 仍按池级故障处理。SortWork 按输入行与 prepaid output bytes 准入，
+  reservation 随输出保留到调用方取得结果，旧 gather 准入关闭后的排序仍与 DataFusion oracle 一致。
+  SQL 337 项、ASOF 49 项、morsel pool 20 项、Rolling parallel 4 项及全 feature Clippy 通过。
+  global record、bounded order、Join 迁移测试辅助路径、固定分区执行器和其余 I/O 分离尚未完成。
 
 ## 1. 目标
 
