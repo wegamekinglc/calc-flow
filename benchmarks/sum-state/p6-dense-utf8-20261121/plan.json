@@ -2,10 +2,10 @@
   "schema": "calc-flow.sum-state-performance-plan.v1",
   "created_at": "2026-11-21T04:21:46+08:00",
   "baseline": {
-    "revision": "aefd17dc006270457c2e8ccc585111d6f4f1b5ea",
-    "receipt": "target/p6-keyed-build/baseline/build.json",
-    "evidence": "benchmarks/sum-state/p6-fixed-partitions-20261120/summary.json",
-    "implementation": "fixed-N ownership with serial apply"
+    "revision": "2ac1af5f",
+    "receipt": "target/p6-dense-build/baseline-current/build.json",
+    "evidence": "fresh paired baseline; historical values are not treated as this revision's sealed result",
+    "implementation": "pre-dense keyed SUM state path"
   },
   "candidate": {
     "revision": "aa63c80c",
@@ -26,25 +26,25 @@
     {
       "id": "stock-stream-1cpu",
       "rows": 2010000,
-      "baseline_p50_ms": 199.879117,
+      "archived_reference_p50_ms": 199.879117,
       "connection": "principal dense two-UTF-8-key Int64 SUM path"
     },
     {
       "id": "stock-stream-8cpu",
       "rows": 2010000,
-      "baseline_p50_ms": 136.1946685,
+      "archived_reference_p50_ms": 136.1946685,
       "connection": "same dense path with eight logical workers and the four-physical-core speedup gate"
     },
     {
       "id": "sparse-stream-1cpu",
       "rows": 12000,
-      "baseline_p50_ms": 20.8515495,
+      "archived_reference_p50_ms": 20.8515495,
       "connection": "100 updated groups among 10k retained groups; small-batch control"
     },
     {
       "id": "stock-batch-8cpu",
       "rows": 2010000,
-      "baseline_p50_ms": 53.8201685,
+      "archived_reference_p50_ms": 53.8201685,
       "connection": "finite execution control, not the parallel-state acceptance path"
     }
   ],
