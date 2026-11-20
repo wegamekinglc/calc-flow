@@ -421,6 +421,77 @@ async fn test_keyed_sum_fixed_partitions_preserve_output_and_owner() {
 }
 
 #[tokio::test]
+async fn test_keyed_sum_parallel_workers_preserve_deterministic_output() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let job = StreamJobContext::new(
+        987,
+        "keyed-sum",
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "keyed-sum", None);
+    let rows = fixture(false);
+    let full = record(false, &rows);
+    let full = Batch::table(vec![full], crate::BatchMetadata::default()).unwrap();
+    let mut plan = plan(&runtime, false).await;
+    partitioned(&mut plan, 2);
+    plan.keyed_sum.as_ref().unwrap().force_parallel_for_test();
+
+    let transaction = plan.update(&full, &context, "keyed-sum").await.unwrap();
+    assert_eq!(output_rows(&transaction.records), expected(false, &rows));
+    assert!(plan.keyed_sum.as_ref().unwrap().worker_count_for_test() >= 2);
+    plan.commit(transaction);
+}
+
+#[tokio::test]
+async fn test_keyed_sum_worker_panic_rolls_back_every_partition() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let job = StreamJobContext::new(
+        988,
+        "keyed-sum",
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "keyed-sum", None);
+    let rows = fixture(false);
+    let full = record(false, &rows);
+    let mut plan = plan(&runtime, false).await;
+    partitioned(&mut plan, 2);
+    plan.keyed_sum.as_ref().unwrap().force_parallel_for_test();
+    let initial = Batch::table(vec![full.slice(0, 8)], crate::BatchMetadata::default()).unwrap();
+    let transaction = plan.update(&initial, &context, "keyed-sum").await.unwrap();
+    plan.commit(transaction);
+    let before = plan.export_native_state("keyed-sum", || Ok(())).unwrap();
+    plan.keyed_sum
+        .as_ref()
+        .unwrap()
+        .panic_group_for_test(crate::operator::keyed::GroupId::new(0).unwrap());
+    let remaining = Batch::table(
+        vec![full.slice(8, rows.len() - 8)],
+        crate::BatchMetadata::default(),
+    )
+    .unwrap();
+
+    assert!(
+        plan.update(&remaining, &context, "keyed-sum")
+            .await
+            .is_err()
+    );
+    let after = plan.export_native_state("keyed-sum", || Ok(())).unwrap();
+    assert_eq!(before.records(), after.records());
+
+    plan.keyed_sum.as_ref().unwrap().clear_panic_for_test();
+    let transaction = plan
+        .update(&remaining, &context, "keyed-sum")
+        .await
+        .unwrap();
+    assert_eq!(output_rows(&transaction.records), expected(false, &rows));
+    plan.commit(transaction);
+}
+
+#[tokio::test]
 async fn test_keyed_sum_restore_rejects_partition_count_mismatch() {
     let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
     let job = StreamJobContext::new(

@@ -297,6 +297,11 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   不复制 key、重哈希或合并跨分区累加器。N 与 fixed-group-id-modulo-v1 路由身份纳入 layout fingerprint 和
   wire metadata，N=1/2/4 输出与 owner 跨批次一致，N 不匹配恢复拒绝。SQL 342 项及非 test/test Clippy 通过。
   本步不含并行 worker 或性能提升声明；并行执行、其他 keyed 算子和 P6 性能门槛尚未完成。
+- 2026-11-20 P6 grouped integer SUM 固定分区已接入实际并行执行：N>1 且输入不少于 64,000 行时，
+  各分区 SUM/marks 移入 scoped worker，KeyStore 路由与 lease 仍使用原共享锁；undo、reservation、输出和错误按分区序号恢复。
+  N=1 或小批保持串行，不增加线程成本。逐行捕获 worker panic 后恢复原分区状态，回滚所有分区及 key births，
+  清除故障后同一输入可重试；强制并行测试证明至少两个真实 worker 参与。SQL 344 项及全 feature Clippy 通过。
+  本步不含性能提升声明；其他 keyed 算子、统一分片执行面、其余 I/O 分离和 P6 性能门槛尚未完成。
 
 ## 1. 目标
 

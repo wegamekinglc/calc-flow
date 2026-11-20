@@ -9,6 +9,7 @@ use datafusion::execution::memory_pool::MemoryReservation;
 use sha2::{Digest, Sha256};
 use std::{
     mem::size_of,
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
@@ -20,9 +21,10 @@ pub(super) struct KeyedSum {
 pub(super) struct KeyedSumState {
     keys: KeyStore,
     sums: PartitionedSums,
-    marks: Vec<u64>,
     generation: u64,
     active: bool,
+    #[cfg(test)]
+    panic_group: Option<GroupId>,
 }
 
 pub(super) struct Transaction {
@@ -34,7 +36,7 @@ pub(super) struct Transaction {
     undo: Vec<(GroupId, SumValue)>,
     affected: Vec<GroupId>,
     leased: Vec<GroupId>,
-    undo_reservation: MemoryReservation,
+    undo_reservations: Vec<MemoryReservation>,
     active: bool,
 }
 
@@ -57,7 +59,11 @@ enum SumKind {
 struct PartitionedSums {
     kind: SumKind,
     partitions: Vec<std::collections::BTreeMap<GroupId, SumValue>>,
+    marks: Vec<std::collections::BTreeMap<GroupId, u64>>,
     groups: usize,
+    parallel_min_rows: usize,
+    #[cfg(test)]
+    worker_ids: Arc<Mutex<std::collections::HashSet<std::thread::ThreadId>>>,
 }
 
 enum SumInput<'a> {
@@ -98,9 +104,10 @@ impl KeyedSum {
             state: Arc::new(Mutex::new(KeyedSumState {
                 keys: KeyStore::new(schema, reservation),
                 sums,
-                marks: Vec::new(),
                 generation: 0,
                 active: false,
+                #[cfg(test)]
+                panic_group: None,
             })),
         }))
     }
@@ -137,6 +144,26 @@ impl KeyedSum {
     #[cfg(test)]
     pub(super) fn owner_for_test(&self, group: GroupId) -> usize {
         self.lock().sums.owner(group)
+    }
+
+    #[cfg(test)]
+    pub(super) fn force_parallel_for_test(&self) {
+        self.lock().sums.parallel_min_rows = 1;
+    }
+
+    #[cfg(test)]
+    pub(super) fn worker_count_for_test(&self) -> usize {
+        self.lock().sums.worker_ids.lock().unwrap().len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn panic_group_for_test(&self, group: GroupId) {
+        self.lock().panic_group = Some(group);
+    }
+
+    #[cfg(test)]
+    pub(super) fn clear_panic_for_test(&self) {
+        self.lock().panic_group = None;
     }
 
     pub(super) fn group_count(&self) -> usize {
@@ -187,7 +214,6 @@ impl KeyedSum {
             .ok_or_else(|| super::df_error("keyed SUM", "transaction generation overflowed"))?;
         state.generation = generation;
         state.active = true;
-        let undo_reservation = state.keys.transaction_reservation();
         let limit = budget.map_or(usize::MAX, |budget| {
             usize::try_from(budget.max_rows()).unwrap_or(usize::MAX)
         });
@@ -200,7 +226,7 @@ impl KeyedSum {
             undo: Vec::new(),
             affected: Vec::new(),
             leased: Vec::new(),
-            undo_reservation,
+            undo_reservations: Vec::new(),
             active: true,
         })
     }
@@ -295,52 +321,240 @@ impl Transaction {
     ) -> Result<()> {
         let input = SumInput::new(values)?;
         let state = self.state.clone();
-        let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-        let groups = state
+        let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+        let groups = guard
             .keys
             .route_selected_with_limit(keys, selection, self.limit, check)?;
-        grow(&mut state)?;
-        for (row, group) in groups.into_iter().enumerate() {
-            self.apply_row(&mut state, &input, selection, filter, row, group)?;
+        grow(&mut guard)?;
+        let count = guard.sums.partitions.len();
+        self.undo_reservations = (0..count)
+            .map(|_| guard.keys.transaction_reservation())
+            .collect();
+        let kind = guard.sums.kind;
+        let parallel_min_rows = guard.sums.parallel_min_rows;
+        let mut sums = std::mem::replace(&mut guard.sums, PartitionedSums::new(kind, count));
+        drop(guard);
+        let parallel = count > 1 && groups.len() >= parallel_min_rows;
+        let result = if parallel {
+            self.apply_parallel(&state, &input, selection, filter, &groups, &mut sums)
+        } else {
+            self.apply_serial(&state, &input, selection, filter, &groups, &mut sums)
+        };
+        state.lock().unwrap_or_else(PoisonError::into_inner).sums = sums;
+        result
+    }
+
+    fn apply_serial(
+        &mut self,
+        state: &Arc<Mutex<KeyedSumState>>,
+        input: &SumInput,
+        selection: Option<&BooleanArray>,
+        filter: Option<&BooleanArray>,
+        groups: &[GroupId],
+        sums: &mut PartitionedSums,
+    ) -> Result<()> {
+        let kind = sums.kind;
+        let (mut partitions, mut marks) = (
+            std::mem::take(&mut sums.partitions),
+            std::mem::take(&mut sums.marks),
+        );
+        for (row, group) in groups.iter().copied().enumerate() {
+            let owner = group.index() % partitions.len();
+            if let Err(error) = apply_row(
+                state,
+                RowContext {
+                    generation: self.generation,
+                    old_groups: self.old_groups,
+                    kind,
+                    input,
+                    selection,
+                    filter,
+                    row,
+                    group,
+                },
+                &mut partitions[owner],
+                &mut marks[owner],
+                &mut self.undo_parts(owner),
+            ) {
+                sums.partitions = partitions;
+                sums.marks = marks;
+                return Err(error);
+            }
         }
+        sums.partitions = partitions;
+        sums.marks = marks;
         Ok(())
     }
 
-    fn undo_parts(&mut self) -> TouchUndo<'_> {
+    fn apply_parallel(
+        &mut self,
+        state: &Arc<Mutex<KeyedSumState>>,
+        input: &SumInput,
+        selection: Option<&BooleanArray>,
+        filter: Option<&BooleanArray>,
+        groups: &[GroupId],
+        sums: &mut PartitionedSums,
+    ) -> Result<()> {
+        let kind = sums.kind;
+        let mut work = sums
+            .partitions
+            .iter_mut()
+            .zip(std::mem::take(&mut sums.marks))
+            .map(|(values, marks)| PartitionWork {
+                values: std::mem::take(values),
+                marks,
+                rows: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let partition_count = work.len();
+        for (row, group) in groups.iter().copied().enumerate() {
+            work[group.index() % partition_count]
+                .rows
+                .push((row, group));
+        }
+        let generation = self.generation;
+        let old_groups = self.old_groups;
+        let execution = PartitionExecution {
+            state,
+            generation,
+            old_groups,
+            kind,
+            input,
+            selection,
+            filter,
+        };
+        #[cfg(test)]
+        let worker_ids = Arc::clone(&sums.worker_ids);
+        let outcomes = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(work.len());
+            for work in work {
+                #[cfg(test)]
+                let worker_ids = Arc::clone(&worker_ids);
+                handles.push(scope.spawn(move || {
+                    #[cfg(test)]
+                    worker_ids
+                        .lock()
+                        .unwrap()
+                        .insert(std::thread::current().id());
+                    Self::run_partition_worker(execution, work)
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().map_err(|payload| {
+                        let message: String = payload.downcast_ref::<&str>().map_or_else(
+                            || "keyed SUM partition worker panicked".to_owned(),
+                            |value| (*value).to_owned(),
+                        );
+                        super::df_error("keyed SUM", message)
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        });
+        let outcomes = outcomes?;
+        sums.marks = (0..outcomes.len())
+            .map(|_| std::collections::BTreeMap::new())
+            .collect();
+        let mut first_error = None;
+        for (index, outcome) in outcomes.into_iter().enumerate() {
+            sums.partitions[index] = outcome.values;
+            sums.marks[index] = outcome.marks;
+            self.affected.extend(outcome.affected);
+            self.leased.extend(outcome.leased);
+            self.undo.extend(outcome.undo);
+            self.undo_reservations[index] = outcome.reservation;
+            if let Err(error) = outcome.result
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    fn run_partition_worker(
+        execution: PartitionExecution<'_>,
+        work: PartitionWork,
+    ) -> ParallelOutcome {
+        let PartitionWork {
+            mut values,
+            mut marks,
+            rows,
+        } = work;
+        let mut affected = Vec::new();
+        let mut leased = Vec::new();
+        let mut undo = Vec::new();
+        let mut reservation = execution
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys
+            .transaction_reservation();
+        let mut result = Ok(());
+        for (row, group) in rows {
+            let attempt = catch_unwind(AssertUnwindSafe(|| {
+                apply_row(
+                    execution.state,
+                    RowContext {
+                        generation: execution.generation,
+                        old_groups: execution.old_groups,
+                        kind: execution.kind,
+                        input: execution.input,
+                        selection: execution.selection,
+                        filter: execution.filter,
+                        row,
+                        group,
+                    },
+                    &mut values,
+                    &mut marks,
+                    &mut TouchUndo {
+                        affected: &mut affected,
+                        leased: &mut leased,
+                        undo: &mut undo,
+                        reservation: &mut reservation,
+                    },
+                )
+            }));
+            match attempt {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    result = Err(error);
+                    break;
+                }
+                Err(payload) => {
+                    result = Err(super::df_error(
+                        "keyed SUM",
+                        format!(
+                            "partition worker panicked: {}",
+                            payload
+                                .downcast_ref::<&str>()
+                                .copied()
+                                .unwrap_or("non-string panic payload")
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+        ParallelOutcome {
+            values,
+            marks,
+            affected,
+            leased,
+            undo,
+            reservation,
+            result,
+        }
+    }
+
+    fn undo_parts(&mut self, partition: usize) -> TouchUndo<'_> {
         TouchUndo {
             affected: &mut self.affected,
             leased: &mut self.leased,
             undo: &mut self.undo,
-            reservation: &mut self.undo_reservation,
+            reservation: &mut self.undo_reservations[partition],
         }
-    }
-
-    fn apply_row(
-        &mut self,
-        state: &mut KeyedSumState,
-        input: &SumInput,
-        selection: Option<&BooleanArray>,
-        filter: Option<&BooleanArray>,
-        row: usize,
-        group: GroupId,
-    ) -> Result<()> {
-        if selection.is_some_and(|selection| !predicate::selected(selection, row)) {
-            return Ok(());
-        }
-        touch(
-            state,
-            group,
-            self.generation,
-            self.old_groups,
-            &mut self.undo_parts(),
-        )?;
-        if filter.is_some_and(|filter| !predicate::selected(filter, row)) {
-            return Ok(());
-        }
-        if let Some(value) = input.value(row) {
-            state.sums.add(group, value);
-        }
-        Ok(())
     }
 
     #[cfg(test)]
@@ -434,38 +648,71 @@ impl Transaction {
         let keys = chunk.columns()[..key_count].to_vec();
         let input = SumInput::new(chunk.column(key_count))?;
         let state = self.state.clone();
-        let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-        let groups = state.keys.route_with_limit(&keys, self.limit, check)?;
-        grow(&mut state)?;
+        let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+        let groups = guard.keys.route_with_limit(&keys, self.limit, check)?;
+        grow(&mut guard)?;
+        let kind = guard.sums.kind;
+        let count = guard.sums.partitions.len();
+        self.undo_reservations = (0..count)
+            .map(|_| guard.keys.transaction_reservation())
+            .collect();
+        let mut sums = std::mem::replace(&mut guard.sums, PartitionedSums::new(kind, count));
+        drop(guard);
+        let mut result = Ok(());
+        let generation = self.generation;
+        let old_groups = self.old_groups;
         for (row, group) in groups.into_iter().enumerate() {
-            self.restore_row(&mut state, &input, replace, seen, row, group)?;
+            let owner = group.index() % sums.partitions.len();
+            if let Err(error) = Self::restore_row(
+                &state,
+                RowContext {
+                    generation,
+                    old_groups,
+                    kind,
+                    input: &input,
+                    selection: None,
+                    filter: None,
+                    row,
+                    group,
+                },
+                replace,
+                seen,
+                &mut sums.partitions[owner],
+                &mut sums.marks[owner],
+                &mut self.undo_parts(owner),
+            ) {
+                result = Err(error);
+                break;
+            }
         }
-        Ok(())
+        state.lock().unwrap_or_else(PoisonError::into_inner).sums = sums;
+        result
     }
 
     fn restore_row(
-        &mut self,
-        state: &mut KeyedSumState,
-        input: &SumInput,
+        state: &Arc<Mutex<KeyedSumState>>,
+        context: RowContext<'_>,
         replace: bool,
         seen: &mut std::collections::BTreeSet<GroupId>,
-        row: usize,
-        group: GroupId,
+        values: &mut std::collections::BTreeMap<GroupId, SumValue>,
+        marks: &mut std::collections::BTreeMap<GroupId, u64>,
+        undo: &mut TouchUndo<'_>,
     ) -> Result<()> {
-        if !seen.insert(group) || (group.index() < self.old_groups && !replace) {
+        let group = context.group;
+        if !seen.insert(group) || (group.index() < context.old_groups && !replace) {
             return Err(super::df_error(
                 "keyed SUM",
                 "native state contains duplicate keys",
             ));
         }
-        touch(
-            state,
+        touch(state, &context, values, marks, undo)?;
+        values.insert(
             group,
-            self.generation,
-            self.old_groups,
-            &mut self.undo_parts(),
-        )?;
-        state.sums.set(group, input.value(row));
+            context
+                .input
+                .value(context.row)
+                .unwrap_or_else(|| null_value(context.kind)),
+        );
         Ok(())
     }
 
@@ -479,7 +726,6 @@ impl Transaction {
                 state.sums.set(group, Some(value));
             }
             state.sums.truncate(self.old_groups);
-            state.marks.truncate(self.old_groups);
             state.keys.rollback(self.cut);
         }
         for group in self.leased.drain(..) {
@@ -509,34 +755,146 @@ fn grow(state: &mut KeyedSumState) -> Result<()> {
         .ok_or_else(|| super::df_error("keyed SUM", "typed state charge overflowed"))?;
     state.keys.charge(bytes)?;
     state.sums.grow(groups);
-    state.marks.resize(groups, 0);
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct RowContext<'a> {
+    generation: u64,
+    old_groups: usize,
+    kind: SumKind,
+    input: &'a SumInput<'a>,
+    selection: Option<&'a BooleanArray>,
+    filter: Option<&'a BooleanArray>,
+    row: usize,
+    group: GroupId,
+}
+
+#[derive(Clone, Copy)]
+struct PartitionExecution<'a> {
+    state: &'a Arc<Mutex<KeyedSumState>>,
+    generation: u64,
+    old_groups: usize,
+    kind: SumKind,
+    input: &'a SumInput<'a>,
+    selection: Option<&'a BooleanArray>,
+    filter: Option<&'a BooleanArray>,
+}
+
+struct PartitionWork {
+    values: std::collections::BTreeMap<GroupId, SumValue>,
+    marks: std::collections::BTreeMap<GroupId, u64>,
+    rows: Vec<(usize, GroupId)>,
+}
+
+struct ParallelOutcome {
+    values: std::collections::BTreeMap<GroupId, SumValue>,
+    marks: std::collections::BTreeMap<GroupId, u64>,
+    affected: Vec<GroupId>,
+    leased: Vec<GroupId>,
+    undo: Vec<(GroupId, SumValue)>,
+    reservation: MemoryReservation,
+    result: Result<()>,
+}
+
+fn apply_row(
+    state: &Arc<Mutex<KeyedSumState>>,
+    context: RowContext<'_>,
+    values: &mut std::collections::BTreeMap<GroupId, SumValue>,
+    marks: &mut std::collections::BTreeMap<GroupId, u64>,
+    undo: &mut TouchUndo<'_>,
+) -> Result<()> {
+    #[cfg(test)]
+    if state
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .panic_group
+        == Some(context.group)
+    {
+        panic!("injected keyed SUM partition panic");
+    }
+    if context
+        .selection
+        .is_some_and(|selection| !predicate::selected(selection, context.row))
+    {
+        return Ok(());
+    }
+    touch(state, &context, values, marks, undo)?;
+    if context
+        .filter
+        .is_some_and(|filter| !predicate::selected(filter, context.row))
+    {
+        return Ok(());
+    }
+    if let Some(value) = context.input.value(context.row) {
+        add_value(context.kind, values, context.group, value);
+    }
     Ok(())
 }
 
 fn touch(
-    state: &mut KeyedSumState,
-    group: GroupId,
-    generation: u64,
-    old_groups: usize,
+    state: &Arc<Mutex<KeyedSumState>>,
+    context: &RowContext<'_>,
+    values: &std::collections::BTreeMap<GroupId, SumValue>,
+    marks: &mut std::collections::BTreeMap<GroupId, u64>,
     undo: &mut TouchUndo<'_>,
 ) -> Result<()> {
-    if state.marks[group.index()] == generation {
+    let group = context.group;
+    if marks.get(&group) == Some(&context.generation) {
         return Ok(());
     }
-    let existing = usize::from(group.index() < old_groups);
+    let existing = usize::from(group.index() < context.old_groups);
     let charge =
         size_of::<GroupId>() + existing * (size_of::<GroupId>() + size_of::<(GroupId, SumValue)>());
     undo.reservation
         .try_grow(charge)
         .map_err(|error| super::df_error("keyed SUM", error))?;
-    state.marks[group.index()] = generation;
+    marks.insert(group, context.generation);
     undo.affected.push(group);
-    if group.index() < old_groups {
-        state.keys.acquire(group)?;
+    if group.index() < context.old_groups {
+        let previous = values
+            .get(&group)
+            .copied()
+            .unwrap_or_else(|| null_value(context.kind));
+        state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys
+            .acquire(group)?;
         undo.leased.push(group);
-        undo.undo.push((group, state.sums.value(group)));
+        undo.undo.push((group, previous));
     }
     Ok(())
+}
+
+fn add_value(
+    kind: SumKind,
+    values: &mut std::collections::BTreeMap<GroupId, SumValue>,
+    group: GroupId,
+    value: SumValue,
+) {
+    let current = values.entry(group).or_insert_with(|| null_value(kind));
+    match current {
+        SumValue::Int64(current_value) => {
+            let SumValue::Int64(value) = value else {
+                unreachable!("typed SUM state and input were compiled together")
+            };
+            *current_value = value.map(|value| current_value.unwrap_or(0).wrapping_add(value));
+        }
+        SumValue::UInt64(current_value) => {
+            let SumValue::UInt64(value) = value else {
+                unreachable!("typed SUM state and input were compiled together")
+            };
+            *current_value = value.map(|value| current_value.unwrap_or(0).wrapping_add(value));
+        }
+    }
+}
+
+fn null_value(kind: SumKind) -> SumValue {
+    match kind {
+        SumKind::Int64 => SumValue::Int64(None),
+        SumKind::UInt64 => SumValue::UInt64(None),
+    }
 }
 
 impl Drop for Transaction {
@@ -634,7 +992,13 @@ impl PartitionedSums {
             partitions: (0..partitions)
                 .map(|_| std::collections::BTreeMap::new())
                 .collect(),
+            marks: (0..partitions)
+                .map(|_| std::collections::BTreeMap::new())
+                .collect(),
             groups: 0,
+            parallel_min_rows: 64_000,
+            #[cfg(test)]
+            worker_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -655,6 +1019,9 @@ impl PartitionedSums {
                 .all(std::collections::BTreeMap::is_empty)
         );
         self.partitions = (0..partitions)
+            .map(|_| std::collections::BTreeMap::new())
+            .collect();
+        self.marks = (0..partitions)
             .map(|_| std::collections::BTreeMap::new())
             .collect();
     }
@@ -689,6 +1056,9 @@ impl PartitionedSums {
         for partition in &mut self.partitions {
             partition.retain(|group, _| group.index() < groups);
         }
+        for marks in &mut self.marks {
+            marks.clear();
+        }
     }
 
     fn value(&self, group: GroupId) -> SumValue {
@@ -702,26 +1072,6 @@ impl PartitionedSums {
         let null = self.null();
         let owner = self.owner(group);
         self.partitions[owner].insert(group, value.unwrap_or(null));
-    }
-
-    fn add(&mut self, group: GroupId, value: SumValue) {
-        let null = self.null();
-        let owner = self.owner(group);
-        let current = self.partitions[owner].entry(group).or_insert(null);
-        match current {
-            SumValue::Int64(current_value) => {
-                let SumValue::Int64(value) = value else {
-                    unreachable!("typed SUM state and input were compiled together")
-                };
-                *current_value = value.map(|value| current_value.unwrap_or(0).wrapping_add(value));
-            }
-            SumValue::UInt64(current_value) => {
-                let SumValue::UInt64(value) = value else {
-                    unreachable!("typed SUM state and input were compiled together")
-                };
-                *current_value = value.map(|value| current_value.unwrap_or(0).wrapping_add(value));
-            }
-        }
     }
 
     fn array(&self, groups: &[GroupId]) -> ArrayRef {
