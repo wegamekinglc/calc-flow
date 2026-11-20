@@ -282,6 +282,11 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   state 层不反向依赖 runtime，session 的 N=1 路径未改成跨线程执行。池关闭在写入前拒绝，开放池真实写入/读回通过。
   v4 focused 10 项、SQL recovery 24 项、checkpoint lifecycle 3 项及全 feature Clippy 通过。
   固定 N 分区、native/table/source-history 其余编码迁移和性能门槛尚未完成。
+- 2026-11-20 P6 runner native v4 编码已与持久化分离：state 新增轻量 V4ObjectStore 接口，
+  原 V4Store 行为不变，runner 的 ManagedNativeStore 仅在 write_objects 时切换到 managed morsel，
+  previous manifest/index、page 分配、引用校验和 carried 计数继续复用原实现。池关闭在写入前拒绝，
+  开放池完成 partition/page 持久化。native page 3 项、Join 581 项、SQL recovery 24 项及全 feature Clippy 通过。
+  固定 N 分区、table/source-history 其余编码迁移和性能门槛尚未完成。
 
 ## 1. 目标
 

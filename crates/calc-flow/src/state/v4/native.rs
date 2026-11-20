@@ -1,6 +1,6 @@
 use super::{
-    NewObject, ObjectKind, ObjectPayload, OperatorV4, Result, V4Handle, V4Manifest, V4Store,
-    mismatch,
+    EncodedObject, NewObject, ObjectKind, ObjectPayload, OperatorV4, Result, V4Handle, V4Manifest,
+    V4Store, mismatch,
 };
 use crate::state::manifest::OperatorIngressManifestEntry;
 use crate::state::table::v4::{LogicalRange, PageEntry, PartitionIndex, V4PageId};
@@ -15,6 +15,41 @@ use std::{
 
 const METADATA_COLUMN: &str = "__cf_operator_metadata";
 const MAX_METADATA_BYTES: usize = 64 * 1024;
+
+#[async_trait::async_trait]
+pub(crate) trait V4ObjectStore {
+    async fn write_objects(
+        &mut self,
+        epoch: u64,
+        objects: Vec<NewObject>,
+    ) -> Result<Vec<EncodedObject>>;
+    fn record_carried(&mut self, count: usize);
+    fn read_epoch_manifest(&self, epoch: u64) -> Result<Option<V4Manifest>>;
+    fn read_object(&mut self, handle: &V4Handle) -> Result<ObjectPayload>;
+}
+
+#[async_trait::async_trait]
+impl V4ObjectStore for V4Store {
+    async fn write_objects(
+        &mut self,
+        epoch: u64,
+        objects: Vec<NewObject>,
+    ) -> Result<Vec<EncodedObject>> {
+        V4Store::write_objects(self, epoch, objects).await
+    }
+
+    fn record_carried(&mut self, count: usize) {
+        V4Store::record_carried(self, count);
+    }
+
+    fn read_epoch_manifest(&self, epoch: u64) -> Result<Option<V4Manifest>> {
+        V4Store::read_epoch_manifest(self, epoch)
+    }
+
+    fn read_object(&mut self, handle: &V4Handle) -> Result<ObjectPayload> {
+        V4Store::read_object(self, handle)
+    }
+}
 
 mod pages;
 pub(crate) use pages::{NativePageChange, NativePageSet};
@@ -290,8 +325,8 @@ impl PreviousPartition {
     }
 }
 
-pub(crate) async fn persist_native(
-    store: &mut V4Store,
+pub(crate) async fn persist_native<S: V4ObjectStore>(
+    store: &mut S,
     owner: &str,
     capture: NativeCapture,
     epoch: u64,
@@ -364,8 +399,8 @@ pub(crate) async fn persist_native(
     })
 }
 
-fn previous_native_partitions(
-    store: &mut V4Store,
+fn previous_native_partitions<S: V4ObjectStore>(
+    store: &mut S,
     owner: &str,
     epoch: u64,
 ) -> Result<BTreeMap<u32, PartitionIndex>> {
@@ -392,8 +427,8 @@ fn previous_native_partitions(
         .collect()
 }
 
-async fn persist_partition(
-    store: &mut V4Store,
+async fn persist_partition<S: V4ObjectStore>(
+    store: &mut S,
     owner: &str,
     key_group: u32,
     pages: NativePageSet,
@@ -423,8 +458,8 @@ async fn persist_partition(
     finish_partition_index(previous, key_group, entries, carried, epoch)
 }
 
-async fn persist_delta_partition(
-    store: &mut V4Store,
+async fn persist_delta_partition<S: V4ObjectStore>(
+    store: &mut S,
     owner: &str,
     key_group: u32,
     pages: NativePageSet,
@@ -468,8 +503,8 @@ async fn persist_delta_partition(
     finish_partition_index(previous, key_group, entries, carried, epoch)
 }
 
-async fn write_assigned_pages(
-    store: &mut V4Store,
+async fn write_assigned_pages<S: V4ObjectStore>(
+    store: &mut S,
     owner: &str,
     key_group: u32,
     pages: Vec<NativePage>,
@@ -639,8 +674,8 @@ pub(crate) fn native_partition_handles(
         .collect())
 }
 
-fn read_partition_index(
-    store: &mut V4Store,
+fn read_partition_index<S: V4ObjectStore>(
+    store: &mut S,
     partition: &super::manifest::PartitionV4,
     epoch: u64,
 ) -> Result<PartitionIndex> {

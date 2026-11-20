@@ -13,9 +13,10 @@ use crate::runtime::streaming::morsel_pool::{
     ManagedMorsel, MorselCost, MorselLease, execute_managed,
 };
 use crate::state::v4::{
-    EncodedObject, JobKind, OpaqueObject, OperatorV4, SinkV4, SourceV4, V4Handle, V4Manifest,
-    V4OpaqueAdapter, V4Store, encode_opaque, manifest_fingerprint,
-    native::{NativeCapture, load_native, persist_native},
+    EncodedObject, JobKind, NewObject, ObjectPayload, OpaqueObject, OperatorV4, SinkV4, SourceV4,
+    V4Handle, V4Manifest, V4OpaqueAdapter, V4Store, encode_object, encode_opaque,
+    manifest_fingerprint,
+    native::{NativeCapture, V4ObjectStore, load_native, persist_native},
 };
 use crate::state::{OperatorManifestEntry, SinkManifestEntry, SourceManifestEntry};
 use crate::{CalcFlowError, EventTime, OperatorStateSnapshot, Result, StreamJobContext};
@@ -77,6 +78,79 @@ async fn encode_objects(
         |error| error,
     )
     .await
+}
+
+struct NativeEncodingWork {
+    objects: Vec<NewObject>,
+    root: PathBuf,
+    epoch: u64,
+}
+
+impl NativeEncodingWork {
+    fn run(self, lease: &MorselLease) -> Result<Vec<EncodedObject>> {
+        self.objects
+            .into_iter()
+            .map(|object| {
+                lease.check()?;
+                encode_object(&object, &self.root, self.epoch)
+            })
+            .collect()
+    }
+}
+
+struct ManagedNativeStore<'a> {
+    store: &'a mut V4Store,
+    job: &'a StreamJobContext,
+}
+
+impl<'a> ManagedNativeStore<'a> {
+    fn new(store: &'a mut V4Store, job: &'a StreamJobContext) -> Self {
+        Self { store, job }
+    }
+}
+
+#[async_trait::async_trait]
+impl V4ObjectStore for ManagedNativeStore<'_> {
+    async fn write_objects(
+        &mut self,
+        epoch: u64,
+        objects: Vec<NewObject>,
+    ) -> Result<Vec<EncodedObject>> {
+        let cost = MorselCost {
+            rows: objects.len(),
+            scratch_bytes: 0,
+            output_bytes: 0,
+        };
+        let encoded = execute_managed(
+            self.job,
+            "native-v4-objects",
+            None,
+            ManagedMorsel::new(
+                NativeEncodingWork {
+                    objects,
+                    root: self.store.root().to_owned(),
+                    epoch,
+                },
+                cost,
+                NativeEncodingWork::run,
+            ),
+            |error| error,
+        )
+        .await?;
+        self.store.write_encoded_objects(encoded).await
+    }
+
+    fn record_carried(&mut self, count: usize) {
+        self.store.record_carried(count);
+    }
+
+    fn read_epoch_manifest(&self, epoch: u64) -> Result<Option<V4Manifest>> {
+        self.store.read_epoch_manifest(epoch)
+    }
+
+    fn read_object(&mut self, handle: &V4Handle) -> Result<ObjectPayload> {
+        self.store.read_object(handle)
+    }
 }
 
 fn store_root(checkpoint: &OpenedCheckpointRuntime) -> PathBuf {
@@ -250,8 +324,9 @@ async fn persist_operators(
         let progress = view.operator_progress[node_id].progress.clone();
         let output_frontier = view.operator_frontiers.get(node_id).copied().flatten();
         let operator = if let Some(capture) = view.native_captures.get(node_id) {
+            let mut managed = ManagedNativeStore::new(store, job);
             persist_native(
-                store,
+                &mut managed,
                 node_id,
                 capture.clone(),
                 epoch,
@@ -403,5 +478,59 @@ mod tests {
             .unwrap();
         assert_eq!(store.read_opaque(&handle).unwrap(), b"payload");
         assert_eq!(store.stats().opaque_blocks, 1);
+    }
+
+    #[tokio::test]
+    async fn native_write_requires_an_open_job_morsel_pool() {
+        use crate::state::v4::native::{NativePage, NativePageSet, NativePartition};
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = V4Store::new(directory.path().join("lineage"));
+        let job = StreamJobContext::new(
+            953,
+            "v4-native-morsel-write",
+            crate::JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        );
+        job.managed_morsel_owner().close_and_drain().await.unwrap();
+        let capture = || {
+            NativeCapture::new(
+                crate::JsonMap::new(),
+                vec![NativePartition {
+                    key_group: 0,
+                    pages: NativePageSet::full(vec![NativePage::json(
+                        "control",
+                        serde_json::json!({"rows": 1}),
+                        0,
+                        0..0,
+                    )])
+                    .unwrap(),
+                }],
+            )
+            .unwrap()
+        };
+        let result = {
+            let mut managed = ManagedNativeStore::new(&mut store, &job);
+            persist_native(&mut managed, "join", capture(), 1, BTreeMap::new(), None).await
+        };
+        assert!(matches!(result, Err(CalcFlowError::Cancelled { .. })));
+
+        let job = StreamJobContext::new(
+            954,
+            "v4-native-morsel-write",
+            crate::JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        );
+        let mut managed = ManagedNativeStore::new(&mut store, &job);
+        let operator = persist_native(&mut managed, "join", capture(), 1, BTreeMap::new(), None)
+            .await
+            .unwrap();
+        let OperatorV4::Table { partitions, .. } = operator else {
+            panic!("native write must produce table state")
+        };
+        assert_eq!(partitions.len(), 1);
+        assert!(managed.store.stats().content_hashes > 0);
     }
 }

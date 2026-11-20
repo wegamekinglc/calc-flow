@@ -99,7 +99,22 @@ impl V4Store {
         objects: Vec<NewObject>,
         fault: Option<V4Fault>,
     ) -> Result<Vec<EncodedObject>> {
-        let mut encoded = self.encode_objects(epoch, &objects, fault).await?;
+        let encoded = self.encode_objects(epoch, &objects, fault).await?;
+        self.write_encoded_objects_inner(encoded, fault).await
+    }
+
+    pub(crate) async fn write_encoded_objects(
+        &mut self,
+        encoded: Vec<EncodedObject>,
+    ) -> Result<Vec<EncodedObject>> {
+        self.write_encoded_objects_inner(encoded, None).await
+    }
+
+    async fn write_encoded_objects_inner(
+        &mut self,
+        mut encoded: Vec<EncodedObject>,
+        fault: Option<V4Fault>,
+    ) -> Result<Vec<EncodedObject>> {
         sort_encoded(&mut encoded);
         self.stats.content_hashes += encoded.len() as u64;
         self.apply_fault(fault)?;
