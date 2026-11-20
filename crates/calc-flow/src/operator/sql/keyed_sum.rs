@@ -313,6 +313,39 @@ impl KeyedSum {
 }
 
 impl Transaction {
+    fn route(
+        &mut self,
+        guard: &mut KeyedSumState,
+        keys: &[ArrayRef],
+        selection: Option<&BooleanArray>,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Vec<GroupId>> {
+        let rows = keys.first().map_or(0, Array::len);
+        let mut groups = Vec::with_capacity(rows);
+        for start in (0..rows).step_by(MORSEL_ROWS) {
+            let len = MORSEL_ROWS.min(rows - start);
+            let keys = keys
+                .iter()
+                .map(|array| array.slice(start, len))
+                .collect::<Vec<_>>();
+            let selection = selection.map(|selection| {
+                selection
+                    .slice(start, len)
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .expect("Boolean selection retains its type")
+                    .clone()
+            });
+            groups.extend(guard.keys.route_selected_with_limit(
+                &keys,
+                selection.as_ref(),
+                self.limit,
+                check,
+            )?);
+        }
+        Ok(groups)
+    }
+
     pub(super) fn apply(
         &mut self,
         keys: &[ArrayRef],
@@ -326,9 +359,7 @@ impl Transaction {
         let input = SumInput::new(values)?;
         let state = self.state.clone();
         let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
-        let groups = guard
-            .keys
-            .route_selected_with_limit(keys, selection, self.limit, check)?;
+        let groups = self.route(&mut guard, keys, selection, check)?;
         grow(&mut guard)?;
         let count = guard.sums.partitions.len();
         self.undo_reservations = (0..count)

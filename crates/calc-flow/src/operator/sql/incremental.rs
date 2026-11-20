@@ -1858,19 +1858,9 @@ impl IncrementalSql {
         let mut processed = 0;
         context.check_cancelled()?;
         for record in records {
-            for offset in (0..record.num_rows()).step_by(MORSEL_ROWS) {
-                context.check_cancelled()?;
-                let chunk = record.slice(offset, MORSEL_ROWS.min(record.num_rows() - offset));
-                self.update_keyed_chunk(
-                    &chunk,
-                    transaction,
-                    workspace.0,
-                    workspace.1,
-                    context,
-                    name,
-                )?;
-                processed += chunk.num_rows();
-            }
+            context.check_cancelled()?;
+            self.update_keyed_chunk(record, transaction, workspace.0, workspace.1, context, name)?;
+            processed += record.num_rows();
         }
         Ok(processed)
     }
