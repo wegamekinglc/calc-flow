@@ -1,0 +1,28 @@
+{
+  "schema": "calc-flow.sum-state-absolute-plan.v1",
+  "created_at": "2026-11-21T05:45:03+08:00",
+  "baseline": {
+    "revision": "main 9a75a71f",
+    "evidence": "benchmarks/stock-positions/engine-core-sweep-20261107.md",
+    "p50_ms": 1669,
+    "timer_boundary": "lazy source generation through completed cumulative positions; same example and built-in check"
+  },
+  "candidate": {
+    "revision": "5d666afa",
+    "binary": "target/p6-delegated-cargo/release/examples/30_streaming_stock_positions",
+    "implementation": "DataFusion whole-batch stock SUM with first-sequence ordering and compact-state merge"
+  },
+  "execution": {
+    "command": "taskset -c 0 <binary> --rows 10000000 --batch-size 1000000",
+    "rows": 10000000,
+    "key_groups": "100x100",
+    "batch_rows": 1000000,
+    "cpu_affinity": 0,
+    "warmups": 2,
+    "measured_samples": 10,
+    "correctness": "example30 built-in check_positions on every completed run",
+    "total_budget_seconds": 600,
+    "no_retries_or_case_expansion": true,
+    "threshold_p50_ms": 500
+  }
+}
