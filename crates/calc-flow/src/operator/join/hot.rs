@@ -331,8 +331,8 @@ fn projected_equi_record(
         }
     });
     let columns = vec![
-        Arc::new(UInt64Array::from_iter(sequence)) as ArrayRef,
-        Arc::new(Float64Array::from_iter(values)) as ArrayRef,
+        Arc::new(sequence.collect::<UInt64Array>()) as ArrayRef,
+        Arc::new(values.collect::<Float64Array>()) as ArrayRef,
     ];
     RecordBatch::try_new(Arc::clone(schema), columns)
         .map_err(|error| operator_error(&operator.name, &error.to_string()))
@@ -507,6 +507,30 @@ mod tests {
         .unwrap()
     }
 
+    fn static_inputs() -> (RecordBatch, RecordBatch) {
+        let left = RecordBatch::try_new(
+            quote_schema(),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(vec![0, 1_000_000]).with_timezone("UTC")),
+                Arc::new(UInt64Array::from(vec![0, 1])),
+                Arc::new(StringArray::from(vec!["S000", "S000"])),
+                Arc::new(Float64Array::from(vec![2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let right = RecordBatch::try_new(
+            dimension_schema(),
+            vec![
+                Arc::new(StringArray::from(vec!["S000"])),
+                Arc::new(Float64Array::from(vec![2.0])),
+                Arc::new(UInt64Array::from(vec![0])),
+                Arc::new(TimestampMicrosecondArray::from(vec![1_000_000]).with_timezone("UTC")),
+            ],
+        )
+        .unwrap();
+        (left, right)
+    }
+
     #[tokio::test]
     async fn hot_join_emits_the_complete_downstream_schema() {
         for (projection, fused) in [(None, false), (Some(vec![1, 3, 5]), false), (None, true)] {
@@ -530,28 +554,7 @@ mod tests {
                 operator.set_output_projection(columns.clone()).unwrap();
             }
             operator.enable_run_core();
-            let left = RecordBatch::try_new(
-                quote_schema(),
-                vec![
-                    Arc::new(
-                        TimestampMicrosecondArray::from(vec![0, 1_000_000]).with_timezone("UTC"),
-                    ),
-                    Arc::new(UInt64Array::from(vec![0, 1])),
-                    Arc::new(StringArray::from(vec!["S000", "S000"])),
-                    Arc::new(Float64Array::from(vec![2.0, 3.0])),
-                ],
-            )
-            .unwrap();
-            let right = RecordBatch::try_new(
-                dimension_schema(),
-                vec![
-                    Arc::new(StringArray::from(vec!["S000"])),
-                    Arc::new(Float64Array::from(vec![2.0])),
-                    Arc::new(UInt64Array::from(vec![0])),
-                    Arc::new(TimestampMicrosecondArray::from(vec![1_000_000]).with_timezone("UTC")),
-                ],
-            )
-            .unwrap();
+            let (left, right) = static_inputs();
             let job = StreamJobContext::new(
                 1,
                 "fingerprint",

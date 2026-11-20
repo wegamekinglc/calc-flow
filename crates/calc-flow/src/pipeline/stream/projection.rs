@@ -108,8 +108,8 @@ fn normalized(select: &str) -> String {
         .collect()
 }
 
-fn matches_projection(select: &str, expression: String) -> bool {
-    normalized(select) == normalized(&expression)
+fn matches_projection(select: &str, expression: &str) -> bool {
+    normalized(select) == normalized(expression)
 }
 
 fn hot_projection(
@@ -134,8 +134,11 @@ fn hot_equi_projection(
     let left_sequence = format!("{}__sequence", join.spec().left_prefix());
     let left_price = format!("{}__price", join.spec().left_prefix());
     let right_price = format!("{}__factor", join.spec().right_prefix());
-    if !matches_projection(&select[0], format!("{left_sequence} AS sequence"))
-        || !matches_projection(&select[1], format!("{left_price} * {right_price} AS value"))
+    if !matches_projection(&select[0], &format!("{left_sequence} AS sequence"))
+        || !matches_projection(
+            &select[1],
+            &format!("{left_price} * {right_price} AS value"),
+        )
     {
         return None;
     }
@@ -161,9 +164,12 @@ fn hot_band_projection(
     let right_sequence = format!("{}__sequence", join.spec().right_prefix());
     let left_price = format!("{}__price", join.spec().left_prefix());
     let right_price = format!("{}__price", join.spec().right_prefix());
-    if !matches_projection(&select[0], format!("{left_sequence} AS sequence"))
-        || !matches_projection(&select[1], format!("{right_sequence} AS right_sequence"))
-        || !matches_projection(&select[2], format!("{left_price} * {right_price} AS value"))
+    if !matches_projection(&select[0], &format!("{left_sequence} AS sequence"))
+        || !matches_projection(&select[1], &format!("{right_sequence} AS right_sequence"))
+        || !matches_projection(
+            &select[2],
+            &format!("{left_price} * {right_price} AS value"),
+        )
     {
         return None;
     }
@@ -193,7 +199,7 @@ fn hot_projection_schema(
             left_price,
             right_price,
         } => Some(Arc::new(Schema::new(vec![
-            renamed(&schema, sequence, "sequence")?,
+            renamed(schema, sequence, "sequence")?,
             projected_value(schema.field(left_price), schema.field(right_price)),
         ]))),
         HotProjection::Band => {
@@ -210,8 +216,8 @@ fn hot_projection_schema(
                 .index_of(&format!("{}__price", join.spec().right_prefix()))
                 .ok()?;
             Some(Arc::new(Schema::new(vec![
-                renamed(&schema, left_sequence, "sequence")?,
-                renamed(&schema, right_sequence, "right_sequence")?,
+                renamed(schema, left_sequence, "sequence")?,
+                renamed(schema, right_sequence, "right_sequence")?,
                 projected_value(schema.field(left_price), schema.field(right_price)),
             ])))
         }
