@@ -19,6 +19,7 @@ use crate::{
     Batch, BatchKind, BatchMetadata, CalcFlowError, DataFusionConfig, DataFusionRuntime, Epoch,
     EventTime, JsonMap, Port, Result, RunContext, UdfReference, UdfRegistrySnapshot,
     expression::{ValidatedQuery, parse_select_query},
+    runtime::streaming::morsel_pool::{ManagedMorsel, MorselCost, MorselLease, execute_managed},
 };
 
 use super::{
@@ -1702,6 +1703,38 @@ fn sql_state_error(message: &str) -> CalcFlowError {
     }
 }
 
+struct SqlEncodingWork {
+    prepared: Option<SqlCheckpointInput>,
+    metadata: Option<(
+        BatchMetadata,
+        datafusion::execution::memory_pool::MemoryReservation,
+    )>,
+    job: crate::StreamJobContext,
+    attempt: tokio_util::sync::CancellationToken,
+}
+
+impl SqlEncodingWork {
+    fn run(self, lease: &MorselLease) -> Result<EncodedSqlState> {
+        lease.check()?;
+        let prepared = self
+            .prepared
+            .map(|input| encode_checkpoint_input(input, &self.job, &self.attempt))
+            .transpose()?;
+        let metadata = self
+            .metadata
+            .map(|(metadata, reservation)| {
+                metadata::encode(&metadata, reservation, || {
+                    check_encoding_cancelled(&self.job, &self.attempt)
+                })
+            })
+            .transpose()?;
+        lease.check()?;
+        let (segment, native) =
+            prepared.map_or((None, None), |(segment, native)| (Some(segment), native));
+        Ok((segment, metadata, native))
+    }
+}
+
 async fn encode_sql_state_async(
     prepared: Option<SqlCheckpointInput>,
     metadata: Option<(
@@ -1711,25 +1744,41 @@ async fn encode_sql_state_async(
     job: crate::StreamJobContext,
     attempt: tokio_util::sync::CancellationToken,
 ) -> Result<EncodedSqlState> {
-    tokio::task::spawn_blocking(move || {
-        let prepared = prepared
-            .map(|input| encode_checkpoint_input(input, &job, &attempt))
-            .transpose()?;
-        let metadata = metadata
-            .map(|(metadata, reservation)| {
-                metadata::encode(&metadata, reservation, || {
-                    check_encoding_cancelled(&job, &attempt)
-                })
-            })
-            .transpose()?;
-        let (segment, native) =
-            prepared.map_or((None, None), |(segment, native)| (Some(segment), native));
-        Ok((segment, metadata, native))
-    })
+    let rows = prepared.as_ref().map_or(0, |input| {
+        input.records.iter().map(RecordBatch::num_rows).sum()
+    });
+    let work = SqlEncodingWork {
+        prepared,
+        metadata,
+        job: job.clone(),
+        attempt,
+    };
+    execute_managed(
+        &job,
+        "sql-checkpoint-encoder",
+        None,
+        ManagedMorsel::new(
+            work,
+            MorselCost {
+                rows,
+                scratch_bytes: 0,
+                output_bytes: 0,
+            },
+            SqlEncodingWork::run,
+        ),
+        |error| match error {
+            CalcFlowError::InvalidArgument { ref field, .. }
+                if matches!(
+                    field.as_str(),
+                    "morsel.rows" | "morsel.bytes" | "morsel.count"
+                ) =>
+            {
+                sql_state_error(&error.to_string())
+            }
+            error => error,
+        },
+    )
     .await
-    .map_err(|error| CalcFlowError::Internal {
-        message: format!("SQL state encoder task failed: {error}"),
-    })?
 }
 
 fn encode_checkpoint_input(
@@ -1926,6 +1975,34 @@ mod tests {
     pub(super) static DROP_WRITES: AtomicUsize = AtomicUsize::new(0);
     static ENCODER_FINISHED: LazyLock<Mutex<BTreeMap<String, tokio::sync::oneshot::Sender<()>>>> =
         LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+    #[tokio::test]
+    async fn test_sql_checkpoint_encoding_requires_an_open_job_morsel_pool() {
+        let job = StreamJobContext::new(
+            941,
+            "sql-morsel-encoding",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let owner = job.managed_morsel_owner();
+        owner.close_and_drain().await.unwrap();
+        let pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool> = Arc::new(
+            datafusion::execution::memory_pool::GreedyMemoryPool::new(4096),
+        );
+        let reservation =
+            datafusion::execution::memory_pool::MemoryConsumer::new("sql-morsel-encoding-test")
+                .register(&pool);
+
+        let result = encode_sql_state_async(
+            None,
+            Some((BatchMetadata::default(), reservation)),
+            job,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(result, Err(CalcFlowError::Cancelled { .. })));
+    }
 
     pub(super) fn after_encode(batch: &Batch) {
         if let Some(finished) = ENCODER_FINISHED

@@ -269,6 +269,10 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   没有 dead-code 豁免或非 test 兼容壳。非 test 全 feature compile 无警告，legacy entity 12 项、真实 morsel runner 10 项、
   operator-task 77 项（2 ignored）、Rolling 699 项、supervision 5 项、session 26 项及全 feature Clippy 通过。
   固定分区执行器、其余 I/O 分离与性能门槛尚未完成。
+- 2026-11-20 P6 SQL checkpoint 编码已从 spawn_blocking 迁入 managed morsel：保留原 attempt 取消检查和预付
+  reservations，池关闭后拒绝新编码，普通错误仍可重试。懒初始化 owner 改为 Arc<OnceLock<_>>，所有 job clone
+  共享同一生命周期，修复 prepare 放弃时最后 owner 等待编码线程退出的阻塞；两个既有 dropped-prepare/worker 回归恢复。
+  SQL 340 项、ASOF 49 项、order 11 项及全 feature Clippy 通过。固定 N 分区、Window/v4 其余 CPU 编码迁移和性能门槛尚未完成。
 
 ## 1. 目标
 

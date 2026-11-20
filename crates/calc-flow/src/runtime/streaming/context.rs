@@ -26,7 +26,7 @@ pub struct StreamJobContext {
     native_statics: Option<Arc<crate::array::NativeScope>>,
     #[cfg(test)]
     gather: super::gather_work::JobGatherOwner,
-    morsels: std::sync::OnceLock<super::morsel_pool::JobMorselOwner>,
+    morsels: Arc<std::sync::OnceLock<super::morsel_pool::JobMorselOwner>>,
     #[cfg(feature = "benchmark-internals")]
     dispatch_trace: crate::benchmark_internals::DispatchTraceOwner,
     #[cfg(feature = "benchmark-internals")]
@@ -114,7 +114,7 @@ impl StreamJobContext {
             native_statics: None,
             #[cfg(test)]
             gather: super::gather_work::JobGatherOwner::new(job_id.to_string().into()),
-            morsels: std::sync::OnceLock::new(),
+            morsels: Arc::new(std::sync::OnceLock::new()),
             #[cfg(feature = "benchmark-internals")]
             dispatch_trace: crate::benchmark_internals::DispatchTraceOwner::default(),
             #[cfg(feature = "benchmark-internals")]
@@ -184,7 +184,7 @@ impl StreamJobContext {
     }
 
     pub(crate) fn with_morsel_owner(mut self, morsels: super::morsel_pool::JobMorselOwner) -> Self {
-        self.morsels = std::sync::OnceLock::from(morsels);
+        self.morsels = Arc::new(std::sync::OnceLock::from(morsels));
         self
     }
 
