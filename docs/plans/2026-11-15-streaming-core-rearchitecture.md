@@ -338,7 +338,9 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   Clippy 通过；证据见 `benchmarks/sum-state/p6-vector-sums-20261121/`。独立 10M P4 为 **1,524.5 ms P50**、
   1,598 ms P95，10/10 内置 positions 校验通过，采集 18.693 秒；较历史 1,669 ms 仅描述性降低约 8.66%，
   ≤500 ms 明确未通过。证据见 `benchmarks/sum-state/p4-vector-sums-10m-20261121/`。保留 paired P6 改进，
-  下一步先归因 source、expression、routing 与 snapshot 的剩余成本，不再只优化 SUM apply。
+  下一步先归因 source、expression、routing 与 snapshot 的剩余成本，不再只优化 SUM apply。单次诊断总耗时 1.535 秒，
+  其中 deltas 223.038 ms、positions 375.222 ms，keyed route/apply 为 288.789/79.376 ms，source 与运行时调度
+  残差约 937 ms（尚非 source-only 测量）。这证明只优化 apply 无法达到门槛，路由和 source/调度必须分别核实。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
