@@ -302,6 +302,12 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   N=1 或小批保持串行，不增加线程成本。逐行捕获 worker panic 后恢复原分区状态，回滚所有分区及 key births，
   清除故障后同一输入可重试；强制并行测试证明至少两个真实 worker 参与。SQL 344 项及全 feature Clippy 通过。
   本步不含性能提升声明；其他 keyed 算子、统一分片执行面、其余 I/O 分离和 P6 性能门槛尚未完成。
+- 2026-11-20 P6 SQL restore/capture prepare 已从独立 `spawn_blocking` 执行迁入 job morsel：
+  保留 JobSqlRecoveryOwner 的串行准入、join loan、候选算子安装与 abandoned-work 结算，启动 gate 改为异步 oneshot，
+  morsel lease 并入 prepare 的取消检查。池关闭后拒绝新 prepare，不再绕过统一准入；3 项 SQL worker 生命周期测试及全 feature Clippy 通过。
+  当前 sql_recovery suite 为 16 passed/11 failed；独立 target 的 `e824b3f4` 基线为 15 passed/11 failed，
+  失败测试集合逐项相同，均为既有 `state.ledger.metadata_ok && state.ledger.values_ok` 断言，本步没有新增失败，
+  但也不能宣称该 suite 全绿。既有失败需要在最终验收前单独修复；其余 CPU 工作、其他 keyed 算子和 P6 性能门槛尚未完成。
 
 ## 1. 目标
 

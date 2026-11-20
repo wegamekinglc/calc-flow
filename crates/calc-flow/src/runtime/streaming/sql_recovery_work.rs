@@ -20,6 +20,7 @@ use tokio::{
 use super::{
     context::StreamJobContext,
     failure::{FailureOrigin, RuntimeFailure, panic_message},
+    morsel_pool::{JobMorselOwner, MorselCost, MorselLease},
     supervisor::TaskId,
 };
 use crate::{
@@ -69,6 +70,7 @@ pub(crate) struct SqlRecoveryContext {
     job_id: u64,
     deadline: Option<DateTime<Utc>>,
     cancellation: CancellationToken,
+    morsels: JobMorselOwner,
 }
 
 impl From<&StreamJobContext> for SqlRecoveryContext {
@@ -77,6 +79,7 @@ impl From<&StreamJobContext> for SqlRecoveryContext {
             job_id: context.job_id(),
             deadline: context.deadline().copied(),
             cancellation: context.cancellation().clone(),
+            morsels: context.managed_morsel_owner().clone(),
         }
     }
 }
@@ -147,7 +150,7 @@ struct Attempt {
     identity: SqlWorkIdentity,
     stop: CancellationToken,
     work: Option<Work>,
-    handle: Option<JoinHandle<OwnedSqlWorkCompletion>>,
+    handle: Option<JoinHandle<Result<OwnedSqlWorkCompletion>>>,
     loaned: bool,
     abandoned: bool,
 }
@@ -469,7 +472,7 @@ impl JobSqlRecoveryOwner {
             let Some(work) = attempt.work.take() else {
                 return Ok(None);
             };
-            let (start, gate) = std::sync::mpsc::sync_channel(1);
+            let (start, gate) = tokio::sync::oneshot::channel();
             let task_id = attempt.identity.task_id;
             let node_id = attempt.identity.node_id.clone();
             let launched = launch_work(work, gate);
@@ -670,7 +673,7 @@ impl Drop for SqlRecoveryTicket {
 struct SqlRecoveryJoinLoan {
     owner: JobSqlRecoveryOwner,
     id: u64,
-    handle: Option<JoinHandle<OwnedSqlWorkCompletion>>,
+    handle: Option<JoinHandle<Result<OwnedSqlWorkCompletion>>>,
 }
 
 impl SqlRecoveryJoinLoan {
@@ -690,33 +693,44 @@ impl SqlRecoveryJoinLoan {
         let result = self.handle.as_mut().expect("owned SQL join").await;
         self.handle = None;
         match result {
-            Ok(mut completion) => {
+            Ok(Ok(mut completion)) => {
                 completion.stop.cancel();
                 let _ = completion.check_current();
                 drop(completion);
             }
+            Ok(Err(error)) => self.record_error(error),
             Err(error) => self.record_join_error(error),
         }
         drop(self.finish());
     }
 
     fn record_join_error(&self, error: JoinError) {
-        let identity = {
-            let state = self.owner.0.state.lock();
-            let attempt = state
-                .attempts
-                .get(&self.id)
-                .expect("registered SQL attempt");
-            SqlWorkIdentity {
-                node_id: attempt.identity.node_id.clone(),
-                node_order: attempt.identity.node_order,
-                task_id: attempt.identity.task_id,
-            }
-        };
-        let origin = cleanup_origin(&identity);
+        let identity = self.identity();
         let error = native_join_error(error, &identity);
+        self.record_error(error);
+    }
+
+    fn record_error(&self, error: CalcFlowError) {
+        if matches!(error, CalcFlowError::Cancelled { .. }) {
+            return;
+        }
+        let identity = self.identity();
+        let origin = cleanup_origin(&identity);
         let mut state = self.owner.0.state.lock();
         push_cleanup(&mut state, identity.node_order, self.id, origin, error);
+    }
+
+    fn identity(&self) -> SqlWorkIdentity {
+        let state = self.owner.0.state.lock();
+        let attempt = state
+            .attempts
+            .get(&self.id)
+            .expect("registered SQL attempt");
+        SqlWorkIdentity {
+            node_id: attempt.identity.node_id.clone(),
+            node_order: attempt.identity.node_order,
+            task_id: attempt.identity.task_id,
+        }
     }
 
     async fn join(mut self) -> Result<OwnedSqlWorkCompletion> {
@@ -724,13 +738,14 @@ impl SqlRecoveryJoinLoan {
         self.handle = None;
         let attempt = self.finish();
         match result {
-            Ok(mut completion) => {
+            Ok(Ok(mut completion)) => {
                 if attempt.abandoned {
                     completion.stop.cancel();
                 }
                 let _ = completion.check_current();
                 Ok(completion)
             }
+            Ok(Err(error)) => Err(error),
             Err(error) => Err(native_join_error(error, &attempt.identity)),
         }
     }
@@ -760,18 +775,31 @@ impl Drop for SqlRecoveryJoinLoan {
 
 fn launch_work(
     work: Work,
-    gate: std::sync::mpsc::Receiver<()>,
-) -> std::thread::Result<JoinHandle<OwnedSqlWorkCompletion>> {
+    gate: tokio::sync::oneshot::Receiver<()>,
+) -> std::thread::Result<JoinHandle<Result<OwnedSqlWorkCompletion>>> {
     catch_unwind(AssertUnwindSafe(|| {
-        tokio::task::spawn_blocking(move || {
-            let _ = gate.recv();
-            run(work)
+        tokio::spawn(async move {
+            let _ = gate.await;
+            let client = work.context.morsels.client()?;
+            let ticket = client
+                .submit_async(
+                    work,
+                    MorselCost {
+                        rows: 1,
+                        scratch_bytes: 0,
+                        output_bytes: 0,
+                    },
+                    |work, lease| Ok(run(work, lease)),
+                )
+                .await?;
+            ticket.join_async().await
         })
     }))
 }
 
-fn prepare_work(work: &mut Work) -> Result<PreparedCheckpointWork> {
+fn prepare_work(work: &mut Work, lease: &MorselLease) -> Result<PreparedCheckpointWork> {
     let check = || {
+        lease.check()?;
         check_stop(
             &work.context,
             &work.launch_cancel,
@@ -788,8 +816,8 @@ fn prepare_work(work: &mut Work) -> Result<PreparedCheckpointWork> {
     Ok(prepared)
 }
 
-fn run(mut work: Work) -> OwnedSqlWorkCompletion {
-    let prepared = match catch_unwind(AssertUnwindSafe(|| prepare_work(&mut work))) {
+fn run(mut work: Work, lease: &MorselLease) -> OwnedSqlWorkCompletion {
+    let prepared = match catch_unwind(AssertUnwindSafe(|| prepare_work(&mut work, lease))) {
         Ok(result) => result,
         Err(payload) => Err(panicked(
             work.identity.task_id,
