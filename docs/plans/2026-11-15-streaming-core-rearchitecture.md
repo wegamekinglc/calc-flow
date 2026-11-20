@@ -319,6 +319,12 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   249.977 ms（+25.06%，regression），stock-stream-8cpu 从 136.195 ms 增至 164.141 ms（+20.52%，regression），
   sparse-stream-1cpu +5.18%（inconclusive），finite 控制 +1.82%（inconclusive）。release 构建分别为 671.666/970.241 秒。
   因此当前并行实现不是性能升级，P6 4 核 ≥3 倍门槛明确未通过；后续先定位并消除回退，不扩张 keyed 功能面。
+- 2026-11-20 P6 dense partition marks（`d80a334a`）已消除上述回退，证据归档于 `benchmarks/sum-state/p6-dense-marks-20261120/`。
+  marks 改为按 `group_id / N` 索引的 dense u64 vector，SUM、undo 和 checkpoint layout identity 不变；
+  SQL 344 项及全 feature Clippy 通过。相同 `aefd17dc` 基线下，stock-stream-1cpu 为 198.546 ms（−2.73%，no confirmed regression），
+  stock-stream-8cpu 为 136.283 ms（+1.28%，no confirmed regression）；sparse 为 +1.70%（inconclusive），finite 为 +1.10%（inconclusive）。
+  采集 118.698 秒、release 构建 628.631 秒，全部 oracle 通过。当前只恢复到基线附近，P6 4 核 ≥3 倍仍未达到；
+  下一步处理共享 KeyStore 锁与状态所有权，不扩张 keyed 功能面。
 - 2026-11-20 P6 SQL restore/capture prepare 已从独立 `spawn_blocking` 执行迁入 job morsel：
   保留 JobSqlRecoveryOwner 的串行准入、join loan、候选算子安装与 abandoned-work 结算，启动 gate 改为异步 oneshot，
   morsel lease 并入 prepare 的取消检查。池关闭后拒绝新 prepare，不再绕过统一准入；3 项 SQL worker 生命周期测试及全 feature Clippy 通过。
