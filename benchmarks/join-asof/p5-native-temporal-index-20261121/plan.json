@@ -1,0 +1,68 @@
+{
+  "schema": "calc-flow.join-p5-performance-plan.v1",
+  "created_at": "2026-11-21T01:19:24+08:00",
+  "baseline": {
+    "kind": "previous_sealed_candidate",
+    "revision": "705adc7f",
+    "evidence": "benchmarks/join-asof/p5-key-run-cache-20261120/result.json",
+    "join_p50_ms": 399.8451665,
+    "interval_p50_ms": 1076.1127749999998,
+    "paired_comparison": false
+  },
+  "rejected_candidates": [
+    {
+      "revision": "186adde0",
+      "evidence": "benchmarks/join-asof/p5-hot-whole-batch-20261120/result.json",
+      "reason": "production projection disabled the hot path"
+    },
+    {
+      "revision": "2983e787",
+      "evidence": "benchmarks/join-asof/p5-projected-hot-20261121/result.json",
+      "reason": "temporal SQL did not complete its first warmup before 570 seconds"
+    }
+  ],
+  "candidate": {
+    "kind": "sealed_default_feature_release_wheel",
+    "revision": "619c553d",
+    "required_tracked_source_clean_before_build": true,
+    "build_budget": "separate from the 600-second acquisition budget",
+    "change": "static Join replaces temporal SQL with a per-key hash index, sorted right-time entries, checked inclusive-bound binary searches and projected Arrow take; interval retains projected native BandJoin"
+  },
+  "execution": {
+    "cpu_affinity": 0,
+    "tokio_worker_threads": 1,
+    "blas_openmp_workers": 1,
+    "checkpoint": "enabled with a 24-hour interval; no trigger in the timed path",
+    "timing_scope": "ready-source enqueue through Arrow output",
+    "warmups_per_case": 2,
+    "measured_samples_per_case": 10,
+    "sample_order": "Join, interval; no retries or extensions",
+    "correctness": "maintained EngineCase full-output oracle on every sample",
+    "total_budget_seconds": 600,
+    "acquisition_stop_seconds": 570,
+    "owned_cleanup_reserve_seconds": 30,
+    "external_backstop": "timeout --kill-after=30s 600s",
+    "state_root_policy": "new empty root for every warmup and measured observation"
+  },
+  "cases": [
+    {
+      "id": "join-1m-single-cpu",
+      "scenario": "join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "direct native key and time indexing removes the rejected temporal SQL plan and old run/key state machine",
+      "threshold_p50_ms": 30,
+      "baseline_p50_ms": 399.8451665
+    },
+    {
+      "id": "interval-1m-single-cpu",
+      "scenario": "interval_join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "projected native BandJoin materializes only the two sequence and two price columns required downstream",
+      "threshold_p50_ms": 350,
+      "baseline_p50_ms": 1076.1127749999998
+    }
+  ],
+  "unmeasured": "ASOF, multi-batch hot-path inputs, durable hot-path restore, other row counts/types/modes, partitioned execution and remaining acceptance matrix"
+}
