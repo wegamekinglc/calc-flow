@@ -1,11 +1,13 @@
 //! Managed checkpoint task and durable settlement.
 
 use super::*;
+use crate::StreamJobContext;
 
 #[cfg(test)]
 mod tests;
 
 pub(super) struct LiveCheckpointTaskInputs {
+    pub(super) job: StreamJobContext,
     pub(super) checkpoint: OpenedCheckpointRuntime,
     pub(super) channels: LiveCheckpointChannels,
     pub(super) live_progress: LiveProgressCoordinator,
@@ -231,6 +233,7 @@ pub(super) async fn run_live_checkpoint_task(
     inputs: LiveCheckpointTaskInputs,
 ) -> crate::Result<()> {
     let LiveCheckpointTaskInputs {
+        job,
         checkpoint,
         mut channels,
         live_progress,
@@ -299,6 +302,7 @@ pub(super) async fn run_live_checkpoint_task(
                     event,
                     &coordinator,
                     &checkpoint,
+                    &job,
                     &live_progress,
                     &sources,
                     &channels.sink_commands,
@@ -623,6 +627,7 @@ async fn handle_checkpoint_event(
     event: CheckpointEvent,
     coordinator: &CheckpointCoordinatorHandle,
     checkpoint: &OpenedCheckpointRuntime,
+    job: &StreamJobContext,
     live_progress: &LiveProgressCoordinator,
     sources: &BTreeMap<String, SourceProgress>,
     sink_commands: &BTreeMap<String, mpsc::Sender<SinkCheckpointCommand>>,
@@ -729,7 +734,7 @@ async fn handle_checkpoint_event(
         }
         CheckpointEvent::ReadyToPublish(epoch) => {
             publish_epoch_manifest(
-                checkpoint,
+                CheckpointPublication { checkpoint, job },
                 coordinator,
                 sink_commands,
                 cancellation,
@@ -826,6 +831,7 @@ async fn notify_terminal_checkpoint(
 )]
 async fn persist_v4_epoch(
     checkpoint: &OpenedCheckpointRuntime,
+    job: &StreamJobContext,
     assembly: &EpochManifestAssembly,
     epoch: Epoch,
     cancellation: &CancellationToken,
@@ -838,6 +844,7 @@ async fn persist_v4_epoch(
     }
     let publication = checkpoint_v4::persist_epoch(
         checkpoint,
+        job,
         checkpoint_v4::AssemblyView {
             sources: &assembly.sources,
             operator_snapshots: &assembly.operator_snapshots,
@@ -863,8 +870,13 @@ async fn persist_v4_epoch(
     }
 }
 
+struct CheckpointPublication<'a> {
+    checkpoint: &'a OpenedCheckpointRuntime,
+    job: &'a StreamJobContext,
+}
+
 async fn publish_epoch_manifest(
-    checkpoint: &OpenedCheckpointRuntime,
+    publication: CheckpointPublication<'_>,
     coordinator: &CheckpointCoordinatorHandle,
     sink_commands: &BTreeMap<String, mpsc::Sender<SinkCheckpointCommand>>,
     cancellation: &CancellationToken,
@@ -872,6 +884,7 @@ async fn publish_epoch_manifest(
     assembly: &mut EpochManifestAssembly,
     epoch: Epoch,
 ) -> crate::Result<()> {
+    let CheckpointPublication { checkpoint, job } = publication;
     assembly.expect_epoch(epoch)?;
     checkpoint
         .status
@@ -880,7 +893,7 @@ async fn publish_epoch_manifest(
     let manifest = build_epoch_manifest(checkpoint, assembly, epoch)?;
     let (state_bytes, manifest_bytes) = checkpoint_manifest_sizes(&manifest)?;
     metrics.record_checkpoint_manifest(state_bytes, manifest_bytes)?;
-    let publication = match persist_v4_epoch(checkpoint, assembly, epoch, cancellation).await {
+    let publication = match persist_v4_epoch(checkpoint, job, assembly, epoch, cancellation).await {
         Ok(Some(publication)) => publication,
         Ok(None) => return Ok(()),
         Err(_) if cancellation.is_cancelled() => return Ok(()),

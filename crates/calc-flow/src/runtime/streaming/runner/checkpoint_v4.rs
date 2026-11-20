@@ -9,13 +9,16 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 
 use super::super::checkpoint_runtime::OpenedCheckpointRuntime;
+use crate::runtime::streaming::morsel_pool::{
+    ManagedMorsel, MorselCost, MorselLease, execute_managed,
+};
 use crate::state::v4::{
-    JobKind, OpaqueObject, OperatorV4, SinkV4, SourceV4, V4Handle, V4Manifest, V4OpaqueAdapter,
-    V4Store, manifest_fingerprint,
+    EncodedObject, JobKind, OpaqueObject, OperatorV4, SinkV4, SourceV4, V4Handle, V4Manifest,
+    V4OpaqueAdapter, V4Store, encode_opaque, manifest_fingerprint,
     native::{NativeCapture, load_native, persist_native},
 };
 use crate::state::{OperatorManifestEntry, SinkManifestEntry, SourceManifestEntry};
-use crate::{CalcFlowError, EventTime, OperatorStateSnapshot, Result};
+use crate::{CalcFlowError, EventTime, OperatorStateSnapshot, Result, StreamJobContext};
 
 #[derive(Clone, Copy)]
 pub(super) struct AssemblyView<'a> {
@@ -26,6 +29,54 @@ pub(super) struct AssemblyView<'a> {
     pub operator_frontiers: &'a BTreeMap<String, Option<EventTime>>,
     pub sink_outputs: &'a BTreeMap<String, BTreeMap<String, SinkManifestEntry>>,
     pub sink_captures: &'a BTreeMap<String, BTreeMap<String, Vec<u8>>>,
+}
+
+struct OpaqueEncodingWork {
+    objects: Vec<OpaqueObject>,
+    root: PathBuf,
+    epoch: u64,
+}
+
+impl OpaqueEncodingWork {
+    fn run(self, lease: &MorselLease) -> Result<Vec<EncodedObject>> {
+        self.objects
+            .into_iter()
+            .map(|object| {
+                lease.check()?;
+                encode_opaque(&object, &self.root, self.epoch)
+            })
+            .collect()
+    }
+}
+
+async fn encode_objects(
+    job: &StreamJobContext,
+    owner: &str,
+    objects: Vec<OpaqueObject>,
+    root: PathBuf,
+    epoch: u64,
+) -> Result<Vec<EncodedObject>> {
+    let cost = MorselCost {
+        rows: objects.len(),
+        scratch_bytes: 0,
+        output_bytes: objects.iter().map(|object| object.bytes.len()).sum(),
+    };
+    execute_managed(
+        job,
+        owner,
+        None,
+        ManagedMorsel::new(
+            OpaqueEncodingWork {
+                objects,
+                root,
+                epoch,
+            },
+            cost,
+            OpaqueEncodingWork::run,
+        ),
+        |error| error,
+    )
+    .await
 }
 
 fn store_root(checkpoint: &OpenedCheckpointRuntime) -> PathBuf {
@@ -85,6 +136,7 @@ pub(in crate::runtime::streaming) async fn load_sink_segments(
 
 pub(super) async fn persist_epoch(
     checkpoint: &OpenedCheckpointRuntime,
+    job: &StreamJobContext,
     view: AssemblyView<'_>,
     epoch: u64,
     cancellation: &crate::CancellationToken,
@@ -93,8 +145,8 @@ pub(super) async fn persist_epoch(
     let _ = cancellation;
     let mut store = V4Store::new(store_root(checkpoint));
     let sources = persist_sources(view.sources);
-    let operators = persist_operators(&mut store, view, epoch).await?;
-    let sinks = persist_sinks(&mut store, view, epoch).await?;
+    let operators = persist_operators(&mut store, job, view, epoch).await?;
+    let sinks = persist_sinks(&mut store, job, view, epoch).await?;
     let mut manifest = V4Manifest {
         format_version: 4,
         pipeline_name: checkpoint.identity.pipeline_name.clone(),
@@ -189,6 +241,7 @@ fn persist_sources(sources: &BTreeMap<String, SourceManifestEntry>) -> BTreeMap<
 
 async fn persist_operators(
     store: &mut V4Store,
+    job: &StreamJobContext,
     view: AssemblyView<'_>,
     epoch: u64,
 ) -> Result<BTreeMap<String, OperatorV4>> {
@@ -208,7 +261,15 @@ async fn persist_operators(
             .await?
         } else {
             let adapter = V4OpaqueAdapter::from_snapshot(node_id, snapshot);
-            let (mut operator, _) = adapter.persist(store, epoch).await?;
+            let encoded = encode_objects(
+                job,
+                node_id,
+                adapter.blocks_for_encoding(),
+                store.root().to_owned(),
+                epoch,
+            )
+            .await?;
+            let (mut operator, _) = adapter.persist_preencoded(store, encoded).await?;
             if let OperatorV4::Opaque {
                 progress: current,
                 output_frontier: frontier,
@@ -227,6 +288,7 @@ async fn persist_operators(
 
 async fn persist_sinks(
     store: &mut V4Store,
+    job: &StreamJobContext,
     view: AssemblyView<'_>,
     epoch: u64,
 ) -> Result<BTreeMap<String, SinkV4>> {
@@ -238,7 +300,8 @@ async fn persist_sinks(
                     let mut blocks = Vec::with_capacity(segments.len());
                     for (segment_id, bytes) in segments {
                         blocks.push(
-                            write_bytes(store, sink_id, segment_id, bytes.clone(), epoch).await?,
+                            write_bytes(store, job, sink_id, segment_id, bytes.clone(), epoch)
+                                .await?,
                         );
                     }
                     blocks
@@ -267,6 +330,7 @@ async fn persist_sinks(
 
 async fn write_bytes(
     store: &mut V4Store,
+    job: &StreamJobContext,
     owner: &str,
     object_id: &str,
     bytes: Vec<u8>,
@@ -280,7 +344,8 @@ async fn write_bytes(
         bytes,
         sha256,
     };
-    let mut encoded = store.write_opaque(epoch, vec![object]).await?;
+    let encoded = encode_objects(job, owner, vec![object], store.root().to_owned(), epoch).await?;
+    let mut encoded = store.write_encoded_opaque(encoded).await?;
     Ok(encoded.remove(0).handle)
 }
 
@@ -304,4 +369,39 @@ fn validate_participants(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn opaque_write_requires_an_open_job_morsel_pool() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = V4Store::new(directory.path().join("lineage"));
+        let job = StreamJobContext::new(
+            951,
+            "v4-morsel-write",
+            crate::JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        );
+        job.managed_morsel_owner().close_and_drain().await.unwrap();
+
+        let result = write_bytes(&mut store, &job, "sink", "segment", b"payload".to_vec(), 7).await;
+        assert!(matches!(result, Err(CalcFlowError::Cancelled { .. })));
+
+        let job = StreamJobContext::new(
+            952,
+            "v4-morsel-write",
+            crate::JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        );
+        let handle = write_bytes(&mut store, &job, "sink", "segment", b"payload".to_vec(), 7)
+            .await
+            .unwrap();
+        assert_eq!(store.read_opaque(&handle).unwrap(), b"payload");
+        assert_eq!(store.stats().opaque_blocks, 1);
+    }
 }

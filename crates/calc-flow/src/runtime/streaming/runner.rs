@@ -4781,6 +4781,7 @@ fn register_boundary_tasks(
     match (checkpoint, checkpoint_channels) {
         (Some(checkpoint), Some(channels)) => {
             let task_inputs = LiveCheckpointTaskInputs {
+                job: context.clone(),
                 checkpoint,
                 channels,
                 live_progress: live_progress

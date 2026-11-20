@@ -15,6 +15,27 @@ pub(crate) struct V4OpaqueAdapter {
     blocks: Vec<OpaqueObject>,
 }
 
+fn finish_encoded(
+    encoded: Vec<super::EncodedObject>,
+    state_fingerprint: String,
+    inline_metadata: JsonMap,
+) -> (OperatorV4, Vec<V4Handle>) {
+    let handles = encoded
+        .into_iter()
+        .map(|object| object.handle)
+        .collect::<Vec<_>>();
+    (
+        OperatorV4::Opaque {
+            progress: BTreeMap::new(),
+            output_frontier: None,
+            state_fingerprint,
+            inline_metadata,
+            blocks: handles.clone(),
+        },
+        handles,
+    )
+}
+
 #[allow(
     dead_code,
     reason = "P3.4 runner uses opaque adapters for un-migrated operators"
@@ -59,25 +80,33 @@ impl V4OpaqueAdapter {
         &self.owner
     }
 
+    pub(crate) fn blocks_for_encoding(&self) -> Vec<OpaqueObject> {
+        self.blocks.clone()
+    }
+
+    pub(crate) async fn persist_preencoded(
+        self,
+        store: &mut V4Store,
+        encoded: Vec<super::EncodedObject>,
+    ) -> Result<(OperatorV4, Vec<V4Handle>)> {
+        let encoded = store.write_encoded_opaque(encoded).await?;
+        Ok(finish_encoded(
+            encoded,
+            self.state_fingerprint,
+            self.inline_metadata,
+        ))
+    }
+
     pub(crate) async fn persist(
         self,
         store: &mut V4Store,
         epoch: u64,
     ) -> Result<(OperatorV4, Vec<V4Handle>)> {
         let encoded = store.write_opaque(epoch, self.blocks).await?;
-        let handles = encoded
-            .into_iter()
-            .map(|object| object.handle)
-            .collect::<Vec<_>>();
-        Ok((
-            OperatorV4::Opaque {
-                progress: BTreeMap::new(),
-                output_frontier: None,
-                state_fingerprint: self.state_fingerprint,
-                inline_metadata: self.inline_metadata,
-                blocks: handles.clone(),
-            },
-            handles,
+        Ok(finish_encoded(
+            encoded,
+            self.state_fingerprint,
+            self.inline_metadata,
         ))
     }
 

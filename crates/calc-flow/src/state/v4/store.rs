@@ -72,6 +72,10 @@ impl V4Store {
         self.stats.carried_objects += count as u64;
     }
 
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub(crate) async fn write_objects(
         &mut self,
         epoch: u64,
@@ -151,7 +155,14 @@ impl V4Store {
         epoch: u64,
         objects: Vec<OpaqueObject>,
     ) -> Result<Vec<EncodedObject>> {
-        let mut encoded = self.encode_opaque(epoch, &objects).await?;
+        let encoded = self.encode_opaque(epoch, &objects).await?;
+        self.write_encoded_opaque(encoded).await
+    }
+
+    pub(crate) async fn write_encoded_opaque(
+        &mut self,
+        mut encoded: Vec<EncodedObject>,
+    ) -> Result<Vec<EncodedObject>> {
         sort_encoded(&mut encoded);
         self.stats.opaque_blocks += encoded.len() as u64;
         self.persist_encoded(&encoded).await?;

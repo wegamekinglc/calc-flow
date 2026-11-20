@@ -277,6 +277,11 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   operations/spec/状态身份均由 owned work 携带，空操作保持直接返回，编码前后检查取消，池关闭后拒绝新编码。
   Window 55 项（1 ignored）、window_state 15 项、window_hopping 4 项及全 feature Clippy 通过。
   固定 N 分区、v4 store 与其余 CPU 编码迁移和性能门槛尚未完成。
+- 2026-11-20 P6 runner opaque v4 编码已与持久化分离：checkpoint task 携带原 job context，
+  managed morsel 只负责对象编码，V4OpaqueAdapter/V4Store 接收编码结果并保持原排序、统计和持久化语义；
+  state 层不反向依赖 runtime，session 的 N=1 路径未改成跨线程执行。池关闭在写入前拒绝，开放池真实写入/读回通过。
+  v4 focused 10 项、SQL recovery 24 项、checkpoint lifecycle 3 项及全 feature Clippy 通过。
+  固定 N 分区、native/table/source-history 其余编码迁移和性能门槛尚未完成。
 
 ## 1. 目标
 
