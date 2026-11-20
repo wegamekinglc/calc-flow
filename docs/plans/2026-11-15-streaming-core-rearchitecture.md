@@ -325,6 +325,12 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   stock-stream-8cpu 为 136.283 ms（+1.28%，no confirmed regression）；sparse 为 +1.70%（inconclusive），finite 为 +1.10%（inconclusive）。
   采集 118.698 秒、release 构建 628.631 秒，全部 oracle 通过。当前只恢复到基线附近，P6 4 核 ≥3 倍仍未达到；
   下一步处理共享 KeyStore 锁与状态所有权，不扩张 keyed 功能面。
+- 2026-11-20 P6 批量旧组 lease 未证明收益并已撤回（`39ef601a`，revert `c75fe501`），证据归档于
+  `benchmarks/sum-state/p6-batched-leases-20261120/`。stock-stream-1cpu 基本持平（−0.05%），stock-stream-8cpu
+  为 148.248 ms（+8.24%，inconclusive），sparse/finite 分别 +3.80%/+2.61%（均 inconclusive）；
+  该实现比 dense marks 更慢且增加分区扫描，不能留在默认路径。采集 120.230 秒、release 构建 621.022 秒，
+  全部 oracle 通过。撤回后 `keyed_sum.rs` 与 `d80a334a` 逐字一致，不重复同一性能检查。
+  后续先量化全局 key routing 与实际 partition update 成本，不再凭锁假设增加优化。
 - 2026-11-20 P6 SQL restore/capture prepare 已从独立 `spawn_blocking` 执行迁入 job morsel：
   保留 JobSqlRecoveryOwner 的串行准入、join loan、候选算子安装与 abandoned-work 结算，启动 gate 改为异步 oneshot，
   morsel lease 并入 prepare 的取消检查。池关闭后拒绝新 prepare，不再绕过统一准入；3 项 SQL worker 生命周期测试及全 feature Clippy 通过。
