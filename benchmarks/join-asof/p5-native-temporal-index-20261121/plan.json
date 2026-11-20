@@ -23,7 +23,7 @@
   ],
   "candidate": {
     "kind": "sealed_default_feature_release_wheel",
-    "revision": "619c553d",
+    "revision": "7ba44180",
     "required_tracked_source_clean_before_build": true,
     "build_budget": "separate from the 600-second acquisition budget",
     "change": "static Join replaces temporal SQL with a per-key hash index, sorted right-time entries, checked inclusive-bound binary searches and projected Arrow take; interval retains projected native BandJoin"
