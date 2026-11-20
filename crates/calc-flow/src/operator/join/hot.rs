@@ -118,7 +118,7 @@ impl HotJoinCore {
                 .join_cpu_trace()
                 .stage(&operator.name, "hot_execute", batch.num_rows());
         let joined = match self.kind {
-            HotKind::Equi => self.execute_equi(operator, left, right)?,
+            HotKind::Equi => Self::execute_equi(operator, left, right)?,
             HotKind::Band => self.execute_band(operator, left, right).await?,
         };
         #[cfg(feature = "benchmark-internals")]
@@ -169,12 +169,7 @@ impl HotJoinCore {
         Ok(())
     }
 
-    fn execute_equi(
-        &self,
-        operator: &StreamJoinOperator,
-        left: &Batch,
-        right: &Batch,
-    ) -> Result<Batch> {
+    fn execute_equi(operator: &StreamJoinOperator, left: &Batch, right: &Batch) -> Result<Batch> {
         let left = concat_input(operator, left)?;
         let right = concat_input(operator, right)?;
         let (left_indices, right_indices) =
