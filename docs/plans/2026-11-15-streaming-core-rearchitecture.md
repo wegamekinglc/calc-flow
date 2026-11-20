@@ -335,7 +335,10 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   （−29.66%，约 1.42×，improved），sparse −29.89%，finite control inconclusive；160 个观测的完整 oracle
   全部通过，采集 120.656 秒。四物理核 ≥3× 仍未达到，但保留该严格改进。诊断观测的 apply 从约 72 ms
   降到 21.506 ms，route 仍为 58.818 ms，后续须处理 key routing 与整批调度成本。完整 SQL 344 项及全 feature
-  Clippy 通过；证据见 `benchmarks/sum-state/p6-vector-sums-20261121/`，10M P4 仍待独立采集。
+  Clippy 通过；证据见 `benchmarks/sum-state/p6-vector-sums-20261121/`。独立 10M P4 为 **1,524.5 ms P50**、
+  1,598 ms P95，10/10 内置 positions 校验通过，采集 18.693 秒；较历史 1,669 ms 仅描述性降低约 8.66%，
+  ≤500 ms 明确未通过。证据见 `benchmarks/sum-state/p4-vector-sums-10m-20261121/`。保留 paired P6 改进，
+  下一步先归因 source、expression、routing 与 snapshot 的剩余成本，不再只优化 SUM apply。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
