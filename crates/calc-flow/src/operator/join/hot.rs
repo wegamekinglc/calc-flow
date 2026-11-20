@@ -104,6 +104,12 @@ impl HotJoinCore {
         let (Some(left), Some(right)) = (self.left.as_ref(), self.right.as_ref()) else {
             return Ok(());
         };
+        #[cfg(feature = "benchmark-internals")]
+        let execute_span =
+            context
+                .job()
+                .join_cpu_trace()
+                .stage(&operator.name, "hot_execute", batch.num_rows());
         let joined = match self.kind {
             HotKind::Equi => {
                 let tables = BTreeMap::from([
@@ -118,8 +124,16 @@ impl HotJoinCore {
             }
             HotKind::Band => self.execute_band(operator, left, right).await?,
         };
+        #[cfg(feature = "benchmark-internals")]
+        drop(execute_span);
         let mut sequence = operator.state.next_output_sequence;
         let schema = Arc::clone(&operator.logical_output_schema);
+        #[cfg(feature = "benchmark-internals")]
+        let emit_span =
+            context
+                .job()
+                .join_cpu_trace()
+                .stage(&operator.name, "hot_emit", joined.num_rows());
         for record in joined.table_payload()?.batches() {
             let record = RecordBatch::try_new_with_options(
                 Arc::clone(&schema),
@@ -135,6 +149,8 @@ impl HotJoinCore {
                 .emit("output", Batch::table(vec![record], metadata)?)
                 .await?;
         }
+        #[cfg(feature = "benchmark-internals")]
+        drop(emit_span);
         operator.state.next_output_sequence = sequence;
         operator.state.next_left_row_id = u64::try_from(left.num_rows())
             .map_err(|_| counter_overflow(&operator.name, "left_row_id"))?;
