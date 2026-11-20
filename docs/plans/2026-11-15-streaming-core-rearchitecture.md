@@ -259,6 +259,10 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   大输入回归的 Tokio budget 边界从 15,847 降为 0，相关 19 项测试及全 test-target Clippy 通过。复测 Join P50 **449.057 ms**、
   interval P50 **3,574.794 ms**，两例各 10/10 完整 oracle 通过，采集 84.064 秒，在预算内；相对上轮描述性下降约 2.6%/3.4%，
   但不是配对显著性结论，≤30 ms/≤350 ms 仍未达到。证据见 `benchmarks/join-asof/p5-bulk-admission-20261120/`；下一步处理 morsel 间重复合并。
+- 2026-11-20 P5 整批状态合并（`e737fb0f`）已交付：先构造不可变 run，再统一合并 bucket/expiration，乱序输入排序回退，
+  全部门限和输出序列检查后才原子安装。10,000 行回归的合并访问从 40,480 降为 20,000；Join 模块 585 项测试与 Clippy 通过。
+  复测 interval P50 **1,397.678 ms**，较上轮描述性下降 60.9%；Join P50 **459.643 ms**。两例各 10/10 完整 oracle 通过，采集
+  47.989 秒，在预算内，但 ≤30 ms/≤350 ms 仍未达到。证据见 `benchmarks/join-asof/p5-batch-merge-20261120/`；下一步处理匹配查找和输出碎片。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
