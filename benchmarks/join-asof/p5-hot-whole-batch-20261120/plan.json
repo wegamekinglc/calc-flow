@@ -11,7 +11,7 @@
   },
   "candidate": {
     "kind": "sealed_default_feature_release_wheel",
-    "revision": "1384db41",
+    "revision": "186adde0",
     "required_tracked_source_clean_before_build": true,
     "build_budget": "separate from the 600-second acquisition budget",
     "change": "admitted single-batch quote schemas bypass per-morsel run/key state: static Join uses DataFusion HashJoin and symmetric interval Join uses native BandJoin row locators with direct full-column materialization"
