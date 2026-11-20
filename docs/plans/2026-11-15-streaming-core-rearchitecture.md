@@ -281,6 +281,12 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   P95 **429.574 ms**，interval P50 **1,076.113 ms**、P95 **1,199.817 ms**；两例 10/10 完整 oracle 通过，
   采集 42.759 秒，在 600 秒预算内。相对上轮仅为描述性改进，≤30 ms/≤350 ms 仍未达到；停止旧逐 morsel
   run/key 状态机的微优化，转向面向重点场景的整批原生物理执行。
+- 2026-11-20 P5 整批原生 Join 实验（候选 `186adde0`）未达到性能目标：静态 Join 使用 DataFusion HashJoin，对称
+  interval 使用原生 BandJoin locator 并直接物化完整输入列。固定两例各 2 次预热 + 10 个样本，Join P50 **486.163 ms**、
+  P95 **552.442 ms**，interval P50 **1,222.780 ms**、P95 **1,266.255 ms**；两例 10/10 完整 oracle 通过，
+  采集 47.213 秒，wheel 单独构建 724.140 秒。相对上轮描述性变慢 21.6%/13.6%，≤30 ms/≤350 ms 均未达到，
+  直接 `collect` 诊断不构成 stream 验收。证据见 `benchmarks/join-asof/p5-hot-whole-batch-20261120/`；
+  下一步先确认生产计划是否实际进入 `HotJoinCore`，再分离物理执行与 runner/物化成本，不重复相同样本寻找更优中位数。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
