@@ -1,0 +1,351 @@
+{
+  "schema": "calc-flow.join-p5-performance-result.v1",
+  "plan": {
+    "schema": "calc-flow.join-p5-performance-plan.v1",
+    "created_at": "2026-11-20T21:20:00+08:00",
+    "baseline": {
+      "kind": "previous_sealed_candidate",
+      "revision": "fcec2dc3",
+      "evidence": "benchmarks/join-asof/p5-dense-runs-20261120/result.json",
+      "join_p50_ms": 422.432261,
+      "interval_p50_ms": 1147.60857,
+      "paired_comparison": false
+    },
+    "candidate": {
+      "kind": "sealed_default_feature_release_wheel",
+      "revision": "705adc7f",
+      "required_tracked_source_clean_before_build": true,
+      "build_budget": "separate from the 600-second acquisition budget",
+      "change": "reuse group IDs only for Join's logically identical key runs, with default KeyStore ownership unchanged and rollback invalidation"
+    },
+    "execution": {
+      "cpu_affinity": 0,
+      "tokio_worker_threads": 1,
+      "blas_openmp_workers": 1,
+      "checkpoint": "enabled with a 24-hour interval; no trigger in the timed path",
+      "timing_scope": "ready-source enqueue through Arrow output",
+      "warmups_per_case": 2,
+      "measured_samples_per_case": 10,
+      "sample_order": "Join, interval; no retries or extensions",
+      "correctness": "maintained EngineCase full-output oracle on every sample",
+      "total_budget_seconds": 600,
+      "acquisition_stop_seconds": 570,
+      "owned_cleanup_reserve_seconds": 30,
+      "external_backstop": "timeout --kill-after=30s 600s",
+      "state_root_policy": "new empty root for every warmup and measured observation"
+    },
+    "cases": [
+      {
+        "id": "join-1m-single-cpu",
+        "scenario": "join",
+        "backend": "calc-flow-stream",
+        "rows": 1000000,
+        "connection": "repeated entity key-run routing without per-morsel rehashing",
+        "threshold_p50_ms": 30,
+        "baseline_p50_ms": 422.432261
+      },
+      {
+        "id": "interval-1m-single-cpu",
+        "scenario": "interval_join",
+        "backend": "calc-flow-stream",
+        "rows": 1000000,
+        "connection": "repeated interval key-run routing and complete output",
+        "threshold_p50_ms": 350,
+        "baseline_p50_ms": 1147.60857
+      }
+    ],
+    "unmeasured": "ASOF, other row counts/types/modes, partitioned execution and remaining acceptance matrix"
+  },
+  "candidate": {
+    "wheel": "target/p5-join-wheel-705adc7f/calc_flow_python-2026.11.14-cp313-cp313-linux_x86_64.whl",
+    "wheel_sha256": "ffc91575d167daa834dcf0dc2468000de1159112bc6be93e06f0c4465e442fc6",
+    "loaded_native": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p5-join-venv/lib/python3.13/site-packages/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+    "loaded_native_sha256": "b39283016dc96eddb25e72457923ad22bb0f8d157454015a3d1fa56339638637",
+    "distribution_version": "2026.11.14"
+  },
+  "environment": {
+    "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+    "tokio_worker_threads": "1",
+    "openblas_num_threads": "1",
+    "omp_num_threads": "1",
+    "taskset": "cpu0",
+    "cpus_allowed": "Cpus_allowed_list:\t0"
+  },
+  "cases": [
+    {
+      "id": "join-1m-single-cpu",
+      "scenario": "join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "repeated entity key-run routing without per-morsel rehashing",
+      "threshold_p50_ms": 30,
+      "baseline_p50_ms": 422.432261,
+      "samples": [
+        {
+          "seconds": 0.399844488,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.3980064,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.399845845,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.403318132,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.398902518,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.399068926,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.40065364,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.395604562,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.418205973,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.438874379,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        }
+      ],
+      "p50_ms": 399.8451665,
+      "p95_ms": 429.57359629999996,
+      "threshold_pass": false,
+      "output_rows": 1000000,
+      "all_oracles_passed": true
+    },
+    {
+      "id": "interval-1m-single-cpu",
+      "scenario": "interval_join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "repeated interval key-run routing and complete output",
+      "threshold_p50_ms": 350,
+      "baseline_p50_ms": 1147.60857,
+      "samples": [
+        {
+          "seconds": 1.067579306,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.089350613,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.076866403,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.148293272,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.054303662,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.071761928,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.064672848,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.075359147,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.24197215,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.122070541,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        }
+      ],
+      "p50_ms": 1076.1127749999998,
+      "p95_ms": 1199.8166548999998,
+      "threshold_pass": false,
+      "output_rows": 10998080,
+      "all_oracles_passed": true
+    }
+  ],
+  "wall_seconds": 42.759350699023344,
+  "within_budget": true,
+  "error": null
+}
