@@ -20,6 +20,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 pub(super) struct RunCore {
     state: RunState,
+    hot: Option<super::hot::HotJoinCore>,
     keys: KeyStore,
     pages: NativePageCache,
     key_page: Option<(usize, NativePage)>,
@@ -47,6 +48,7 @@ impl RunCore {
         );
         Ok(Self {
             state: RunState::new(&operator.name, operator.spec.limits, operator.spec.bounds)?,
+            hot: super::hot::HotJoinCore::new(operator),
             keys,
             pages: NativePageCache::default(),
             key_page: None,
@@ -160,6 +162,7 @@ impl RunCore {
             segments,
             &mut core.keys,
         )?;
+        core.hot = None;
         Ok(core)
     }
 
@@ -252,6 +255,9 @@ impl RunCore {
             operator.state.next_output_sequence,
             operator.state.metrics.match_limit_failures,
         );
+        if core.state.rows(JoinSide::Left) + core.state.rows(JoinSide::Right) > 0 {
+            core.hot = None;
+        }
         Ok(core)
     }
 
@@ -319,6 +325,11 @@ impl RunCore {
     }
 
     #[cfg(test)]
+    pub(super) fn hot_enabled(&self) -> bool {
+        self.hot.is_some()
+    }
+
+    #[cfg(test)]
     pub(super) fn fingerprint(&self) -> [u8; 32] {
         self.state.snapshot().fingerprint()
     }
@@ -331,6 +342,9 @@ impl RunCore {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        if let Some(hot) = &mut self.hot {
+            return hot.process(operator, ingress, batch, context, output).await;
+        }
         #[cfg(feature = "benchmark-internals")]
         let admit_span =
             context
@@ -463,6 +477,9 @@ impl RunCore {
         ingress: &str,
         progress: crate::IngressProgress,
     ) -> Result<()> {
+        if self.hot.is_some() {
+            return Ok(());
+        }
         let (side, extension) = match ingress {
             "left" => (JoinSide::Right, operator.spec.bounds.before_micros),
             "right" => (JoinSide::Left, operator.spec.bounds.after_micros),

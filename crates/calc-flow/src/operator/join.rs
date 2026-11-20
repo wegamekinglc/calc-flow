@@ -4304,6 +4304,7 @@ use expiration::ExpirationIndex;
 use retained::{Rows, StateRows};
 #[cfg(test)]
 mod historical_validation;
+mod hot;
 #[cfg(test)]
 mod key_arena;
 #[cfg(test)]

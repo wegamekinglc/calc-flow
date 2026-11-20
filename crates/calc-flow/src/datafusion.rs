@@ -43,7 +43,7 @@ pub(crate) const MAX_SQL_RESULT_ROWS: usize = 100_000_000;
 pub(crate) const MAX_SQL_RESULT_BYTES: usize = 1 << 30;
 
 #[path = "datafusion_join.rs"]
-mod datafusion_join;
+pub(crate) mod datafusion_join;
 #[cfg(test)]
 #[path = "datafusion_owned.rs"]
 pub(crate) mod owned;

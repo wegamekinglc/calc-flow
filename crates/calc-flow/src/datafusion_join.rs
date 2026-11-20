@@ -63,6 +63,19 @@ pub(super) struct BandSpec {
     right_price: usize,
     offsets: Arc<[i64]>,
     shared: Arc<execution::BandShared>,
+    output: BandOutput,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum BandOutput {
+    Values,
+    Columns(Vec<BandColumn>),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum BandColumn {
+    Left(usize),
+    Right(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -202,6 +215,25 @@ pub(super) fn plan(
     partitions: usize,
 ) -> Option<Arc<dyn ExecutionPlan>> {
     planning::plan(query, tables).map(|spec| {
+        Arc::new(CalcFlowJoinExec::new(spec, schema, partitions)) as Arc<dyn ExecutionPlan>
+    })
+}
+
+pub(crate) fn plan_with_output(
+    query: &ValidatedQuery,
+    tables: &std::collections::BTreeMap<String, Batch>,
+    schema: SchemaRef,
+    output: Vec<BandColumn>,
+    partitions: usize,
+) -> Option<Arc<dyn ExecutionPlan>> {
+    planning::plan(query, tables).map(|spec| {
+        let spec = match spec {
+            JoinSpec::Band(mut band) => {
+                band.output = BandOutput::Columns(output);
+                JoinSpec::Band(band)
+            }
+            other @ JoinSpec::Asof(_) => other,
+        };
         Arc::new(CalcFlowJoinExec::new(spec, schema, partitions)) as Arc<dyn ExecutionPlan>
     })
 }
