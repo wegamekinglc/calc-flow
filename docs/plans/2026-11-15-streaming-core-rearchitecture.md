@@ -301,6 +301,12 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   wheel 单独构建 986.940 秒。≤30 ms/≤350 ms 仍分别差 9.336/13.002 ms，不宣称门槛完成；
   证据见 `benchmarks/join-asof/p5-native-temporal-index-20261121/`。下一步融合 Join 与下游 projection，
   直接生成静态 `sequence/value` 和 interval `sequence/right_sequence/value`，去除剩余列物化与算术。
+- 2026-11-21 P5 Join+projection 融合候选 `5e7c22db` 已完成正式复测：静态 Join 直接生成最终两列，interval
+  直接生成最终三列，下游 Expression 变为 identity。Join P50 **17.047 ms**、P95 **17.616 ms**，**≤30 ms 门槛通过**；
+  interval P50 **355.067 ms**、P95 **398.374 ms**，较 ≤350 ms 仍差 **5.067 ms**。两例 10/10 完整 oracle 通过，
+  采集 28.786 秒，wheel 单独构建 739.080 秒。相对最初基线描述性加速约 23.46×/3.03×，无配对显著性声明。
+  证据见 `benchmarks/join-asof/p5-fused-projection-20261121/`。下一步将 BandJoin 输出批次从默认 8,192 行调至
+  65,536 行，降低 11M 输出的逐批下游与 Arrow 转换成本，match 语义不变。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
