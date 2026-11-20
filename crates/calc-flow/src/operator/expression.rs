@@ -298,6 +298,32 @@ impl ExpressionOperator {
             })
     }
 
+    pub(crate) fn stream_select(&self) -> &[String] {
+        &self.select
+    }
+
+    pub(crate) fn replace_with_identity_projection(&mut self, schema: SchemaRef) -> Result<()> {
+        let select = schema
+            .fields()
+            .iter()
+            .map(|field| format!("\"{}\"", field.name().replace('"', "\"\"")))
+            .collect();
+        let mut replacement = Self::new(&self.name, "", select, None, Vec::new())?;
+        if self.ordered_input {
+            replacement.preserve_input_order();
+        }
+        *self = replacement.with_ports(
+            Port::with_schema_ref(
+                "input",
+                crate::BatchKind::Table,
+                true,
+                Some(Arc::clone(&schema)),
+            )?,
+            Port::with_schema_ref("output", crate::BatchKind::Table, true, Some(schema))?,
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn set_projected_stream_input(&mut self, schema: SchemaRef) -> Result<()> {
         self.input_ports[0] =
             Port::with_schema_ref("input", crate::BatchKind::Table, true, Some(schema))?;

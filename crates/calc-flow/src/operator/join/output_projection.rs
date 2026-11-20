@@ -10,15 +10,32 @@ use datafusion::arrow::{
     record_batch::{RecordBatch, RecordBatchOptions},
 };
 
-use super::{StreamJoinOperator, operator_error};
+use super::{HotProjection, StreamJoinOperator, operator_error};
 #[cfg(test)]
 use super::{materialization::JoinOutput, output_gather};
 use crate::{BatchKind, Port, Result};
+use datafusion::arrow::datatypes::SchemaRef;
 
 #[cfg(test)]
 pub(super) mod tests;
 
 impl StreamJoinOperator {
+    pub(crate) fn hot_projection_supported(&self) -> bool {
+        super::hot::HotJoinCore::new(self).is_some()
+    }
+
+    pub(crate) fn set_hot_projection(
+        &mut self,
+        projection: HotProjection,
+        schema: SchemaRef,
+    ) -> Result<()> {
+        self.output_ports[0] =
+            Port::with_schema_ref("output", BatchKind::Table, true, Some(schema))?;
+        self.output_columns = None;
+        self.hot_projection = Some(projection);
+        Ok(())
+    }
+
     /// Installs physical columns after logical validation; admission keeps its
     /// complete input schemas and frozen V1 logical charges.
     pub(crate) fn set_output_projection(&mut self, columns: Vec<usize>) -> Result<()> {

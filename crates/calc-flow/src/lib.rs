@@ -103,6 +103,7 @@ pub use datafusion::{
 };
 pub use error::{CalcFlowError, Result};
 pub use json::{JsonMap, MAX_JSON_DEPTH, canonical_json};
+pub(crate) use operator::HotProjection;
 pub use operator::{
     AggregateFunction, AggregateSpec, AnalyticExpr, AsofJoinSide, AsofLatePolicy, AsofStateLimits,
     BatchOperator, BatchOperatorContext, BatchOperatorFactory, BoundedOrderOperator,

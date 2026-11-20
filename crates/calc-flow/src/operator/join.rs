@@ -3526,6 +3526,16 @@ enum RunCoreMode {
     Columnar,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HotProjection {
+    Equi {
+        sequence: usize,
+        left_price: usize,
+        right_price: usize,
+    },
+    Band,
+}
+
 /// Stateful two-input bounded event-time Join.
 pub struct StreamJoinOperator {
     name: String,
@@ -3534,6 +3544,7 @@ pub struct StreamJoinOperator {
     output_ports: [Port; 1],
     logical_output_schema: SchemaRef,
     output_columns: Option<Arc<[usize]>>,
+    hot_projection: Option<HotProjection>,
     #[cfg(test)]
     payload_projection: Option<Arc<state_projection::Layout>>,
     #[cfg(test)]
@@ -4419,6 +4430,7 @@ impl StreamJoinOperator {
             )?],
             logical_output_schema: output_schema,
             output_columns: None,
+            hot_projection: None,
             #[cfg(test)]
             payload_projection: None,
             #[cfg(test)]

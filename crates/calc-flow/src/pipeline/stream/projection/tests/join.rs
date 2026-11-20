@@ -1,12 +1,115 @@
 use std::{sync::Arc, time::Duration};
 
 use crate::{
-    JoinStateLimits, JoinTimeBounds, NodeOperator, OperatorMetadata, PipelineBuilder,
-    StreamJoinOperator, StreamJoinSpec,
+    BatchKind, Edge, ExpressionOperator, JoinStateLimits, JoinTimeBounds, NodeOperator,
+    OperatorMetadata, PipelineBuilder, Port, PortEndpoint, StreamJoinOperator, StreamJoinSpec,
 };
 
 mod execution;
 pub(super) use execution::execution_and_restore;
+
+fn hot_graph(select: &[&str], band: bool) -> PipelineBuilder {
+    use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+
+    let quote = || {
+        Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("sequence", DataType::UInt64, false),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("price", DataType::Float64, false),
+        ]))
+    };
+    let left = quote();
+    let right = if band {
+        quote()
+    } else {
+        Arc::new(Schema::new(vec![
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("factor", DataType::Float64, false),
+            Field::new("sequence", DataType::UInt64, false),
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+        ]))
+    };
+    let (left_prefix, right_prefix) = if band {
+        ("left", "right")
+    } else {
+        ("quote", "dimension")
+    };
+    let spec = StreamJoinSpec::inner(
+        ["symbol"],
+        ["symbol"],
+        "event_time",
+        "event_time",
+        JoinTimeBounds::new(
+            Duration::from_secs(if band { 5 } else { 300 }),
+            Duration::from_secs(if band { 5 } else { 0 }),
+        )
+        .unwrap(),
+        JoinStateLimits::new(100, 1_000_000, 1_000).unwrap(),
+    )
+    .unwrap()
+    .with_prefixes(left_prefix, right_prefix)
+    .unwrap();
+    let join = StreamJoinOperator::new("asof", left, right, spec).unwrap();
+    let output = Arc::clone(join.output_ports()[0].schema().unwrap());
+    let expression = ExpressionOperator::new(
+        "result",
+        "",
+        select.iter().map(|value| (*value).into()).collect(),
+        None,
+        vec![],
+    )
+    .unwrap()
+    .with_ports(
+        Port::with_schema_ref("input", BatchKind::Table, true, Some(output)).unwrap(),
+        Port::new("output", BatchKind::Table, true, None).unwrap(),
+    )
+    .unwrap();
+    PipelineBuilder::new("hot projection")
+        .unwrap()
+        .add_node("asof", join)
+        .unwrap()
+        .add_node("result", Box::new(expression))
+        .unwrap()
+        .connect(Edge::new(
+            PortEndpoint::new("asof", "output").unwrap(),
+            PortEndpoint::new("result", "input").unwrap(),
+        ))
+        .unwrap()
+}
+
+#[test]
+fn hot_join_fuses_native_final_projection() {
+    assert_eq!(
+        super::physical_fields(hot_graph(
+            &[
+                "\"quote__sequence\" AS \"sequence\"",
+                "(\"quote__price\" * \"dimension__factor\") AS \"value\"",
+            ],
+            false,
+        )),
+        ["sequence", "value"]
+    );
+    assert_eq!(
+        super::physical_fields(hot_graph(
+            &[
+                "\"left__sequence\" AS \"sequence\"",
+                "\"right__sequence\" AS \"right_sequence\"",
+                "(\"left__price\" * \"right__price\") AS \"value\"",
+            ],
+            true,
+        )),
+        ["sequence", "right_sequence", "value"]
+    );
+}
 
 fn graph(selects: &[&[&str]]) -> PipelineBuilder {
     let mut builder = super::graph(selects);

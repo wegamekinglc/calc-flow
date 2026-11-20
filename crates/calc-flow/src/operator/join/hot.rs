@@ -1,7 +1,7 @@
-use super::{JoinSide, StreamJoinOperator, counter_overflow, operator_error};
+use super::{HotProjection, JoinSide, StreamJoinOperator, counter_overflow, operator_error};
 use crate::{Batch, BatchMetadata, Result, StreamCollector, StreamOperatorContext};
 use datafusion::arrow::{
-    array::{Array, StringArray, TimestampMicrosecondArray, UInt64Array},
+    array::{Array, ArrayRef, Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
     compute::{concat_batches, take},
     datatypes::{DataType, SchemaRef, TimeUnit},
     record_batch::{RecordBatch, RecordBatchOptions},
@@ -37,6 +37,12 @@ impl HotJoinCore {
         } else {
             return None;
         };
+        match (kind, operator.hot_projection) {
+            (_, None)
+            | (HotKind::Equi, Some(HotProjection::Equi { .. }))
+            | (HotKind::Band, Some(HotProjection::Band)) => {}
+            _ => return None,
+        }
         if operator.spec.left_keys() != ["symbol"]
             || operator.spec.right_keys() != ["symbol"]
             || operator.spec.left_event_time() != "event_time"
@@ -174,6 +180,16 @@ impl HotJoinCore {
         let right = concat_input(operator, right)?;
         let (left_indices, right_indices) =
             temporal_indices(operator, &left, &right, operator.spec.bounds.before_micros);
+        if let Some(projection @ HotProjection::Equi { .. }) = operator.hot_projection {
+            return projected_equi(
+                operator,
+                &left,
+                &right,
+                &left_indices,
+                &right_indices,
+                projection,
+            );
+        }
         let schema = output_schema(operator);
         let left_width = operator.input_schema(0).fields().len();
         let sources = (0..schema.fields().len())
@@ -216,21 +232,25 @@ impl HotJoinCore {
         ]);
         let query = crate::expression::parse_select_query(&self.query)
             .map_err(|error| operator_error(&operator.name, &error.to_string()))?;
-        let left_width = operator.input_schema(0).fields().len();
         let schema = output_schema(operator);
-        let columns = (0..schema.fields().len())
-            .map(|ordinal| {
-                let source = output_source(operator, ordinal);
-                if source < left_width {
-                    crate::datafusion::datafusion_join::BandColumn::Left(source)
-                } else {
-                    crate::datafusion::datafusion_join::BandColumn::Right(source - left_width)
-                }
-            })
-            .collect::<Vec<_>>();
-        let plan = crate::datafusion::datafusion_join::plan_with_output(
-            &query, &tables, schema, columns, 1,
-        )
+        let plan = if operator.hot_projection == Some(HotProjection::Band) {
+            crate::datafusion::datafusion_join::plan(&query, &tables, schema, 1)
+        } else {
+            let left_width = operator.input_schema(0).fields().len();
+            let columns = (0..schema.fields().len())
+                .map(|ordinal| {
+                    let source = output_source(operator, ordinal);
+                    if source < left_width {
+                        crate::datafusion::datafusion_join::BandColumn::Left(source)
+                    } else {
+                        crate::datafusion::datafusion_join::BandColumn::Right(source - left_width)
+                    }
+                })
+                .collect::<Vec<_>>();
+            crate::datafusion::datafusion_join::plan_with_output(
+                &query, &tables, schema, columns, 1,
+            )
+        }
         .ok_or_else(|| operator_error(&operator.name, "native band planning is unsupported"))?;
         let session = datafusion::execution::context::SessionContext::new_with_config(
             datafusion::execution::context::SessionConfig::new().with_target_partitions(1),
@@ -240,6 +260,82 @@ impl HotJoinCore {
             .map_err(|error| operator_error(&operator.name, &error.to_string()))?;
         Batch::table(records, BatchMetadata::default())
     }
+}
+
+fn projected_equi(
+    operator: &StreamJoinOperator,
+    left: &RecordBatch,
+    right: &RecordBatch,
+    left_indices: &UInt64Array,
+    right_indices: &UInt64Array,
+    projection: HotProjection,
+) -> Result<Batch> {
+    let schema = output_schema(operator);
+    let records = left_indices
+        .values()
+        .chunks(65_536)
+        .zip(right_indices.values().chunks(65_536))
+        .map(|(left_rows, right_rows)| {
+            projected_equi_record(
+                operator, left, right, left_rows, right_rows, projection, &schema,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Batch::table(records, BatchMetadata::default())
+}
+
+fn projected_equi_record(
+    operator: &StreamJoinOperator,
+    left: &RecordBatch,
+    right: &RecordBatch,
+    left_rows: &[u64],
+    right_rows: &[u64],
+    projection: HotProjection,
+    schema: &SchemaRef,
+) -> Result<RecordBatch> {
+    let HotProjection::Equi {
+        sequence,
+        left_price,
+        right_price,
+    } = projection
+    else {
+        unreachable!("static projection has a concrete shape")
+    };
+    let left_width = operator.input_schema(0).fields().len();
+    let sequences = left
+        .column(sequence)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .expect("hot Join sequence is UInt64");
+    let left_prices = left
+        .column(left_price)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .expect("hot Join price is Float64");
+    let right_prices = right
+        .column(right_price - left_width)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .expect("hot Join factor is Float64");
+    let sequence = left_rows.iter().map(|row| {
+        let row = usize::try_from(*row).expect("Arrow row fits usize");
+        (!sequences.is_null(row)).then(|| sequences.value(row))
+    });
+    let values = left_rows.iter().zip(right_rows).map(|(left, right)| {
+        let left = usize::try_from(*left).expect("Arrow row fits usize");
+        let right = usize::try_from(*right).expect("Arrow row fits usize");
+        if left_prices.is_null(left) || right_prices.is_null(right) {
+            None
+        } else {
+            Some(left_prices.value(left) * right_prices.value(right))
+        }
+    });
+    let columns = vec![
+        Arc::new(UInt64Array::from_iter(sequence)) as ArrayRef,
+        Arc::new(Float64Array::from_iter(values)) as ArrayRef,
+    ];
+    RecordBatch::try_new(Arc::clone(schema), columns)
+        .map_err(|error| operator_error(&operator.name, &error.to_string()))
 }
 
 #[derive(Clone, Copy)]
@@ -413,10 +509,24 @@ mod tests {
 
     #[tokio::test]
     async fn hot_join_emits_the_complete_downstream_schema() {
-        for projection in [None, Some(vec![1, 3, 5])] {
+        for (projection, fused) in [(None, false), (Some(vec![1, 3, 5]), false), (None, true)] {
             let mut operator =
                 StreamJoinOperator::new("hot", quote_schema(), dimension_schema(), spec()).unwrap();
-            if let Some(columns) = &projection {
+            if fused {
+                operator
+                    .set_hot_projection(
+                        HotProjection::Equi {
+                            sequence: 1,
+                            left_price: 3,
+                            right_price: 5,
+                        },
+                        Arc::new(Schema::new(vec![
+                            Field::new("sequence", DataType::UInt64, false),
+                            Field::new("value", DataType::Float64, false),
+                        ])),
+                    )
+                    .unwrap();
+            } else if let Some(columns) = &projection {
                 operator.set_output_projection(columns.clone()).unwrap();
             }
             operator.enable_run_core();
@@ -478,20 +588,39 @@ mod tests {
             let record = &output.table_payload().unwrap().batches()[0];
             assert_eq!(
                 record.schema().fields().len(),
-                projection.as_ref().map_or(8, Vec::len)
+                if fused {
+                    2
+                } else {
+                    projection.as_ref().map_or(8, Vec::len)
+                }
             );
-            let price = record
-                .column(record.schema().index_of("quote__price").unwrap())
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap();
-            assert_eq!(price.values(), &[3.0]);
-            let factor = record
-                .column(record.schema().index_of("dimension__factor").unwrap())
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap();
-            assert_eq!(factor.values(), &[2.0]);
+            if fused {
+                let sequence = record
+                    .column(record.schema().index_of("sequence").unwrap())
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap();
+                assert_eq!(sequence.values(), &[1]);
+                let value = record
+                    .column(record.schema().index_of("value").unwrap())
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                assert_eq!(value.values(), &[6.0]);
+            } else {
+                let price = record
+                    .column(record.schema().index_of("quote__price").unwrap())
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                assert_eq!(price.values(), &[3.0]);
+                let factor = record
+                    .column(record.schema().index_of("dimension__factor").unwrap())
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                assert_eq!(factor.values(), &[2.0]);
+            }
             assert_eq!(operator.state.metrics.emitted_match_rows, 1);
             let core = operator.run_core.as_ref().unwrap();
             assert!(core.hot_enabled());
@@ -516,11 +645,22 @@ mod tests {
 
     #[tokio::test]
     async fn hot_band_emits_requested_input_columns() {
-        for projection in [None, Some(vec![1, 3, 5, 7])] {
+        for (projection, fused) in [(None, false), (Some(vec![1, 3, 5, 7]), false), (None, true)] {
             let mut operator =
                 StreamJoinOperator::new("hot-band", quote_schema(), quote_schema(), band_spec())
                     .unwrap();
-            if let Some(columns) = &projection {
+            if fused {
+                operator
+                    .set_hot_projection(
+                        HotProjection::Band,
+                        Arc::new(Schema::new(vec![
+                            Field::new("sequence", DataType::UInt64, false),
+                            Field::new("right_sequence", DataType::UInt64, false),
+                            Field::new("value", DataType::Float64, false),
+                        ])),
+                    )
+                    .unwrap();
+            } else if let Some(columns) = &projection {
                 operator.set_output_projection(columns.clone()).unwrap();
             }
             operator.enable_run_core();
@@ -565,22 +705,40 @@ mod tests {
             let record = &output.table_payload().unwrap().batches()[0];
             assert_eq!(
                 record.schema().fields().len(),
-                projection.as_ref().map_or(8, Vec::len)
+                if fused {
+                    3
+                } else {
+                    projection.as_ref().map_or(8, Vec::len)
+                }
             );
-            let left = record
-                .column(record.schema().index_of("left__price").unwrap())
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap();
-            assert_eq!(left.values(), &[2.0, 2.0, 3.0, 3.0]);
-            let right = record
-                .column(record.schema().index_of("right__price").unwrap())
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap();
-            assert_eq!(right.values(), &[2.0, 3.0, 2.0, 3.0]);
+            if fused {
+                let value = record
+                    .column(record.schema().index_of("value").unwrap())
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                assert_eq!(value.values(), &[4.0, 6.0, 6.0, 9.0]);
+            } else {
+                let left = record
+                    .column(record.schema().index_of("left__price").unwrap())
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                assert_eq!(left.values(), &[2.0, 2.0, 3.0, 3.0]);
+                let right = record
+                    .column(record.schema().index_of("right__price").unwrap())
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                assert_eq!(right.values(), &[2.0, 3.0, 2.0, 3.0]);
+            }
+            let right_sequence_name = if fused {
+                "right_sequence"
+            } else {
+                "right__sequence"
+            };
             let right_sequence = record
-                .column(record.schema().index_of("right__sequence").unwrap())
+                .column(record.schema().index_of(right_sequence_name).unwrap())
                 .as_any()
                 .downcast_ref::<UInt64Array>()
                 .unwrap();

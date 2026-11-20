@@ -50,9 +50,9 @@ pub use cross_section::{
 pub use expression::ExpressionOperator;
 pub(crate) use expression::{PreparedExpression, SyncExpressionOperator};
 pub(crate) use join::admission_masks::IngressPlan as JoinIngressPlan;
-pub(crate) use join::supported_key_type;
 #[cfg(test)]
 pub(crate) use join::with_one_gib_pool;
+pub(crate) use join::{HotProjection, supported_key_type};
 pub use join::{
     JoinStateLimits, JoinTimeBounds, STREAM_JOIN_MAX_SAFE_JSON_INTEGER,
     STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1, StreamJoinOperator, StreamJoinSideStatus,

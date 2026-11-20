@@ -208,7 +208,7 @@ impl ExecutionPlan for CalcFlowJoinExec {
     }
 }
 
-pub(super) fn plan(
+pub(crate) fn plan(
     query: &ValidatedQuery,
     tables: &std::collections::BTreeMap<String, Batch>,
     schema: SchemaRef,
