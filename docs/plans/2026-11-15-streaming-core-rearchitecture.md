@@ -258,6 +258,12 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   analytic 的 StateBudgetExceeded 映射及输出拒绝语义不变。旧 GatherOperatorId reservation-owner 接口和过时测试已删除，
   declaration 由 FinalWork 自身持有。旧 gather 关闭后的 on_end 输出、order 11 项、bounded_global_ordering 10 项、
   order_closure 2 项及全 feature Clippy 通过。global record、Join 迁移测试辅助路径、固定分区执行器和其余 I/O 分离尚未完成。
+- 2026-11-20 P6 SQL global record 与 FILTER coalescer 已迁入统一 morsel 池，普通 aggregate 与 coalescer
+  共用 MorselLease，prepaid credit 随输出释放；旧 gather 准入关闭后的两类查询均与 DataFusion oracle 一致。
+  这也是最后一个生产 gather 用户：非 test 构建已不再编译 legacy gather submission/worker/process pool，
+  共用停止检查移到独立 stop 模块，runner/supervision 的旧 owner 仅在 test 保留作迁移证据，benchmark 收尾改用 morsel owner。
+  SQL 339 项、legacy gather 43 项、supervision 5 项、operator-task 77 项（2 ignored）、order 11 项、ASOF 49 项、
+  Rolling parallel 4 项及非 test/test 全 feature Clippy 通过。entity_work、固定分区执行器、其余 I/O 分离与性能门槛尚未完成。
 
 ## 1. 目标
 

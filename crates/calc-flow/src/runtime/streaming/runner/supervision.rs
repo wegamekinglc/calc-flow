@@ -26,7 +26,7 @@ impl SupervisionHome {
         supervisor: TaskSupervisor,
         cpu: JobEntityWorkOwner,
         sql: JobSqlRecoveryOwner,
-        gather: super::super::gather_work::JobGatherOwner,
+        #[cfg(test)] gather: super::super::gather_work::JobGatherOwner,
     ) -> SupervisorLoan {
         let mut home = self.0.lock();
         assert!(!home.loaned && home.returned.is_none());
@@ -36,6 +36,7 @@ impl SupervisionHome {
             supervisor: Some(supervisor),
             cpu,
             sql,
+            #[cfg(test)]
             gather,
         }
     }
@@ -44,7 +45,7 @@ impl SupervisionHome {
         &self,
         cpu: JobEntityWorkOwner,
         sql: JobSqlRecoveryOwner,
-        gather: super::super::gather_work::JobGatherOwner,
+        #[cfg(test)] gather: super::super::gather_work::JobGatherOwner,
     ) -> Option<SupervisorLoan> {
         let mut home = self.0.lock();
         assert!(!home.loaned, "only one driver can own the supervisor");
@@ -55,6 +56,7 @@ impl SupervisionHome {
             supervisor: Some(supervisor),
             cpu,
             sql,
+            #[cfg(test)]
             gather,
         })
     }
@@ -126,6 +128,7 @@ pub(super) struct SupervisorLoan {
     supervisor: Option<TaskSupervisor>,
     cpu: JobEntityWorkOwner,
     sql: JobSqlRecoveryOwner,
+    #[cfg(test)]
     gather: super::super::gather_work::JobGatherOwner,
 }
 
@@ -133,9 +136,15 @@ impl SupervisorLoan {
     pub(super) async fn join_all(&mut self) -> SupervisionReport {
         self.deref_mut().settle_tasks().await;
         self.cpu.close_admission();
+        #[cfg(test)]
         self.gather.close_admission();
-        let mut secondary = self.cpu.drain().await;
-        secondary.extend(self.gather.close_and_drain().await);
+        let secondary = self.cpu.drain().await;
+        #[cfg(test)]
+        let secondary = {
+            let mut secondary = secondary;
+            secondary.extend(self.gather.close_and_drain().await);
+            secondary
+        };
         self.home.0.lock().secondary.extend(secondary);
         self.sql.close_admission();
         let failures = self.sql.drain().await;
@@ -161,6 +170,7 @@ impl Drop for SupervisorLoan {
     fn drop(&mut self) {
         self.cpu.close_admission();
         self.sql.close_admission();
+        #[cfg(test)]
         self.gather.close_admission();
         if let Some(mut supervisor) = self.supervisor.take() {
             supervisor.cancel_and_abort();

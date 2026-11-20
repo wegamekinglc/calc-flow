@@ -16,7 +16,7 @@ use crate::operator::rolling_metrics::{
     NumericWorkLease, RollingMetricsRecorder, RollingStage, RollingWork, RollingWorkBatch,
 };
 use crate::operator::sync_operator::{Emitter, SyncContext};
-use crate::runtime::streaming::gather_work::TaskId;
+use crate::runtime::streaming::TaskId;
 #[cfg(test)]
 use crate::runtime::streaming::morsel_pool::MorselTestHooks;
 use crate::runtime::streaming::morsel_pool::{
@@ -505,7 +505,7 @@ impl RollingOperator {
         if let Some(reason) = plan.entity_parallel_fallback(input) {
             return self.serial_ordered_update(input, context, reason);
         }
-        let cpus = owner.parallelism(context.job().gather_owner().parallelism());
+        let cpus = owner.parallelism(context.job().morsel_worker_count());
         if cpus < 2 {
             return self.serial_ordered_update(
                 input,

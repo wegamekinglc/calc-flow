@@ -2,8 +2,8 @@
 use super::{BoundedOrderOperator, SortKey, SortTies, owned, workspace_bound};
 use crate::Batch;
 use crate::runtime::streaming::{
-    gather_work::GatherStop,
     morsel_pool::{ManagedMorsel, MorselCost, MorselLease, execute_managed},
+    stop::GatherStop,
 };
 use crate::{Result, RunContext, StreamOperatorContext};
 use datafusion::{

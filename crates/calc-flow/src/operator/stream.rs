@@ -357,7 +357,7 @@ pub struct StreamOperatorContext<'a> {
     entity_work_task: Option<&'a crate::runtime::streaming::entity_work::TaskEntityWorkClient>,
     entity_work_scope: OnceLock<crate::runtime::streaming::entity_work::CallbackWorkScope>,
     entity_work_cache: OnceLock<ScopedEntityWorkClient>,
-    task_id: Option<crate::runtime::streaming::gather_work::TaskId>,
+    task_id: Option<crate::runtime::streaming::TaskId>,
     ingress_preparation: Option<&'a super::ingress::Preparation>,
 }
 
@@ -479,12 +479,13 @@ impl<'a> StreamOperatorContext<'a> {
 
     pub(crate) fn with_task_id(
         mut self,
-        task_id: Option<crate::runtime::streaming::gather_work::TaskId>,
+        task_id: Option<crate::runtime::streaming::TaskId>,
     ) -> Self {
         self.task_id = task_id;
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn gather_client(
         &self,
         operator: crate::runtime::streaming::gather_work::GatherOperatorId,
@@ -546,7 +547,7 @@ impl<'a> StreamOperatorContext<'a> {
         self.operator_id
     }
 
-    pub(crate) const fn task_id(&self) -> Option<crate::runtime::streaming::gather_work::TaskId> {
+    pub(crate) const fn task_id(&self) -> Option<crate::runtime::streaming::TaskId> {
         self.task_id
     }
 

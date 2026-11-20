@@ -2,7 +2,7 @@ use super::super::StreamAsofJoinOperator;
 use crate::{
     CalcFlowError, Result,
     runtime::streaming::{
-        gather_work::TaskId,
+        TaskId,
         morsel_pool::{ManagedMorsel, MorselCost, MorselLease, execute_managed},
     },
 };

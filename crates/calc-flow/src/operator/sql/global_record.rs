@@ -2,8 +2,9 @@ use super::{
     AggregateFunctionExpr, Arc, ArrayRef, DataType, Expr, LogicalPlan, MemoryReservation,
     RecordBatch, Result, ScalarValue, SchemaRef, checked_bytes, df_error,
 };
-use crate::runtime::streaming::gather_work::{
-    AdmissionFailure, GatherOperatorId, GatherStop, OwnedCpuWork,
+use crate::{
+    CalcFlowError,
+    runtime::streaming::morsel_pool::{ManagedMorsel, MorselCost, MorselLease, execute_managed},
 };
 use crate::{DataFusionConfig, DataFusionRuntime, StreamOperatorContext};
 use serde::{Deserialize, Serialize};
@@ -91,8 +92,12 @@ pub(super) struct Proof {
     pub policy: Policy,
     pub coalesced: Option<Arc<coalescer::State>>,
     kinds: Arc<[Kind]>,
-    operator: GatherOperatorId,
     reservation: MemoryReservation,
+}
+
+struct RecordOutput {
+    update: Update,
+    _credit: MemoryReservation,
 }
 
 fn saved_values<'a>(
@@ -210,7 +215,6 @@ impl Proof {
                 .iter()
                 .map(|expression| Kind::of(expression).expect("selected kind"))
                 .collect(),
-            operator: GatherOperatorId::new(name.to_owned().into()),
             reservation,
         }))
     }
@@ -334,19 +338,43 @@ impl Proof {
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<Update> {
-        let scope = context.gather_client(self.operator.clone()).scope()?;
-        let ticket = scope
-            .submit_work(work, credit, GatherStop::from_job(context.job()))
-            .await
-            .map_err(|failure| match failure {
-                AdmissionFailure::Budget { source, .. } => df_error(name, source),
-                AdmissionFailure::Runtime(error) => error,
-            })?;
-        let output = ticket.finish().await?;
+        let cost = MorselCost {
+            rows: work.records.iter().map(RecordBatch::num_rows).sum(),
+            scratch_bytes: 0,
+            output_bytes: credit.size(),
+        };
+        let output = execute_managed(
+            context.job(),
+            name,
+            context.task_id(),
+            ManagedMorsel::new(
+                (work, credit),
+                cost,
+                |(work, credit): (RecordWork, MemoryReservation), lease: &MorselLease| {
+                    let update = work.run(lease)?;
+                    Ok(RecordOutput {
+                        update,
+                        _credit: credit,
+                    })
+                },
+            ),
+            |error| match error {
+                CalcFlowError::InvalidArgument { ref field, .. }
+                    if matches!(
+                        field.as_str(),
+                        "morsel.rows" | "morsel.bytes" | "morsel.count"
+                    ) =>
+                {
+                    df_error(name, error)
+                }
+                error => error,
+            },
+        )
+        .await?;
         context.check_cancelled()?;
-        let values = output.value.clone();
+        let update = output.update.clone();
         drop(output);
-        Ok(values)
+        Ok(update)
     }
 
     fn update_charge(
@@ -496,16 +524,14 @@ struct RecordWork {
     _input_owner: Option<Arc<MemoryReservation>>,
 }
 
-impl OwnedCpuWork for RecordWork {
-    type Output = Update;
-
-    fn run(mut self, stop: &GatherStop) -> Result<Self::Output> {
+impl RecordWork {
+    fn run(mut self, lease: &MorselLease) -> Result<Update> {
         if let Some(predicate) = self.predicate.take() {
-            return coalescer::run(&self, &predicate, stop);
+            return coalescer::run(&self, &predicate, lease);
         }
-        let check = || stop.check();
+        let check = || lease.check();
         let mut accumulators = self.accumulators(&self.states, &check)?;
-        self.update_records(&mut accumulators, stop, &check)?;
+        self.update_records(&mut accumulators, lease, &check)?;
         Ok(Update {
             values: self.values(&mut accumulators, &check)?,
             coalesced: None,
@@ -517,13 +543,13 @@ impl RecordWork {
     fn update_records(
         &self,
         accumulators: &mut [Box<dyn datafusion::logical_expr::Accumulator>],
-        stop: &GatherStop,
+        lease: &MorselLease,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<()> {
         for record in &self.records {
-            stop.check()?;
+            lease.check()?;
             for offset in (0..record.num_rows()).step_by(self.batch_size) {
-                stop.check()?;
+                lease.check()?;
                 let rows = self.batch_size.min(record.num_rows() - offset);
                 self.update_batch(&record.slice(offset, rows), accumulators, check)?;
             }

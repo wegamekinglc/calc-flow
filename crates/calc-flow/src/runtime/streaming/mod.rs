@@ -17,6 +17,7 @@ mod context;
 mod edge_queue;
 pub(crate) mod entity_work;
 pub(crate) mod failure;
+#[cfg(test)]
 pub(crate) mod gather_work;
 mod inline_pipeline;
 #[allow(
@@ -72,6 +73,7 @@ mod soak;
 )]
 pub(crate) mod source_task;
 mod sql_recovery_work;
+pub(crate) mod stop;
 #[allow(
     dead_code,
     reason = "task supervision is an internal continuous-runtime detail"
@@ -89,3 +91,4 @@ pub use message::{StreamMessage, StreamMessageKind};
 #[cfg(feature = "benchmark-internals")]
 pub(crate) use operator_task::benchmark_replay;
 pub use session::{SessionOutput, SessionWatermark, StreamSession};
+pub(crate) use supervisor::TaskId;

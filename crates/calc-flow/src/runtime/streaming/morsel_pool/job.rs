@@ -9,7 +9,7 @@ use super::{
     MorselClient, MorselCost, MorselLease, MorselPool, MorselPoolConfig, MorselTicket, lock,
 };
 use crate::runtime::streaming::{
-    gather_work::GatherStop,
+    stop::GatherStop,
     supervisor::{TaskFailure, TaskId},
 };
 use crate::{CalcFlowError, Result, StreamJobContext};

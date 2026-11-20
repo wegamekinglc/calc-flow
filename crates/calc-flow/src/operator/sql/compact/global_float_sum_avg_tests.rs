@@ -17,6 +17,23 @@ const WITH_EXTREMA: &str = "SELECT SUM(value) AS total, AVG(value) AS mean, MIN(
 const LARGE: Bits = (0x5a80_0000, 0x4350_0000_0000_0000);
 const NEG_LARGE: Bits = (0xda80_0000, 0xc350_0000_0000_0000);
 
+#[tokio::test]
+async fn test_global_record_uses_morsels_after_gather_admission_closes() {
+    let dtype = DataType::Float64;
+    let job = job();
+    job.gather_owner().close_admission();
+    let context = StreamOperatorContext::new(&job, "float_extrema", None);
+    let mut state = operator(&dtype, MIXED);
+    let parts = vec![vec![Some(ONE), None, Some(TWO)]];
+
+    let actual = process(&mut state, input(&dtype, &parts, 0), &context).await;
+    assert_oracle(&actual, MIXED, &dtype, &parts, 0).await;
+
+    drop((state, actual, context));
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+}
+
 fn cases() -> [(DataType, &'static str); 12] {
     [
         (DataType::Float32, SUM),

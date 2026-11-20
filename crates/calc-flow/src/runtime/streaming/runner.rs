@@ -168,6 +168,7 @@ pub(super) struct JobCore {
     entity_work: JobEntityWorkOwner,
     morsels: JobMorselOwner,
     sql_recovery: JobSqlRecoveryOwner,
+    #[cfg(test)]
     gather_work: super::gather_work::JobGatherOwner,
     asof_loads: asof::LoadOwner,
     source_histories: source_history::HistoryOwner,
@@ -211,10 +212,15 @@ impl JobCore {
         let sink_outputs = status_projection.sink_outputs();
         #[cfg(test)]
         let owned_lane_launches = Arc::new(AtomicU64::new(0));
+        #[cfg(test)]
         let gather_work = super::gather_work::JobGatherOwner::new(job_id.to_string().into());
+        #[cfg(test)]
+        let morsel_workers = gather_work.parallelism();
+        #[cfg(not(test))]
+        let morsel_workers = std::thread::available_parallelism().map_or(1, usize::from);
         let morsels = JobMorselOwner::new(
             job_id,
-            gather_work.parallelism(),
+            morsel_workers,
             #[cfg(test)]
             owned_lane_launches.clone(),
         );
@@ -251,6 +257,7 @@ impl JobCore {
             ),
             morsels,
             sql_recovery: JobSqlRecoveryOwner::new(),
+            #[cfg(test)]
             gather_work,
             asof_loads: asof::LoadOwner::default(),
             source_histories: source_history::HistoryOwner::default(),
@@ -1717,6 +1724,7 @@ async fn settle_driver_report(core: &Arc<JobCore>, join_error: Option<&str>) -> 
     if let Some(mut loan) = core.supervision.take(
         core.entity_work.clone(),
         core.sql_recovery.clone(),
+        #[cfg(test)]
         core.gather_work.clone(),
     ) {
         let report = loan.join_all().await;
@@ -1733,8 +1741,13 @@ async fn settle_driver_report(core: &Arc<JobCore>, join_error: Option<&str>) -> 
     core.supervision.append_cleanup(sql_failures);
     if !core.supervision.has_report() {
         core.entity_work.close_admission();
-        let mut secondary = core.entity_work.drain().await;
-        secondary.extend(core.gather_work.close_and_drain().await);
+        let secondary = core.entity_work.drain().await;
+        #[cfg(test)]
+        let secondary = {
+            let mut secondary = secondary;
+            secondary.extend(core.gather_work.close_and_drain().await);
+            secondary
+        };
         let mut failed = unprepared_driver_report(
             core,
             SupervisionReport {
@@ -1758,10 +1771,13 @@ async fn settle_driver_report(core: &Arc<JobCore>, join_error: Option<&str>) -> 
                 error,
             })]);
     }
-    core.gather_work.close_admission();
-    let gather_secondary = core.gather_work.close_and_drain().await;
-    if !gather_secondary.is_empty() {
-        core.supervision.append_secondary(gather_secondary);
+    #[cfg(test)]
+    {
+        core.gather_work.close_admission();
+        let gather_secondary = core.gather_work.close_and_drain().await;
+        if !gather_secondary.is_empty() {
+            core.supervision.append_secondary(gather_secondary);
+        }
     }
     #[cfg(test)]
     {
@@ -2111,9 +2127,9 @@ async fn run_job_driver(
     ) {
         return core.prepare_driver_report(checkpoint_start_failure(launch_id, error));
     }
-    let context = context
-        .with_gather_owner(core.gather_work.clone())
-        .with_morsel_owner(core.morsels.clone());
+    let context = context.with_morsel_owner(core.morsels.clone());
+    #[cfg(test)]
+    let context = context.with_gather_owner(core.gather_work.clone());
     core.runtime_status.lock().rolling_metrics = plan
         .nodes
         .iter()
@@ -4055,6 +4071,7 @@ async fn run_operator_entry_inner(
         supervisor,
         core.entity_work.clone(),
         core.sql_recovery.clone(),
+        #[cfg(test)]
         core.gather_work.clone(),
     );
     core.runtime_status.lock().tasks = supervisor.registry();

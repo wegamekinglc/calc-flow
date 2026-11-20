@@ -401,7 +401,7 @@ async fn acquire(
     });
     tokio::select! {
         biased;
-        () = stop.wait() => Err(super::cancelled(&stop.run_id)),
+        () = stop.wait() => Err(super::cancelled(stop.run_id())),
         permit = queued => permit,
     }
 }

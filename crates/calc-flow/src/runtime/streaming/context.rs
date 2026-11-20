@@ -24,6 +24,7 @@ pub struct StreamJobContext {
     checkpoint_budget: crate::state::v4::V4InflightBudget,
     static_inputs: Arc<BTreeMap<String, Batch>>,
     native_statics: Option<Arc<crate::array::NativeScope>>,
+    #[cfg(test)]
     gather: super::gather_work::JobGatherOwner,
     morsels: std::sync::OnceLock<super::morsel_pool::JobMorselOwner>,
     #[cfg(feature = "benchmark-internals")]
@@ -111,6 +112,7 @@ impl StreamJobContext {
             checkpoint_budget: crate::state::v4::V4InflightBudget::default(),
             static_inputs: Arc::new(BTreeMap::new()),
             native_statics: None,
+            #[cfg(test)]
             gather: super::gather_work::JobGatherOwner::new(job_id.to_string().into()),
             morsels: std::sync::OnceLock::new(),
             #[cfg(feature = "benchmark-internals")]
@@ -160,6 +162,7 @@ impl StreamJobContext {
     pub(crate) fn native_static_input(&self, node: &str, port: &str) -> Option<&Batch> {
         self.native_statics.as_ref()?.input(node, port)
     }
+    #[cfg(test)]
     pub(crate) fn gather_owner(&self) -> &super::gather_work::JobGatherOwner {
         &self.gather
     }
@@ -174,6 +177,7 @@ impl StreamJobContext {
         &self.join_cpu_trace
     }
 
+    #[cfg(test)]
     pub(crate) fn with_gather_owner(mut self, gather: super::gather_work::JobGatherOwner) -> Self {
         self.gather = gather;
         self
@@ -188,11 +192,21 @@ impl StreamJobContext {
         self.morsels.get()
     }
 
+    pub(crate) fn morsel_worker_count(&self) -> usize {
+        #[cfg(test)]
+        let available = self.gather.parallelism();
+        #[cfg(not(test))]
+        let available = std::thread::available_parallelism().map_or(1, usize::from);
+        self.morsels
+            .get()
+            .map_or(available, |owner| owner.parallelism(available))
+    }
+
     pub(crate) fn managed_morsel_owner(&self) -> &super::morsel_pool::JobMorselOwner {
         self.morsels.get_or_init(|| {
             super::morsel_pool::JobMorselOwner::new(
                 self.job_id,
-                self.gather.parallelism(),
+                self.morsel_worker_count(),
                 #[cfg(test)]
                 Arc::new(std::sync::atomic::AtomicU64::new(0)),
             )

@@ -122,17 +122,22 @@ pub(crate) fn with_process_observations(mut observation: Value) -> Result<Value>
     Ok(observation)
 }
 
-/// Closes and awaits every gather task owned by a direct benchmark job.
+/// Closes and awaits every compute task owned by a direct benchmark job.
 ///
 /// # Errors
 /// Returns an error if any owned task fails while draining.
 pub async fn settle_job(job: &crate::StreamJobContext) -> Result<()> {
-    let failures = job.gather_owner().close_and_drain().await;
+    let owner = job.managed_morsel_owner();
+    owner
+        .close_and_drain()
+        .await
+        .map_err(|error| invalid(format!("owned compute cleanup failed: {error}")))?;
+    let failures = owner.drain_failures().await;
     if failures.is_empty() {
         Ok(())
     } else {
         Err(invalid(format!(
-            "owned gather cleanup failures: {failures:?}"
+            "owned compute cleanup failures: {failures:?}"
         )))
     }
 }

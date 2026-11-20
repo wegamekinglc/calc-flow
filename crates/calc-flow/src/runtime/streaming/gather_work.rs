@@ -9,7 +9,6 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Utc};
 #[cfg(test)]
 use datafusion::arrow::array::ArrayRef;
 use datafusion::{common::DataFusionError, execution::memory_pool::MemoryReservation};
@@ -18,7 +17,7 @@ use tokio::sync::Notify;
 
 use super::supervisor::TaskFailure;
 pub(crate) use super::supervisor::TaskId;
-use crate::{CalcFlowError, CancellationToken, Result};
+use crate::{CalcFlowError, Result};
 
 fn launch_registration(registered: process::Registration, workers: usize) -> Result<()> {
     catch_unwind(AssertUnwindSafe(|| registered.launch(workers))).unwrap_or_else(|payload| {
@@ -381,7 +380,7 @@ impl ClaimedWork {
             } => {
                 stop.check()?;
                 if siblings.load(Ordering::Acquire) {
-                    return Err(cancelled(&stop.run_id));
+                    return Err(cancelled(stop.run_id()));
                 }
                 let value = match range {
                     Some(range) => plan.gather_range(ordinal, range, stop),
@@ -426,146 +425,7 @@ impl GatherOperatorId {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct GatherStop {
-    #[cfg(all(test, feature = "benchmark-internals"))]
-    trace: crate::benchmark_internals::JoinCpuTraceOwner,
-    #[cfg(all(test, feature = "benchmark-internals"))]
-    operator: Arc<str>,
-    run_id: Arc<str>,
-    cancellation: CancellationToken,
-    deadline: Option<DateTime<Utc>>,
-    #[cfg(test)]
-    deadline_clock: Option<tokio::sync::watch::Receiver<DateTime<Utc>>>,
-    abandoned: Arc<AtomicBool>,
-    #[cfg(test)]
-    check_hook: Option<Arc<dyn Fn(bool) + Send + Sync>>,
-}
-
-impl GatherStop {
-    pub(crate) fn from_job(job: &super::StreamJobContext) -> Self {
-        Self {
-            #[cfg(all(test, feature = "benchmark-internals"))]
-            trace: job.join_cpu_trace().clone(),
-            #[cfg(all(test, feature = "benchmark-internals"))]
-            operator: "".into(),
-            run_id: job.job_id().to_string().into(),
-            cancellation: job.cancellation().clone(),
-            deadline: job.deadline().copied(),
-            #[cfg(test)]
-            deadline_clock: job.deadline_clock_for_test(),
-            abandoned: Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
-            check_hook: None,
-        }
-    }
-
-    pub(crate) fn from_run(run: &crate::RunContext) -> Self {
-        Self {
-            #[cfg(all(test, feature = "benchmark-internals"))]
-            trace: crate::benchmark_internals::JoinCpuTraceOwner::default(),
-            #[cfg(all(test, feature = "benchmark-internals"))]
-            operator: "".into(),
-            run_id: run.run_id().into(),
-            cancellation: run.cancellation().clone(),
-            deadline: run.deadline().copied(),
-            #[cfg(test)]
-            deadline_clock: None,
-            abandoned: Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
-            check_hook: None,
-        }
-    }
-
-    #[cfg(all(test, feature = "benchmark-internals"))]
-    pub(crate) fn join_cpu_trace(&self) -> &crate::benchmark_internals::JoinCpuTraceOwner {
-        &self.trace
-    }
-
-    #[cfg(all(test, feature = "benchmark-internals"))]
-    pub(crate) fn join_cpu_operator(&self) -> &str {
-        &self.operator
-    }
-
-    pub(crate) fn check(&self) -> Result<()> {
-        #[cfg(test)]
-        if let Some(hook) = &self.check_hook {
-            hook(false);
-        }
-        if self.abandoned.load(Ordering::Acquire)
-            || self.cancellation.is_cancelled()
-            || self.deadline.is_some_and(|deadline| {
-                #[cfg(test)]
-                if let Some(clock) = &self.deadline_clock {
-                    return *clock.borrow() >= deadline;
-                }
-                Utc::now() >= deadline
-            })
-        {
-            return Err(cancelled(&self.run_id));
-        }
-        Ok(())
-    }
-
-    /// Polls only the attempt's shared stop flag. The ticket owner must drive
-    /// cancellation/deadline waiting and drop the ticket on stop; admission and
-    /// result settlement must still use `check`.
-    #[cfg(test)]
-    pub(crate) fn check_abandoned(&self) -> Result<()> {
-        #[cfg(test)]
-        if let Some(hook) = &self.check_hook {
-            hook(true);
-        }
-        if self.abandoned.load(Ordering::Acquire) {
-            return Err(cancelled(&self.run_id));
-        }
-        Ok(())
-    }
-
-    fn abandon(&self) {
-        self.abandoned.store(true, Ordering::Release);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_check_hook(mut self, hook: Arc<dyn Fn(bool) + Send + Sync>) -> Self {
-        self.check_hook = Some(hook);
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn abandon_for_test(&self) {
-        self.abandon();
-    }
-
-    pub(crate) async fn wait(&self) {
-        let deadline = deadline_wait(self.deadline);
-        #[cfg(test)]
-        let deadline = async {
-            if let (Some(mut clock), Some(expires)) = (self.deadline_clock.clone(), self.deadline) {
-                clock
-                    .wait_for(|now| *now >= expires)
-                    .await
-                    .expect("deadline clock outlives its wait");
-            } else {
-                deadline.await;
-            }
-        };
-        tokio::select! {
-            () = self.cancellation.cancelled() => {},
-            () = deadline => {},
-        }
-    }
-}
-
-async fn deadline_wait(deadline: Option<DateTime<Utc>>) {
-    match deadline {
-        Some(deadline) => {
-            let delay = (deadline - Utc::now()).to_std().unwrap_or(Duration::ZERO);
-            tokio::time::sleep(delay).await;
-        }
-        None => std::future::pending().await,
-    }
-}
+pub(crate) use super::stop::GatherStop;
 
 #[derive(Clone)]
 pub(crate) struct JobGatherOwner(Arc<ExternalLease>);
@@ -1060,10 +920,7 @@ impl GatherHome {
         state.next_attempt = next_attempt;
         let id = state.next_attempt;
         #[cfg(all(test, feature = "benchmark-internals"))]
-        let stop = GatherStop {
-            operator: scope.operator.join_cpu_name.clone(),
-            ..stop
-        };
+        let stop = stop.with_join_cpu_operator(scope.operator.join_cpu_name.clone());
         state.slot = Slot::Active(Attempt {
             id,
             generation: 0,
