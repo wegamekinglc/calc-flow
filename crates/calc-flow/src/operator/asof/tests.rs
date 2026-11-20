@@ -4,14 +4,18 @@ mod columnar_production;
 mod source_replay;
 use crate::{
     BatchMetadata, CancellationToken, EdgeBudget, EdgeCollector, Epoch, IngressProgress,
-    IngressState, StreamJobContext,
+    IngressState, StreamJobContext, runtime::streaming::morsel_pool::JobMorselOwner,
 };
 use datafusion::arrow::{
     array::{Int64Array, StringArray, TimestampMicrosecondArray},
     datatypes::{DataType, Field, Schema, TimeUnit},
     record_batch::RecordBatch,
 };
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, atomic::AtomicU64},
+    time::Duration,
+};
 
 struct LateMetrics;
 
@@ -70,4 +74,36 @@ pub(super) fn fixture() -> (StreamAsofJoinOperator, Batch) {
     )
     .unwrap();
     (operator, batch)
+}
+
+#[tokio::test]
+async fn managed_checkpoint_uses_morsels_after_gather_admission_closes() {
+    let (operator, _) = fixture();
+    let morsels = JobMorselOwner::new(91, 2, Arc::new(AtomicU64::new(0)));
+    let job = StreamJobContext::new(91, "asof", JsonMap::new(), None, CancellationToken::new())
+        .with_morsel_owner(morsels.clone());
+    job.gather_owner().close_admission();
+
+    let (operator, snapshot) = Box::new(operator)
+        .capture_managed(Epoch::INITIAL, &job, None)
+        .await
+        .unwrap();
+    let progress = IngressProgressSnapshot::new(BTreeMap::from([
+        (
+            "left".into(),
+            IngressProgress::new(IngressState::Active, None),
+        ),
+        (
+            "right".into(),
+            IngressProgress::new(IngressState::Active, None),
+        ),
+    ]));
+    let restored = operator
+        .restore_managed(snapshot, progress, None, &job, None)
+        .await
+        .unwrap();
+    assert_eq!(restored.status().state_rows, 0);
+
+    morsels.close_and_drain().await.unwrap();
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
 }

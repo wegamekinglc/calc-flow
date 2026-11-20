@@ -242,6 +242,11 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
   9 项 pane 测试及全 feature Clippy 通过。SUM/AVG 需要能保持逐位输出的合并证明与新数值方案，P7 仍未完成。
+- 2026-11-20 P6 ASOF managed checkpoint capture/restore 已从旧 gather worker 迁到 job 统一 morsel 池，
+  保留独立 workspace reservation、job cancellation/deadline 等待和取消 ticket；放弃 future 后的后台失败继续归入原 operator task。
+  新增旧 gather 准入关闭后的 capture/restore 回归及 abandoned failure 诊断回归，ASOF 49 项、operator-task 77 项
+  （2 ignored）和全 feature Clippy 通过。SQL/order、Join 迁移测试辅助路径等其他 gather 用户、固定分区执行器、
+  剩余 I/O 分离与 P6 性能门槛尚未完成。
 
 ## 1. 目标
 

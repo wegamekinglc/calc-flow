@@ -2824,7 +2824,7 @@ pub(super) mod tests {
         collections::BTreeMap,
         sync::{
             Arc,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         },
         task::Poll,
         time::Duration,
@@ -2848,6 +2848,14 @@ pub(super) mod tests {
         pipeline::{CompiledStreamOperator, OperatorCheckpointCapability},
         runtime::streaming::supervisor::{TaskId, TaskSupervisor},
     };
+
+    fn job_morsels() -> crate::runtime::streaming::morsel_pool::JobMorselOwner {
+        crate::runtime::streaming::morsel_pool::JobMorselOwner::new(
+            7,
+            2,
+            Arc::new(AtomicU64::new(0)),
+        )
+    }
 
     fn batch(source: &str, sequence: u64) -> Batch {
         let record = RecordBatch::try_from_iter(vec![(
@@ -3906,7 +3914,8 @@ pub(super) mod tests {
     ) -> Harness {
         let cancellation = CancellationToken::new();
         let context =
-            StreamJobContext::new(7, "fingerprint", JsonMap::new(), None, cancellation.clone());
+            StreamJobContext::new(7, "fingerprint", JsonMap::new(), None, cancellation.clone())
+                .with_morsel_owner(job_morsels());
         let edge_ids = input_names
             .iter()
             .map(|name| format!("source->{name}"))

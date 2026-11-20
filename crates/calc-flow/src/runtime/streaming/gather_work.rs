@@ -546,7 +546,7 @@ impl GatherStop {
         self.abandon();
     }
 
-    async fn wait(&self) {
+    pub(crate) async fn wait(&self) {
         let deadline = deadline_wait(self.deadline);
         #[cfg(test)]
         let deadline = async {
