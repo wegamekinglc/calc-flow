@@ -524,3 +524,91 @@ async fn test_keyed_sum_restore_rejects_partition_count_mismatch() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn test_dense_utf8_pair_sum_executes_and_rolls_back_new_keys() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let record = RecordBatch::try_from_iter(vec![
+        (
+            "account",
+            Arc::new(StringArray::from(vec!["a", "a", "b", "a"])) as ArrayRef,
+        ),
+        (
+            "stock",
+            Arc::new(StringArray::from(vec!["x", "x", "y", "x"])) as ArrayRef,
+        ),
+        (
+            "delta",
+            Arc::new(Int64Array::from(vec![1, 2, 3, 4])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    let query = crate::expression::parse_select_query(
+        "SELECT account, stock, SUM(delta) AS position FROM input GROUP BY account, stock",
+    )
+    .unwrap();
+    let mut plan = IncrementalSql::plan(&runtime, &query, "input", record.schema(), "dense-sum")
+        .await
+        .unwrap()
+        .unwrap();
+    let job = StreamJobContext::new(
+        989,
+        "dense-sum",
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "dense-sum", None);
+    let batch = Batch::table(vec![record], crate::BatchMetadata::default()).unwrap();
+    let transaction = plan.update(&batch, &context, "dense-sum").await.unwrap();
+    assert_eq!(
+        output_rows(&transaction.records),
+        vec![
+            vec![
+                ScalarValue::Utf8(Some("a".into())),
+                ScalarValue::Utf8(Some("x".into())),
+                ScalarValue::Int64(Some(7)),
+            ],
+            vec![
+                ScalarValue::Utf8(Some("b".into())),
+                ScalarValue::Utf8(Some("y".into())),
+                ScalarValue::Int64(Some(3)),
+            ],
+        ]
+    );
+    assert!(
+        plan.keyed_sum
+            .as_ref()
+            .unwrap()
+            .dense_applications_for_test()
+            > 0
+    );
+    plan.commit(transaction);
+
+    let before = plan.export_native_state("dense-sum", || Ok(())).unwrap();
+    let discarded = plan.update(&batch, &context, "dense-sum").await.unwrap();
+    drop(discarded);
+    let after = plan.export_native_state("dense-sum", || Ok(())).unwrap();
+    assert_eq!(before.records(), after.records());
+
+    let transaction = plan.update(&batch, &context, "dense-sum").await.unwrap();
+    assert_eq!(
+        output_rows(&transaction.records),
+        vec![
+            vec![
+                ScalarValue::Utf8(Some("a".into())),
+                ScalarValue::Utf8(Some("x".into())),
+                ScalarValue::Int64(Some(14)),
+            ],
+            vec![
+                ScalarValue::Utf8(Some("b".into())),
+                ScalarValue::Utf8(Some("y".into())),
+                ScalarValue::Int64(Some(6)),
+            ],
+        ]
+    );
+    plan.commit(transaction);
+    assert_eq!(plan.group_count(), 2);
+    drop((before, after, plan));
+    assert_eq!(runtime.incremental_memory_pool().reserved(), 0);
+}

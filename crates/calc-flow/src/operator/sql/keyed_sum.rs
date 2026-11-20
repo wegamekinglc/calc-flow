@@ -1,6 +1,6 @@
 use super::{
     AggregateFunctionExpr, ArrayRef, BooleanArray, CHUNK_ROWS, GroupKey, Int64Array, RecordBatch,
-    Result, ScalarValue, SchemaRef, UInt64Array, grouped_sum, predicate,
+    Result, ScalarValue, SchemaRef, StringArray, UInt64Array, grouped_sum, predicate,
 };
 use crate::StateBudget;
 use crate::operator::keyed::{ExportValue, GroupId, KeyCut, KeySchema, KeyStore, MORSEL_ROWS};
@@ -23,10 +23,13 @@ pub(super) struct KeyedSum {
 pub(super) struct KeyedSumState {
     keys: KeyStore,
     sums: PartitionedSums,
+    hot_keys: Option<HotKeyMap>,
     generation: u64,
     active: bool,
     #[cfg(test)]
     panic_group: Option<GroupId>,
+    #[cfg(test)]
+    dense_applications: usize,
 }
 
 pub(super) struct Transaction {
@@ -39,6 +42,7 @@ pub(super) struct Transaction {
     affected: Vec<GroupId>,
     leased: Vec<GroupId>,
     undo_reservations: Vec<MemoryReservation>,
+    hot_new_keys: Vec<(String, String)>,
     active: bool,
 }
 
@@ -56,6 +60,32 @@ enum SumValue {
 enum SumKind {
     Int64,
     UInt64,
+}
+
+type HotKeyMap = hashbrown::HashMap<(String, String), GroupId, ahash::RandomState>;
+
+#[derive(Hash)]
+struct PairRef<'a>(&'a str, &'a str);
+
+impl hashbrown::Equivalent<(String, String)> for PairRef<'_> {
+    fn equivalent(&self, key: &(String, String)) -> bool {
+        self.0 == key.0 && self.1 == key.1
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DenseInput<'a> {
+    keys: [&'a StringArray; 2],
+    values: &'a Int64Array,
+    selection: Option<&'a BooleanArray>,
+    filter: Option<&'a BooleanArray>,
+}
+
+struct DenseScan {
+    pending: Vec<(String, String)>,
+    pending_map: HotKeyMap,
+    sums: Vec<SumValue>,
+    touched: Vec<GroupId>,
 }
 
 struct PartitionedSums {
@@ -106,10 +136,13 @@ impl KeyedSum {
             state: Arc::new(Mutex::new(KeyedSumState {
                 keys: KeyStore::new(schema, reservation),
                 sums,
+                hot_keys: None,
                 generation: 0,
                 active: false,
                 #[cfg(test)]
                 panic_group: None,
+                #[cfg(test)]
+                dense_applications: 0,
             })),
         }))
     }
@@ -151,6 +184,11 @@ impl KeyedSum {
     #[cfg(test)]
     pub(super) fn force_parallel_for_test(&self) {
         self.lock().sums.parallel_min_rows = 1;
+    }
+
+    #[cfg(test)]
+    pub(super) fn dense_applications_for_test(&self) -> usize {
+        self.lock().dense_applications
     }
 
     #[cfg(test)]
@@ -229,6 +267,7 @@ impl KeyedSum {
             affected: Vec::new(),
             leased: Vec::new(),
             undo_reservations: Vec::new(),
+            hot_new_keys: Vec::new(),
             active: true,
         })
     }
@@ -284,6 +323,7 @@ impl KeyedSum {
             }
         }
         transaction.commit();
+        self.lock().hot_keys = None;
         Ok(())
     }
 
@@ -324,6 +364,9 @@ impl Transaction {
         #[cfg(feature = "benchmark-internals")]
         let route_started = Instant::now();
         let input = SumInput::new(values)?;
+        if let Some(()) = self.apply_dense(keys, &input, selection, filter, check)? {
+            return Ok(());
+        }
         let state = self.state.clone();
         let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
         let groups = guard
@@ -356,6 +399,144 @@ impl Transaction {
         );
         state.lock().unwrap_or_else(PoisonError::into_inner).sums = sums;
         result
+    }
+
+    fn apply_dense(
+        &mut self,
+        keys: &[ArrayRef],
+        input: &SumInput<'_>,
+        selection: Option<&BooleanArray>,
+        filter: Option<&BooleanArray>,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Option<()>> {
+        let SumInput::Int64(values) = input else {
+            return Ok(None);
+        };
+        let [left, right] = keys else {
+            return Ok(None);
+        };
+        let (Some(left), Some(right)) = (
+            left.as_any().downcast_ref::<StringArray>(),
+            right.as_any().downcast_ref::<StringArray>(),
+        ) else {
+            return Ok(None);
+        };
+        let state = self.state.clone();
+        let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+        if guard.hot_keys.is_none() {
+            let mut hot_keys = HotKeyMap::default();
+            for index in 0..self.old_groups {
+                let group = GroupId::new(index)?;
+                let (ExportValue::Utf8(Some(left)), ExportValue::Utf8(Some(right))) = (
+                    guard.keys.export_value(group, 0)?,
+                    guard.keys.export_value(group, 1)?,
+                ) else {
+                    return Ok(None);
+                };
+                hot_keys.insert((left.to_string(), right.to_string()), group);
+            }
+            guard.hot_keys = Some(hot_keys);
+        }
+        let hot_keys = guard.hot_keys.take().expect("initialized dense keys");
+        let previous = (0..self.old_groups)
+            .map(|index| {
+                guard
+                    .sums
+                    .value(GroupId::new(index).expect("existing group ID"))
+            })
+            .collect::<Vec<_>>();
+        drop(guard);
+        let dense_input = DenseInput {
+            keys: [left, right],
+            values,
+            selection,
+            filter,
+        };
+        let scan = dense_scan(dense_input, &hot_keys, previous, check);
+        let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.hot_keys = Some(hot_keys);
+        let Some(scan) = scan? else {
+            return Ok(None);
+        };
+        self.commit_dense(guard, &scan, dense_input, input, check)?;
+        #[cfg(test)]
+        {
+            self.state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .dense_applications += 1;
+        }
+        Ok(Some(()))
+    }
+
+    fn commit_dense(
+        &mut self,
+        mut guard: MutexGuard<'_, KeyedSumState>,
+        scan: &DenseScan,
+        dense_input: DenseInput<'_>,
+        input: &SumInput<'_>,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        let left = Arc::new(StringArray::from_iter_values(
+            scan.pending.iter().map(|(left, _)| left.as_str()),
+        )) as ArrayRef;
+        let right = Arc::new(StringArray::from_iter_values(
+            scan.pending.iter().map(|(_, right)| right.as_str()),
+        )) as ArrayRef;
+        let routed =
+            guard
+                .keys
+                .route_selected_with_limit(&[left, right], None, self.limit, check)?;
+        grow(&mut guard)?;
+        let count = guard.sums.partitions.len();
+        self.undo_reservations = (0..count)
+            .map(|_| guard.keys.transaction_reservation())
+            .collect();
+        let actual = (0..self.old_groups)
+            .map(|index| GroupId::new(index).expect("existing group ID"))
+            .chain(routed.iter().copied())
+            .collect::<Vec<_>>();
+        let partitions = guard.sums.partitions.len();
+        for (index, key) in scan.pending.iter().enumerate() {
+            let group = routed[index];
+            guard
+                .hot_keys
+                .as_mut()
+                .expect("dense keys are installed")
+                .insert(key.clone(), group);
+            self.hot_new_keys.push(key.clone());
+        }
+        let state = &mut *guard;
+        let keys = &mut state.keys;
+        let sums = &mut state.sums;
+        let (values, marks) = (&sums.partitions, &mut sums.marks);
+        for temporary in &scan.touched {
+            let group = actual[temporary.index()];
+            let owner = group.index() % partitions;
+            let context = RowContext {
+                generation: self.generation,
+                old_groups: self.old_groups,
+                partitions,
+                kind: SumKind::Int64,
+                input,
+                selection: dense_input.selection,
+                filter: dense_input.filter,
+                row: temporary.index(),
+                group,
+            };
+            touch_dense(
+                &mut *keys,
+                &context,
+                &values[owner],
+                &mut marks[owner],
+                &mut self.undo_parts(owner),
+            )?;
+        }
+        for temporary in &scan.touched {
+            let group = actual[temporary.index()];
+            sums.set(group, Some(scan.sums[temporary.index()]));
+        }
+        Ok(())
     }
 
     fn apply_serial(
@@ -741,6 +922,11 @@ impl Transaction {
             for (group, value) in self.undo.drain(..).rev() {
                 state.sums.set(group, Some(value));
             }
+            for key in self.hot_new_keys.drain(..) {
+                if let Some(hot_keys) = state.hot_keys.as_mut() {
+                    hot_keys.remove(&key);
+                }
+            }
             state.sums.truncate(self.old_groups);
             state.keys.rollback(self.cut);
         }
@@ -750,6 +936,65 @@ impl Transaction {
         state.active = false;
         self.active = false;
     }
+}
+
+fn dense_scan(
+    input: DenseInput<'_>,
+    hot_keys: &HotKeyMap,
+    sums: Vec<SumValue>,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<Option<DenseScan>> {
+    let mut scan = DenseScan {
+        pending: Vec::new(),
+        pending_map: HotKeyMap::default(),
+        sums,
+        touched: Vec::new(),
+    };
+    let mut seen = vec![false; scan.sums.len()];
+    for row in 0..input.values.len() {
+        if row % 65_536 == 0 {
+            check()?;
+        }
+        if input
+            .selection
+            .is_some_and(|selection| !predicate::selected(selection, row))
+            || input
+                .filter
+                .is_some_and(|filter| !predicate::selected(filter, row))
+        {
+            continue;
+        }
+        if input.keys.iter().any(|keys| keys.is_null(row)) {
+            return Ok(None);
+        }
+        let pair = PairRef(input.keys[0].value(row), input.keys[1].value(row));
+        let group = if let Some(group) = hot_keys.get(&pair).or_else(|| scan.pending_map.get(&pair))
+        {
+            *group
+        } else {
+            let group = GroupId::new(scan.sums.len())?;
+            let key = (
+                input.keys[0].value(row).to_owned(),
+                input.keys[1].value(row).to_owned(),
+            );
+            scan.pending.push(key.clone());
+            scan.pending_map.insert(key, group);
+            scan.sums.push(null_value(SumKind::Int64));
+            seen.push(false);
+            group
+        };
+        if !seen[group.index()] {
+            seen[group.index()] = true;
+            scan.touched.push(group);
+        }
+        if input.values.is_valid(row) {
+            let SumValue::Int64(current) = &mut scan.sums[group.index()] else {
+                unreachable!("dense SUM has one integer type")
+            };
+            *current = Some(current.unwrap_or(0).wrapping_add(input.values.value(row)));
+        }
+    }
+    Ok(Some(scan))
 }
 
 struct TouchUndo<'a> {
@@ -880,6 +1125,38 @@ fn touch(
             .unwrap_or_else(PoisonError::into_inner)
             .keys
             .acquire(group)?;
+        undo.leased.push(group);
+        undo.undo.push((group, previous));
+    }
+    Ok(())
+}
+
+fn touch_dense(
+    keys: &mut KeyStore,
+    context: &RowContext<'_>,
+    values: &std::collections::BTreeMap<GroupId, SumValue>,
+    marks: &mut [u64],
+    undo: &mut TouchUndo<'_>,
+) -> Result<()> {
+    let group = context.group;
+    let local = group.index() / context.partitions;
+    if marks[local] == context.generation {
+        return Ok(());
+    }
+    let existing = usize::from(group.index() < context.old_groups);
+    let charge =
+        size_of::<GroupId>() + existing * (size_of::<GroupId>() + size_of::<(GroupId, SumValue)>());
+    undo.reservation
+        .try_grow(charge)
+        .map_err(|error| super::df_error("keyed SUM", error))?;
+    marks[local] = context.generation;
+    undo.affected.push(group);
+    if group.index() < context.old_groups {
+        let previous = values
+            .get(&group)
+            .copied()
+            .unwrap_or_else(|| null_value(context.kind));
+        keys.acquire(group)?;
         undo.leased.push(group);
         undo.undo.push((group, previous));
     }
