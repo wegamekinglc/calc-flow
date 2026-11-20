@@ -307,6 +307,11 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   采集 28.786 秒，wheel 单独构建 739.080 秒。相对最初基线描述性加速约 23.46×/3.03×，无配对显著性声明。
   证据见 `benchmarks/join-asof/p5-fused-projection-20261121/`。下一步将 BandJoin 输出批次从默认 8,192 行调至
   65,536 行，降低 11M 输出的逐批下游与 Arrow 转换成本，match 语义不变。
+- 2026-11-21 P5 大批次候选 `1bd3b3ce` 完成 interval 专项复测：P50 **282.396 ms**、P95 **290.990 ms**，
+  **≤350 ms 门槛通过**，10/10 完整 oracle 覆盖 10,998,080 行，采集 23.171 秒，wheel 单独构建 587.980 秒。
+  大批次较融合候选描述性降低 20.4%，相对最初基线约 3.81×。结合静态 Join **17.047 ms**，两个重点 Join 门槛均已完成。
+  证据见 `benchmarks/join-asof/p5-band-output-batch-20261121/`。下一阶段转向 keyed SUM 的 P4/P6 性能目标；
+  多批热路径输入、durable 热路径恢复、ASOF 和高重复右表 BandJoin 异常仍需独立验收，不在本次完成声明内。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
