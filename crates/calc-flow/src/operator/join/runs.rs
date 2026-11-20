@@ -603,10 +603,12 @@ pub(super) struct RunOutputContext<'a> {
     projection: Option<&'a [usize]>,
     left_width: usize,
     budget: EdgeBudget,
+    #[cfg(feature = "benchmark-internals")]
+    trace: Option<&'a crate::benchmark_internals::JoinCpuTraceOwner>,
 }
 
-impl RunOutputContext<'_> {
-    pub(super) fn new<'a>(
+impl<'a> RunOutputContext<'a> {
+    pub(super) fn new(
         schema: &'a SchemaRef,
         projection: Option<&'a [usize]>,
         left_width: usize,
@@ -617,7 +619,18 @@ impl RunOutputContext<'_> {
             projection,
             left_width,
             budget,
+            #[cfg(feature = "benchmark-internals")]
+            trace: None,
         }
+    }
+
+    #[cfg(feature = "benchmark-internals")]
+    pub(super) fn with_trace(
+        mut self,
+        trace: &'a crate::benchmark_internals::JoinCpuTraceOwner,
+    ) -> Self {
+        self.trace = Some(trace);
+        self
     }
 }
 
@@ -1052,7 +1065,7 @@ impl RunState {
         let mut prepared = Vec::<Prepared>::new();
         let mut runs = Vec::new();
         for incoming in incoming {
-            let next = self.prepare(incoming_side, incoming, RunId(next_run), check)?;
+            let next = self.prepare(incoming_side, incoming, RunId(next_run), &output, check)?;
             if let Some(run) = &next.run {
                 next_run = next_run
                     .checked_add(1)
@@ -1070,6 +1083,14 @@ impl RunState {
             self.limits.max_matches_per_input_batch(),
             &self.name,
         )?;
+        #[cfg(feature = "benchmark-internals")]
+        let merge_span = output.trace.map(|trace| {
+            trace.stage(
+                &self.name,
+                "run_merge",
+                runs.iter().map(|run| run.len()).sum(),
+            )
+        });
         let update = if runs.is_empty() {
             None
         } else {
@@ -1079,10 +1100,16 @@ impl RunState {
                 self.limits,
             )?)
         };
+        #[cfg(feature = "benchmark-internals")]
+        drop(merge_span);
         let mut next_output = self.next_output;
         let mut outputs = Vec::with_capacity(prepared.len());
         for prepared in &mut prepared {
             prepared.output_base = next_output;
+            #[cfg(feature = "benchmark-internals")]
+            let materialize_span = output
+                .trace
+                .map(|trace| trace.stage(&self.name, "run_materialize", prepared.probe.len()));
             let records = prepared.materialize(
                 self,
                 output.schema,
@@ -1091,6 +1118,8 @@ impl RunState {
                 output.budget,
                 check,
             )?;
+            #[cfg(feature = "benchmark-internals")]
+            drop(materialize_span);
             let count = u64::try_from(records.len())
                 .map_err(|_| run_error("output sequence overflowed"))?;
             next_output = next_output
@@ -1116,14 +1145,29 @@ impl RunState {
         incoming_side: JoinSide,
         incoming: Incoming,
         id: RunId,
+        output: &RunOutputContext<'_>,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<Prepared> {
         check()?;
+        #[cfg(not(feature = "benchmark-internals"))]
+        let _ = output;
         if incoming.next_row_id < self.next_row_id(incoming_side) {
             return Err(run_error("Join run row-ID frontier regressed"));
         }
+        #[cfg(feature = "benchmark-internals")]
+        let probe_span = output
+            .trace
+            .map(|trace| trace.stage(&self.name, "run_probe", incoming.len()));
         let probe = self.probe(incoming_side, &incoming, check)?;
+        #[cfg(feature = "benchmark-internals")]
+        drop(probe_span);
+        #[cfg(feature = "benchmark-internals")]
+        let build_span = output
+            .trace
+            .map(|trace| trace.stage(&self.name, "run_build", incoming.len()));
         let run = Run::new(id, &incoming)?;
+        #[cfg(feature = "benchmark-internals")]
+        drop(build_span);
         Ok(Prepared {
             incoming_is_left: incoming_side == JoinSide::Left,
             next_row_id: incoming.next_row_id,

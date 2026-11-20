@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(any(test, feature = "benchmark-internals"))]
 use std::{collections::HashMap, thread::ThreadId};
 use std::{sync::Arc, time::Instant};
 
@@ -30,7 +30,7 @@ struct Trace {
     started: Instant,
     events: Vec<Event>,
     active: usize,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "benchmark-internals"))]
     active_workers: HashMap<ThreadId, usize>,
     markers: u8,
     max_active_workers: usize,
@@ -65,7 +65,7 @@ impl JoinCpuTraceOwner {
             started: Instant::now(),
             events: Vec::with_capacity(CAPACITY),
             active: 0,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "benchmark-internals"))]
             active_workers: HashMap::new(),
             markers: 0,
             max_active_workers: 0,
@@ -74,7 +74,7 @@ impl JoinCpuTraceOwner {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "benchmark-internals"))]
     pub(crate) fn stage(&self, operator: &str, stage: &'static str, rows: usize) -> Stage {
         self.begin(operator, stage, rows, false)
     }
@@ -84,7 +84,7 @@ impl JoinCpuTraceOwner {
         self.begin(operator, stage, rows, true)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "benchmark-internals"))]
     fn begin(&self, operator: &str, stage: &'static str, rows: usize, worker: bool) -> Stage {
         let mut capture = self.0.lock();
         let State::Active(trace) = &mut *capture else {
@@ -226,7 +226,7 @@ impl JoinCpuTraceOwner {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "benchmark-internals"))]
 pub(crate) struct Stage {
     owner: Option<JoinCpuTraceOwner>,
     index: usize,
@@ -234,7 +234,7 @@ pub(crate) struct Stage {
     cpu: Option<u64>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "benchmark-internals"))]
 impl Stage {
     fn disabled() -> Self {
         Self {
@@ -246,7 +246,7 @@ impl Stage {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "benchmark-internals"))]
 impl Drop for Stage {
     fn drop(&mut self) {
         let Some(owner) = &self.owner else {
@@ -282,7 +282,7 @@ fn elapsed(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(any(test, feature = "benchmark-internals"), target_os = "linux"))]
 fn thread_cpu() -> Option<u64> {
     let value = nix::time::clock_gettime(nix::time::ClockId::CLOCK_THREAD_CPUTIME_ID).ok()?;
     let seconds = u64::try_from(value.tv_sec()).ok()?;
@@ -293,7 +293,7 @@ fn thread_cpu() -> Option<u64> {
     seconds.checked_mul(1_000_000_000)?.checked_add(nanos)
 }
 
-#[cfg(all(test, not(target_os = "linux")))]
+#[cfg(all(any(test, feature = "benchmark-internals"), not(target_os = "linux")))]
 fn thread_cpu() -> Option<u64> {
     None
 }

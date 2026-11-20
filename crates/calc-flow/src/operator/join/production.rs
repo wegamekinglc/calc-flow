@@ -331,6 +331,12 @@ impl RunCore {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        #[cfg(feature = "benchmark-internals")]
+        let admit_span =
+            context
+                .job()
+                .join_cpu_trace()
+                .stage(&operator.name, "run_admit", batch.num_rows());
         let plan = operator.begin_batch(ingress, batch)?;
         let mut bundle = operator.admission_bundle(&plan, batch)?;
         bundle.quantum = super::columnar_quantum::Quantum::bulk();
@@ -342,6 +348,8 @@ impl RunCore {
         operator
             .project_admitted_payloads(&mut bundle.admitted, plan.port_index, context)
             .await?;
+        #[cfg(feature = "benchmark-internals")]
+        drop(admit_span);
         let metrics = std::mem::take(&mut bundle.metrics);
         let cut = self.keys.cut();
         let prepared = self.prepare(operator, &plan, &bundle.admitted, context);
@@ -380,27 +388,21 @@ impl RunCore {
                 return Err(error);
             }
         };
-        for item in prepared.outputs() {
-            for (record, sequence) in item.records.iter().zip(&item.sequences) {
-                let result = async {
-                    context.check_cancelled()?;
-                    let metadata = BatchMetadata::new(&operator.name, *sequence, BTreeMap::new())?;
-                    output
-                        .emit("output", Batch::table(vec![record.clone()], metadata)?)
-                        .await
-                }
-                .await;
-                if let Err(error) = result {
-                    self.keys.rollback(cut);
-                    return Err(error);
-                }
-            }
+        if let Err(error) = emit_prepared(operator, &prepared, context, output).await {
+            self.keys.rollback(cut);
+            return Err(error);
         }
         let side = if plan.incoming_is_left {
             JoinSide::Left
         } else {
             JoinSide::Right
         };
+        #[cfg(feature = "benchmark-internals")]
+        let _commit = context.job().join_cpu_trace().stage(
+            &operator.name,
+            "run_commit",
+            prepared.matched_rows(),
+        );
         drop(prepared.commit(&mut self.state)?);
         self.sync_side(operator, side, metrics);
         operator.state.next_left_row_id = self.state.next_row_id(JoinSide::Left);
@@ -430,22 +432,29 @@ impl RunCore {
         } else {
             &compiled.right_key_indices
         };
+        #[cfg(feature = "benchmark-internals")]
+        let route_span =
+            context
+                .job()
+                .join_cpu_trace()
+                .stage(&operator.name, "run_route", admitted.len());
         let incoming = route(admitted, key_indices, &mut self.keys, &mut || {
             context.check_cancelled()
         })?;
-        self.state.prepare_batch(
-            side,
-            incoming,
-            RunOutputContext::new(
-                operator.output_ports[0]
-                    .schema()
-                    .expect("compiled Join output schema"),
-                operator.output_columns.as_deref(),
-                operator.retained_schema(0).fields().len(),
-                context.output_budget(),
-            ),
-            &mut || context.check_cancelled(),
-        )
+        #[cfg(feature = "benchmark-internals")]
+        drop(route_span);
+        let output = RunOutputContext::new(
+            operator.output_ports[0]
+                .schema()
+                .expect("compiled Join output schema"),
+            operator.output_columns.as_deref(),
+            operator.retained_schema(0).fields().len(),
+            context.output_budget(),
+        );
+        #[cfg(feature = "benchmark-internals")]
+        let output = output.with_trace(context.job().join_cpu_trace());
+        self.state
+            .prepare_batch(side, incoming, output, &mut || context.check_cancelled())
     }
 
     pub(super) fn evict(
@@ -515,6 +524,32 @@ impl RunCore {
             operator.state.metrics.right = metrics;
         }
     }
+}
+
+async fn emit_prepared(
+    operator: &StreamJoinOperator,
+    prepared: &PreparedRuns,
+    context: &StreamOperatorContext<'_>,
+    output: &mut dyn StreamCollector,
+) -> Result<()> {
+    #[cfg(feature = "benchmark-internals")]
+    let emit_span =
+        context
+            .job()
+            .join_cpu_trace()
+            .stage(&operator.name, "run_emit", prepared.matched_rows());
+    for item in prepared.outputs() {
+        for (record, sequence) in item.records.iter().zip(&item.sequences) {
+            context.check_cancelled()?;
+            let metadata = BatchMetadata::new(&operator.name, *sequence, BTreeMap::new())?;
+            output
+                .emit("output", Batch::table(vec![record.clone()], metadata)?)
+                .await?;
+        }
+    }
+    #[cfg(feature = "benchmark-internals")]
+    drop(emit_span);
+    Ok(())
 }
 
 fn route(
