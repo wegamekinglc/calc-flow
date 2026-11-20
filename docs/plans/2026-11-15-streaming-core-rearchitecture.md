@@ -339,6 +339,12 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   +15.63%（inconclusive），sparse +3.72%、finite −3.33%（均 inconclusive）；P6 4 核 ≥3 倍明确未达到。
   示例 route/apply 约 60/53 ms（串行）与 65/73 ms（并行），并行没有降低 apply 时间且 CPU 更高。
   此前 lease 实验没有真正执行并行，不能据此判定锁分摊无效；下一步仅在 worker 内预取旧组，避免串行新增扫描，仍无收益则关闭默认并行。
+- 2026-11-20 P6 worker 预取 lease 仍未达到门槛，默认并行已撤回（`84570246`，revert `ebc64d9f`；
+  激活 `6dcacab6`，revert `3c830fee`），证据归档于 `benchmarks/sum-state/p6-worker-prefetch-20261120/`。
+  stock-stream-1cpu +0.45%（no confirmed regression），stock-stream-8cpu +9.02%（inconclusive），
+  sparse/finite −0.52%/−1.23%（分别 no confirmed regression/inconclusive）。采集 120.652 秒、release 构建 632.512 秒，
+  全部 oracle 通过。撤回后相关源码与 `2ac1af5f` 一致，不重复同一检查。thread-per-record 与 lease batching 路线已证伪；
+  P6 仍需不同的路由/状态所有权设计，不能把当前状态称为性能升级。
 - 2026-11-20 P6 SQL restore/capture prepare 已从独立 `spawn_blocking` 执行迁入 job morsel：
   保留 JobSqlRecoveryOwner 的串行准入、join loan、候选算子安装与 abandoned-work 结算，启动 gate 改为异步 oneshot，
   morsel lease 并入 prepare 的取消检查。池关闭后拒绝新 prepare，不再绕过统一准入；3 项 SQL worker 生命周期测试及全 feature Clippy 通过。
