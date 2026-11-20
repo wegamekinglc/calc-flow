@@ -253,7 +253,9 @@ impl HotJoinCore {
         }
         .ok_or_else(|| operator_error(&operator.name, "native band planning is unsupported"))?;
         let session = datafusion::execution::context::SessionContext::new_with_config(
-            datafusion::execution::context::SessionConfig::new().with_target_partitions(1),
+            datafusion::execution::context::SessionConfig::new()
+                .with_target_partitions(1)
+                .with_batch_size(65_536),
         );
         let records = datafusion::physical_plan::collect(plan, session.task_ctx())
             .await
@@ -749,5 +751,76 @@ mod tests {
             assert_eq!(operator.state.metrics.emitted_match_rows, 4);
             assert!(operator.run_core.as_ref().unwrap().hot_enabled());
         }
+    }
+
+    #[tokio::test]
+    async fn hot_band_uses_large_output_batches() {
+        let rows = 70_000usize;
+        let record = RecordBatch::try_new(
+            quote_schema(),
+            vec![
+                Arc::new(
+                    TimestampMicrosecondArray::from_iter_values(
+                        (0..rows).map(|row| i64::try_from((row % 2) * 1_000_000).unwrap()),
+                    )
+                    .with_timezone("UTC"),
+                ),
+                Arc::new(UInt64Array::from_iter_values(
+                    (0..rows).map(|row| u64::try_from(row).unwrap()),
+                )),
+                Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
+                    "S000", rows,
+                ))),
+                Arc::new(Float64Array::from_iter_values(std::iter::repeat_n(
+                    2.0, rows,
+                ))),
+            ],
+        )
+        .unwrap();
+        let mut operator =
+            StreamJoinOperator::new("hot-band", quote_schema(), quote_schema(), band_spec())
+                .unwrap();
+        operator
+            .set_hot_projection(
+                HotProjection::Band,
+                Arc::new(Schema::new(vec![
+                    Field::new("sequence", DataType::UInt64, false),
+                    Field::new("right_sequence", DataType::UInt64, false),
+                    Field::new("value", DataType::Float64, false),
+                ])),
+            )
+            .unwrap();
+        operator.enable_run_core();
+        let job = StreamJobContext::new(
+            1,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        )
+        .with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "hot-band", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        for (side, input) in [("left", record.clone()), ("right", record.slice(0, 2))] {
+            operator
+                .process_data(
+                    side,
+                    Batch::table(vec![input], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+        }
+        let messages = collector.drain("output");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].as_data().unwrap().num_rows(), 65_536);
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.as_data().unwrap().num_rows())
+                .sum::<usize>(),
+            2 * rows
+        );
     }
 }
