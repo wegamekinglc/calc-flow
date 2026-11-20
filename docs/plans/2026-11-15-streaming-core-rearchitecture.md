@@ -271,6 +271,11 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   稀疏或 schema 转换输入保留 gather。两个 buffer 共享回归及 Join 模块 587 项测试、Clippy 通过。复测 Join P50 **422.432 ms**、
   interval P50 **1,147.609 ms**，描述性下降约 6.1%/1.7%，采集 43.173 秒，完整 oracle 均通过，但门槛仍未达到。
   证据见 `benchmarks/join-asof/p5-dense-runs-20261120/`；下一步以分阶段计时定位剩余成本，不再仅按推测微调。
+- 2026-11-20 P5 生产阶段诊断（`42d5ab31`）已完成：在显式 `benchmark-internals` wheel 上记录 admission、route、probe、merge、
+  materialize、emit 和 commit，单次 1M Join 完整 oracle 和自然结束通过。`run_route` **460.377 ms**（65.7%）、
+  `run_materialize` 140.155 ms（20.0%）、`run_probe` 79.144 ms（11.3%）、`run_admit` 11.400 ms（1.6%）。
+  带记录器的 701.569 ms 不与默认 P50 比较，也不作为门槛样本。证据见 `benchmarks/join-asof/p5-stage-profile-20261120/`；
+  下一步针对重复 key-run 的 group ID 复用，默认 KeyStore 的所有权行为不变。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
