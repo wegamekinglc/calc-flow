@@ -1,6 +1,6 @@
 use super::{
     JoinSide, JoinStateLimits, JoinTimeBounds,
-    runs::{Incoming, RunOutputContext, RunState},
+    runs::{Incoming, RunOutputContext, RunState, merge_visits, reset_merge_visits},
 };
 use crate::operator::keyed::{GroupId, KeySchema, KeyStore, MORSEL_ROWS};
 use crate::{Batch, BatchMetadata, DataFusionConfig, DataFusionRuntime, EdgeBudget, EventTime};
@@ -840,6 +840,65 @@ fn test_morsel_preparation_chains_across_unretained_rows() {
 }
 
 #[test]
+fn test_batch_merge_sorts_out_of_order_runs_like_sequential_appends() {
+    let first = || {
+        incoming(
+            &record(&[1, 1], &[20, 10]),
+            vec![0, 1],
+            vec![GroupId::new(0).unwrap(); 2],
+            &[20, 10],
+            &[0, 1],
+            vec![true; 2],
+            2,
+        )
+    };
+    let second = || {
+        incoming(
+            &record(&[1], &[15]),
+            vec![0],
+            vec![GroupId::new(0).unwrap()],
+            &[15],
+            &[2],
+            vec![true],
+            3,
+        )
+    };
+    let mut batched = state(100);
+    let prepared = batched
+        .prepare_batch(
+            JoinSide::Left,
+            vec![first(), second()],
+            RunOutputContext::new(&output_schema(), Some(&[1, 3]), 2, EdgeBudget::default()),
+            &mut || Ok(()),
+        )
+        .unwrap();
+    prepared.commit(&mut batched).unwrap();
+
+    let mut sequential = state(100);
+    for incoming in [first(), second()] {
+        sequential
+            .apply(
+                JoinSide::Left,
+                incoming,
+                &output_schema(),
+                Some(&[1, 3]),
+                2,
+                EdgeBudget::default(),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        batched.locators(JoinSide::Left),
+        sequential.locators(JoinSide::Left)
+    );
+    assert_eq!(
+        batched.snapshot().fingerprint(),
+        sequential.snapshot().fingerprint()
+    );
+    RunState::restore(batched.snapshot()).unwrap();
+}
+
+#[test]
 fn test_run_interval_large_batch_emits_every_match() {
     let rows = 10_000usize;
     let make = |keys: &mut KeyStore, retain: bool| {
@@ -897,6 +956,7 @@ fn test_run_interval_large_batch_emits_every_match() {
             .unwrap();
     }
     let sequential = state.snapshot().fingerprint();
+    reset_merge_visits();
     let mut batched = RunState::new(
         "run-large-interval",
         JoinStateLimits::new(100_000, 1 << 30, 1_000_000).unwrap(),
@@ -912,6 +972,7 @@ fn test_run_interval_large_batch_emits_every_match() {
         )
         .unwrap();
     left.commit(&mut batched).unwrap();
+    assert_eq!(merge_visits(), 2 * rows);
     assert_eq!(
         batched.locators(JoinSide::Left),
         state.locators(JoinSide::Left)

@@ -30,6 +30,21 @@ const BUCKET_OWNER_BYTES: usize = size_of::<Bucket>() + 64;
 const ROW_COLUMN_BYTES: usize =
     size_of::<GroupId>() + size_of::<i64>() + size_of::<u64>() + size_of::<RowLocator>();
 
+#[cfg(test)]
+thread_local! {
+    static MERGE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn reset_merge_visits() {
+    MERGE_VISITS.set(0);
+}
+
+#[cfg(test)]
+pub(super) fn merge_visits() -> usize {
+    MERGE_VISITS.get()
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct RunId(u64);
 
@@ -391,7 +406,7 @@ impl Side {
 }
 
 struct SideUpdate {
-    run: Arc<Run>,
+    runs: Vec<Arc<Run>>,
     buckets: Vec<(GroupId, Bucket)>,
     expiration: Vec<LocatorEntry>,
     rows: usize,
@@ -399,32 +414,44 @@ struct SideUpdate {
 }
 
 impl SideUpdate {
-    fn prepare<'a>(
-        side: &'a Side,
-        previous: Option<&'a Self>,
-        run: Arc<Run>,
-        limits: JoinStateLimits,
-    ) -> Result<Self> {
-        let bucket = |group| {
-            previous
-                .and_then(|update| {
-                    update
-                        .buckets
-                        .binary_search_by_key(&group, |(group, _)| *group)
-                        .ok()
-                        .map(|index| &update.buckets[index].1)
-                })
-                .or_else(|| side.buckets.get(&group))
-        };
+    fn prepare(side: &Side, runs: Vec<Arc<Run>>, limits: JoinStateLimits) -> Result<Self> {
         let mut grouped = BTreeMap::<GroupId, Vec<LocatorEntry>>::new();
-        for entry in run.entries() {
-            grouped.entry(entry.group).or_default().push(entry);
+        let mut expiration_entries = Vec::new();
+        let mut rows = side.rows;
+        let mut run_bytes = 0usize;
+        for run in &runs {
+            rows = rows
+                .checked_add(run.len())
+                .ok_or_else(|| run_error("state row count overflowed"))?;
+            run_bytes = run_bytes
+                .checked_add(run.bytes)
+                .ok_or_else(|| run_error("state run charge overflowed"))?;
+            for entry in run.entries() {
+                grouped.entry(entry.group).or_default().push(entry);
+                expiration_entries.push(entry);
+            }
+        }
+        if expiration_entries
+            .windows(2)
+            .any(|pair| pair[0].identity() >= pair[1].identity())
+        {
+            expiration_entries.sort_unstable_by_key(|entry| entry.identity());
+        }
+        for entries in grouped.values_mut() {
+            if entries
+                .windows(2)
+                .any(|pair| pair[0].identity() >= pair[1].identity())
+            {
+                entries.sort_unstable_by_key(|entry| entry.identity());
+            }
         }
         let buckets = grouped
             .into_iter()
             .map(|(group, entries)| {
-                let merged = bucket(group)
-                    .map_or(entries.clone(), |bucket| merge(bucket.active(), &entries));
+                let merged = side.buckets.get(&group).map_or_else(
+                    || merge(&[], &entries),
+                    |bucket| merge(bucket.active(), &entries),
+                );
                 (
                     group,
                     Bucket {
@@ -435,38 +462,30 @@ impl SideUpdate {
             })
             .collect::<Vec<_>>();
         let expiration = merge(
-            previous.map_or(&side.expiration[side.expiration_head..], |update| {
-                update.expiration.as_slice()
-            }),
-            &run.entries().collect::<Vec<_>>(),
+            &side.expiration[side.expiration_head..],
+            &expiration_entries,
         );
-        let new_owner_bytes = buckets.iter().try_fold(run.bytes, |total, (_, bucket)| {
+        let new_owner_bytes = buckets.iter().try_fold(run_bytes, |total, (_, bucket)| {
             total.checked_add(bucket.charge())
         });
         let new_owner_bytes = new_owner_bytes
             .and_then(|bytes| bytes.checked_add(expiration.capacity() * size_of::<LocatorEntry>()))
             .ok_or_else(|| run_error("state update charge overflowed"))?;
-        let expiration_charge = previous.map_or_else(
-            || side.expiration_charge(),
-            |update| update.expiration.capacity() * size_of::<LocatorEntry>(),
-        );
-        let replaced_bytes = buckets
-            .iter()
-            .try_fold(expiration_charge, |total, (group, _)| {
-                total.checked_add(bucket(*group).map_or(0, Bucket::charge))
-            });
+        let replaced_bytes =
+            buckets
+                .iter()
+                .try_fold(side.expiration_charge(), |total, (group, _)| {
+                    total.checked_add(side.buckets.get(group).map_or(0, Bucket::charge))
+                });
         let replaced_bytes =
             replaced_bytes.ok_or_else(|| run_error("replaced state charge overflowed"))?;
-        let base_rows = previous.map_or(side.rows, |update| update.rows);
-        let base_bytes = previous.map_or(side.bytes, |update| update.bytes);
-        let rows = base_rows
-            .checked_add(run.len())
-            .ok_or_else(|| run_error("state row count overflowed"))?;
-        let bytes = base_bytes
+        let bytes = side
+            .bytes
             .checked_add(new_owner_bytes)
             .and_then(|bytes| bytes.checked_sub(replaced_bytes))
             .ok_or_else(|| run_error("state byte count overflowed"))?;
-        let prospective = base_bytes
+        let prospective = side
+            .bytes
             .checked_add(new_owner_bytes)
             .ok_or_else(|| run_error("prospective state charge overflowed"))?;
         if u64::try_from(rows).unwrap_or(u64::MAX) > limits.max_state_rows_per_side()
@@ -480,7 +499,7 @@ impl SideUpdate {
             ));
         }
         Ok(Self {
-            run,
+            runs,
             buckets,
             expiration,
             rows,
@@ -489,14 +508,16 @@ impl SideUpdate {
     }
 
     fn install(self, side: &mut Side) {
-        side.runs.insert(
-            self.run.id,
-            LiveRun {
-                run: self.run,
-                head: 0,
-                released_bytes: 0,
-            },
-        );
+        for run in self.runs {
+            side.runs.insert(
+                run.id,
+                LiveRun {
+                    run,
+                    head: 0,
+                    released_bytes: 0,
+                },
+            );
+        }
         for (group, bucket) in self.buckets {
             side.buckets.insert(group, bucket);
         }
@@ -522,7 +543,7 @@ struct Prepared {
     incoming_is_left: bool,
     incoming: Incoming,
     probe: Probe,
-    update: Option<SideUpdate>,
+    run: Option<Arc<Run>>,
     next_row_id: u64,
     output_base: u64,
 }
@@ -562,6 +583,8 @@ pub(super) struct PreparedRuns {
     incoming_side: JoinSide,
     prepared: Vec<Prepared>,
     outputs: Vec<RunOutput>,
+    update: Option<SideUpdate>,
+    next_run: u64,
 }
 
 impl PreparedRuns {
@@ -577,25 +600,62 @@ impl PreparedRuns {
     }
 
     pub(super) fn commit(self, state: &mut RunState) -> Result<Vec<RunOutput>> {
-        if self
-            .prepared
+        let Self {
+            incoming_side,
+            prepared,
+            outputs,
+            update,
+            next_run,
+        } = self;
+        if prepared
             .first()
             .is_some_and(|prepared| prepared.output_base != state.next_output)
         {
             return Err(run_error("prepared batch output sequence is stale"));
         }
-        let counts = self
-            .outputs
-            .iter()
-            .map(|output| output.records.len())
-            .collect::<Vec<_>>();
-        for (prepared, count) in self.prepared.into_iter().zip(counts) {
-            if prepared.incoming_is_left != (self.incoming_side == JoinSide::Left) {
+        let mut next_output = state.next_output;
+        for (prepared, output) in prepared.iter().zip(&outputs) {
+            if prepared.incoming_is_left != (incoming_side == JoinSide::Left) {
                 return Err(run_error("prepared batch changed its input side"));
             }
-            prepared.commit(state, count)?;
+            if prepared.output_base != next_output {
+                return Err(run_error("prepared output sequence is stale"));
+            }
+            let count = u64::try_from(output.records.len())
+                .map_err(|_| run_error("output count overflowed"))?;
+            next_output = next_output
+                .checked_add(count)
+                .ok_or_else(|| run_error("output sequence overflowed"))?;
         }
-        Ok(self.outputs)
+        let next_row_id = prepared.last().map_or_else(
+            || state.next_row_id(incoming_side),
+            |prepared| prepared.next_row_id,
+        );
+        let side = incoming_side.index();
+        if let Some(update) = update {
+            let expected = u64::try_from(update.runs.len())
+                .ok()
+                .and_then(|count| state.next_run.checked_add(count));
+            if update.runs.first().map(|run| run.id.0) != Some(state.next_run)
+                || expected != Some(next_run)
+            {
+                return Err(run_error("prepared run identity is stale"));
+            }
+            let ids = update.runs.iter().map(|run| run.id).collect::<Vec<_>>();
+            let groups = update
+                .buckets
+                .iter()
+                .map(|(group, _)| *group)
+                .collect::<Vec<_>>();
+            update.install(&mut state.sides[side]);
+            state.dirty.runs[side].extend(ids);
+            state.dirty.groups[side].extend(groups);
+            state.dirty.expiration[side] = true;
+        }
+        state.sides[side].next_row_id = next_row_id;
+        state.next_run = next_run;
+        state.next_output = next_output;
+        Ok(outputs)
     }
 }
 
@@ -734,13 +794,6 @@ impl RunState {
 
     pub(super) fn bytes(&self, side: JoinSide) -> usize {
         self.sides[side.index()].bytes
-    }
-
-    fn mark_run(&mut self, side: JoinSide, id: RunId, groups: Vec<GroupId>) {
-        let side = side.index();
-        self.dirty.runs[side].insert(id);
-        self.dirty.groups[side].extend(groups);
-        self.dirty.expiration[side] = true;
     }
 
     pub(super) fn finish_native_capture(&mut self) {
@@ -948,16 +1001,14 @@ impl RunState {
         let mut matches = 0usize;
         let mut next_run = self.next_run;
         let mut prepared = Vec::<Prepared>::new();
+        let mut runs = Vec::new();
         for incoming in incoming {
-            let previous = prepared
-                .iter()
-                .rev()
-                .find_map(|prepared| prepared.update.as_ref());
-            let next = self.prepare(incoming_side, incoming, RunId(next_run), previous, check)?;
-            if next.update.is_some() {
+            let next = self.prepare(incoming_side, incoming, RunId(next_run), check)?;
+            if let Some(run) = &next.run {
                 next_run = next_run
                     .checked_add(1)
                     .ok_or_else(|| run_error("run-ID frontier overflowed"))?;
+                runs.push(Arc::clone(run));
             }
             matches = matches
                 .checked_add(next.probe.len())
@@ -970,6 +1021,15 @@ impl RunState {
             self.limits.max_matches_per_input_batch(),
             &self.name,
         )?;
+        let update = if runs.is_empty() {
+            None
+        } else {
+            Some(SideUpdate::prepare(
+                &self.sides[incoming_side.index()],
+                runs,
+                self.limits,
+            )?)
+        };
         let mut next_output = self.next_output;
         let mut outputs = Vec::with_capacity(prepared.len());
         for prepared in &mut prepared {
@@ -997,6 +1057,8 @@ impl RunState {
             incoming_side,
             prepared,
             outputs,
+            update,
+            next_run,
         })
     }
 
@@ -1005,7 +1067,6 @@ impl RunState {
         incoming_side: JoinSide,
         incoming: Incoming,
         id: RunId,
-        previous: Option<&SideUpdate>,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<Prepared> {
         check()?;
@@ -1014,23 +1075,12 @@ impl RunState {
         }
         let probe = self.probe(incoming_side, &incoming, check)?;
         let run = Run::new(id, &incoming)?;
-        let update = run
-            .as_ref()
-            .map(|run| {
-                SideUpdate::prepare(
-                    &self.sides[incoming_side.index()],
-                    previous,
-                    Arc::clone(run),
-                    self.limits,
-                )
-            })
-            .transpose()?;
         Ok(Prepared {
             incoming_is_left: incoming_side == JoinSide::Left,
             next_row_id: incoming.next_row_id,
             incoming,
             probe,
-            update,
+            run,
             output_base: self.next_output,
         })
     }
@@ -1356,37 +1406,6 @@ impl Prepared {
         )
         .map_err(|error| operator_error(&state.name, &format!("run output failed: {error}")))
     }
-
-    fn commit(self, state: &mut RunState, outputs: usize) -> Result<()> {
-        if self.output_base != state.next_output {
-            return Err(run_error("prepared output sequence is stale"));
-        }
-        let incoming_side = if self.incoming_is_left {
-            JoinSide::Left
-        } else {
-            JoinSide::Right
-        };
-        if let Some(update) = self.update {
-            let id = update.run.id;
-            if id != RunId(state.next_run) {
-                return Err(run_error("prepared run identity is stale"));
-            }
-            let groups = update.buckets.iter().map(|(group, _)| *group).collect();
-            state.next_run = state
-                .next_run
-                .checked_add(1)
-                .ok_or_else(|| run_error("run-ID frontier overflowed"))?;
-            update.install(&mut state.sides[incoming_side.index()]);
-            state.mark_run(incoming_side, id, groups);
-        }
-        state.sides[incoming_side.index()].next_row_id = self.next_row_id;
-        let outputs = u64::try_from(outputs).map_err(|_| run_error("output count overflowed"))?;
-        state.next_output = state
-            .next_output
-            .checked_add(outputs)
-            .ok_or_else(|| run_error("output sequence overflowed"))?;
-        Ok(())
-    }
 }
 
 #[derive(Clone)]
@@ -1579,6 +1598,8 @@ fn validate_snapshot(snapshot: &RunStateSnapshot) -> Result<()> {
 }
 
 fn merge(left: &[LocatorEntry], right: &[LocatorEntry]) -> Vec<LocatorEntry> {
+    #[cfg(test)]
+    MERGE_VISITS.with(|count| count.set(count.get() + left.len() + right.len()));
     let mut merged = Vec::with_capacity(left.len() + right.len());
     let (mut left, mut right) = (left.iter().peekable(), right.iter().peekable());
     loop {
