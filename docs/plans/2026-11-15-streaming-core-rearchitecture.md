@@ -319,6 +319,15 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   但不构成性能升级；采集分别在 127.048/29.587 秒内完成。证据见 `benchmarks/sum-state/p6-dense-utf8-20261121/`
   和 `benchmarks/sum-state/p4-dense-10m-20261121/`。旧 `aefd17dc` 因缺少当前 harness 所需接口而在计时前排除，
   随后使用兼容的 `2ac1af5f`。dense 绕过旧阶段计时，根因尚未隔离；撤回该实现，不追加样本寻找有利中位数。
+- 2026-11-21 P4/P6 DataFusion 整批委托也被性能证据否决：首版 `5d666afa` 因真实输入没有 `sequence` 而未激活；
+  `74ac0775` 改用 `ROW_NUMBER()` 恢复首见组顺序后，P4 10M 单核 P50 为 **3,872.5 ms**、P95 3,956 ms，
+  明显未达到 ≤500 ms。P6 两轮各 10 组 AB/BA、共 160 个观测的完整 snapshot/lifecycle oracle 全部通过，
+  但 stock 单核仅 −0.49%，八逻辑核从 138.798 ms 到 137.206 ms（−1.15%，no confirmed regression），
+  远未达到四物理核 ≥3×；sparse +1.97%、finite +1.36% 均 inconclusive。采集在既定预算内完成，
+  不追加样本。证据分别保存在 `benchmarks/sum-state/p4-delegated-10m-20261121/ordinal-result.json` 和
+  `benchmarks/sum-state/p6-delegated-20261121/ordinal-*`。构建 receipt 的 source HEAD 为 `1aab97c6`，
+  运行时代码相对 `74ac0775` 仅增加验收计划文档。撤回整批 SQL 委托，下一步直接消除原生 SUM 的逐行
+  `BTreeMap` 状态访问，不以 DataFusion 局部聚合替代端到端验收。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
