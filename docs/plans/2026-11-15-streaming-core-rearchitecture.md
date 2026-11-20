@@ -273,6 +273,10 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   reservations，池关闭后拒绝新编码，普通错误仍可重试。懒初始化 owner 改为 Arc<OnceLock<_>>，所有 job clone
   共享同一生命周期，修复 prepare 放弃时最后 owner 等待编码线程退出的阻塞；两个既有 dropped-prepare/worker 回归恢复。
   SQL 340 项、ASOF 49 项、order 11 项及全 feature Clippy 通过。固定 N 分区、Window/v4 其余 CPU 编码迁移和性能门槛尚未完成。
+- 2026-11-20 P6 Window 非空 checkpoint operations 编码已从 spawn_blocking 迁入 managed morsel，
+  operations/spec/状态身份均由 owned work 携带，空操作保持直接返回，编码前后检查取消，池关闭后拒绝新编码。
+  Window 55 项（1 ignored）、window_state 15 项、window_hopping 4 项及全 feature Clippy 通过。
+  固定 N 分区、v4 store 与其余 CPU 编码迁移和性能门槛尚未完成。
 
 ## 1. 目标
 
