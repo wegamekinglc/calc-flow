@@ -384,6 +384,14 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   静态较上一轮描述性降低约 3.70%，interval 较 282.396 ms 描述性增加约 8.98%；不是配对显著性或等价结论，
   不追加样本寻找更优中位数。首次 0 样本失败和最终原始样本均保留在 `benchmarks/join-asof/p5-hot-multi-recovery-20261121/`。
   多批与 durable 正确性至此有真实磁盘/native 覆盖，但多批吞吐、ASOF 和其余验收矩阵仍未测量。
+- 2026-11-21 P3.7 direct 驱动（`7d0b4169`）已实现真实 Rolling→`mean5-mean` projection 的 checkpoint-on/no-epoch
+  与 checkpoint-off 对照，独立二进制分数 oracle、digest、AB/BA 和 paired statistics 齐备；2 个 Rust 测试、
+  benchmark feature Clippy、6 个 Python 测试及直接 CLI 通过。首次 release 构建在 20 分钟工具超时终止，
+  同一增量构建随后以 1,309.230 秒完成，构建与采集预算分离。M1 `1x1-dual` 两轮中位数约 +0.326%/+0.339%，
+  第二轮 95% 区间上界 **3.0559%** 跨过 3% 门槛，故为 **inconclusive** 而非通过，未重试。M2 `6400x64-dual`
+  两轮中位数 +1.249%/+1.163%，区间均未跨门槛，pooled +1.165%，**通过**。两例各完成 2 轮×10 对×每臂 30 次
+  dispatch，完整 oracle/digest 通过，采集 0.227/1.086 秒。原始样本、报告与 build receipt 均保存在
+  `benchmarks/checkpoint-v4/`。M3/M4 持续 runner 测量尚未实现，P3 不能据此宣告全部完成。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
