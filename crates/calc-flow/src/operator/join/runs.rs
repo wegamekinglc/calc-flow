@@ -898,7 +898,6 @@ impl RunState {
             .collect()
     }
 
-    #[cfg(test)]
     pub(super) fn restore_counters(
         &mut self,
         next_row_ids: [u64; 2],

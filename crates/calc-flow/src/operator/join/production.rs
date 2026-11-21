@@ -11,9 +11,10 @@ use super::{
 };
 use crate::operator::keyed::{KeySchema, KeyStore, MORSEL_ROWS};
 use crate::state::v4::native::{NativeCapture, NativePage, NativePageChange, NativePartition};
-use crate::{Batch, BatchMetadata, Result, StreamCollector, StreamOperatorContext};
+use crate::{Batch, BatchMetadata, EventTime, Result, StreamCollector, StreamOperatorContext};
 use datafusion::arrow::{
-    array::BooleanArray,
+    array::{BooleanArray, TimestampMicrosecondArray},
+    datatypes::SchemaRef,
     record_batch::{RecordBatch, RecordBatchOptions},
 };
 use std::{collections::BTreeMap, sync::Arc};
@@ -59,11 +60,143 @@ impl RunCore {
         })
     }
 
-    pub(super) fn native_capture(
+    fn migrate_hot(&mut self, operator: &mut StreamJoinOperator) -> Result<()> {
+        let Some([left, right]) = self
+            .hot
+            .as_ref()
+            .filter(|hot| hot.has_history())
+            .map(super::hot::HotJoinCore::history)
+        else {
+            return Ok(());
+        };
+        let mut migrated = Self::new(operator)?;
+        migrated.hot = None;
+        for (side, batch) in [(JoinSide::Left, left), (JoinSide::Right, right)] {
+            if let Some(batch) = batch {
+                migrated.seed_hot(operator, side, &batch)?;
+            }
+        }
+        migrated.state.restore_counters(
+            [
+                operator.state.next_left_row_id,
+                operator.state.next_right_row_id,
+            ],
+            operator.state.next_output_sequence,
+            operator.state.metrics.match_limit_failures,
+        );
+        for side in [JoinSide::Left, JoinSide::Right] {
+            let metrics = if side == JoinSide::Left {
+                operator.state.metrics.left.clone()
+            } else {
+                operator.state.metrics.right.clone()
+            };
+            migrated.sync_side(operator, side, metrics);
+        }
+        operator.state.next_left_row_id = migrated.state.next_row_id(JoinSide::Left);
+        operator.state.next_right_row_id = migrated.state.next_row_id(JoinSide::Right);
+        operator.state.next_output_sequence = migrated.state.next_output_sequence();
+        *self = migrated;
+        Ok(())
+    }
+
+    fn seed_hot(
         &mut self,
         operator: &StreamJoinOperator,
+        side: JoinSide,
+        batch: &Batch,
+    ) -> Result<()> {
+        let compiled = operator.retained_compiled();
+        let (event_time, keys) = if side == JoinSide::Left {
+            (
+                compiled.left_event_time_index,
+                compiled.left_key_indices.as_slice(),
+            )
+        } else {
+            (
+                compiled.right_event_time_index,
+                compiled.right_key_indices.as_slice(),
+            )
+        };
+        let mut next_row_id = self.state.next_row_id(side);
+        let mut incoming = Vec::new();
+        for record in batch.table_payload()?.batches() {
+            let record = retained_hot_record(operator, side, record)?;
+            let times = record
+                .column(event_time)
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .expect("hot Join time is microseconds");
+            for start in (0..record.num_rows()).step_by(MORSEL_ROWS) {
+                let rows = (record.num_rows() - start).min(MORSEL_ROWS);
+                let row_ids = (0..rows)
+                    .map(|row| {
+                        let row = u64::try_from(row)
+                            .map_err(|_| counter_overflow(&operator.name, "hot row_id"))?;
+                        next_row_id
+                            .checked_add(row)
+                            .ok_or_else(|| counter_overflow(&operator.name, "hot row_id"))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let following_row_id = next_row_id
+                    .checked_add(
+                        u64::try_from(rows)
+                            .map_err(|_| counter_overflow(&operator.name, "hot row_id"))?,
+                    )
+                    .ok_or_else(|| counter_overflow(&operator.name, "hot row_id"))?;
+                let times = times
+                    .iter()
+                    .skip(start)
+                    .take(rows)
+                    .map(|time| {
+                        time.map(EventTime::from_micros).ok_or_else(|| {
+                            operator_error(&operator.name, "hot history has null event time")
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let cut = self.keys.cut();
+                let chunk = Incoming::route(
+                    &record.slice(start, rows),
+                    keys,
+                    (0..rows).collect(),
+                    times,
+                    row_ids,
+                    BooleanArray::from(vec![true; rows]),
+                    following_row_id,
+                    &mut self.keys,
+                    &mut || Ok(()),
+                );
+                match chunk {
+                    Ok(chunk) => incoming.push(chunk),
+                    Err(error) => {
+                        self.keys.rollback(cut);
+                        return Err(error);
+                    }
+                }
+                next_row_id = following_row_id;
+            }
+        }
+        if incoming.is_empty() {
+            return Ok(());
+        }
+        let output = RunOutputContext::new(
+            run_output_schema(operator),
+            operator.output_columns.as_deref(),
+            operator.retained_schema(0).fields().len(),
+            crate::EdgeBudget::default(),
+        );
+        let prepared = self
+            .state
+            .prepare_batch(side, incoming, output, &mut || Ok(()))?;
+        drop(prepared.commit(&mut self.state)?);
+        Ok(())
+    }
+
+    pub(super) fn native_capture(
+        &mut self,
+        operator: &mut StreamJoinOperator,
         epoch: crate::Epoch,
     ) -> Result<Option<NativeCapture>> {
+        self.migrate_hot(operator)?;
         let mut metrics = operator.state.metrics.clone();
         for side in [JoinSide::Left, JoinSide::Right] {
             let rows = u64::try_from(self.state.rows(side)).unwrap_or(u64::MAX);
@@ -342,6 +475,13 @@ impl RunCore {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        if self
+            .hot
+            .as_ref()
+            .is_some_and(|hot| hot.needs_migration(ingress))
+        {
+            self.migrate_hot(operator)?;
+        }
         if let Some(hot) = &mut self.hot {
             return hot.process(operator, ingress, batch, context, output).await;
         }
@@ -458,9 +598,7 @@ impl RunCore {
         #[cfg(feature = "benchmark-internals")]
         drop(route_span);
         let output = RunOutputContext::new(
-            operator.output_ports[0]
-                .schema()
-                .expect("compiled Join output schema"),
+            run_output_schema(operator),
             operator.output_columns.as_deref(),
             operator.retained_schema(0).fields().len(),
             context.output_budget(),
@@ -543,6 +681,46 @@ impl RunCore {
     }
 }
 
+fn run_output_schema(operator: &StreamJoinOperator) -> &SchemaRef {
+    if operator.hot_projection.is_some() {
+        &operator.logical_output_schema
+    } else {
+        operator.output_ports[0]
+            .schema()
+            .expect("compiled Join output schema")
+    }
+}
+
+fn retained_hot_record(
+    operator: &StreamJoinOperator,
+    side: JoinSide,
+    record: &RecordBatch,
+) -> Result<RecordBatch> {
+    let schema = operator.retained_schema(side.index());
+    let columns = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            record
+                .schema()
+                .index_of(field.name())
+                .map(|index| record.column(index).clone())
+                .map_err(|error| {
+                    operator_error(
+                        &operator.name,
+                        &format!("hot history column {:?}: {error}", field.name()),
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    RecordBatch::try_new_with_options(
+        Arc::clone(schema),
+        columns,
+        &RecordBatchOptions::new().with_row_count(Some(record.num_rows())),
+    )
+    .map_err(|error| operator_error(&operator.name, &format!("hot history: {error}")))
+}
+
 async fn emit_prepared(
     operator: &StreamJoinOperator,
     prepared: &PreparedRuns,
@@ -558,9 +736,10 @@ async fn emit_prepared(
     for item in prepared.outputs() {
         for (record, sequence) in item.records.iter().zip(&item.sequences) {
             context.check_cancelled()?;
+            let record = super::hot::project_run_record(operator, record)?;
             let metadata = BatchMetadata::new(&operator.name, *sequence, BTreeMap::new())?;
             output
-                .emit("output", Batch::table(vec![record.clone()], metadata)?)
+                .emit("output", Batch::table(vec![record], metadata)?)
                 .await?;
         }
     }
@@ -693,7 +872,7 @@ mod tests {
         let rows = (1usize..3)
             .map(|row| AdmittedRef {
                 record: PayloadRef::Record(&record, row),
-                event_time: crate::EventTime::from_micros(i64::try_from(row).unwrap()),
+                event_time: EventTime::from_micros(i64::try_from(row).unwrap()),
                 row_id: u64::try_from(row).unwrap(),
                 retain: true,
             })
