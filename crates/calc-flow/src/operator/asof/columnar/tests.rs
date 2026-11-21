@@ -111,6 +111,7 @@ fn keys_only_snapshot(
 
 #[test]
 fn test_visible_latest_right_row_skips_binary_search_only_when_safe() {
+    let _ = super::state::take_latest_binary_searches();
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
     {
         let declaration = spec(5, 100, 1 << 20);
