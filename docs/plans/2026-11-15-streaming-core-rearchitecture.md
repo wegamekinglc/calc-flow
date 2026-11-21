@@ -378,6 +378,12 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   聚焦百万行回归进一步证明 terminal capture 会无谓重建并保留 1,000,000 行历史；新增“双源结束后不得重建历史”断言先以
   `left=1000000/right=0` 失败，随后让 terminal capture 直接释放 hot 历史，非 terminal 恢复仍走原子迁移。修复后该回归及 Join
   **599 项**及全 feature Clippy 通过；新 release wheel 验收另行记录，当前不把首次失败改写为性能结论。
+- 2026-11-21 P5 terminal 修复候选 `d6e49ddc` 的密封 wheel（source `0c7b4ee7`）已完成两例复测：静态 Join
+  P50 **16.417 ms**、P95 16.675 ms，interval P50 **307.755 ms**、P95 327.228 ms，分别通过 ≤30/≤350 ms。
+  两例各 10/10 完整 oracle 通过，输出 1,000,000/10,998,080 行且误差为 0，采集 27.406 秒，release 构建 611.470 秒另计。
+  静态较上一轮描述性降低约 3.70%，interval 较 282.396 ms 描述性增加约 8.98%；不是配对显著性或等价结论，
+  不追加样本寻找更优中位数。首次 0 样本失败和最终原始样本均保留在 `benchmarks/join-asof/p5-hot-multi-recovery-20261121/`。
+  多批与 durable 正确性至此有真实磁盘/native 覆盖，但多批吞吐、ASOF 和其余验收矩阵仍未测量。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
