@@ -25,14 +25,13 @@ use super::{
     dispatch_watermark_handler,
 };
 use crate::{
-    Batch, BatchKind, BatchMetadata, CancellationToken, Cursor, Edge, EdgeBudget, EdgeReceiver,
-    Epoch, EventTime, ExpressionOperator, IngressProgressSnapshot, JsonMap,
+    Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken, Cursor, Edge, EdgeBudget,
+    EdgeReceiver, Epoch, EventTime, ExpressionOperator, IngressProgressSnapshot, JsonMap,
     ManagedCheckpointRuntime, NativeWatermarkCapability, OperatorMetadata, PipelineBuilder, Port,
     PortEndpoint, ReplayPositioning, RollingOperator, RollingSpec, SinkBinding, SourceBinding,
     SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema, StreamExecutionPlan,
     StreamJobContext, StreamMessage, StreamRequirements, StreamRuntimeConfig, StreamSession,
     StreamSink, StreamSource, StreamingRunner, UdfRegistry, WatermarkPolicy,
-    benchmark_internals::invalid,
     operator::rolling_metrics::RollingMetricsStore,
     pipeline::{CompiledStreamOperator, OperatorCheckpointCapability},
     state::v4::V4Store,
@@ -989,6 +988,7 @@ fn direct_checkpoint_pair_reports_median_and_digest() {
     assert!(evidence["pairs"][0]["output_digest"].is_array());
 }
 
+#[cfg(feature = "benchmark-internals")]
 #[test]
 #[ignore = "P3.7 direct checkpoint performance evidence, not a CI timing gate"]
 fn checkpoint_direct_evidence() {
@@ -1142,6 +1142,13 @@ impl StreamSink for RunnerSink {
 
     async fn close(&mut self) -> crate::Result<()> {
         Ok(())
+    }
+}
+
+fn invalid(message: impl Into<String>) -> CalcFlowError {
+    CalcFlowError::InvalidArgument {
+        field: "benchmark_fixture".into(),
+        message: message.into(),
     }
 }
 
@@ -1390,6 +1397,7 @@ async fn runner_round_tracks_warmups_and_alternating_pairs() {
     );
 }
 
+#[cfg(feature = "benchmark-internals")]
 #[test]
 #[ignore = "P3.7 sustained runner performance evidence, not a CI timing gate"]
 fn checkpoint_runner_evidence() {

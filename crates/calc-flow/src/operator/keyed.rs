@@ -996,11 +996,15 @@ fn hash_strings<T: StringKeyArray + 'static>(
         hash.bytes(&[u8::from(values.is_null(row))]);
         if values.is_valid(row) {
             let bytes = values.key_value(row).as_bytes();
-            let mut offset = 0;
-            while offset < bytes.len() {
-                let count = variable.chunk(bytes.len() - offset)?;
-                hash.bytes(&bytes[offset..offset + count]);
-                offset += count;
+            if bytes.len() <= VARIABLE_STEP_BYTES {
+                hash.bytes(bytes);
+            } else {
+                let mut offset = 0;
+                while offset < bytes.len() {
+                    let count = variable.chunk(bytes.len() - offset)?;
+                    hash.bytes(&bytes[offset..offset + count]);
+                    offset += count;
+                }
             }
         }
     }
@@ -1104,11 +1108,15 @@ fn canonical_string(
     if let Some(value) = value {
         output.extend_from_slice(&(value.len() as u64).to_le_bytes());
         let bytes = value.as_bytes();
-        let mut offset = 0;
-        while offset < bytes.len() {
-            let count = variable.chunk(bytes.len() - offset)?;
-            output.extend_from_slice(&bytes[offset..offset + count]);
-            offset += count;
+        if bytes.len() <= VARIABLE_STEP_BYTES {
+            output.extend_from_slice(bytes);
+        } else {
+            let mut offset = 0;
+            while offset < bytes.len() {
+                let count = variable.chunk(bytes.len() - offset)?;
+                output.extend_from_slice(&bytes[offset..offset + count]);
+                offset += count;
+            }
         }
     }
     Ok(())
@@ -1815,6 +1823,9 @@ fn string_equality<T: StringKeyArray>(
     }
     let left = stored.as_bytes();
     let right = incoming.as_bytes();
+    if left.len() <= VARIABLE_STEP_BYTES {
+        return Ok(left == right);
+    }
     let mut offset = 0;
     while offset < left.len() {
         let count = variable.chunk(left.len() - offset)?;
