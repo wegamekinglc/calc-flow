@@ -1,6 +1,6 @@
 # Streaming core rearchitecture — closing review
 
-Status: **CI repair review passed; Join performance gates failed; candidate review and GitHub CI are pending**. This is not a merge-ready claim. The overall P0–P7 architecture and absolute performance plan remains incomplete.
+Status: **candidate and CI repair reviews passed; Join performance gates failed and GitHub CI is pending**. This is not a merge-ready claim. The overall P0–P7 architecture and absolute performance plan remains incomplete.
 
 ## Review history
 
@@ -89,7 +89,8 @@ Evidence: `benchmarks/join-asof/p5-review-fixes-20261122/diagnosis.json`.
 
 - The transient-admission candidate `f327a886` reduced static Join P50 from 619.785 to **518.787 ms**, still above the 30 ms gate. Its sealed build took 714.230 seconds and acquisition took 10.362 seconds. All ten output oracles passed. Evidence: `benchmarks/join-asof/p5-static-transient-20261122/result.json`.
 - The dictionary-charge candidate `e860894e` reduced static P50 to **496.539 ms** (−4.29% against the transient candidate) and interval P50 to **1,617.387 ms** (−21.42% against the earlier review candidate). Both absolute gates still fail. The separate build took 635.410 seconds and both acquisitions took 48.372 seconds. All 20 output oracles passed. Direct full-routing comparisons and 18 hot tests passed. Evidence: `benchmarks/join-asof/p5-dictionary-charge-20261122/result.json`.
-- These are real but insufficient improvements. No further charge tuning is planned. The narrow transient and dictionary changes are retained only with their equivalence and lifecycle tests, not as a gate recovery or merge-ready performance result.
+- These earlier candidates showed real but insufficient improvements. No further charge tuning is planned. The narrow transient and dictionary changes are retained only with their equivalence and lifecycle tests, not as a gate recovery or merge-ready performance result.
+- Correctness reseal `34087619` produced static P50 **632.161 ms** and interval P50 **2,032.692 ms**, with all 20 output oracles passing. Acquisition took 61.872 seconds and the separate build took 825.350 seconds. The earlier lower values are historical only; this is not a paired comparison, so no causal regression or speedup is claimed. Both gates still fail. The focused reviewer confirmed the cumulative group-limit blocker is closed with no new blocking findings. Evidence: `benchmarks/join-asof/p5-dictionary-limit-20261122/result.json`.
 
 ## CI-driven follow-up
 
