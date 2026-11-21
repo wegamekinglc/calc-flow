@@ -105,7 +105,11 @@ pub(crate) fn numpy_snapshot(values: &Bound<'_, PyAny>) -> PyResult<NativeArray>
             "expected native-endian bool, float32 or float64",
         ));
     }
-    match dtype.num() {
+    typed_numpy_snapshot(values, dtype.num())
+}
+
+fn typed_numpy_snapshot(values: &Bound<'_, PyAny>, dtype: i32) -> PyResult<NativeArray> {
+    match dtype {
         value if value == numpy::npyffi::NPY_TYPES::NPY_BOOL as i32 => {
             boolean_numpy_snapshot(values)
         }

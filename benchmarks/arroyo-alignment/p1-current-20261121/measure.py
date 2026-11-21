@@ -503,23 +503,34 @@ async def acquire_samples(args, root: Path, cases: list, started: float) -> list
     return samples
 
 
-def summary_entry(samples: list[dict], engine: str, case: str, gap: float) -> dict:
-    selected = [
+def matching_samples(
+    samples: list[dict], engine: str, case: str, gap: float
+) -> list[dict]:
+    return [
         sample
         for sample in samples
         if sample["engine"] == engine
         and sample["case"] == case
         and sample["gap_s"] == gap
     ]
+
+
+def summary_quantiles(selected: list[dict]) -> dict:
     return {
-        "case": case,
-        "gap_s": gap,
-        "engine": engine,
         "throughput": quantiles([s["rows_per_second"] for s in selected]),
         "latency_p50_ms": quantiles([s["latency_ms"]["p50"] for s in selected]),
         "latency_p95_ms": quantiles([s["latency_ms"]["p95"] for s in selected]),
         "rss_peak_mib": quantiles([s["rss_peak_bytes"] / 2**20 for s in selected]),
         "startup_s": quantiles([s["startup_to_connection_s"] for s in selected]),
+    }
+
+
+def summary_entry(samples: list[dict], engine: str, case: str, gap: float) -> dict:
+    return {
+        "case": case,
+        "gap_s": gap,
+        "engine": engine,
+        **summary_quantiles(matching_samples(samples, engine, case, gap)),
     }
 
 
