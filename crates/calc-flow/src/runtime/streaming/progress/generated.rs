@@ -109,6 +109,19 @@ impl GeneratedWatermarkState {
         self.max_observed_nanos
     }
 
+    pub(crate) fn max_observed_micros(&self) -> Result<Option<EventTime>> {
+        self.max_observed_nanos
+            .map(|observed| {
+                i64::try_from(observed.div_euclid(1_000))
+                    .map(EventTime::from_micros)
+                    .map_err(|_| CalcFlowError::CheckpointMismatch {
+                        message: "generated watermark observed maximum exceeds the durable range"
+                            .into(),
+                    })
+            })
+            .transpose()
+    }
+
     pub(crate) const fn last_emitted(&self) -> Option<EventTime> {
         self.last_emitted
     }

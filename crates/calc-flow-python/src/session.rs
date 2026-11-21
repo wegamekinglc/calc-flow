@@ -182,32 +182,9 @@ impl PyStreamSession {
         let config = crate::continuous::runtime_config(config)?;
         let watermarks = session_watermarks(watermarks)?;
         let (plan, owner) = plan.take()?;
-        let checkpoints = checkpoints.map(|runtime| runtime.take()).transpose()?;
-        if restore && checkpoints.is_none() {
-            return Err(PyValueError::new_err(
-                "restore requires managed checkpoint storage",
-            ));
-        }
+        let checkpoints = take_checkpoint_runtime(checkpoints, restore)?;
         let session = py
-            .detach(move || {
-                if restore {
-                    calc_flow::StreamSession::restore(
-                        plan,
-                        &config,
-                        watermarks,
-                        checkpoints.expect("restore storage was checked"),
-                    )
-                } else if let Some(checkpoints) = checkpoints {
-                    calc_flow::StreamSession::new_with_checkpoints(
-                        plan,
-                        &config,
-                        watermarks,
-                        checkpoints,
-                    )
-                } else {
-                    calc_flow::StreamSession::new(plan, &config, watermarks)
-                }
-            })
+            .detach(move || open_native_session(plan, &config, watermarks, checkpoints, restore))
             .map_err(crate::error::to_py_err)?;
         let input_ids = session.input_ids().into_iter().map(str::to_owned).collect();
         let output_ids = session
@@ -312,6 +289,40 @@ impl PyStreamSession {
     }
 }
 
+fn take_checkpoint_runtime(
+    checkpoints: Option<PyRef<'_, crate::continuous::PyManagedCheckpointRuntime>>,
+    restore: bool,
+) -> PyResult<Option<calc_flow::ManagedCheckpointRuntime>> {
+    let checkpoints = checkpoints.map(|runtime| runtime.take()).transpose()?;
+    if restore && checkpoints.is_none() {
+        return Err(PyValueError::new_err(
+            "restore requires managed checkpoint storage",
+        ));
+    }
+    Ok(checkpoints)
+}
+
+fn open_native_session(
+    plan: calc_flow::StreamExecutionPlan,
+    config: &calc_flow::StreamRuntimeConfig,
+    watermarks: BTreeMap<String, calc_flow::SessionWatermark>,
+    checkpoints: Option<calc_flow::ManagedCheckpointRuntime>,
+    restore: bool,
+) -> calc_flow::Result<calc_flow::StreamSession> {
+    if restore {
+        calc_flow::StreamSession::restore(
+            plan,
+            config,
+            watermarks,
+            checkpoints.expect("restore storage was checked"),
+        )
+    } else if let Some(checkpoints) = checkpoints {
+        calc_flow::StreamSession::new_with_checkpoints(plan, config, watermarks, checkpoints)
+    } else {
+        calc_flow::StreamSession::new(plan, config, watermarks)
+    }
+}
+
 /// Lifecycle and Tokio-context errors raise `RuntimeError` and a rejected
 /// input schema raises `ValueError`; the rest keep the ordinary error classes.
 fn session_py_err(error: calc_flow::CalcFlowError, failed: bool) -> PyErr {
@@ -379,41 +390,58 @@ fn outputs_to_python(py: Python<'_>, output: calc_flow::SessionOutput) -> PyResu
     for (name, batches) in output.into_batches() {
         let records = PyList::empty(py);
         for batch in batches {
-            if batch.kind() == calc_flow::BatchKind::Array {
-                let payload = batch.external_payload().map_err(|_| {
-                    PyTypeError::new_err(format!("session output {name:?} has no array payload"))
-                })?;
-                if let Some(native) = payload
-                    .as_any()
-                    .downcast_ref::<calc_flow::array::NativeArray>()
-                {
-                    records.append(
-                        Py::new(py, crate::array::PyNativeArray::from_inner(native.clone()))?
-                            .into_any(),
-                    )?;
-                    continue;
-                }
-                let payload = payload
-                    .as_any()
-                    .downcast_ref::<crate::batch::PythonPayload>()
-                    .ok_or_else(|| {
-                        PyTypeError::new_err(format!(
-                            "session output {name:?} has an unknown array payload"
-                        ))
-                    })?;
-                records.append(payload.object.clone_ref(py))?;
-                continue;
-            }
-            let table = batch.table_payload().map_err(|_| {
-                PyTypeError::new_err(format!("session output {name:?} has no table payload"))
-            })?;
-            for record in table.batches() {
-                records.append(PyRecordBatch::new(record.clone()).into_pyarrow(py)?)?;
-            }
+            append_batch_to_python(py, &name, &batch, &records)?;
         }
         outputs.set_item(name, records)?;
     }
     Ok(outputs.unbind())
+}
+
+fn append_batch_to_python(
+    py: Python<'_>,
+    name: &str,
+    batch: &calc_flow::Batch,
+    records: &Bound<'_, PyList>,
+) -> PyResult<()> {
+    if batch.kind() == calc_flow::BatchKind::Array {
+        return append_array_to_python(py, name, batch, records);
+    }
+    let table = batch.table_payload().map_err(|_| {
+        PyTypeError::new_err(format!("session output {name:?} has no table payload"))
+    })?;
+    for record in table.batches() {
+        records.append(PyRecordBatch::new(record.clone()).into_pyarrow(py)?)?;
+    }
+    Ok(())
+}
+
+fn append_array_to_python(
+    py: Python<'_>,
+    name: &str,
+    batch: &calc_flow::Batch,
+    records: &Bound<'_, PyList>,
+) -> PyResult<()> {
+    let payload = batch.external_payload().map_err(|_| {
+        PyTypeError::new_err(format!("session output {name:?} has no array payload"))
+    })?;
+    if let Some(native) = payload
+        .as_any()
+        .downcast_ref::<calc_flow::array::NativeArray>()
+    {
+        records.append(
+            Py::new(py, crate::array::PyNativeArray::from_inner(native.clone()))?.into_any(),
+        )?;
+        return Ok(());
+    }
+    let payload = payload
+        .as_any()
+        .downcast_ref::<crate::batch::PythonPayload>()
+        .ok_or_else(|| {
+            PyTypeError::new_err(format!(
+                "session output {name:?} has an unknown array payload"
+            ))
+        })?;
+    records.append(payload.object.clone_ref(py))
 }
 
 fn session_watermarks(

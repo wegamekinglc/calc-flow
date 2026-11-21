@@ -603,6 +603,12 @@ timing fields do not schedule automatic session captures. A failure after
 capture begins fails the live session; a manifest that already finished
 publication remains available to restore.
 
+Generated watermark state is restored with explicit units. Ordered inputs keep
+the largest raw event time in its declared Arrow unit; the generator separately
+keeps the observed maximum and last emitted watermark as actual microseconds.
+This preserves seconds, milliseconds, microseconds and nanoseconds, including
+negative values and empty or non-advancing pushes, across repeated checkpoints.
+
 `config.edge_budget` bounds each input and internal message. Internal edges have
 no queue backpressure: a call buffers whatever each operator emits during its
 turn and returns only after every queue is empty, so memory per call is bounded
@@ -980,18 +986,19 @@ The `operators` tuple contains exactly `cross_section@1`, `expression@1`,
 with truths anchored in
 the engine implementation:
 
-| Operator             | Modes         | Finality                | Checkpoint support    | State version | State layouts    |
-|----------------------|---------------|-------------------------|-----------------------|---------------|------------------|
-| `cross_section@1`    | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1                |
-| `expression@1`       | batch, stream | per_row_final           | stateless             | —             | —                |
-| `rolling@1`          | batch, stream | per_row_final           | checkpointed_stateful | 1             | 1, 2, 3, 4, 5, 6 |
-| `sql@1`              | batch, stream | unproven                | checkpointed_stateful | 2             | 3, 4             |
-| `stream_asof_join@1` | stream        | group_final_append_only | checkpointed_stateful | 3             | 10               |
-| `stream_join@1`      | stream        | unproven                | checkpointed_stateful | 1             | 1, 2, 3          |
-| `window@1`           | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1, 2             |
+| Operator             | Modes         | Finality                | Checkpoint support    | State version | State layouts       |
+|----------------------|---------------|-------------------------|-----------------------|---------------|---------------------|
+| `cross_section@1`    | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1                   |
+| `expression@1`       | batch, stream | per_row_final           | stateless             | —             | —                   |
+| `rolling@1`          | batch, stream | per_row_final           | checkpointed_stateful | 1             | 1, 2, 3, 4, 5, 6, 7 |
+| `sql@1`              | batch, stream | unproven                | checkpointed_stateful | 2             | 3, 4, 5, 6          |
+| `stream_asof_join@1` | stream        | group_final_append_only | checkpointed_stateful | 3             | 11                  |
+| `stream_join@1`      | stream        | unproven                | checkpointed_stateful | 1             | 12                  |
+| `window@1`           | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1, 2                |
 
-The rolling inventory includes retained-history and accumulator layouts as well
-as columnar layout `3` and cumulative layout `4`. See
+The rolling inventory includes retained-history, accumulator, indicator and
+shared typed-state layouts through layout `7`. The SQL inventory includes its
+compact and retained-input layouts `3` through `6`. See
 [native rolling state](symbolic-design.md#native-rolling-state) for the
 implemented encoding and restore rules.
 

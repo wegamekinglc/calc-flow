@@ -88,6 +88,7 @@ fn write_runner_v4_fixture(root: &Path, manifest: &crate::CheckpointManifest) {
                     next_sequence: entry.sequence,
                     ended: entry.ended,
                     watermark_policy: entry.watermark_policy.clone(),
+                    session_ordered_max: None,
                     history: None,
                 },
             )
@@ -8469,6 +8470,7 @@ async fn manual_request_queued_during_periodic_checkpoint_receives_next_epoch() 
         .clone()
         .expect("checkpoint task registered its manual queue");
     let manual = coordinator.request_manual().await.unwrap();
+    tokio::time::resume();
     gate.release();
 
     assert_eq!(manual.await.unwrap(), crate::Epoch::new(2).unwrap());
@@ -9829,6 +9831,7 @@ async fn restored_ended_source_participates_without_open_seek_poll_or_barrier() 
                     next_sequence: entry.sequence,
                     ended: entry.ended,
                     watermark_policy: entry.watermark_policy.clone(),
+                    session_ordered_max: None,
                     history: None,
                 },
             )

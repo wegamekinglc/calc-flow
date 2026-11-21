@@ -5,8 +5,8 @@ use std::{
 
 use datafusion::arrow::{
     array::{
-        ArrayRef, Float64Array, StringArray, TimestampMicrosecondArray, TimestampNanosecondArray,
-        TimestampSecondArray, UInt64Array,
+        ArrayRef, Float64Array, StringArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+        TimestampNanosecondArray, TimestampSecondArray, UInt64Array,
     },
     datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
     record_batch::RecordBatch,
@@ -370,6 +370,216 @@ fn durable_session_checkpoint_restores_operator_and_input_progress() {
         vec!["1970-01-01T00:00:00.000011Z|a|2.0".to_owned()]
     );
     assert_eq!(restored.checkpoint().unwrap(), Epoch::new(2).unwrap());
+}
+
+fn timestamp_schema(unit: TimeUnit) -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("ts", DataType::Timestamp(unit, Some("UTC".into())), false),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("sequence", DataType::UInt64, false),
+        Field::new("price", DataType::Float64, false),
+    ]))
+}
+
+fn timestamp_batch(unit: TimeUnit, times: &[i64]) -> Batch {
+    let timestamps: ArrayRef = match unit {
+        TimeUnit::Second => {
+            Arc::new(TimestampSecondArray::from(times.to_vec()).with_timezone("UTC"))
+        }
+        TimeUnit::Millisecond => {
+            Arc::new(TimestampMillisecondArray::from(times.to_vec()).with_timezone("UTC"))
+        }
+        TimeUnit::Microsecond => {
+            Arc::new(TimestampMicrosecondArray::from(times.to_vec()).with_timezone("UTC"))
+        }
+        TimeUnit::Nanosecond => {
+            Arc::new(TimestampNanosecondArray::from(times.to_vec()).with_timezone("UTC"))
+        }
+    };
+    let columns: Vec<ArrayRef> = vec![
+        timestamps,
+        Arc::new(StringArray::from_iter_values(times.iter().map(|_| "a"))),
+        Arc::new(UInt64Array::from_iter_values(
+            times.iter().enumerate().map(|(index, _)| index as u64),
+        )),
+        Arc::new(Float64Array::from_iter_values(times.iter().map(|_| 1.0))),
+    ];
+    Batch::table(
+        vec![RecordBatch::try_new(timestamp_schema(unit), columns).unwrap()],
+        BatchMetadata::default(),
+    )
+    .unwrap()
+}
+
+fn timestamp_session_plan(unit: TimeUnit) -> StreamExecutionPlan {
+    pass_through_plan(&timestamp_schema(unit))
+}
+
+fn timestamp_cases() -> [(TimeUnit, ArrowTimestampUnit); 4] {
+    [
+        (TimeUnit::Second, ArrowTimestampUnit::Second),
+        (TimeUnit::Millisecond, ArrowTimestampUnit::Millisecond),
+        (TimeUnit::Microsecond, ArrowTimestampUnit::Microsecond),
+        (TimeUnit::Nanosecond, ArrowTimestampUnit::Nanosecond),
+    ]
+}
+
+fn expected_nanos(value: i64, unit: ArrowTimestampUnit) -> i128 {
+    let factor = match unit {
+        ArrowTimestampUnit::Second => 1_000_000_000,
+        ArrowTimestampUnit::Millisecond => 1_000_000,
+        ArrowTimestampUnit::Microsecond => 1_000,
+        ArrowTimestampUnit::Nanosecond => 1,
+    };
+    i128::from(value) * factor
+}
+
+fn assert_generated_max(session: &StreamSession, value: i64, unit: ArrowTimestampUnit) {
+    let maximum = session
+        .input
+        .progress
+        .generator
+        .as_ref()
+        .and_then(GeneratedWatermarkState::max_observed_nanos);
+    assert_eq!(maximum, Some(expected_nanos(value, unit)));
+}
+
+fn assert_restored_call_matches(
+    control: &mut StreamSession,
+    restored: &mut StreamSession,
+    input: &str,
+    output: &str,
+    batch: Batch,
+) {
+    let expected = control.push(input, batch.clone(), None).unwrap();
+    let actual = restored.push(input, batch, None).unwrap();
+    assert_same_batches(actual.batches(output), expected.batches(output));
+    assert_eq!(restored.watermark_for_test(), control.watermark_for_test());
+}
+
+fn restore_session(
+    plan: TimeUnit,
+    config: &StreamRuntimeConfig,
+    watermarks: BTreeMap<String, SessionWatermark>,
+    root: &std::path::Path,
+) -> StreamSession {
+    StreamSession::restore(
+        timestamp_session_plan(plan),
+        config,
+        watermarks,
+        ManagedCheckpointRuntime::new(root).unwrap(),
+    )
+    .unwrap()
+}
+
+fn ordered_restore_case(unit: TimeUnit, arrow_unit: ArrowTimestampUnit, raw: i64) {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("managed");
+    let mut config = session_config();
+    config.checkpointing = true;
+    let plan = timestamp_session_plan(unit);
+    let input = source_id(&plan);
+    let output = plan.sink_binding_ids()[0].to_owned();
+    let watermarks = ordered(&input);
+    let mut control = open_session(plan, watermarks.clone());
+    let mut durable = StreamSession::new_with_checkpoints(
+        timestamp_session_plan(unit),
+        &config,
+        watermarks.clone(),
+        ManagedCheckpointRuntime::new(&root).unwrap(),
+    )
+    .unwrap();
+    assert_restored_call_matches(
+        &mut control,
+        &mut durable,
+        &input,
+        &output,
+        timestamp_batch(unit, &[raw]),
+    );
+    assert_eq!(durable.checkpoint().unwrap(), Epoch::new(1).unwrap());
+    drop(durable);
+
+    let mut restored = restore_session(unit, &config, watermarks.clone(), &root);
+    assert_restored_call_matches(
+        &mut control,
+        &mut restored,
+        &input,
+        &output,
+        timestamp_batch(unit, &[]),
+    );
+    assert_eq!(restored.checkpoint().unwrap(), Epoch::new(2).unwrap());
+    drop(restored);
+
+    let mut restored = restore_session(unit, &config, watermarks, &root);
+    assert_restored_call_matches(
+        &mut control,
+        &mut restored,
+        &input,
+        &output,
+        timestamp_batch(unit, &[raw + 1]),
+    );
+    assert_generated_max(&restored, raw + 1, arrow_unit);
+    assert_generated_max(&control, raw + 1, arrow_unit);
+    assert_same_batches(
+        restored.finish().unwrap().batches(&output),
+        control.finish().unwrap().batches(&output),
+    );
+}
+
+#[test]
+fn durable_ordered_restore_preserves_timestamp_units() {
+    for (unit, arrow_unit) in timestamp_cases() {
+        for raw in [5_000, -5_000] {
+            ordered_restore_case(unit, arrow_unit, raw);
+        }
+    }
+}
+
+fn bounded_restore_case(unit: TimeUnit, arrow_unit: ArrowTimestampUnit, raw: i64) {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("managed");
+    let mut config = session_config();
+    config.checkpointing = true;
+    let plan = timestamp_session_plan(unit);
+    let input = source_id(&plan);
+    let watermarks = BTreeMap::from([(
+        input.clone(),
+        SessionWatermark::BoundedOutOfOrderness {
+            event_time_column: "ts".into(),
+            max_out_of_orderness: std::time::Duration::from_nanos(1_500),
+        },
+    )]);
+    let mut session = StreamSession::new_with_checkpoints(
+        plan,
+        &config,
+        watermarks.clone(),
+        ManagedCheckpointRuntime::new(&root).unwrap(),
+    )
+    .unwrap();
+    session
+        .push(&input, timestamp_batch(unit, &[raw]), None)
+        .unwrap();
+    assert_eq!(session.checkpoint().unwrap(), Epoch::new(1).unwrap());
+    drop(session);
+
+    let mut restored = restore_session(unit, &config, watermarks.clone(), &root);
+    assert_generated_max(&restored, raw, arrow_unit);
+    restored
+        .push(&input, timestamp_batch(unit, &[]), None)
+        .unwrap();
+    assert_eq!(restored.checkpoint().unwrap(), Epoch::new(2).unwrap());
+    drop(restored);
+    let restored = restore_session(unit, &config, watermarks, &root);
+    assert_generated_max(&restored, raw, arrow_unit);
+}
+
+#[test]
+fn durable_bounded_restore_preserves_observed_maximum() {
+    for (unit, arrow_unit) in timestamp_cases() {
+        for raw in [5_000, -5_000] {
+            bounded_restore_case(unit, arrow_unit, raw);
+        }
+    }
 }
 
 fn ordered(input: &str) -> BTreeMap<String, SessionWatermark> {

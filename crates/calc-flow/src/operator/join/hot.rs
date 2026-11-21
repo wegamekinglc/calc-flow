@@ -1,4 +1,6 @@
-use super::{HotProjection, JoinSide, StreamJoinOperator, counter_overflow, operator_error};
+use super::{
+    HotProjection, JoinSide, SideMetrics, StreamJoinOperator, counter_overflow, operator_error,
+};
 use crate::{Batch, BatchMetadata, Result, StreamCollector, StreamOperatorContext};
 use datafusion::arrow::{
     array::{Array, ArrayRef, Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
@@ -13,6 +15,14 @@ use std::{collections::BTreeMap, sync::Arc};
 pub(super) enum HotKind {
     Equi,
     Band,
+}
+
+pub(super) struct HotInput<'a> {
+    pub side: JoinSide,
+    pub batch: &'a Batch,
+    pub next_row_id: u64,
+    pub metrics: SideMetrics,
+    pub charge: (usize, usize),
 }
 
 pub(super) struct HotJoinCore {
@@ -108,8 +118,7 @@ impl HotJoinCore {
     pub(super) async fn process(
         &mut self,
         operator: &mut StreamJoinOperator,
-        ingress: &str,
-        batch: &Batch,
+        input: HotInput<'_>,
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
@@ -119,22 +128,27 @@ impl HotJoinCore {
                 "whole-batch hot Join accepts one input batch per side",
             ));
         }
-        let plan = operator.begin_batch(ingress, batch)?;
-        let side = if plan.incoming_is_left {
-            JoinSide::Left
-        } else {
-            JoinSide::Right
-        };
-        let next_row_id = u64::try_from(batch.num_rows())
-            .map_err(|_| counter_overflow(&operator.name, "hot_input_row_id"))?;
+        let HotInput {
+            side,
+            batch,
+            next_row_id,
+            mut metrics,
+            charge,
+        } = input;
+        metrics.retained_rows = u64::try_from(charge.0)
+            .map_err(|_| counter_overflow(&operator.name, "hot retained rows"))?;
+        metrics.retained_bytes = u64::try_from(charge.1)
+            .map_err(|_| counter_overflow(&operator.name, "hot retained bytes"))?;
         match side {
             JoinSide::Left => {
                 self.left = Some(batch.clone());
                 operator.state.next_left_row_id = next_row_id;
+                operator.state.metrics.left = metrics;
             }
             JoinSide::Right => {
                 self.right = Some(batch.clone());
                 operator.state.next_right_row_id = next_row_id;
+                operator.state.metrics.right = metrics;
             }
         }
         let (Some(left), Some(right)) = (self.left.as_ref(), self.right.as_ref()) else {
@@ -167,21 +181,11 @@ impl HotJoinCore {
                 &RecordBatchOptions::new().with_row_count(Some(record.num_rows())),
             )
             .map_err(|error| operator_error(&operator.name, &error.to_string()))?;
-            let metadata = BatchMetadata::new(&operator.name, sequence, BTreeMap::new())?;
-            sequence = sequence
-                .checked_add(1)
-                .ok_or_else(|| counter_overflow(&operator.name, "output_sequence"))?;
-            output
-                .emit("output", Batch::table(vec![record], metadata)?)
-                .await?;
+            emit_hot_record(operator, record, context, output, &mut sequence).await?;
         }
         #[cfg(feature = "benchmark-internals")]
         drop(emit_span);
         operator.state.next_output_sequence = sequence;
-        operator.state.next_left_row_id = u64::try_from(left.num_rows())
-            .map_err(|_| counter_overflow(&operator.name, "left_row_id"))?;
-        operator.state.next_right_row_id = u64::try_from(right.num_rows())
-            .map_err(|_| counter_overflow(&operator.name, "right_row_id"))?;
         operator.state.metrics.emitted_match_rows = operator
             .state
             .metrics
@@ -248,7 +252,7 @@ impl HotJoinCore {
                     .map_err(|error| operator_error(&operator.name, &error.to_string()))
             })
             .collect::<Result<Vec<_>>>()?;
-        Batch::table(records, BatchMetadata::default())
+        hot_table(records, schema)
     }
 
     async fn execute_band(
@@ -308,8 +312,55 @@ impl HotJoinCore {
             )?;
             records.push(record);
         }
-        Batch::table(records, BatchMetadata::default())
+        hot_table(records, output_schema(operator))
     }
+}
+
+fn hot_table(records: Vec<RecordBatch>, schema: SchemaRef) -> Result<Batch> {
+    let records = if records.is_empty() {
+        vec![RecordBatch::new_empty(schema)]
+    } else {
+        records
+    };
+    Batch::table(records, BatchMetadata::default())
+}
+
+async fn emit_hot_record(
+    operator: &StreamJoinOperator,
+    record: RecordBatch,
+    context: &StreamOperatorContext<'_>,
+    output: &mut dyn StreamCollector,
+    sequence: &mut u64,
+) -> Result<()> {
+    let budget = context.output_budget();
+    let mut pending = vec![record];
+    while let Some(record) = pending.pop() {
+        if record.num_rows() == 0 {
+            continue;
+        }
+        let bytes =
+            Batch::table(vec![record.clone()], BatchMetadata::default())?.estimated_bytes()?;
+        if record.num_rows() > budget.max_rows || bytes > budget.max_bytes {
+            if record.num_rows() == 1 {
+                return Err(
+                    crate::operator::output_chunk::OutputChunkErrors::STREAM_JOIN
+                        .over_budget_row(bytes, budget.max_bytes),
+                );
+            }
+            let middle = record.num_rows() / 2;
+            pending.push(record.slice(middle, record.num_rows() - middle));
+            pending.push(record.slice(0, middle));
+            continue;
+        }
+        let metadata = BatchMetadata::new(&operator.name, *sequence, BTreeMap::new())?;
+        *sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| counter_overflow(&operator.name, "output_sequence"))?;
+        output
+            .emit("output", Batch::table(vec![record], metadata)?)
+            .await?;
+    }
+    Ok(())
 }
 
 pub(super) fn project_run_record(
@@ -395,7 +446,7 @@ fn projected_equi(
             )
         })
         .collect::<Result<Vec<_>>>()?;
-    Batch::table(records, BatchMetadata::default())
+    hot_table(records, schema)
 }
 
 fn projected_equi_record(
@@ -1493,6 +1544,9 @@ mod tests {
     #[tokio::test]
     async fn hot_band_uses_large_output_batches() {
         let rows = 70_000usize;
+        let mut declaration = band_spec();
+        declaration.limits.max_state_rows_per_side = 2 * rows as u64;
+        declaration.limits.max_state_bytes_per_side = 64 << 20;
         let record = RecordBatch::try_new(
             quote_schema(),
             vec![
@@ -1515,7 +1569,7 @@ mod tests {
         )
         .unwrap();
         let mut operator =
-            StreamJoinOperator::new("hot-band", quote_schema(), quote_schema(), band_spec())
+            StreamJoinOperator::new("hot-band", quote_schema(), quote_schema(), declaration)
                 .unwrap();
         operator.spec.limits.max_matches_per_input_batch = 140_000;
         operator
@@ -1560,6 +1614,243 @@ mod tests {
                 .sum::<usize>(),
             2 * rows
         );
+    }
+    #[cfg(test)]
+    fn hot_progress_context(
+        job: &StreamJobContext,
+        right_watermark: i64,
+        budget: crate::EdgeBudget,
+    ) -> StreamOperatorContext<'_> {
+        let progress = crate::IngressProgressSnapshot::new(BTreeMap::from([
+            (
+                "left".into(),
+                crate::IngressProgress::new(
+                    crate::IngressState::Active,
+                    Some(crate::EventTime::from_micros(right_watermark)),
+                ),
+            ),
+            (
+                "right".into(),
+                crate::IngressProgress::new(
+                    crate::IngressState::Active,
+                    Some(crate::EventTime::from_micros(right_watermark)),
+                ),
+            ),
+        ]));
+        StreamOperatorContext::for_task(
+            job,
+            "hot",
+            None,
+            progress,
+            budget,
+            Arc::new(NoopLateMetrics),
+        )
+    }
+
+    #[cfg(test)]
+    mod admission_tests {
+        use super::*;
+
+        fn operator() -> StreamJoinOperator {
+            static_operator(false)
+        }
+
+        fn job() -> StreamJobContext {
+            StreamJobContext::new(
+                1,
+                "fingerprint",
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            )
+            .with_checkpointing(false)
+        }
+
+        #[tokio::test]
+        async fn hot_admission_drops_late_and_null_rows_with_metrics() {
+            let schema = Schema::new(
+                quote_schema()
+                    .fields()
+                    .iter()
+                    .map(|field| {
+                        if field.name() == "symbol" {
+                            field.as_ref().clone().with_nullable(true)
+                        } else {
+                            field.as_ref().clone()
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            let mut operator = StreamJoinOperator::new(
+                "hot",
+                Arc::new(schema.clone()),
+                dimension_schema(),
+                spec(),
+            )
+            .unwrap();
+            operator.enable_native_checkpoint().unwrap();
+            let left = RecordBatch::try_new(
+                Arc::new(schema),
+                vec![
+                    Arc::new(
+                        TimestampMicrosecondArray::from(vec![-1, 1_000_000]).with_timezone("UTC"),
+                    ),
+                    Arc::new(UInt64Array::from(vec![0, 1])),
+                    Arc::new(StringArray::from(vec![Some("S000"), None])),
+                    Arc::new(Float64Array::from(vec![2.0, 3.0])),
+                ],
+            )
+            .unwrap();
+            let (_, right) = static_inputs();
+            let job = job();
+            let context = hot_progress_context(&job, 0, crate::EdgeBudget::default());
+            let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+            operator
+                .process_data(
+                    "left",
+                    Batch::table(vec![left], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            operator
+                .process_data(
+                    "right",
+                    Batch::table(vec![right], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            assert!(collector.drain("output").is_empty());
+            assert_eq!(operator.state.metrics.left.late_rows, 1);
+            assert_eq!(operator.state.metrics.left.null_key_rows, 1);
+        }
+
+        #[tokio::test]
+        async fn hot_no_matches_emit_an_empty_output() {
+            let mut operator = operator();
+            let (left, right) = static_inputs();
+            let job = job();
+            let context = hot_context(&job);
+            let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+            for (side, record) in [("left", left.slice(0, 1)), ("right", right)] {
+                operator
+                    .process_data(
+                        side,
+                        Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                        &context,
+                        &mut collector,
+                    )
+                    .await
+                    .unwrap();
+            }
+            assert!(collector.drain("output").is_empty());
+        }
+
+        #[tokio::test]
+        async fn hot_admission_enforces_state_row_limits() {
+            let mut declaration = spec();
+            declaration.limits.max_state_rows_per_side = 1;
+            let mut operator =
+                StreamJoinOperator::new("hot", quote_schema(), dimension_schema(), declaration)
+                    .unwrap();
+            operator.enable_native_checkpoint().unwrap();
+            let (left, _) = static_inputs();
+            let job = job();
+            let context = hot_context(&job);
+            let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+            let error = operator
+                .process_data(
+                    "left",
+                    Batch::table(vec![left], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                crate::CalcFlowError::OperatorReason {
+                    reason_code: crate::StreamingFailureReason::JoinStateLimitExceeded,
+                    ..
+                }
+            ));
+            assert_eq!(operator.state.metrics.state_limit_failures, 1);
+            assert!(collector.drain("output").is_empty());
+        }
+
+        #[tokio::test]
+        async fn hot_output_respects_the_edge_row_budget() {
+            let mut operator =
+                StreamJoinOperator::new("hot", quote_schema(), quote_schema(), band_spec())
+                    .unwrap();
+            operator.enable_run_core();
+            let record = RecordBatch::try_new(
+                quote_schema(),
+                vec![
+                    Arc::new(
+                        TimestampMicrosecondArray::from(vec![0, 1_000_000]).with_timezone("UTC"),
+                    ),
+                    Arc::new(UInt64Array::from(vec![0, 1])),
+                    Arc::new(StringArray::from(vec!["S000", "S000"])),
+                    Arc::new(Float64Array::from(vec![2.0, 3.0])),
+                ],
+            )
+            .unwrap();
+            let job = job();
+            let budget = crate::EdgeBudget::new(1, usize::MAX).unwrap();
+            let context = hot_progress_context(&job, 0, budget);
+            let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+            for side in ["left", "right"] {
+                operator
+                    .process_data(
+                        side,
+                        Batch::table(vec![record.clone()], BatchMetadata::default()).unwrap(),
+                        &context,
+                        &mut collector,
+                    )
+                    .await
+                    .unwrap();
+            }
+            let messages = collector.drain("output");
+            assert_eq!(messages.len(), 4);
+            assert!(
+                messages
+                    .iter()
+                    .all(|message| message.as_data().unwrap().num_rows() == 1)
+            );
+        }
+
+        #[tokio::test]
+        async fn hot_watermark_migration_evicts_expired_history() {
+            let mut operator = operator();
+            let (left, right) = static_inputs();
+            let job = job();
+            let context = hot_context(&job);
+            let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+            for (side, batch) in [("left", left), ("right", right)] {
+                operator
+                    .process_data(
+                        side,
+                        Batch::table(vec![batch], BatchMetadata::default()).unwrap(),
+                        &context,
+                        &mut collector,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{side}: {error:?}"));
+            }
+            collector.drain("output");
+            let progress = hot_progress_context(&job, 400_000_000, crate::EdgeBudget::default());
+            operator
+                .on_ingress_progress("right", &progress)
+                .await
+                .unwrap();
+            assert!(!operator.run_core.as_ref().unwrap().hot_enabled());
+            assert_eq!(operator.run_core.as_ref().unwrap().rows(JoinSide::Left), 0);
+            assert_eq!(operator.state.metrics.left.evicted_rows, 2);
+        }
     }
 }
 

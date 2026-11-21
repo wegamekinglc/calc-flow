@@ -2675,6 +2675,7 @@ async fn prepare_private_manifest_publication_benchmark() -> PrivateManifestPubl
                 next_sequence: 0,
                 ended: false,
                 watermark_policy: SourceWatermarkManifestState::Disabled { idle: false },
+                session_ordered_max: None,
                 history: None,
             },
         )]),
@@ -5394,6 +5395,7 @@ async fn late_periodic_cut_promotes_the_same_epoch_to_terminal() {
         tokio::task::yield_now().await;
     }
     assert!(job.status().sources.values().all(|source| source.ended));
+    tokio::time::resume();
     gate.release();
 
     let outcome = tokio::time::timeout(Duration::from_secs(5), job.wait())

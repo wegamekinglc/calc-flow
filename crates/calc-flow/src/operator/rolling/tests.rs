@@ -2718,18 +2718,21 @@ fn parallel_rollback_record(start: usize, count: usize) -> RecordBatch {
     )
 }
 
+#[derive(Debug, PartialEq)]
+struct CommittedScalars {
+    last_input_watermark: Option<EventTime>,
+    next_output_sequence: u64,
+    ended: bool,
+    metrics: LateMetricDelta,
+    pipeline_fingerprint: Option<String>,
+    operator_id: Option<String>,
+    last_checkpoint_epoch: Option<Epoch>,
+}
+
 struct CommittedState {
     encoded: Option<(String, Vec<u8>)>,
     canonical: String,
-    scalars: (
-        Option<EventTime>,
-        u64,
-        bool,
-        LateMetricDelta,
-        Option<String>,
-        Option<String>,
-        Option<Epoch>,
-    ),
+    scalars: CommittedScalars,
     addresses: Vec<usize>,
 }
 
@@ -2742,23 +2745,23 @@ fn committed_state(operator: &RollingOperator, epoch: Epoch) -> CommittedState {
             .as_deref()
             .unwrap()
             .canonical_state_for_test(),
-        scalars: (
-            operator.state.last_input_watermark,
-            operator.state.next_output_sequence,
-            operator.state.ended,
-            operator.state.metrics,
-            operator.state.pipeline_fingerprint.clone(),
-            operator.state.operator_id.clone(),
-            operator.state.last_checkpoint_epoch,
-        ),
+        scalars: CommittedScalars {
+            last_input_watermark: operator.state.last_input_watermark,
+            next_output_sequence: operator.state.next_output_sequence,
+            ended: operator.state.ended,
+            metrics: operator.state.metrics,
+            pipeline_fingerprint: operator.state.pipeline_fingerprint.clone(),
+            operator_id: operator.state.operator_id.clone(),
+            last_checkpoint_epoch: operator.state.last_checkpoint_epoch,
+        },
         addresses: retained_buffer_addresses(operator),
     }
 }
 
 fn assert_parallel_rollback_preserved(
     operator: &RollingOperator,
-    before: CommittedState,
-    after: CommittedState,
+    before: &CommittedState,
+    after: &CommittedState,
     previous_charge: StateCharge,
     charge: StateCharge,
     launches: u64,
@@ -2897,8 +2900,8 @@ async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
     let after = committed_state(&operator, epoch);
     assert_parallel_rollback_preserved(
         &operator,
-        before,
-        after,
+        &before,
+        &after,
         previous_charge,
         charge,
         launches.load(AtomicOrdering::SeqCst),

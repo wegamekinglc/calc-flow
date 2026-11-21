@@ -95,44 +95,66 @@ def measure_case(plan: dict, case_plan: dict, root: Path) -> dict:
     }
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--plan", type=Path, required=True)
-    parser.add_argument("--wheel", type=Path, required=True)
-    parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    args = parser.parse_args()
-    started = time.perf_counter()
-    plan = json.loads(args.plan.read_text())
-    evidence = native_evidence(args.wheel)
-    args.root.mkdir(parents=True, exist_ok=True)
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser()
+    result.add_argument("--plan", type=Path, required=True)
+    result.add_argument("--wheel", type=Path, required=True)
+    result.add_argument("--root", type=Path, required=True)
+    result.add_argument("--output", type=Path, required=True)
+    return result
+
+
+def environment() -> dict:
+    return {
+        "python": os.sys.version,
+        "tokio_worker_threads": os.environ.get("TOKIO_WORKER_THREADS"),
+        "openblas_num_threads": os.environ.get("OPENBLAS_NUM_THREADS"),
+        "omp_num_threads": os.environ.get("OMP_NUM_THREADS"),
+        "taskset": os.environ.get("CALC_FLOW_TASKSET"),
+        "cpus_allowed": next(
+            (
+                line.strip()
+                for line in Path("/proc/self/status").read_text().splitlines()
+                if line.startswith("Cpus_allowed_list:")
+            ),
+            None,
+        ),
+    }
+
+
+def measure_cases(plan: dict, root: Path) -> tuple[list[dict], str | None]:
     results = []
     error = None
     try:
         for case in plan["cases"]:
-            results.append(measure_case(plan, case, args.root / case["id"]))
+            results.append(measure_case(plan, case, root / case["id"]))
     except BaseException as exc:
         error = repr(exc)
+    return results, error
+
+
+def validate_report(report: dict) -> None:
+    if report["error"] is not None:
+        raise RuntimeError(report["error"])
+    if not report["within_budget"]:
+        raise RuntimeError("performance acquisition exceeded its fixed budget")
+    if any(not case["threshold_pass"] for case in report["cases"]):
+        raise SystemExit(2)
+
+
+def main() -> None:
+    args = parser().parse_args()
+    started = time.perf_counter()
+    plan = json.loads(args.plan.read_text())
+    evidence = native_evidence(args.wheel)
+    args.root.mkdir(parents=True, exist_ok=True)
+    results, error = measure_cases(plan, args.root)
     elapsed = time.perf_counter() - started
     report = {
         "schema": "calc-flow.join-p5-performance-result.v1",
         "plan": plan,
         "candidate": evidence,
-        "environment": {
-            "python": os.sys.version,
-            "tokio_worker_threads": os.environ.get("TOKIO_WORKER_THREADS"),
-            "openblas_num_threads": os.environ.get("OPENBLAS_NUM_THREADS"),
-            "omp_num_threads": os.environ.get("OMP_NUM_THREADS"),
-            "taskset": os.environ.get("CALC_FLOW_TASKSET"),
-            "cpus_allowed": next(
-                (
-                    line.strip()
-                    for line in Path("/proc/self/status").read_text().splitlines()
-                    if line.startswith("Cpus_allowed_list:")
-                ),
-                None,
-            ),
-        },
+        "environment": environment(),
         "cases": results,
         "wall_seconds": elapsed,
         "within_budget": elapsed <= plan["execution"]["total_budget_seconds"],
@@ -140,12 +162,7 @@ def main() -> None:
     }
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
-    if error is not None:
-        raise RuntimeError(error)
-    if elapsed > plan["execution"]["total_budget_seconds"]:
-        raise RuntimeError("performance acquisition exceeded its fixed budget")
-    if any(not case["threshold_pass"] for case in results):
-        raise SystemExit(2)
+    validate_report(report)
 
 
 if __name__ == "__main__":

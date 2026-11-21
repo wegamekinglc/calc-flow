@@ -797,23 +797,7 @@ impl PyRuntime {
             .into_iter()
             .map(|(alias, schema)| (alias, schema.into_inner()))
             .collect::<BTreeMap<_, _>>();
-        let mut operator =
-            calc_flow::SqlOperator::new("schema", query, schemas.keys().cloned().collect(), vec![])
-                .map_err(crate::error::to_py_err)?;
-        if let Some(mode) = aggregate_output {
-            let mode = match mode {
-                "snapshot" => calc_flow::SqlAggregateOutputMode::Snapshot,
-                "changelog" => calc_flow::SqlAggregateOutputMode::Changelog,
-                other => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "unsupported aggregate output mode {other:?}"
-                    )));
-                }
-            };
-            operator
-                .set_aggregate_output_mode(mode)
-                .map_err(crate::error::to_py_err)?;
-        }
+        let operator = sql_schema_operator(query, &schemas, aggregate_output)?;
         let schema = py
             .detach(|| runtime.tokio.block_on(operator.infer_schema(&schemas)))
             .map_err(crate::error::to_py_err)?;
@@ -839,6 +823,43 @@ impl PyRuntime {
         let state = self.state.write().take();
         drop(state);
     }
+}
+
+fn sql_schema_operator(
+    query: &str,
+    schemas: &BTreeMap<String, datafusion::arrow::datatypes::SchemaRef>,
+    aggregate_output: Option<&str>,
+) -> PyResult<calc_flow::SqlOperator> {
+    let mut operator =
+        calc_flow::SqlOperator::new("schema", query, schemas.keys().cloned().collect(), vec![])
+            .map_err(crate::error::to_py_err)?;
+    configure_sql_aggregate_output(&mut operator, aggregate_output)?;
+    Ok(operator)
+}
+
+fn configure_sql_aggregate_output(
+    operator: &mut calc_flow::SqlOperator,
+    aggregate_output: Option<&str>,
+) -> PyResult<()> {
+    if let Some(mode) = aggregate_output {
+        let mode = sql_aggregate_output_mode(mode)?;
+        operator
+            .set_aggregate_output_mode(mode)
+            .map_err(crate::error::to_py_err)?;
+    }
+    Ok(())
+}
+
+fn sql_aggregate_output_mode(mode: &str) -> PyResult<calc_flow::SqlAggregateOutputMode> {
+    Ok(match mode {
+        "snapshot" => calc_flow::SqlAggregateOutputMode::Snapshot,
+        "changelog" => calc_flow::SqlAggregateOutputMode::Changelog,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unsupported aggregate output mode {other:?}"
+            )));
+        }
+    })
 }
 
 #[pyfunction]

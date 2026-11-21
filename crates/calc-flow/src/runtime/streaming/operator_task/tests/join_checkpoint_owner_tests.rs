@@ -207,6 +207,7 @@ async fn test_native_checkpoint_ack_omits_legacy_capture() {
     assert!(ack.snapshot.segments.is_empty());
     assert_eq!(ack.state.inline_metadata["layout_version"], 12);
     assert!(!ack.state.inline_metadata.contains_key("v2_inventory"));
+    drop(ack);
     let gather = fixture.harness.gather.clone();
     fixture.harness.cancellation.cancel();
     let report = tokio::time::timeout(

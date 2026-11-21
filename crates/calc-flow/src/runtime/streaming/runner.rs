@@ -708,7 +708,6 @@ impl ContinuousJob {
                 checkpoint
                     .last_completed_epoch
                     .is_some_and(|completed| completed >= epoch)
-                    && checkpoint.current_epoch != Some(epoch)
             });
             if settled {
                 return Ok(());
@@ -2439,6 +2438,11 @@ async fn run_job_driver(
     let operator_checkpoint = checkpoint_channels
         .as_ref()
         .map(|channels| channels.operator.clone());
+    let direct_progress = can_use_direct_source_progress(
+        &prepared_progress,
+        durable_progress.as_ref(),
+        checkpoint.as_ref(),
+    );
     let entry = run_operator_entry(
         plan,
         &context,
@@ -2446,6 +2450,7 @@ async fn run_job_driver(
         &cancellation,
         operator_restores,
         operator_checkpoint,
+        direct_progress,
     )
     .await;
     let mut runtime = match entry {
@@ -4050,6 +4055,7 @@ fn run_operator_entry(
     cancellation: &CancellationToken,
     restores: BTreeMap<String, OperatorRestoreState>,
     checkpoint: Option<OperatorCheckpointRegistration>,
+    direct_progress: bool,
 ) -> impl Future<Output = Result<RegisteredRuntime, EntryFailure>> + Send {
     Box::pin(run_operator_entry_inner(
         plan,
@@ -4058,6 +4064,7 @@ fn run_operator_entry(
         cancellation,
         restores,
         checkpoint,
+        direct_progress,
     ))
 }
 
@@ -4068,6 +4075,7 @@ async fn run_operator_entry_inner(
     cancellation: &CancellationToken,
     mut restores: BTreeMap<String, OperatorRestoreState>,
     checkpoint: Option<OperatorCheckpointRegistration>,
+    direct_progress: bool,
 ) -> Result<RegisteredRuntime, EntryFailure> {
     let supervisor = TaskSupervisor::new_with_terminal_arbiter(
         cancellation.clone(),
@@ -4085,7 +4093,7 @@ async fn run_operator_entry_inner(
     let (entry_tx, _) = watch::channel(false);
     let (data_tx, _) = watch::channel(false);
     let (ack_tx, mut ack_rx) = mpsc::unbounded_channel();
-    let pipeline = inline_admission(&plan, &restores, checkpoint.as_ref());
+    let pipeline = direct_progress && inline_admission(&plan, &restores, checkpoint.as_ref());
     let layout = if pipeline {
         BTreeMap::new()
     } else {

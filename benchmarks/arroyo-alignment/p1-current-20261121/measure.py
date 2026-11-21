@@ -99,10 +99,65 @@ def sql(case: str, endpoint: str) -> str:
     """
 
 
-async def cf_worker(case: str, endpoint: str) -> None:
+def cf_output(source, case: str):
+    import calc_flow as cf
+
+    accepted = source.filter(source["id"] >= 0)
+    if case == "stateless":
+        selected = accepted.filter(accepted["k"] < 8)
+        return selected.select("id", y=selected["x"] * 2 + 1)
+    return cf.window.tumbling(
+        accepted,
+        event_time="ts",
+        size_micros=4_000_000,
+        group_by=("k",),
+        aggregates=(
+            cf.window.sum("x", output="total"),
+            cf.window.count("id", output="cnt"),
+        ),
+    )
+
+
+async def cf_batches(case: str, endpoint: str, schema):
+    import pyarrow.json as paj
+
+    import calc_flow as cf
+
+    async with connect(endpoint, compression=None, max_size=4 * 1024 * 1024) as ws:
+        async for frame in ws:
+            data = frame.encode() if isinstance(frame, str) else frame
+            table = paj.read_json(
+                io.BytesIO(data),
+                read_options=paj.ReadOptions(use_threads=False),
+                parse_options=paj.ParseOptions(explicit_schema=schema),
+            )
+            yield table
+            if case == "window":
+                yield cf.Watermark(table["ts"][0].as_py() - timedelta(microseconds=1))
+
+
+def write_cf_output(table, case: str) -> None:
     import pyarrow as pa
     import pyarrow.compute as pc
-    import pyarrow.json as paj
+
+    if case == "window":
+        table = pa.table(
+            {
+                "ws": pc.cast(table["window_start"], pa.int64()),
+                "k": table["k"],
+                "total": table["total"],
+                "cnt": table["cnt"],
+            }
+        )
+    payload = "".join(
+        json.dumps(row, separators=(",", ":")) + "\n" for row in table.to_pylist()
+    )
+    sys.stdout.write(payload)
+    sys.stdout.flush()
+
+
+async def cf_worker(case: str, endpoint: str) -> None:
+    import pyarrow as pa
 
     import calc_flow as cf
     import calc_flow._native as native
@@ -115,7 +170,6 @@ async def cf_worker(case: str, endpoint: str) -> None:
         file=sys.stderr,
         flush=True,
     )
-
     schema = pa.schema(
         [
             ("id", pa.int64()),
@@ -125,60 +179,14 @@ async def cf_worker(case: str, endpoint: str) -> None:
         ]
     )
     source = cf.table_input("events", schema=schema)
-    accepted = source.filter(source["id"] >= 0)
-    if case == "stateless":
-        selected = accepted.filter(accepted["k"] < 8)
-        output = selected.select("id", y=selected["x"] * 2 + 1)
-    else:
-        output = cf.window.tumbling(
-            accepted,
-            event_time="ts",
-            size_micros=4_000_000,
-            group_by=("k",),
-            aggregates=(
-                cf.window.sum("x", output="total"),
-                cf.window.count("id", output="cnt"),
-            ),
-        )
-
-    async def batches():
-        async with connect(endpoint, compression=None, max_size=4 * 1024 * 1024) as ws:
-            async for frame in ws:
-                data = frame.encode() if isinstance(frame, str) else frame
-                table = paj.read_json(
-                    io.BytesIO(data),
-                    read_options=paj.ReadOptions(use_threads=False),
-                    parse_options=paj.ParseOptions(explicit_schema=schema),
-                )
-                yield table
-                if case == "window":
-                    yield cf.Watermark(
-                        table["ts"][0].as_py() - timedelta(microseconds=1)
-                    )
-
-    def write(table):
-        if case == "window":
-            table = pa.table(
-                {
-                    "ws": pc.cast(table["window_start"], pa.int64()),
-                    "k": table["k"],
-                    "total": table["total"],
-                    "cnt": table["cnt"],
-                }
-            )
-        payload = "".join(
-            json.dumps(row, separators=(",", ":")) + "\n" for row in table.to_pylist()
-        )
-        sys.stdout.write(payload)
-        sys.stdout.flush()
-
+    output = cf_output(source, case)
     async with output.stream(
-        batches(),
+        cf_batches(case, endpoint, schema),
         config=cf.StreamRuntimeConfig(checkpointing=False),
         watermarks=cf.SourceProvidedWatermarks(),
     ) as results:
         async for table in results:
-            await asyncio.to_thread(write, table)
+            await asyncio.to_thread(write_cf_output, table, case)
 
 
 def quantiles(values: list[float]) -> dict[str, float]:
@@ -259,11 +267,7 @@ def prepare_worker(args, engine: str, case: str, directory: Path, server):
     return command, environment
 
 
-def output_observers(directory: Path, expected_count: int):
-    arrivals: list[tuple[float, dict]] = []
-    memory: list[dict] = []
-    done = asyncio.Event()
-
+def output_reader(directory: Path, arrivals: list, expected_count: int, done):
     async def read(process):
         with (directory / "stdout.jsonl").open("wb") as raw:
             while line := await process.stdout.readline():
@@ -278,6 +282,10 @@ def output_observers(directory: Path, expected_count: int):
                     if len(arrivals) >= expected_count:
                         done.set()
 
+    return read
+
+
+def memory_sampler(memory: list[dict]):
     async def sample_memory(process):
         parent = psutil.Process(process.pid)
         while process.returncode is None:
@@ -289,6 +297,15 @@ def output_observers(directory: Path, expected_count: int):
                 pass
             await asyncio.sleep(0.01)
 
+    return sample_memory
+
+
+def output_observers(directory: Path, expected_count: int):
+    arrivals: list[tuple[float, dict]] = []
+    memory: list[dict] = []
+    done = asyncio.Event()
+    read = output_reader(directory, arrivals, expected_count, done)
+    sample_memory = memory_sampler(memory)
     return arrivals, memory, done, read, sample_memory
 
 
@@ -376,7 +393,8 @@ async def acquisition(
     async with serve(source, "127.0.0.1", 0, compression=None) as server:
         command, environment = prepare_worker(args, engine, case, directory, server)
         with (directory / "stderr.log").open("wb") as errors:
-            process = await asyncio.create_subprocess_exec(
+            # The operator selects the executable and local paths; no shell is involved.
+            process = await asyncio.create_subprocess_exec(  # nosec B603  # nosemgrep
                 *command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=errors,
@@ -443,13 +461,8 @@ async def acquisition(
             return result
 
 
-async def controller(args) -> None:
-    import calc_flow._native as native
-
-    root = args.output.resolve()
-    root.mkdir(parents=True, exist_ok=False)
-    started = time.perf_counter()
-    identity = {
+def worker_identity(args, native) -> dict:
+    return {
         "calc_flow_commit": CF_REF,
         "arroyo_commit": ARROYO_REF,
         "arroyo_binary_sha256": digest(args.arroyo),
@@ -469,10 +482,10 @@ async def controller(args) -> None:
             for name in ("calc-flow-python", "pyarrow", "numpy", "psutil", "websockets")
         },
     }
-    os.environ["COMPARISON_NATIVE_SHA256"] = identity["native_sha256"]
-    save(root / "identity.json", identity)
+
+
+async def acquire_samples(args, root: Path, cases: list, started: float) -> list[dict]:
     samples = []
-    cases = [(case, gap) for case in args.cases for gap in args.gaps]
     for case, gap in cases:
         for pair in range(args.pairs):
             order = (
@@ -487,37 +500,50 @@ async def controller(args) -> None:
                 samples.append({"pair": pair, **result})
                 save(root / "samples.json", samples)
                 print(json.dumps(result), flush=True)
-    summary = []
-    for case, gap in cases:
-        for engine in ("calc_flow", "arroyo"):
-            if engine not in args.engines:
-                continue
-            selected = [
-                s
-                for s in samples
-                if s["engine"] == engine and s["case"] == case and s["gap_s"] == gap
-            ]
-            summary.append(
-                {
-                    "case": case,
-                    "gap_s": gap,
-                    "engine": engine,
-                    "throughput": quantiles([s["rows_per_second"] for s in selected]),
-                    "latency_p50_ms": quantiles(
-                        [s["latency_ms"]["p50"] for s in selected]
-                    ),
-                    "latency_p95_ms": quantiles(
-                        [s["latency_ms"]["p95"] for s in selected]
-                    ),
-                    "rss_peak_mib": quantiles(
-                        [s["rss_peak_bytes"] / 2**20 for s in selected]
-                    ),
-                    "startup_s": quantiles(
-                        [s["startup_to_connection_s"] for s in selected]
-                    ),
-                }
-            )
-    save(root / "summary.json", summary)
+    return samples
+
+
+def summary_entry(samples: list[dict], engine: str, case: str, gap: float) -> dict:
+    selected = [
+        sample
+        for sample in samples
+        if sample["engine"] == engine
+        and sample["case"] == case
+        and sample["gap_s"] == gap
+    ]
+    return {
+        "case": case,
+        "gap_s": gap,
+        "engine": engine,
+        "throughput": quantiles([s["rows_per_second"] for s in selected]),
+        "latency_p50_ms": quantiles([s["latency_ms"]["p50"] for s in selected]),
+        "latency_p95_ms": quantiles([s["latency_ms"]["p95"] for s in selected]),
+        "rss_peak_mib": quantiles([s["rss_peak_bytes"] / 2**20 for s in selected]),
+        "startup_s": quantiles([s["startup_to_connection_s"] for s in selected]),
+    }
+
+
+def summarize_samples(args, cases: list, samples: list[dict]) -> list[dict]:
+    return [
+        summary_entry(samples, engine, case, gap)
+        for case, gap in cases
+        for engine in ("calc_flow", "arroyo")
+        if engine in args.engines
+    ]
+
+
+async def controller(args) -> None:
+    import calc_flow._native as native
+
+    root = args.output.resolve()
+    root.mkdir(parents=True, exist_ok=False)
+    started = time.perf_counter()
+    identity = worker_identity(args, native)
+    os.environ["COMPARISON_NATIVE_SHA256"] = identity["native_sha256"]
+    save(root / "identity.json", identity)
+    cases = [(case, gap) for case in args.cases for gap in args.gaps]
+    samples = await acquire_samples(args, root, cases, started)
+    save(root / "summary.json", summarize_samples(args, cases, samples))
     save(
         root / "completion.json",
         {"elapsed_s": time.perf_counter() - started, "samples": len(samples)},

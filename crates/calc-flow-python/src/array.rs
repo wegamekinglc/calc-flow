@@ -107,29 +107,35 @@ pub(crate) fn numpy_snapshot(values: &Bound<'_, PyAny>) -> PyResult<NativeArray>
     }
     match dtype.num() {
         value if value == numpy::npyffi::NPY_TYPES::NPY_BOOL as i32 => {
-            let (values, shape) = copy_numpy::<bool>(values)?;
-            NativeArray::from_boolean(
-                BooleanBuffer::collect_bool(values.len(), |index| values[index]),
-                shape,
-                None,
-            )
+            boolean_numpy_snapshot(values)
         }
-        value if value == numpy::npyffi::NPY_TYPES::NPY_FLOAT as i32 => {
-            let (values, shape) = copy_numpy::<f32>(values)?;
-            NativeArray::from_f32(values, shape, None)
-        }
-        value if value == numpy::npyffi::NPY_TYPES::NPY_DOUBLE as i32 => {
-            let (values, shape) = copy_numpy::<f64>(values)?;
-            NativeArray::from_f64(values, shape, None)
-        }
-        _ => {
-            return Err(invalid(
-                "input.dtype",
-                "expected native-endian bool, float32 or float64",
-            ));
-        }
+        value if value == numpy::npyffi::NPY_TYPES::NPY_FLOAT as i32 => f32_numpy_snapshot(values),
+        value if value == numpy::npyffi::NPY_TYPES::NPY_DOUBLE as i32 => f64_numpy_snapshot(values),
+        _ => Err(invalid(
+            "input.dtype",
+            "expected native-endian bool, float32 or float64",
+        )),
     }
+}
+
+fn boolean_numpy_snapshot(values: &Bound<'_, PyAny>) -> PyResult<NativeArray> {
+    let (values, shape) = copy_numpy::<bool>(values)?;
+    NativeArray::from_boolean(
+        BooleanBuffer::collect_bool(values.len(), |index| values[index]),
+        shape,
+        None,
+    )
     .map_err(crate::error::to_py_err)
+}
+
+fn f32_numpy_snapshot(values: &Bound<'_, PyAny>) -> PyResult<NativeArray> {
+    let (values, shape) = copy_numpy::<f32>(values)?;
+    NativeArray::from_f32(values, shape, None).map_err(crate::error::to_py_err)
+}
+
+fn f64_numpy_snapshot(values: &Bound<'_, PyAny>) -> PyResult<NativeArray> {
+    let (values, shape) = copy_numpy::<f64>(values)?;
+    NativeArray::from_f64(values, shape, None).map_err(crate::error::to_py_err)
 }
 
 fn copy_numpy<T: numpy::Element + Copy>(
@@ -144,30 +150,36 @@ fn copy_numpy<T: numpy::Element + Copy>(
 }
 
 fn direct_numpy(array: &NativeArray, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-    if array.as_arrow().null_count() != 0 {
+    let Some((bytes, dtype)) = direct_numpy_storage(array) else {
         return Ok(None);
+    };
+    Ok(Some(reshape_numpy(py, array, bytes, dtype)?))
+}
+
+fn direct_numpy_storage(array: &NativeArray) -> Option<(&[u8], &'static str)> {
+    if array.as_arrow().null_count() != 0 {
+        return None;
     }
-    let bytes = match array.dtype() {
-        ArrayDType::Float32 => array
-            .as_arrow()
+    let arrow = array.as_arrow();
+    match array.dtype() {
+        ArrayDType::Float32 => arrow
             .as_any()
             .downcast_ref::<Float32Array>()
-            .map(|values| values.values().inner().as_slice()),
-        ArrayDType::Float64 => array
-            .as_arrow()
+            .map(|values| (values.values().inner().as_slice(), "float32")),
+        ArrayDType::Float64 => arrow
             .as_any()
             .downcast_ref::<Float64Array>()
-            .map(|values| values.values().inner().as_slice()),
+            .map(|values| (values.values().inner().as_slice(), "float64")),
         ArrayDType::Boolean | _ => None,
-    };
-    let Some(bytes) = bytes else {
-        return Ok(None);
-    };
-    let dtype = match array.dtype() {
-        ArrayDType::Float32 => "float32",
-        ArrayDType::Float64 => "float64",
-        _ => unreachable!("unsupported storage uses the existing conversion"),
-    };
+    }
+}
+
+fn reshape_numpy(
+    py: Python<'_>,
+    array: &NativeArray,
+    bytes: &[u8],
+    dtype: &str,
+) -> PyResult<Py<PyAny>> {
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", dtype)?;
     let bytes = PyBytes::new(py, bytes);
@@ -175,7 +187,7 @@ fn direct_numpy(array: &NativeArray, py: Python<'_>) -> PyResult<Option<Py<PyAny
         .getattr("frombuffer")?
         .call((bytes,), Some(&kwargs))?;
     let shape = PyTuple::new(py, array.shape())?;
-    Ok(Some(values.call_method1("reshape", (shape,))?.unbind()))
+    Ok(values.call_method1("reshape", (shape,))?.unbind())
 }
 
 fn invalid(field: &str, message: &str) -> PyErr {

@@ -183,32 +183,80 @@ pub(super) fn contains_duplicate_identity_in_records(
     let Some(first) = records.first() else {
         return Ok(false);
     };
-    let fields = identity_columns(first, side)?
-        .iter()
-        .map(|array| Arc::new(Field::new("identity", array.data_type().clone(), false)))
-        .collect();
-    let schema = KeySchema::groupable(fields)?;
-    let mut seen = HashMap::<u64, Vec<(usize, usize)>>::new();
+    let mut search = DuplicateIdentitySearch::new(records, side, first, input)?;
     for (record_index, record) in records.iter().enumerate() {
-        let columns = identity_columns(record, side)?;
-        let hashes = hash_rows(&schema, &columns, None, check)?;
-        let times = times(record, side);
-        for (row, hash) in hashes.into_iter().enumerate() {
-            if input.is_late(times.value(row)) {
-                continue;
-            }
-            if let Some(prior) = seen.get(&hash) {
-                for &(prior_record, prior_row) in prior {
-                    let prior_columns = identity_columns(&records[prior_record], side)?;
-                    if same_identity(&prior_columns, prior_row, &columns, row)? {
-                        return Ok(true);
-                    }
-                }
-            }
-            seen.entry(hash).or_default().push((record_index, row));
+        if search.contains_in_record(record_index, record, check)? {
+            return Ok(true);
         }
     }
     Ok(false)
+}
+
+struct DuplicateIdentitySearch<'a> {
+    records: &'a [RecordBatch],
+    side: &'a AsofJoinSide,
+    schema: KeySchema,
+    input: ValidatedInput,
+    seen: HashMap<u64, Vec<(usize, usize)>>,
+}
+
+impl<'a> DuplicateIdentitySearch<'a> {
+    fn new(
+        records: &'a [RecordBatch],
+        side: &'a AsofJoinSide,
+        first: &RecordBatch,
+        input: ValidatedInput,
+    ) -> Result<Self> {
+        let fields = identity_columns(first, side)?
+            .iter()
+            .map(|array| Arc::new(Field::new("identity", array.data_type().clone(), false)))
+            .collect();
+        Ok(Self {
+            records,
+            side,
+            schema: KeySchema::groupable(fields)?,
+            input,
+            seen: HashMap::new(),
+        })
+    }
+
+    fn contains_in_record(
+        &mut self,
+        record_index: usize,
+        record: &RecordBatch,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<bool> {
+        let columns = identity_columns(record, self.side)?;
+        let hashes = hash_rows(&self.schema, &columns, None, check)?;
+        let times = times(record, self.side);
+        for (row, hash) in hashes.into_iter().enumerate() {
+            if self.input.is_late(times.value(row)) {
+                continue;
+            }
+            if let Some(prior) = self.seen.get(&hash)
+                && self.contains_prior(prior, &columns, row)?
+            {
+                return Ok(true);
+            }
+            self.seen.entry(hash).or_default().push((record_index, row));
+        }
+        Ok(false)
+    }
+
+    fn contains_prior(
+        &self,
+        prior: &[(usize, usize)],
+        columns: &[ArrayRef],
+        row: usize,
+    ) -> Result<bool> {
+        for &(prior_record, prior_row) in prior {
+            let prior_columns = identity_columns(&self.records[prior_record], self.side)?;
+            if same_identity(&prior_columns, prior_row, columns, row)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 fn identity_columns(record: &RecordBatch, side: &AsofJoinSide) -> Result<Vec<ArrayRef>> {

@@ -778,7 +778,8 @@ class TableExpr(Expr[object]):
         ``SourceProvidedWatermarks`` advances only through ``watermark=``,
         ``BoundedOutOfOrderness`` ignores ``emit_interval``, and idle timeouts
         must be ``None``. Static parameters and native array inputs are
-        rejected; ``config`` checkpoint fields are ignored.
+        rejected. Without managed storage, checkpoint fields are ignored;
+        durable sessions require effective ``checkpointing=True``.
         """
         from calc_flow.session import _open_session
         from calc_flow.symbolic.program import Program

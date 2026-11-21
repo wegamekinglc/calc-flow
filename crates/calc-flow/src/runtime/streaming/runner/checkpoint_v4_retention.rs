@@ -224,6 +224,7 @@ mod tests {
                     next_sequence: 0,
                     ended: false,
                     watermark_policy: SourceWatermarkManifestState::Disabled { idle: false },
+                    session_ordered_max: None,
                     history: None,
                 },
             )]),

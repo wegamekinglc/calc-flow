@@ -7,6 +7,7 @@ use super::{
     SessionWatermark, StreamExecutionPlan, StreamRuntimeConfig, StreamSession, WatermarkMode,
     session_block_on, session_error, session_runtime,
 };
+use crate::runtime::streaming::progress::prepare::{ArrowTimestampUnit, ResolvedEventTimeColumn};
 use crate::{
     Epoch, SourceWatermarkManifestState,
     state::{
@@ -14,7 +15,10 @@ use crate::{
         v4::{
             V4Store,
             coordinator::V4Coordinator,
-            manifest::{JobKind, SourceV4, V4Manifest, manifest_fingerprint},
+            manifest::{
+                JobKind, SessionOrderedMaximumV4, SessionTimestampUnitV4, SourceV4, V4Manifest,
+                manifest_fingerprint,
+            },
             opaque::V4OpaqueAdapter,
         },
     },
@@ -219,7 +223,7 @@ impl StreamSession {
         let source = manifest.sources.get(&input_id).ok_or_else(|| {
             session_error("checkpoint manifest does not contain the session input")
         })?;
-        session.restore_input(source);
+        session.restore_input(source)?;
         for node in &mut session.nodes {
             let mut store = V4Store::new(opened.manifest_root().join("lineage"));
             let snapshot = V4OpaqueAdapter::restore(&mut store, &manifest, node.node_id())?;
@@ -257,7 +261,8 @@ impl StreamSession {
             identity_hash: "session".into(),
             next_sequence: self.input.progress.next_sequence.unwrap_or(0),
             ended: self.lifecycle == Lifecycle::Finished,
-            watermark_policy: self.input.watermark_manifest_state(),
+            watermark_policy: self.input.watermark_manifest_state()?,
+            session_ordered_max: self.input.ordered_max_manifest(),
             history: None,
         };
         let manifest = V4Manifest {
@@ -282,13 +287,17 @@ impl StreamSession {
         })
     }
 
-    fn restore_input(&mut self, source: &SourceV4) {
+    fn restore_input(&mut self, source: &SourceV4) -> Result<()> {
         self.input.progress.next_sequence = Some(source.next_sequence);
         self.input.progress.watermark = source.watermark_policy.last_emitted_micros();
-        self.input.progress.max_event_time = source
-            .watermark_policy
-            .observed_max_micros()
-            .map(EventTime::as_micros);
+        let ordered_event_time = match &self.input.mode {
+            WatermarkMode::Generated {
+                event_time,
+                ordered: true,
+            } => Some(event_time),
+            _ => None,
+        };
+        self.input.progress.max_event_time = restore_ordered_maximum(source, ordered_event_time)?;
         if let WatermarkMode::Generated { event_time, .. } = &self.input.mode {
             let (observed, last) = match source.watermark_policy {
                 SourceWatermarkManifestState::BoundedOutOfOrderness {
@@ -312,6 +321,40 @@ impl StreamSession {
                 observed,
                 last,
             ));
+        }
+        Ok(())
+    }
+}
+
+fn restore_ordered_maximum(
+    source: &SourceV4,
+    event_time: Option<&ResolvedEventTimeColumn>,
+) -> Result<Option<i64>> {
+    let persisted = source.session_ordered_max;
+    let observed = source.watermark_policy.observed_max_micros();
+    match (event_time, persisted, observed) {
+        (None, None, _) | (Some(_), None, None) => Ok(None),
+        (Some(expected), Some(maximum), Some(_))
+            if maximum.unit == SessionTimestampUnitV4::from(expected.unit) =>
+        {
+            Ok(Some(maximum.value))
+        }
+        (Some(_), None, Some(_)) => Err(session_error(
+            "ordered session checkpoint lacks its raw event-time maximum",
+        )),
+        _ => Err(session_error(
+            "ordered session checkpoint event-time unit or progress does not match the plan",
+        )),
+    }
+}
+
+impl From<ArrowTimestampUnit> for SessionTimestampUnitV4 {
+    fn from(unit: ArrowTimestampUnit) -> Self {
+        match unit {
+            ArrowTimestampUnit::Second => Self::Second,
+            ArrowTimestampUnit::Millisecond => Self::Millisecond,
+            ArrowTimestampUnit::Microsecond => Self::Microsecond,
+            ArrowTimestampUnit::Nanosecond => Self::Nanosecond,
         }
     }
 }
@@ -348,20 +391,44 @@ impl SessionWatermarkManifest for SourceWatermarkManifestState {
 }
 
 impl SessionInput {
-    fn watermark_manifest_state(&self) -> SourceWatermarkManifestState {
+    fn ordered_max_manifest(&self) -> Option<SessionOrderedMaximumV4> {
         match &self.mode {
+            WatermarkMode::Generated {
+                event_time,
+                ordered: true,
+            } => self
+                .progress
+                .max_event_time
+                .map(|value| SessionOrderedMaximumV4 {
+                    unit: event_time.unit.into(),
+                    value,
+                }),
+            _ => None,
+        }
+    }
+
+    fn watermark_manifest_state(&self) -> Result<SourceWatermarkManifestState> {
+        let state = match &self.mode {
             WatermarkMode::Explicit => SourceWatermarkManifestState::SourceProvided {
                 last_emitted_micros: self.progress.watermark,
                 idle: false,
             },
             WatermarkMode::Generated { .. } => {
+                let observed_max_micros = self
+                    .progress
+                    .generator
+                    .as_ref()
+                    .map(GeneratedWatermarkState::max_observed_micros)
+                    .transpose()?
+                    .flatten();
                 SourceWatermarkManifestState::BoundedOutOfOrderness {
-                    observed_max_micros: self.progress.max_event_time.map(EventTime::from_micros),
+                    observed_max_micros,
                     last_emitted_micros: self.progress.watermark,
                     idle: false,
                 }
             }
             WatermarkMode::Disabled => SourceWatermarkManifestState::Disabled { idle: false },
-        }
+        };
+        Ok(state)
     }
 }

@@ -339,6 +339,7 @@ fn persist_sources(sources: &BTreeMap<String, SourceManifestEntry>) -> BTreeMap<
                     next_sequence: entry.sequence,
                     ended: entry.ended,
                     watermark_policy: entry.watermark_policy.clone(),
+                    session_ordered_max: None,
                     history: entry.history.clone(),
                 },
             )

@@ -25,6 +25,22 @@ pub(crate) enum JobKind {
     Session,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SessionTimestampUnitV4 {
+    Second,
+    Millisecond,
+    Microsecond,
+    Nanosecond,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SessionOrderedMaximumV4 {
+    pub(crate) unit: SessionTimestampUnitV4,
+    pub(crate) value: i64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SourceV4 {
@@ -34,6 +50,8 @@ pub(crate) struct SourceV4 {
     pub(crate) next_sequence: u64,
     pub(crate) ended: bool,
     pub(crate) watermark_policy: super::super::manifest::SourceWatermarkManifestState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) session_ordered_max: Option<SessionOrderedMaximumV4>,
     #[serde(deserialize_with = "deserialize_required_option")]
     pub(crate) history: Option<SourceHistoryManifestEntry>,
 }

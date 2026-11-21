@@ -646,71 +646,119 @@ fn compare_paired_samples(left: &Value, right: &Value) {
     }
 }
 
+type PairedMeasurements = (Vec<Vec<f64>>, Vec<Vec<f64>>, Vec<Value>);
+
+async fn paired_sample(input: &LoadedInput, changelog: bool, index: usize) -> ExampleResult<Value> {
+    sample(
+        Arc::clone(&input.batches),
+        &input.sha256,
+        "stream",
+        1,
+        index,
+        changelog,
+    )
+    .await
+}
+
+async fn checked_changelog_case(id: &str, input: &LoadedInput) -> ExampleResult<Value> {
+    let baseline = paired_sample(input, false, 0).await?;
+    let candidate = paired_sample(input, true, 0).await?;
+    validate_paired_sample(&baseline, false);
+    validate_paired_sample(&candidate, true);
+    compare_paired_samples(&baseline, &candidate);
+    Ok(json!({"id":id,"correctness":true}))
+}
+
+async fn paired_changelog_warmup(
+    input: &LoadedInput,
+    round: usize,
+    deadline: Instant,
+) -> ExampleResult {
+    let baseline = paired_sample(input, false, round).await?;
+    let candidate = paired_sample(input, true, round).await?;
+    validate_paired_sample(&baseline, false);
+    validate_paired_sample(&candidate, true);
+    compare_paired_samples(&baseline, &candidate);
+    if Instant::now() >= deadline {
+        return Err("measurement deadline exhausted".into());
+    }
+    Ok(())
+}
+
+async fn paired_changelog_observation(
+    input: &LoadedInput,
+    changelog: bool,
+    pair: usize,
+    deadline: Instant,
+) -> ExampleResult<(f64, Value)> {
+    let observation = paired_sample(input, changelog, pair).await?;
+    validate_paired_sample(&observation, changelog);
+    if Instant::now() >= deadline {
+        return Err("measurement deadline exhausted".into());
+    }
+    Ok((observation["seconds"].as_f64().unwrap(), observation))
+}
+
+async fn paired_changelog_round(
+    input: &LoadedInput,
+    round: usize,
+    deadline: Instant,
+    observations: &mut Vec<Value>,
+) -> ExampleResult<(Vec<f64>, Vec<f64>)> {
+    let mut baseline = Vec::new();
+    let mut candidate = Vec::new();
+    for pair in 0..10 {
+        for changelog in if pair % 2 == 0 {
+            [false, true]
+        } else {
+            [true, false]
+        } {
+            let (seconds, observation) =
+                paired_changelog_observation(input, changelog, pair, deadline).await?;
+            if changelog {
+                candidate.push(seconds);
+            } else {
+                baseline.push(seconds);
+            }
+            observations.push(json!({
+                "round":round + 1,
+                "pair":pair + 1,
+                "side":if changelog {"candidate"} else {"baseline"},
+                "row":observation,
+            }));
+        }
+    }
+    Ok((baseline, candidate))
+}
+
+async fn paired_changelog_measurements(
+    input: &LoadedInput,
+    deadline: Instant,
+) -> ExampleResult<PairedMeasurements> {
+    let mut baseline = Vec::new();
+    let mut candidate = Vec::new();
+    let mut observations = Vec::new();
+    for round in 0..2 {
+        paired_changelog_warmup(input, round, deadline).await?;
+        let (baseline_round, candidate_round) =
+            paired_changelog_round(input, round, deadline, &mut observations).await?;
+        baseline.push(baseline_round);
+        candidate.push(candidate_round);
+    }
+    Ok((baseline, candidate, observations))
+}
+
 async fn paired_changelog_case(
     id: &str,
     input: &LoadedInput,
     check: bool,
     deadline: Instant,
 ) -> ExampleResult<Value> {
-    let execute = |changelog, index| {
-        sample(
-            Arc::clone(&input.batches),
-            &input.sha256,
-            "stream",
-            1,
-            index,
-            changelog,
-        )
-    };
     if check {
-        let baseline = execute(false, 0).await?;
-        let candidate = execute(true, 0).await?;
-        validate_paired_sample(&baseline, false);
-        validate_paired_sample(&candidate, true);
-        compare_paired_samples(&baseline, &candidate);
-        return Ok(json!({"id":id,"correctness":true}));
+        return checked_changelog_case(id, input).await;
     }
-    let mut baseline = Vec::new();
-    let mut candidate = Vec::new();
-    let mut observations = Vec::new();
-    for round in 0..2 {
-        let baseline_warmup = execute(false, round).await?;
-        let candidate_warmup = execute(true, round).await?;
-        validate_paired_sample(&baseline_warmup, false);
-        validate_paired_sample(&candidate_warmup, true);
-        compare_paired_samples(&baseline_warmup, &candidate_warmup);
-        if Instant::now() >= deadline {
-            return Err("measurement deadline exhausted".into());
-        }
-        let mut baseline_round = Vec::new();
-        let mut candidate_round = Vec::new();
-        for pair in 0..10 {
-            for changelog in if pair % 2 == 0 {
-                [false, true]
-            } else {
-                [true, false]
-            } {
-                let observation = execute(changelog, pair).await?;
-                validate_paired_sample(&observation, changelog);
-                if Instant::now() >= deadline {
-                    return Err("measurement deadline exhausted".into());
-                }
-                if changelog {
-                    candidate_round.push(observation["seconds"].as_f64().unwrap());
-                } else {
-                    baseline_round.push(observation["seconds"].as_f64().unwrap());
-                }
-                observations.push(json!({
-                    "round":round + 1,
-                    "pair":pair + 1,
-                    "side":if changelog {"candidate"} else {"baseline"},
-                    "row":observation,
-                }));
-            }
-        }
-        baseline.push(baseline_round);
-        candidate.push(candidate_round);
-    }
+    let (baseline, candidate, observations) =
+        paired_changelog_measurements(input, deadline).await?;
     Ok(json!({
         "id":id,
         "rows":input.batches.iter().map(Batch::num_rows).sum::<usize>(),
@@ -720,6 +768,23 @@ async fn paired_changelog_case(
         "candidate":candidate,
         "observations":observations,
     }))
+}
+
+async fn write_paired_changelog_report(
+    output: &str,
+    started: Instant,
+    check: bool,
+    cases: Vec<Value>,
+) -> ExampleResult {
+    let report = json!({
+        "schema":"calc-flow.sum-state-changelog.v1",
+        "scope":"fresh-stream-plan-execution-retained-output-and-cleanup",
+        "status":if check {"checked"} else {"completed"},
+        "elapsed_seconds":started.elapsed().as_secs_f64(),
+        "cases":cases,
+    });
+    tokio::fs::write(output, serde_json::to_vec_pretty(&report)?).await?;
+    Ok(())
 }
 
 async fn paired_changelog(stock: &str, sparse: &str, output: &str, check: bool) -> ExampleResult {
@@ -734,15 +799,7 @@ async fn paired_changelog(stock: &str, sparse: &str, output: &str, check: bool) 
     if started.elapsed() >= Duration::from_secs(600) {
         return Err("measurement deadline exhausted".into());
     }
-    let report = json!({
-        "schema":"calc-flow.sum-state-changelog.v1",
-        "scope":"fresh-stream-plan-execution-retained-output-and-cleanup",
-        "status":if check {"checked"} else {"completed"},
-        "elapsed_seconds":started.elapsed().as_secs_f64(),
-        "cases":cases,
-    });
-    tokio::fs::write(output, serde_json::to_vec_pretty(&report)?).await?;
-    Ok(())
+    write_paired_changelog_report(output, started, check, cases).await
 }
 
 struct SampleRequest<'a> {
@@ -805,17 +862,31 @@ async fn run_samples(request: SampleRequest<'_>) -> ExampleResult {
     Ok(())
 }
 
+fn paired_changelog_check(args: &[String]) -> ExampleResult<bool> {
+    if !(args.len() == 4 || args.len() == 5 && args[4] == "--check") {
+        return Err("--paired-changelog STOCK.arrow SPARSE.arrow OUTPUT.json [--check]".into());
+    }
+    Ok(args.len() == 5)
+}
+
+async fn paired_changelog_command(args: &[String]) -> ExampleResult {
+    let check = paired_changelog_check(args)?;
+    paired_changelog(&args[1], &args[2], &args[3], check).await
+}
+
+async fn prepare_command(args: &[String]) -> ExampleResult {
+    let directory = args.get(1).ok_or("--prepare directory")?;
+    prepare(Path::new(directory)).await
+}
+
 #[tokio::main]
 async fn main() -> ExampleResult {
     let args = support::arguments()?;
     if args.first().map(String::as_str) == Some("--paired-changelog") {
-        if !(args.len() == 4 || args.len() == 5 && args[4] == "--check") {
-            return Err("--paired-changelog STOCK.arrow SPARSE.arrow OUTPUT.json [--check]".into());
-        }
-        return paired_changelog(&args[1], &args[2], &args[3], args.len() == 5).await;
+        return paired_changelog_command(&args).await;
     }
     if args.first().map(String::as_str) == Some("--prepare") {
-        return prepare(Path::new(args.get(1).ok_or("--prepare directory")?)).await;
+        return prepare_command(&args).await;
     }
     run_samples(sample_request(&args)?).await
 }

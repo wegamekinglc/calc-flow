@@ -326,8 +326,16 @@ mod tests {
             plan.name().into(),
         ));
         let parts = plan.into_runtime_parts(EdgeBudget::default()).unwrap();
-        let Ok(mut runtime) =
-            run_operator_entry(parts, &context, &core, &cancellation, BTreeMap::new(), None).await
+        let Ok(mut runtime) = run_operator_entry(
+            parts,
+            &context,
+            &core,
+            &cancellation,
+            BTreeMap::new(),
+            None,
+            true,
+        )
+        .await
         else {
             panic!("valid pair entry failed");
         };
@@ -738,10 +746,17 @@ mod tests {
                 faults: super::super::CheckpointFaultInjector::default(),
                 fault_cancellation: cancellation.clone(),
             });
-        let runtime =
-            run_operator_entry(parts, &context, &core, &cancellation, restores, checkpoint)
-                .await
-                .unwrap_or_else(|error| panic!("graph entry failed: {error:?}"));
+        let runtime = run_operator_entry(
+            parts,
+            &context,
+            &core,
+            &cancellation,
+            restores,
+            checkpoint,
+            true,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("graph entry failed: {error:?}"));
         assert_eq!(
             runtime.supervisor.physical_driver_count(),
             if cooperative {
@@ -1281,6 +1296,7 @@ mod tests {
                 &cancellation,
                 BTreeMap::from([(failing_node.into(), restore)]),
                 None,
+                true,
             )
             .await;
             let Err(EntryFailure::Failed(failure)) = result else {
@@ -1532,8 +1548,16 @@ mod tests {
             false,
             parts.name.clone(),
         ));
-        let Ok(mut runtime) =
-            run_operator_entry(parts, &context, &core, &cancellation, BTreeMap::new(), None).await
+        let Ok(mut runtime) = run_operator_entry(
+            parts,
+            &context,
+            &core,
+            &cancellation,
+            BTreeMap::new(),
+            None,
+            true,
+        )
+        .await
         else {
             panic!("native projection entry failed");
         };

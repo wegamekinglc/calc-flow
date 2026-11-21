@@ -96,6 +96,10 @@ impl RunCore {
         operator.state.next_right_row_id = migrated.state.next_row_id(JoinSide::Right);
         operator.state.next_output_sequence = migrated.state.next_output_sequence();
         *self = migrated;
+        let progress = operator.ingress_progress.clone();
+        for (ingress, progress) in progress.by_ingress() {
+            self.evict(operator, ingress, *progress)?;
+        }
         Ok(())
     }
 
@@ -497,9 +501,6 @@ impl RunCore {
         {
             self.migrate_hot(operator)?;
         }
-        if let Some(hot) = &mut self.hot {
-            return hot.process(operator, ingress, batch, context, output).await;
-        }
         #[cfg(feature = "benchmark-internals")]
         let admit_span =
             context
@@ -519,6 +520,36 @@ impl RunCore {
             .await?;
         #[cfg(feature = "benchmark-internals")]
         drop(admit_span);
+        if let Some(input) = prepare_hot_input(
+            operator,
+            &plan,
+            batch,
+            &bundle,
+            self.hot.is_some(),
+            &mut self.keys,
+        )? {
+            let hot = self
+                .hot
+                .as_mut()
+                .expect("hot admission requires a hot core");
+            return hot.process(operator, input, context, output).await;
+        }
+        if self.hot.is_some() {
+            self.migrate_hot(operator)?;
+            self.hot = None;
+        }
+        self.process_admitted(operator, plan, bundle, context, output)
+            .await
+    }
+
+    async fn process_admitted(
+        &mut self,
+        operator: &mut StreamJoinOperator,
+        plan: super::SidePlan,
+        mut bundle: super::AdmissionBundle,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
         let metrics = std::mem::take(&mut bundle.metrics);
         let cut = self.keys.cut();
         let prepared = self.prepare(operator, &plan, &bundle.admitted, context);
@@ -630,8 +661,12 @@ impl RunCore {
         ingress: &str,
         progress: crate::IngressProgress,
     ) -> Result<()> {
-        if self.hot.is_some() {
-            return Ok(());
+        if self
+            .hot
+            .as_ref()
+            .is_some_and(super::hot::HotJoinCore::has_history)
+        {
+            self.migrate_hot(operator)?;
         }
         let (side, extension) = match ingress {
             "left" => (JoinSide::Right, operator.spec.bounds.before_micros),
@@ -694,6 +729,48 @@ impl RunCore {
             operator.state.metrics.right = metrics;
         }
     }
+}
+
+fn prepare_hot_input<'a>(
+    operator: &StreamJoinOperator,
+    plan: &super::SidePlan,
+    batch: &'a Batch,
+    bundle: &'a super::AdmissionBundle,
+    enabled: bool,
+    key_store: &mut KeyStore,
+) -> Result<Option<super::hot::HotInput<'a>>> {
+    if !enabled
+        || bundle.admitted.len() != batch.num_rows()
+        || !bundle.admitted.iter().all(|row| row.retain)
+    {
+        return Ok(None);
+    }
+    let compiled = operator.retained_compiled();
+    let keys = if plan.incoming_is_left {
+        &compiled.left_key_indices
+    } else {
+        &compiled.right_key_indices
+    };
+    let charge = super::runs::hot_batch_charge(batch, keys, key_store)?;
+    let within_rows = u64::try_from(charge.0).unwrap_or(u64::MAX)
+        <= operator.spec.limits.max_state_rows_per_side();
+    let within_bytes = u64::try_from(charge.1).unwrap_or(u64::MAX)
+        <= operator.spec.limits.max_state_bytes_per_side();
+    if !(within_rows && within_bytes) {
+        return Ok(None);
+    }
+    let side = if plan.incoming_is_left {
+        JoinSide::Left
+    } else {
+        JoinSide::Right
+    };
+    Ok(Some(super::hot::HotInput {
+        side,
+        batch,
+        next_row_id: bundle.next_row_id,
+        metrics: bundle.metrics.clone(),
+        charge,
+    }))
 }
 
 fn run_output_schema(operator: &StreamJoinOperator) -> &SchemaRef {

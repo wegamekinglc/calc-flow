@@ -6,7 +6,7 @@ use super::{
     native_dictionary::{TimedEntry, WindowBounds, WindowCursor, ordered_window_bounds},
     operator_error, output_gather,
 };
-use crate::operator::keyed::{GroupId, MORSEL_ROWS};
+use crate::operator::keyed::{GroupId, KeyStore, MORSEL_ROWS};
 use crate::operator::output_chunk::OutputChunkErrors;
 use crate::{
     Batch, BatchMetadata, CalcFlowError, EdgeBudget, EventTime, Result, StreamingFailureReason,
@@ -170,7 +170,7 @@ impl Incoming {
 
     pub(super) fn route(
         input: RouteInput<'_>,
-        keys: &mut crate::operator::keyed::KeyStore,
+        keys: &mut KeyStore,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<Self> {
         let RouteInput {
@@ -425,6 +425,43 @@ struct LiveRun {
     run: Arc<Run>,
     head: usize,
     released_bytes: usize,
+}
+
+pub(super) fn hot_batch_charge(
+    batch: &Batch,
+    key_indices: &[usize],
+    keys: &mut KeyStore,
+) -> Result<(usize, usize)> {
+    let mut run_bytes = 0usize;
+    let mut groups = BTreeMap::<GroupId, Vec<usize>>::new();
+    let mut expiration = Vec::new();
+    for record in batch.table_payload()?.batches() {
+        for start in (0..record.num_rows()).step_by(MORSEL_ROWS) {
+            let rows = (record.num_rows() - start).min(MORSEL_ROWS);
+            let record = record.slice(start, rows);
+            run_bytes = run_bytes
+                .checked_add(RunCharge::read(&record)?.total(rows)?)
+                .ok_or_else(|| run_error("hot state run charge overflowed"))?;
+            let arrays = key_indices
+                .iter()
+                .map(|&index| record.column(index).clone())
+                .collect::<Vec<_>>();
+            let routed = keys.route_with_limit(&arrays, rows, &mut || Ok(()))?;
+            for group in routed {
+                groups.entry(group).or_default().push(0);
+                expiration.push(0);
+            }
+        }
+    }
+    let bucket_bytes = groups.into_values().try_fold(0usize, |total, entries| {
+        let charge = BUCKET_OWNER_BYTES + entries.capacity() * size_of::<LocatorEntry>();
+        total.checked_add(charge)
+    });
+    let bytes = bucket_bytes
+        .and_then(|bytes| bytes.checked_add(expiration.capacity() * size_of::<LocatorEntry>()))
+        .and_then(|bytes| bytes.checked_add(run_bytes))
+        .ok_or_else(|| run_error("hot state owner charge overflowed"))?;
+    Ok((batch.num_rows(), bytes))
 }
 
 #[derive(Clone)]
@@ -1565,7 +1602,7 @@ impl RunState {
         limits: JoinStateLimits,
         bounds: JoinTimeBounds,
         segments: &BTreeMap<String, crate::StateSegment>,
-        keys: &mut crate::operator::keyed::KeyStore,
+        keys: &mut KeyStore,
     ) -> Result<Self> {
         pages::restore(name, limits, bounds, segments, keys)
     }
