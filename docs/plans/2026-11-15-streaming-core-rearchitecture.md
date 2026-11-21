@@ -108,7 +108,7 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   静态测试通过：`python/tests/test_distribution.py` 4 项、`scripts/test_release_workflow.py` 4 项、
   `scripts/test_inspect_v3_wheel.py` 2 项、`scripts/test_release_config.py` 42 项；实际 wheel 与跨平台发布仍由
   release workflow 验收。P6 的分区执行器、统一 morsel 池、I/O 与计算分离及性能门槛仍未完成。
-- P7 pane 部分交付（`68b43fe3`）：N=1 hopping 且完整聚合列表仅含 COUNT/MIN/MAX 时启用按 slide 对齐的 pane；
+- P7 pane 候选曾部分交付（`68b43fe3`，后续性能验收否决并撤回）：当时 N=1 hopping 且完整聚合列表仅含 COUNT/MIN/MAX 时启用按 slide 对齐的 pane；
   负时间戳使用数学向下取整，每个有效行只更新一个 `(group, pane)`，关闭时按 pane start 升序合并恰好 k 个 pane。
   COUNT 更新与合并均检查 u64 溢出，MIN/MAX 保持既有全序和浮点位模式；全 NULL 操作数的有效组仍产生 count=0
   和 NULL extrema。保留逐目标窗口的 `end <= watermark` late 判定，pane 在最后可贡献窗口关闭时（含等号）退休。
@@ -405,10 +405,22 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   hash/canonical/equality 快路径及其专用回调计数测试，保留独立的 benchmark feature 编译边界修正。
   原始两轮证据见 `benchmarks/sum-state/p6-short-string-route-20261121/`。下一阶段转向 window COUNT/MIN/MAX
   pane 的真实对照，不继续微调同一取消检查路径。
+- 2026-11-21 P7 COUNT/MIN/MAX pane 端到端验收明确失败，已撤回 `68b43fe3` 的生产实现。专用 harness `c6968721`
+  在同一 release 二进制内用 benchmark-only 开关比较旧逐窗口路径和 pane，避免跨编译器与跨构建噪声；100,000 行、
+  window/slide=100/10 微秒，每例 2 轮×10 组 AB/BA、每轮每臂一次带恢复预热，所有正式输出均执行独立值 oracle。
+  4 组从 **14.561 ms** 增至 **27.090 ms**（**+86.04%，regression**），8,192 组从 **76.432 ms** 增至
+  **254.610 ms**（**+233.12%，regression**）；两例 paired rounds 也全部同向回退。80 个正式观测的输出值、
+  完整 digest、输入/输出计数和 CPU 证据均有效，采集 10.172 秒，release 构建 558.106 秒另计。
+  因此“每行只更新一个 pane 累加器”被实际 open-window 维护、标量状态与合并成本抵消，不能称为性能升级。
+  按停止规则删除 pane 模块、layout 3 接入和专用 harness，不保留未证明收益的实验开关；所有声明恢复为既有
+  per-window accumulators 与 layouts 1/2；撤回后现有 window 47 项回归（46 通过、1 ignored）及全 feature Clippy 通过。
+  证据见 `benchmarks/window-panes/p7-count-min-max-20261121/`。
+  P7 高重叠改善门槛未通过，SUM/AVG 的数值准入阻塞仍独立存在；下一项转向尚未验收的 ASOF 热路径，
+  不再围绕该 pane 实现调参。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
-  因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
-  9 项 pane 测试及全 feature Clippy 通过。SUM/AVG 需要能保持逐位输出的合并证明与新数值方案，P7 仍未完成。
+  因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。当时 COUNT/MIN/MAX pane 保持现状；
+  9 项 pane 测试及全 feature Clippy 通过，其后续性能否决与撤回见上条。SUM/AVG 需要能保持逐位输出的合并证明与新数值方案，P7 仍未完成。
 - 2026-11-20 P6 ASOF managed checkpoint capture/restore 已从旧 gather worker 迁到 job 统一 morsel 池，
   保留独立 workspace reservation、job cancellation/deadline 等待和取消 ticket；放弃 future 后的后台失败继续归入原 operator task。
   新增旧 gather 准入关闭后的 capture/restore 回归及 abandoned failure 诊断回归，ASOF 49 项、operator-task 77 项

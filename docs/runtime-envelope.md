@@ -292,9 +292,7 @@ prepared buffers, and captures bounded metadata. Restore validates every
 metadata field, Arrow schema, group-key encoding, row order, and accumulator
 shape on a worker before replacing live state. More than 32 retained deltas
 prepares one replacement base at the next capture; old immutable segments remain
-live until manifest reachability collection can remove them. The pane path
-instead captures the canonical full pane and open-window segments described
-under [window state and storage](#window-state-and-storage).
+live until manifest reachability collection can remove them.
 
 `StreamCollector` is the only way a stream operator emits. `emit(port,
 batch)` validates the port name, the `BatchKind`, and the optional exact
@@ -1218,60 +1216,39 @@ configuration fingerprints before source open. Supported aggregates are
 matrix; decimal, session,
 early-trigger, allowed-lateness, update, and retract forms remain unavailable.
 
-Execution has two internal representations with the same visible contract.
-Tumbling windows, and hopping windows whose complete aggregate list is not
-exclusively `count`, `min`, and `max`, retain deterministic per-window
-accumulators in `(window_start, window_end, G1 group key)` order. An eligible
-hopping window instead uses single-owner (N=1), slide-aligned pane state. For
-window size `W`, slide `S`, and overlap `k = W/S`, pane `p` is the half-open
-interval `[p*S, (p+1)*S)`. The pane index is `floor(t/S)` using mathematical
-floor for negative timestamps. Each valid row with at least one open target
-window updates one `(group, pane)` rather than `k` per-window accumulators.
-Closing `[w, w+W)` merges exactly panes `floor(w/S)` through
-`floor(w/S) + k - 1` in increasing pane-start order. This path adds no
-partitioned dispatch.
-
-`count` ignores null operands and uses checked `u64` addition during both
-update and merge. `min` and `max` ignore nulls and apply the existing scalar
-total comparison during update and merge, preserving exact floating values and
-bits for NaNs, infinities, and signed zero as well as the supported string and
-temporal types. A valid group row creates pane and open-window state even when
-all aggregate operands are null, so that group still emits count zero and null
-extrema. No empty window is invented.
+Execution retains deterministic per-window accumulators in
+`(window_start, window_end, G1 group key)` order for both tumbling and hopping
+windows. `count` ignores null operands and uses checked `u64` addition. `min`
+and `max` ignore nulls and apply the existing scalar total comparison,
+preserving exact floating values and bits for NaNs, infinities, and signed zero
+as well as the supported string and temporal types. A valid group row creates
+window state even when all aggregate operands are null, so that group still
+emits count zero and null extrema. No empty window is invented.
 
 Null event times are dropped and counted separately. A row-window assignment
-is late only when `window_end <= WM_in`; a hopping row can therefore update a
-pane needed by open assignments while dropping its closed assignments, with
-unchanged late metrics. Watermark and end handlers emit one final value per
-non-empty window before runtime-owned control forwarding, chunk outputs to the
-effective edge budget, and preserve checked operator-owned sequences across
-snapshot/restore. A pane remains until every window it can contribute to has
-closed. At a real watermark, pane `p` is retired when `p*S + W <= watermark`;
-equality therefore retires it after the latest possible target window closes.
+is late only when `window_end <= WM_in`; a hopping row can therefore update open
+assignments while dropping its closed assignments, with unchanged late metrics.
+Watermark and end handlers emit one final value per non-empty window before
+runtime-owned control forwarding, chunk outputs to the effective edge budget,
+and preserve checked operator-owned sequences across snapshot/restore.
 
-`StateBudget.rows` continues to count logical open `(window bounds, group)`
-pairs on either representation, not physical panes. For pane state,
-`StateBudget.bytes` covers actual pane, key, and open-window storage plus merge
-scratch. Input and close prepare isolated candidates and check logical and
-physical usage before committing; a budget failure installs no partial state.
-A rejected pane close leaves pane contents, open windows, progress, metrics,
-terminal state, and the output sequence at their exact pre-call values. Output
-already accepted downstream before a failed send cannot be retracted.
+`StateBudget.rows` counts logical open `(window bounds, group)` pairs, and
+`StateBudget.bytes` covers retained accumulator and key storage. Input and close
+prepare isolated candidates and check logical and physical usage before
+committing; a budget failure installs no partial state. A rejected close leaves
+accumulators, progress, metrics, terminal state, and the output sequence at
+their exact pre-call values. Output already accepted downstream before a failed
+send cannot be retracted.
 
-Floating `sum` and `avg` on the per-window path use compensated accumulation.
-Its checkpoint segments use physical layout 2 with separate sum and correction
-columns; recovery accepts existing layout 1 segments, initializes their missing
+Floating `sum` and `avg` use compensated accumulation. Their checkpoint
+segments use physical layout 2 with separate sum and correction columns;
+recovery accepts existing layout 1 segments, initializes their missing
 correction to zero, and rewrites live windows as a layout 2 base at the next
-checkpoint. Pane checkpoints instead use physical layout 3 with canonical
-`panes` and `open-windows` segments, plus configuration, schema, lineage,
-progress, output-sequence, terminal, metrics, and checksum metadata. Restore
-validates the exact segment set, checksums, identities, budget, and
-pane/open-window membership before installing state. Compatible continuation
-after restore is bit-identical to uninterrupted execution, including subsequent
-output and checkpoint bytes. Layout 3 is required for pane snapshots;
-per-window layouts 1 and 2 are not alternative pane encodings. The public
-operator state capability remains version 1, and project and manifest formats
-are unchanged.
+checkpoint. Compatible continuation after restore is bit-identical to
+uninterrupted execution, including subsequent output and checkpoint bytes. The
+withdrawn experimental pane layout 3 is not supported; new snapshots always use
+per-window layouts 1 and 2. The public operator state capability remains version
+1, and project and manifest formats are unchanged.
 
 The public state surface consists of immutable `StateHandle` values, native
 v4 `SourceHistorySegmentHandle` references, lineage-exclusive `StateBackend`

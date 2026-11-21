@@ -1440,12 +1440,9 @@ SQL dialect create a shared window boundary. In batch mode,
 input. Its stream lifecycle updates incremental state, classifies late
 row-window assignments against the current input watermark, and emits closed
 windows in deterministic order. Per-window execution snapshots retained Arrow
-IPC deltas. Hopping windows whose complete aggregate list contains only `count`,
-`min`, and `max` instead preaggregate into slide-aligned panes and write physical
-layout 3 with canonical pane and open-window segments. Both paths retain
-logical open-window row accounting; pane byte accounting also covers physical
-pane/key storage and merge scratch. Compatible pane restore continues with
-bit-identical output and subsequent checkpoint bytes. See
+IPC deltas in physical layouts 1 and 2. Logical open-window row accounting and
+retained accumulator/key byte accounting apply to every aggregate declaration.
+Compatible restore continues with bit-identical output and checkpoint bytes. See
 [window state and storage](runtime-envelope.md#window-state-and-storage).
 Retained accumulators default to the JSON counter range,
 9,007,199,254,740,991 windows and logical bytes, without a smaller implicit budget.

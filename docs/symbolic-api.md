@@ -491,9 +491,8 @@ fail before any source opens, with field paths such as
 types append `.dtype` to the field path.
 
 The native window owns accumulators, output sequence, and versioned checkpoint
-state. Per-window snapshots use physical layouts 1 and 2. Hopping windows whose
-complete aggregate list contains only `count`, `min`, and `max` use pane layout
-3; compatible restore preserves subsequent output and checkpoint bits. Bind
+state. Per-window snapshots use physical layouts 1 and 2; compatible restore
+preserves subsequent output and checkpoint bits. Bind
 sources and sinks through `StreamingRunner` and use `ManagedCheckpointRuntime`
 for the existing aligned checkpoint and recovery protocol. Recovering an open
 window restores that native state. There is no Python row executor or separate

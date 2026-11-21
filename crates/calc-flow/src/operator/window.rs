@@ -55,7 +55,6 @@ const MAX_WINDOW_DELTA_SEGMENTS: usize = 32;
 #[path = "window/kernels.rs"]
 mod kernels;
 mod keys;
-mod panes;
 #[path = "window/recovery.rs"]
 mod recovery;
 
@@ -74,10 +73,6 @@ mod kernel_tests;
 #[cfg(test)]
 #[path = "window/key_tests.rs"]
 mod key_tests;
-
-#[cfg(test)]
-#[path = "window/pane_tests.rs"]
-mod pane_tests;
 
 /// Aggregate function supported by the first built-in window operator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -342,7 +337,6 @@ struct CompiledWindowGeometry {
 #[derive(Default)]
 struct WindowState {
     accumulators: BTreeMap<WindowKey, AccumulatorRow>,
-    panes: Option<panes::PaneState>,
     accumulator_bytes: u64,
     last_input_watermark: Option<EventTime>,
     next_output_sequence: u64,
@@ -1164,7 +1158,6 @@ impl WindowAggregateOperator {
         let configuration = configuration(&spec)?;
         let compiled = compile_spec(&input_schema, &spec, &configuration)?;
         let output_schema = output_schema(&input_schema, &spec, &compiled);
-        let pane_state = panes::enabled(&spec).then(panes::PaneState::default);
         Ok(Self {
             name: name.into(),
             spec,
@@ -1181,22 +1174,12 @@ impl WindowAggregateOperator {
                 Some(output_schema),
             )?],
             compiled,
-            state: WindowState {
-                panes: pane_state,
-                ..WindowState::default()
-            },
+            state: WindowState::default(),
             state_budget: StateBudget::default(),
             max_delta_segments: MAX_WINDOW_DELTA_SEGMENTS,
             #[cfg(test)]
             force_rowwise: false,
         })
-    }
-
-    /// Selects pane or legacy execution for a freshly constructed benchmark operator.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "benchmark-internals"))]
-    pub fn set_pane_execution_for_benchmark(&mut self, enabled: bool) {
-        self.state.panes = enabled.then(panes::PaneState::default);
     }
 
     /// The row-major reference path remains for aggregates whose dynamic
@@ -1239,19 +1222,10 @@ impl WindowAggregateOperator {
     /// }
     /// ```
     pub fn set_state_budget(&mut self, budget: StateBudget) -> Result<()> {
-        let (rows, bytes) = self.state.panes.as_ref().map_or(
-            (
-                u64::try_from(self.state.accumulators.len()).unwrap_or(u64::MAX),
-                self.state.accumulator_bytes,
-            ),
-            |panes| {
-                (
-                    logical_length(panes.open_windows.len()),
-                    panes.physical_bytes,
-                )
-            },
-        );
-        if !budget.allows(rows, bytes) {
+        if !budget.allows(
+            u64::try_from(self.state.accumulators.len()).unwrap_or(u64::MAX),
+            self.state.accumulator_bytes,
+        ) {
             return Err(invalid_argument(
                 "window.state_budget",
                 "existing accumulator state exceeds the requested budget",
@@ -1950,45 +1924,6 @@ impl WindowAggregateOperator {
         Ok(removed)
     }
 
-    async fn emit_pane_closed(
-        &mut self,
-        prepared: panes::PreparedPaneClose,
-        context: &StreamOperatorContext<'_>,
-        output: &mut dyn StreamCollector,
-    ) -> Result<()> {
-        let previous_sequence = self.state.next_output_sequence;
-        if !prepared.closed.is_empty() {
-            let built = build_output_record(
-                &prepared.closed,
-                &self.spec,
-                &self.compiled,
-                self.output_ports[0]
-                    .schema()
-                    .expect("window output always has an exact schema"),
-                context.operator_id(),
-            )
-            .and_then(|record| {
-                chunk_output_record(
-                    &record,
-                    context.operator_id(),
-                    previous_sequence,
-                    context.output_budget(),
-                )
-            });
-            let batches = match built {
-                Ok(batches) => batches,
-                Err(error) => return Err(error),
-            };
-            if let Err(error) = self.emit_chunks(batches, output).await {
-                self.state.next_output_sequence = previous_sequence;
-                return Err(error);
-            }
-        }
-        self.state.accumulator_bytes = prepared.state.physical_bytes;
-        self.state.panes = Some(prepared.state);
-        Ok(())
-    }
-
     /// Merges an un-emitted closed prefix back into live state, restoring the
     /// exact pre-close contents.
     fn restore_closed_prefix(&mut self, mut closed: BTreeMap<WindowKey, AccumulatorRow>) {
@@ -2074,42 +2009,21 @@ impl super::BatchOperator for WindowAggregateOperator {
             self.spec.clone(),
         )?;
         fresh.state_budget = self.state_budget;
-        let record = if fresh.state.panes.is_some() {
-            let update = panes::prepare_window_input(
-                &fresh,
-                batch,
-                &WindowInputContext {
-                    operator_id: &self.name,
-                    watermark: None,
-                    run: Some(context.run),
-                },
-            )?;
-            fresh.state.panes = Some(update.state);
-            let closed = panes::prepare_close(&fresh, None)?;
-            build_output_record(
-                &closed.closed,
-                &self.spec,
-                &self.compiled,
-                self.output_ports[0].schema().expect("exact output"),
-                &self.name,
-            )?
-        } else {
-            let update = fresh.prepare_window_input(
-                batch,
-                &WindowInputContext {
-                    operator_id: &self.name,
-                    watermark: None,
-                    run: Some(context.run),
-                },
-            )?;
-            build_output_record(
-                &update.accumulators,
-                &self.spec,
-                &self.compiled,
-                self.output_ports[0].schema().expect("exact output"),
-                &self.name,
-            )?
-        };
+        let update = fresh.prepare_window_input(
+            batch,
+            &WindowInputContext {
+                operator_id: &self.name,
+                watermark: None,
+                run: Some(context.run),
+            },
+        )?;
+        let record = build_output_record(
+            &update.accumulators,
+            &self.spec,
+            &self.compiled,
+            self.output_ports[0].schema().expect("exact output"),
+            &self.name,
+        )?;
         context.run.check_cancelled()?;
         let mut records = Vec::new();
         crate::datafusion::push_bounded_sql_batch(
@@ -2138,28 +2052,6 @@ impl StreamOperator for WindowAggregateOperator {
         _output: &mut dyn StreamCollector,
     ) -> Result<()> {
         self.validate_process_input(ingress, &batch, context)?;
-        if self.state.panes.is_some() {
-            let update = panes::prepare_window_input(
-                self,
-                &batch,
-                &WindowInputContext {
-                    operator_id: context.operator_id(),
-                    watermark: context.input_watermark(),
-                    run: None,
-                },
-            )?;
-            let next_metrics = accumulate_late_metrics(self.state.metrics, update.metrics)?;
-            context.record_window_metrics(
-                update.metrics.late_rows,
-                update.metrics.max_lateness_micros,
-                update.metrics.null_event_time_rows,
-            )?;
-            self.install_context_identity(context);
-            self.state.metrics = next_metrics;
-            self.state.accumulator_bytes = update.state.physical_bytes;
-            self.state.panes = Some(update.state);
-            return Ok(());
-        }
         let update = self.prepare_input_batch(&batch, context)?;
         let next_metrics = accumulate_late_metrics(self.state.metrics, update.metrics)?;
         context.record_window_metrics(
@@ -2188,13 +2080,6 @@ impl StreamOperator for WindowAggregateOperator {
                 "input watermark did not advance strictly",
             ));
         }
-        if self.state.panes.is_some() {
-            let prepared = panes::prepare_close(self, Some(watermark))?;
-            self.emit_pane_closed(prepared, context, output).await?;
-            self.install_context_identity(context);
-            self.state.last_input_watermark = Some(watermark);
-            return Ok(());
-        }
         let closed = self.take_closed(watermark);
         let removed = self.emit_closed(closed, context, output).await?;
         if context.job().checkpointing() {
@@ -2212,13 +2097,6 @@ impl StreamOperator for WindowAggregateOperator {
     ) -> Result<()> {
         self.observe_context(context)?;
         if self.state.ended {
-            return Ok(());
-        }
-        if self.state.panes.is_some() {
-            let prepared = panes::prepare_close(self, None)?;
-            self.emit_pane_closed(prepared, context, output).await?;
-            self.install_context_identity(context);
-            self.state.ended = true;
             return Ok(());
         }
         let closed = std::mem::take(&mut self.state.accumulators);
@@ -2240,9 +2118,6 @@ impl StreamOperator for WindowAggregateOperator {
             return Ok(());
         }
         self.install_context_identity(context);
-        if self.state.panes.is_some() {
-            return Ok(());
-        }
         let Some(encoding) = self.plan_pending_encoding()? else {
             return Ok(());
         };
@@ -2266,9 +2141,6 @@ impl StreamOperator for WindowAggregateOperator {
             return Err(checkpoint_mismatch(
                 "window checkpoint epoch did not advance strictly",
             ));
-        }
-        if self.state.panes.is_some() {
-            return panes::checkpoint(self, epoch);
         }
         self.prepare_pending_encoding_sync()?;
         let prepared = self.prepare_snapshot_segments(epoch)?;
@@ -2309,9 +2181,6 @@ impl StreamOperator for WindowAggregateOperator {
         if snapshot.inline_metadata.is_empty() && snapshot.segments.is_empty() {
             return self.reset();
         }
-        if self.state.panes.is_some() {
-            return panes::restore(self, snapshot);
-        }
         let metadata = parse_snapshot_metadata(snapshot)?;
         let inventory =
             validate_snapshot_metadata(&metadata, &self.spec, &self.compiled, snapshot)?;
@@ -2320,10 +2189,7 @@ impl StreamOperator for WindowAggregateOperator {
     }
 
     fn reset(&mut self) -> Result<()> {
-        self.state = WindowState {
-            panes: panes::enabled(&self.spec).then(panes::PaneState::default),
-            ..WindowState::default()
-        };
+        self.state = WindowState::default();
         Ok(())
     }
 }
@@ -2573,7 +2439,6 @@ impl WindowAggregateOperator {
         };
         self.state = WindowState {
             accumulators: decoded,
-            panes: None,
             accumulator_bytes: usage.bytes,
             last_input_watermark: metadata.last_input_watermark,
             next_output_sequence: metadata.next_output_sequence,
@@ -4098,30 +3963,8 @@ fn encode_state_segment(
     pipeline_fingerprint: &str,
     operator_id: &str,
 ) -> Result<Vec<u8>> {
-    encode_state_segment_for_version(
-        operations,
-        spec,
-        compiled,
-        pipeline_fingerprint,
-        operator_id,
-        WINDOW_SEGMENT_LAYOUT_VERSION,
-    )
-}
-
-fn encode_state_segment_for_version(
-    operations: &[StateOperationRow],
-    spec: &WindowSpec,
-    compiled: &CompiledWindowSpec,
-    pipeline_fingerprint: &str,
-    operator_id: &str,
-    version: u32,
-) -> Result<Vec<u8>> {
     validate_state_operations(operations)?;
-    let schema = if version == WINDOW_SEGMENT_LAYOUT_VERSION {
-        state_schema(spec, compiled, pipeline_fingerprint, operator_id)
-    } else {
-        state_schema_for_version(spec, compiled, pipeline_fingerprint, operator_id, version)
-    };
+    let schema = state_schema(spec, compiled, pipeline_fingerprint, operator_id);
     let mut arrays = state_key_arrays(operations);
     append_group_state_arrays(&mut arrays, operations, compiled, operator_id)?;
     append_aggregate_state_arrays(&mut arrays, operations, spec, compiled, operator_id)?;

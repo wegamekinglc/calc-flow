@@ -1,0 +1,34 @@
+{
+  "schema": "calc-flow.window-panes.v1",
+  "scope": "operator-input-and-finalization",
+  "status": "checked",
+  "elapsed_seconds": 5.174936188,
+  "process_observations": {
+    "observed_cpu_affinity": [
+      0
+    ],
+    "observed_thread_environment": {
+      "TOKIO_WORKER_THREADS": "1",
+      "OMP_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1",
+      "MKL_NUM_THREADS": "1",
+      "NUMEXPR_NUM_THREADS": "1",
+      "VECLIB_MAXIMUM_THREADS": "1",
+      "RAYON_NUM_THREADS": "1",
+      "POLARS_MAX_THREADS": "1"
+    },
+    "process_id": 94184
+  },
+  "cases": [
+    {
+      "id": "integer-4-hopping-100-10",
+      "correctness": true,
+      "recovery": true
+    },
+    {
+      "id": "integer-8192-hopping-100-10",
+      "correctness": true,
+      "recovery": true
+    }
+  ]
+}
