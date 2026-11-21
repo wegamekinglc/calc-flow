@@ -1,0 +1,27 @@
+{
+  "schema": "calc-flow.rolling-current-performance-plan.v1",
+  "created_at": "2026-11-21T09:03:17+08:00",
+  "runtime_revision": "2a4c6d57",
+  "build_receipt": "target/p2-current-build/build.json",
+  "binary": "target/p2-current-2a4c6d57",
+  "purpose": "establish fresh current-source absolute G1-G3 values before another rolling optimization; the same-binary arms are not a speedup claim",
+  "driver": "uv run python scripts/profile_warm_stream.py native",
+  "cases": [
+    {"id": "1x1-dual", "connection": "G1 native one-row append and fixed dispatch overhead"},
+    {"id": "6400x64-dual", "connection": "G2 recorder-present numeric update and G3 complete dispatch"},
+    {"id": "64x64-dual-tick", "connection": "full-tick control at one tick per entity"}
+  ],
+  "execution": {
+    "rounds": 10,
+    "comparison": "alternating AB/BA with both recorder arms",
+    "timed_dispatches_per_case_per_arm_per_round": 30,
+    "total_budget_seconds": 590,
+    "no_retries_or_case_expansion": true,
+    "build_reported_separately": true
+  },
+  "absolute_gates": {
+    "G1": {"case": "1x1-dual", "arm": "absent", "threshold_seconds": 0.000001},
+    "G2": {"case": "6400x64-dual", "arm": "present", "threshold_ns_per_window_row": 4.0},
+    "G3": {"case": "6400x64-dual", "arm": "absent", "threshold_seconds": 0.0001}
+  }
+}
