@@ -340,7 +340,9 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   ≤500 ms 明确未通过。证据见 `benchmarks/sum-state/p4-vector-sums-10m-20261121/`。保留 paired P6 改进，
   下一步先归因 source、expression、routing 与 snapshot 的剩余成本，不再只优化 SUM apply。单次诊断总耗时 1.535 秒，
   其中 deltas 223.038 ms、positions 375.222 ms，keyed route/apply 为 288.789/79.376 ms，source 与运行时调度
-  残差约 937 ms（尚非 source-only 测量）。这证明只优化 apply 无法达到门槛，路由和 source/调度必须分别核实。
+  残差约 937 ms。随后 source-only 直接消费同一 lazy `DemoSource` 的 10,010,000 行，在无图、无表达式、无聚合、
+  无输出校验时单独耗时 **1.233 秒**，已超过整个 500 ms 门槛（`source-only.json`）。因此当前 P4 绝对配置
+  不能靠引擎内优化达标，不得通过优化 fixture 或移动计时边界冒充完成；任何边界调整须由用户明确决定。
 - 2026-11-21 AHash 路由候选 `7f61738b` 因正确性失败被否决：P6 在首个 candidate warmup 以 `positions` 失败停止，
   0 个有效性能样本，P4 未启动。聚焦回归在 10,000 个初始组之后处理 100,000 行，输出却为 10,024 组；
   相同文本在 `hash_rows` 中也出现不同哈希，`AHasher::default()` 同样失败。恢复 FNV 并保留大批次身份回归，

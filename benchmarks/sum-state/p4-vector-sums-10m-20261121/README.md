@@ -11,3 +11,9 @@ Raw samples are in `result.json`. The candidate remains because the paired P6 ev
 One subsequent diagnostic run took 1.535 seconds and passed the same positions check. Operator processing was 223.038 ms for `deltas` and 375.222 ms for `positions`; keyed routing/apply counters were 288.789/79.376 ms. The remaining approximately 937 ms is source generation plus runtime scheduling, not yet a direct source-only measurement. This diagnostic is not a P50 and does not alter the formal result above.
 
 The distribution shows that SUM apply alone cannot bring the absolute gate within reach. Routing remains a direct engine target, while the large source/scheduling residual requires separate attribution before claiming that the 500 ms boundary is achievable.
+
+## Source-only boundary
+
+A separate single diagnostic consumed the same lazy `DemoSource` for all 10,010,000 rows with one CPU and no graph, expression, aggregate, output table or positions check. It took **1.233 seconds**, already 2.47× the entire 500 ms P4 limit. Raw metadata is in `source-only.json`; the temporary diagnostic branch was removed before delivery.
+
+This is a hard constraint on the current absolute harness, not a new P50 and not an invitation to optimize the fixture or move the timer boundary. Engine-only changes cannot make this P4 configuration pass. The valid formal P4 result remains 1,524.5 ms. Further performance work moves to other gates while any P4 boundary revision requires an explicit user decision.
