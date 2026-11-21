@@ -1187,6 +1187,12 @@ fn nonterminal_epochs(root: &std::path::Path) -> crate::Result<Vec<u64>> {
     Ok(epochs)
 }
 
+fn timed_nonterminal_epochs(root: &std::path::Path) -> (Vec<u64>, f64) {
+    let started = Instant::now();
+    let epochs = nonterminal_epochs(root).unwrap();
+    (epochs, started.elapsed().as_secs_f64())
+}
+
 async fn runner_arm(
     workload: Workload,
     checkpointing: bool,
@@ -1220,6 +1226,7 @@ async fn runner_arm(
             max_rows: workload.rows,
             max_bytes: 64 << 20,
         },
+        retained_epochs: minimum_epochs.max(2),
         ..StreamRuntimeConfig::default()
     };
     let runner = if checkpointing {
@@ -1244,9 +1251,7 @@ async fn runner_arm(
     let accepted_input_rows = sink.accepted_rows();
     assert!(accepted_input_rows > 0);
     let status_at_cutoff = serde_json::to_value(job.status()).unwrap();
-    let manifest_started = Instant::now();
-    let epochs = nonterminal_epochs(root.path()).unwrap();
-    let manifest_validation_seconds = manifest_started.elapsed().as_secs_f64();
+    let (epochs, manifest_validation_seconds) = timed_nonterminal_epochs(root.path());
     assert!(
         epochs.len() >= minimum_epochs,
         "checkpoint coverage: {epochs:?}"
