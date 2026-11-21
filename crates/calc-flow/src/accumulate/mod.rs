@@ -617,10 +617,6 @@ impl NumericAccumulator {
         self.sum.raw_parts()
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "restore consumes the frozen counter and sum fields independently"
-    )]
     pub(crate) fn restore_mean_parts(
         &mut self,
         valid: u64,
@@ -628,15 +624,14 @@ impl NumericAccumulator {
         nan: u64,
         positive: u64,
         negative: u64,
-        sum: f64,
-        error: f64,
+        sum_parts: (f64, f64),
     ) {
         self.valid_count = valid;
         self.finite_count = finite;
         self.nan_count = nan;
         self.pos_inf = positive;
         self.neg_inf = negative;
-        self.sum.set_raw_parts(sum, error);
+        self.sum.set_raw_parts(sum_parts.0, sum_parts.1);
         self.since_rebuild = 0;
         self.n_prev = 64;
     }

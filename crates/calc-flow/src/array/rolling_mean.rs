@@ -430,7 +430,7 @@ mod tests {
             history.push(None);
         }
         let mut summary = FloatSummary::mean_only();
-        summary.restore_mean_parts(0, 0, 0, 0, 0, f64::INFINITY, 0.0);
+        summary.restore_mean_parts(0, 0, 0, 0, 0, (f64::INFINITY, 0.0));
         let mut checks = 0;
         let result = repair(&mut summary, &history, 8192, &mut || {
             checks += 1;

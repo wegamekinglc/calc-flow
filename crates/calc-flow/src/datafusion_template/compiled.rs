@@ -275,16 +275,11 @@ fn push<C: Cancellation>(
             active_tail,
             record,
             output,
-            node_id,
-            context,
+            (node_id, context),
         ),
     }
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the filter step forwards the existing output and cancellation context"
-)]
 fn push_filter<C: Cancellation>(
     filter: &Filter,
     active: &mut ActiveStep,
@@ -292,9 +287,9 @@ fn push_filter<C: Cancellation>(
     active_tail: &mut [ActiveStep],
     record: RecordBatch,
     output: &mut Output,
-    node_id: &str,
-    context: &C,
+    node_context: (&str, &C),
 ) -> Result<()> {
+    let (node_id, context) = node_context;
     let record = filter_record(filter, record, node_id)?;
     let coalescer = active.coalescer.as_mut().expect("filter call state");
     coalescer

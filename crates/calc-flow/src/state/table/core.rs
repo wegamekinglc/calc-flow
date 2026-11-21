@@ -22,6 +22,14 @@ const PAGE_DESCRIPTOR_BYTES: usize = 64;
 
 type RestoredPartition = (StatePartition, Vec<(Vec<u8>, EntityId)>);
 
+#[derive(Clone, Copy)]
+struct ValueLogUndo {
+    chunks: usize,
+    len: u32,
+    logical_bytes: usize,
+    total_len: u32,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct EntityId {
     index: u32,
@@ -3775,7 +3783,17 @@ impl StateTable {
                 len,
                 logical_bytes,
                 total_len,
-            } => self.undo_value_log(group, column, slot, chunks, len, logical_bytes, total_len),
+            } => self.undo_value_log(
+                group,
+                column,
+                slot,
+                &ValueLogUndo {
+                    chunks,
+                    len,
+                    logical_bytes,
+                    total_len,
+                },
+            ),
             _ => unreachable!(),
         }
     }
@@ -3874,20 +3892,19 @@ impl StateTable {
         Ok(())
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the value-log undo fields mirror the persisted transaction record"
-    )]
     fn undo_value_log(
         &mut self,
         group: KeyGroupId,
         column: usize,
         slot: u32,
-        chunks: usize,
-        len: u32,
-        logical_bytes: usize,
-        total_len: u32,
+        undo: &ValueLogUndo,
     ) -> Result<()> {
+        let ValueLogUndo {
+            chunks,
+            len,
+            logical_bytes,
+            total_len,
+        } = *undo;
         let partition = self.partitions.get_mut(&group).expect("prepared group");
         partition.value_logs[column].len = total_len;
         let PageLocation::ValueLog { page_index, .. } = partition.locations[&slot] else {

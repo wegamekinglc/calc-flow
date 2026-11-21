@@ -278,8 +278,7 @@ fn decode_run(
         sequences,
         payload_live,
         identity_live,
-        payload_charge,
-        identity_charge,
+        (payload_charge, identity_charge),
     )
 }
 

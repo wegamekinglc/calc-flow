@@ -2034,8 +2034,7 @@ fn entity_parallel_mean_only_difference_keeps_exact_fallback_and_float_bits() {
                     u64::from(mean.is_nan()),
                     u64::from(mean == f64::INFINITY),
                     u64::from(mean == f64::NEG_INFINITY),
-                    mean,
-                    0.0,
+                    (mean, 0.0),
                 );
             }
             let before = format!("{states:?}");

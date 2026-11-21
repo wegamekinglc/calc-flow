@@ -431,10 +431,6 @@ impl Run {
             }
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "snapshot restores one complete run"
-    )]
     pub(super) fn restored(
         payload: Option<Arc<RecordBatch>>,
         groups: Vec<GroupId>,
@@ -442,14 +438,14 @@ impl Run {
         sequences: SequenceColumn,
         payload_live: Vec<bool>,
         identity_live: Vec<bool>,
-        payload_charge: usize,
-        identity_charge: usize,
+        charges: (usize, usize),
     ) -> Result<Self> {
+        let (payload_charge, identity_charge) = charges;
         let actual_payload_charge = payload
             .as_ref()
             .map_or(0, |record| retained_payload_charge(record));
         let actual_identity_charge = retained_identity_charge(&groups, &times, &sequences);
-        if (payload_charge, identity_charge) != (actual_payload_charge, actual_identity_charge) {
+        if charges != (actual_payload_charge, actual_identity_charge) {
             return Err(crate::CalcFlowError::CheckpointMismatch {
                 message: format!(
                     "ASOF columnar run charges differ from decoded state: payload stored={payload_charge} actual={actual_payload_charge}, identity stored={identity_charge} actual={actual_identity_charge}"

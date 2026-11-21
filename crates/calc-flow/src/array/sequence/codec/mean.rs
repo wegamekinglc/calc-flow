@@ -90,8 +90,7 @@ fn read_summary(reader: &mut Reader<'_>) -> Result<FloatSummary> {
         nan_count,
         pos_inf,
         neg_inf,
-        sum,
-        error,
+        (sum, error),
     );
     Ok(summary)
 }
