@@ -34,7 +34,7 @@ use crate::{
     StreamSink, StreamSource, StreamingRunner, UdfRegistry, WatermarkPolicy,
     operator::rolling_metrics::RollingMetricsStore,
     pipeline::{CompiledStreamOperator, OperatorCheckpointCapability},
-    state::v4::V4Store,
+    state::v4::{V4Manifest, V4Store},
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -1172,6 +1172,16 @@ fn checkpoint_objects(path: &std::path::Path) -> crate::Result<usize> {
     Ok(count)
 }
 
+fn read_manifest_if_present(path: &std::path::Path) -> crate::Result<Option<V4Manifest>> {
+    match V4Store::read_manifest(path) {
+        Ok(manifest) => Ok(Some(manifest)),
+        Err(CalcFlowError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn nonterminal_epochs(root: &std::path::Path) -> crate::Result<Vec<u64>> {
     let directory = root.join("manifests/lineage/manifests");
     if !directory.exists() {
@@ -1184,7 +1194,9 @@ fn nonterminal_epochs(root: &std::path::Path) -> crate::Result<Vec<u64>> {
         let path = entry
             .map_err(|error| invalid(format!("checkpoint manifest entry: {error}")))?
             .path();
-        let manifest = V4Store::read_manifest(&path)?;
+        let Some(manifest) = read_manifest_if_present(&path)? else {
+            continue;
+        };
         if manifest.sources.values().all(|source| !source.ended) {
             epochs.push(manifest.epoch);
         }
@@ -1192,6 +1204,15 @@ fn nonterminal_epochs(root: &std::path::Path) -> crate::Result<Vec<u64>> {
     epochs.sort_unstable();
     epochs.dedup();
     Ok(epochs)
+}
+
+#[test]
+fn retention_scan_ignores_only_manifests_that_disappear() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("epoch-11.json");
+    assert!(read_manifest_if_present(&path).unwrap().is_none());
+    std::fs::write(&path, b"not a manifest").unwrap();
+    assert!(read_manifest_if_present(&path).is_err());
 }
 
 fn timed_nonterminal_epochs(root: &std::path::Path) -> (Vec<u64>, f64) {
