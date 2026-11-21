@@ -342,7 +342,8 @@ impl RollingKernelPlan {
     }
 
     pub(in crate::operator::rolling) fn can_use_slab(&self, state: &RollingKernelState) -> bool {
-        self.supports_slab() && (state.slab.is_some() || state.states.is_empty())
+        self.supports_slab()
+            && (state.slab.is_some() || state.dual_sma.is_some() || state.states.is_empty())
     }
 
     fn ensure_slab(&self, state: &mut RollingKernelState) {
@@ -429,6 +430,9 @@ impl RollingKernelPlan {
         state: &RollingKernelState,
         node_id: &str,
     ) -> Result<Option<StateCharge>> {
+        if let Some(state) = &state.dual_sma {
+            return state.charge(node_id).map(Some);
+        }
         state
             .slab
             .as_ref()
@@ -439,7 +443,9 @@ impl RollingKernelPlan {
     pub(in crate::operator::rolling) fn slab_last_identity(
         state: &RollingKernelState,
     ) -> Option<Vec<u8>> {
-        state.slab.as_ref()?;
+        if state.slab.is_none() && state.dual_sma.is_none() {
+            return None;
+        }
         state.last_identity.clone()
     }
 
@@ -715,6 +721,7 @@ impl RollingKernelPlan {
                 entities,
                 created,
             }),
+            dual_sma: None,
         })
     }
 }

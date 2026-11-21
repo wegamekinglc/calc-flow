@@ -559,6 +559,7 @@ impl RollingKernelPlan {
             },
             in_place: Some(in_place),
             slab: None,
+            dual_sma: None,
         };
         complete_in_place_update(update, state, result)
     }
