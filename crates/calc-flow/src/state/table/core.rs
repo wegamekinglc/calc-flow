@@ -1484,7 +1484,7 @@ impl StateTable {
                     id,
                     KeyedPage {
                         kind,
-                        values: Vec::with_capacity(KEYED_PAGE_ROWS),
+                        values: Vec::new(),
                     },
                 ),
             })?;
@@ -1495,6 +1495,19 @@ impl StateTable {
             .id
             .slot;
         self.replace_page(group, slot, false)?;
+        let values = &self.partitions[&group].keyed[column][page_index]
+            .as_ref()
+            .expect("keyed page")
+            .value
+            .values;
+        if values.len() == values.capacity() {
+            self.push_undo(Undo::Keyed {
+                group,
+                slot,
+                values: values.clone(),
+                capacity: values.capacity(),
+            });
+        }
         let partition = self.partitions.get_mut(&group).expect("prepared group");
         Arc::get_mut(
             &mut partition.keyed[column][page_index]

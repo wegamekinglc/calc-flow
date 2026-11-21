@@ -291,3 +291,39 @@ fn freeze_captures_only_dirty_pages_and_restore_starts_clean() {
     table.restore(snapshot).unwrap();
     assert!(table.first_dirty_slots(KeyGroupId(0)).is_empty());
 }
+
+#[test]
+fn rollback_restores_keyed_page_capacity_after_growth() {
+    for checkpointing in [false, true] {
+        let mut table = StateTable::with_checkpointing(checkpointing);
+        let counter = table.add_keyed_column("counter", ValueKind::UInt64);
+        let mut first = None;
+        for index in 1..=8_u64 {
+            table.begin().unwrap();
+            let next = table
+                .resolve_or_append(EntityKey::new(format!("entity-{index}").into_bytes()))
+                .unwrap();
+            table.set_u64(counter, next, index).unwrap();
+            table.commit().unwrap();
+            first.get_or_insert(next);
+        }
+        let first = first.expect("the first entity was appended");
+        let before = table.logical_bytes();
+
+        table.begin().unwrap();
+        let next = table
+            .resolve_or_append(EntityKey::new(b"entity-9".to_vec()))
+            .unwrap();
+        table.set_u64(counter, next, 9).unwrap();
+        assert!(table.logical_bytes() > before);
+        table.rollback().unwrap();
+
+        assert_eq!(table.entity_count(), 8, "checkpointing={checkpointing}");
+        assert_eq!(table.u64(counter, first).unwrap(), 1);
+        assert_eq!(
+            table.logical_bytes(),
+            before,
+            "checkpointing={checkpointing}"
+        );
+    }
+}
