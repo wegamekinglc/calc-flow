@@ -438,6 +438,15 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   额外成本没有被输出缩减抵消。采集 45.994 秒，release 构建 854.723 秒另计，证据见
   `benchmarks/sum-state/p4-changelog-20261121/`。保留现有显式 changelog 语义 API 和该负例 harness，
   但不把它作为性能改进或默认迁移方向，snapshot 默认不变；不再围绕这一 full-relation diff 实现调参。
+- 2026-11-21 Arroyo 对齐实测（native source `bd611929`，harness `bb220ba2`）未达到 0.8× 门槛。复用既有
+  WebSocket NDJSON 集成协议与官方 Arroyo v0.15.0 二进制，四例各 5 组 AB/BA、共 40 次新进程运行，
+  完整行值 oracle、输出时机、native hash 和原始离线审计均通过。burst 下 calc-flow/Arroyo 的吞吐比中位数为
+  stateless **0.391×**（283.141k/719.526k rows/s）、window **0.212×**（424.036k/2,030.961k rows/s），
+  均明确失败；paced 比值约 1.003×/1.000× 仅反映生产者限速，不证明引擎相等。采集 76.974 秒，
+  wheel 构建、安装与 preflight 共 1072.274 秒另计。原始 40 次进程证据和 6.6 MiB 压缩包见
+  `benchmarks/arroyo-alignment/p1-current-20261121/`。该路径包含 Python/PyArrow/JSON 适配与 Arroyo 原生连接器的差异，
+  不是纯算子排名；跨年份/主机的 Arroyo 绝对值变化也不用于回退归因。不得把局部 Join、SUM、ASOF 改进说成
+  已达到 Arroyo 对齐；后续只有在新的实测假设成立时才继续，不为门槛追加无方向实验。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。当时 COUNT/MIN/MAX pane 保持现状；

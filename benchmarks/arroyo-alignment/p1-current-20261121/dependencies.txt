@@ -1,0 +1,12 @@
+annotated-types==0.8.0
+calc-flow-python @ file:///home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/arroyo-current/wheels/calc_flow_python-2026.11.14-cp313-cp313-linux_x86_64.whl
+maturin==1.14.1
+numpy==2.5.4
+psutil==7.2.2
+pyarrow==24.0.0
+pydantic==2.14.1
+pydantic-core==2.50.1
+ruff==0.16.0
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+websockets==15.0.1
