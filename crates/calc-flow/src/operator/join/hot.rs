@@ -23,6 +23,7 @@ pub(super) struct HotInput<'a> {
     pub next_row_id: u64,
     pub metrics: SideMetrics,
     pub charge: (usize, usize),
+    pub transient: bool,
 }
 
 pub(super) struct HotJoinCore {
@@ -134,6 +135,7 @@ impl HotJoinCore {
             next_row_id,
             mut metrics,
             charge,
+            transient,
         } = input;
         metrics.retained_rows = u64::try_from(charge.0)
             .map_err(|_| counter_overflow(&operator.name, "hot retained rows"))?;
@@ -195,6 +197,27 @@ impl HotJoinCore {
                     .map_err(|_| counter_overflow(&operator.name, "emitted_match_rows"))?,
             )
             .ok_or_else(|| counter_overflow(&operator.name, "emitted_match_rows"))?;
+        if transient {
+            let metrics = match side {
+                JoinSide::Left => {
+                    self.left = None;
+                    &mut operator.state.metrics.left
+                }
+                JoinSide::Right => {
+                    self.right = None;
+                    &mut operator.state.metrics.right
+                }
+            };
+            metrics.evicted_rows = metrics
+                .evicted_rows
+                .checked_add(
+                    u64::try_from(charge.0)
+                        .map_err(|_| counter_overflow(&operator.name, "hot evicted rows"))?,
+                )
+                .ok_or_else(|| counter_overflow(&operator.name, "evicted_rows"))?;
+            metrics.retained_rows = 0;
+            metrics.retained_bytes = 0;
+        }
         operator.ingress_progress = context.ingress_progress().clone();
         self.completed = true;
         Ok(())
@@ -842,6 +865,31 @@ mod tests {
                     crate::IngressState::Ended,
                     Some(crate::EventTime::from_micros(0)),
                 ),
+            ),
+        ]));
+        StreamOperatorContext::for_task(
+            job,
+            "hot",
+            None,
+            progress,
+            crate::EdgeBudget::default(),
+            Arc::new(NoopLateMetrics),
+        )
+    }
+
+    fn hot_right_progress_context(
+        job: &StreamJobContext,
+        state: crate::IngressState,
+        watermark: i64,
+    ) -> StreamOperatorContext<'_> {
+        let progress = crate::IngressProgressSnapshot::new(BTreeMap::from([
+            (
+                "left".into(),
+                crate::IngressProgress::new(crate::IngressState::Active, None),
+            ),
+            (
+                "right".into(),
+                crate::IngressProgress::new(state, Some(crate::EventTime::from_micros(watermark))),
             ),
         ]));
         StreamOperatorContext::for_task(
@@ -1746,6 +1794,92 @@ mod tests {
                     .await
                     .unwrap();
             }
+            assert!(collector.drain("output").is_empty());
+        }
+
+        #[tokio::test]
+        async fn hot_transient_rows_keep_hot_history_only_on_opposite_side() {
+            let mut operator = operator();
+            let (left, right) = static_inputs();
+            let job = job();
+            let active = hot_context(&job);
+            let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+            operator
+                .process_data(
+                    "right",
+                    Batch::table(vec![right], BatchMetadata::default()).unwrap(),
+                    &active,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            assert!(collector.drain("output").is_empty());
+            assert!(operator.run_core.as_ref().unwrap().hot_enabled());
+            let ended = hot_right_progress_context(&job, crate::IngressState::Ended, 0);
+            operator
+                .process_data(
+                    "left",
+                    Batch::table(vec![left.slice(1, 1)], BatchMetadata::default()).unwrap(),
+                    &ended,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            assert!(operator.run_core.as_ref().unwrap().hot_enabled());
+            assert_eq!(static_pairs(&collector.drain("output"), false), [(1, 6.0)]);
+            assert_eq!(operator.state.metrics.left.retained_rows, 0);
+            assert_eq!(operator.state.metrics.left.retained_bytes, 0);
+            assert_eq!(operator.state.metrics.left.evicted_rows, 1);
+            assert_eq!(operator.state.metrics.right.retained_rows, 1);
+        }
+
+        #[tokio::test]
+        async fn hot_mixed_retention_uses_run_core() {
+            let mut operator = operator();
+            let (left, right) = static_inputs();
+            let job = job();
+            let active = hot_context(&job);
+            let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+            operator
+                .process_data(
+                    "right",
+                    Batch::table(vec![right], BatchMetadata::default()).unwrap(),
+                    &active,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            let progress = hot_right_progress_context(&job, crate::IngressState::Active, 500_000);
+            operator
+                .process_data(
+                    "left",
+                    Batch::table(vec![left], BatchMetadata::default()).unwrap(),
+                    &progress,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            assert!(!operator.run_core.as_ref().unwrap().hot_enabled());
+            assert_eq!(static_pairs(&collector.drain("output"), false), [(1, 6.0)]);
+        }
+
+        #[tokio::test]
+        async fn hot_transient_without_opposite_history_uses_run_core() {
+            let mut operator = operator();
+            let (left, _) = static_inputs();
+            let job = job();
+            let ended = hot_right_progress_context(&job, crate::IngressState::Ended, 0);
+            let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+            operator
+                .process_data(
+                    "left",
+                    Batch::table(vec![left.slice(0, 1)], BatchMetadata::default()).unwrap(),
+                    &ended,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            assert!(!operator.run_core.as_ref().unwrap().hot_enabled());
             assert!(collector.drain("output").is_empty());
         }
 

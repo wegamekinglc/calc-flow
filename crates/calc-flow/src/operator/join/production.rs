@@ -526,6 +526,9 @@ impl RunCore {
             batch,
             &bundle,
             self.hot.is_some(),
+            self.hot
+                .as_ref()
+                .is_some_and(super::hot::HotJoinCore::has_history),
             &mut self.keys,
         )? {
             let hot = self
@@ -737,12 +740,12 @@ fn prepare_hot_input<'a>(
     batch: &'a Batch,
     bundle: &'a super::AdmissionBundle,
     enabled: bool,
+    has_history: bool,
     key_store: &mut KeyStore,
 ) -> Result<Option<super::hot::HotInput<'a>>> {
-    if !enabled
-        || bundle.admitted.len() != batch.num_rows()
-        || !bundle.admitted.iter().all(|row| row.retain)
-    {
+    let fully_retained = bundle.admitted.iter().all(|row| row.retain);
+    let transient = !fully_retained && has_history && bundle.admitted.iter().all(|row| !row.retain);
+    if !enabled || bundle.admitted.len() != batch.num_rows() || !(fully_retained || transient) {
         return Ok(None);
     }
     let compiled = operator.retained_compiled();
@@ -770,6 +773,7 @@ fn prepare_hot_input<'a>(
         next_row_id: bundle.next_row_id,
         metrics: bundle.metrics.clone(),
         charge,
+        transient,
     }))
 }
 
