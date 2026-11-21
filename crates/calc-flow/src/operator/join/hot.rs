@@ -6,6 +6,7 @@ use datafusion::arrow::{
     datatypes::{DataType, SchemaRef, TimeUnit},
     record_batch::{RecordBatch, RecordBatchOptions},
 };
+use futures::StreamExt;
 use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -222,7 +223,7 @@ impl HotJoinCore {
 
     async fn execute_band(
         &self,
-        operator: &StreamJoinOperator,
+        operator: &mut StreamJoinOperator,
         left: &Batch,
         right: &Batch,
     ) -> Result<Batch> {
@@ -257,9 +258,24 @@ impl HotJoinCore {
                 .with_target_partitions(1)
                 .with_batch_size(65_536),
         );
-        let records = datafusion::physical_plan::collect(plan, session.task_ctx())
-            .await
+        let mut stream = datafusion::physical_plan::execute_stream(plan, session.task_ctx())
             .map_err(|error| operator_error(&operator.name, &error.to_string()))?;
+        let mut records = Vec::new();
+        let mut matches: usize = 0;
+        while let Some(record) = stream.next().await {
+            let record =
+                record.map_err(|error| operator_error(&operator.name, &error.to_string()))?;
+            matches = matches
+                .checked_add(record.num_rows())
+                .ok_or_else(|| counter_overflow(&operator.name, "match_count"))?;
+            super::enforce_match_limit(
+                matches,
+                &mut operator.state.metrics.match_limit_failures,
+                operator.spec.limits.max_matches_per_input_batch(),
+                &operator.name,
+            )?;
+            records.push(record);
+        }
         Batch::table(records, BatchMetadata::default())
     }
 }
@@ -780,6 +796,7 @@ mod tests {
         let mut operator =
             StreamJoinOperator::new("hot-band", quote_schema(), quote_schema(), band_spec())
                 .unwrap();
+        operator.spec.limits.max_matches_per_input_batch = 140_000;
         operator
             .set_hot_projection(
                 HotProjection::Band,
@@ -822,5 +839,84 @@ mod tests {
                 .sum::<usize>(),
             2 * rows
         );
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+    use crate::{JoinStateLimits, JoinTimeBounds, StreamJoinSpec};
+    use datafusion::arrow::datatypes::{Field, Schema};
+    use std::time::Duration;
+
+    fn quote_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("sequence", DataType::UInt64, false),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("price", DataType::Float64, false),
+        ]))
+    }
+
+    fn band_spec() -> StreamJoinSpec {
+        StreamJoinSpec::inner(
+            ["symbol"],
+            ["symbol"],
+            "event_time",
+            "event_time",
+            JoinTimeBounds::new(Duration::from_secs(5), Duration::from_secs(5)).unwrap(),
+            JoinStateLimits::new(100, 1_000_000, 100).unwrap(),
+        )
+        .unwrap()
+        .with_prefixes("left", "right")
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn hot_band_rejects_excess_matches_before_materializing_output() {
+        let left = RecordBatch::try_new(
+            quote_schema(),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(vec![0]).with_timezone("UTC")),
+                Arc::new(UInt64Array::from(vec![0])),
+                Arc::new(StringArray::from(vec!["S000"])),
+                Arc::new(Float64Array::from(vec![2.0])),
+            ],
+        )
+        .unwrap();
+        let right = RecordBatch::try_new(
+            quote_schema(),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(vec![0, 0]).with_timezone("UTC")),
+                Arc::new(UInt64Array::from(vec![0, 1])),
+                Arc::new(StringArray::from(vec!["S000", "S000"])),
+                Arc::new(Float64Array::from(vec![2.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let mut spec = band_spec();
+        spec.limits.max_matches_per_input_batch = 1;
+        let mut operator =
+            StreamJoinOperator::new("hot-band-limit", quote_schema(), quote_schema(), spec)
+                .unwrap();
+        let core = HotJoinCore::new(&operator).unwrap();
+        let error = core
+            .execute_band(
+                &mut operator,
+                &Batch::table(vec![left], BatchMetadata::default()).unwrap(),
+                &Batch::table(vec![right], BatchMetadata::default()).unwrap(),
+            )
+            .await
+            .expect_err("two matches must exceed the configured cap of one");
+        assert!(
+            error
+                .to_string()
+                .contains("input batch match limit exceeded")
+        );
+        assert_eq!(operator.state.metrics.match_limit_failures, 1);
     }
 }
