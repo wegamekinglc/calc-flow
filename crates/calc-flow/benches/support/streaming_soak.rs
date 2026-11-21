@@ -5967,12 +5967,18 @@ async fn assert_named_checkpoint_fault_case(
             component_kind: Some(PublicComponentKind::Checkpoint),
             component_id: None,
         },
-        (
-            CheckpointFaultPoint::CompletedCommit
-            | CheckpointFaultPoint::Retention
-            | CheckpointFaultPoint::Compaction,
-            _,
-        ) => CheckpointManualObservation::Completed(Epoch::INITIAL),
+        (CheckpointFaultPoint::CompletedCommit, _) => CheckpointManualObservation::Failed {
+            category: PublicStreamingErrorCategory::Internal,
+            epoch: (mode != CheckpointFaultMode::Panic).then_some(Epoch::INITIAL),
+            phase: (mode != CheckpointFaultMode::Panic)
+                .then_some(PublicCheckpointPhase::ManifestDurable),
+            component_kind: (mode != CheckpointFaultMode::Panic)
+                .then_some(PublicComponentKind::Checkpoint),
+            component_id: None,
+        },
+        (CheckpointFaultPoint::Retention | CheckpointFaultPoint::Compaction, _) => {
+            CheckpointManualObservation::Completed(Epoch::INITIAL)
+        }
         _ => CheckpointManualObservation::Failed {
             category: if mode == CheckpointFaultMode::Io {
                 PublicStreamingErrorCategory::Io

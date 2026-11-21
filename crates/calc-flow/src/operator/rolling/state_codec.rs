@@ -4,19 +4,19 @@ use std::{borrow::Cow, collections::BTreeSet};
 
 use super::history::{PreparedHistoryUpdate, prepare_scalar_appends};
 use super::{
-    Arc, Array, ArrayRef, BTreeMap, Batch, BufferedRow, CompiledFrame, CompiledRollingSpec,
-    CompiledWindowGroup, Cursor, DataType, DecodedRollingState, Deserialize, Deserializer,
-    DictionaryTracker, Digest, EntityRollingState, EwmaAccumulator, ExtremaAccumulator, ExtremaKey,
-    Field, FileReader, FileWriter, Float64Array, HashMap, IpcSchemaEncoder, KeyValue,
-    ROLLING_COLUMNAR_STATE_LAYOUT_VERSION, ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION,
-    ROLLING_EWMA_STATE_LAYOUT_VERSION, ROLLING_INDICATOR_STATE_LAYOUT_VERSION,
-    ROLLING_MACD_STATE_LAYOUT_VERSION, RecordBatch, Result, RollingHistories, RollingKernelPlan,
-    RollingKernelState, RollingMetricsRecorder, RollingSnapshotMetadata, RollingStage, RollingWork,
-    RollingWorkBatch, RowIdentity, ScalarValue, Schema, SchemaRef, SegmentDescriptor, Sha256,
-    StateInventory, StateRowOrderKey, TableBatch, UInt8Array, UInt64Array, Value, WindowState,
-    checkpoint_mismatch, concat_batches, ewma_entity_values, format_error, fresh_windows,
-    history_event_time, internal_error, is_valid_sample, kernel, new_null_array, operator_error,
-    state_format, state_v3,
+    Arc, Array, ArrayRef, BTreeMap, Batch, BufferedRow, CalcFlowError, CompiledFrame,
+    CompiledRollingSpec, CompiledWindowGroup, Cursor, DataType, DecodedRollingState, Deserialize,
+    Deserializer, DictionaryTracker, Digest, EntityRollingState, EwmaAccumulator,
+    ExtremaAccumulator, ExtremaKey, Field, FileReader, FileWriter, Float64Array, HashMap,
+    IpcSchemaEncoder, KeyValue, ROLLING_COLUMNAR_STATE_LAYOUT_VERSION,
+    ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION, ROLLING_EWMA_STATE_LAYOUT_VERSION,
+    ROLLING_INDICATOR_STATE_LAYOUT_VERSION, ROLLING_MACD_STATE_LAYOUT_VERSION, RecordBatch, Result,
+    RollingHistories, RollingKernelPlan, RollingKernelState, RollingMetricsRecorder,
+    RollingSnapshotMetadata, RollingStage, RollingWork, RollingWorkBatch, RowIdentity, ScalarValue,
+    Schema, SchemaRef, SegmentDescriptor, Sha256, StateInventory, StateRowOrderKey, TableBatch,
+    UInt8Array, UInt64Array, Value, WindowState, checkpoint_mismatch, concat_batches,
+    ewma_entity_values, format_error, fresh_windows, history_event_time, internal_error,
+    is_valid_sample, kernel, new_null_array, operator_error, state_format, state_v3,
 };
 use kernel::{StreamKernelUpdate, TypedStreamTransition};
 
@@ -38,15 +38,12 @@ pub(super) fn state_schema_prepared(
     }
 }
 
-pub(super) fn layout_five_restore_error(
-    error: crate::CalcFlowError,
-    node: &str,
-) -> crate::CalcFlowError {
+pub(super) fn layout_five_restore_error(error: CalcFlowError, node: &str) -> CalcFlowError {
     match error {
-        crate::CalcFlowError::Format { message } => {
+        CalcFlowError::Format { message } => {
             checkpoint_mismatch(format!("rolling operator {node:?} state.format: {message}"))
         }
-        crate::CalcFlowError::InvalidArgument { field, message } => {
+        CalcFlowError::InvalidArgument { field, message } => {
             checkpoint_mismatch(format!("rolling operator {node:?} {field}: {message}"))
         }
         other => other,
@@ -1082,7 +1079,16 @@ pub(super) fn build_typed_batch_output(
             )
         })?
     };
-    let Some(execution) = compiled.kernel_plan.open_and_fill(&input, node_id)? else {
+    let Some(execution) = compiled
+        .kernel_plan
+        .open_and_fill(&input, node_id)
+        .map_err(|error| match error {
+            CalcFlowError::InvalidArgument { field, message } => {
+                operator_error(node_id, &format!("{field}: {message}"))
+            }
+            other => other,
+        })?
+    else {
         return Ok(None);
     };
     debug_assert_eq!(execution.metrics.input_rows, input.num_rows());
