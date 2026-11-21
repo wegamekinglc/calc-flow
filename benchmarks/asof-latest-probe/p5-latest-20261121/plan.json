@@ -15,6 +15,7 @@
     "ab_ba_pairs_per_round": 10,
     "warmups_per_arm_per_round": 1,
     "comparison": "interleaved AB/BA with maintained paired statistics",
+    "comparison_integrity": "the legacy arm exits before reading the latest locator or timestamp and then follows the original binary search; an initial build that charged it an extra latest lookup was stopped before any measurement",
     "correctness": "existing complete per-row value oracle on every warmup, output counts/status/chunks on every observation, independent right-row selection and recovery where configured",
     "total_budget_seconds": 600,
     "builds_timed_separately": true,

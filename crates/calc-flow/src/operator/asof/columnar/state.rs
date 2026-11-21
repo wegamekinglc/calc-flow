@@ -1227,11 +1227,15 @@ impl ColumnarState {
 
     fn candidate(&self, bucket: &RightBucket, time: i64) -> Option<RowLocator> {
         let rows = bucket.payloads.rows();
-        let latest = rows.last().copied()?;
-        let use_latest = self.right_runs[&latest.run].time(latest) <= time;
-        #[cfg(feature = "benchmark-internals")]
-        let use_latest = use_latest && !self.legacy_latest_lookup;
-        let locator = if use_latest {
+        let direct = 'latest: {
+            #[cfg(feature = "benchmark-internals")]
+            if self.legacy_latest_lookup {
+                break 'latest None;
+            }
+            let latest = rows.last().copied()?;
+            (self.right_runs[&latest.run].time(latest) <= time).then_some(latest)
+        };
+        let locator = if let Some(latest) = direct {
             latest
         } else {
             #[cfg(test)]
