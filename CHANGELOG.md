@@ -9,6 +9,14 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-21: Withdraw the experimental N=1 pane preaggregation and its
+  physical layout 3 after direct paired measurements found 86.04% and 233.12%
+  regressions. All window declarations use per-window accumulators and layouts
+  1/2; experimental pane snapshots are rejected. The 2026-11-18 pane entry is
+  superseded. Existing window tests pass 46 with one ignored, and all-feature
+  Clippy passes. See [window state and storage](docs/runtime-envelope.md#window-state-and-storage)
+  and [the performance evidence](benchmarks/window-panes/p7-count-min-max-20261121/summary.json).
+
 - 2026-11-18: Replace production ASOF state with shared-key columnar runs.
   Each admitted batch becomes an immutable Arrow run with group, time, sequence,
   and payload/identity liveness columns. Stable `(run ID, row offset)` locators
