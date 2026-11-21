@@ -1991,6 +1991,64 @@ impl StateTable {
         Ok(())
     }
 
+    fn update_numeric_windows_finite(
+        page: &mut RingPage,
+        windows: &[usize],
+        max_window: usize,
+        update: NumericRingUpdate,
+        value: f64,
+    ) -> Result<()> {
+        let numeric = page.numeric.as_mut().expect("numeric group");
+        for (numeric, &window) in numeric.iter_mut().zip(windows) {
+            let history = NumericHistory {
+                ring: &page.ring,
+                offset: page.ring.len.saturating_sub(window),
+            };
+            let leaving = Self::numeric_leaving(&page.ring, update, window, max_window);
+            numeric
+                .rows_finite(leaving, value)
+                .and_then(|()| numeric.finish_rows(window, history))
+                .map_err(|error| {
+                    internal(&format!("rolling numeric arithmetic failed: {error:?}"))
+                })?;
+        }
+        Ok(())
+    }
+
+    fn push_numeric_recurrent_page_finite<'a>(
+        transaction: &mut Transaction,
+        partition: &'a mut StatePartition,
+        schema: &RingColumn,
+        column: usize,
+        group: KeyGroupId,
+        row: usize,
+        value: f64,
+    ) -> Result<&'a [NumericAccumulator]> {
+        let max_window = Self::numeric_max_window(schema)?;
+        let slot = partition.rings[column][row]
+            .as_ref()
+            .expect("ring page")
+            .id
+            .slot;
+        let page = Arc::get_mut(
+            &mut partition.rings[column][row]
+                .as_mut()
+                .expect("ring page")
+                .value,
+        )
+        .expect("checkpoint-off ring page is writable");
+        let update =
+            Self::push_numeric_recurrent_ring(transaction, page, group, slot, Some(value))?;
+        Self::update_numeric_windows_finite(
+            page,
+            &schema.numeric_windows,
+            max_window,
+            update,
+            value,
+        )?;
+        Ok(page.numeric.as_deref().expect("numeric group"))
+    }
+
     fn numeric_leaving(
         ring: &Ring,
         update: NumericRingUpdate,
@@ -2034,6 +2092,13 @@ impl StateTable {
         emit(first, self.numeric_accumulators(column, entity)?)?;
 
         let (group, row) = self.location(entity)?;
+        let finite = remaining
+            .iter()
+            .all(|&row| values.is_valid(row) && values.value(row).is_finite())
+            && self
+                .numeric_accumulators(column, entity)?
+                .iter()
+                .all(NumericAccumulator::arithmetic_is_finite);
         let schema = &self.rings[column];
         let transaction = self
             .transaction
@@ -2044,16 +2109,28 @@ impl StateTable {
             .get_mut(&group)
             .expect("numeric entity run group was prepared");
         for &row_index in remaining {
-            let value = Self::numeric_input_value(values, row_index, nan_as_value);
-            let accumulators = Self::push_numeric_recurrent_page(
-                transaction,
-                partition,
-                schema,
-                column,
-                group,
-                row,
-                value,
-            )?;
+            let accumulators = if finite {
+                Self::push_numeric_recurrent_page_finite(
+                    transaction,
+                    partition,
+                    schema,
+                    column,
+                    group,
+                    row,
+                    values.value(row_index),
+                )?
+            } else {
+                let value = Self::numeric_input_value(values, row_index, nan_as_value);
+                Self::push_numeric_recurrent_page(
+                    transaction,
+                    partition,
+                    schema,
+                    column,
+                    group,
+                    row,
+                    value,
+                )?
+            };
             emit(row_index, accumulators)?;
         }
         Ok(true)

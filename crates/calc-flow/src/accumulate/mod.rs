@@ -415,6 +415,29 @@ impl NumericAccumulator {
         self.unpaired_rows(leaving, entering)
     }
 
+    pub(crate) fn arithmetic_is_finite(&self) -> bool {
+        self.nan_count == 0
+            && self.pos_inf == 0
+            && self.neg_inf == 0
+            && !self.sum.is_non_finite()
+            && !self.dispersion.is_non_finite()
+    }
+
+    #[inline]
+    pub(crate) fn rows_finite(
+        &mut self,
+        leaving: Option<f64>,
+        entering: f64,
+    ) -> Result<(), ArithmeticError> {
+        if let Some(leaving) = leaving
+            && self.finite_count > 1
+        {
+            self.paired_rows(leaving, entering)
+        } else {
+            self.unpaired_rows(leaving, Some(entering))
+        }
+    }
+
     fn paired_rows(&mut self, leaving: f64, entering: f64) -> Result<(), ArithmeticError> {
         self.evict_counters(leaving)?;
         self.insert_counters(entering)?;

@@ -20,6 +20,8 @@ use crate::{
     state::{EntityId, EntityKey, StateTable, ValueKind},
 };
 
+const NUMERIC_RUN_MIN_ROWS: usize = 16;
+
 pub(super) struct SlabUpdate {
     previous_charge: StateCharge,
     entities: usize,
@@ -81,7 +83,8 @@ fn charge(table: &StateTable, node_id: &str) -> Result<StateCharge> {
 }
 
 struct NumericRunBuilder {
-    values: Vec<Option<f64>>,
+    values: Vec<f64>,
+    valid: Vec<bool>,
     output: TypedOutputPlan,
 }
 
@@ -96,7 +99,8 @@ impl NumericRunBuilder {
             return None;
         }
         Some(Self {
-            values: vec![None; rows],
+            values: vec![0.0; rows],
+            valid: vec![true; rows],
             output: *output,
         })
     }
@@ -116,12 +120,16 @@ impl NumericRunBuilder {
                 _ => unreachable!("numeric run output was admitted above"),
             }
         };
-        self.values[row] = value;
+        self.valid[row] = value.is_some();
+        self.values[row] = value.unwrap_or(0.0);
         Ok(())
     }
 
     fn finish(self) -> ArrayRef {
-        Arc::new(Float64Array::from(self.values))
+        Arc::new(Float64Array::new(
+            self.values.into(),
+            Some(datafusion::arrow::buffer::NullBuffer::from(self.valid)),
+        ))
     }
 }
 
@@ -633,6 +641,15 @@ impl RollingKernelPlan {
         input_rows: usize,
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<Option<Vec<ArrayRef>>> {
+        if entities.len() < NUMERIC_RUN_MIN_ROWS
+            || routing
+                .rows
+                .counts
+                .iter()
+                .any(|&count| count < NUMERIC_RUN_MIN_ROWS)
+        {
+            return Ok(None);
+        }
         let Some(mut builders) = self
             .outputs
             .iter()
