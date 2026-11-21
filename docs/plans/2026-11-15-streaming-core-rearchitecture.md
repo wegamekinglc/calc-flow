@@ -341,6 +341,10 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   下一步先归因 source、expression、routing 与 snapshot 的剩余成本，不再只优化 SUM apply。单次诊断总耗时 1.535 秒，
   其中 deltas 223.038 ms、positions 375.222 ms，keyed route/apply 为 288.789/79.376 ms，source 与运行时调度
   残差约 937 ms（尚非 source-only 测量）。这证明只优化 apply 无法达到门槛，路由和 source/调度必须分别核实。
+- 2026-11-21 AHash 路由候选 `7f61738b` 因正确性失败被否决：P6 在首个 candidate warmup 以 `positions` 失败停止，
+  0 个有效性能样本，P4 未启动。聚焦回归在 10,000 个初始组之后处理 100,000 行，输出却为 10,024 组；
+  相同文本在 `hash_rows` 中也出现不同哈希，`AHasher::default()` 同样失败。恢复 FNV 并保留大批次身份回归，
+  不将该候选描述为性能结果。失败命令、stderr 和 stopped summary 见 `benchmarks/sum-state/p6-ahash-20261121/`。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
