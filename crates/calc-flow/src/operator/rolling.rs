@@ -1573,6 +1573,22 @@ impl BatchOperator for RollingOperator {
             record
         } else {
             let rows = read_buffered_rows(table, &self.compiled, &self.name)?;
+            if !self.compiled.indicator_groups.is_empty() {
+                for (index, row) in rows.iter().enumerate() {
+                    indicators::validate_row(
+                        &self.compiled.indicator_groups,
+                        &row.values,
+                        &self.name,
+                        indicators::Coordinate::InputRow(index),
+                    )
+                    .map_err(|error| match error {
+                        CalcFlowError::InvalidArgument { field, message } => {
+                            operator_error(&self.name, &format!("{field}: {message}"))
+                        }
+                        other => other,
+                    })?;
+                }
+            }
             let ordered = sort_and_validate(rows, &self.name)?;
             let computed = compute_output_columns(
                 &ordered,

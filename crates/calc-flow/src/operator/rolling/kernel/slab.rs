@@ -524,7 +524,8 @@ impl RollingKernelPlan {
         table: &mut StateTable,
         routing: &EntityRouting,
         node_id: &str,
-    ) -> Result<(Vec<EntityId>, Vec<EntityId>)> {
+        track_positions: bool,
+    ) -> Result<(Vec<EntityId>, Vec<EntityId>, Vec<u64>)> {
         let resolved = routing
             .keys
             .iter()
@@ -535,15 +536,20 @@ impl RollingKernelPlan {
             .iter()
             .map(|&local| resolved[local])
             .collect::<Vec<_>>();
+        let mut positions = Vec::with_capacity(if track_positions { resolved.len() } else { 0 });
         for (&entity, &rows) in resolved.iter().zip(&routing.rows.counts) {
             let rows = u64::try_from(rows)
                 .map_err(|_| operator_error(node_id, "rolling entity row count overflowed"))?;
-            let transitions = table.u64(0, entity)?.checked_add(rows).ok_or_else(|| {
+            let previous = table.u64(0, entity)?;
+            if track_positions {
+                positions.push(previous);
+            }
+            let transitions = previous.checked_add(rows).ok_or_else(|| {
                 operator_error(node_id, "rolling entity transition count overflowed")
             })?;
             table.set_u64(0, entity, transitions)?;
         }
-        Ok((resolved, ids))
+        Ok((resolved, ids, positions))
     }
 
     fn append_slab_outputs(
@@ -609,7 +615,14 @@ impl RollingKernelPlan {
         node_id: &str,
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<Vec<ArrayRef>> {
-        let (_, ids) = Self::prepare_slab_entities(table, routing, node_id)?;
+        let track_positions = self.groups.iter().any(|group| {
+            matches!(
+                group,
+                TypedGroupPlan::Rsi { .. } | TypedGroupPlan::Atr { .. }
+            )
+        });
+        let (_, ids, mut positions) =
+            Self::prepare_slab_entities(table, routing, node_id, track_positions)?;
         let mut builders = self
             .outputs
             .iter()
@@ -626,11 +639,17 @@ impl RollingKernelPlan {
         };
         if !full_tick {
             for (row, &entity) in ids.iter().enumerate() {
+                let local = routing.entity_ids[row];
+                let ordered_position = if track_positions { positions[local] } else { 0 };
+                if track_positions {
+                    positions[local] += 1;
+                }
                 self.append_slab_row(
                     table,
                     indicator::EntityRow {
                         entity,
-                        first: routing.rows.first_rows[routing.entity_ids[row]] == row,
+                        first: routing.rows.first_rows[local] == row,
+                        ordered_position,
                         node_id,
                     },
                     inputs,

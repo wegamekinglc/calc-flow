@@ -6,9 +6,13 @@ use super::super::{
     internal_error, valid_float64,
 };
 use crate::{
+    CalcFlowError,
     accumulate::NumericAccumulator,
     array::indicators::{AtrKernel, MacdKernel, MacdParameters, RsiKernel},
-    operator::rolling::cumulative::CumulativeAccumulator,
+    operator::rolling::{
+        cumulative::CumulativeAccumulator,
+        indicators::{Coordinate, numeric_error},
+    },
     state::{EntityId, StateTable, ValueKind},
 };
 
@@ -16,6 +20,7 @@ use crate::{
 pub(super) struct EntityRow<'a> {
     pub(super) entity: EntityId,
     pub(super) first: bool,
+    pub(super) ordered_position: u64,
     pub(super) node_id: &'a str,
 }
 
@@ -251,6 +256,35 @@ fn scratch_groups(groups: &[TypedGroupPlan]) -> Scratch {
     (valid_counts, cumulative, lag_values)
 }
 
+fn ordered_error(error: CalcFlowError, position: EntityRow<'_>) -> CalcFlowError {
+    numeric_error(
+        error,
+        position.node_id,
+        Coordinate::OrderedPosition(position.ordered_position),
+    )
+}
+
+fn push_rsi(
+    table: &mut StateTable,
+    position: EntityRow<'_>,
+    base: usize,
+    input: &Float64Array,
+    row: usize,
+    period: u64,
+    field: &str,
+) -> Result<Option<f64>> {
+    let mut kernel = read_rsi(table, position.entity, base)?;
+    let value = kernel
+        .push(
+            input.is_valid(row).then_some(input.value(row)),
+            period,
+            field,
+        )
+        .map_err(|error| ordered_error(error, position))?;
+    write_rsi(table, position.entity, base, kernel)?;
+    Ok(value)
+}
+
 pub(super) fn update<'a>(
     table: &'a mut StateTable,
     position: EntityRow<'_>,
@@ -302,28 +336,23 @@ pub(super) fn update<'a>(
             }
             (TypedGroupPlan::Rsi { .. }, TypedGroupInput::Rsi(input, field, period)) => {
                 let base = column_base(groups, index);
-                let mut kernel = read_rsi(table, entity, base)?;
-                values[index][0] = kernel.push(
-                    input.is_valid(row).then_some(input.value(row)),
-                    *period,
-                    field,
-                )?;
-                write_rsi(table, entity, base, kernel)?;
+                values[index][0] = push_rsi(table, position, base, input, row, *period, field)?;
             }
             (TypedGroupPlan::Atr { .. }, TypedGroupInput::Atr(inputs, fields, period)) => {
-                let base = column_base(groups, index);
-                let mut kernel = read_atr(table, entity, base)?;
+                let mut kernel = read_atr(table, entity, column_base(groups, index))?;
                 let [high, low, close] = inputs;
-                values[index][0] = kernel.push(
-                    [
-                        high.is_valid(row).then_some(high.value(row)),
-                        low.is_valid(row).then_some(low.value(row)),
-                        close.is_valid(row).then_some(close.value(row)),
-                    ],
-                    *period,
-                    fields.each_ref().map(String::as_str),
-                )?;
-                write_atr(table, entity, base, kernel)?;
+                values[index][0] = kernel
+                    .push(
+                        [
+                            high.is_valid(row).then_some(high.value(row)),
+                            low.is_valid(row).then_some(low.value(row)),
+                            close.is_valid(row).then_some(close.value(row)),
+                        ],
+                        *period,
+                        fields.each_ref().map(String::as_str),
+                    )
+                    .map_err(|error| ordered_error(error, position))?;
+                write_atr(table, entity, column_base(groups, index), kernel)?;
             }
             (TypedGroupPlan::Macd { options, .. }, TypedGroupInput::Single(input)) => {
                 let base = column_base(groups, index);
