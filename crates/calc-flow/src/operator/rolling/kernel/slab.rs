@@ -20,8 +20,6 @@ use crate::{
     state::{EntityId, EntityKey, StateTable, ValueKind},
 };
 
-const NUMERIC_RUN_MIN_ROWS: usize = 16;
-
 pub(super) struct SlabUpdate {
     previous_charge: StateCharge,
     entities: usize,
@@ -80,57 +78,6 @@ fn charge(table: &StateTable, node_id: &str) -> Result<StateCharge> {
         bytes: u64::try_from(table.logical_bytes())
             .map_err(|_| operator_error(node_id, "rolling slab byte charge overflowed"))?,
     })
-}
-
-struct NumericRunBuilder {
-    values: Vec<f64>,
-    valid: Vec<bool>,
-    output: TypedOutputPlan,
-}
-
-impl NumericRunBuilder {
-    fn new(output: &TypedOutputPlan, rows: usize) -> Option<Self> {
-        if output.storage != OutputStorage::Float64
-            || !matches!(
-                output.kind,
-                TypedOutputKind::Statistic(Statistic::Sum | Statistic::Mean)
-            )
-        {
-            return None;
-        }
-        Some(Self {
-            values: vec![0.0; rows],
-            valid: vec![true; rows],
-            output: *output,
-        })
-    }
-
-    fn append(&mut self, row: usize, accumulators: &[NumericAccumulator]) -> Result<()> {
-        let accumulator = accumulators
-            .get(self.output.group)
-            .ok_or_else(|| internal_error("rolling numeric run output group is absent"))?;
-        let value = if accumulator.valid_count < self.output.min_periods {
-            None
-        } else {
-            match self.output.kind {
-                TypedOutputKind::Statistic(Statistic::Sum) => Some(accumulator.sum()),
-                TypedOutputKind::Statistic(Statistic::Mean) => {
-                    (accumulator.valid_count > 0).then(|| accumulator.mean())
-                }
-                _ => unreachable!("numeric run output was admitted above"),
-            }
-        };
-        self.valid[row] = value.is_some();
-        self.values[row] = value.unwrap_or(0.0);
-        Ok(())
-    }
-
-    fn finish(self) -> ArrayRef {
-        Arc::new(Float64Array::new(
-            self.values.into(),
-            Some(datafusion::arrow::buffer::NullBuffer::from(self.valid)),
-        ))
-    }
 }
 
 enum SlabBuilder {
@@ -632,72 +579,6 @@ impl RollingKernelPlan {
         Ok(())
     }
 
-    fn write_numeric_runs(
-        &self,
-        table: &mut StateTable,
-        entities: &[EntityId],
-        values: &Float64Array,
-        routing: &EntityRouting,
-        input_rows: usize,
-        observer: Option<&RollingMetricsRecorder>,
-    ) -> Result<Option<Vec<ArrayRef>>> {
-        if entities.len() < NUMERIC_RUN_MIN_ROWS
-            || routing
-                .rows
-                .counts
-                .iter()
-                .any(|&count| count < NUMERIC_RUN_MIN_ROWS)
-        {
-            return Ok(None);
-        }
-        let Some(mut builders) = self
-            .outputs
-            .iter()
-            .map(|output| NumericRunBuilder::new(output, input_rows))
-            .collect::<Option<Vec<_>>>()
-        else {
-            return Ok(None);
-        };
-        let mut runs = routing
-            .rows
-            .counts
-            .iter()
-            .map(|&count| Vec::with_capacity(count))
-            .collect::<Vec<_>>();
-        for (row, &local) in routing.entity_ids.iter().enumerate() {
-            runs[local].push(row);
-        }
-        let _stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
-        for (local, rows) in runs.iter().enumerate() {
-            let completed = table.write_numeric_entity_run(
-                0,
-                entities[local],
-                rows,
-                values,
-                self.nan_as_value,
-                |row, accumulators| {
-                    for builder in &mut builders {
-                        builder.append(row, accumulators)?;
-                    }
-                    Ok(())
-                },
-            )?;
-            if !completed {
-                return Ok(None);
-            }
-        }
-        if let Some(recorder) = observer {
-            recorder.add(RollingWork::NumericRows, input_rows);
-            recorder.add(RollingWork::NumericSerialCalls, 1);
-        }
-        Ok(Some(
-            builders
-                .into_iter()
-                .map(NumericRunBuilder::finish)
-                .collect(),
-        ))
-    }
-
     fn write_full_tick(
         &self,
         table: &mut StateTable,
@@ -728,17 +609,7 @@ impl RollingKernelPlan {
         node_id: &str,
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<Vec<ArrayRef>> {
-        let (entities, ids) = Self::prepare_slab_entities(table, routing, node_id)?;
-        if indicator::numeric_only(&self.groups) {
-            let Some(TypedGroupInput::Single(values)) = inputs.first() else {
-                return Err(internal_error("rolling numeric slab input mismatch"));
-            };
-            if let Some(columns) =
-                self.write_numeric_runs(table, &entities, values, routing, input_rows, observer)?
-            {
-                return Ok(columns);
-            }
-        }
+        let (_, ids) = Self::prepare_slab_entities(table, routing, node_id)?;
         let mut builders = self
             .outputs
             .iter()
