@@ -347,6 +347,12 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   0 个有效性能样本，P4 未启动。聚焦回归在 10,000 个初始组之后处理 100,000 行，输出却为 10,024 组；
   相同文本在 `hash_rows` 中也出现不同哈希，`AHasher::default()` 同样失败。恢复 FNV 并保留大批次身份回归，
   不将该候选描述为性能结果。失败命令、stderr 和 stopped summary 见 `benchmarks/sum-state/p6-ahash-20261121/`。
+- 2026-11-21 当前 rolling sealed 基线（runtime `2a4c6d57`，source receipt `9ce0b8d6`）完成：G1 **5.458 µs**、
+  G2 **28.428 ns/window-row**、G3 **497.927 µs**，三项均未达标。10 轮三用例在 1.711 秒内完成，
+  release test 构建 1,646.819 秒另计；controller 与 source receipt 见 `benchmarks/rolling-kernel-v2/p2-current-baseline.*`
+  和 `p2-current-build.json`。`dfa3c5ae` 为 Float64 SUM/MEAN 新增稳定 per-entity run、复用递推状态页和
+  原行索引 Vec 输出，checkpoint 与其他 family 保留旧路径；rolling 686 项、run rollback 回归及全 feature Clippy
+  通过，候选性能仍待相同三用例验收。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
