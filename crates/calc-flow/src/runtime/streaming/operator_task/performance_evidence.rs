@@ -7,7 +7,7 @@ use std::{
 };
 
 use datafusion::arrow::{
-    array::{ArrayRef, Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
+    array::{Array, ArrayRef, Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
     datatypes::{DataType, Field, Schema, TimeUnit},
     ipc::writer::StreamWriter,
     record_batch::RecordBatch,
@@ -21,9 +21,11 @@ use super::{
     dispatch_watermark_handler,
 };
 use crate::{
-    Batch, BatchMetadata, CancellationToken, EdgeBudget, EdgeReceiver, Epoch, EventTime,
-    IngressProgressSnapshot, JsonMap, OperatorMetadata, RollingOperator, RollingSpec,
-    StreamJobContext, StreamMessage,
+    Batch, BatchKind, BatchMetadata, CancellationToken, Edge, EdgeBudget, EdgeReceiver, Epoch,
+    EventTime, ExpressionOperator, IngressProgressSnapshot, JsonMap, ManagedCheckpointRuntime,
+    OperatorMetadata, PipelineBuilder, Port, PortEndpoint, RollingOperator, RollingSpec,
+    StreamExecutionPlan, StreamJobContext, StreamMessage, StreamRequirements, StreamRuntimeConfig,
+    StreamSession, UdfRegistry,
     operator::rolling_metrics::RollingMetricsStore,
     pipeline::{CompiledStreamOperator, OperatorCheckpointCapability},
 };
@@ -728,3 +730,312 @@ fn rolling_kernel_v2_evidence() {
     )
     .unwrap();
 }
+
+struct DirectSessionArm {
+    session: StreamSession,
+    input: String,
+    output: String,
+    entities: usize,
+    _root: Option<tempfile::TempDir>,
+}
+
+fn direct_plan(workload: Workload) -> StreamExecutionPlan {
+    let rolling = RollingOperator::new("rolling", workload.schema(), workload.spec()).unwrap();
+    let rolled = rolling.output_ports()[0].schema().unwrap().clone();
+    let projected = Arc::new(Schema::new(vec![Field::new(
+        "value",
+        DataType::Float64,
+        true,
+    )]));
+    let projection = ExpressionOperator::new(
+        "project",
+        "",
+        vec!["mean5 - mean AS value".into()],
+        None,
+        Vec::new(),
+    )
+    .unwrap()
+    .with_ports(
+        Port::with_schema_ref("input", BatchKind::Table, true, Some(rolled)).unwrap(),
+        Port::with_schema_ref("output", BatchKind::Table, true, Some(projected)).unwrap(),
+    )
+    .unwrap();
+    PipelineBuilder::new("checkpoint-v4-direct")
+        .unwrap()
+        .add_node("rolling", rolling)
+        .unwrap()
+        .add_node("project", Box::new(projection))
+        .unwrap()
+        .connect(Edge::new(
+            PortEndpoint::new("rolling", "output").unwrap(),
+            PortEndpoint::new("project", "input").unwrap(),
+        ))
+        .unwrap()
+        .compile_stream(
+            &UdfRegistry::new().snapshot(),
+            &StreamRequirements::default(),
+        )
+        .unwrap()
+}
+
+fn direct_sessions(workload: Workload) -> [DirectSessionArm; 2] {
+    [true, false].map(|checkpointing| {
+        let config = StreamRuntimeConfig {
+            checkpointing,
+            ..StreamRuntimeConfig::default()
+        };
+        let mut root = None;
+        let session = if checkpointing {
+            let directory = tempfile::tempdir().unwrap();
+            let session = StreamSession::new_with_checkpoints(
+                direct_plan(workload),
+                &config,
+                BTreeMap::new(),
+                ManagedCheckpointRuntime::new(directory.path()).unwrap(),
+            )
+            .unwrap();
+            root = Some(directory);
+            session
+        } else {
+            StreamSession::new(direct_plan(workload), &config, BTreeMap::new()).unwrap()
+        };
+        let input = session.input_ids()[0].to_owned();
+        let output = session.output_ids()[0].to_owned();
+        DirectSessionArm {
+            session,
+            input,
+            output,
+            entities: workload.entities,
+            _root: root,
+        }
+    })
+}
+
+fn direct_price(row: usize) -> f64 {
+    100.0 + f64::from(u32::try_from(row % 257).unwrap()) / 8.0
+}
+
+fn direct_expected(row: usize, entities: usize) -> Option<f64> {
+    let tick = row / entities;
+    if tick < 19 {
+        return None;
+    }
+    let entity = row % entities;
+    let mean = |window| {
+        (0..window)
+            .map(|offset| direct_price((tick + 1 - window + offset) * entities + entity))
+            .sum::<f64>()
+            / f64::from(u32::try_from(window).unwrap())
+    };
+    Some(mean(5) - mean(20))
+}
+
+fn validate_direct_output(records: &[RecordBatch], start: usize, entities: usize) {
+    let mut row = start;
+    for record in records {
+        let values = record
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        for offset in 0..record.num_rows() {
+            let expected = direct_expected(row, entities);
+            assert_eq!(values.is_null(offset), expected.is_none(), "row {row}");
+            if let Some(expected) = expected {
+                assert_eq!(
+                    values.value(offset).to_bits(),
+                    expected.to_bits(),
+                    "row {row}"
+                );
+            }
+            row += 1;
+        }
+    }
+}
+
+fn direct_push(arm: &mut DirectSessionArm, batch: &Batch, start: usize) -> (f64, String) {
+    let watermark = EventTime::from_micros(
+        i64::try_from((start + batch.num_rows() - 1) / arm.entities).unwrap(),
+    );
+    let began = Instant::now();
+    let emitted = arm
+        .session
+        .push(&arm.input.clone(), batch.clone(), Some(watermark))
+        .unwrap();
+    let seconds = began.elapsed().as_secs_f64();
+    let records = emitted
+        .batches(&arm.output)
+        .iter()
+        .flat_map(|batch| batch.table_payload().unwrap().batches().to_vec())
+        .collect::<Vec<_>>();
+    validate_direct_output(&records, start, arm.entities);
+    (seconds, output_digest(&records))
+}
+
+#[test]
+fn direct_checkpoint_sessions_match_independent_oracle() {
+    let workload = dual(1, 1, false);
+    let mut arms = direct_sessions(workload);
+    for start in [0, 1, 2] {
+        let batch = workload.batch(start);
+        let [on, off] = arms.each_mut();
+        let on_output = direct_push(on, &batch, start);
+        let off_output = direct_push(off, &batch, start);
+        assert_eq!(on_output.1, off_output.1);
+    }
+}
+
+fn direct_median(
+    arm: &mut DirectSessionArm,
+    workload: Workload,
+    mut start: usize,
+    dispatches: usize,
+) -> (f64, Vec<String>) {
+    let mut seconds = Vec::with_capacity(dispatches);
+    let mut digests = Vec::with_capacity(dispatches);
+    for _ in 0..dispatches {
+        let batch = workload.batch(start);
+        let (elapsed, digest) = direct_push(arm, &batch, start);
+        seconds.push(elapsed);
+        digests.push(digest);
+        start += workload.rows;
+    }
+    seconds.sort_unstable_by(f64::total_cmp);
+    (
+        f64::midpoint(seconds[dispatches / 2 - 1], seconds[dispatches / 2]),
+        digests,
+    )
+}
+
+fn direct_finish(arm: &mut DirectSessionArm, start: usize) -> String {
+    let emitted = arm.session.finish().unwrap();
+    let records = emitted
+        .batches(&arm.output)
+        .iter()
+        .flat_map(|batch| batch.table_payload().unwrap().batches().to_vec())
+        .collect::<Vec<_>>();
+    validate_direct_output(&records, start, arm.entities);
+    output_digest(&records)
+}
+
+fn direct_evidence_case(
+    name: &str,
+    workload: Workload,
+    history_rows: usize,
+    pairs: usize,
+    dispatches: usize,
+    recorder: &str,
+) -> Value {
+    let mut arms = direct_sessions(workload);
+    for (start, rows) in [
+        (0, history_rows),
+        (history_rows, workload.rows),
+        (history_rows + workload.rows, workload.rows),
+        (history_rows + 2 * workload.rows, workload.rows),
+    ] {
+        let batch = workload.rows_batch(start, rows);
+        let [on, off] = arms.each_mut();
+        let on = direct_push(on, &batch, start);
+        let off = direct_push(off, &batch, start);
+        assert_eq!(on.1, off.1);
+    }
+    let mut start = history_rows + 3 * workload.rows;
+    let mut samples = Vec::with_capacity(pairs);
+    for pair in 0..pairs {
+        let mut medians = [0.0; 2];
+        let mut digests = [Vec::new(), Vec::new()];
+        for side in if pair % 2 == 0 { [0, 1] } else { [1, 0] } {
+            let (median, output) = direct_median(&mut arms[side], workload, start, dispatches);
+            medians[side] = median;
+            digests[side] = output;
+        }
+        assert_eq!(digests[0], digests[1]);
+        samples.push(json!({
+            "pair": pair,
+            "order": if pair % 2 == 0 { "AB" } else { "BA" },
+            "dispatches_per_arm": dispatches,
+            "on_median_seconds": medians[0],
+            "off_median_seconds": medians[1],
+            "output_digest": digests[0],
+        }));
+        start += dispatches * workload.rows;
+    }
+    let [on, off] = arms.each_mut();
+    assert_eq!(direct_finish(on, start), direct_finish(off, start));
+    json!({
+        "case": name,
+        "workload": workload.identity(),
+        "history_rows": history_rows,
+        "warm_dispatches": 3,
+        "recorder": recorder,
+        "pairs": samples,
+    })
+}
+
+#[test]
+fn direct_checkpoint_pair_reports_median_and_digest() {
+    let evidence = direct_evidence_case("1x1-dual", dual(1, 1, false), 3, 1, 2, "absent");
+    assert_eq!(evidence["pairs"][0]["dispatches_per_arm"], 2);
+    assert!(evidence["pairs"][0]["on_median_seconds"].is_number());
+    assert!(evidence["pairs"][0]["off_median_seconds"].is_number());
+    assert!(evidence["pairs"][0]["output_digest"].is_array());
+}
+
+#[test]
+#[ignore = "P3.7 direct checkpoint performance evidence, not a CI timing gate"]
+fn checkpoint_direct_evidence() {
+    assert!(
+        !std::hint::black_box(cfg!(debug_assertions)),
+        "checkpoint direct evidence requires a release test binary"
+    );
+    let destination = std::env::var("CALC_FLOW_CHECKPOINT_V4_DIRECT_OUTPUT")
+        .expect("set direct evidence output path");
+    let name =
+        std::env::var("CALC_FLOW_CHECKPOINT_V4_DIRECT_CASE").expect("set direct evidence case");
+    let history_rows = std::env::var("CALC_FLOW_CHECKPOINT_V4_DIRECT_HISTORY")
+        .expect("set direct history rows")
+        .parse::<usize>()
+        .unwrap();
+    let recorder =
+        std::env::var("CALC_FLOW_CHECKPOINT_V4_DIRECT_RECORDER").expect("set direct recorder");
+    let pairs = std::env::var("CALC_FLOW_CHECKPOINT_V4_DIRECT_PAIRS")
+        .expect("set direct pair count")
+        .parse::<usize>()
+        .unwrap();
+    let dispatches = std::env::var("CALC_FLOW_CHECKPOINT_V4_DIRECT_DISPATCHES")
+        .expect("set direct dispatch count")
+        .parse::<usize>()
+        .unwrap();
+    assert_eq!(history_rows, HISTORY_ROWS);
+    assert_eq!(recorder, "absent");
+    assert!(pairs > 0 && dispatches >= 2 && dispatches % 2 == 0);
+    let (name, workload) = DISPATCH_CASES
+        .iter()
+        .find(|(candidate, _)| {
+            *candidate == name && matches!(name.as_str(), "1x1-dual" | "6400x64-dual")
+        })
+        .copied()
+        .unwrap_or_else(|| panic!("unsupported direct checkpoint case {name}"));
+    let evidence = direct_evidence_case(name, workload, history_rows, pairs, dispatches, &recorder);
+    let mut evidence = evidence.as_object().unwrap().clone();
+    evidence.extend([
+        ("contract".into(), json!(DIRECT_CONTRACT)),
+        ("executable".into(), json!(std::env::current_exe().unwrap())),
+        ("debug_assertions".into(), json!(cfg!(debug_assertions))),
+        (
+            "process".into(),
+            crate::benchmark_internals::process_observations().unwrap(),
+        ),
+        (
+            "boundary".into(),
+            json!("StreamSession::push through Rolling and mean5-mean projection; input construction, warm-up, output validation and finish are outside the timer; enabled arm captures no epoch"),
+        ),
+    ]);
+    std::fs::write(
+        destination,
+        serde_json::to_string_pretty(&Value::Object(evidence)).unwrap() + "\n",
+    )
+    .unwrap();
+}
+
+const DIRECT_CONTRACT: &str = "calc-flow.checkpoint-v4-direct/1";
