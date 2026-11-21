@@ -1,5 +1,7 @@
 use super::*;
-use crate::{CancellationToken, DataFusionConfig, JsonMap, StreamJobContext};
+use crate::{
+    CancellationToken, DataFusionConfig, DataFusionParallelismMode, JsonMap, StreamJobContext,
+};
 use datafusion::arrow::array::{Int64Array, StringArray};
 
 const QUERY: &str = "SELECT key, label, SUM(value) FILTER (WHERE selected) AS total \
@@ -523,4 +525,93 @@ async fn test_keyed_sum_restore_rejects_partition_count_mismatch() {
             .import_native_state(exported.records(), 8, true, || Ok(()), "keyed-sum")
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn test_keyed_sum_ten_thousand_stock_groups_continue() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig {
+        target_partitions: 1,
+        min_rows_per_partition: 1,
+        parallelism_mode: DataFusionParallelismMode::Fixed,
+        ..DataFusionConfig::default()
+    })
+    .unwrap();
+    let rows = 10_000;
+    let record = RecordBatch::try_from_iter(vec![
+        (
+            "account",
+            Arc::new(StringArray::from(
+                (0..rows)
+                    .map(|row| format!("account-{:03}", row / 100))
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
+        ),
+        (
+            "stock",
+            Arc::new(StringArray::from(
+                (0..rows)
+                    .map(|row| format!("stock-{:03}", row % 100))
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
+        ),
+        (
+            "delta",
+            Arc::new(Int64Array::from(vec![1; rows])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    let query = crate::expression::parse_select_query(
+        "SELECT account, stock, SUM(delta) AS position FROM input GROUP BY account, stock",
+    )
+    .unwrap();
+    let mut plan = IncrementalSql::plan(&runtime, &query, "input", record.schema(), "keyed-sum")
+        .await
+        .unwrap()
+        .unwrap();
+    let job = StreamJobContext::new(
+        987,
+        "keyed-sum",
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "keyed-sum", None);
+    let batch = Batch::table(vec![record.clone()], crate::BatchMetadata::default()).unwrap();
+    let transaction = plan.update(&batch, &context, "keyed-sum").await.unwrap();
+    plan.commit(transaction);
+
+    let wide = RecordBatch::try_from_iter(vec![
+        (
+            "account",
+            Arc::new(StringArray::from(
+                (0..100_000)
+                    .map(|row| format!("account-{:03}", row % rows / 100))
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
+        ),
+        (
+            "stock",
+            Arc::new(StringArray::from(
+                (0..100_000)
+                    .map(|row| format!("stock-{:03}", row % 100))
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
+        ),
+        (
+            "delta",
+            Arc::new(Int64Array::from(vec![1; 100_000])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    let wide = Batch::table(vec![wide], crate::BatchMetadata::default()).unwrap();
+    let transaction = plan.update(&wide, &context, "keyed-sum").await.unwrap();
+    assert_eq!(
+        transaction
+            .records
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>(),
+        rows
+    );
+    plan.commit(transaction);
 }
