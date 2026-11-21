@@ -1,6 +1,6 @@
 # Streaming core rearchitecture — closing review
 
-Status: **pending final verification**. This is not an approval or a merge-ready claim. The overall P0–P7 architecture and absolute performance plan remains incomplete.
+Status: **code re-review found no new blocking findings; Join performance gates failed and GitHub CI is pending**. This is not an approval or a merge-ready claim. The overall P0–P7 architecture and absolute performance plan remains incomplete.
 
 ## Review history
 
@@ -56,16 +56,25 @@ The targeted checkpoint tests passed. The independent native Join ack regression
 
 ## Verification completed locally
 
-- Hot Join: 16 tests plus zero-match passed.
+- Hot Join: 16 tests plus zero-match passed. The zero-match test was rerun independently after review: one test passed and 3,171 were filtered out.
 - Durable sessions: 23 tests passed.
-- Rust complexity specialist: grouped-SUM 11, PyO3 session 7, PyO3 config 12 and focused ASOF recovery tests passed; scoped Clippy passed.
-- Python: profiling 55 tests plus 2 subtests, P3 45, checkpoint 11 and release 23 passed; numeric/session combined tests passed.
-- Ruff, formatting, complexity ratchet, spec references, schema drift and full-PR whitespace checks passed.
+- Rust complexity specialist: grouped-SUM 11, PyO3 session 7, PyO3 config 12 and focused ASOF recovery tests passed; full `--tests` Clippy passed.
+- Python: capability 41 and the other 179 targeted binding tests passed. Profiling 55 tests plus 2 subtests, P3 45, checkpoint 11 and release 23 passed; numeric/session combined tests passed.
+- Full Ruff lint, changed-file Python formatting, Rust formatting, complexity ratchet, spec references, schema drift and full-PR whitespace checks passed.
 - Arroyo pure-function fixture, oracle, summary and explicit-error checks passed.
+
+## Final specialist re-review
+
+The original reviewer inspected `6a2abc08` and found no new production blockers. Its initial zero-match fixture finding was withdrawn after checking the actual one-row right input, join time bounds and the recorded passing test. Final verdict: **no new blocking findings in production code or tests**. This source review does not establish performance or CI success.
+
+A separate documentation check caught an attempted release-rule exception introduced while addressing Codacy wording. The guidance now says release inspection rejects frozen `src/calc_flow`, fixtures and guidance directories, matching the existing inspector without an exception.
+
+## Current-head performance conclusion
+
+- Sealed Join wheel, revision `6a2abc08`: static Join P50 **619.785 ms** against the 30 ms limit; interval Join P50 **2,058.241 ms** against the 350 ms limit. Both cases passed all 10 complete output oracles. Acquisition took 64.513 seconds and the separate release build took 837.820 seconds. Both absolute gates failed; semantic fixes are retained and no timing-driven samples were added. Evidence: `benchmarks/join-asof/p5-review-fixes-20261122/result.json`.
+- Sealed ASOF binary, revision `6a2abc08`: balanced **−17.30% (improved)**, fixed128 **−3.15% (no-confirmed-regression)**, skew **−18.69% (improved)** and restored-skew **−21.39% (improved)**. The fixed 160-observation protocol passed its maintained validators. Acquisition took 1.070 seconds and the separate build took 757.790 seconds. Evidence: `benchmarks/asof-latest-probe/p5-latest-20261121/outcome.json`.
 
 ## Open verification and acceptance
 
-- Full `--tests` Clippy and checkpoint/native-Join regressions passed. Capability 41 tests and the other 179 targeted Python tests passed. Final specialist re-review is pending.
-- Required GitHub checks are not green on the current dirty head. Earlier failed checks are not treated as current-head results.
-- Hot Join and ASOF performance must be re-measured after semantic changes. Old sealed values are not current-head evidence.
-- Rolling G1–G3, P4 10M, P6 parallel scaling, P3 M3/M4, full ASOF inventory, Arroyo burst alignment and the complete P0–P7 plan remain unmet or unmeasured.
+- Required GitHub checks are pending on the evidence commit. Earlier failed checks are not treated as current-head results; Codacy must also be scanned again.
+- Rolling G1–G3, Join absolute gates, P4 10M, P6 parallel scaling, P3 M3/M4, full ASOF inventory, Arroyo burst alignment and the complete P0–P7 plan remain unmet or unmeasured. No overall completion or merge-ready claim is made.

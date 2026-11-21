@@ -343,8 +343,8 @@ selectors.
   `target-cpu=x86-64-v3`; portable x86-64 and AArch64 builds remain unchanged.
   No v3 source distribution is published.
 - Portable source distributions contain essential Rust/Python build sources.
-  Frozen `src/calc_flow`, fixtures, and guidance directories are excluded unless
-  a reviewed release exception documents why specific content is essential.
+  Release inspection rejects frozen `src/calc_flow`, fixtures, and guidance
+  directories.
 - The published crate includes license/source/examples/benches and excludes
   repository-only integration tests.
 - Preserve pinned workflow actions, Maturin/Rust versions, audit policies, and

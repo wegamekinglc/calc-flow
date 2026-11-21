@@ -1,15 +1,15 @@
 {
-  "acquisition_elapsed_seconds": 0.901114748,
-  "binary_sha256": "cc7a66b637aeb59957a569da59f4b06183658f76fae9676adce0cf3f469c4e7d",
+  "acquisition_elapsed_seconds": 1.069625035,
+  "binary_sha256": "8f7d0f4f190bf4335fb213218bcc971269b7900ca42f4df689398b08577aafce",
   "budget_seconds": 600,
-  "build_elapsed_seconds": 447.65985521598486,
+  "build_elapsed_seconds": 757.79,
   "evidence_sha256": {
-    "samples.csv": "0931859370310751e377aa423eef61ba328eb33161793b7ba112727527db4921",
-    "summary.json": "8ec8c4027c2a348e47078cd2796af7a6212b54943082233af7d06d6218c9c497"
+    "samples.csv": "2dc930c08b117e6c269bcfa239994980d2421b24424942928fbdb6c01d03a6ba",
+    "summary.json": "7f3a91f3beed017432c303dc7291786ee4420ce920d6a6913477dd7493a4f3be"
   },
   "independent_harness_failure": "strict_frontiers_cancel_restore_check hangs under both algorithms and remains excluded from paired mode; it is not claimed as passing",
-  "measured_revision": "0cbe65dea4cd459bcd26ccc32b6722d972ac3a13",
-  "measured_tree": "cf9c126fa367ac4fbc0f65fa7162ce15d3593901",
+  "measured_revision": "6a2abc0876e20a8fb1883555b85bd5652b17b506",
+  "measured_tree": "698cd13ffae1b6a45ff1e94a44364f6616d2908d",
   "process_observations": {
     "observed_cpu_affinity": [
       0
@@ -24,7 +24,7 @@
       "TOKIO_WORKER_THREADS": "1",
       "VECLIB_MAXIMUM_THREADS": "1"
     },
-    "process_id": 70370
+    "process_id": 93083
   },
   "protocol": {
     "ab_ba_pairs_per_round": 10,
@@ -50,12 +50,12 @@
   "source_status_at_build_and_measurement": "clean",
   "status": "completed",
   "supersedes": {
-    "reason": "the latest-row hot function changed after the historical measurement; this is a fresh sealed implementation-head run, not added samples",
-    "revision": "0b4ab10529d017e4041b406dc1a80401798163b8"
+    "reason": "final review fixes changed the implementation head; this is a fresh sealed run with the same fixed protocol, not added samples",
+    "revision": "0cbe65dea4cd459bcd26ccc32b6722d972ac3a13"
   },
   "verdicts": {
     "balanced_8192": "improved",
-    "fixed128_right8192": "inconclusive",
+    "fixed128_right8192": "no-confirmed-regression",
     "restored_skew_8192": "improved",
     "skew_8192": "improved"
   }
