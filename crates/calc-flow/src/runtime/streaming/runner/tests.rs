@@ -7805,7 +7805,7 @@ async fn checkpointed_runner_periodically_publishes_before_sink_commit() {
         backend,
         directory.path().join("manifests"),
         StreamRuntimeConfig {
-            checkpoint_interval: StdDuration::from_millis(10),
+            checkpoint_interval: StdDuration::from_secs(3_600),
             checkpoint_timeout: StdDuration::from_secs(10),
             ..StreamRuntimeConfig::default()
         },
@@ -7815,6 +7815,8 @@ async fn checkpointed_runner_periodically_publishes_before_sink_commit() {
     let job = runner.start_checkpointed(spec, checkpoint).await.unwrap();
     wait_for_counter(&source_polls, 1).await;
 
+    tokio::time::advance(StdDuration::from_secs(3_600)).await;
+    tokio::time::resume();
     tokio::time::timeout(StdDuration::from_secs(5), async {
         loop {
             if log.lock().iter().any(|entry| entry == "sink-begin:2") {
@@ -7825,6 +7827,19 @@ async fn checkpointed_runner_periodically_publishes_before_sink_commit() {
     })
     .await
     .expect("periodic checkpoint should complete");
+    tokio::time::timeout(StdDuration::from_secs(5), async {
+        loop {
+            if job.status().checkpoint.as_ref().is_some_and(|status| {
+                status.current_epoch.is_none()
+                    && status.last_completed_epoch == Some(crate::Epoch::INITIAL)
+            }) {
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the first checkpoint status should settle");
 
     assert_eq!(
         &*log.lock(),
