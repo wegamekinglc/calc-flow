@@ -352,7 +352,11 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   release test 构建 1,646.819 秒另计；controller 与 source receipt 见 `benchmarks/rolling-kernel-v2/p2-current-baseline.*`
   和 `p2-current-build.json`。`dfa3c5ae` 为 Float64 SUM/MEAN 新增稳定 per-entity run、复用递推状态页和
   原行索引 Vec 输出，checkpoint 与其他 family 保留旧路径；rolling 686 项、run rollback 回归及全 feature Clippy
-  通过，候选性能仍待相同三用例验收。
+  通过。首轮配对结果为 G1 5.342 µs、G2 23.929 ns、G3 488.114 µs，仍未达标；6400x64 absent inconclusive、
+  present 1.05× faster，但 64x64 tick 两臂约 0.94× 回退。候选 numeric 阶段较基线减少约 1.76 ms，
+  其他阶段增加约 1.92 ms 且多分配约 257 KB，不能称为重大提升。证据见 `benchmarks/rolling-kernel-v2/p2-run-tier-result.*`
+  和 `p2-run-tier-build.json`。后续改为紧凑 values+validity、少于 16 行的 run 回退，并增加 finite pre-scan 快循环，
+  作为新候选重新测量。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
