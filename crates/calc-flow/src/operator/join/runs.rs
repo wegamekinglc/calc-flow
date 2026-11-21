@@ -469,7 +469,7 @@ fn dictionary_route(values: &StringArray, keys: &mut KeyStore) -> Result<Vec<Gro
     }
     let groups = keys.route_with_limit(
         &[Arc::new(StringArray::from(dictionary))],
-        unique.len(),
+        values.len(),
         &mut || Ok(()),
     )?;
     Ok(indices.into_iter().map(|index| groups[index]).collect())

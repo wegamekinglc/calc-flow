@@ -1078,3 +1078,37 @@ fn test_hot_dictionary_routing_matches_full_key_routing() {
         Field::new("key", DataType::Int64, false),
     );
 }
+
+#[test]
+fn test_hot_dictionary_routing_admits_new_keys_after_existing_groups() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let schema =
+        KeySchema::groupable(vec![Arc::new(Field::new("key", DataType::Utf8, false))]).unwrap();
+    let mut expected = KeyStore::new(
+        schema.clone(),
+        runtime.incremental_reservation("expected-existing-hot-route"),
+    );
+    let mut actual = KeyStore::new(
+        schema,
+        runtime.incremental_reservation("actual-existing-hot-route"),
+    );
+    let existing = RecordBatch::try_from_iter([(
+        "key",
+        Arc::new(StringArray::from(vec!["existing"])) as ArrayRef,
+    )])
+    .unwrap();
+    for keys in [&mut expected, &mut actual] {
+        keys.route_with_limit(&[existing.column(0).clone()], 1, &mut || Ok(()))
+            .unwrap();
+    }
+    let record = RecordBatch::try_from_iter([(
+        "key",
+        Arc::new(StringArray::from(vec!["new", "new"])) as ArrayRef,
+    )])
+    .unwrap();
+    let expected = expected
+        .route_with_limit(&[record.column(0).clone()], 2, &mut || Ok(()))
+        .unwrap();
+    let actual = route_hot_keys(&record, &[0], &mut actual).unwrap();
+    assert_eq!(actual, expected);
+}
