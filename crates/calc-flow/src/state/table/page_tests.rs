@@ -291,3 +291,44 @@ fn freeze_captures_only_dirty_pages_and_restore_starts_clean() {
     table.restore(snapshot).unwrap();
     assert!(table.first_dirty_slots(KeyGroupId(0)).is_empty());
 }
+
+#[test]
+fn numeric_entity_run_preserves_row_indexes_and_rollback() {
+    let mut table = StateTable::with_checkpointing(false);
+    let column = table.add_numeric_rows_column("value", 2);
+    table.add_numeric_window(column, 1);
+    table.set_numeric_dispersion(column, 0, false);
+    table.set_numeric_dispersion(column, 1, false);
+    let entity = entity(&mut table, b"entity");
+    table.begin().unwrap();
+    table.push_numeric_rows(column, entity, Some(1.0)).unwrap();
+    table.push_numeric_rows(column, entity, Some(3.0)).unwrap();
+    table.commit().unwrap();
+
+    let values = datafusion::arrow::array::Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+    let mut outputs = Vec::new();
+    table.begin().unwrap();
+    table
+        .write_numeric_entity_run(
+            column,
+            entity,
+            &[0, 2, 4],
+            &values,
+            false,
+            |row, accumulators| {
+                outputs.push((row, accumulators[0].mean(), accumulators[1].mean()));
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(outputs, vec![(0, 2.0, 1.0), (2, 2.0, 3.0), (4, 4.0, 5.0)]);
+
+    table.rollback().unwrap();
+    assert_eq!(
+        table.f64_history(column, entity).unwrap(),
+        vec![Some(1.0), Some(3.0)]
+    );
+    let accumulators = table.numeric_accumulators(column, entity).unwrap();
+    assert_eq!(accumulators[0].mean().to_bits(), 2.0_f64.to_bits());
+    assert_eq!(accumulators[1].mean().to_bits(), 3.0_f64.to_bits());
+}

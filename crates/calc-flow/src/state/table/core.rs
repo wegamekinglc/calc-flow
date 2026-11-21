@@ -2011,6 +2011,54 @@ impl StateTable {
         }
     }
 
+    pub(crate) fn write_numeric_entity_run(
+        &mut self,
+        column: usize,
+        entity: EntityId,
+        rows: &[usize],
+        values: &Float64Array,
+        nan_as_value: bool,
+        mut emit: impl FnMut(usize, &[NumericAccumulator]) -> Result<()>,
+    ) -> Result<bool> {
+        if self.checkpointing {
+            return Ok(false);
+        }
+        if rows.iter().any(|&row| row >= values.len()) {
+            return Err(internal("numeric entity run row exceeds the input array"));
+        }
+        let Some((&first, remaining)) = rows.split_first() else {
+            return Ok(true);
+        };
+        let value = Self::numeric_input_value(values, first, nan_as_value);
+        self.push_numeric_rows(column, entity, value)?;
+        emit(first, self.numeric_accumulators(column, entity)?)?;
+
+        let (group, row) = self.location(entity)?;
+        let schema = &self.rings[column];
+        let transaction = self
+            .transaction
+            .as_mut()
+            .ok_or_else(|| internal("state-table mutation requires a transaction"))?;
+        let partition = self
+            .partitions
+            .get_mut(&group)
+            .expect("numeric entity run group was prepared");
+        for &row_index in remaining {
+            let value = Self::numeric_input_value(values, row_index, nan_as_value);
+            let accumulators = Self::push_numeric_recurrent_page(
+                transaction,
+                partition,
+                schema,
+                column,
+                group,
+                row,
+                value,
+            )?;
+            emit(row_index, accumulators)?;
+        }
+        Ok(true)
+    }
+
     pub(crate) fn write_numeric_full_tick(
         &mut self,
         column: usize,
