@@ -196,11 +196,24 @@ mod source_history_tests {
     }
 
     fn history(handles: &[StateHandle]) -> Value {
+        let segments = handles
+            .iter()
+            .map(|handle| {
+                json!({
+                    "owner": handle.operator_id(),
+                    "epoch": handle.epoch().as_u64(),
+                    "object_id": handle.segment_id(),
+                    "relative_path": handle.relative_path(),
+                    "byte_len": handle.byte_len(),
+                    "sha256": handle.sha256(),
+                })
+            })
+            .collect::<Vec<_>>();
         json!({
             "format_version": 1,
             "contract": "file_snapshot_v1",
             "inline_metadata": {"files": ["prices.json"]},
-            "segments": handles
+            "segments": segments
         })
     }
 
