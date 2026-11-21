@@ -350,18 +350,18 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
 - 2026-11-21 当前 rolling sealed 基线（runtime `2a4c6d57`，source receipt `9ce0b8d6`）完成：G1 **5.458 µs**、
   G2 **28.428 ns/window-row**、G3 **497.927 µs**，三项均未达标。10 轮三用例在 1.711 秒内完成，
   release test 构建 1,646.819 秒另计；controller 与 source receipt 见 `benchmarks/rolling-kernel-v2/p2-current-baseline.*`
-  和 `p2-current-build.json`。`dfa3c5ae` 为 Float64 SUM/MEAN 新增稳定 per-entity run、复用递推状态页和
+  和 `p2-current-baseline.json`。`dfa3c5ae` 为 Float64 SUM/MEAN 新增稳定 per-entity run、复用递推状态页和
   原行索引 Vec 输出，checkpoint 与其他 family 保留旧路径；rolling 686 项、run rollback 回归及全 feature Clippy
   通过。首轮配对结果为 G1 5.342 µs、G2 23.929 ns、G3 488.114 µs，仍未达标；6400x64 absent inconclusive、
   present 1.05× faster，但 64x64 tick 两臂约 0.94× 回退。候选 numeric 阶段较基线减少约 1.76 ms，
   其他阶段增加约 1.92 ms 且多分配约 257 KB，不能称为重大提升。证据见 `benchmarks/rolling-kernel-v2/p2-run-tier-result.*`
-  和 `p2-run-tier-build.json`。后续改为紧凑 values+validity、少于 16 行的 run 回退，并增加 finite pre-scan 快循环，
+  和 `p2-run-tier-result.json`。后续改为紧凑 values+validity、少于 16 行的 run 回退，并增加 finite pre-scan 快循环，
   第二轮 G1 5.561 µs、G2 23.708 ns、G3 484.409 µs，主要用例均 inconclusive，G1 还略慢；
   small-run 回退消除了 tick 回退但无实质加速。证据见 `benchmarks/rolling-kernel-v2/p2-run-finite-result.*`
-  和 `p2-run-finite-build.json`。按停止规则撤回整个 run-tier，不保留无效复杂度，下一步评估专用 dual-SMA
+  和 `p2-run-finite-result.json`。按停止规则撤回整个 run-tier，不保留无效复杂度，下一步评估专用 dual-SMA
   状态机与原语级输出路径。专用 dual-SMA（`f52f0157`）也未达标：G1 5.554 µs、G2 28.781 ns、G3 522.565 µs，
   6400x64 两臂均 slower，10 轮采集 2.866 秒且 digest 一致。证据见 `benchmarks/rolling-kernel-v2/p2-dual-sma-result.*`
-  和 `p2-dual-sma-build.json`。本机没有 perf、samply 或 valgrind，不能据此伪造函数级热点；撤回该实现，
+  和 `p2-dual-sma-result.json`。本机没有 perf、samply 或 valgrind，不能据此伪造函数级热点；撤回该实现，
   下一阶段先解决已复现的高重复 BandJoin 内存失控，避免继续无效 rolling 实验。
 - 2026-11-21 P5 高重复 BandJoin 修复（runtime `58d7b26f`）已将一次性 DataFusion `collect` 改为 `execute_stream`，
   每个输出批次累计匹配数并执行 match cap，超限不再先收集完整结果。固定 1 个左行、100,000 个同键同时间戳右行、cap=1，
@@ -443,8 +443,8 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   完整行值 oracle、输出时机、native hash 和原始离线审计均通过。burst 下 calc-flow/Arroyo 的吞吐比中位数为
   stateless **0.391×**（283.141k/719.526k rows/s）、window **0.212×**（424.036k/2,030.961k rows/s），
   均明确失败；paced 比值约 1.003×/1.000× 仅反映生产者限速，不证明引擎相等。采集 76.974 秒，
-  wheel 构建、安装与 preflight 共 1072.274 秒另计。原始 40 次进程证据和 6.6 MiB 压缩包见
-  `benchmarks/arroyo-alignment/p1-current-20261121/`。该路径包含 Python/PyArrow/JSON 适配与 Arroyo 原生连接器的差异，
+  wheel 构建、安装与 preflight 共 1072.274 秒另计。40 次进程摘要、样本和离线审计见
+  `benchmarks/arroyo-alignment/p1-current-20261121/`；大体积原始进程包已在 PR 瘦身时删除。该路径包含 Python/PyArrow/JSON 适配与 Arroyo 原生连接器的差异，
   不是纯算子排名；跨年份/主机的 Arroyo 绝对值变化也不用于回退归因。不得把局部 Join、SUM、ASOF 改进说成
   已达到 Arroyo 对齐；后续只有在新的实测假设成立时才继续，不为门槛追加无方向实验。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通

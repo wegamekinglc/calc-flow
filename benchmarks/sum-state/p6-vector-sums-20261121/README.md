@@ -15,4 +15,4 @@ The four-physical-core ≥3× gate is **not met**. The candidate remains because
 
 A diagnostic stock one-CPU observation reduced keyed apply from approximately 72 ms in the old implementation to **21.506 ms**, while route remained **58.818 ms**. Candidate operator processing was 86.820 ms, with expression processing another 43.080 ms. These single-observation stage values explain the next target but are not medians or independent acceptance evidence. Further work must address key routing and whole-batch execution costs rather than merely retrying the previously rejected parallel apply design.
 
-Raw acquisition is in `summary.json`, `samples.csv`, `environment.json` and `driver-plan.json`. The separate 10M P4 acquisition uses the same runtime candidate and is registered in `../p4-vector-sums-10m-20261121/plan.json`; no P4 result is claimed here.
+The retained acquisition evidence is in `summary.json`, `samples.csv` and `environment.json`; oversized raw observations were removed during PR cleanup. The separate 10M P4 acquisition uses the same runtime candidate and is registered in `../p4-vector-sums-10m-20261121/plan.json`; no P4 result is claimed here.
