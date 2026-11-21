@@ -356,7 +356,10 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   present 1.05× faster，但 64x64 tick 两臂约 0.94× 回退。候选 numeric 阶段较基线减少约 1.76 ms，
   其他阶段增加约 1.92 ms 且多分配约 257 KB，不能称为重大提升。证据见 `benchmarks/rolling-kernel-v2/p2-run-tier-result.*`
   和 `p2-run-tier-build.json`。后续改为紧凑 values+validity、少于 16 行的 run 回退，并增加 finite pre-scan 快循环，
-  作为新候选重新测量。
+  第二轮 G1 5.561 µs、G2 23.708 ns、G3 484.409 µs，主要用例均 inconclusive，G1 还略慢；
+  small-run 回退消除了 tick 回退但无实质加速。证据见 `benchmarks/rolling-kernel-v2/p2-run-finite-result.*`
+  和 `p2-run-finite-build.json`。按停止规则撤回整个 run-tier，不保留无效复杂度，下一步评估专用 dual-SMA
+  状态机与原语级输出路径。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
