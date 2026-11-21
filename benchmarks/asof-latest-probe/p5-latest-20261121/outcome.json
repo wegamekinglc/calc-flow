@@ -1,0 +1,62 @@
+{
+  "acquisition_elapsed_seconds": 0.901114748,
+  "binary_sha256": "cc7a66b637aeb59957a569da59f4b06183658f76fae9676adce0cf3f469c4e7d",
+  "budget_seconds": 600,
+  "build_elapsed_seconds": 447.65985521598486,
+  "evidence_sha256": {
+    "samples.csv": "0931859370310751e377aa423eef61ba328eb33161793b7ba112727527db4921",
+    "summary.json": "8ec8c4027c2a348e47078cd2796af7a6212b54943082233af7d06d6218c9c497"
+  },
+  "independent_harness_failure": "strict_frontiers_cancel_restore_check hangs under both algorithms and remains excluded from paired mode; it is not claimed as passing",
+  "measured_revision": "0cbe65dea4cd459bcd26ccc32b6722d972ac3a13",
+  "measured_tree": "cf9c126fa367ac4fbc0f65fa7162ce15d3593901",
+  "process_observations": {
+    "observed_cpu_affinity": [
+      0
+    ],
+    "observed_thread_environment": {
+      "MKL_NUM_THREADS": "1",
+      "NUMEXPR_NUM_THREADS": "1",
+      "OMP_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1",
+      "POLARS_MAX_THREADS": "1",
+      "RAYON_NUM_THREADS": "1",
+      "TOKIO_WORKER_THREADS": "1",
+      "VECLIB_MAXIMUM_THREADS": "1"
+    },
+    "process_id": 70370
+  },
+  "protocol": {
+    "ab_ba_pairs_per_round": 10,
+    "cases": [
+      "balanced_8192",
+      "fixed128_right8192",
+      "skew_8192",
+      "restored_skew_8192"
+    ],
+    "formal_observation_validation": "maintained ASOF output, status, chunk, timing and resource validators; full values are checked during warmup",
+    "formal_observations": 160,
+    "full_value_oracle_warmups": 16,
+    "rounds_per_case": 2
+  },
+  "retry_or_case_expansion": false,
+  "schema": "calc-flow.asof-latest-probe-outcome.v1",
+  "source_sha256": {
+    "Cargo.lock": "00b7892fa062527bea87ce8a5f554836a007255906d82e5237cafe60a30a7d4a",
+    "crates/calc-flow/benches/stream_asof_perf.rs": "9db82b971f3a5c716b7896df8d4db11a8c8fb6f46ff4eaed3c9fa1264e8142f2",
+    "crates/calc-flow/src/operator/asof/columnar/run.rs": "aa8cc4bd01ffc163b0854384447de0c36bac21b8d34a264597b235b4d7839b65",
+    "crates/calc-flow/src/operator/asof/columnar/state.rs": "b5930b89a6e57c83949e81bf3e5f1a0558f4a52ffbd9fb15ca7a8a228f35b5b0"
+  },
+  "source_status_at_build_and_measurement": "clean",
+  "status": "completed",
+  "supersedes": {
+    "reason": "the latest-row hot function changed after the historical measurement; this is a fresh sealed implementation-head run, not added samples",
+    "revision": "0b4ab10529d017e4041b406dc1a80401798163b8"
+  },
+  "verdicts": {
+    "balanced_8192": "improved",
+    "fixed128_right8192": "inconclusive",
+    "restored_skew_8192": "improved",
+    "skew_8192": "improved"
+  }
+}

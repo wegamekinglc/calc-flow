@@ -417,18 +417,17 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   证据见 `benchmarks/window-panes/p7-count-min-max-20261121/`。
   P7 高重叠改善门槛未通过，SUM/AVG 的数值准入阻塞仍独立存在；下一项转向尚未验收的 ASOF 热路径，
   不再围绕该 pane 实现调参。
-- 2026-11-21 P5 ASOF latest-row 快路径（候选 `7082da61`，无污染对照修正 `0b4ab105`）取得实际收益并保留：
+- 2026-11-21 P5 ASOF latest-row 快路径已在最终实现提交 `0cbe65de` 上重新密封验收并保留：
   当 per-key 最后一行右侧数据的时间已经不晚于左侧时间时，直接使用该 locator，否则保留原二分搜索；tolerance、
-  时间/序列排序和恢复语义不变。聚焦回归先证明旧实现有搜索调用，再验证可见 latest 为 0 次、未来时间仍回退、
-  过 tolerance 不匹配。同一 release 二进制内，legacy 在读取 latest 前直接落到原算法，避免人为增加基线成本；
-  首轮会多收基线一次读取的构建在任何测量前停止，未产生样本。四例各 2 轮×10 组 AB/BA、每轮每臂一次完整值预热，
-  160 个正式观测均通过维护版 ASOF 校验。skew **1.452 → 1.143 ms**（**−21.31%，improved**），restored-skew
-  **1.498 → 1.150 ms**（**−23.23%，improved**）；balanced −16.21%、fixed128 −4.47% 均为
-  no-confirmed-regression，不称为显著改进。各例分配次数与分配字节中位数一致，不声称内存收益。
-  采集 1.022 秒，release 构建 554.854 秒另计，证据见 `benchmarks/asof-latest-probe/p5-latest-20261121/`。
-  既有 `strict_frontiers_cancel_restore_check` 在两种算法下都悬挂于取消调用，已单独记录并排除 paired，
-  普通模式不变且未声称该检查通过。50 项 ASOF 测试及专用 Clippy 通过。此结果不覆盖其他 key 类型、完整 runner
-  或完整 ASOF inventory；下一项评估 grouped SUM changelog 是否能减少全量快照输出成本。
+  时间/序列排序和恢复语义不变。同一 release 二进制内，legacy 在读取 latest 前直接落到原算法，避免人为增加基线成本。
+  四例各 2 轮×10 组 AB/BA，每轮每臂一次完整值预热，共 16 次完整值 oracle；160 个正式观测均通过维护版输出、状态、
+  chunk、计时与资源校验。balanced **1.232 → 1.013 ms**（**−17.77%，improved**），fixed128
+  **0.120 → 0.115 ms**（**−4.16%，inconclusive**），skew **1.287 → 1.001 ms**（**−22.25%，improved**），
+  restored-skew **1.268 → 0.976 ms**（**−23.02%，improved**）。各例分配次数与分配字节中位数一致，不声称内存收益。
+  采集 0.901 秒，release 构建 447.660 秒另计；commit/tree、二进制、harness 与关键源码 SHA-256 见
+  `benchmarks/asof-latest-probe/p5-latest-20261121/outcome.json`。该次测量取代热函数修改前的 `0b4ab105` 历史数值，
+  不是为有利结果追加样本。既有 `strict_frontiers_cancel_restore_check` 在两种算法下都悬挂于取消调用，已单独记录并排除
+  paired，普通模式不变且未声称该检查通过。此结果不覆盖其他 key 类型、完整 runner 或完整 ASOF inventory。
 - 2026-11-21 P4 changelog 性能方案被明确否决：harness `05b6ff7a` 复用同一 stock/sparse fixture、图和独立 trades oracle，
   每个输入批后逐条应用 retract/upsert 并重建完整 positions，所有 80 个正式观测和跨臂 digest 均一致。
   stock 从 **183.318 ms** 增至 **714.989 ms**（**+290.03%，regression**），sparse 从 **14.361 ms** 增至
