@@ -6,9 +6,11 @@ from types import SimpleNamespace
 
 from scripts.profile_checkpoint_v4 import (
     DIRECT_CONTRACT,
+    paired_runner_statistics,
     paired_statistics,
     positive_int,
     validate_direct_evidence,
+    validate_runner_evidence,
 )
 
 
@@ -40,6 +42,44 @@ def arguments() -> SimpleNamespace:
     )
 
 
+def runner_evidence(ratios: list[float]) -> dict:
+    return {
+        "contract": "calc-flow.checkpoint-v4-runner/1",
+        "checkpoint_interval_ms": 100,
+        "seconds": 5,
+        "pairs": [
+            {
+                "on": {
+                    "checkpointing": True,
+                    "accepted_input_rows": 100,
+                    "rows_per_second": ratio,
+                    "completed_nonterminal_epochs": 40,
+                    "checkpoint_objects": 40,
+                    "cleanup_completed": True,
+                },
+                "off": {
+                    "checkpointing": False,
+                    "accepted_input_rows": 100,
+                    "rows_per_second": 1.0,
+                    "completed_nonterminal_epochs": 0,
+                    "checkpoint_objects": 0,
+                    "cleanup_completed": True,
+                },
+            }
+            for ratio in ratios
+        ],
+    }
+
+
+def runner_arguments() -> SimpleNamespace:
+    return SimpleNamespace(
+        checkpoint_ms=100,
+        seconds=5,
+        pairs=10,
+        minimum_epochs=40,
+    )
+
+
 class CheckpointV4DirectTests(unittest.TestCase):
     def test_paired_statistics_passes_inside_the_three_percent_gate(self):
         result = paired_statistics([evidence([1.01] * 10), evidence([1.02] * 10)], 0.03)
@@ -64,6 +104,37 @@ class CheckpointV4DirectTests(unittest.TestCase):
         value["pairs"][0]["output_digest"] = None
         with self.assertRaisesRegex(ValueError, "digest"):
             validate_direct_evidence(value, arguments())
+
+    def test_runner_statistics_passes_above_the_throughput_gate(self):
+        result = paired_runner_statistics(
+            [runner_evidence([1.0] * 10), runner_evidence([1.0] * 10)], 0.90
+        )
+        self.assertEqual(result["verdict"], "passed")
+
+    def test_runner_statistics_fails_below_the_throughput_gate(self):
+        result = paired_runner_statistics(
+            [runner_evidence([0.5] * 10), runner_evidence([0.6] * 10)], 0.75
+        )
+        self.assertEqual(result["verdict"], "failed")
+
+    def test_runner_statistics_marks_gate_crossing_inconclusive(self):
+        ratios = [0.5, 1.0] * 5
+        result = paired_runner_statistics(
+            [runner_evidence(ratios), runner_evidence(ratios)], 0.75
+        )
+        self.assertEqual(result["verdict"], "inconclusive")
+
+    def test_runner_validation_requires_epoch_coverage(self):
+        value = runner_evidence([1.0] * 10)
+        value["pairs"][0]["on"]["completed_nonterminal_epochs"] = 0
+        with self.assertRaisesRegex(ValueError, "coverage"):
+            validate_runner_evidence(value, runner_arguments())
+
+    def test_runner_validation_rejects_off_checkpoint_objects(self):
+        value = runner_evidence([1.0] * 10)
+        value["pairs"][0]["off"]["checkpoint_objects"] = 1
+        with self.assertRaisesRegex(ValueError, "objects"):
+            validate_runner_evidence(value, runner_arguments())
 
     def test_positive_int_rejects_zero(self):
         with self.assertRaises(argparse.ArgumentTypeError):

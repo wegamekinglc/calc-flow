@@ -2,7 +2,11 @@
 
 use std::{
     collections::BTreeMap,
-    sync::Arc,
+    mem::size_of,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -21,13 +25,17 @@ use super::{
     dispatch_watermark_handler,
 };
 use crate::{
-    Batch, BatchKind, BatchMetadata, CancellationToken, Edge, EdgeBudget, EdgeReceiver, Epoch,
-    EventTime, ExpressionOperator, IngressProgressSnapshot, JsonMap, ManagedCheckpointRuntime,
-    OperatorMetadata, PipelineBuilder, Port, PortEndpoint, RollingOperator, RollingSpec,
-    StreamExecutionPlan, StreamJobContext, StreamMessage, StreamRequirements, StreamRuntimeConfig,
-    StreamSession, UdfRegistry,
+    Batch, BatchKind, BatchMetadata, CancellationToken, Cursor, Edge, EdgeBudget, EdgeReceiver,
+    Epoch, EventTime, ExpressionOperator, IngressProgressSnapshot, JsonMap,
+    ManagedCheckpointRuntime, NativeWatermarkCapability, OperatorMetadata, PipelineBuilder, Port,
+    PortEndpoint, ReplayPositioning, RollingOperator, RollingSpec, SinkBinding, SourceBinding,
+    SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema, StreamExecutionPlan,
+    StreamJobContext, StreamMessage, StreamRequirements, StreamRuntimeConfig, StreamSession,
+    StreamSink, StreamSource, StreamingRunner, UdfRegistry, WatermarkPolicy,
+    benchmark_internals::invalid,
     operator::rolling_metrics::RollingMetricsStore,
     pipeline::{CompiledStreamOperator, OperatorCheckpointCapability},
+    state::v4::V4Store,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -1039,3 +1047,434 @@ fn checkpoint_direct_evidence() {
 }
 
 const DIRECT_CONTRACT: &str = "calc-flow.checkpoint-v4-direct/1";
+
+struct RunnerSource {
+    workload: Workload,
+    position: usize,
+    watermark: Option<i64>,
+    cutoff: watch::Receiver<Option<(Instant, Instant)>>,
+}
+
+#[async_trait::async_trait]
+impl StreamSource for RunnerSource {
+    fn capabilities(&self) -> SourceCapabilities {
+        SourceCapabilities {
+            replay_positioning: ReplayPositioning::ExactPauseReportAndSeek,
+            delivery: SourceDeliveryCapability::Lossless,
+            max_batch_rows: self.workload.rows,
+            max_batch_bytes: 64 << 20,
+            schema: SourceSchema::DynamicOrUnknown,
+            native_watermarks: NativeWatermarkCapability::EmitsNative,
+        }
+    }
+
+    async fn open(&mut self, cursor: Option<Cursor>) -> crate::Result<()> {
+        if let Some(cursor) = cursor {
+            let bytes = cursor.order();
+            assert_eq!(bytes.len(), size_of::<usize>());
+            self.position = usize::from_be_bytes(bytes.try_into().unwrap());
+        }
+        self.watermark = None;
+        Ok(())
+    }
+
+    async fn next(&mut self) -> crate::Result<Option<SourceEvent>> {
+        let deadline = loop {
+            if let Some((_, deadline)) = *self.cutoff.borrow() {
+                break deadline;
+            }
+            self.cutoff.changed().await.unwrap();
+        };
+        if Instant::now() >= deadline {
+            std::future::pending::<()>().await;
+        }
+        if let Some(watermark) = self.watermark.take() {
+            return Ok(Some(SourceEvent::Watermark(EventTime::from_micros(
+                watermark,
+            ))));
+        }
+        let batch = self.workload.batch(self.position);
+        self.position += self.workload.rows;
+        self.watermark = Some(i64::try_from((self.position - 1) / self.workload.entities).unwrap());
+        let cursor = Cursor::unbound(self.position.to_be_bytes().to_vec(), JsonMap::new()).unwrap();
+        Ok(Some(SourceEvent::Data { batch, cursor }))
+    }
+
+    async fn close(&mut self) -> crate::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct RunnerSink {
+    next_row: Arc<std::sync::Mutex<usize>>,
+    accepted: Arc<AtomicUsize>,
+    entities: usize,
+}
+
+impl RunnerSink {
+    fn new(entities: usize) -> Self {
+        Self {
+            next_row: Arc::default(),
+            accepted: Arc::default(),
+            entities,
+        }
+    }
+
+    fn accepted_rows(&self) -> usize {
+        self.accepted.load(Ordering::Relaxed)
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamSink for RunnerSink {
+    async fn open(&mut self) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn write(&mut self, batch: &Batch) -> crate::Result<()> {
+        let start = *self.next_row.lock().unwrap();
+        validate_direct_output(batch.table_payload()?.batches(), start, self.entities);
+        *self.next_row.lock().unwrap() = start + batch.num_rows();
+        self.accepted.fetch_add(batch.num_rows(), Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn close(&mut self) -> crate::Result<()> {
+        Ok(())
+    }
+}
+
+fn checkpoint_objects(path: &std::path::Path) -> crate::Result<usize> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let mut count = 0;
+    for entry in
+        std::fs::read_dir(path).map_err(|error| invalid(format!("checkpoint objects: {error}")))?
+    {
+        let path = entry
+            .map_err(|error| invalid(format!("checkpoint object entry: {error}")))?
+            .path();
+        if path.is_dir() {
+            count += checkpoint_objects(&path)?;
+        } else {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn nonterminal_epochs(root: &std::path::Path) -> crate::Result<Vec<u64>> {
+    let directory = root.join("manifests/lineage/manifests");
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    let mut epochs = Vec::new();
+    for entry in std::fs::read_dir(directory)
+        .map_err(|error| invalid(format!("checkpoint manifest directory: {error}")))?
+    {
+        let path = entry
+            .map_err(|error| invalid(format!("checkpoint manifest entry: {error}")))?
+            .path();
+        let manifest = V4Store::read_manifest(&path)?;
+        if manifest.sources.values().all(|source| !source.ended) {
+            epochs.push(manifest.epoch);
+        }
+    }
+    epochs.sort_unstable();
+    epochs.dedup();
+    Ok(epochs)
+}
+
+async fn runner_arm(
+    workload: Workload,
+    checkpointing: bool,
+    seconds: u64,
+    checkpoint_ms: u64,
+    minimum_epochs: usize,
+) -> Value {
+    assert!(seconds > 0 && checkpoint_ms > 0);
+    let root = tempfile::tempdir().unwrap();
+    let (cutoff_tx, cutoff_rx) = watch::channel(None);
+    let source = RunnerSource {
+        workload,
+        position: 0,
+        watermark: None,
+        cutoff: cutoff_rx,
+    };
+    let sink = RunnerSink::new(workload.entities);
+    let plan = direct_plan(workload);
+    let source_id = plan.source_binding_ids()[0].to_owned();
+    let sink_id = plan.sink_binding_ids()[0].to_owned();
+    let source = SourceBinding::new(source).with_watermark_policy(WatermarkPolicy::SourceProvided);
+    let sources = BTreeMap::from([(source_id, source)]);
+    let sinks = BTreeMap::from([(
+        sink_id,
+        vec![SinkBinding::ordinary("checkpoint-v4-sink", sink.clone()).unwrap()],
+    )]);
+    let config = StreamRuntimeConfig {
+        checkpointing,
+        checkpoint_interval: Duration::from_millis(checkpoint_ms),
+        edge_budget: EdgeBudget {
+            max_rows: workload.rows,
+            max_bytes: 64 << 20,
+        },
+        ..StreamRuntimeConfig::default()
+    };
+    let runner = if checkpointing {
+        StreamingRunner::new(
+            plan,
+            sources,
+            sinks,
+            ManagedCheckpointRuntime::new(root.path()).unwrap(),
+        )
+        .unwrap()
+    } else {
+        StreamingRunner::without_checkpoints(plan, sources, sinks).unwrap()
+    }
+    .with_runtime_config(config)
+    .unwrap();
+    let job = runner.start().await.unwrap();
+    let started = Instant::now();
+    cutoff_tx
+        .send(Some((started, started + Duration::from_secs(seconds))))
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(seconds)).await;
+    let accepted_input_rows = sink.accepted_rows();
+    assert!(accepted_input_rows > 0);
+    let status_at_cutoff = serde_json::to_value(job.status()).unwrap();
+    let manifest_started = Instant::now();
+    let epochs = nonterminal_epochs(root.path()).unwrap();
+    let manifest_validation_seconds = manifest_started.elapsed().as_secs_f64();
+    assert!(
+        epochs.len() >= minimum_epochs,
+        "checkpoint coverage: {epochs:?}"
+    );
+    let freeze_to_ack_seconds = if checkpointing {
+        let began = Instant::now();
+        job.trigger_checkpoint().await.unwrap();
+        Some(began.elapsed().as_secs_f64())
+    } else {
+        None
+    };
+    let post_cutoff_epochs = nonterminal_epochs(root.path()).unwrap();
+    let cancel_started = Instant::now();
+    let outcome = job.cancel().await;
+    let cancel_seconds = cancel_started.elapsed().as_secs_f64();
+    assert!(outcome.errors.is_empty(), "{outcome:?}");
+    let settled_rows_after_cancel = sink.accepted_rows();
+    assert!(settled_rows_after_cancel >= accepted_input_rows);
+    let status_after_cancel = serde_json::to_value(job.status()).unwrap();
+    let checkpoint_objects = checkpoint_objects(root.path()).unwrap();
+    if checkpointing {
+        assert!(checkpoint_objects > 0);
+    } else {
+        assert_eq!(checkpoint_objects, 0);
+    }
+    json!({
+        "checkpointing": checkpointing,
+        "seconds": seconds,
+        "checkpoint_interval_ms": checkpoint_ms,
+        "accepted_input_rows": accepted_input_rows,
+        "emitted_rows": accepted_input_rows,
+        "settled_rows_after_cancel": settled_rows_after_cancel,
+        "rows_per_second": f64::from(u32::try_from(accepted_input_rows).unwrap()) / f64::from(u32::try_from(seconds).unwrap()),
+        "completed_nonterminal_epochs": epochs.len(),
+        "post_cutoff_nonterminal_epochs": post_cutoff_epochs.len(),
+        "epoch_values": epochs,
+        "checkpoint_objects": checkpoint_objects,
+        "freeze_to_ack_seconds": freeze_to_ack_seconds,
+        "manifest_validation_seconds": manifest_validation_seconds,
+        "cancel_seconds": cancel_seconds,
+        "status_at_cutoff": status_at_cutoff,
+        "status_after_cancel": status_after_cancel,
+        "recovery_validation_seconds": Value::Null,
+        "cleanup_completed": true,
+    })
+}
+
+#[tokio::test]
+async fn runner_checkpoint_arms_cover_epoch_and_off_cleanup() {
+    let workload = dual(6_400, 64, false);
+    let on = runner_arm(workload, true, 2, 10, 0).await;
+    assert!(on["accepted_input_rows"].as_u64().unwrap() > 0);
+    assert!(on["post_cutoff_nonterminal_epochs"].as_u64().unwrap() >= 1);
+    let off = runner_arm(workload, false, 2, 10, 0).await;
+    assert!(off["accepted_input_rows"].as_u64().unwrap() > 0);
+    assert_eq!(off["checkpoint_objects"], 0);
+}
+
+async fn runner_round(
+    workload: Workload,
+    round: usize,
+    seconds: u64,
+    checkpoint_ms: u64,
+    pairs: usize,
+    warmups: usize,
+    minimum_epochs: usize,
+) -> Value {
+    let mut warmup_evidence = Vec::new();
+    for checkpointing in [true, false] {
+        let mut arms = Vec::with_capacity(warmups);
+        for _ in 0..warmups {
+            arms.push(
+                runner_arm(
+                    workload,
+                    checkpointing,
+                    seconds,
+                    checkpoint_ms,
+                    minimum_epochs,
+                )
+                .await,
+            );
+        }
+        warmup_evidence.push(json!({"checkpointing": checkpointing, "arms": arms}));
+    }
+    let mut pair_evidence = Vec::with_capacity(pairs);
+    for pair in 0..pairs {
+        let mut on = Value::Null;
+        let mut off = Value::Null;
+        for checkpointing in if pair % 2 == 0 {
+            [true, false]
+        } else {
+            [false, true]
+        } {
+            let arm = runner_arm(
+                workload,
+                checkpointing,
+                seconds,
+                checkpoint_ms,
+                minimum_epochs,
+            )
+            .await;
+            if checkpointing {
+                on = arm;
+            } else {
+                off = arm;
+            }
+        }
+        pair_evidence.push(json!({
+            "pair": pair,
+            "order": if pair % 2 == 0 { "AB" } else { "BA" },
+            "on": on,
+            "off": off,
+        }));
+    }
+    json!({
+        "round": round,
+        "warmups": warmup_evidence,
+        "pairs": pair_evidence,
+    })
+}
+
+#[tokio::test]
+async fn runner_round_tracks_warmups_and_alternating_pairs() {
+    let evidence = runner_round(dual(6_400, 64, false), 1, 2, 10, 2, 1, 0).await;
+    assert_eq!(evidence["warmups"].as_array().unwrap().len(), 2);
+    assert_eq!(evidence["warmups"][0]["arms"].as_array().unwrap().len(), 1);
+    assert_eq!(evidence["warmups"][1]["arms"].as_array().unwrap().len(), 1);
+    assert_eq!(evidence["pairs"].as_array().unwrap().len(), 2);
+    assert_eq!(evidence["pairs"][0]["order"], "AB");
+    assert_eq!(evidence["pairs"][1]["order"], "BA");
+    assert!(
+        evidence["pairs"][0]["on"]["post_cutoff_nonterminal_epochs"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+}
+
+#[test]
+#[ignore = "P3.7 sustained runner performance evidence, not a CI timing gate"]
+fn checkpoint_runner_evidence() {
+    assert!(
+        !std::hint::black_box(cfg!(debug_assertions)),
+        "checkpoint runner evidence requires a release test binary"
+    );
+    let destination = std::env::var("CALC_FLOW_CHECKPOINT_V4_RUNNER_OUTPUT")
+        .expect("set runner evidence output path");
+    let entities = std::env::var("CALC_FLOW_CHECKPOINT_V4_RUNNER_ENTITIES")
+        .expect("set runner entities")
+        .parse::<usize>()
+        .unwrap();
+    let batch_rows = std::env::var("CALC_FLOW_CHECKPOINT_V4_RUNNER_BATCH_ROWS")
+        .expect("set runner batch rows")
+        .parse::<usize>()
+        .unwrap();
+    let checkpoint_ms = std::env::var("CALC_FLOW_CHECKPOINT_V4_RUNNER_CHECKPOINT_MS")
+        .expect("set runner checkpoint interval")
+        .parse::<u64>()
+        .unwrap();
+    let rounds = std::env::var("CALC_FLOW_CHECKPOINT_V4_RUNNER_ROUNDS")
+        .map_or(2, |value| value.parse::<usize>().unwrap());
+    let pairs = std::env::var("CALC_FLOW_CHECKPOINT_V4_RUNNER_PAIRS")
+        .expect("set runner pairs")
+        .parse::<usize>()
+        .unwrap();
+    let seconds = std::env::var("CALC_FLOW_CHECKPOINT_V4_RUNNER_SECONDS")
+        .expect("set runner seconds")
+        .parse::<u64>()
+        .unwrap();
+    let warmups = std::env::var("CALC_FLOW_CHECKPOINT_V4_RUNNER_WARMUPS")
+        .expect("set runner warmups")
+        .parse::<usize>()
+        .unwrap();
+    let minimum_epochs = std::env::var("CALC_FLOW_CHECKPOINT_V4_RUNNER_MIN_EPOCHS")
+        .expect("set runner minimum epochs")
+        .parse::<usize>()
+        .unwrap();
+    assert_eq!(entities, 64);
+    assert_eq!(batch_rows, 6_400);
+    assert_eq!(seconds, 5);
+    assert_eq!(pairs, 10);
+    assert_eq!(rounds, 2);
+    assert_eq!(warmups, 1);
+    let workload = dual(batch_rows, entities, false);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+    let evidence = runtime.block_on(async {
+        let mut round_evidence = Vec::with_capacity(rounds);
+        for round in 0..rounds {
+            round_evidence.push(
+                runner_round(
+                    workload,
+                    round + 1,
+                    seconds,
+                    checkpoint_ms,
+                    pairs,
+                    warmups,
+                    minimum_epochs,
+                )
+                .await,
+            );
+        }
+        round_evidence
+    });
+    let evidence = json!({
+        "contract": "calc-flow.checkpoint-v4-runner/1",
+        "executable": std::env::current_exe().unwrap(),
+        "debug_assertions": cfg!(debug_assertions),
+        "process": crate::benchmark_internals::process_observations().unwrap(),
+        "entities": entities,
+        "batch_rows": batch_rows,
+        "checkpoint_interval_ms": checkpoint_ms,
+        "seconds": seconds,
+        "rounds": evidence,
+        "boundary": "Five seconds of source-native replay through Rolling and mean5-mean projection. Only rows accepted by the sink at cutoff count. Post-cutoff checkpoint acknowledgement, manifest validation and cancel are outside the timer.",
+        "limitations": [
+            "Each round warms each arm once, then runs ten adjacent AB/BA pairs with fresh runners per arm.",
+            "On arms prove completed nonterminal manifests. Off arms prove zero checkpoint objects after cancellation.",
+            "No recovery is performed in M3/M4; recovery_validation_seconds is null rather than fabricated.",
+            "Status snapshots retain edge high-water marks and checkpoint state. Freeze-to-ack is measured separately after cutoff.",
+        ],
+    });
+    std::fs::write(
+        destination,
+        serde_json::to_string_pretty(&evidence).unwrap() + "\n",
+    )
+    .unwrap();
+}
