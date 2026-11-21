@@ -21,11 +21,17 @@ use std::{
 #[cfg(test)]
 thread_local! {
     static SELECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LATEST_BINARY_SEARCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
 pub(in crate::operator::asof) fn take_selections() -> usize {
     SELECTIONS.with(|count| count.replace(0))
+}
+
+#[cfg(test)]
+pub(in crate::operator::asof) fn take_latest_binary_searches() -> usize {
+    LATEST_BINARY_SEARCHES.with(|count| count.replace(0))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -170,6 +176,8 @@ pub(in crate::operator::asof) struct ColumnarState {
     pending: LocatorColumn,
     left_by_key: Vec<LocatorColumn>,
     right_by_key: Vec<RightBucket>,
+    #[cfg(feature = "benchmark-internals")]
+    legacy_latest_lookup: bool,
     key_ranks: Vec<u32>,
     right_rows: usize,
     right_payloads: usize,
@@ -241,12 +249,22 @@ impl ColumnarState {
             pending: LocatorColumn::default(),
             left_by_key: Vec::new(),
             right_by_key: Vec::new(),
+            #[cfg(feature = "benchmark-internals")]
+            legacy_latest_lookup: false,
             key_ranks: Vec::new(),
             right_rows: 0,
             right_payloads: 0,
             right_identity_only: 0,
             next_run: 0,
         })
+    }
+
+    #[cfg(feature = "benchmark-internals")]
+    pub(in crate::operator::asof) fn set_legacy_latest_lookup_for_benchmark(
+        &mut self,
+        enabled: bool,
+    ) {
+        self.legacy_latest_lookup = enabled;
     }
 
     fn adjust_index(&mut self, before: usize, after: usize) {
@@ -1209,9 +1227,19 @@ impl ColumnarState {
 
     fn candidate(&self, bucket: &RightBucket, time: i64) -> Option<RowLocator> {
         let rows = bucket.payloads.rows();
-        let end =
-            rows.partition_point(|locator| self.right_runs[&locator.run].time(*locator) <= time);
-        let locator = rows.get(end.checked_sub(1)?).copied()?;
+        let latest = rows.last().copied()?;
+        let use_latest = self.right_runs[&latest.run].time(latest) <= time;
+        #[cfg(feature = "benchmark-internals")]
+        let use_latest = use_latest && !self.legacy_latest_lookup;
+        let locator = if use_latest {
+            latest
+        } else {
+            #[cfg(test)]
+            LATEST_BINARY_SEARCHES.with(|count| count.set(count.get() + 1));
+            let end = rows
+                .partition_point(|locator| self.right_runs[&locator.run].time(*locator) <= time);
+            rows.get(end.checked_sub(1)?).copied()?
+        };
         let right_time = self.right_runs[&locator.run].time(locator);
         (i128::from(right_time) >= i128::from(time) - i128::from(self.spec.tolerance_micros()))
             .then_some(locator)

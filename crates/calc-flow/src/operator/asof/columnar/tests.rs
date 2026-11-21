@@ -110,6 +110,50 @@ fn keys_only_snapshot(
 }
 
 #[test]
+fn test_visible_latest_right_row_skips_binary_search_only_when_safe() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    {
+        let declaration = spec(5, 100, 1 << 20);
+        let mut state = state(&declaration, &pool);
+        admit(
+            &mut state,
+            1,
+            &record(&[
+                (1, 1, 10, Some("first")),
+                (1, 3, 20, Some("middle")),
+                (1, 5, 30, Some("latest")),
+            ]),
+        )
+        .unwrap();
+        admit(
+            &mut state,
+            0,
+            &record(&[(1, 5, 100, Some("left")), (2, 5, 200, Some("empty"))]),
+        )
+        .unwrap();
+        let selection = state.select(None, true, 10).unwrap();
+        assert_eq!(selection.matched(), 1);
+        assert_eq!(super::state::take_latest_binary_searches(), 0);
+    }
+    {
+        let declaration = spec(0, 100, 1 << 20);
+        let mut state = state(&declaration, &pool);
+        admit(&mut state, 1, &record(&[(1, 5, 1, Some("future"))])).unwrap();
+        admit(&mut state, 0, &record(&[(1, 4, 1, Some("left"))])).unwrap();
+        assert_eq!(state.select(None, true, 10).unwrap().matched(), 0);
+        assert_eq!(super::state::take_latest_binary_searches(), 1);
+    }
+    {
+        let declaration = spec(5, 100, 1 << 20);
+        let mut state = state(&declaration, &pool);
+        admit(&mut state, 1, &record(&[(1, 5, 1, Some("old"))])).unwrap();
+        admit(&mut state, 0, &record(&[(1, 11, 1, Some("left"))])).unwrap();
+        assert_eq!(state.select(None, true, 10).unwrap().matched(), 0);
+        assert_eq!(super::state::take_latest_binary_searches(), 0);
+    }
+}
+
+#[test]
 fn test_columnar_restore_rejects_exhausted_run_id() {
     let declaration = spec(0, 100, 1 << 20);
     let mut segments = keys_only_snapshot(&declaration);

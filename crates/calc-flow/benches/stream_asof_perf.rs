@@ -102,6 +102,10 @@ fn batch(rows: usize, skew: bool, left: bool) -> Batch {
 }
 
 fn operator() -> StreamAsofJoinOperator {
+    operator_with_legacy(false)
+}
+
+fn operator_with_legacy(legacy: bool) -> StreamAsofJoinOperator {
     let side = |name: &str| {
         AsofJoinSide::new(
             vec!["key".into()],
@@ -118,7 +122,9 @@ fn operator() -> StreamAsofJoinOperator {
         AsofStateLimits::new(100_000, 512 << 20).unwrap(),
     )
     .unwrap();
-    StreamAsofJoinOperator::new("asof", schema(), schema(), spec).unwrap()
+    let mut operator = StreamAsofJoinOperator::new("asof", schema(), schema(), spec).unwrap();
+    operator.set_legacy_latest_lookup_for_benchmark(legacy);
+    operator
 }
 
 fn job(cancel: CancellationToken) -> StreamJobContext {
@@ -265,6 +271,15 @@ impl StreamCollector for Collector {
 }
 
 fn sample(rt: &tokio::runtime::Runtime, config: &Config, check: bool) -> Value {
+    sample_with_legacy(rt, config, check, false)
+}
+
+fn sample_with_legacy(
+    rt: &tokio::runtime::Runtime,
+    config: &Config,
+    check: bool,
+    legacy: bool,
+) -> Value {
     let Config {
         pending,
         retained,
@@ -272,7 +287,7 @@ fn sample(rt: &tokio::runtime::Runtime, config: &Config, check: bool) -> Value {
         restored,
     } = *config;
     let job = job(CancellationToken::new());
-    let mut op = operator();
+    let mut op = operator_with_legacy(legacy);
     let setup_start = Instant::now();
     let admission_phases = rt.block_on(seed(&mut op, &job, pending, retained, skew));
     let admission_seconds = setup_start.elapsed().as_secs_f64();
@@ -285,8 +300,9 @@ fn sample(rt: &tokio::runtime::Runtime, config: &Config, check: bool) -> Value {
     let restore_start = Instant::now();
     if restored {
         drop(op);
-        op = operator();
+        op = operator_with_legacy(legacy);
         op.restore(&snapshot).unwrap();
+        op.set_legacy_latest_lookup_for_benchmark(legacy);
     }
     let restore_seconds = if restored {
         Some(restore_start.elapsed().as_secs_f64())
@@ -482,6 +498,100 @@ fn workloads() -> [(&'static str, Config); 8] {
     })
 }
 
+fn compare_pair(left: &Value, right: &Value) {
+    assert_eq!(left["output_rows"], right["output_rows"]);
+    assert_eq!(
+        left["after_status"]["matched_rows"],
+        right["after_status"]["matched_rows"]
+    );
+}
+
+fn paired_case(
+    rt: &tokio::runtime::Runtime,
+    name: &'static str,
+    config: &Config,
+    check: bool,
+    deadline: Instant,
+) -> Value {
+    if check {
+        let baseline = sample_with_legacy(rt, config, true, true);
+        let candidate = sample_with_legacy(rt, config, true, false);
+        compare_pair(&baseline, &candidate);
+        return json!({"name":name,"config":config,"correctness":true});
+    }
+    let mut baseline = Vec::new();
+    let mut candidate = Vec::new();
+    let mut observations = Vec::new();
+    for round in 0..2 {
+        let baseline_warmup = sample_with_legacy(rt, config, true, true);
+        let candidate_warmup = sample_with_legacy(rt, config, true, false);
+        compare_pair(&baseline_warmup, &candidate_warmup);
+        assert!(Instant::now() < deadline, "measurement deadline exhausted");
+        let mut legacy_round = Vec::new();
+        let mut candidate_round = Vec::new();
+        for pair in 0..10 {
+            let order = if pair % 2 == 0 {
+                [true, false]
+            } else {
+                [false, true]
+            };
+            for legacy in order {
+                let observation = sample_with_legacy(rt, config, false, legacy);
+                assert!(Instant::now() < deadline, "measurement deadline exhausted");
+                let seconds = observation["seconds"].as_f64().unwrap();
+                if legacy {
+                    legacy_round.push(seconds);
+                } else {
+                    candidate_round.push(seconds);
+                }
+                observations.push(json!({
+                    "round":round + 1,
+                    "pair":pair + 1,
+                    "side":if legacy {"baseline"} else {"candidate"},
+                    "observation":observation,
+                }));
+            }
+        }
+        baseline.push(legacy_round);
+        candidate.push(candidate_round);
+    }
+    json!({
+        "id":name,
+        "rows":config.pending,
+        "config":config,
+        "comparison":"interleaved",
+        "correctness":true,
+        "baseline":baseline,
+        "candidate":candidate,
+        "observations":observations,
+    })
+}
+
+fn paired_report(rt: &tokio::runtime::Runtime, check: bool) -> Value {
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(600);
+    let selected = [
+        "balanced_8192",
+        "fixed128_right8192",
+        "skew_8192",
+        "restored_skew_8192",
+    ];
+    let cases = workloads()
+        .into_iter()
+        .filter(|(name, _)| selected.contains(name))
+        .map(|(name, config)| paired_case(rt, name, &config, check, deadline))
+        .collect::<Vec<_>>();
+    assert!(started.elapsed() < Duration::from_secs(600));
+    json!({
+        "schema":"calc-flow.asof-latest-probe.v1",
+        "scope":"operator-watermark-settlement",
+        "status":if check {"checked"} else {"completed"},
+        "elapsed_seconds":started.elapsed().as_secs_f64(),
+        "process_observations":calc_flow::benchmark_internals::process_observations().unwrap(),
+        "cases":cases,
+    })
+}
+
 fn main() {
     if std::env::var_os("CALC_FLOW_ASOF_CONFIG").is_some() {
         worker();
@@ -490,26 +600,33 @@ fn main() {
     // Arguments select local benchmark mode/report paths, never authorization or credentials.
     let args = std::env::args().collect::<Vec<_>>(); // nosemgrep: args
     let check = args.iter().any(|arg| arg == "--check" || arg == "--test");
-    strict_frontiers_cancel_restore_check();
+    let paired = args.iter().any(|arg| arg == "--paired-latest");
+    if !paired {
+        strict_frontiers_cancel_restore_check();
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
-    let cases = workloads()
-        .into_iter()
-        .map(|(name, config)| {
-            let oracle = sample(&rt, &config, true);
-            let samples = if check {
-                Vec::new()
-            } else {
-                (0..20)
-                    .map(|_| sample(&rt, &config, false))
-                    .collect::<Vec<_>>()
-            };
-            json!({"name": name, "config": config, "oracle": oracle, "samples": samples})
-        })
-        .collect::<Vec<_>>();
-    let report = json!({"schema": "calc-flow.asof-finalization.v1", "scope": "operator-watermark-settlement", "retention": "latest-per-key", "cases": cases});
+    let report = if paired {
+        paired_report(&rt, check)
+    } else {
+        let cases = workloads()
+            .into_iter()
+            .map(|(name, config)| {
+                let oracle = sample(&rt, &config, true);
+                let samples = if check {
+                    Vec::new()
+                } else {
+                    (0..20)
+                        .map(|_| sample(&rt, &config, false))
+                        .collect::<Vec<_>>()
+                };
+                json!({"name": name, "config": config, "oracle": oracle, "samples": samples})
+            })
+            .collect::<Vec<_>>();
+        json!({"schema": "calc-flow.asof-finalization.v1", "scope": "operator-watermark-settlement", "retention": "latest-per-key", "cases": cases})
+    };
     let bytes = serde_json::to_vec_pretty(&report).unwrap();
     if let Some(index) = args.iter().position(|arg| arg == "--output") {
         let path = std::path::Path::new(args.get(index + 1).expect("--output needs a path"));

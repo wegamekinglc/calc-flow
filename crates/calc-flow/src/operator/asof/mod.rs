@@ -77,6 +77,13 @@ pub struct StreamAsofJoinOperator {
 }
 
 impl StreamAsofJoinOperator {
+    /// Selects the previous lookup algorithm for a benchmark-controlled A/B arm.
+    #[doc(hidden)]
+    #[cfg(feature = "benchmark-internals")]
+    pub fn set_legacy_latest_lookup_for_benchmark(&mut self, enabled: bool) {
+        self.state.set_legacy_latest_lookup_for_benchmark(enabled);
+    }
+
     async fn admit_batch(
         &mut self,
         ingress: &str,

@@ -1,0 +1,95 @@
+{
+  "schema": "calc-flow.asof-latest-probe.v1",
+  "scope": "operator-watermark-settlement",
+  "status": "checked",
+  "elapsed_seconds": 0.831050883,
+  "process_observations": {
+    "observed_cpu_affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31
+    ],
+    "observed_thread_environment": {
+      "TOKIO_WORKER_THREADS": null,
+      "OMP_NUM_THREADS": null,
+      "OPENBLAS_NUM_THREADS": null,
+      "MKL_NUM_THREADS": null,
+      "NUMEXPR_NUM_THREADS": null,
+      "VECLIB_MAXIMUM_THREADS": null,
+      "RAYON_NUM_THREADS": null,
+      "POLARS_MAX_THREADS": null
+    },
+    "process_id": 3578
+  },
+  "cases": [
+    {
+      "name": "balanced_8192",
+      "config": {
+        "pending": 8192,
+        "retained": 8192,
+        "skew": false,
+        "restored": false
+      },
+      "correctness": true
+    },
+    {
+      "name": "fixed128_right8192",
+      "config": {
+        "pending": 128,
+        "retained": 8192,
+        "skew": false,
+        "restored": false
+      },
+      "correctness": true
+    },
+    {
+      "name": "skew_8192",
+      "config": {
+        "pending": 8192,
+        "retained": 8192,
+        "skew": true,
+        "restored": false
+      },
+      "correctness": true
+    },
+    {
+      "name": "restored_skew_8192",
+      "config": {
+        "pending": 8192,
+        "retained": 8192,
+        "skew": true,
+        "restored": true
+      },
+      "correctness": true
+    }
+  ]
+}
