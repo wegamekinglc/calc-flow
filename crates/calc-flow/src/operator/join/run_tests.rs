@@ -2,7 +2,7 @@ use super::{
     JoinSide, JoinStateLimits, JoinTimeBounds,
     runs::{
         Incoming, RouteInput, RunOutputContext, RunState, merge_visits, reset_merge_visits,
-        reset_run_lookups, run_lookups,
+        reset_run_lookups, route_hot_keys, run_lookups,
     },
 };
 use crate::operator::keyed::{GroupId, KeySchema, KeyStore, MORSEL_ROWS};
@@ -1044,5 +1044,37 @@ fn test_run_interval_large_batch_emits_every_match() {
             .map(|output| output.records.len())
             .sum::<usize>(),
         3
+    );
+}
+
+fn assert_hot_route_matches_full_routing(record: &RecordBatch, field: Field) {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let schema = KeySchema::groupable(vec![Arc::new(field)]).unwrap();
+    let mut expected = KeyStore::new(
+        schema.clone(),
+        runtime.incremental_reservation("expected-hot-route"),
+    );
+    let mut actual = KeyStore::new(schema, runtime.incremental_reservation("actual-hot-route"));
+    let arrays = vec![record.column(0).clone()];
+    let expected = expected
+        .route_with_limit(&arrays, record.num_rows(), &mut || Ok(()))
+        .unwrap();
+    let actual = route_hot_keys(record, &[0], &mut actual).unwrap();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn test_hot_dictionary_routing_matches_full_key_routing() {
+    for values in [
+        StringArray::from(vec!["a", "b", "a", "c", "b", "a"]),
+        StringArray::from(vec![Some("a"), None, Some("a")]),
+        StringArray::from(Vec::<&str>::new()),
+    ] {
+        let record = RecordBatch::try_from_iter([("key", Arc::new(values) as ArrayRef)]).unwrap();
+        assert_hot_route_matches_full_routing(&record, Field::new("key", DataType::Utf8, false));
+    }
+    assert_hot_route_matches_full_routing(
+        &record(&[1, 9, 1], &[10, 99, 11]),
+        Field::new("key", DataType::Int64, false),
     );
 }

@@ -12,7 +12,7 @@ use crate::{
     Batch, BatchMetadata, CalcFlowError, EdgeBudget, EventTime, Result, StreamingFailureReason,
 };
 use datafusion::arrow::{
-    array::{Array, BooleanArray, UInt64Array},
+    array::{Array, BooleanArray, StringArray, UInt64Array},
     compute::take,
     datatypes::SchemaRef,
     record_batch::{RecordBatch, RecordBatchOptions},
@@ -427,6 +427,54 @@ struct LiveRun {
     released_bytes: usize,
 }
 
+pub(super) fn route_hot_keys(
+    record: &RecordBatch,
+    key_indices: &[usize],
+    keys: &mut KeyStore,
+) -> Result<Vec<GroupId>> {
+    let arrays = key_indices
+        .iter()
+        .map(|&index| record.column(index).clone())
+        .collect::<Vec<_>>();
+    if let [index] = key_indices
+        && let Some(values) = record
+            .column(*index)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .filter(|values| values.null_count() == 0)
+    {
+        return dictionary_route(values, keys);
+    }
+    keys.route_with_limit(&arrays, record.num_rows(), &mut || Ok(()))
+}
+
+fn dictionary_route(values: &StringArray, keys: &mut KeyStore) -> Result<Vec<GroupId>> {
+    if values.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut unique = hashbrown::HashMap::<&str, usize, ahash::RandomState>::default();
+    let mut dictionary = Vec::new();
+    let mut indices = Vec::with_capacity(values.len());
+    for row in 0..values.len() {
+        let value = values.value(row);
+        let index = if let Some(&index) = unique.get(value) {
+            index
+        } else {
+            let index = dictionary.len();
+            dictionary.push(value);
+            unique.insert(value, index);
+            index
+        };
+        indices.push(index);
+    }
+    let groups = keys.route_with_limit(
+        &[Arc::new(StringArray::from(dictionary))],
+        unique.len(),
+        &mut || Ok(()),
+    )?;
+    Ok(indices.into_iter().map(|index| groups[index]).collect())
+}
+
 pub(super) fn hot_batch_charge(
     batch: &Batch,
     key_indices: &[usize],
@@ -442,11 +490,7 @@ pub(super) fn hot_batch_charge(
             run_bytes = run_bytes
                 .checked_add(RunCharge::read(&record)?.total(rows)?)
                 .ok_or_else(|| run_error("hot state run charge overflowed"))?;
-            let arrays = key_indices
-                .iter()
-                .map(|&index| record.column(index).clone())
-                .collect::<Vec<_>>();
-            let routed = keys.route_with_limit(&arrays, rows, &mut || Ok(()))?;
+            let routed = route_hot_keys(&record, key_indices, keys)?;
             for group in routed {
                 groups.entry(group).or_default().push(0);
                 expiration.push(0);
