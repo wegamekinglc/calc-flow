@@ -1,0 +1,31 @@
+{
+  "schema": "calc-flow.arroyo-alignment-performance-plan.v1",
+  "created_at": "2026-11-21",
+  "baseline": {
+    "calc_flow": "dab98a559314bd46d866ed7a6489abcdd3810afe",
+    "arroyo": "v0.15.0 / 4ef15f6336a596651f10cf27c1ee29c29bf81577",
+    "evidence": ".codex/artifacts/arroyo-comparison/REPORT.md; burst Arroyo/calc-flow median ratios 2.26x stateless and 4.50x window"
+  },
+  "candidate": {
+    "calc_flow": "bd611929; current native source before benchmark-only evidence commits",
+    "arroyo": "the same official v0.15.0 Linux x86_64 release with the recorded SHA-256"
+  },
+  "execution": {
+    "harness": "unchanged maintained WebSocket NDJSON integration protocol, with only the calc-flow source identity updated",
+    "rows_per_run": 32768,
+    "pairs_per_case": 5,
+    "comparison": "adjacent alternating AB/BA with fresh processes and exact all-row oracles",
+    "total_budget_seconds": 600,
+    "builds_timed_separately": true,
+    "no_retries_or_case_expansion": true,
+    "target": "burst calc-flow throughput >=0.8x Arroyo for both stateless and window cases; paced results are informational only"
+  },
+  "cases": [
+    {"id": "stateless-burst", "connection": "P1 stateless pipeline and Arroyo alignment gate"},
+    {"id": "stateless-paced-5ms", "connection": "producer-limited control, not an engine-equality claim"},
+    {"id": "window-burst", "connection": "cross-batch tumbling SUM/COUNT and the second alignment gate"},
+    {"id": "window-paced-5ms", "connection": "producer-limited window control"}
+  ],
+  "boundary": "Python websockets/PyArrow/JSON adaptation for calc-flow versus native Arroyo connectors; not a pure operator ranking and not a distributed or long-running result",
+  "unmeasured": "native-source/sink-only decomposition, checkpoint/recovery, other key counts, large state, backpressure, Kafka and distributed execution"
+}
