@@ -429,6 +429,15 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   既有 `strict_frontiers_cancel_restore_check` 在两种算法下都悬挂于取消调用，已单独记录并排除 paired，
   普通模式不变且未声称该检查通过。50 项 ASOF 测试及专用 Clippy 通过。此结果不覆盖其他 key 类型、完整 runner
   或完整 ASOF inventory；下一项评估 grouped SUM changelog 是否能减少全量快照输出成本。
+- 2026-11-21 P4 changelog 性能方案被明确否决：harness `05b6ff7a` 复用同一 stock/sparse fixture、图和独立 trades oracle，
+  每个输入批后逐条应用 retract/upsert 并重建完整 positions，所有 80 个正式观测和跨臂 digest 均一致。
+  stock 从 **183.318 ms** 增至 **714.989 ms**（**+290.03%，regression**），sparse 从 **14.361 ms** 增至
+  **443.996 ms**（**+2991.64%，regression**）。stock 每批所有组都变化，retract+upsert 使输出从 210,000
+  增至 410,000 行；sparse 输出虽从 210,000 降至 13,200 行，positions 算子仍从 **9.604 ms** 增至
+  **436.580 ms**，证明只减少 sink 行数不等于降低计算成本。当前实现逐组构造变更前后的完整可见关系并 diff，
+  额外成本没有被输出缩减抵消。采集 45.994 秒，release 构建 854.723 秒另计，证据见
+  `benchmarks/sum-state/p4-changelog-20261121/`。保留现有显式 changelog 语义 API 和该负例 harness，
+  但不把它作为性能改进或默认迁移方向，snapshot 默认不变；不再围绕这一 full-relation diff 实现调参。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。当时 COUNT/MIN/MAX pane 保持现状；
