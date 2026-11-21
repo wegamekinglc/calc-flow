@@ -1,0 +1,21 @@
+{
+  "schema": "calc-flow.checkpoint-v4-runner-plan.v1",
+  "protocol": "benchmarks/checkpoint-v4/protocol.md M3",
+  "candidate_revision": "1f5efa95",
+  "baseline": "checkpoint-off arm inside the same sealed evidence binary",
+  "case": "6400x64-dual",
+  "connection": "Measure sustained replayable-source Rolling and mean5-mean projection with one-second periodic checkpoints versus checkpoint-off.",
+  "entities": 64,
+  "batch_rows": 6400,
+  "checkpoint_ms": 1000,
+  "rounds": 2,
+  "adjacent_ab_ba_pairs_per_round": 10,
+  "seconds_per_arm_pair": 5,
+  "warmups_per_arm_round": 1,
+  "minimum_completed_nonterminal_epochs": 4,
+  "gate": "median(on_rows_s/off_rows_s) >= 0.90 with per-round interval crossing classified inconclusive",
+  "budget_seconds": 250,
+  "build": "cargo test --release --locked -p calc-flow --lib --features benchmark-internals --no-run; recorded separately",
+  "correctness": "independent exact binary-fraction oracle on every sink batch, completed nonterminal manifests on every on arm, and zero checkpoint objects on every off arm",
+  "unmeasured": "M1/M2, M4, recovery, other cases and remaining acceptance matrix"
+}
