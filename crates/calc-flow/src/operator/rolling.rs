@@ -224,11 +224,13 @@ impl DataFusionRollingKernel {
             .collect::<Vec<_>>();
         let plan = RollingKernelPlan::compile_with_order(
             input_schema,
-            ROLLING_STATE_LAYOUT_VERSION,
-            event_time_index,
-            physical_order,
-            partition_indices.to_vec(),
-            sequence_columns.iter().map(|column| column.index).collect(),
+            kernel::KernelOrder::new(
+                ROLLING_STATE_LAYOUT_VERSION,
+                event_time_index,
+                physical_order,
+                partition_indices.to_vec(),
+                sequence_columns.iter().map(|column| column.index).collect(),
+            ),
             &outputs,
             &groups,
             &[],
@@ -1975,6 +1977,14 @@ impl StreamOperator for RollingOperator {
     }
 }
 
+struct EmissionPreparation {
+    record: RecordBatch,
+    next_kernel_state: Option<TypedStreamTransition>,
+    touched: PreparedHistoryUpdate,
+    current_charge: StateCharge,
+    next_charge: StateCharge,
+}
+
 impl RollingOperator {
     fn check_state_budget(&self, charge: StateCharge, node: &str) -> Result<()> {
         if self.state_budget.allows(charge.rows, charge.bytes) {
@@ -2200,14 +2210,6 @@ impl RollingOperator {
         Ok(())
     }
 
-    // Final emission keeps compute, record building, chunking, sequence
-    // accounting, and history application in one ordered pass so a partial
-    // failure leaves consistent in-memory state.
-    // #lizard forgives
-    #[allow(
-        clippy::too_many_lines,
-        reason = "final emission deliberately keeps one ordered compute-and-commit pass"
-    )]
     async fn emit_rows(
         &mut self,
         rows: Vec<BufferedRow>,
@@ -2226,6 +2228,55 @@ impl RollingOperator {
         {
             return self.emit_slab_rows(rows, context, output).await;
         }
+        let EmissionPreparation {
+            record,
+            next_kernel_state,
+            touched,
+            current_charge,
+            next_charge,
+        } = self.prepare_emission(rows, context)?;
+        let observer = context.rolling_metrics();
+        self.state.owned_mut()?.charge = current_charge;
+        if let Some(recorder) = observer {
+            recorder.add(RollingWork::OutputRowsPrepared, record.num_rows());
+        }
+        let budget_stage = observer.map(|recorder| recorder.stage(RollingStage::BudgetPreparation));
+        let batches = chunk_output_record(
+            &record,
+            context.operator_id(),
+            self.state.next_output_sequence,
+            context.output_budget(),
+        )?;
+        let chunk_count = u64::try_from(batches.len()).map_err(|_| {
+            operator_error(
+                context.operator_id(),
+                "output chunk count does not fit the sequence range",
+            )
+        })?;
+        if let Some(recorder) = observer {
+            recorder.add(RollingWork::OutputChunksPrepared, batches.len());
+        }
+        drop(budget_stage);
+        let state = self.state.owned_mut()?;
+        for batch in batches {
+            output.emit("output", batch).await?;
+        }
+        state.next_output_sequence = state
+            .next_output_sequence
+            .checked_add(chunk_count)
+            .ok_or_else(|| operator_error(context.operator_id(), "output sequence overflowed"))?;
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
+        touched.commit(&mut state.histories);
+        TypedStreamTransition::replace(next_kernel_state, &mut state.typed_kernel_state);
+        state.charge = next_charge;
+        Ok(())
+    }
+
+    fn prepare_emission(
+        &mut self,
+        rows: Vec<BufferedRow>,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<EmissionPreparation> {
         let observer = context.rolling_metrics();
         self.materialize_histories_with_charge(context.operator_id(), observer)?;
         let output_schema = self.output_ports[0]
@@ -2286,40 +2337,13 @@ impl RollingOperator {
                 return Err(error);
             }
         };
-        self.state.owned_mut()?.charge = current_charge;
-        if let Some(recorder) = observer {
-            recorder.add(RollingWork::OutputRowsPrepared, record.num_rows());
-        }
-        let budget_stage = observer.map(|recorder| recorder.stage(RollingStage::BudgetPreparation));
-        let batches = chunk_output_record(
-            &record,
-            context.operator_id(),
-            self.state.next_output_sequence,
-            context.output_budget(),
-        )?;
-        let chunk_count = u64::try_from(batches.len()).map_err(|_| {
-            operator_error(
-                context.operator_id(),
-                "output chunk count does not fit the sequence range",
-            )
-        })?;
-        if let Some(recorder) = observer {
-            recorder.add(RollingWork::OutputChunksPrepared, batches.len());
-        }
-        drop(budget_stage);
-        let state = self.state.owned_mut()?;
-        for batch in batches {
-            output.emit("output", batch).await?;
-        }
-        state.next_output_sequence = state
-            .next_output_sequence
-            .checked_add(chunk_count)
-            .ok_or_else(|| operator_error(context.operator_id(), "output sequence overflowed"))?;
-        let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
-        touched.commit(&mut state.histories);
-        TypedStreamTransition::replace(next_kernel_state, &mut state.typed_kernel_state);
-        state.charge = next_charge;
-        Ok(())
+        Ok(EmissionPreparation {
+            record,
+            next_kernel_state,
+            touched,
+            current_charge,
+            next_charge,
+        })
     }
 }
 

@@ -293,12 +293,11 @@ def _open_session(
     config: StreamRuntimeConfig | None,
     watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None,
     *,
-    table_output: bool,
-    checkpoints: ManagedCheckpointRuntime | None = None,
-    restore: bool = False,
+    options: tuple[bool, ManagedCheckpointRuntime | None, bool],
 ) -> StreamSession[object]:
     from calc_flow.stream import _compile_stream, _StreamRequest
 
+    table_output, checkpoints, restore = options
     _require_blocking("session")
     dynamic = _session_dynamic_inputs(program)
     _check_session_outputs(program)

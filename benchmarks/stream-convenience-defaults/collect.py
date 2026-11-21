@@ -137,8 +137,9 @@ async def observe(case: dict, site: Path, native: str, output: Path) -> dict:
 
 
 def validate_observation(
-    value: dict, case: dict, seals: dict, side: str, reference: dict, workers: set[str]
+    value: dict, context: tuple[dict, dict, dict], side: str, workers: set[str]
 ) -> None:
+    case, seals, reference = context
     workers.add(_unique_worker(value, workers))
     if value.get("binary_sha256") != seals[side]:
         raise ValueError("incomparable observation: wrong native SHA")
@@ -166,7 +167,7 @@ def observation_values(case: dict, evidence: dict, seals: dict) -> dict:
             observations = _pair_observations(pair, index)
             for side in SIDES:
                 value = observations[side]
-                validate_observation(value, case, seals, side, reference, workers)
+                validate_observation(value, (case, seals, reference), side, workers)
                 values[side][round_index].append(_sample_median(value["samples"]))
     return values
 
@@ -285,8 +286,13 @@ async def install_sites(builds: dict, output: Path) -> dict:
 
 
 async def measure_cases(
-    report: dict, protocol: dict, sites: dict, seals: dict, output: Path, started: float
+    report: dict,
+    protocol: dict,
+    bindings: tuple[dict, dict],
+    output: Path,
+    started: float,
 ) -> dict:
+    sites, seals = bindings
     for case in protocol["cases"]:
         print(f"case {case['label']} {case['id']}", flush=True)
         entry = await measure_case(case, sites, seals, output, started)
@@ -320,7 +326,7 @@ async def collect(args: argparse.Namespace) -> int:
         async with asyncio.timeout(budget):
             sites = await install_sites(builds, output)
             report = await measure_cases(
-                report, protocol, sites, seals, output, started
+                report, protocol, (sites, seals), output, started
             )
     except TimeoutError:
         report = {

@@ -2718,6 +2718,89 @@ fn parallel_rollback_record(start: usize, count: usize) -> RecordBatch {
     )
 }
 
+struct CommittedState {
+    encoded: Option<(String, Vec<u8>)>,
+    canonical: String,
+    scalars: (
+        Option<EventTime>,
+        u64,
+        bool,
+        LateMetricDelta,
+        Option<String>,
+        Option<String>,
+        Option<Epoch>,
+    ),
+    addresses: Vec<usize>,
+}
+
+fn committed_state(operator: &RollingOperator, epoch: Epoch) -> CommittedState {
+    CommittedState {
+        encoded: operator.encode_state(epoch).unwrap(),
+        canonical: operator
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .unwrap()
+            .canonical_state_for_test(),
+        scalars: (
+            operator.state.last_input_watermark,
+            operator.state.next_output_sequence,
+            operator.state.ended,
+            operator.state.metrics,
+            operator.state.pipeline_fingerprint.clone(),
+            operator.state.operator_id.clone(),
+            operator.state.last_checkpoint_epoch,
+        ),
+        addresses: retained_buffer_addresses(operator),
+    }
+}
+
+fn assert_parallel_rollback_preserved(
+    operator: &RollingOperator,
+    before: CommittedState,
+    after: CommittedState,
+    previous_charge: StateCharge,
+    charge: StateCharge,
+    launches: u64,
+    collector: &mut crate::EdgeCollector,
+) {
+    if after.canonical != before.canonical {
+        let index = after
+            .canonical
+            .bytes()
+            .zip(before.canonical.bytes())
+            .position(|(left, right)| left != right)
+            .unwrap_or(after.canonical.len().min(before.canonical.len()));
+        let start = index.saturating_sub(100);
+        let after_end = (index + 160).min(after.canonical.len());
+        let before_end = (index + 160).min(before.canonical.len());
+        eprintln!(
+            "canonical diff at {index}: after={} before={}",
+            &after.canonical[start..after_end],
+            &before.canonical[start..before_end]
+        );
+    }
+    assert_eq!(after.canonical, before.canonical);
+    assert_eq!(after.encoded, before.encoded);
+    assert_eq!(after.scalars, before.scalars);
+    assert_eq!(after.addresses, before.addresses);
+    assert_eq!(
+        operator.state.charge,
+        previous_charge.checked_add(charge, "rolling").unwrap()
+    );
+    assert!(operator.state.buffer.is_empty());
+    assert_eq!(operator.state.ordered.records().count(), 1);
+    assert!(collector.drain("output").is_empty());
+    assert_eq!(
+        launches,
+        if operator.compiled.kernel_plan.supports_slab() {
+            0
+        } else {
+            2
+        }
+    );
+}
+
 struct RejectParallelOutput;
 
 #[async_trait]
@@ -2728,10 +2811,6 @@ impl StreamCollector for RejectParallelOutput {
 }
 
 #[tokio::test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "the parallel rollback regression intentionally covers the full failure lifecycle"
-)]
 async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
@@ -2772,34 +2851,11 @@ async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
     collector.drain("output");
     assert!(operator.state.typed_kernel_state.is_some());
 
-    // Materialize the existing history once; compare the same epoch's
-    // complete encoded snapshot without advancing checkpoint state again.
     let epoch = Epoch::new(1).unwrap();
     let snapshot = operator.checkpoint(epoch).unwrap();
-    let committed = |operator: &RollingOperator| {
-        (
-            operator.encode_state(epoch).unwrap(),
-            operator
-                .state
-                .typed_kernel_state
-                .as_deref()
-                .unwrap()
-                .canonical_state_for_test(),
-            (
-                operator.state.last_input_watermark,
-                operator.state.next_output_sequence,
-                operator.state.ended,
-                operator.state.metrics,
-                operator.state.pipeline_fingerprint.clone(),
-                operator.state.operator_id.clone(),
-                operator.state.last_checkpoint_epoch,
-            ),
-            retained_buffer_addresses(operator),
-        )
-    };
-    let before = committed(&operator);
+    let before = committed_state(&operator, epoch);
     let previous_charge = operator.state.charge;
-    let (segment_id, bytes) = before.0.as_ref().unwrap();
+    let (segment_id, bytes) = before.encoded.as_ref().unwrap();
     assert_eq!(snapshot.segments[segment_id].bytes(), bytes);
 
     let launches = Arc::new(AtomicU64::new(0));
@@ -2838,48 +2894,16 @@ async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
             .contains("expected parallel collector rejection"),
         "{error}"
     );
-    assert_eq!(
+    let after = committed_state(&operator, epoch);
+    assert_parallel_rollback_preserved(
+        &operator,
+        before,
+        after,
+        previous_charge,
+        charge,
         launches.load(AtomicOrdering::SeqCst),
-        if operator.compiled.kernel_plan.supports_slab() {
-            0
-        } else {
-            2
-        }
+        &mut collector,
     );
-    let after = committed(&operator);
-    if after.1 != before.1 {
-        let index = after
-            .1
-            .bytes()
-            .zip(before.1.bytes())
-            .position(|(left, right)| left != right)
-            .unwrap_or(after.1.len().min(before.1.len()));
-        let start = index.saturating_sub(100);
-        let after_end = (index + 160).min(after.1.len());
-        let before_end = (index + 160).min(before.1.len());
-        eprintln!(
-            "canonical diff at {index}: after={} before={}",
-            &after.1[start..after_end],
-            &before.1[start..before_end]
-        );
-    }
-    assert_eq!(
-        after.1, before.1,
-        "canonical kernel state changed on rollback"
-    );
-    assert_eq!(after.0, before.0, "layout-7 bytes changed on rollback");
-    assert_eq!(
-        after.2, before.2,
-        "scalar operator state changed on rollback"
-    );
-    assert_eq!(after.3, before.3, "retained addresses changed on rollback");
-    assert_eq!(
-        operator.state.charge,
-        previous_charge.checked_add(charge, "rolling").unwrap()
-    );
-    assert!(operator.state.buffer.is_empty());
-    assert_eq!(operator.state.ordered.records().count(), 1);
-    assert!(collector.drain("output").is_empty());
 }
 
 #[tokio::test]
@@ -4138,116 +4162,129 @@ fn incremental_scans_keep_ties_zero_signs_and_invalid_rows_across_batches() {
 }
 
 #[tokio::test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "the compaction regression covers checkpoint, fallback and continuation in one scenario"
-)]
 async fn columnar_history_compacts_input_and_survives_checkpoint_or_fallback() {
-    use crate::{CancellationToken, StreamJobContext};
-
     for checkpoint in [false, true] {
-        let spec = kernel_spec(json!([
-            aggregate_output("mean", "price", "mean2", 2),
-            aggregate_output("mean", "price", "mean5", 5)
-        ]));
-        let mut operator =
-            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
-        let job = StreamJobContext::new(
-            7,
-            TEST_FINGERPRINT,
-            JsonMap::new(),
-            None,
-            CancellationToken::new(),
-        );
-        let rows = (1..=128_u32)
-            .map(|index| {
-                (
-                    i64::from(index),
-                    if index % 2 == 0 { "a" } else { "b" },
-                    u64::from(index),
-                    Some(f64::from(index)),
-                )
-            })
-            .collect::<Vec<_>>();
-        let input = float64_fast_record(&rows);
-        let context = StreamOperatorContext::new(&job, "rolling", None);
-        let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
-        operator
-            .process_data(
-                "input",
-                Batch::table(vec![input.clone()], BatchMetadata::default()).unwrap(),
-                &context,
-                &mut collector,
+        let (mut operator, job, mut collector) = seed_columnar_history(checkpoint).await;
+        assert_columnar_history_continuation(&mut operator, &job, &mut collector).await;
+    }
+}
+
+async fn seed_columnar_history(
+    checkpoint: bool,
+) -> (
+    RollingOperator,
+    crate::StreamJobContext,
+    crate::EdgeCollector,
+) {
+    use crate::StreamJobContext;
+
+    let spec = kernel_spec(json!([
+        aggregate_output("mean", "price", "mean2", 2),
+        aggregate_output("mean", "price", "mean5", 5)
+    ]));
+    let mut operator =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
+    let job = StreamJobContext::new(
+        7,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let rows = (1..=128_u32)
+        .map(|index| {
+            (
+                i64::from(index),
+                if index % 2 == 0 { "a" } else { "b" },
+                u64::from(index),
+                Some(f64::from(index)),
             )
-            .await
-            .unwrap();
-        operator
-            .on_watermark(EventTime::from_micros(128), &context, &mut collector)
-            .await
-            .unwrap();
-        collector.drain("output");
+        })
+        .collect::<Vec<_>>();
+    let input = float64_fast_record(&rows);
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data(
+            "input",
+            Batch::table(vec![input], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    operator
+        .on_watermark(EventTime::from_micros(128), &context, &mut collector)
+        .await
+        .unwrap();
+    collector.drain("output");
+    let histories = RollingKernelPlan::slab_histories_for_test(
+        operator.state.typed_kernel_state.as_deref().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(histories.len(), 2);
+    assert!(histories.iter().all(|history| history.len() == 5));
+    let transitions = RollingKernelPlan::slab_transition_counts_for_test(
+        operator.state.typed_kernel_state.as_deref().unwrap(),
+    )
+    .unwrap();
+    assert!(transitions.iter().all(|&count| count == 64));
+    if checkpoint {
+        let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
         let histories = RollingKernelPlan::slab_histories_for_test(
             operator.state.typed_kernel_state.as_deref().unwrap(),
         )
         .unwrap();
-        assert_eq!(histories.len(), 2);
         assert!(histories.iter().all(|history| history.len() == 5));
-        let transitions = RollingKernelPlan::slab_transition_counts_for_test(
+        let mut restored =
+            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+        StreamOperator::restore(&mut restored, &snapshot).unwrap();
+        operator = restored;
+    }
+    (operator, job, collector)
+}
+
+async fn assert_columnar_history_continuation(
+    operator: &mut RollingOperator,
+    job: &crate::StreamJobContext,
+    collector: &mut crate::EdgeCollector,
+) {
+    let next = float64_fast_record(&[(132, "a", 132, Some(132.0)), (130, "a", 130, Some(130.0))]);
+    let context = StreamOperatorContext::new(job, "rolling", Some(EventTime::from_micros(128)));
+    operator
+        .process_data(
+            "input",
+            Batch::table(vec![next], BatchMetadata::default()).unwrap(),
+            &context,
+            collector,
+        )
+        .await
+        .unwrap();
+    operator
+        .on_watermark(EventTime::from_micros(132), &context, collector)
+        .await
+        .unwrap();
+    let emitted = collector.drain("output");
+    let record = &emitted[0]
+        .as_data()
+        .unwrap()
+        .table_payload()
+        .unwrap()
+        .batches()[0];
+    let means = record
+        .column(7)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert_eq!(means.values().as_ref(), &[126.0, 128.0]);
+    assert_eq!(
+        RollingKernelPlan::slab_histories_for_test(
             operator.state.typed_kernel_state.as_deref().unwrap(),
         )
-        .unwrap();
-        assert!(transitions.iter().all(|&count| count == 64));
-        if checkpoint {
-            let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
-            let histories = RollingKernelPlan::slab_histories_for_test(
-                operator.state.typed_kernel_state.as_deref().unwrap(),
-            )
-            .unwrap();
-            assert!(histories.iter().all(|history| history.len() == 5));
-            let mut restored =
-                RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
-            StreamOperator::restore(&mut restored, &snapshot).unwrap();
-            operator = restored;
-        }
-        let next =
-            float64_fast_record(&[(132, "a", 132, Some(132.0)), (130, "a", 130, Some(130.0))]);
-        let context =
-            StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(128)));
-        operator
-            .process_data(
-                "input",
-                Batch::table(vec![next], BatchMetadata::default()).unwrap(),
-                &context,
-                &mut collector,
-            )
-            .await
-            .unwrap();
-        operator
-            .on_watermark(EventTime::from_micros(132), &context, &mut collector)
-            .await
-            .unwrap();
-        let emitted = collector.drain("output");
-        let record = &emitted[0]
-            .as_data()
-            .unwrap()
-            .table_payload()
-            .unwrap()
-            .batches()[0];
-        let means = record
-            .column(7)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert_eq!(means.values().as_ref(), &[126.0, 128.0]);
-        assert_eq!(
-            RollingKernelPlan::slab_histories_for_test(
-                operator.state.typed_kernel_state.as_deref().unwrap(),
-            )
-            .unwrap()
-            .len(),
-            2
-        );
-    }
+        .unwrap()
+        .len(),
+        2
+    );
 }
 
 #[test]

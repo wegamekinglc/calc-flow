@@ -153,6 +153,26 @@ def paired_runner_statistics(
     }
 
 
+def _validate_runner_arm(value: dict[str, Any], *, enabled: bool) -> None:
+    if value.get("checkpointing") is not enabled:
+        raise ValueError("runner arm mode is inconsistent")
+    if value.get("accepted_input_rows", 0) <= 0:
+        raise ValueError("runner arm has no accepted rows")
+    if value.get("rows_per_second", 0) <= 0:
+        raise ValueError("runner arm has invalid throughput")
+    if not value.get("cleanup_completed"):
+        raise ValueError("runner arm cleanup failed")
+
+
+def _validate_runner_pair(pair: dict[str, Any], args: argparse.Namespace) -> None:
+    for arm in ("on", "off"):
+        _validate_runner_arm(pair.get(arm, {}), enabled=arm == "on")
+    if pair["on"]["completed_nonterminal_epochs"] < args.minimum_epochs:
+        raise ValueError("runner checkpoint coverage is insufficient")
+    if pair["off"]["checkpoint_objects"] != 0:
+        raise ValueError("checkpoint-off arm produced checkpoint objects")
+
+
 def validate_runner_evidence(
     evidence: dict[str, Any], args: argparse.Namespace
 ) -> None:
@@ -166,20 +186,18 @@ def validate_runner_evidence(
     if len(pairs) != args.pairs:
         raise ValueError("runner pair count differs from its request")
     for pair in pairs:
-        for arm in ("on", "off"):
-            value = pair.get(arm, {})
-            if value.get("checkpointing") is not (arm == "on"):
-                raise ValueError("runner arm mode is inconsistent")
-            if value.get("accepted_input_rows", 0) <= 0:
-                raise ValueError("runner arm has no accepted rows")
-            if value.get("rows_per_second", 0) <= 0:
-                raise ValueError("runner arm has invalid throughput")
-            if not value.get("cleanup_completed"):
-                raise ValueError("runner arm cleanup failed")
-        if pair["on"]["completed_nonterminal_epochs"] < args.minimum_epochs:
-            raise ValueError("runner checkpoint coverage is insufficient")
-        if pair["off"]["checkpoint_objects"] != 0:
-            raise ValueError("checkpoint-off arm produced checkpoint objects")
+        _validate_runner_pair(pair, args)
+
+
+def _validate_direct_pair(pair: dict[str, Any], args: argparse.Namespace) -> None:
+    if pair.get("dispatches_per_arm") != args.dispatches:
+        raise ValueError("direct evidence dispatch count differs from its request")
+    for name in ("on_median_seconds", "off_median_seconds"):
+        value = pair.get(name)
+        if not isinstance(value, float) or value <= 0:
+            raise ValueError(f"direct evidence contains an invalid {name}")
+    if pair.get("output_digest") is None:
+        raise ValueError("direct evidence lacks an output digest")
 
 
 def validate_direct_evidence(
@@ -197,14 +215,7 @@ def validate_direct_evidence(
     if len(pairs) != args.pairs:
         raise ValueError("direct evidence pair count differs from its request")
     for pair in pairs:
-        if pair.get("dispatches_per_arm") != args.dispatches:
-            raise ValueError("direct evidence dispatch count differs from its request")
-        for name in ("on_median_seconds", "off_median_seconds"):
-            value = pair.get(name)
-            if not isinstance(value, float) or value <= 0:
-                raise ValueError(f"direct evidence contains an invalid {name}")
-        if pair.get("output_digest") is None:
-            raise ValueError("direct evidence lacks an output digest")
+        _validate_direct_pair(pair, args)
 
 
 async def run_direct_round(args: argparse.Namespace, output: Path) -> dict[str, Any]:

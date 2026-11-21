@@ -791,9 +791,7 @@ class TableExpr(Expr[object]):
                 runtime,
                 config,
                 watermarks,
-                table_output=True,
-                checkpoints=checkpoints,
-                restore=restore,
+                options=(True, checkpoints, restore),
             ),
         )
 

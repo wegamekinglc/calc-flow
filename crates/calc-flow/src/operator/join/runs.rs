@@ -90,6 +90,38 @@ impl LocatorEntry {
     }
 }
 
+pub(super) struct RouteInput<'a> {
+    payload: &'a RecordBatch,
+    key_indices: &'a [usize],
+    physical: Vec<usize>,
+    times: Vec<EventTime>,
+    row_ids: Vec<u64>,
+    retain: BooleanArray,
+    next_row_id: u64,
+}
+
+impl<'a> RouteInput<'a> {
+    pub(super) fn new(
+        payload: &'a RecordBatch,
+        key_indices: &'a [usize],
+        physical: Vec<usize>,
+        times: Vec<EventTime>,
+        row_ids: Vec<u64>,
+        retain: BooleanArray,
+        next_row_id: u64,
+    ) -> Self {
+        Self {
+            payload,
+            key_indices,
+            physical,
+            times,
+            row_ids,
+            retain,
+            next_row_id,
+        }
+    }
+}
+
 /// One admitted input morsel. Physical positions preserve the source payload;
 /// group, time, ID and retain columns use admitted positions.
 pub(super) struct Incoming {
@@ -136,21 +168,20 @@ impl Incoming {
         })
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "one admitted input carries payload, routing, retention, cancellation and limits"
-    )]
     pub(super) fn route(
-        payload: &RecordBatch,
-        key_indices: &[usize],
-        physical: Vec<usize>,
-        times: Vec<EventTime>,
-        row_ids: Vec<u64>,
-        retain: BooleanArray,
-        next_row_id: u64,
+        input: RouteInput<'_>,
         keys: &mut crate::operator::keyed::KeyStore,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<Self> {
+        let RouteInput {
+            payload,
+            key_indices,
+            physical,
+            times,
+            row_ids,
+            retain,
+            next_row_id,
+        } = input;
         let rows = physical.len();
         if rows > MORSEL_ROWS
             || times.len() != rows
@@ -1018,35 +1049,20 @@ impl RunState {
         self.apply_checked(
             incoming_side,
             incoming,
-            schema,
-            projection,
-            left_width,
-            budget,
+            RunOutputContext::new(schema, projection, left_width, budget),
             &mut || Ok(()),
         )
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "one admitted morsel needs its output context"
-    )]
     #[cfg(test)]
     pub(super) fn apply_checked(
         &mut self,
         incoming_side: JoinSide,
         incoming: Incoming,
-        schema: &SchemaRef,
-        projection: Option<&[usize]>,
-        left_width: usize,
-        budget: EdgeBudget,
+        output: RunOutputContext<'_>,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<RunOutput> {
-        let prepared = self.prepare_batch(
-            incoming_side,
-            vec![incoming],
-            RunOutputContext::new(schema, projection, left_width, budget),
-            check,
-        )?;
+        let prepared = self.prepare_batch(incoming_side, vec![incoming], output, check)?;
         let mut outputs = prepared.commit(self)?;
         Ok(outputs.remove(0))
     }
@@ -1109,14 +1125,7 @@ impl RunState {
             let materialize_span = output
                 .trace
                 .map(|trace| trace.stage(&self.name, "run_materialize", prepared.probe.len()));
-            let records = prepared.materialize(
-                self,
-                output.schema,
-                output.projection,
-                output.left_width,
-                output.budget,
-                check,
-            )?;
+            let records = prepared.materialize(self, &output, check)?;
             #[cfg(feature = "benchmark-internals")]
             drop(materialize_span);
             let count = u64::try_from(records.len())
@@ -1258,17 +1267,20 @@ impl Prepared {
     fn materialize(
         &self,
         state: &RunState,
-        schema: &SchemaRef,
-        projection: Option<&[usize]>,
-        left_width: usize,
-        budget: EdgeBudget,
+        output: &RunOutputContext<'_>,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<Vec<RecordBatch>> {
         check()?;
         if self.probe.len() == 0 {
             return Ok(Vec::new());
         }
-        let ranges = self.ranges(schema, projection, left_width, budget, check)?;
+        let ranges = self.ranges(
+            output.schema,
+            output.projection,
+            output.left_width,
+            output.budget,
+            check,
+        )?;
         // Validate the complete sequence range before gathering any output.
         drop(state.output_sequences(ranges.len())?);
         let mut records = Vec::with_capacity(ranges.len());
@@ -1276,10 +1288,7 @@ impl Prepared {
             check()?;
             self.materialize_range(
                 state,
-                schema,
-                projection,
-                left_width,
-                budget,
+                output,
                 range,
                 self.output_base + ordinal as u64,
                 &mut records,
@@ -1383,52 +1392,35 @@ impl Prepared {
             })
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "one output range needs its full source context"
-    )]
     fn materialize_range(
         &self,
         state: &RunState,
-        schema: &SchemaRef,
-        projection: Option<&[usize]>,
-        left_width: usize,
-        budget: EdgeBudget,
+        output: &RunOutputContext<'_>,
         range: std::ops::Range<usize>,
         sequence: u64,
         records: &mut Vec<RecordBatch>,
     ) -> Result<()> {
-        let record = self.record_range(state, schema, projection, left_width, range.clone())?;
+        let record = self.record_range(
+            state,
+            output.schema,
+            output.projection,
+            output.left_width,
+            range.clone(),
+        )?;
         let metadata = BatchMetadata::new(&state.name, sequence, BTreeMap::new())?;
         let bytes = Batch::table(vec![record.clone()], metadata)?.estimated_bytes()?;
-        if range.len() <= budget.max_rows && bytes <= budget.max_bytes {
+        if range.len() <= output.budget.max_rows && bytes <= output.budget.max_bytes {
             records.push(record);
             return Ok(());
         }
         if range.len() == 1 {
-            return Err(OutputChunkErrors::STREAM_JOIN.over_budget_row(bytes, budget.max_bytes));
+            return Err(
+                OutputChunkErrors::STREAM_JOIN.over_budget_row(bytes, output.budget.max_bytes)
+            );
         }
         let middle = range.start + range.len() / 2;
-        self.materialize_range(
-            state,
-            schema,
-            projection,
-            left_width,
-            budget,
-            range.start..middle,
-            sequence,
-            records,
-        )?;
-        self.materialize_range(
-            state,
-            schema,
-            projection,
-            left_width,
-            budget,
-            middle..range.end,
-            sequence,
-            records,
-        )
+        self.materialize_range(state, output, range.start..middle, sequence, records)?;
+        self.materialize_range(state, output, middle..range.end, sequence, records)
     }
 
     fn record_range(

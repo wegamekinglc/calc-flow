@@ -78,12 +78,65 @@ struct GroupUndo {
     initialized: Vec<bool>,
 }
 
-struct RestoreSpec<'a> {
+#[derive(Clone, Copy)]
+pub(super) struct RestoreSpec<'a> {
     key_count: usize,
     replace: bool,
     aggregates: &'a [Arc<AggregateFunctionExpr>],
     global: Option<&'a global_record::Proof>,
     sequential: bool,
+}
+
+impl<'a> RestoreSpec<'a> {
+    pub(super) fn new(
+        key_count: usize,
+        replace: bool,
+        aggregates: &'a [Arc<AggregateFunctionExpr>],
+        global: Option<&'a global_record::Proof>,
+        sequential: bool,
+    ) -> Self {
+        Self {
+            key_count,
+            replace,
+            aggregates,
+            global,
+            sequential,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct AggregateChunk<'a> {
+    rows: usize,
+    arguments: &'a [Vec<ArrayRef>],
+    filters: &'a [Option<&'a BooleanArray>],
+    selection: Option<&'a BooleanArray>,
+    variable: &'a [usize],
+}
+
+impl<'a> AggregateChunk<'a> {
+    pub(super) fn new(
+        rows: usize,
+        arguments: &'a [Vec<ArrayRef>],
+        filters: &'a [Option<&'a BooleanArray>],
+        selection: Option<&'a BooleanArray>,
+        variable: &'a [usize],
+    ) -> Self {
+        Self {
+            rows,
+            arguments,
+            filters,
+            selection,
+            variable,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RankMerge<'a> {
+    index: usize,
+    arrays: &'a [ArrayRef],
+    rank: usize,
 }
 
 pub(super) struct Committed {
@@ -290,29 +343,17 @@ impl KeyedState {
         Ok(counts)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn restore_records(
         &self,
         records: &[RecordBatch],
-        key_count: usize,
-        replace: bool,
+        spec: RestoreSpec<'_>,
         budget: Option<StateBudget>,
-        aggregates: &[Arc<AggregateFunctionExpr>],
-        global: Option<&global_record::Proof>,
-        sequential: bool,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
         if records.iter().all(|record| record.num_rows() == 0) {
             check()?;
             return Ok(());
         }
-        let spec = RestoreSpec {
-            key_count,
-            replace,
-            aggregates,
-            global,
-            sequential,
-        };
         let mut transaction = self.begin(budget)?;
         let mut seen = std::collections::BTreeSet::new();
         for record in records {
@@ -534,18 +575,20 @@ impl Transaction {
         Ok(indices)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_chunk(
         &mut self,
         keys: &[ArrayRef],
-        rows: usize,
-        arguments: &[Vec<ArrayRef>],
-        filters: &[Option<&BooleanArray>],
-        selection: Option<&BooleanArray>,
-        variable: &[usize],
+        chunk: AggregateChunk<'_>,
         check: &mut dyn FnMut() -> Result<()>,
         name: &str,
     ) -> Result<()> {
+        let AggregateChunk {
+            rows,
+            arguments,
+            filters,
+            selection,
+            variable,
+        } = chunk;
         if self.global_accumulators.is_some() {
             return self.apply_global(arguments, filters, name);
         }
@@ -653,9 +696,11 @@ impl Transaction {
                 partial,
                 aggregates[index].as_ref(),
                 group,
-                index,
-                arrays,
-                rank,
+                RankMerge {
+                    index,
+                    arrays,
+                    rank,
+                },
                 name,
             )?;
         }
@@ -857,17 +902,19 @@ impl Transaction {
         partial.check_size(name)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn merge_rank(
         state: &mut State,
         partial: &PartialGroups,
         expression: &AggregateFunctionExpr,
         group: GroupId,
-        index: usize,
-        arrays: &[ArrayRef],
-        rank: usize,
+        merge: RankMerge<'_>,
         name: &str,
     ) -> Result<()> {
+        let RankMerge {
+            index,
+            arrays,
+            rank,
+        } = merge;
         if partial.sequential[index] || partial.accumulators[index].integer_sum() {
             return Self::merge_sequential_rank(state, partial, index, group, arrays, rank, name);
         }

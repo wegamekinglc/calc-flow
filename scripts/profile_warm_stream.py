@@ -1053,10 +1053,13 @@ async def _measure_case(
     samples: int,
     collect_gc: bool,
     *,
-    drivers: tuple[str, str] = DEFAULT_DRIVERS,
-    reference: str | None = None,
-    numeric_contract_change: bool = False,
+    options: tuple[tuple[str, str], str | None, bool] = (
+        DEFAULT_DRIVERS,
+        None,
+        False,
+    ),
 ) -> dict[str, Any]:
+    drivers, reference, numeric_contract_change = options
     starts = [
         await worker.request(operation="start", config=config, driver=driver)
         for worker, driver in zip(workers, drivers, strict=True)
@@ -1512,9 +1515,11 @@ async def _fresh_case(
                 config,
                 samples,
                 collect_gc,
-                drivers=options.drivers,
-                reference=options.reference,
-                numeric_contract_change=options.numeric_contract_change,
+                options=(
+                    options.drivers,
+                    options.reference,
+                    options.numeric_contract_change,
+                ),
             )
         except BaseException as error:
             primary_error = error
@@ -2087,7 +2092,6 @@ def _native_find_arm(arms: list[dict[str, Any]], case: str, arm: str):
 
 
 def _native_latency_gate(
-    gate: str,
     case: str,
     arm: str,
     limit: float,
@@ -2129,7 +2133,7 @@ def _native_gate_values(
     arms: list[dict[str, Any]], complete: bool
 ) -> dict[str, dict[str, Any]]:
     latency = {
-        gate: _native_latency_gate(gate, case, arm, limit, arms, complete)
+        gate: _native_latency_gate(case, arm, limit, arms, complete)
         for gate, case, arm, limit in NATIVE_LATENCY_GATES
     }
     return {
@@ -2144,9 +2148,9 @@ def _native_report(
     binaries: list[dict[str, Any]],
     rounds: list[dict[str, Any]],
     round_records: list[dict[str, Any]],
-    status: str,
-    started: float,
+    metadata: tuple[str, float],
 ) -> dict[str, Any]:
+    status, started = metadata
     arms = _native_arm_summaries(rounds)
     return {
         "contract": "paired-native-evidence-v1",
@@ -2344,7 +2348,11 @@ async def native(args: argparse.Namespace) -> None:
     if stopped:
         print(f"budget exhausted; retained {len(rounds)} completed rounds", flush=True)
     report = _native_report(
-        args, binaries, rounds, records, "stopped" if stopped else "completed", started
+        args,
+        binaries,
+        rounds,
+        records,
+        ("stopped" if stopped else "completed", started),
     )
     output.write_text(
         json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8"
@@ -2403,13 +2411,7 @@ async def diagnose(args: argparse.Namespace) -> None:
     )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest="command", required=True)
-    builder = commands.add_parser("build")
-    builder.add_argument("--source", type=Path, required=True)
-    builder.add_argument("--target", type=Path, required=True)
-    builder.add_argument("--output", type=Path, required=True)
+def _add_compare_arguments(commands) -> None:
     paired = commands.add_parser("compare")
     paired.add_argument("--baseline-build", type=Path, required=True)
     paired.add_argument("--candidate-build", type=Path, required=True)
@@ -2457,6 +2459,9 @@ def main() -> None:
         choices=("forced", "normal"),
         default=("forced", "normal"),
     )
+
+
+def _add_native_arguments(commands) -> None:
     native_parser = commands.add_parser("native")
     native_parser.add_argument("--baseline-binary", type=Path, required=True)
     native_parser.add_argument("--candidate-binary", type=Path, required=True)
@@ -2466,8 +2471,9 @@ def main() -> None:
     native_parser.add_argument("--work-dir", type=Path)
     native_parser.add_argument("--budget-seconds", type=_positive_float)
     native_parser.add_argument("--numeric-contract-change", action="store_true")
-    worker = commands.add_parser("_worker")
-    worker.add_argument("--root", type=Path, required=True)
+
+
+def _add_diagnostic_arguments(commands) -> None:
     diagnostic = commands.add_parser("diagnose")
     diagnostic.add_argument("--build", type=Path, required=True)
     diagnostic.add_argument("--output", type=Path, required=True)
@@ -2483,6 +2489,25 @@ def main() -> None:
     diagnostic.add_argument("--forced-gc", action="store_true")
     diagnostic.add_argument("--exact-projection", action="store_true")
     _add_scalar_dimensions(diagnostic)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    builder = commands.add_parser("build")
+    builder.add_argument("--source", type=Path, required=True)
+    builder.add_argument("--target", type=Path, required=True)
+    builder.add_argument("--output", type=Path, required=True)
+    _add_compare_arguments(commands)
+    _add_native_arguments(commands)
+    worker = commands.add_parser("_worker")
+    worker.add_argument("--root", type=Path, required=True)
+    _add_diagnostic_arguments(commands)
+    return parser
+
+
+def main() -> None:
+    parser = _parser()
     args = parser.parse_args()
     if args.command == "build":
         asyncio.run(build(args))

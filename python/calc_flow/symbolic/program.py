@@ -708,9 +708,7 @@ class Program:
                 runtime,
                 config,
                 watermarks,
-                table_output=False,
-                checkpoints=checkpoints,
-                restore=restore,
+                options=(False, checkpoints, restore),
             ),
         )
 

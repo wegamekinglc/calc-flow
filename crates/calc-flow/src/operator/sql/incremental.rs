@@ -1788,11 +1788,13 @@ impl IncrementalSql {
         };
         transaction.apply_chunk(
             &input.keys,
-            chunk.num_rows(),
-            &input.arguments,
-            &filters,
-            selection,
-            &self.variable_extrema,
+            keyed_state::AggregateChunk::new(
+                chunk.num_rows(),
+                &input.arguments,
+                &filters,
+                selection,
+                &self.variable_extrema,
+            ),
             &mut || context.check_cancelled(),
             name,
         )

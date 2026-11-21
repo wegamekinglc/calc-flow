@@ -48,15 +48,9 @@ fn scalar_oracle(rows: &[Vec<ScalarValue>]) -> Vec<usize> {
         .collect()
 }
 
-#[test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "the supported-type matrix is intentionally one exhaustive test table"
-)]
-fn test_keyed_typed_routing_matches_naive_oracle_for_every_supported_type() {
-    let runtime = runtime();
+fn supported_routing_cases() -> Vec<Vec<ScalarValue>> {
     let timezone: Arc<str> = Arc::from("America/New_York");
-    let cases = vec![
+    vec![
         vec![
             ScalarValue::Boolean(Some(true)),
             ScalarValue::Boolean(None),
@@ -146,7 +140,13 @@ fn test_keyed_typed_routing_matches_naive_oracle_for_every_supported_type() {
             ScalarValue::TimestampNanosecond(None, None),
             ScalarValue::TimestampNanosecond(Some(i64::MAX), None),
         ],
-    ];
+    ]
+}
+
+#[test]
+fn test_keyed_typed_routing_matches_naive_oracle_for_every_supported_type() {
+    let runtime = runtime();
+    let cases = supported_routing_cases();
     for values in cases {
         let array = ScalarValue::iter_to_array(values.iter().cloned()).unwrap();
         let mut store = store(&runtime, vec![field(array.data_type().clone())]);

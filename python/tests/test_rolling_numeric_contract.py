@@ -320,9 +320,9 @@ class SeriesOracle:
         value: float | int | None,
         exact: dict,
         bounds: dict[str, Fraction],
-        n: int,
-        ddof: int,
+        periods: tuple[int, int],
     ) -> None:
+        n, ddof = periods
         if n <= ddof:
             assert value is None
             return
@@ -341,7 +341,7 @@ class SeriesOracle:
         ddof: int,
     ) -> None:
         for name in ("variance", "stddev"):
-            self._check_spread_value(name, actual[name], exact, bounds, n, ddof)
+            self._check_spread_value(name, actual[name], exact, bounds, (n, ddof))
 
     def _check_finite(
         self, actual: dict[str, float | int | None], exact: dict, n: int, ddof: int
@@ -601,12 +601,12 @@ class PairOracle:
     def _assert_correlation(
         correlation: float,
         covariance: Fraction,
-        vx: Fraction,
-        vy: Fraction,
+        variances: tuple[Fraction, Fraction],
         bracket: Fraction,
-        delta_x: Fraction,
-        delta_y: Fraction,
+        deltas: tuple[Fraction, Fraction],
     ) -> None:
+        vx, vy = variances
+        delta_x, delta_y = deltas
         product = vx * vy
         lower = (
             covariance / _sqrt(product, upper=True)
@@ -653,7 +653,7 @@ class PairOracle:
         covariance = exact["covariance"]
         assert isinstance(covariance, Fraction)
         self._assert_correlation(
-            correlation, covariance, vx, vy, bracket, delta_x, delta_y
+            correlation, covariance, (vx, vy), bracket, (delta_x, delta_y)
         )
 
     def _check_finite(
@@ -800,10 +800,10 @@ def _check_values(
     values: list[tuple[float | int | None, float | int | None]],
     window: int | None = None,
     duration_us: int | None = None,
-    integer: bool = False,
     timestamps: list[int] | None = None,
-    unsigned: bool = False,
+    numeric: tuple[bool, bool] = (False, False),
 ) -> None:
+    integer, unsigned = numeric
     timestamps = timestamps or list(range(len(values)))
     actual = _execute(
         _program(
@@ -870,12 +870,12 @@ def test_exact_oracle_extremes_nulls_infinities_and_constants() -> None:
             (-(2**63) + 1, 8),
         ],
         2,
-        integer=True,
+        numeric=(True, False),
     )
     _check_values(
         [(2**64 - 1, 2), (0, 3), (1, 4), (0, 5), (2**64 - 1, 6), (0, 7)],
         2,
-        unsigned=True,
+        numeric=(False, True),
     )
 
 

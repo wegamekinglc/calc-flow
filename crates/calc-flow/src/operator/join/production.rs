@@ -2,7 +2,7 @@ use super::{
     AdmittedBatch, JoinCheckpointMetadata, JoinSide, SideMetrics, StreamJoinOperator,
     admitted::AdmittedRef,
     checked_metric, counter_overflow, operator_error, output_gather,
-    runs::{Incoming, NativePageCache, PreparedRuns, RunOutputContext, RunState},
+    runs::{Incoming, NativePageCache, PreparedRuns, RouteInput, RunOutputContext, RunState},
 };
 #[cfg(test)]
 use super::{
@@ -155,13 +155,15 @@ impl RunCore {
                     .collect::<Result<Vec<_>>>()?;
                 let cut = self.keys.cut();
                 let chunk = Incoming::route(
-                    &record.slice(start, rows),
-                    keys,
-                    (0..rows).collect(),
-                    times,
-                    row_ids,
-                    BooleanArray::from(vec![true; rows]),
-                    following_row_id,
+                    RouteInput::new(
+                        &record.slice(start, rows),
+                        keys,
+                        (0..rows).collect(),
+                        times,
+                        row_ids,
+                        BooleanArray::from(vec![true; rows]),
+                        following_row_id,
+                    ),
                     &mut self.keys,
                     &mut || Ok(()),
                 );
@@ -365,15 +367,17 @@ impl RunCore {
             for (_, row) in rows.indexed() {
                 let view = row.record.view();
                 let incoming = Incoming::route(
-                    &view,
-                    keys,
-                    vec![0],
-                    vec![row.event_time],
-                    vec![row.row_id],
-                    BooleanArray::from(vec![true]),
-                    row.row_id
-                        .checked_add(1)
-                        .ok_or_else(|| counter_overflow(&operator.name, "restored row_id"))?,
+                    RouteInput::new(
+                        &view,
+                        keys,
+                        vec![0],
+                        vec![row.event_time],
+                        vec![row.row_id],
+                        BooleanArray::from(vec![true]),
+                        row.row_id
+                            .checked_add(1)
+                            .ok_or_else(|| counter_overflow(&operator.name, "restored row_id"))?,
+                    ),
                     &mut core.keys,
                     &mut || Ok(()),
                 )?;
@@ -784,13 +788,15 @@ fn route(
                 .ok_or_else(|| counter_overflow("Join runs", "row_id"))?;
             let retain = BooleanArray::from(rows.iter().map(|row| row.retain).collect::<Vec<_>>());
             Incoming::route(
-                &payload,
-                key_indices,
-                (0..rows.len()).collect(),
-                times,
-                row_ids,
-                retain,
-                next_row_id,
+                RouteInput::new(
+                    &payload,
+                    key_indices,
+                    (0..rows.len()).collect(),
+                    times,
+                    row_ids,
+                    retain,
+                    next_row_id,
+                ),
                 keys,
                 check,
             )

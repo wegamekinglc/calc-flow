@@ -836,12 +836,14 @@ impl IncrementalSql {
         if let Some(keyed) = &self.keyed_state {
             return keyed.restore_records(
                 records,
-                self.keys.len(),
-                replace,
+                super::keyed_state::RestoreSpec::new(
+                    self.keys.len(),
+                    replace,
+                    &self.aggregates,
+                    self.global_records.as_ref(),
+                    self.sequential.is_some(),
+                ),
                 self.compact_budget,
-                &self.aggregates,
-                self.global_records.as_ref(),
-                self.sequential.is_some(),
                 check_cancelled,
             );
         }

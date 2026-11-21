@@ -357,10 +357,16 @@ fn compile_spec_against_schema(
     };
     let kernel_plan = RollingKernelPlan::compile(
         input_schema,
-        state_layout_version,
-        event_time_index,
-        &partition_columns,
-        &sequence_columns,
+        super::kernel::KernelOrder::new(
+            state_layout_version,
+            event_time_index,
+            Vec::new(),
+            partition_columns
+                .iter()
+                .map(|column| column.index)
+                .collect(),
+            sequence_columns.iter().map(|column| column.index).collect(),
+        ),
         &outputs,
         &window_groups,
         &indicator_groups,

@@ -1,8 +1,8 @@
 use super::{
     JoinSide, JoinStateLimits, JoinTimeBounds,
     runs::{
-        Incoming, RunOutputContext, RunState, merge_visits, reset_merge_visits, reset_run_lookups,
-        run_lookups,
+        Incoming, RouteInput, RunOutputContext, RunState, merge_visits, reset_merge_visits,
+        reset_run_lookups, run_lookups,
     },
 };
 use crate::operator::keyed::{GroupId, KeySchema, KeyStore, MORSEL_ROWS};
@@ -227,13 +227,15 @@ fn test_shared_key_routing_preserves_sparse_ids_and_skips_retention_work() {
     );
     let left_record = record(&[1, 9, 1], &[10, 99, 11]);
     let left = Incoming::route(
-        &left_record,
-        &[0],
-        vec![0, 2],
-        vec![EventTime::from_micros(10), EventTime::from_micros(10)],
-        vec![0, 2],
-        datafusion::arrow::array::BooleanArray::from(vec![true, false]),
-        3,
+        RouteInput::new(
+            &left_record,
+            &[0],
+            vec![0, 2],
+            vec![EventTime::from_micros(10), EventTime::from_micros(10)],
+            vec![0, 2],
+            datafusion::arrow::array::BooleanArray::from(vec![true, false]),
+            3,
+        ),
         &mut keys,
         &mut || Ok(()),
     )
@@ -254,13 +256,15 @@ fn test_shared_key_routing_preserves_sparse_ids_and_skips_retention_work() {
 
     let right_record = record(&[1], &[100]);
     let right = Incoming::route(
-        &right_record,
-        &[0],
-        vec![0],
-        vec![EventTime::from_micros(10)],
-        vec![0],
-        datafusion::arrow::array::BooleanArray::from(vec![false]),
-        1,
+        RouteInput::new(
+            &right_record,
+            &[0],
+            vec![0],
+            vec![EventTime::from_micros(10)],
+            vec![0],
+            datafusion::arrow::array::BooleanArray::from(vec![false]),
+            1,
+        ),
         &mut keys,
         &mut || Ok(()),
     )
@@ -726,10 +730,7 @@ fn test_cancellation_before_morsel_leaves_run_state_unchanged() {
         .apply_checked(
             JoinSide::Left,
             left,
-            &output_schema(),
-            Some(&[1, 3]),
-            2,
-            EdgeBudget::default(),
+            RunOutputContext::new(&output_schema(), Some(&[1, 3]), 2, EdgeBudget::default()),
             &mut || {
                 Err(crate::CalcFlowError::Cancelled {
                     run_id: "run-test".into(),
@@ -958,17 +959,19 @@ fn test_run_interval_large_batch_emits_every_match() {
                     .map(|row| EventTime::from_micros(i64::try_from(row / 64).unwrap() * 1_000_000))
                     .collect::<Vec<_>>();
                 Incoming::route(
-                    &record,
-                    &[0],
-                    (start..end).collect(),
-                    times,
-                    (start..end).map(|row| row as u64).collect(),
-                    datafusion::arrow::array::BooleanArray::from(
-                        (start..end)
-                            .map(|row| retain || row / 64 >= 151)
-                            .collect::<Vec<_>>(),
+                    RouteInput::new(
+                        &record,
+                        &[0],
+                        (start..end).collect(),
+                        times,
+                        (start..end).map(|row| row as u64).collect(),
+                        datafusion::arrow::array::BooleanArray::from(
+                            (start..end)
+                                .map(|row| retain || row / 64 >= 151)
+                                .collect::<Vec<_>>(),
+                        ),
+                        end as u64,
                     ),
-                    end as u64,
                     keys,
                     &mut || Ok(()),
                 )

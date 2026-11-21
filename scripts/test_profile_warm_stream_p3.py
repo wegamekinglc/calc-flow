@@ -488,8 +488,7 @@ def test_session_pair_summarizes_driver_phases_and_runs_the_reference_last() -> 
             config,
             2,
             True,
-            drivers=("runner", "session"),
-            reference="ta_lib",
+            options=(("runner", "session"), "ta_lib", False),
         )
         assert result["drivers"] == ["runner", "session"]
         starts = [call.kwargs for call in candidate.request.await_args_list[:1]]
@@ -529,8 +528,11 @@ def test_session_pair_rejects_wrong_driver_phases_or_reference(mismatch) -> None
                 config,
                 2,
                 False,
-                drivers=("runner", "session"),
-                reference="ta_lib" if mismatch == "reference" else None,
+                options=(
+                    ("runner", "session"),
+                    "ta_lib" if mismatch == "reference" else None,
+                    False,
+                ),
             )
 
     asyncio.run(exercise())
@@ -632,7 +634,7 @@ def test_budget_stop_settles_the_running_case_and_reports_unmeasured_cases(
             _config(),
             2,
             collect_gc,
-            drivers=pair.drivers,
+            options=(pair.drivers, None, False),
         )
         assert pair.directory == (tmp_path / "work").resolve()
         return case, []

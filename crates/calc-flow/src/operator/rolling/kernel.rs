@@ -30,9 +30,8 @@ use sha2::{Digest, Sha256};
 use super::budget::StateCharge;
 use super::{
     CompiledAggregate, CompiledDifference, CompiledEvaluation, CompiledEwma, CompiledFloatReadout,
-    CompiledFrame, CompiledKeyColumn, CompiledPairAggregate, CompiledRollingOutput,
-    CompiledWindowGroup, PairAccumulator, ScanKind, Statistic, SumClass, SumState,
-    WindowAccumulator,
+    CompiledFrame, CompiledPairAggregate, CompiledRollingOutput, CompiledWindowGroup,
+    PairAccumulator, ScanKind, Statistic, SumClass, SumState, WindowAccumulator,
     generated_kernel_manifest::{
         GeneratedComplexity, GeneratedTransition, generated_kernel_capability,
     },
@@ -104,6 +103,32 @@ pub(super) enum KernelSelection {
 pub(super) enum KernelComplexity {
     AmortizedConstant,
     General,
+}
+
+pub(super) struct KernelOrder {
+    state_layout_version: u32,
+    event_time_index: usize,
+    order_columns: Vec<usize>,
+    partition_columns: Vec<usize>,
+    sequence_columns: Vec<usize>,
+}
+
+impl KernelOrder {
+    pub(super) fn new(
+        state_layout_version: u32,
+        event_time_index: usize,
+        order_columns: Vec<usize>,
+        partition_columns: Vec<usize>,
+        sequence_columns: Vec<usize>,
+    ) -> Self {
+        Self {
+            state_layout_version,
+            event_time_index,
+            order_columns,
+            partition_columns,
+            sequence_columns,
+        }
+    }
 }
 
 /// Immutable execution plan derived from a validated rolling declaration.
@@ -866,60 +891,46 @@ impl RollingKernelPlan {
         })
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the compiler boundary keeps every rolling semantic explicit"
-    )]
     pub(super) fn compile(
         input_schema: &Schema,
-        state_layout_version: u32,
-        event_time_index: usize,
-        partition_columns: &[CompiledKeyColumn],
-        sequence_columns: &[CompiledKeyColumn],
+        order: KernelOrder,
         outputs: &[CompiledRollingOutput],
         window_groups: &[CompiledWindowGroup],
         indicator_groups: &[super::indicators::Group],
     ) -> Self {
-        let order_columns = std::iter::once(event_time_index)
-            .chain(partition_columns.iter().map(|column| column.index))
-            .chain(sequence_columns.iter().map(|column| column.index))
-            .collect::<Vec<_>>();
-        let partition_columns = partition_columns
-            .iter()
-            .map(|column| column.index)
-            .collect::<Vec<_>>();
-        let sequence_columns = sequence_columns
-            .iter()
-            .map(|column| column.index)
+        let order_columns = std::iter::once(order.event_time_index)
+            .chain(order.partition_columns.iter().copied())
+            .chain(order.sequence_columns.iter().copied())
             .collect::<Vec<_>>();
         Self::compile_with_order(
             input_schema,
-            state_layout_version,
-            event_time_index,
-            order_columns,
-            partition_columns,
-            sequence_columns,
+            KernelOrder::new(
+                order.state_layout_version,
+                order.event_time_index,
+                order_columns,
+                order.partition_columns,
+                order.sequence_columns,
+            ),
             outputs,
             window_groups,
             indicator_groups,
         )
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the compiler boundary keeps every ordering semantic explicit"
-    )]
     pub(super) fn compile_with_order(
         input_schema: &Schema,
-        state_layout_version: u32,
-        event_time_index: usize,
-        order_columns: Vec<usize>,
-        partition_columns: Vec<usize>,
-        sequence_columns: Vec<usize>,
+        order: KernelOrder,
         outputs: &[CompiledRollingOutput],
         window_groups: &[CompiledWindowGroup],
         indicator_groups: &[super::indicators::Group],
     ) -> Self {
+        let KernelOrder {
+            state_layout_version,
+            event_time_index,
+            order_columns,
+            partition_columns,
+            sequence_columns,
+        } = order;
         let compiled = compile_typed_plan(input_schema, outputs, window_groups, indicator_groups);
         let allow_order_peers = order_columns.first() != Some(&event_time_index);
         let (selection, complexity, groups, typed_outputs, fallback_reason) = match compiled {
